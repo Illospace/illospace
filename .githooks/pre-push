@@ -1,0 +1,13 @@
+#!/bin/bash
+# Pre-push hook: block direct pushes to main.
+
+while read local_ref local_sha remote_ref remote_sha; do
+    if echo "$remote_ref" | grep -qE "refs/heads/main$"; then
+        echo "❌ Direct push to main blocked."
+        echo "   Use: python3 -m cli.safe_deploy --title \"...\" --body \"...\""
+        echo "   Or create a PR manually."
+        exit 1
+    fi
+done
+
+exit 0
