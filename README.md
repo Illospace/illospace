@@ -1,11 +1,12 @@
-# Illo Brain
+# Illospace
 
-Illo Brain is an experimental cognitive workspace for AI agents: semantic memory,
-skills, vault-backed secrets, Cortex thought threads, browser/tool execution, and a
-Svelte dashboard for monitoring and directing work.
+Illospace is an open-source cognitive workspace for AI agents: semantic memory,
+skills, vault-backed secrets, Cortex thought threads, browser/tool execution,
+and a Svelte dashboard for monitoring and directing work.
 
 > Status: early/open-source preview. The project is actively changing and is not
-> yet a hosted product or stable library API.
+> yet a hosted product or stable library API. Contributions, issues, and design
+> feedback are welcome.
 
 ## What is in this repo?
 
@@ -21,8 +22,8 @@ Prerequisites: Python 3.11+, Node.js 22+, and one local database path: Docker,
 Podman, or PostgreSQL 16+ server tools with pgvector.
 
 ```bash
-git clone <public-repository-url>
-cd <repository-directory>
+git clone https://github.com/Illospace/illospace.git
+cd illospace
 ./illo doctor
 ./illo
 ```
@@ -71,7 +72,7 @@ worker/systemd services to own background AgentRuns.
   deployed callback URL.
 - For local file-based overrides, copy `.env.example` to `.env` and fill in the
   values you need. For production, prefer your platform's secret manager or an
-  external environment file such as `~/.config/illo-brain/production.env`.
+  external environment file such as `~/.config/illospace/production.env`.
 - Run `./illo doctor --production` before starting a production deployment.
 - Never commit `.env`, provider keys, database dumps, uploads, or generated journals.
 - Runtime-private state defaults to `.illo/` via `ILLO_PRIVATE_HOME` and is ignored by git.
