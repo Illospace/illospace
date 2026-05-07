@@ -1,18 +1,26 @@
 # Illospace
 
-Illospace is an open-source cognitive workspace for AI agents: semantic memory,
-skills, vault-backed secrets, Cortex thought threads, browser/tool execution,
-and a Svelte dashboard for monitoring and directing work.
+Illospace is an open-source workspace where humans and AI agents can work
+together in teams. It brings shared memory, skills, vault-backed secrets,
+Cortex thought threads, browser/tool execution, and operational dashboards into
+one place for collaborative agent work.
 
 > Status: early/open-source preview. The project is actively changing and is not
 > yet a hosted product or stable library API. Contributions, issues, and design
 > feedback are welcome.
 
+## Why Illospace?
+
+AI agents are most useful when they can participate in the same context as the
+people guiding them: shared projects, durable memory, team permissions, visible
+runs, and tools that make collaboration inspectable. Illospace is a foundation
+for that kind of human-agent teamwork.
+
 ## What is in this repo?
 
-- **FastAPI backend** for Cortex threads, memory, skills, vault, projects, browser sessions, and agent runs.
+- **FastAPI backend** for teams, Cortex threads, memory, skills, vault, projects, browser sessions, and agent runs.
 - **PostgreSQL + pgvector** storage for durable memory and workspace state.
-- **SvelteKit frontend** for the Cortex workspace and operational dashboards.
+- **SvelteKit frontend** for the shared workspace and operational dashboards.
 - **Agent runtime tooling** for model invocation, workspace tools, skill bundles, and recurring cycles.
 - **Optional local embedding/GPU workers** for lower-latency semantic retrieval.
 
