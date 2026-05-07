@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "required": [
+    "domain",
+    "changes",
+    "conflicts",
+    "verification"
+  ],
+  "properties": {
+    "domain": {
+      "type": "string"
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "records_changed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verification": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

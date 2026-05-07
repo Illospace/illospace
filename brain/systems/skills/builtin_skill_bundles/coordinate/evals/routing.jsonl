@@ -1,0 +1,2 @@
+{"prompt":"Can you quickly check whether this tool exists?","expected":{"route_to":"coordinate","triggers_include":["can you check"],"should_not_route_to":["orchestrate"]}}
+{"prompt":"Plan parallel agents to implement three independent PRs.","expected":{"route_to":"orchestrate","reason":"coordinate should escalate after choosing orchestration"}}

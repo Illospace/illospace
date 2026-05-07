@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Illo mascot light rig</title>
+  <desc id="desc">Layered import-friendly SVG rig for the light Illo mascot variant.</desc>
+  <g id="illo_mascot_light_rig">
+    <g id="orbit_back" data-pivot-x="256" data-pivot-y="266">
+      <path
+        id="orbit_back_path"
+        d="M70 326 C132 235 336 146 425 180 C491 205 414 314 286 371 C166 424 56 391 70 326"
+        style="fill:none"
+        stroke="#d8c9b7"
+        stroke-width="6"
+        stroke-linecap="round"
+        opacity="0.72"
+      />
+      <path
+        id="orbit_back_core"
+        d="M70 326 C132 235 336 146 425 180 C491 205 414 314 286 371 C166 424 56 391 70 326"
+        style="fill:none"
+        stroke="#8db7ff"
+        stroke-width="2"
+        stroke-linecap="round"
+        opacity="0.78"
+      />
+    </g>
+
+    <g id="feet" data-pivot-x="256" data-pivot-y="365">
+      <ellipse id="foot_left" cx="215" cy="369" rx="28" ry="35" fill="#d8cfc2" stroke="#b7aa9a" stroke-width="2" />
+      <ellipse id="foot_center" cx="256" cy="374" rx="27" ry="34" fill="#e5dbcd" stroke="#b7aa9a" stroke-width="2" />
+      <ellipse id="foot_right" cx="297" cy="369" rx="28" ry="35" fill="#d8cfc2" stroke="#b7aa9a" stroke-width="2" />
+    </g>
+
+    <g id="body" data-pivot-x="260" data-pivot-y="245">
+      <path
+        id="body_shape"
+        d="M260 70 C234 102 198 134 185 191 C169 263 192 327 246 350 C306 376 357 326 350 252 C344 190 313 153 286 128 C273 116 272 96 286 82 C298 71 289 60 260 70 Z"
+        fill="#f0e7d9"
+        stroke="#b9aa98"
+        stroke-width="3"
+        stroke-linejoin="round"
+      />
+      <path
+        id="body_shadow"
+        d="M310 141 C337 179 351 218 348 258 C343 329 296 371 246 350 C297 345 323 309 321 256 C320 207 298 171 273 137 C287 145 299 145 310 141 Z"
+        fill="#d8cfc2"
+        opacity="0.42"
+      />
+      <path
+        id="face_plane"
+        d="M178 246 C187 185 232 155 279 166 C333 179 356 229 340 278 C324 327 276 348 229 333 C188 320 172 286 178 246 Z"
+        fill="#f0e7d9"
+        fill-opacity="0"
+        stroke="#c6b8a7"
+        stroke-width="2"
+        opacity="0.58"
+      />
+    </g>
+
+    <g id="body_speckles" opacity="0.72">
+      <circle id="speckle_01" cx="230" cy="130" r="2.2" fill="#ffffff" />
+      <circle id="speckle_02" cx="274" cy="122" r="1.6" fill="#8db7ff" />
+      <circle id="speckle_03" cx="304" cy="166" r="1.8" fill="#ffffff" />
+      <circle id="speckle_04" cx="220" cy="192" r="1.6" fill="#8db7ff" />
+      <circle id="speckle_05" cx="278" cy="206" r="2.1" fill="#ffffff" />
+      <circle id="speckle_06" cx="320" cy="235" r="1.5" fill="#8db7ff" />
+      <circle id="speckle_07" cx="207" cy="269" r="1.7" fill="#ffffff" />
+      <circle id="speckle_08" cx="289" cy="287" r="1.4" fill="#8db7ff" />
+      <circle id="speckle_09" cx="244" cy="312" r="1.9" fill="#ffffff" />
+      <circle id="speckle_10" cx="333" cy="301" r="1.5" fill="#ffffff" />
+      <circle id="speckle_11" cx="259" cy="154" r="1.2" fill="#8db7ff" />
+      <circle id="speckle_12" cx="191" cy="225" r="1.3" fill="#ffffff" />
+    </g>
+
+    <g id="eyes" data-pivot-x="256" data-pivot-y="244">
+      <g id="eye_left" data-pivot-x="218" data-pivot-y="244">
+        <ellipse id="eye_left_shape" cx="218" cy="244" rx="21" ry="27" fill="#07111d" />
+        <ellipse id="eye_left_blue" cx="221" cy="254" rx="13" ry="12" fill="#0d69c8" opacity="0.7" />
+        <circle id="eye_left_highlight_warm" cx="210" cy="232" r="5" fill="#fff0ce" />
+        <circle id="eye_left_highlight_cool" cx="226" cy="235" r="2.5" fill="#dceaff" />
+      </g>
+      <g id="eye_right" data-pivot-x="294" data-pivot-y="244">
+        <ellipse id="eye_right_shape" cx="294" cy="244" rx="21" ry="27" fill="#07111d" />
+        <ellipse id="eye_right_blue" cx="297" cy="254" rx="13" ry="12" fill="#0d69c8" opacity="0.7" />
+        <circle id="eye_right_highlight_warm" cx="286" cy="232" r="5" fill="#fff0ce" />
+        <circle id="eye_right_highlight_cool" cx="302" cy="235" r="2.5" fill="#dceaff" />
+      </g>
+    </g>
+
+    <g id="orbit_front" data-pivot-x="256" data-pivot-y="266">
+      <path
+        id="orbit_front_path"
+        d="M73 337 C160 307 287 260 423 185"
+        style="fill:none"
+        stroke="#e5d7c7"
+        stroke-width="6"
+        stroke-linecap="round"
+        opacity="0.92"
+      />
+      <path
+        id="orbit_front_core"
+        d="M73 337 C160 307 287 260 423 185"
+        style="fill:none"
+        stroke="#8db7ff"
+        stroke-width="2"
+        stroke-linecap="round"
+        opacity="0.95"
+      />
+      <path
+        id="orbit_lower_loop"
+        d="M239 360 C272 356 286 389 262 413 C246 428 216 413 226 389 C230 378 235 368 239 360"
+        style="fill:none"
+        stroke="#d8c9b7"
+        stroke-width="5"
+        stroke-linecap="round"
+        opacity="0.9"
+      />
+      <path
+        id="orbit_lower_loop_core"
+        d="M239 360 C272 356 286 389 262 413 C246 428 216 413 226 389 C230 378 235 368 239 360"
+        style="fill:none"
+        stroke="#8db7ff"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        opacity="0.92"
+      />
+    </g>
+
+    <g id="signal_nodes">
+      <g id="node_left" data-pivot-x="73" data-pivot-y="337">
+        <circle cx="73" cy="337" r="12" fill="#2e8dff" opacity="0.28" />
+        <circle cx="73" cy="337" r="7" fill="#48a1ff" stroke="#cfe5ff" stroke-width="2" />
+        <circle cx="70" cy="334" r="2" fill="#ffffff" />
+      </g>
+      <g id="node_top" data-pivot-x="423" data-pivot-y="185">
+        <circle cx="423" cy="185" r="12" fill="#2e8dff" opacity="0.28" />
+        <circle cx="423" cy="185" r="7" fill="#48a1ff" stroke="#cfe5ff" stroke-width="2" />
+        <circle cx="420" cy="182" r="2" fill="#ffffff" />
+      </g>
+      <g id="node_lower" data-pivot-x="262" data-pivot-y="413">
+        <circle cx="262" cy="413" r="10" fill="#2e8dff" opacity="0.22" />
+        <circle cx="262" cy="413" r="5.5" fill="#48a1ff" stroke="#cfe5ff" stroke-width="1.5" />
+      </g>
+    </g>
+  </g>
+</svg>

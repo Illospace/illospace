@@ -1,0 +1,2373 @@
+#!/usr/bin/env bash
+
+if [ -z "${BASH_VERSION:-}" ] || [ "${BASH:-}" = "/bin/sh" ]; then
+  exec /usr/bin/env bash "$0" "$@"
+fi
+
+# illo — single entry point for Illospace
+# First run: sets everything up. Every run after: starts the app.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+DOCKER_BIN=""
+DOCKER_START_ATTEMPTED=0
+LAUNCH_LOG_DEFAULT="$ROOT/logs/illo-launcher.log"
+UNINSTALL_DB_ENV_RESET_MARKER="$ROOT/.illo-uninstall-reset-db-env"
+DATABASE_ENV_VARS=(DATABASE_URL DB_URL BRAIN_DB_URL DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD)
+LOCAL_POSTGRES_RUNTIME_DIR="${ILLO_LOCAL_POSTGRES_RUNTIME_DIR:-$ROOT/.runtime/postgres}"
+LOCAL_POSTGRES_DATA_DIR="$LOCAL_POSTGRES_RUNTIME_DIR/data"
+LOCAL_POSTGRES_LOG="$LOCAL_POSTGRES_RUNTIME_DIR/postgres.log"
+LOCAL_POSTGRES_PORT_FILE="$LOCAL_POSTGRES_RUNTIME_DIR/port"
+MANAGED_POSTGRES_PORT=""
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()  { echo -e "${GREEN}$1${NC}"; }
+warn()  { echo -e "${YELLOW}$1${NC}"; }
+err()   { echo -e "${RED}$1${NC}"; }
+dim()   { echo -e "${DIM}$1${NC}"; }
+
+launch_log_path() {
+  echo "${ILLO_LAUNCH_LOG:-$LAUNCH_LOG_DEFAULT}"
+}
+
+ensure_launch_log_dir() {
+  local log_path
+  log_path="$(launch_log_path)"
+  mkdir -p "$(dirname "$log_path")" 2>/dev/null || true
+}
+
+launch_log() {
+  local log_path
+  log_path="$(launch_log_path)"
+  ensure_launch_log_dir
+  printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$log_path" 2>/dev/null || true
+}
+
+begin_launch_log() {
+  local log_path
+  log_path="$(launch_log_path)"
+  ensure_launch_log_dir
+  printf '\n[%s] === ./illo %s ===\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$log_path" 2>/dev/null || true
+  dim "Launcher log: $log_path"
+}
+
+log_phase() {
+  launch_log "phase: $*"
+}
+
+path_prepend_once() {
+  local dir="${1:-}"
+  if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+    return 0
+  fi
+  case ":$PATH:" in
+    *":$dir:"*) ;;
+    *) export PATH="$dir:$PATH" ;;
+  esac
+}
+
+LOCAL_DENO_INSTALL="${ILLO_DENO_INSTALL:-$ROOT/.runtime/deno}"
+LOCAL_BROWSER_RUNTIME_DIR="${ILLO_BROWSER_RUNTIME_DIR:-$ROOT/.runtime/browser}"
+LOCAL_BROWSER_CHROME_FOR_TESTING_DIR="${ILLO_BROWSER_CHROME_FOR_TESTING_DIR:-$LOCAL_BROWSER_RUNTIME_DIR/chrome-for-testing}"
+export ILLO_PROJECT_ROOT="${ILLO_PROJECT_ROOT:-$ROOT}"
+export ILLO_BROWSER_RUNTIME_DIR="$LOCAL_BROWSER_RUNTIME_DIR"
+export ILLO_BROWSER_CHROME_FOR_TESTING_DIR="$LOCAL_BROWSER_CHROME_FOR_TESTING_DIR"
+path_prepend_once "$LOCAL_DENO_INSTALL/bin"
+
+find_docker_bin() {
+  local detected=""
+  local candidates=(
+    "docker"
+    "podman"
+    "/usr/local/bin/docker"
+    "/opt/homebrew/bin/docker"
+    "$HOME/.docker/bin/docker"
+    "/Applications/Docker.app/Contents/Resources/bin/docker"
+    "/usr/local/bin/podman"
+    "/opt/homebrew/bin/podman"
+  )
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [ "$candidate" = "docker" ] || [ "$candidate" = "podman" ]; then
+      if detected="$(command -v "$candidate" 2>/dev/null)"; then
+        echo "$detected"
+        return 0
+      fi
+    elif [ -x "$candidate" ]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+ensure_docker_path() {
+  if [ -n "${DOCKER_BIN:-}" ] && [ -x "$DOCKER_BIN" ]; then
+    return 0
+  fi
+
+  local detected=""
+  if ! detected="$(find_docker_bin)"; then
+    return 1
+  fi
+
+  DOCKER_BIN="$detected"
+  export PATH="$(dirname "$DOCKER_BIN"):$PATH"
+  return 0
+}
+
+try_start_docker_daemon() {
+  [ "$DOCKER_START_ATTEMPTED" = "0" ] || return 1
+  DOCKER_START_ATTEMPTED=1
+
+  [ -n "${DOCKER_BIN:-}" ] || return 1
+  [ "$(basename "$DOCKER_BIN")" = "docker" ] || return 1
+  is_truthy "${ILLO_AUTO_START_DOCKER:-1}" || return 1
+  command -v systemctl &>/dev/null || return 1
+
+  dim "Docker is installed but not responding — trying to start the Docker service..."
+  if run_with_timeout 25 systemctl start docker >/dev/null 2>&1 || \
+     run_with_timeout 25 sudo -n systemctl start docker >/dev/null 2>&1; then
+    sleep 2
+    run_with_timeout 5 "$DOCKER_BIN" info >/dev/null 2>&1 && return 0
+  fi
+
+  return 1
+}
+
+find_postgres_bin_dir() {
+  local tool dir found=""
+  for tool in pg_ctl postgres initdb psql; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      dir="$(dirname "$(command -v "$tool")")"
+      if [ -x "$dir/pg_ctl" ] && [ -x "$dir/postgres" ] && [ -x "$dir/initdb" ] && [ -x "$dir/psql" ]; then
+        echo "$dir"
+        return 0
+      fi
+    fi
+  done
+
+  for dir in /usr/lib/postgresql/*/bin /opt/homebrew/opt/postgresql@*/bin /usr/local/opt/postgresql@*/bin /Applications/Postgres.app/Contents/Versions/*/bin; do
+    [ -d "$dir" ] || continue
+    if [ -x "$dir/pg_ctl" ] && [ -x "$dir/postgres" ] && [ -x "$dir/initdb" ] && [ -x "$dir/psql" ]; then
+      found="$dir"
+    fi
+  done
+
+  [ -n "$found" ] || return 1
+  echo "$found"
+}
+
+find_psql_bin() {
+  local pg_bin_dir
+  if command -v psql >/dev/null 2>&1; then
+    command -v psql
+    return 0
+  fi
+
+  if pg_bin_dir="$(find_postgres_bin_dir)"; then
+    echo "$pg_bin_dir/psql"
+    return 0
+  fi
+
+  return 1
+}
+
+psql_available() {
+  find_psql_bin >/dev/null 2>&1
+}
+
+run_psql_no_prompt() {
+  local psql_bin
+  psql_bin="$(find_psql_bin)" || return 1
+  env PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-3}" "$psql_bin" -w "$@"
+}
+
+# ── Source optional env files ─────────────────────────────
+
+runtime_env_file_path() {
+  if [ -n "${ILLO_RUNTIME_ENV_FILE:-}" ]; then
+    case "$ILLO_RUNTIME_ENV_FILE" in
+      /*) echo "$ILLO_RUNTIME_ENV_FILE" ;;
+      *) echo "$ROOT/$ILLO_RUNTIME_ENV_FILE" ;;
+    esac
+    return 0
+  fi
+
+  local private_home="${ILLO_PRIVATE_HOME:-.illo}"
+  case "$private_home" in
+    /*) echo "$private_home/runtime.env" ;;
+    *) echo "$ROOT/$private_home/runtime.env" ;;
+  esac
+}
+
+launcher_python_bin() {
+  if [ -x "$ROOT/venv/bin/python3" ]; then
+    echo "$ROOT/venv/bin/python3"
+  else
+    echo "python3"
+  fi
+}
+
+production_env_file_path() {
+  if [ -n "${ILLO_PRODUCTION_ENV_FILE:-}" ]; then
+    case "$ILLO_PRODUCTION_ENV_FILE" in
+      /*) echo "$ILLO_PRODUCTION_ENV_FILE" ;;
+      *) echo "$ROOT/$ILLO_PRODUCTION_ENV_FILE" ;;
+    esac
+    return 0
+  fi
+
+  echo "$HOME/.config/illo-brain/production.env"
+}
+
+source_env_file_defaults() {
+  local file="$1"
+  local preserve_empty="${2:-1}"
+  [ -f "$file" ] || return 0
+
+  local keys=()
+  local had=()
+  local values=()
+  local line trimmed key idx
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    if [[ "$trimmed" =~ ^(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)= ]]; then
+      key="${BASH_REMATCH[2]}"
+      keys+=("$key")
+      if [ "${!key+x}" = "x" ] && { [ "$preserve_empty" = "1" ] || [ -n "${!key}" ]; }; then
+        had+=("1")
+        values+=("${!key}")
+      else
+        had+=("0")
+        values+=("")
+      fi
+    fi
+  done < "$file"
+
+  set -a
+  source "$file" 2>/dev/null || true
+  set +a
+
+  for idx in "${!keys[@]}"; do
+    if [ "${had[$idx]}" = "1" ]; then
+      export "${keys[$idx]}=${values[$idx]}"
+    fi
+  done
+}
+
+source_env() {
+  source_env_file_defaults ".env"
+  source_env_file_defaults "$(runtime_env_file_path)" 0
+}
+
+source_service_env() {
+  source_env_file_defaults "$(production_env_file_path)" 0
+  source_env
+}
+
+generate_runtime_secret() {
+  local name="$1"
+  local python_bin="python3"
+  if [ -x "$ROOT/venv/bin/python3" ]; then
+    python_bin="$ROOT/venv/bin/python3"
+  fi
+
+  "$python_bin" - "$name" <<'PY'
+import base64
+import os
+import secrets
+import sys
+
+name = sys.argv[1]
+if name == "VAULT_MASTER_KEY":
+    print(base64.urlsafe_b64encode(os.urandom(32)).decode("ascii"))
+else:
+    print(secrets.token_urlsafe(64))
+PY
+}
+
+append_runtime_env_assignment() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  printf '%s=%s\n' "$key" "$value" >> "$file"
+}
+
+ensure_runtime_secrets() {
+  local env_file env_dir value wrote=0
+  env_file="$(runtime_env_file_path)"
+  env_dir="$(dirname "$env_file")"
+
+  mkdir -p "$env_dir" 2>/dev/null || {
+    warn "Could not create runtime-private env directory: $env_dir"
+    return 0
+  }
+  chmod 700 "$env_dir" 2>/dev/null || true
+
+  if [ ! -f "$env_file" ]; then
+    (umask 077 && {
+      echo "# Generated by ./illo for this local checkout."
+      echo "# Real environment variables or .env values override these defaults."
+    } > "$env_file") 2>/dev/null || {
+      warn "Could not create runtime-private env file: $env_file"
+      return 0
+    }
+  fi
+  chmod 600 "$env_file" 2>/dev/null || true
+
+  if [ -z "${SECRET_KEY:-}" ]; then
+    value="$(generate_runtime_secret SECRET_KEY)" || value=""
+    if [ -n "$value" ]; then
+      append_runtime_env_assignment "$env_file" "SECRET_KEY" "$value"
+      export SECRET_KEY="$value"
+      wrote=1
+    fi
+  fi
+
+  if [ -z "${VAULT_MASTER_KEY:-}" ]; then
+    value="$(generate_runtime_secret VAULT_MASTER_KEY)" || value=""
+    if [ -n "$value" ]; then
+      append_runtime_env_assignment "$env_file" "VAULT_MASTER_KEY" "$value"
+      export VAULT_MASTER_KEY="$value"
+      wrote=1
+    fi
+  fi
+
+  if [ $wrote -eq 1 ]; then
+    dim "Generated local runtime secrets in $env_file"
+  fi
+}
+
+sync_production_service_env() {
+  local env_file dotenv_file runtime_file python_bin
+  env_file="$(production_env_file_path)"
+  dotenv_file="$ROOT/.env"
+  runtime_file="$(runtime_env_file_path)"
+  python_bin="$(launcher_python_bin)"
+
+  mkdir -p "$(dirname "$env_file")" 2>/dev/null || {
+    warn "Could not create production env directory: $(dirname "$env_file")"
+    return 1
+  }
+
+  "$python_bin" - "$env_file" "$dotenv_file" "$runtime_file" <<'PY'
+import os
+import re
+import sys
+from collections import OrderedDict
+from pathlib import Path
+
+env_path = Path(sys.argv[1])
+source_paths = [Path(item) for item in sys.argv[2:]]
+assignment = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+
+required_keys = (
+    "DATABASE_URL",
+    "DB_URL",
+    "BRAIN_DB_URL",
+    "DB_HOST",
+    "DB_PORT",
+    "DB_NAME",
+    "DB_USER",
+    "DB_PASSWORD",
+    "DB_POOL_MIN",
+    "DB_POOL_MAX",
+    "SECRET_KEY",
+    "VAULT_MASTER_KEY",
+    "FLASK_SECRET_KEY",
+    "OPENCLAW_GATEWAY_TOKEN",
+    "ILLO_API_TOKEN",
+    "CORS_ORIGINS",
+    "RATE_LIMIT",
+    "RATE_WINDOW",
+    "EMBEDDING_BACKEND",
+    "EMBEDDING_DIM",
+    "EMBEDDING_API_PROVIDER",
+    "EMBEDDING_API_MODEL",
+    "EMBEDDING_API_KEY",
+    "EMBEDDING_CPU_MODEL",
+    "EMBEDDING_MODEL",
+    "EMBEDDING_MODEL_PATH",
+    "MEMORY_RERANKER",
+    "OPENAI_API_KEY",
+    "OPENAI_ORG_ID",
+    "OPENAI_PROJECT",
+)
+
+
+def parse_value(raw: str) -> str:
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return value
+
+
+def read_assignments(path: Path) -> OrderedDict[str, str]:
+    values: OrderedDict[str, str] = OrderedDict()
+    if not path.exists():
+        return values
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = assignment.match(line)
+        if match:
+            values[match.group(1)] = parse_value(match.group(2))
+    return values
+
+
+def env_value(key: str) -> str | None:
+    value = os.environ.get(key)
+    if value is None or value == "":
+        return None
+    return value
+
+
+def systemd_quote(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_@%+=:,./-]*", value):
+        return value
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+merged = read_assignments(env_path)
+ordered_keys: list[str] = list(merged)
+for path in source_paths:
+    for key in read_assignments(path):
+        if key not in ordered_keys:
+            ordered_keys.append(key)
+for key in required_keys:
+    if key not in ordered_keys:
+        ordered_keys.append(key)
+
+for key in ordered_keys:
+    value = env_value(key)
+    if value is not None:
+        merged[key] = value
+
+env_path.parent.mkdir(parents=True, exist_ok=True)
+with env_path.open("w", encoding="utf-8") as handle:
+    handle.write("# Generated by ./illo for Illo Brain user services.\n")
+    handle.write("# Keep this file private; it may contain API keys and vault secrets.\n")
+    for key, value in merged.items():
+        if "\n" in value:
+            continue
+        handle.write(f"{key}={systemd_quote(value)}\n")
+env_path.chmod(0o600)
+print(env_path)
+PY
+}
+
+install_user_service_template() {
+  local source_path="$1"
+  local dest_dir="$HOME/.config/systemd/user"
+  local dest_path="$dest_dir/$(basename "$source_path")"
+  local python_bin
+
+  [ -f "$source_path" ] || return 0
+  python_bin="$(launcher_python_bin)"
+  mkdir -p "$dest_dir" 2>/dev/null || {
+    warn "Could not create systemd user service directory: $dest_dir"
+    return 1
+  }
+
+  "$python_bin" - "$source_path" "$dest_path" "$ROOT" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+root = sys.argv[3]
+
+text = source.read_text(encoding="utf-8").replace("%h/illo-brain", root)
+dest.write_text(text, encoding="utf-8")
+print(dest)
+PY
+}
+
+systemd_user_ready() {
+  command -v systemctl &>/dev/null || return 1
+  run_logged_timeout 5 systemctl --user show-environment >/dev/null 2>&1
+}
+
+restart_or_drain_production_worker() {
+  run_logged_timeout 10 systemctl --user enable cortex-worker.service >/dev/null 2>&1 || return 1
+
+  local active_runs
+  active_runs="$(active_agent_run_count || echo unknown)"
+  if [ "$active_runs" = "0" ]; then
+    run_logged_timeout 15 systemctl --user restart cortex-worker.service >/dev/null 2>&1
+    dim "cortex-worker restarted for this checkout"
+    return $?
+  fi
+  if [ "$active_runs" = "unknown" ]; then
+    warn "Could not count active AgentRuns; restarting cortex-worker so this checkout owns the queue"
+    run_logged_timeout 15 systemctl --user restart cortex-worker.service >/dev/null 2>&1
+    dim "cortex-worker restarted for this checkout"
+    return $?
+  fi
+
+  warn "$active_runs AgentRun(s) active; draining cortex-worker instead of restarting it"
+  run_logged_timeout 10 systemctl --user kill --kill-who=main --signal=TERM cortex-worker.service >/dev/null 2>&1 || true
+}
+
+ensure_production_user_services() {
+  if is_truthy "${CORTEX_INLINE_DISPATCHER:-0}"; then
+    dim "Inline dispatcher enabled; skipping standalone worker service startup"
+    return 0
+  fi
+  if ! systemd_user_ready; then
+    warn "systemd user manager is unavailable; standalone worker services cannot be started"
+    return 1
+  fi
+
+  sync_production_service_env >/dev/null || return 1
+  install_user_service_template "ops/cortex-worker.service" >/dev/null || return 1
+  install_user_service_template "ops/illo-scheduler.service" >/dev/null || return 1
+  install_user_service_template "ops/illo-embed.service" >/dev/null || true
+  install_user_service_template "ops/gpu_server/illo-gpu-server.service" >/dev/null || true
+  run_logged_timeout 10 systemctl --user daemon-reload >/dev/null 2>&1 || return 1
+
+  restart_or_drain_production_worker || return 1
+  run_logged_timeout 10 systemctl --user enable illo-scheduler.service >/dev/null 2>&1 || return 1
+  run_logged_timeout 15 systemctl --user restart illo-scheduler.service >/dev/null 2>&1 || return 1
+  dim "illo-scheduler restarted for this checkout"
+}
+
+unload_unused_embedding_worker() {
+  if [ "${EMBEDDING_BACKEND:-api}" = "gpu" ]; then
+    return 0
+  fi
+  curl --max-time 5 -fsS -X POST http://127.0.0.1:9800/models/embedding/unload >/dev/null 2>&1 || return 0
+  dim "Stopped unused GPU embedding worker; EMBEDDING_BACKEND=${EMBEDDING_BACKEND:-api}"
+}
+
+database_env_var_names() {
+  local db_var
+  local names=()
+  for db_var in "${DATABASE_ENV_VARS[@]}"; do
+    if [ "${!db_var+x}" = "x" ]; then
+      names+=("$db_var")
+    fi
+  done
+  if [ ${#names[@]} -gt 0 ]; then
+    printf '%s' "${names[*]}"
+  fi
+}
+
+apply_uninstall_database_env_reset() {
+  [ -f "$UNINSTALL_DB_ENV_RESET_MARKER" ] || return 0
+
+  if [ -f ".env" ]; then
+    rm -f "$UNINSTALL_DB_ENV_RESET_MARKER"
+    return 0
+  fi
+
+  local db_var
+  local reset_any=0
+  for db_var in "${DATABASE_ENV_VARS[@]}"; do
+    if [ "${!db_var+x}" = "x" ]; then
+      unset "$db_var"
+      reset_any=1
+    fi
+  done
+
+  rm -f "$UNINSTALL_DB_ENV_RESET_MARKER"
+  if [ $reset_any -eq 1 ]; then
+    dim "Ignoring inherited database environment once after ./illo uninstall"
+  fi
+}
+
+record_uninstall_database_env_reset() {
+  local dry_run="$1"
+  if [ "$dry_run" = "1" ]; then
+    echo "Would ignore inherited database environment once on the next setup run"
+    return 0
+  fi
+
+  {
+    echo "# Created by ./illo uninstall."
+    echo "# The next ./illo setup/run will ignore inherited database env vars once when no .env exists."
+    echo "# Remove this file if you intentionally want shell DB_* values to apply immediately."
+  } > "$UNINSTALL_DB_ENV_RESET_MARKER" 2>/dev/null || {
+    warn "Could not record one-time database environment reset at $UNINSTALL_DB_ENV_RESET_MARKER"
+    return 0
+  }
+  dim "Next ./illo setup will ignore inherited database env vars once unless you create .env first"
+}
+
+stop_conflicting_services() {
+  if ! command -v systemctl &>/dev/null; then
+    launch_log "systemctl not found; skipping user-service cleanup"
+    return
+  fi
+
+  launch_log "checking systemd user manager"
+  if ! run_logged_timeout 5 systemctl --user show-environment; then
+    warn "systemd user manager did not respond; skipping user-service cleanup"
+    return
+  fi
+
+  local services=("$@")
+  if [ ${#services[@]} -eq 0 ]; then
+    services=("cortex-worker" "illo-dashboard" "illo-api" "illo-embed" "illo-gpu-server")
+  fi
+  local stopped=0
+
+  for svc in "${services[@]}"; do
+    launch_log "checking user service: $svc"
+    if run_logged_timeout 5 systemctl --user cat "$svc"; then
+      if [ $stopped -eq 0 ]; then
+        warn "Stopping conflicting user services so ./illo owns the runtime..."
+        stopped=1
+      fi
+      launch_log "stopping user service: $svc"
+      if run_logged_timeout 10 systemctl --user stop "$svc"; then
+        dim "Stopped $svc"
+      else
+        warn "Timed out stopping $svc; forcing its user-service processes down"
+        launch_log "forcing user service down: $svc"
+        run_logged_timeout 5 systemctl --user kill --signal=KILL "$svc" || true
+        run_logged_timeout 5 systemctl --user stop --no-block "$svc" || true
+      fi
+    else
+      launch_log "user service not installed or unavailable: $svc"
+    fi
+  done
+}
+
+active_agent_run_count() {
+  "$ROOT/venv/bin/python3" - <<'PY' 2>/dev/null
+from sqlalchemy import func, select
+
+from brain.platform.db.models.agent_run import AgentRunRow
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+active = ("starting", "running", "verifying")
+with UnitOfWork() as uow:
+    count = uow.session.scalar(
+        select(func.count()).select_from(AgentRunRow).where(AgentRunRow.status.in_(active))
+    )
+print(int(count or 0))
+PY
+}
+
+api_owned_active_run_count() {
+  local owner_pids="$1"
+  if [ -z "$owner_pids" ]; then
+    echo "0"
+    return 0
+  fi
+  ILLO_RUNNER_OWNER_PIDS="$owner_pids" "$ROOT/venv/bin/python3" - <<'PY' 2>/dev/null
+import os
+
+from sqlalchemy import select
+
+from brain.platform.db.models.agent_run import AgentRunRow
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+pids = {
+    item.strip()
+    for item in os.environ.get("ILLO_RUNNER_OWNER_PIDS", "").replace(",", " ").split()
+    if item.strip()
+}
+active = ("starting", "running", "verifying")
+count = 0
+with UnitOfWork() as uow:
+    rows = uow.session.scalars(select(AgentRunRow).where(AgentRunRow.status.in_(active))).all()
+    for row in rows:
+        metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
+        heartbeat = metadata.get("runner_heartbeat")
+        heartbeat = heartbeat if isinstance(heartbeat, dict) else {}
+        token = str(heartbeat.get("token") or "")
+        owner_pid = token.split(":", 1)[0] if ":" in token else ""
+        if owner_pid in pids:
+            count += 1
+print(count)
+PY
+}
+
+guard_api_port_kill() {
+  local api_pids="${1:-}"
+  if [ -z "$api_pids" ] || [ "${ILLO_FORCE_KILL_ACTIVE_RUNS:-0}" = "1" ]; then
+    return 0
+  fi
+
+  local owned_runs
+  if ! owned_runs="$(api_owned_active_run_count "$api_pids")"; then
+    err "Cannot verify whether API pid(s) $api_pids own active AgentRuns."
+    err "Refusing to kill port 8000. Set ILLO_FORCE_KILL_ACTIVE_RUNS=1 to override."
+    exit 1
+  fi
+  if [ "${owned_runs:-0}" != "0" ]; then
+    err "Refusing to kill API pid(s) $api_pids because they own $owned_runs active AgentRun(s)."
+    err "Let the runs finish, drain the worker, or set ILLO_FORCE_KILL_ACTIVE_RUNS=1 if you intend to kill them."
+    exit 1
+  fi
+}
+
+worker_status() {
+  source_service_env
+  local active="unknown"
+  if [ -x "$ROOT/venv/bin/python3" ]; then
+    active="$(active_agent_run_count || echo unknown)"
+  fi
+  echo "Active AgentRuns: $active"
+  if command -v systemctl &>/dev/null && run_logged_timeout 5 systemctl --user cat cortex-worker; then
+    echo "cortex-worker: $(systemctl --user is-active cortex-worker 2>/dev/null || echo unknown)"
+  fi
+}
+
+worker_drain() {
+  source_service_env
+  if ! command -v systemctl &>/dev/null || ! run_logged_timeout 5 systemctl --user cat cortex-worker; then
+    err "cortex-worker user service is not installed or systemd is unavailable"
+    exit 1
+  fi
+  info "Draining cortex-worker: it will stop claiming new runs and finish active runs."
+  run_logged_timeout 10 systemctl --user kill --kill-who=main --signal=TERM cortex-worker || {
+    err "Failed to signal cortex-worker"
+    exit 1
+  }
+}
+
+configure_gpu_environment() {
+  if command -v nvidia-smi &>/dev/null; then
+    export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+  fi
+}
+
+offload_ollama_models() {
+  if ! curl --max-time 3 -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+    return
+  fi
+
+  dim "Offloading Ollama models to free VRAM..."
+  "$ROOT/venv/bin/python3" - <<'PY' >/dev/null 2>&1 || true
+import json
+import urllib.request
+
+base = "http://localhost:11434"
+models = set()
+try:
+    with urllib.request.urlopen(f"{base}/api/ps", timeout=5) as resp:
+        payload = json.load(resp)
+    for item in payload.get("models", []):
+        name = item.get("name") or item.get("model")
+        if name:
+            models.add(name)
+except Exception:
+    pass
+
+if not models:
+    models.update({"qwen3.5:4b", "qwen3:4b", "llama3.2:3b"})
+
+for model in sorted(models):
+    body = json.dumps({"model": model, "prompt": "", "keep_alive": "0"}).encode()
+    req = urllib.request.Request(
+        f"{base}/api/generate",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10).read()
+    except Exception:
+        pass
+PY
+  sleep 2
+}
+
+run_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+
+  "$@" &
+  local cmd_pid=$!
+  local elapsed=0
+
+  while kill -0 "$cmd_pid" 2>/dev/null; do
+    if [ "$elapsed" -ge "$timeout_seconds" ]; then
+      kill "$cmd_pid" 2>/dev/null || true
+      sleep 1
+      if kill -0 "$cmd_pid" 2>/dev/null; then
+        kill -KILL "$cmd_pid" 2>/dev/null || true
+      fi
+      wait "$cmd_pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  wait "$cmd_pid"
+}
+
+run_logged_timeout() {
+  local timeout_seconds="$1"
+  shift
+  local log_path
+  log_path="$(launch_log_path)"
+  ensure_launch_log_dir
+  launch_log "run (${timeout_seconds}s timeout): $*"
+  run_with_timeout "$timeout_seconds" "$@" >> "$log_path" 2>&1
+  local status=$?
+  launch_log "exit $status: $*"
+  return "$status"
+}
+
+docker_available() {
+  ensure_docker_path || return 1
+  run_with_timeout 5 "$DOCKER_BIN" info >/dev/null 2>&1 && return 0
+  try_start_docker_daemon && return 0
+
+  if [ "$(basename "$DOCKER_BIN")" = "docker" ] && command -v podman >/dev/null 2>&1; then
+    local previous_bin="$DOCKER_BIN"
+    DOCKER_BIN="$(command -v podman)"
+    if run_with_timeout 5 "$DOCKER_BIN" info >/dev/null 2>&1; then
+      export PATH="$(dirname "$DOCKER_BIN"):$PATH"
+      return 0
+    fi
+    DOCKER_BIN="$previous_bin"
+  fi
+
+  return 1
+}
+
+docker_db_published_port() {
+  ensure_docker_path || return 1
+  run_with_timeout 5 "$DOCKER_BIN" port illo-db 5432/tcp 2>/dev/null \
+    | awk -F: 'NF {print $NF; exit}'
+}
+
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+port_process_pids() {
+  local port="$1"
+  lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null | sort -u | tr '\n' ' '
+}
+
+pid_command() {
+  local pid="$1"
+  ps -p "$pid" -o command= 2>/dev/null || true
+}
+
+pid_looks_illo_runtime() {
+  local pid="$1"
+  local command
+  command="$(pid_command "$pid")"
+  [ -n "$command" ] || return 1
+
+  [[ "$command" == *"$ROOT"* ]] && return 0
+  [[ "$command" =~ (python|uvicorn).*brain\.app\.api\.main ]] && return 0
+  [[ "$command" =~ brain\.platform\.gpu ]] && return 0
+  [[ "$command" =~ (npm|vite).*5173 ]] && return 0
+  return 1
+}
+
+pids_look_illo_runtime() {
+  local pids="$1"
+  local pid
+  for pid in $pids; do
+    if ! pid_looks_illo_runtime "$pid"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+describe_pids() {
+  local pids="$1"
+  local pid command
+  for pid in $pids; do
+    command="$(pid_command "$pid")"
+    echo "  $pid ${command:-<exited>}"
+  done
+}
+
+stop_port_processes() {
+  local port="$1"
+  local label="${2:-runtime}"
+  local pids
+  pids="$(port_process_pids "$port")"
+  [ -n "${pids//[[:space:]]/}" ] || return 0
+
+  if is_truthy "${ILLO_FORCE_KILL_PORTS:-0}"; then
+    warn "Port $port is in use; ILLO_FORCE_KILL_PORTS=1 so killing process(es) for $label"
+  elif pids_look_illo_runtime "$pids"; then
+    warn "Port $port is already used by Illo process(es); stopping them so this launch owns $label"
+  else
+    err "Port $port is already in use by non-Illo process(es):"
+    describe_pids "$pids" >&2
+    err "Stop that process, change the port, or set ILLO_FORCE_KILL_PORTS=1 if you want ./illo to kill it."
+    exit 1
+  fi
+
+  echo "$pids" | xargs kill -9 2>/dev/null || true
+}
+
+is_local_db_host() {
+  case "${1:-}" in
+    localhost|127.0.0.1|::1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+tcp_port_listening() {
+  local host="$1"
+  local port="$2"
+  python3 - "$host" "$port" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+try:
+    with socket.create_connection((host, port), timeout=0.5):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
+port_available() {
+  local port="$1"
+  python3 - "$port" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        raise SystemExit(1)
+PY
+}
+
+find_available_db_port() {
+  local port
+  for port in {55432..55442}; do
+    if port_available "$port"; then
+      echo "$port"
+      return 0
+    fi
+  done
+  return 1
+}
+
+sql_ident() {
+  python3 - "$1" <<'PY'
+import sys
+
+value = sys.argv[1]
+print('"' + value.replace('"', '""') + '"')
+PY
+}
+
+sql_literal() {
+  python3 - "$1" <<'PY'
+import sys
+
+value = sys.argv[1]
+print("'" + value.replace("'", "''") + "'")
+PY
+}
+
+run_postgres_admin_sql() {
+  local db_host="$1"
+  local db_port="$2"
+  local sql_file="$3"
+  local psql_bin
+
+  if psql_bin="$(find_psql_bin)"; then
+    if run_with_timeout 10 env PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-3}" "$psql_bin" -w \
+      -h "$db_host" -p "$db_port" -U postgres -d postgres \
+      -v ON_ERROR_STOP=1 -f "$sql_file" >/dev/null 2>&1; then
+      return 0
+    fi
+    if run_with_timeout 10 env PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-3}" "$psql_bin" -w \
+      -h "$db_host" -p "$db_port" -d postgres \
+      -v ON_ERROR_STOP=1 -f "$sql_file" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  if command -v sudo &>/dev/null && [ -n "${psql_bin:-}" ]; then
+    if run_with_timeout 10 sudo -n -u postgres env PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-3}" "$psql_bin" -w \
+      -p "$db_port" -d postgres \
+      -v ON_ERROR_STOP=1 -f "$sql_file" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+bootstrap_local_postgres_db() {
+  local db_host="$1"
+  local db_port="$2"
+  local db_user="$3"
+  local db_pass="$4"
+  local db_name="$5"
+
+  if ! is_local_db_host "$db_host" || ! psql_available; then
+    return 1
+  fi
+
+  local user_ident db_ident user_lit pass_lit db_lit sql_file
+  user_ident="$(sql_ident "$db_user")"
+  db_ident="$(sql_ident "$db_name")"
+  user_lit="$(sql_literal "$db_user")"
+  pass_lit="$(sql_literal "$db_pass")"
+  db_lit="$(sql_literal "$db_name")"
+  sql_file="$(mktemp "${TMPDIR:-/tmp}/illo-postgres-bootstrap.XXXXXX.sql")"
+
+  cat > "$sql_file" <<SQL
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${user_lit}) THEN
+    EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', ${user_lit}, ${pass_lit});
+  ELSE
+    EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', ${user_lit}, ${pass_lit});
+  END IF;
+END
+\$\$;
+SELECT format('CREATE DATABASE %I OWNER %I', ${db_lit}, ${user_lit})
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = ${db_lit})\\gexec
+\\connect ${db_ident}
+CREATE EXTENSION IF NOT EXISTS vector;
+SQL
+
+  if run_postgres_admin_sql "$db_host" "$db_port" "$sql_file"; then
+    rm -f "$sql_file"
+    return 0
+  fi
+
+  rm -f "$sql_file"
+  return 1
+}
+
+managed_postgres_exists() {
+  [ -s "$LOCAL_POSTGRES_DATA_DIR/PG_VERSION" ]
+}
+
+ensure_managed_postgres_db() {
+  local db_user="$1"
+  local db_pass="$2"
+  local db_name="$3"
+  local pg_bin_dir port
+  local started_here=0
+
+  is_truthy "${ILLO_DISABLE_MANAGED_POSTGRES:-0}" && return 1
+  pg_bin_dir="$(find_postgres_bin_dir)" || return 1
+
+  mkdir -p "$LOCAL_POSTGRES_RUNTIME_DIR"
+  chmod 700 "$LOCAL_POSTGRES_RUNTIME_DIR" 2>/dev/null || true
+  if ! managed_postgres_exists; then
+    info "Creating repo-local PostgreSQL cluster..."
+    launch_log "creating managed PostgreSQL cluster at $LOCAL_POSTGRES_DATA_DIR"
+    if ! run_with_timeout 60 "$pg_bin_dir/initdb" \
+      -D "$LOCAL_POSTGRES_DATA_DIR" \
+      -U postgres \
+      --encoding=UTF8 \
+      --auth-local=trust \
+      --auth-host=trust \
+      >> "$LOCAL_POSTGRES_LOG" 2>&1; then
+      warn "Could not create repo-local PostgreSQL cluster"
+      launch_log "managed PostgreSQL initdb failed; see $LOCAL_POSTGRES_LOG"
+      return 1
+    fi
+  fi
+
+  if [ -f "$LOCAL_POSTGRES_PORT_FILE" ]; then
+    port="$(tr -cd '0-9' < "$LOCAL_POSTGRES_PORT_FILE" | head -c 5)"
+  fi
+  if [ -z "${port:-}" ] && [ -f "$LOCAL_POSTGRES_DATA_DIR/postmaster.pid" ]; then
+    port="$(sed -n '4p' "$LOCAL_POSTGRES_DATA_DIR/postmaster.pid" | tr -cd '0-9' | head -c 5)"
+  fi
+  if [ -z "${port:-}" ]; then
+    port="$(find_available_db_port || true)"
+  fi
+  [ -n "${port:-}" ] || return 1
+
+  if ! "$pg_bin_dir/pg_ctl" -D "$LOCAL_POSTGRES_DATA_DIR" status >/dev/null 2>&1; then
+    if tcp_port_listening "127.0.0.1" "$port"; then
+      port="$(find_available_db_port || true)"
+      [ -n "$port" ] || return 1
+    fi
+    echo "$port" > "$LOCAL_POSTGRES_PORT_FILE"
+    info "Starting repo-local PostgreSQL on 127.0.0.1:$port..."
+    launch_log "starting managed PostgreSQL on port $port"
+    if ! run_with_timeout 45 "$pg_bin_dir/pg_ctl" \
+      -D "$LOCAL_POSTGRES_DATA_DIR" \
+      -l "$LOCAL_POSTGRES_LOG" \
+      -o "-p $port -c listen_addresses=127.0.0.1 -c unix_socket_directories=$LOCAL_POSTGRES_RUNTIME_DIR" \
+      -w start >/dev/null 2>&1; then
+      warn "Could not start repo-local PostgreSQL"
+      tail -20 "$LOCAL_POSTGRES_LOG" 2>/dev/null | sed 's/^/  /' >&2 || true
+      launch_log "managed PostgreSQL start failed; see $LOCAL_POSTGRES_LOG"
+      return 1
+    fi
+    started_here=1
+  fi
+
+  MANAGED_POSTGRES_PORT="$port"
+  if bootstrap_local_postgres_db "127.0.0.1" "$port" "$db_user" "$db_pass" "$db_name"; then
+    export PGPASSWORD="$db_pass"
+    if run_psql_no_prompt -h "127.0.0.1" -p "$port" -U "$db_user" -d "$db_name" -c "SELECT 1" >/dev/null 2>&1; then
+      unset PGPASSWORD
+      export DB_HOST="127.0.0.1"
+      export DB_PORT="$port"
+      info "Database ready in repo-local PostgreSQL at 127.0.0.1:$port"
+      return 0
+    fi
+    unset PGPASSWORD
+  fi
+
+  warn "Repo-local PostgreSQL is available, but Illo could not prepare '$db_name'."
+  warn "Usually this means the PostgreSQL installation is missing the pgvector extension."
+  if [ $started_here -eq 1 ]; then
+    run_with_timeout 30 "$pg_bin_dir/pg_ctl" -D "$LOCAL_POSTGRES_DATA_DIR" -m fast -w stop >/dev/null 2>&1 || true
+  fi
+  return 1
+}
+
+stop_managed_postgres_for_uninstall() {
+  local dry_run="$1"
+  local pg_bin_dir
+  [ -d "$LOCAL_POSTGRES_DATA_DIR" ] || return 0
+  pg_bin_dir="$(find_postgres_bin_dir)" || return 0
+
+  if ! "$pg_bin_dir/pg_ctl" -D "$LOCAL_POSTGRES_DATA_DIR" status >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ "$dry_run" = "1" ]; then
+    echo "Would stop repo-local PostgreSQL"
+    return 0
+  fi
+
+  run_with_timeout 30 "$pg_bin_dir/pg_ctl" -D "$LOCAL_POSTGRES_DATA_DIR" -m fast -w stop >/dev/null 2>&1 || \
+    warn "Failed to stop repo-local PostgreSQL cleanly"
+}
+
+# ── Prerequisites ──────────────────────────────────────────
+
+check_prereqs() {
+  local missing=0
+
+  if ! command -v python3 &>/dev/null; then
+    err "python3 not found — install Python 3.11+"
+    missing=1
+  fi
+
+  if ! command -v node &>/dev/null; then
+    err "node not found — install Node.js 22+"
+    missing=1
+  fi
+
+  if ! ensure_docker_path && ! find_postgres_bin_dir >/dev/null 2>&1; then
+    dim "No container runtime or PostgreSQL server tools found — will need external PostgreSQL"
+  fi
+
+  if [ $missing -eq 1 ]; then
+    exit 1
+  fi
+}
+
+# ── Database ──────────────────────────────────────────────
+
+ensure_db() {
+  log_phase "database: check/start"
+  source_env
+  apply_uninstall_database_env_reset
+  local db_settings_configured=0
+  local db_port_configured=0
+  local db_var
+  for db_var in "${DATABASE_ENV_VARS[@]}"; do
+    if [ "${!db_var+x}" = "x" ]; then
+      db_settings_configured=1
+    fi
+  done
+  if [ "${DB_PORT+x}" = "x" ]; then
+    db_port_configured=1
+  fi
+  local db_user="${DB_USER:-illo}"
+  local db_pass="${DB_PASSWORD:-illo}"
+  local db_name="${DB_NAME:-illo_memory}"
+  local db_host="${DB_HOST:-127.0.0.1}"
+  local db_port="${DB_PORT:-5432}"
+  local db_reachable=1
+  local postgres_listening=1
+
+  if [ $db_settings_configured -eq 0 ] && managed_postgres_exists; then
+    dim "Using existing repo-local PostgreSQL runtime"
+    if ensure_managed_postgres_db "$db_user" "$db_pass" "$db_name"; then
+      db_host="127.0.0.1"
+      db_port="$MANAGED_POSTGRES_PORT"
+      db_reachable=0
+      postgres_listening=0
+    fi
+  fi
+
+  # Check whether Illo can actually connect to its configured database. A plain
+  # pg_isready success only means something is listening on the port; it does
+  # not prove the DB/user/password are usable.
+  if [ $db_reachable -ne 0 ] && command -v pg_isready &>/dev/null && \
+     pg_isready -h "$db_host" -p "$db_port" &>/dev/null 2>&1; then
+    postgres_listening=0
+  elif [ $db_reachable -ne 0 ] && tcp_port_listening "$db_host" "$db_port"; then
+    postgres_listening=0
+  fi
+  export PGPASSWORD="$db_pass"
+  if [ $db_reachable -ne 0 ] && psql_available && \
+     run_psql_no_prompt -h "$db_host" -p "$db_port" -U "$db_user" -d "$db_name" -c "SELECT 1" &>/dev/null 2>&1; then
+    db_reachable=0
+  fi
+  unset PGPASSWORD
+
+  if [ $db_reachable -eq 0 ]; then
+    dim "Database reachable at $db_host:$db_port"
+    launch_log "database reachable at $db_host:$db_port"
+  else
+    if [ $postgres_listening -eq 0 ]; then
+      if [ $db_settings_configured -eq 0 ] && is_local_db_host "$db_host"; then
+        warn "Postgres is listening at $db_host:$db_port, but Illo cannot connect to '$db_name' as '$db_user'"
+        dim "No DB_* settings were provided — trying to bootstrap the default Illo database in local Postgres..."
+        if bootstrap_local_postgres_db "$db_host" "$db_port" "$db_user" "$db_pass" "$db_name"; then
+          export PGPASSWORD="$db_pass"
+          if psql_available && \
+             run_psql_no_prompt -h "$db_host" -p "$db_port" -U "$db_user" -d "$db_name" -c "SELECT 1" &>/dev/null 2>&1; then
+            db_reachable=0
+          fi
+          unset PGPASSWORD
+          if [ $db_reachable -eq 0 ]; then
+            info "Database bootstrapped in local Postgres at $db_host:$db_port"
+          fi
+        else
+          dim "Could not bootstrap local Postgres automatically; trying container/repo-local fallback next"
+        fi
+      fi
+    fi
+  fi
+
+  if [ $db_reachable -eq 0 ]; then
+    :
+  else
+    if [ $postgres_listening -eq 0 ]; then
+      if [ $db_port_configured -eq 0 ] && is_local_db_host "$db_host" && docker_available; then
+        local fallback_port
+        fallback_port="$(docker_db_published_port || true)"
+        if [ -z "$fallback_port" ]; then
+          fallback_port="$(find_available_db_port || true)"
+        fi
+        if [ -n "$fallback_port" ]; then
+          warn "Postgres is listening at $db_host:$db_port, but Illo cannot connect to '$db_name' as '$db_user'"
+          dim "DB_PORT was not explicitly configured — using pgvector Docker database on 127.0.0.1:$fallback_port for this launch"
+          db_host="127.0.0.1"
+          db_port="$fallback_port"
+          export DB_HOST="$db_host"
+          export DB_PORT="$db_port"
+          postgres_listening=1
+        else
+          err "Postgres is listening at $db_host:$db_port, and no alternate local DB port is available for Docker fallback"
+          err "Stop/reconfigure this Postgres, set DB_PORT to a free port, or install pgvector in the existing server"
+          exit 1
+        fi
+      elif [ $db_port_configured -eq 0 ] && [ $db_settings_configured -eq 0 ] && is_local_db_host "$db_host" && ensure_managed_postgres_db "$db_user" "$db_pass" "$db_name"; then
+        db_host="127.0.0.1"
+        db_port="$MANAGED_POSTGRES_PORT"
+        db_reachable=0
+        postgres_listening=0
+      else
+        err "Postgres is listening at $db_host:$db_port, but Illo cannot connect to database '$db_name' as user '$db_user'"
+        if [ $db_port_configured -eq 0 ] && [ $db_settings_configured -eq 0 ] && is_local_db_host "$db_host"; then
+          err "Illo could not bootstrap that Postgres, use a Docker/Podman pgvector fallback, or prepare repo-local PostgreSQL."
+          err "Start Docker/Podman, install pgvector for local PostgreSQL, or provide DATABASE_URL/DB_* settings."
+          exit 1
+        fi
+        if [ $db_port_configured -eq 1 ]; then
+          err "DB_PORT is set in your shell environment or .env, so ./illo is respecting it instead of choosing an alternate Docker port"
+          err "For a fresh-install test, run: env -u DB_HOST -u DB_PORT -u DB_NAME -u DB_USER -u DB_PASSWORD ./illo setup"
+        fi
+        err "Create that DB/user with pgvector, update DB_* settings, or unset DB_PORT so ./illo can choose a pgvector Docker fallback port"
+        exit 1
+      fi
+    fi
+
+    if [ $db_reachable -ne 0 ]; then
+      # No usable native Postgres — use a container runtime or repo-local Postgres.
+      launch_log "database not reachable at $db_host:$db_port; checking container runtime"
+      if ! docker_available; then
+        if [ $db_settings_configured -eq 0 ] && ensure_managed_postgres_db "$db_user" "$db_pass" "$db_name"; then
+          db_host="127.0.0.1"
+          db_port="$MANAGED_POSTGRES_PORT"
+          db_reachable=0
+        else
+          err "No database at $db_host:$db_port and no usable container runtime is available"
+          if ensure_docker_path; then
+            err "Docker/Podman is installed but not responding for this user."
+            err "On Linux, try: sudo systemctl start docker"
+            err "If Docker says permission denied, add this user to the docker group and start a new shell."
+          fi
+          err "Install Docker/Podman, install PostgreSQL server tools plus pgvector, or provide DATABASE_URL/DB_* settings."
+          exit 1
+        fi
+      fi
+    fi
+
+    if [ $db_reachable -ne 0 ]; then
+    local running_containers
+    launch_log "checking illo-db Docker container"
+    running_containers="$(run_with_timeout 10 "$DOCKER_BIN" ps --format '{{.Names}}' 2>/dev/null || true)"
+    if echo "$running_containers" | grep -q '^illo-db$'; then
+      dim "Database container running"
+      launch_log "database container already running"
+    else
+      local existing_containers
+      existing_containers="$(run_with_timeout 10 "$DOCKER_BIN" ps -a --format '{{.Names}}' 2>/dev/null || true)"
+      if echo "$existing_containers" | grep -q '^illo-db$'; then
+        info "Starting database container..."
+        launch_log "starting existing illo-db container"
+        run_with_timeout 15 "$DOCKER_BIN" start illo-db >/dev/null || {
+          err "Failed to start database container"
+          exit 1
+        }
+      else
+        info "Creating database container..."
+        launch_log "creating illo-db container on host port $db_port"
+        run_with_timeout 20 "$DOCKER_BIN" run -d \
+          --name illo-db \
+          -e POSTGRES_DB="$db_name" \
+          -e POSTGRES_USER="$db_user" \
+          -e POSTGRES_PASSWORD="$db_pass" \
+          -p "$db_port":5432 \
+          pgvector/pgvector:pg16 >/dev/null || {
+            err "Failed to create database container"
+            exit 1
+          }
+      fi
+    fi
+
+    # Wait for container to accept connections
+    dim "Waiting for database..."
+    launch_log "waiting for database readiness"
+    local retries=0
+    while ! run_with_timeout 5 "$DOCKER_BIN" exec illo-db pg_isready -U "$db_user" &>/dev/null; do
+      retries=$((retries + 1))
+      if [ $retries -gt 30 ]; then
+        err "Database did not become ready in time"
+        exit 1
+      fi
+      sleep 1
+    done
+    fi
+  fi
+  dim "Database ready"
+  launch_log "database ready"
+  export DB_HOST="$db_host"
+  export DB_PORT="$db_port"
+  export DB_NAME="$db_name"
+  export DB_USER="$db_user"
+  export DB_PASSWORD="$db_pass"
+
+  if psql_available; then
+    export PGPASSWORD="$db_pass"
+    local vector_available
+    vector_available=$(
+      run_psql_no_prompt -h "$db_host" -p "$db_port" -U "$db_user" -d "$db_name" \
+        -tAc "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'" \
+        2>/dev/null || true
+    )
+    unset PGPASSWORD
+    if [ "$vector_available" != "1" ]; then
+      err "Postgres at $db_host:$db_port is missing the pgvector extension"
+      err "Install pgvector for this Postgres, or stop it and let ./illo start the pgvector Docker database"
+      exit 1
+    fi
+  fi
+
+  # Run migrations (from project root where alembic.ini lives)
+  if "$ROOT/venv/bin/python3" -c "import alembic" &>/dev/null; then
+    dim "Running database migrations..."
+    launch_log "running database migrations"
+    cd "$ROOT"
+    "$ROOT/venv/bin/python3" -m alembic upgrade head || {
+      err "Migrations failed — check brain/platform/db/alembic for errors"
+      exit 1
+    }
+  fi
+}
+
+ensure_browser_runtime() {
+  local python_bin="${1:-$ROOT/venv/bin/python3}"
+
+  if [ "${ILLO_SKIP_BROWSER_RUNTIME_CHECK:-0}" = "1" ]; then
+    dim "Skipping browser runtime check (ILLO_SKIP_BROWSER_RUNTIME_CHECK=1)"
+    return 0
+  fi
+
+  if [ ! -x "$python_bin" ]; then
+    warn "Cannot verify browser runtime — Python not found at $python_bin"
+    return 1
+  fi
+
+  local runtime_status=""
+  runtime_status=$(
+    "$python_bin" - <<'PY' 2>/dev/null || true
+import sys
+import os
+import platform
+import shutil
+from pathlib import Path
+
+def existing(candidates):
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return str(candidate)
+    return ""
+
+chrome_for_testing_dir = Path(os.environ["ILLO_BROWSER_CHROME_FOR_TESTING_DIR"])
+chrome_for_testing_candidates = []
+if sys.platform.startswith("linux"):
+    chrome_for_testing_candidates.append(chrome_for_testing_dir / "chrome-linux64" / "chrome")
+elif sys.platform == "darwin":
+    mac_key = "mac-arm64" if platform.machine().lower() in {"arm64", "aarch64"} else "mac-x64"
+    chrome_for_testing_candidates.append(
+        chrome_for_testing_dir / f"chrome-{mac_key}" / "Google Chrome for Testing.app" / "Contents" / "MacOS" / "Google Chrome for Testing"
+    )
+harness = existing([
+    os.environ.get("ILLO_BROWSER_HARNESS_BIN"),
+    str(Path(sys.executable).with_name("browser-harness")),
+    shutil.which("browser-harness"),
+])
+chrome = existing([
+    os.environ.get("ILLO_BROWSER_CHROME_BIN"),
+    *chrome_for_testing_candidates,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    shutil.which("google-chrome"),
+    shutil.which("google-chrome-stable"),
+    shutil.which("chromium"),
+    shutil.which("chromium-browser"),
+    shutil.which("microsoft-edge"),
+])
+
+print(f"HARNESS={harness}")
+print(f"CHROME={chrome}")
+sys.exit(0 if harness and chrome else 10)
+PY
+  )
+
+  local harness_path chrome_path
+  harness_path=$(printf "%s\n" "$runtime_status" | awk -F= '/^HARNESS=/{print substr($0,9)}')
+  chrome_path=$(printf "%s\n" "$runtime_status" | awk -F= '/^CHROME=/{print substr($0,8)}')
+
+  if [ -n "$harness_path" ] && [ -n "$chrome_path" ]; then
+    dim "Browser runtime ready (Browser Harness + Chrome)"
+    return 0
+  fi
+
+  warn "Browser runtime incomplete — checking Browser Harness and repo-local Chrome for Testing..."
+  if "$ROOT/ops/install-browser-runtime.sh" "$python_bin"; then
+    runtime_status=$("$python_bin" - <<'PY' 2>/dev/null || true
+import os
+import platform
+import shutil
+import sys
+from pathlib import Path
+
+def existing(candidates):
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return str(candidate)
+    return ""
+
+chrome_for_testing_dir = Path(os.environ["ILLO_BROWSER_CHROME_FOR_TESTING_DIR"])
+chrome_for_testing_candidates = []
+if sys.platform.startswith("linux"):
+    chrome_for_testing_candidates.append(chrome_for_testing_dir / "chrome-linux64" / "chrome")
+elif sys.platform == "darwin":
+    mac_key = "mac-arm64" if platform.machine().lower() in {"arm64", "aarch64"} else "mac-x64"
+    chrome_for_testing_candidates.append(
+        chrome_for_testing_dir / f"chrome-{mac_key}" / "Google Chrome for Testing.app" / "Contents" / "MacOS" / "Google Chrome for Testing"
+    )
+harness = existing([
+    os.environ.get("ILLO_BROWSER_HARNESS_BIN"),
+    str(Path(sys.executable).with_name("browser-harness")),
+    shutil.which("browser-harness"),
+])
+chrome = existing([
+    os.environ.get("ILLO_BROWSER_CHROME_BIN"),
+    *chrome_for_testing_candidates,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    shutil.which("google-chrome"),
+    shutil.which("google-chrome-stable"),
+    shutil.which("chromium"),
+    shutil.which("chromium-browser"),
+    shutil.which("microsoft-edge"),
+])
+print(f"HARNESS={harness}")
+print(f"CHROME={chrome}")
+PY
+)
+    harness_path=$(printf "%s\n" "$runtime_status" | awk -F= '/^HARNESS=/{print substr($0,9)}')
+    chrome_path=$(printf "%s\n" "$runtime_status" | awk -F= '/^CHROME=/{print substr($0,8)}')
+    if [ -n "$harness_path" ] && [ -n "$chrome_path" ]; then
+      info "Browser runtime ready"
+      return 0
+    fi
+  fi
+
+  if [ -z "$harness_path" ]; then
+    warn "Browser Harness is missing from the Illo venv"
+  fi
+  if [ -z "$chrome_path" ]; then
+    warn "Chrome/Chromium is missing on this server. Illo tried to install repo-local Chrome for Testing under $LOCAL_BROWSER_CHROME_FOR_TESTING_DIR; set ILLO_BROWSER_CHROME_BIN to override."
+  fi
+  warn "Browser runtime is not ready — browser tools will fail until this is fixed"
+  return 1
+}
+
+ensure_deno_runtime() {
+  local deno_install="${ILLO_DENO_INSTALL:-$ROOT/.runtime/deno}"
+  local deno_bin="$deno_install/bin"
+  local deno_exe="$deno_bin/deno"
+
+  path_prepend_once "$deno_bin"
+
+  if [ "${ILLO_SKIP_DENO_INSTALL:-0}" = "1" ]; then
+    dim "Skipping Deno runtime check (ILLO_SKIP_DENO_INSTALL=1)"
+    return 0
+  fi
+
+  if command -v deno >/dev/null 2>&1; then
+    dim "Deno runtime ready ($(command -v deno))"
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl not found — cannot auto-install Deno. PredictRLM workers will fall back to native."
+    return 1
+  fi
+
+  if ! command -v unzip >/dev/null 2>&1; then
+    warn "unzip not found — cannot auto-install Deno. PredictRLM workers will fall back to native."
+    return 1
+  fi
+
+  info "Installing Deno runtime for PredictRLM workers..."
+  mkdir -p "$deno_install"
+
+  local install_script
+  install_script="$(mktemp "${TMPDIR:-/tmp}/illo-deno-install.XXXXXX")"
+
+  if ! curl -fsSL https://deno.land/install.sh -o "$install_script"; then
+    rm -f "$install_script"
+    warn "Failed to download Deno installer — PredictRLM workers will fall back to native."
+    return 1
+  fi
+
+  if ! DENO_INSTALL="$deno_install" sh "$install_script" -y >/tmp/illo-deno-install.log 2>&1; then
+    rm -f "$install_script"
+    warn "Deno install failed — see /tmp/illo-deno-install.log. PredictRLM workers will fall back to native."
+    return 1
+  fi
+
+  rm -f "$install_script"
+  path_prepend_once "$deno_bin"
+
+  if [ -x "$deno_exe" ]; then
+    info "Deno runtime ready ($deno_exe)"
+    return 0
+  fi
+
+  warn "Deno install finished but the binary was not found at $deno_exe"
+  return 1
+}
+
+sync_frontend_dependencies() {
+  if [ ! -d "$ROOT/frontend" ]; then
+    return 0
+  fi
+
+  if [ -d "$ROOT/frontend/node_modules" ]; then
+    info "Syncing frontend dependencies..."
+  else
+    info "Installing frontend dependencies..."
+  fi
+
+  "$ROOT/ops/sync-frontend-deps.sh" --quiet || {
+    err "Failed to install frontend dependencies"
+    exit 1
+  }
+}
+
+ensure_hf_cli() {
+  if [ -x "$ROOT/venv/bin/hf" ] || command -v hf &>/dev/null; then
+    return 0
+  fi
+
+  "$ROOT/venv/bin/pip" install -q "huggingface_hub[cli]" 2>/dev/null || return 1
+  [ -x "$ROOT/venv/bin/hf" ] || command -v hf &>/dev/null
+}
+
+hf_download() {
+  local repo_id="$1"
+  local local_dir="$2"
+  local hf_bin="$ROOT/venv/bin/hf"
+
+  ensure_hf_cli || return 1
+  if [ ! -x "$hf_bin" ]; then
+    hf_bin="$(command -v hf)" || return 1
+  fi
+
+  "$hf_bin" download "$repo_id" --local-dir "$local_dir"
+}
+
+should_prefetch_embedding_model() {
+  is_truthy "${ILLO_DOWNLOAD_GPU_MODELS:-0}" && return 0
+  [ "${EMBEDDING_BACKEND:-api}" = "gpu" ]
+}
+
+should_prefetch_llm_model() {
+  is_truthy "${ILLO_DOWNLOAD_GPU_MODELS:-0}" && return 0
+  [ -n "${LLM_MODEL_PATH:-}" ] || [ -n "${LLM_MODEL:-}" ]
+}
+
+# ── Setup (idempotent) ─────────────────────────────────────
+
+setup() {
+  echo ""
+  echo -e "${BOLD}Setting up Illospace...${NC}"
+  echo ""
+
+  # 1. Python virtual environment
+  if [ ! -d "venv" ]; then
+    info "Creating Python virtual environment..."
+    python3 -m venv venv || {
+      err "Failed to create venv — try: sudo apt install python3-venv python3-full"
+      exit 1
+    }
+  fi
+  source venv/bin/activate
+
+  # 2. Python dependencies (always sync to catch updates)
+  info "Installing Python dependencies..."
+
+  # Install PyTorch with correct CUDA support BEFORE requirements.txt
+  # (sentence-transformers pulls torch — we want the GPU-compatible version)
+  if command -v nvidia-smi &>/dev/null; then
+    local cuda_ver
+    cuda_ver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
+    if [ -n "$cuda_ver" ]; then
+      # Detect CUDA version from nvidia-smi output
+      local cuda_major
+      cuda_major=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' | head -1)
+      if [ -n "$cuda_major" ]; then
+        local cuda_tag="${cuda_major//./}"  # "12.8" → "128"
+        info "Detected CUDA $cuda_major — installing PyTorch with cu${cuda_tag} support..."
+        # Try exact match first, fall back to cu124 (widely supported)
+        "$ROOT/venv/bin/pip" install -q torch --index-url "https://download.pytorch.org/whl/cu${cuda_tag}" 2>/dev/null || \
+        "$ROOT/venv/bin/pip" install -q torch --index-url "https://download.pytorch.org/whl/cu124" 2>/dev/null || \
+        warn "Could not install CUDA-compatible PyTorch — GPU embeddings may not work"
+      fi
+    fi
+  fi
+
+  "$ROOT/venv/bin/pip" install -q -r requirements.txt
+
+  # 2a. PredictRLM runtime
+  ensure_deno_runtime
+
+  # 2b. Browser runtime for thought browsing
+  ensure_browser_runtime "$ROOT/venv/bin/python3" || {
+    err "Browser runtime setup failed — check Chrome for Testing install or set ILLO_BROWSER_CHROME_BIN"
+    exit 1
+  }
+
+  # 2c. Environment values. Source this before optional GPU model decisions
+  # so the default API embedding setup can reach the System tab without
+  # pre-downloading large local models.
+  source_env
+  apply_uninstall_database_env_reset
+  if [ ! -f ".env" ]; then
+    dim "No .env found — using shell environment and built-in development defaults"
+    dim "Optional: copy .env.example to .env for local file-based overrides"
+  else
+    dim ".env already exists"
+  fi
+  ensure_runtime_secrets
+
+  # 2d. Download GPU models if explicitly requested
+  if command -v nvidia-smi &>/dev/null; then
+    local models_dir="$ROOT/models"
+    local prefetched_any=0
+    mkdir -p "$models_dir"
+
+    if should_prefetch_embedding_model; then
+      prefetched_any=1
+      if [ ! -d "$models_dir/qwen3-embedding-8b" ] || [ -z "$(ls -A "$models_dir/qwen3-embedding-8b" 2>/dev/null)" ]; then
+        info "Downloading embedding model (Qwen3-Embedding-8B)..."
+        hf_download Qwen/Qwen3-Embedding-8B "$models_dir/qwen3-embedding-8b" || \
+          warn "Failed to download embedding model — GPU embeddings won't work"
+      else
+        dim "Embedding model already downloaded"
+      fi
+    fi
+
+    if should_prefetch_llm_model; then
+      prefetched_any=1
+      if [ ! -d "$models_dir/qwen3.5-4b" ] || [ -z "$(ls -A "$models_dir/qwen3.5-4b" 2>/dev/null)" ]; then
+        info "Downloading LLM model (Qwen3.5-4B)..."
+        hf_download Qwen/Qwen3.5-4B "$models_dir/qwen3.5-4b" || \
+          warn "Failed to download LLM model — GPU LLM won't work (Ollama fallback still available)"
+      else
+        dim "LLM model already downloaded"
+      fi
+    fi
+
+    if [ $prefetched_any -eq 0 ]; then
+      dim "Skipping GPU model pre-download; configure embeddings in System, or set ILLO_DOWNLOAD_GPU_MODELS=1 to prefetch"
+    fi
+  fi
+
+  # 3. Frontend dependencies
+  sync_frontend_dependencies
+
+  # 4. Database
+  ensure_db
+
+  echo ""
+  info "Setup complete."
+  echo ""
+}
+
+needs_setup() {
+  [ ! -d "venv" ] && return 0
+  [ ! -d "frontend/node_modules" ] && return 0
+  return 1
+}
+
+# ── Run ────────────────────────────────────────────────────
+
+run_dev() {
+  if [ -f "venv/bin/activate" ]; then
+    source venv/bin/activate
+  else
+    err "No venv found — run ./illo setup first"
+    exit 1
+  fi
+  source_env
+  export ILLO_ENV="${ILLO_ENV:-development}"
+  ensure_runtime_secrets
+
+  # Local dev should consume the queue inline unless the user explicitly
+  # turned it off. This keeps ./illo self-contained for laptop testing.
+  if [ -z "${CORTEX_INLINE_DISPATCHER:-}" ]; then
+    export CORTEX_INLINE_DISPATCHER=1
+    dim "CORTEX_INLINE_DISPATCHER not set — enabling inline dispatcher for local dev"
+  fi
+
+  # The API process started by ./illo already launches the dispatcher.
+  # Stop any lingering systemd services so a stale worker cannot consume
+  # dispatches from another checkout.
+  log_phase "development: stop conflicting user services"
+  stop_conflicting_services
+
+  # ── Nuke all stale illo processes ─────────────────────────────
+  # Kill GPU workers (hold VRAM), GPU server, uvicorn + reload children
+  log_phase "development: kill stale local processes"
+  local stale_pids
+  stale_pids=$(pgrep -f "brain[./]gpu" 2>/dev/null || true)
+  [ -n "$stale_pids" ] && echo "$stale_pids" | xargs kill -9 2>/dev/null || true
+  stale_pids=$(pgrep -f "uvicorn.*brain\.api" 2>/dev/null || true)
+  [ -n "$stale_pids" ] && echo "$stale_pids" | xargs kill -9 2>/dev/null || true
+  stale_pids=$(pgrep -f "npm.*dev.*5173" 2>/dev/null || true)
+  [ -n "$stale_pids" ] && echo "$stale_pids" | xargs kill -9 2>/dev/null || true
+  sleep 1
+
+  # ── Kill anything still on our ports ────────────────────────
+  log_phase "development: free runtime ports"
+  for port in 8000 5173 9800; do
+    stop_port_processes "$port" "development runtime"
+  done
+
+  # Wait until ports are free (up to 5s each)
+  for port in 8000 9800; do
+    local wait_count=0
+    while port_process_pids "$port" | grep -q '[0-9]' && [ $wait_count -lt 10 ]; do
+      sleep 0.5
+      wait_count=$((wait_count + 1))
+    done
+    if port_process_pids "$port" | grep -q '[0-9]'; then
+      err "Port $port is still in use after stopping known Illo processes."
+      describe_pids "$(port_process_pids "$port")" >&2
+      err "Stop that process or set ILLO_FORCE_KILL_PORTS=1 if you want ./illo to kill it."
+      exit 1
+    fi
+  done
+
+  # Ensure DB is running even if setup was skipped
+  log_phase "development: ensure database"
+  ensure_db
+
+  # Sync Python deps in case requirements changed since last setup
+  log_phase "development: sync Python dependencies"
+  "$ROOT/venv/bin/pip" install -q -r requirements.txt 2>/dev/null
+  log_phase "development: ensure Deno runtime"
+  ensure_deno_runtime
+  log_phase "development: ensure browser runtime"
+  ensure_browser_runtime "$ROOT/venv/bin/python3" || {
+    err "Browser runtime setup failed — check Chrome for Testing install or set ILLO_BROWSER_CHROME_BIN"
+    exit 1
+  }
+  log_phase "development: sync frontend dependencies"
+  sync_frontend_dependencies
+
+  # Offload Ollama models to free VRAM for GPU server workers
+  log_phase "development: prepare GPU/runtime environment"
+  offload_ollama_models
+  configure_gpu_environment
+
+  # Start GPU server (embeddings + local LLM) in background
+  log_phase "development: start GPU server"
+  GPU_PID=""
+  (
+    cd "$ROOT"
+    PYTHONPATH="$ROOT" "$ROOT/venv/bin/python3" -m brain.platform.gpu >> /tmp/illo-gpu-server.log 2>&1
+  ) &
+  GPU_PID=$!
+  # Quick check: did it crash immediately?
+  sleep 1
+  if kill -0 $GPU_PID 2>/dev/null; then
+    info "GPU server started (pid $GPU_PID)"
+    # Wait for it to be ready (up to 15s)
+    local gpu_ready=0
+    for i in $(seq 1 15); do
+      if curl --max-time 2 -sf http://127.0.0.1:9800/health >/dev/null 2>&1; then
+        gpu_ready=1
+        break
+      fi
+      sleep 1
+    done
+    if [ $gpu_ready -eq 1 ]; then
+      info "GPU server ready"
+    else
+      warn "GPU server started but not ready yet (may still be loading models)"
+    fi
+  else
+    warn "GPU server failed to start — embeddings/memory will not work"
+    warn "Check /tmp/illo-gpu-server.log for errors"
+    GPU_PID=""
+  fi
+
+  echo ""
+  echo -e "${BOLD}Illospace${NC}"
+  echo -e "  API:       ${GREEN}http://localhost:8000${NC}  ${DIM}(docs at /api/docs)${NC}"
+  echo -e "  Dashboard: ${GREEN}http://localhost:5173${NC}"
+  if [ -n "$GPU_PID" ]; then
+    echo -e "  GPU:       ${GREEN}http://localhost:9800${NC}  ${DIM}(embeddings + LLM)${NC}"
+  else
+    echo -e "  GPU:       ${RED}not running${NC}  ${DIM}(check /tmp/illo-gpu-server.log)${NC}"
+  fi
+  echo -e "  API log:   ${GREEN}/tmp/illo-api.log${NC}"
+  echo -e "  ${DIM}Press Ctrl+C to stop${NC}"
+  echo ""
+
+  # Start frontend dev server in background (strict port to avoid drift)
+  log_phase "development: start frontend dev server"
+  cd frontend && npm run dev -- --host --port 5173 --strict-port 2>/dev/null &
+  FRONTEND_PID=$!
+  cd "$ROOT"
+
+  # Cleanup on exit — kill process groups to include worker subprocesses
+  cleanup() {
+    echo ""
+    dim "Shutting down..."
+    # Kill GPU server + its worker subprocesses (entire process group)
+    if [ -n "$GPU_PID" ] && kill -0 "$GPU_PID" 2>/dev/null; then
+      kill -- -"$GPU_PID" 2>/dev/null || kill "$GPU_PID" 2>/dev/null
+    fi
+    # Kill any remaining GPU workers
+    pkill -f "brain\.gpu\.workers\." 2>/dev/null || true
+    kill "$FRONTEND_PID" 2>/dev/null
+    exit 0
+  }
+  trap cleanup INT TERM
+
+  # Final port check — something may have re-bound 8000 during GPU/frontend startup
+  log_phase "development: final API port check"
+  local api_pids
+  api_pids=$(lsof -ti tcp:8000 2>/dev/null || true)
+  if [ -n "$api_pids" ]; then
+    stop_port_processes 8000 "development API"
+    sleep 1
+  fi
+
+  # Start API (foreground)
+  log_phase "development: start API server"
+  : > /tmp/illo-api.log
+  PYTHONUNBUFFERED=1 "$ROOT/venv/bin/uvicorn" brain.app.api.main:app --port 8000 --host 0.0.0.0 \
+    2>&1 | tee -a /tmp/illo-api.log
+}
+
+run_prod() {
+  if [ -f "venv/bin/activate" ]; then
+    source venv/bin/activate
+  else
+    err "No venv found — run ./illo setup first"
+    exit 1
+  fi
+  source_env
+  export ILLO_ENV="${ILLO_ENV:-production}"
+  ensure_runtime_secrets
+  local cortex_inline_defaulted=0
+  # Production-safe start keeps API/dashboard restarts independent from
+  # AgentRun workers. Use the standalone cortex-worker service for queue
+  # ownership; local self-contained queue consumption belongs to ./illo dev.
+  if [ -z "${CORTEX_INLINE_DISPATCHER:-}" ]; then
+    export CORTEX_INLINE_DISPATCHER=0
+    cortex_inline_defaulted=1
+    dim "CORTEX_INLINE_DISPATCHER not set — leaving AgentRuns to the standalone worker"
+  fi
+  log_phase "production: stop conflicting API services"
+  stop_conflicting_services "illo-dashboard" "illo-api"
+  log_phase "production: ensure database"
+  ensure_db
+
+  # Sync Python deps in case requirements changed
+  log_phase "production: sync Python dependencies"
+  "$ROOT/venv/bin/pip" install -q -r requirements.txt 2>/dev/null
+  log_phase "production: ensure Deno runtime"
+  ensure_deno_runtime
+  log_phase "production: ensure browser runtime"
+  ensure_browser_runtime "$ROOT/venv/bin/python3" || {
+    err "Browser runtime setup failed — check Chrome for Testing install or set ILLO_BROWSER_CHROME_BIN"
+    exit 1
+  }
+  log_phase "production: sync frontend dependencies"
+  sync_frontend_dependencies
+
+  log_phase "production: prepare GPU/runtime environment"
+  local active_runs_for_runtime
+  active_runs_for_runtime="$(active_agent_run_count || echo unknown)"
+  if [ "$active_runs_for_runtime" = "0" ]; then
+    offload_ollama_models
+  else
+    dim "Skipping Ollama offload while $active_runs_for_runtime AgentRun(s) are active"
+  fi
+  configure_gpu_environment
+
+  GPU_PID=""
+  local should_start_embedder=0
+  if is_truthy "${ILLO_START_EMBEDDER:-0}"; then
+    should_start_embedder=1
+  elif [ "${EMBEDDING_BACKEND:-api}" = "gpu" ]; then
+    should_start_embedder=1
+    dim "EMBEDDING_BACKEND=gpu - starting local GPU embedder"
+  fi
+
+  if [ "$should_start_embedder" = "1" ]; then
+    log_phase "production: start GPU server"
+    if lsof -ti tcp:9800 >/dev/null 2>&1; then
+      dim "GPU server already bound on :9800; leaving it alone"
+    else
+      (
+        cd "$ROOT"
+        PYTHONPATH="$ROOT" "$ROOT/venv/bin/python3" -m brain.platform.gpu >> /tmp/illo-gpu-server.log 2>&1
+      ) &
+      GPU_PID=$!
+      sleep 1
+      if kill -0 $GPU_PID 2>/dev/null; then
+        info "GPU server started (pid $GPU_PID)"
+      else
+        warn "GPU server failed to start — check /tmp/illo-gpu-server.log"
+        GPU_PID=""
+      fi
+    fi
+  else
+    dim "Leaving GPU/embedder services untouched (set EMBEDDING_BACKEND=gpu or ILLO_START_EMBEDDER=1 to start it here)"
+    unload_unused_embedding_worker
+  fi
+
+  info "Building frontend..."
+  log_phase "production: build frontend"
+  (cd frontend && npm run build) || warn "Frontend build failed"
+  cd "$ROOT"
+
+  log_phase "production: ensure worker services"
+  if ! ensure_production_user_services; then
+    if [ "$cortex_inline_defaulted" = "1" ]; then
+      export CORTEX_INLINE_DISPATCHER=1
+      warn "Standalone worker service is unavailable; using inline AgentRun dispatcher for this launch"
+    else
+      warn "Standalone worker service is unavailable and CORTEX_INLINE_DISPATCHER was set explicitly"
+    fi
+  fi
+
+  echo ""
+  echo -e "${BOLD}Illospace${NC} ${DIM}(production)${NC}"
+  echo -e "  App: ${GREEN}http://localhost:8000${NC}"
+  if [ -n "$GPU_PID" ]; then
+    echo -e "  GPU: ${GREEN}http://localhost:9800${NC}"
+  elif lsof -ti tcp:9800 >/dev/null 2>&1; then
+    echo -e "  GPU: ${GREEN}http://localhost:9800${NC} ${DIM}(existing service)${NC}"
+  else
+    echo -e "  GPU: ${RED}not running${NC}"
+  fi
+  echo -e "  API log: ${GREEN}/tmp/illo-api.log${NC}"
+  echo ""
+
+  cleanup_prod() {
+    dim "Shutting down..."
+    if [ -n "$GPU_PID" ] && kill -0 "$GPU_PID" 2>/dev/null; then
+      kill -- -"$GPU_PID" 2>/dev/null || kill "$GPU_PID" 2>/dev/null
+      pkill -f "brain\.gpu\.workers\." 2>/dev/null || true
+    fi
+    exit 0
+  }
+  trap cleanup_prod INT TERM
+  trap '' HUP
+
+  cd "$ROOT"
+  # Final port check
+  log_phase "production: final API port check"
+  local api_pids
+  api_pids=$(lsof -ti tcp:8000 2>/dev/null || true)
+  if [ -n "$api_pids" ]; then
+    guard_api_port_kill "$api_pids"
+    stop_port_processes 8000 "production API"
+    sleep 1
+  fi
+  : > /tmp/illo-api.log
+  log_phase "production: start API server"
+  PYTHONUNBUFFERED=1 "$ROOT/venv/bin/uvicorn" brain.app.api.main:app --host 0.0.0.0 --port 8000 \
+    2>&1 | tee -a /tmp/illo-api.log
+}
+
+# ── Uninstall / local reset ────────────────────────────────
+
+uninstall_usage() {
+  echo ""
+  echo -e "${BOLD}Usage:${NC} ./illo uninstall [options]"
+  echo ""
+  echo "Removes local Illo runtime/install state so this checkout can be set up from scratch."
+  echo ""
+  echo -e "  ${GREEN}-y, --yes${NC}       Skip confirmation"
+  echo -e "  ${GREEN}--keep-db${NC}       Keep local database runtimes/containers"
+  echo -e "  ${GREEN}--keep-config${NC}   Keep .env and ops/cron/env.conf"
+  echo -e "  ${GREEN}--keep-private${NC}  Keep .illo private runtime state"
+  echo -e "  ${GREEN}--keep-models${NC}   Keep downloaded local models"
+  echo -e "  ${GREEN}--dry-run${NC}       Show what would be removed"
+  echo ""
+}
+
+remove_path_if_present() {
+  local path="$1"
+  local dry_run="$2"
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    return 0
+  fi
+  if [ "$dry_run" = "1" ]; then
+    echo "Would remove: $path"
+    return 0
+  fi
+  rm -rf "$path"
+  dim "Removed $path"
+}
+
+kill_pids() {
+  local pids="$1"
+  local label="$2"
+  local dry_run="$3"
+  if [ -z "$pids" ]; then
+    return 0
+  fi
+  if [ "$dry_run" = "1" ]; then
+    echo "Would stop $label pid(s): $pids"
+    return 0
+  fi
+  echo "$pids" | tr ' ' '\n' | sort -u | xargs kill -TERM 2>/dev/null || true
+  sleep 1
+  echo "$pids" | tr ' ' '\n' | sort -u | xargs kill -KILL 2>/dev/null || true
+  dim "Stopped $label pid(s): $pids"
+}
+
+stop_local_processes_for_uninstall() {
+  local dry_run="$1"
+  local pids
+
+  if [ "$dry_run" = "1" ]; then
+    echo "Would stop known Illo systemd user services if installed"
+  else
+    stop_conflicting_services || true
+  fi
+
+  pids="$(pgrep -f "uvicorn.*brain\.app\.api\.main" 2>/dev/null | tr '\n' ' ' || true)"
+  kill_pids "$pids" "Illo API" "$dry_run"
+
+  pids="$(pgrep -f "brain\.platform\.gpu" 2>/dev/null | tr '\n' ' ' || true)"
+  kill_pids "$pids" "Illo GPU server" "$dry_run"
+
+  pids="$(pgrep -f "brain\.gpu\.workers\." 2>/dev/null | tr '\n' ' ' || true)"
+  kill_pids "$pids" "Illo GPU worker" "$dry_run"
+
+  pids="$(pgrep -f "npm.*dev.*5173" 2>/dev/null | tr '\n' ' ' || true)"
+  kill_pids "$pids" "Illo frontend" "$dry_run"
+
+  local port
+  for port in 8000 5173 9800; do
+    pids="$(port_process_pids "$port")"
+    kill_pids "$pids" "process on port $port" "$dry_run"
+  done
+}
+
+remove_illo_db_containers() {
+  local dry_run="$1"
+  local names=("illo-db" "illo-brain-db")
+  if [ -n "${ILLO_DB_CONTAINER:-}" ]; then
+    names=("$ILLO_DB_CONTAINER" "${names[@]}")
+  fi
+
+  if ! docker_available; then
+    dim "Docker/Podman is not available — skipping container database removal"
+    return 0
+  fi
+
+  local seen="" name existing
+  for name in "${names[@]}"; do
+    case " $seen " in
+      *" $name "*) continue ;;
+    esac
+    seen="$seen $name"
+    existing="$(run_with_timeout 5 "$DOCKER_BIN" ps -a --format '{{.Names}}' 2>/dev/null | grep -x "$name" || true)"
+    if [ -z "$existing" ]; then
+      continue
+    fi
+    if [ "$dry_run" = "1" ]; then
+      echo "Would remove database container and volumes: $name"
+    else
+      run_with_timeout 30 "$DOCKER_BIN" rm -f -v "$name" >/dev/null || {
+        warn "Failed to remove database container $name"
+        continue
+      }
+      dim "Removed database container and volumes: $name"
+    fi
+  done
+}
+
+uninstall() {
+  local assume_yes=0
+  local keep_db=0
+  local keep_config=0
+  local keep_private=0
+  local keep_models=0
+  local dry_run=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -y|--yes) assume_yes=1 ;;
+      --keep-db) keep_db=1 ;;
+      --keep-config) keep_config=1 ;;
+      --keep-private) keep_private=1 ;;
+      --keep-models) keep_models=1 ;;
+      --dry-run) dry_run=1 ;;
+      -h|--help) uninstall_usage; return 0 ;;
+      *)
+        err "Unknown uninstall option: $1"
+        uninstall_usage
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  local inherited_db_vars
+  inherited_db_vars="$(database_env_var_names)"
+  source_env
+
+  echo ""
+  echo -e "${BOLD}Uninstall Illo local runtime${NC}"
+  echo ""
+  echo "This keeps the git checkout, but removes local install/runtime state under:"
+  echo "  $ROOT"
+  echo ""
+  echo "It will stop known Illo services/processes and remove generated dependencies."
+  if [ $keep_db -eq 0 ]; then
+    echo "It will delete the Illo repo-local PostgreSQL runtime and Docker/Podman database container(s)."
+  fi
+  if [ $keep_config -eq 0 ]; then
+    echo "It will delete local config files: .env and ops/cron/env.conf."
+  fi
+  if [ $keep_private -eq 0 ]; then
+    echo "It will delete private runtime state under .illo."
+  fi
+  echo ""
+
+  if [ $assume_yes -eq 0 ] && [ $dry_run -eq 0 ]; then
+    local answer
+    read -r -p "Type 'uninstall' to continue: " answer
+    if [ "$answer" != "uninstall" ]; then
+      dim "Uninstall cancelled."
+      return 0
+    fi
+  fi
+
+  stop_local_processes_for_uninstall "$dry_run"
+  if [ $keep_db -eq 0 ]; then
+    stop_managed_postgres_for_uninstall "$dry_run"
+  fi
+
+  if [ $keep_db -eq 0 ]; then
+    remove_illo_db_containers "$dry_run"
+  fi
+
+  remove_path_if_present "$ROOT/venv" "$dry_run"
+  if [ $keep_db -eq 0 ]; then
+    remove_path_if_present "$ROOT/.runtime" "$dry_run"
+  else
+    remove_path_if_present "$LOCAL_DENO_INSTALL" "$dry_run"
+    remove_path_if_present "$LOCAL_BROWSER_RUNTIME_DIR" "$dry_run"
+  fi
+  remove_path_if_present "$ROOT/frontend/node_modules" "$dry_run"
+  remove_path_if_present "$ROOT/frontend/.svelte-kit" "$dry_run"
+  remove_path_if_present "$ROOT/frontend/build" "$dry_run"
+  remove_path_if_present "$ROOT/.pytest_cache" "$dry_run"
+  remove_path_if_present "$ROOT/logs" "$dry_run"
+  remove_path_if_present "/tmp/illo-api.log" "$dry_run"
+  remove_path_if_present "/tmp/illo-gpu-server.log" "$dry_run"
+  remove_path_if_present "/tmp/illo-deno-install.log" "$dry_run"
+
+  if [ $keep_models -eq 0 ]; then
+    remove_path_if_present "$ROOT/models" "$dry_run"
+  fi
+  if [ $keep_private -eq 0 ]; then
+    remove_path_if_present "$ROOT/.illo" "$dry_run"
+  fi
+  if [ $keep_config -eq 0 ]; then
+    remove_path_if_present "$ROOT/.env" "$dry_run"
+    remove_path_if_present "$ROOT/ops/cron/env.conf" "$dry_run"
+    record_uninstall_database_env_reset "$dry_run"
+  fi
+
+  if [ -n "$inherited_db_vars" ]; then
+    warn "Your shell still has database variables: $inherited_db_vars"
+    if [ $keep_config -eq 0 ]; then
+      dim "./illo cannot unset variables in the parent shell, so the next setup will ignore them once."
+    else
+      warn "Because --keep-config was used, those variables may still affect the next setup."
+    fi
+  fi
+
+  if [ $dry_run -eq 1 ]; then
+    info "Uninstall dry run complete."
+  else
+    info "Uninstall complete. Run ./illo setup to start from scratch."
+  fi
+}
+
+# ── CLI ────────────────────────────────────────────────────
+
+usage() {
+  echo ""
+  echo -e "${BOLD}Usage:${NC} ./illo [command]"
+  echo ""
+  echo -e "  ${GREEN}(no args)${NC}    Start in development mode (setup first if needed)"
+  echo -e "  ${GREEN}dev-start${NC}    Development mode alias (owns local runtime)"
+  echo -e "  ${GREEN}setup${NC}        Run setup only"
+  echo -e "  ${GREEN}start${NC}        Production-safe API mode (standalone worker owns AgentRuns)"
+  echo -e "  ${GREEN}deploy${NC}       Run production-safe deploy script"
+  echo -e "  ${GREEN}doctor${NC}       Validate configuration (pass --production for prod)"
+  echo -e "  ${GREEN}uninstall${NC}    Remove local runtime, config, and Illo Docker DB"
+  echo -e "  ${GREEN}worker-status${NC} Show active AgentRuns and worker service state"
+  echo -e "  ${GREEN}worker-drain${NC}  Stop worker claims and let active AgentRuns finish"
+  echo -e "  ${GREEN}test${NC}         Run tests"
+  echo -e "  ${GREEN}build${NC}        Build frontend only"
+  echo ""
+}
+
+begin_launch_log "$*"
+
+case "${1:-}" in
+  setup)
+    check_prereqs
+    setup
+    ;;
+  start|prod|production)
+    check_prereqs
+    needs_setup && setup
+    run_prod
+    ;;
+  dev-start|dev|development)
+    check_prereqs
+    needs_setup && setup
+    run_dev
+    ;;
+  deploy)
+    check_prereqs
+    exec "$ROOT/ops/deploy.sh" "${@:2}"
+    ;;
+  doctor)
+    check_prereqs
+    source_env
+    if [ -x "$ROOT/venv/bin/python3" ]; then
+      "$ROOT/venv/bin/python3" -m brain.app.cli.config_doctor --root "$ROOT" "${@:2}"
+    else
+      python3 -m brain.app.cli.config_doctor --root "$ROOT" "${@:2}"
+    fi
+    ;;
+  uninstall)
+    uninstall "${@:2}"
+    ;;
+  worker-status|runs-status)
+    check_prereqs
+    worker_status
+    ;;
+  worker-drain)
+    check_prereqs
+    worker_drain
+    ;;
+  test)
+    [ -f "venv/bin/activate" ] && source venv/bin/activate
+    "$ROOT/venv/bin/python3" -m pytest tests/ -m "not requires_db" -q "${@:2}"
+    ;;
+  build)
+    sync_frontend_dependencies
+    cd frontend && npm run build
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  "")
+    check_prereqs
+    needs_setup && setup
+    run_dev
+    ;;
+  *)
+    err "Unknown command: $1"
+    usage
+    exit 1
+    ;;
+esac

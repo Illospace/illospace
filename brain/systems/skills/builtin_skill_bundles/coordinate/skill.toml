@@ -1,0 +1,45 @@
+schema_version = 1
+name = "coordinate"
+display_name = "Coordinate"
+version = "1.0.0"
+description = "Default Illo executive loop for direct answers, focused actions, skill routing, and rare escalation into orchestration."
+license = "Apache-2.0"
+source = "illo-core"
+visibility = "public"
+
+[routing]
+triggers = [
+  { pattern = "general Illo request", direction = "for" },
+  { pattern = "direct answer", direction = "for" },
+  { pattern = "small action", direction = "for" },
+  { pattern = "conversation coordinator", direction = "for" },
+  { pattern = "help me decide", direction = "for" },
+  { pattern = "what should we do", direction = "for" },
+  { pattern = "can you check", direction = "for" },
+  { pattern = "route this", direction = "for" },
+  { pattern = "one focused tool", direction = "for" },
+  { pattern = "ask one question", direction = "for" },
+  { pattern = "single next action", direction = "for" },
+  { pattern = "already selected worker assignment", direction = "against" },
+  { pattern = "single specialist skill is already loaded", direction = "against" },
+]
+
+[runtime]
+default_model_tier = "medium"
+default_thinking_tier = "medium"
+
+[permissions]
+toolsets = ["brain"]
+
+[loading]
+summary = "SKILL.md#role"
+procedure = "SKILL.md"
+examples = "examples/"
+templates = "templates/"
+schemas = "schemas/"
+evals = "evals/"
+references = "references/"
+
+[assets]
+asset_1 = "evals/routing.jsonl"
+asset_2 = "references/routing-ladder.md"

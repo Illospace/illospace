@@ -1,0 +1,46 @@
+schema_version = 1
+name = "manage-domains"
+display_name = "Manage Domains"
+version = "1.0.0"
+description = "Create, evolve, query, and maintain org-wide Domains for durable structured records, typed fields, relations, and history."
+license = "Apache-2.0"
+source = "illo-core"
+visibility = "public"
+
+[routing]
+triggers = [
+  { pattern = "domain", direction = "for" },
+  { pattern = "structured data", direction = "for" },
+  { pattern = "CRM", direction = "for" },
+  { pattern = "records", direction = "for" },
+  { pattern = "database", direction = "for" },
+  { pattern = "typed fields", direction = "for" },
+  { pattern = "relations", direction = "for" },
+  { pattern = "queryable history", direction = "for" },
+  { pattern = "app-local state", direction = "against" },
+  { pattern = "short note", direction = "against" },
+]
+
+[runtime]
+default_model_tier = "medium"
+default_thinking_tier = "high"
+
+[permissions]
+toolsets = ["brain"]
+
+[loading]
+summary = "SKILL.md#role"
+procedure = "SKILL.md"
+examples = "examples/"
+templates = "templates/"
+schemas = "schemas/"
+evals = "evals/"
+references = "references/"
+
+[assets]
+asset_1 = "evals/routing.jsonl"
+asset_2 = "examples/good-crm-domain.md"
+asset_3 = "examples/overmodeled-domain.md"
+asset_4 = "references/versioning-conflicts.md"
+asset_5 = "schemas/domain-change-output.schema.json"
+asset_6 = "templates/domain-schema.json"

@@ -1,0 +1,2 @@
+{"prompt":"Build me a persistent CRM dashboard app for outreach contacts.","expected":{"route_to":"build-workspace-app","assets":["examples/domain-backed-app.md"]}}
+{"prompt":"Change the Svelte composer component.","expected":{"should_not_route_to":["build-workspace-app"],"reason":"repo frontend change"}}

@@ -1,0 +1,229 @@
+"""Workspace app orchestration tool handlers."""
+
+from __future__ import annotations
+
+from brain.systems.runs.tool_catalog.handlers.common import *
+from brain.systems.workspace_apps.compiler import (
+    compile_workspace_app_input,
+    contract_repair_guidance,
+    service_error_guidance,
+)
+
+
+def _workspace_app_context() -> tuple[str | None, str | None]:
+    execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
+    org_id = getattr(_agent_context, "org_id", None) or execution_metadata.get("org_id")
+    user_id = getattr(_agent_context, "user_id", None) or execution_metadata.get("user_id")
+    return org_id, user_id
+
+
+def _handle_manage_workspace_app(
+    action: str,
+    app_id: str | None = None,
+    key: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
+    renderer_key: str | None = None,
+    source_kind: str | None = None,
+    source_code: str | None = None,
+    manifest: dict | None = None,
+    visual_spec: dict | None = None,
+    metadata: dict | None = None,
+    anchor_user_id: str | None = None,
+    initial_state: dict | None = None,
+    state_key: str = "default",
+    data: dict | None = None,
+    data_patch: dict | None = None,
+    include_archived: bool = False,
+    include_prototypes: bool = False,
+) -> str:
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.systems.workspace_apps.service import (
+        WorkspaceAppContractError,
+        WorkspaceAppError,
+        archive_app,
+        create_app,
+        get_app,
+        get_state,
+        list_apps,
+        restore_app,
+        serialize_app,
+        serialize_apps,
+        serialize_state,
+        update_app,
+        update_state,
+    )
+    from brain.systems.workspace_apps.events import publish_workspace_app_change
+
+    org_id, user_id = _workspace_app_context()
+    if not org_id:
+        return json.dumps({"error": "manage_workspace_app requires an org-scoped run"})
+
+    actor_id = str(user_id) if user_id else None
+
+    try:
+        with UnitOfWork() as uow:
+            if action == "list":
+                apps = serialize_apps(
+                    uow.session,
+                    list_apps(
+                        uow.session,
+                        org_id,
+                        include_archived=include_archived,
+                        include_prototypes=include_prototypes,
+                    ),
+                )
+                return json.dumps({"apps": apps}, default=str)
+
+            if action == "create":
+                if not name:
+                    return json.dumps({"error": "create requires: name"})
+                compiled = compile_workspace_app_input(
+                    action="create",
+                    name=name,
+                    key=key,
+                    renderer_key=renderer_key,
+                    source_kind=source_kind,
+                    source_code=source_code,
+                    manifest=manifest,
+                    visual_spec=visual_spec,
+                    metadata=metadata,
+                    initial_state=initial_state,
+                )
+                app = create_app(
+                    uow.session,
+                    org_id=org_id,
+                    key=key,
+                    name=name,
+                    description=description,
+                    renderer_key=compiled.renderer_key,
+                    source_kind=compiled.source_kind,
+                    source_code=compiled.source_code,
+                    manifest=compiled.manifest or {},
+                    visual_spec=compiled.visual_spec or {},
+                    metadata=compiled.metadata or {},
+                    created_by_user_id=actor_id,
+                    anchor_user_id=anchor_user_id or actor_id,
+                    initial_state=initial_state,
+                    state_key=state_key,
+                )
+                serialized = serialize_app(uow.session, app)
+                uow.commit()
+                publish_workspace_app_change(org_id=org_id, action="create", app=serialized)
+                payload = {"app": serialized}
+                if compiled.repairs:
+                    payload["compiler_repairs"] = list(compiled.repairs)
+                return json.dumps(payload, default=str)
+
+            if action == "get":
+                app = get_app(uow.session, org_id, app_id, key=key, include_archived=include_archived)
+                return json.dumps({"app": serialize_app(uow.session, app)}, default=str)
+
+            if action == "update":
+                if not app_id and not key:
+                    return json.dumps({"error": "update requires: app_id or key"})
+                compiled = compile_workspace_app_input(
+                    action="update",
+                    name=name,
+                    key=key,
+                    renderer_key=renderer_key,
+                    source_kind=source_kind,
+                    source_code=source_code,
+                    manifest=manifest,
+                    visual_spec=visual_spec,
+                    metadata=metadata,
+                )
+                app = update_app(
+                    uow.session,
+                    org_id=org_id,
+                    app_id=app_id,
+                    key=key,
+                    name=name,
+                    description=description,
+                    renderer_key=compiled.renderer_key,
+                    source_kind=compiled.source_kind,
+                    source_code=compiled.source_code,
+                    manifest=compiled.manifest,
+                    visual_spec=compiled.visual_spec,
+                    metadata=compiled.metadata,
+                    anchor_user_id=anchor_user_id,
+                    updated_by_user_id=actor_id,
+                )
+                serialized = serialize_app(uow.session, app)
+                uow.commit()
+                publish_workspace_app_change(org_id=org_id, action="update", app=serialized)
+                payload = {"app": serialized}
+                if compiled.repairs:
+                    payload["compiler_repairs"] = list(compiled.repairs)
+                return json.dumps(payload, default=str)
+
+            if action == "archive":
+                if not app_id and not key:
+                    return json.dumps({"error": "archive requires: app_id or key"})
+                result = archive_app(uow.session, org_id=org_id, app_id=app_id, key=key)
+                uow.commit()
+                archived = result.get("archived", {})
+                publish_workspace_app_change(
+                    org_id=org_id,
+                    action="archive",
+                    app_id=archived.get("id") or app_id,
+                    key=archived.get("key") or key,
+                )
+                return json.dumps(result, default=str)
+
+            if action == "restore":
+                if not app_id and not key:
+                    return json.dumps({"error": "restore requires: app_id or key"})
+                app = restore_app(uow.session, org_id=org_id, app_id=app_id, key=key)
+                serialized = serialize_app(uow.session, app)
+                uow.commit()
+                publish_workspace_app_change(org_id=org_id, action="restore", app=serialized)
+                return json.dumps({"app": serialized}, default=str)
+
+            if action == "get_state":
+                if not app_id:
+                    return json.dumps({"error": "get_state requires: app_id"})
+                state = get_state(
+                    uow.session,
+                    org_id=org_id,
+                    app_id=app_id,
+                    key=state_key,
+                    user_id=actor_id,
+                )
+                return json.dumps({"state": serialize_state(state)}, default=str)
+
+            if action == "update_state":
+                if not app_id:
+                    return json.dumps({"error": "update_state requires: app_id"})
+                state = update_state(
+                    uow.session,
+                    org_id=org_id,
+                    app_id=app_id,
+                    key=state_key,
+                    data=data,
+                    data_patch=data_patch,
+                    user_id=actor_id,
+                )
+                return json.dumps({"state": serialize_state(state)}, default=str)
+
+            return json.dumps({"error": f"Unknown action: {action}"})
+    except WorkspaceAppContractError as exc:
+        return json.dumps(
+            {
+                "error": str(exc),
+                "contract_validation": exc.report,
+                "repair_guidance": contract_repair_guidance(exc.report),
+            }
+        )
+    except WorkspaceAppError as exc:
+        payload = {"error": str(exc)}
+        guidance = service_error_guidance(str(exc))
+        if guidance:
+            payload["repair_guidance"] = guidance
+        return json.dumps(payload)
+    except Exception as exc:
+        logger.exception("manage_workspace_app failed: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
+__all__ = [name for name in globals() if not name.startswith("__")]

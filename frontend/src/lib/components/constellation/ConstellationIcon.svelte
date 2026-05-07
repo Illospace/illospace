@@ -1,0 +1,201 @@
+<script lang="ts">
+  import {
+    IconArrowLeft,
+    IconArrowRight,
+    IconArrowUp,
+    IconBell,
+    IconBolt,
+    IconBrain,
+    IconBrowser,
+    IconBrush,
+    IconCheck,
+    IconChevronLeft,
+    IconChevronDown,
+    IconChevronRight,
+    IconCoins,
+    IconCode,
+    IconCpu,
+    IconDatabase,
+    IconEdit,
+    IconExternalLink,
+    IconFile,
+    IconFileText,
+    IconFileTypePdf,
+    IconFileZip,
+    IconFolder,
+    IconFolderPlus,
+    IconGitBranch,
+    IconLayoutGrid,
+    IconLayoutSidebarRight,
+    IconLink,
+    IconListDetails,
+    IconLogout,
+    IconMenu2,
+    IconMessageReply,
+    IconMoon,
+    IconMoodPlus,
+    IconNotes,
+    IconPaperclip,
+    IconPhoto,
+    IconPlus,
+    IconPlaylistAdd,
+    IconRefresh,
+    IconRoute,
+    IconSearch,
+    IconSettings2,
+    IconShieldLock,
+    IconSparkles,
+    IconSquareFilled,
+    IconSun,
+    IconTestPipe,
+    IconTool,
+    IconTrash,
+    IconUsers,
+    IconVideo,
+    IconX,
+  } from '@tabler/icons-svelte-runes';
+
+  export type ConstellationIconName =
+    | 'activity'
+    | 'archive'
+    | 'attach'
+    | 'back'
+    | 'bolt'
+    | 'brush'
+    | 'check'
+    | 'close'
+    | 'code'
+    | 'costs'
+    | 'cortex'
+    | 'cycles'
+    | 'database'
+    | 'edit'
+    | 'document'
+    | 'external-link'
+    | 'file'
+    | 'folder'
+    | 'folder-plus'
+    | 'forward'
+    | 'git-branch'
+    | 'image'
+    | 'link'
+    | 'logout'
+    | 'memory'
+    | 'menu'
+    | 'moon'
+    | 'notification'
+    | 'overview'
+    | 'paperclip'
+    | 'pdf'
+    | 'plus'
+    | 'preview'
+    | 'queue'
+    | 'reaction-add'
+    | 'refresh'
+    | 'reply-thread'
+    | 'route'
+    | 'runtime'
+    | 'search'
+    | 'send'
+    | 'settings'
+    | 'side-panel'
+    | 'skills'
+    | 'stop'
+    | 'sun'
+    | 'system'
+    | 'team'
+    | 'test'
+    | 'tool'
+    | 'trash'
+    | 'vault'
+    | 'video'
+    | 'x'
+    | 'chevron-down'
+    | 'chevron-left'
+    | 'chevron-right';
+
+  const ICONS = {
+    activity: IconListDetails,
+    archive: IconFileZip,
+    attach: IconPaperclip,
+    back: IconArrowLeft,
+    bolt: IconBolt,
+    brush: IconBrush,
+    check: IconCheck,
+    close: IconX,
+    code: IconCode,
+    costs: IconCoins,
+    cortex: IconBrain,
+    cycles: IconRefresh,
+    database: IconDatabase,
+    edit: IconEdit,
+    document: IconFileText,
+    'external-link': IconExternalLink,
+    file: IconFile,
+    folder: IconFolder,
+    'folder-plus': IconFolderPlus,
+    forward: IconArrowRight,
+    'git-branch': IconGitBranch,
+    image: IconPhoto,
+    link: IconLink,
+    logout: IconLogout,
+    memory: IconNotes,
+    menu: IconMenu2,
+    moon: IconMoon,
+    notification: IconBell,
+    overview: IconLayoutGrid,
+    paperclip: IconPaperclip,
+    pdf: IconFileTypePdf,
+    plus: IconPlus,
+    preview: IconBrowser,
+    queue: IconPlaylistAdd,
+    'reaction-add': IconMoodPlus,
+    refresh: IconRefresh,
+    'reply-thread': IconMessageReply,
+    route: IconRoute,
+    runtime: IconCpu,
+    search: IconSearch,
+    send: IconArrowUp,
+    settings: IconSettings2,
+    'side-panel': IconLayoutSidebarRight,
+    skills: IconSparkles,
+    stop: IconSquareFilled,
+    sun: IconSun,
+    system: IconCpu,
+    team: IconUsers,
+    test: IconTestPipe,
+    tool: IconTool,
+    trash: IconTrash,
+    vault: IconShieldLock,
+    video: IconVideo,
+    x: IconX,
+    'chevron-down': IconChevronDown,
+    'chevron-left': IconChevronLeft,
+    'chevron-right': IconChevronRight,
+  } as const;
+
+  let {
+    name,
+    size = 16,
+    stroke = 1.8,
+    color = 'currentColor',
+    className = '',
+  }: {
+    name: ConstellationIconName;
+    size?: number | string;
+    stroke?: number | string;
+    color?: string;
+    className?: string;
+  } = $props();
+
+  const iconClass = $derived(['constellation-icon', className].filter(Boolean).join(' '));
+  const IconComponent = $derived(ICONS[name]);
+</script>
+
+<IconComponent
+  size={size}
+  stroke={stroke}
+  {color}
+  class={iconClass}
+  aria-hidden="true"
+/>

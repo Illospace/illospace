@@ -1,0 +1,2 @@
+{"prompt":"Create a reusable skill for our nightly memory cleanup workflow.","expected":{"route_to":"skill-authoring","triggers_include":["create skill"]}}
+{"prompt":"Remember that I like short answers.","expected":{"should_not_route_to":["skill-authoring"],"reason":"one-off preference belongs in memory"}}

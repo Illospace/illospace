@@ -1,0 +1,43 @@
+schema_version = 1
+name = "orchestrate"
+display_name = "Orchestrate"
+version = "1.0.0"
+description = "Internal orchestration protocol for multi-deliverable work that needs worker assignments, dependencies, artifact checks, and synthesis."
+license = "Apache-2.0"
+source = "illo-core"
+visibility = "public"
+
+[routing]
+triggers = [
+  { pattern = "internal orchestration protocol", direction = "for" },
+  { pattern = "multiple deliverables", direction = "for" },
+  { pattern = "multi-step task", direction = "for" },
+  { pattern = "parallel workers", direction = "for" },
+  { pattern = "autonomous run graph", direction = "for" },
+  { pattern = "worker handoff", direction = "for" },
+  { pattern = "run step dependencies", direction = "for" },
+  { pattern = "one focused action", direction = "against" },
+  { pattern = "direct answer", direction = "against" },
+]
+
+[runtime]
+default_model_tier = "medium"
+default_thinking_tier = "medium"
+
+[permissions]
+toolsets = ["brain"]
+
+[loading]
+summary = "SKILL.md#role"
+procedure = "SKILL.md"
+examples = "examples/"
+templates = "templates/"
+schemas = "schemas/"
+evals = "evals/"
+references = "references/"
+
+[assets]
+asset_1 = "evals/routing.jsonl"
+asset_2 = "references/failure-handling.md"
+asset_3 = "schemas/orchestration-plan.schema.json"
+asset_4 = "templates/worker-assignment.md"

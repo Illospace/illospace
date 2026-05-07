@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en" data-theme="constellation" data-color-scheme="dark">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" href="%sveltekit.assets%/brand/illo/illo-icon-dark.svg" />
+		<link rel="icon" href="%sveltekit.assets%/brand/illo/illo-icon-dark.svg" media="(prefers-color-scheme: dark)" />
+		<link rel="icon" href="%sveltekit.assets%/brand/illo/illo-icon-light.svg" media="(prefers-color-scheme: light)" />
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			href="https://fonts.googleapis.com/css2?family=Geist:wght@300..900&family=JetBrains+Mono:wght@400;500;700&display=swap"
+			rel="stylesheet"
+		/>
+		<script>
+			(() => {
+				const THEME_STORAGE_KEY = 'illo-theme-id';
+				const LEGACY_STORAGE_KEY = 'illo-theme-mode';
+				const THEMES = {
+					constellation: { colorScheme: 'dark' },
+					daylight: { colorScheme: 'light' },
+				};
+				const normalizeThemeId = (value) => {
+					if (value === 'dark') return 'constellation';
+					if (value === 'light') return 'daylight';
+					return Object.prototype.hasOwnProperty.call(THEMES, value) ? value : null;
+				};
+				try {
+					const stored = normalizeThemeId(localStorage.getItem(THEME_STORAGE_KEY))
+						|| normalizeThemeId(localStorage.getItem(LEGACY_STORAGE_KEY));
+					const systemPrefersLight =
+						typeof window.matchMedia === 'function'
+						&& window.matchMedia('(prefers-color-scheme: light)').matches;
+					const themeId = stored
+						? stored
+						: systemPrefersLight
+							? 'daylight'
+							: 'constellation';
+					const colorScheme = THEMES[themeId].colorScheme;
+					document.documentElement.dataset.theme = themeId;
+					document.documentElement.dataset.colorScheme = colorScheme;
+					document.documentElement.style.colorScheme = colorScheme;
+				} catch {
+					document.documentElement.dataset.theme = 'constellation';
+					document.documentElement.dataset.colorScheme = 'dark';
+					document.documentElement.style.colorScheme = 'dark';
+				}
+			})();
+		</script>
+		<script>
+			(() => {
+				if (!location.pathname.startsWith('/cortex')) return;
+				const url = new URL(location.href);
+				const requestedIdeaId = url.searchParams.get('idea');
+				const bootstrapParams = new URLSearchParams();
+				bootstrapParams.set('include', 'core,workspace');
+				const paths = [
+					'/api/me',
+					'/api/notifications/summary',
+					'/api/notifications?status=unread&limit=50',
+				];
+				if (!requestedIdeaId) {
+					paths.splice(1, 0, `/api/cortex/bootstrap?${bootstrapParams.toString()}`);
+				} else {
+					const directBootstrapParams = new URLSearchParams();
+					directBootstrapParams.set('include', 'selected_idea,direct_thread');
+					directBootstrapParams.set('idea_id', requestedIdeaId);
+					paths.splice(1, 0, `/api/cortex/bootstrap?${directBootstrapParams.toString()}`);
+				}
+				window.__illoPreload = window.__illoPreload || {};
+				for (const path of paths) {
+					if (window.__illoPreload[path]) continue;
+					window.__illoPreload[path] = fetch(path, {
+						headers: { Accept: 'application/json' },
+					}).then(async (response) => {
+						if (response.ok) {
+							return { ok: true, value: await response.json() };
+						}
+						const body = await response.json().catch(() => ({ error: response.statusText }));
+						return {
+							ok: false,
+							error: {
+								status: response.status,
+								detail: body.error || body.detail || response.statusText,
+							},
+						};
+					}).catch((error) => {
+						return { ok: false, error };
+					});
+				}
+			})();
+		</script>
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Illospace</title>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-prerender="false">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

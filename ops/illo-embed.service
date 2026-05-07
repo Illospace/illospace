@@ -1,0 +1,36 @@
+[Unit]
+Description=Illo Brain — Embedding Server (Qwen3-Embedding-8B)
+After=network.target
+# Start before the dashboard and worker so embeddings are warm when they need them
+Before=illo-dashboard.service cortex-worker.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/illo-brain
+ExecStart=%h/illo-brain/venv/bin/python3 -m brain.platform.gpu.server
+Restart=always
+RestartSec=10
+
+# Environment
+Environment=PYTHONPATH=%h/illo-brain
+Environment=ILLO_ENV=production
+Environment=ILLO_VALIDATE_MIGRATIONS=1
+Environment=EMBED_IDLE_TIMEOUT=900
+Environment=ILLO_DASHBOARD_URL=http://127.0.0.1:8888
+Environment=GPU_RECLAIM_CONFLICTING_PROCESSES=1
+Environment=GPU_EMBEDDING_VRAM_MB=15000
+Environment=GPU_LLM_VRAM_MB=9000
+Environment=GPU_EMBEDDING_LOAD_TIMEOUT_SECONDS=7200
+Environment=GPU_LLM_LOAD_TIMEOUT_SECONDS=300
+Environment=GPU_EMBEDDING_MAX_BATCH_SIZE=16
+Environment=EMBEDDING_WORKER_WARMUP_WAIT_SECONDS=180
+Environment=EMBEDDING_WORKER_RESTART_TIMEOUT_SECONDS=300
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+EnvironmentFile=-%h/.config/illo-brain/production.env
+
+# Logging
+StandardOutput=append:%h/illo-brain/logs/embed_server.log
+StandardError=append:%h/illo-brain/logs/embed_server.log
+
+[Install]
+WantedBy=default.target

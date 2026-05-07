@@ -1,0 +1,7 @@
+# GPU acceleration for embed server
+# Install with: pip install -r requirements-gpu.txt
+# CUDA wheels are published for Linux x86_64. Other platforms should use the
+# normal torch package pulled by requirements.txt or install a platform-specific
+# build manually.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch>=2.10; platform_system == "Linux" and platform_machine == "x86_64"

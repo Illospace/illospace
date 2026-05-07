@@ -1,0 +1,126 @@
+# Illo Brain
+
+Illo Brain is an experimental cognitive workspace for AI agents: semantic memory,
+skills, vault-backed secrets, Cortex thought threads, browser/tool execution, and a
+Svelte dashboard for monitoring and directing work.
+
+> Status: early/open-source preview. The project is actively changing and is not
+> yet a hosted product or stable library API.
+
+## What is in this repo?
+
+- **FastAPI backend** for Cortex threads, memory, skills, vault, projects, browser sessions, and agent runs.
+- **PostgreSQL + pgvector** storage for durable memory and workspace state.
+- **SvelteKit frontend** for the Cortex workspace and operational dashboards.
+- **Agent runtime tooling** for model invocation, workspace tools, skill bundles, and recurring cycles.
+- **Optional local embedding/GPU workers** for lower-latency semantic retrieval.
+
+## Quick start
+
+Prerequisites: Python 3.11+, Node.js 22+, and one local database path: Docker,
+Podman, or PostgreSQL 16+ server tools with pgvector.
+
+```bash
+git clone <public-repository-url>
+cd <repository-directory>
+./illo doctor
+./illo
+```
+
+For a first install, `./illo` is the command to run. It performs setup when
+needed, then starts the local preview server:
+
+```text
+API:       http://localhost:8000  (docs at /api/docs)
+Dashboard: http://localhost:5173
+```
+
+The launcher starts a local pgvector database when no configured Postgres is
+reachable. It prefers a Docker/Podman pgvector container, but can also manage a
+repo-local PostgreSQL runtime under `.runtime/postgres` when server tools and
+pgvector are installed. If another local Postgres already owns `5432` and you
+have not pinned `DB_PORT`, it can choose an alternate port automatically.
+You will still need at least one model provider key, local model, or
+database-backed credential for LLM-backed agent work.
+
+## Which command should I run?
+
+Use `./illo` for a new checkout, local development, and the first self-hosted
+preview. It owns the local runtime, auto-runs setup when needed, starts the API
+and dashboard, and keeps AgentRuns self-contained.
+
+Use `./illo setup` only when you want to install/sync dependencies and prepare
+the database without starting the app.
+
+Use `./illo start` only for production-style self-hosting. It builds the static
+frontend, starts the production API on port `8000`, and expects the standalone
+worker/systemd services to own background AgentRuns.
+
+## Configuration and secrets
+
+- `.env` is optional. The app reads real environment variables first and only
+  loads `.env` when the file exists.
+- `./illo setup` and `./illo start` create ignored checkout-local defaults for
+  `SECRET_KEY` and `VAULT_MASTER_KEY` in `.illo/runtime.env` when they are not
+  provided, so a self-hosted preview can boot cleanly.
+- Codex sign-in uses OpenAI's localhost callback. On a remote/self-hosted
+  server, System opens the manual fallback automatically: finish sign-in, copy
+  the final `localhost:1455/auth/callback?...` URL from the sign-in tab, and
+  paste it into System. Custom server callbacks are opt-in with
+  `ILLO_OPENAI_OAUTH_SERVER_CALLBACK=1` only for OAuth clients that accept your
+  deployed callback URL.
+- For local file-based overrides, copy `.env.example` to `.env` and fill in the
+  values you need. For production, prefer your platform's secret manager or an
+  external environment file such as `~/.config/illo-brain/production.env`.
+- Run `./illo doctor --production` before starting a production deployment.
+- Never commit `.env`, provider keys, database dumps, uploads, or generated journals.
+- Runtime-private state defaults to `.illo/` via `ILLO_PRIVATE_HOME` and is ignored by git.
+- Personalized operator prompt/context files should live under `.illo/agent-context/`
+  (or another private `AGENT_CONTEXT_DIR`), not in the public repo root.
+
+See [docs/configuration.md](docs/configuration.md) for the production
+configuration contract.
+
+## Development commands
+
+```bash
+./illo              # Recommended for new users; auto-setup, then local preview
+./illo setup        # Setup only
+./illo start        # Production-style API mode for self-hosted service installs
+./illo doctor       # Diagnose config and common setup issues
+./illo uninstall    # Remove local runtime/config/local DB and reset next setup
+./illo test         # Fast tests
+./illo build        # Build frontend only
+make test           # Fast pytest selection
+make test-all       # Full DB-backed suite via Docker
+```
+
+## Project structure
+
+```text
+brain/app/              FastAPI app, CLI, scheduler, hooks, MCP, and web adapters
+brain/jobs/             Offline pipelines, evals, and recurring job code
+brain/kernel/           Shared config, runtime primitives, and common helpers
+brain/platform/         Database, provider, browser, GPU, and telemetry adapters
+brain/systems/          Cortex, memory, skills, runs, vault, domains, and apps
+frontend/               SvelteKit dashboard
+tests/                  Pytest suite and regression fixtures
+ops/                    Local setup, self-hosting templates, and test DB helpers
+docs/                   Public architecture, setup, security, and extension notes
+```
+
+For a deeper map, see [docs/architecture.md](docs/architecture.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Please open issues/PRs with clear repro steps,
+logs with secrets removed, and tests where practical.
+
+## Security
+
+Please do not open public issues for vulnerabilities or leaked secrets. See
+[SECURITY.md](SECURITY.md) for the reporting process.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).

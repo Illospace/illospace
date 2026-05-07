@@ -1,0 +1,1068 @@
+  .project-context-composer {
+    --project-context-chip-border: transparent;
+    --project-context-chip-background: transparent;
+    --project-context-chip-text: var(--constellation-select-chip-trigger-bare-text);
+    --project-context-chip-hover-border: transparent;
+    --project-context-chip-hover-background: transparent;
+    --project-context-chip-hover-text: var(--constellation-select-chip-trigger-hover-text);
+    --project-context-chip-open-background: transparent;
+    --project-context-chip-open-text: var(--constellation-select-chip-trigger-open-text);
+    --project-context-chip-open-shadow: none;
+    --project-context-chip-meta: var(--constellation-select-chip-option-description);
+    --project-context-chip-invalid-border: rgba(212, 128, 143, 0.55);
+    --project-context-chip-invalid-background: rgba(212, 128, 143, 0.12);
+    --project-context-popover-border: var(--composer-menu-border, rgba(240, 240, 250, 0.09));
+    --project-context-popover-background: var(--composer-menu-background, rgba(9, 12, 18, 0.98));
+    --project-context-popover-shadow: var(
+      --composer-menu-shadow,
+      0 18px 42px rgba(0, 0, 0, 0.32),
+      0 0 0 1px rgba(255, 255, 255, 0.02) inset
+    );
+    --project-context-title: rgba(249, 244, 232, 0.95);
+    --project-context-command-border: rgba(255, 255, 255, 0.08);
+    --project-context-command-background: rgba(255, 255, 255, 0.04);
+    --project-context-command-text: rgba(231, 238, 247, 0.7);
+    --project-context-option-text: var(--constellation-select-chip-option-text);
+    --project-context-option-hover-background: var(--composer-menu-option-hover-background, rgba(240, 240, 250, 0.06));
+    --project-context-option-hover-text: var(--constellation-select-chip-option-hover-text);
+    --project-context-option-active-background: var(--composer-menu-option-active-background, rgba(240, 240, 250, 0.075));
+    --project-context-option-active-text: var(--constellation-select-chip-option-active-text);
+    --project-context-option-description: var(--constellation-select-chip-option-description);
+    --project-context-search-border: rgba(255, 255, 255, 0.08);
+    --project-context-search-background: rgba(255, 255, 255, 0.035);
+    --project-context-field-text: rgba(231, 238, 247, 0.62);
+    --project-context-field-border: rgba(255, 255, 255, 0.08);
+    --project-context-field-background: rgba(255, 255, 255, 0.05);
+    --project-context-field-value: rgba(249, 244, 232, 0.9);
+    --project-context-muted-text: rgba(231, 238, 247, 0.56);
+    --project-context-error-text: #d4808f;
+    --project-context-section-divider: rgba(255, 255, 255, 0.07);
+    --project-context-pill-border: rgba(255, 255, 255, 0.08);
+    --project-context-pill-background: rgba(255, 255, 255, 0.04);
+    --project-context-pill-text: rgba(231, 238, 247, 0.68);
+    --project-context-button-border: rgba(232, 169, 75, 0.24);
+    --project-context-button-text: rgba(231, 238, 247, 0.68);
+    --project-context-button-active-background: rgba(232, 169, 75, 0.18);
+    --project-context-button-active-text: rgba(249, 244, 232, 0.95);
+    --project-context-card-border: rgba(232, 169, 75, 0.16);
+    --project-context-card-background: rgba(255, 255, 255, 0.045);
+    --project-context-card-text: rgba(249, 244, 232, 0.86);
+    --project-context-drop-border: rgba(232, 169, 75, 0.24);
+    --project-context-drop-background: rgba(232, 169, 75, 0.055);
+    --project-context-drop-text: rgba(249, 244, 232, 0.84);
+    --project-context-drop-active-border: rgba(232, 169, 75, 0.54);
+    --project-context-drop-active-background: rgba(232, 169, 75, 0.15);
+    --project-context-card-meta: rgba(231, 238, 247, 0.52);
+    --project-context-repo-title: rgba(249, 244, 232, 0.9);
+    --project-context-repo-meta: rgba(231, 238, 247, 0.54);
+    --project-context-repo-menu-border: rgba(255, 255, 255, 0.08);
+    --project-context-repo-menu-background: rgba(255, 255, 255, 0.04);
+    --project-context-repo-option-text: rgba(249, 244, 232, 0.84);
+    --project-context-repo-option-hover-border: rgba(232, 169, 75, 0.2);
+    --project-context-repo-option-hover-background: rgba(232, 169, 75, 0.1);
+    --project-context-repo-tick-border: rgba(232, 169, 75, 0.28);
+    --project-context-repo-tick-text: var(--constellation-select-chip-indicator-active-background);
+    position: relative;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  :root[data-color-scheme='light'] .project-context-composer {
+    --project-context-popover-border: var(--composer-menu-border, rgba(49, 63, 76, 0.12));
+    --project-context-popover-background: var(--composer-menu-background, rgba(255, 253, 247, 0.98));
+    --project-context-popover-shadow: var(--composer-menu-shadow, 0 18px 38px rgba(54, 70, 82, 0.13));
+    --project-context-option-hover-background: var(--composer-menu-option-hover-background, rgba(49, 63, 76, 0.055));
+    --project-context-option-active-background: var(--composer-menu-option-active-background, rgba(49, 63, 76, 0.075));
+    --project-context-chip-invalid-border: rgba(178, 78, 97, 0.42);
+    --project-context-chip-invalid-background: rgba(178, 78, 97, 0.1);
+    --project-context-title: #18212a;
+    --project-context-command-border: rgba(49, 63, 76, 0.12);
+    --project-context-command-background: rgba(255, 253, 247, 0.88);
+    --project-context-command-text: rgba(49, 63, 76, 0.76);
+    --project-context-search-border: rgba(126, 92, 52, 0.1);
+    --project-context-search-background: rgba(248, 250, 248, 0.72);
+    --project-context-field-text: rgba(82, 98, 111, 0.74);
+    --project-context-field-border: rgba(126, 92, 52, 0.11);
+    --project-context-field-background: rgba(255, 255, 255, 0.72);
+    --project-context-field-value: #18212a;
+    --project-context-muted-text: rgba(82, 98, 111, 0.72);
+    --project-context-error-text: #8f3347;
+    --project-context-section-divider: rgba(126, 92, 52, 0.09);
+    --project-context-pill-border: rgba(126, 92, 52, 0.1);
+    --project-context-pill-background: rgba(255, 255, 255, 0.62);
+    --project-context-pill-text: rgba(49, 63, 76, 0.82);
+    --project-context-button-border: rgba(49, 63, 76, 0.12);
+    --project-context-button-text: rgba(49, 63, 76, 0.76);
+    --project-context-button-active-background: rgba(49, 63, 76, 0.075);
+    --project-context-button-active-text: #18212a;
+    --project-context-card-border: rgba(126, 92, 52, 0.1);
+    --project-context-card-background: rgba(255, 255, 255, 0.64);
+    --project-context-card-text: #18212a;
+    --project-context-drop-border: rgba(49, 63, 76, 0.12);
+    --project-context-drop-background: rgba(255, 251, 242, 0.66);
+    --project-context-drop-text: #302719;
+    --project-context-drop-active-border: rgba(49, 63, 76, 0.2);
+    --project-context-drop-active-background: rgba(49, 63, 76, 0.075);
+    --project-context-card-meta: rgba(82, 98, 111, 0.7);
+    --project-context-repo-title: #18212a;
+    --project-context-repo-meta: rgba(82, 98, 111, 0.72);
+    --project-context-repo-menu-border: rgba(126, 92, 52, 0.1);
+    --project-context-repo-menu-background: rgba(255, 255, 255, 0.54);
+    --project-context-repo-option-text: #18212a;
+    --project-context-repo-option-hover-border: rgba(49, 63, 76, 0.14);
+    --project-context-repo-option-hover-background: rgba(49, 63, 76, 0.065);
+    --project-context-repo-tick-border: rgba(49, 63, 76, 0.16);
+    --project-context-repo-tick-text: var(--constellation-select-chip-indicator-active-background);
+  }
+
+  .native-picker-input {
+    display: none;
+  }
+
+  .project-context-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 30px;
+    max-width: 100%;
+    border: 1px solid var(--project-context-chip-border);
+    border-radius: 999px;
+    padding: 0 4px;
+    background: var(--project-context-chip-background);
+    color: var(--project-context-chip-text);
+    font-family: var(--constellation-font-sans);
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    transition:
+      transform var(--constellation-motion-hover-duration) ease,
+      background-color var(--constellation-motion-hover-duration) ease,
+      border-color var(--constellation-motion-hover-duration) ease,
+      color var(--constellation-motion-hover-duration) ease,
+      box-shadow var(--constellation-motion-hover-duration) ease;
+  }
+
+  .project-context-chip:hover:not(:disabled) {
+    border-color: var(--project-context-chip-hover-border);
+    background: var(--project-context-chip-hover-background);
+    color: var(--project-context-chip-hover-text);
+    transform: none;
+  }
+
+  .project-context-chip.active {
+    border-color: var(--project-context-chip-hover-border);
+    background: var(--project-context-chip-open-background);
+    color: var(--project-context-chip-open-text);
+    box-shadow: var(--project-context-chip-open-shadow);
+  }
+
+  .project-context-chip.active .project-context-chip-chevron {
+    transform: rotate(180deg);
+  }
+
+  .project-context-chip.invalid {
+    border-color: var(--project-context-chip-invalid-border);
+    background: var(--project-context-chip-invalid-background);
+  }
+
+  .project-context-chip:disabled {
+    cursor: not-allowed;
+    opacity: 0.64;
+  }
+
+  .project-context-chip small {
+    color: var(--project-context-chip-meta);
+    font-family: var(--constellation-font-mono);
+    font-size: 9px;
+    line-height: 1;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+
+  .project-context-chip-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .project-context-chip-chevron {
+    flex: 0 0 auto;
+    transition: transform var(--constellation-motion-hover-duration) ease;
+  }
+
+  .project-context-popover {
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 10px);
+    width: min(360px, calc(100vw - 40px));
+    z-index: 32;
+    box-sizing: border-box;
+    padding: 6px;
+    border: 1px solid var(--project-context-popover-border);
+    border-radius: 12px;
+    background: var(--project-context-popover-background);
+    box-shadow: var(--project-context-popover-shadow);
+  }
+
+  .project-context-composer[data-mode='inline'] .project-context-popover {
+    bottom: calc(100% + 18px);
+    max-height: min(460px, calc(100vh - 180px));
+    overflow: auto;
+  }
+
+  .project-context-search-control {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 7px;
+    min-height: 32px;
+    padding: 0 8px;
+    border: 1px solid var(--project-context-search-border);
+    border-radius: 9px;
+    background: var(--project-context-search-background);
+    color: var(--project-context-option-description);
+  }
+
+  .project-context-search-control input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--project-context-option-active-text);
+    font-family: var(--constellation-font-sans);
+    font-size: 12px;
+    line-height: 1.2;
+  }
+
+  .project-context-search-control input::placeholder {
+    color: var(--project-context-option-description);
+  }
+
+  .project-context-profile-list {
+    display: grid;
+    gap: 1px;
+    max-height: min(276px, calc(100vh - 320px));
+    margin-top: 6px;
+    overflow: auto;
+    padding-right: 2px;
+  }
+
+  .project-context-profile-option {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr) 18px;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 34px;
+    box-sizing: border-box;
+    border: 0;
+    border-radius: 9px;
+    padding: 6px 8px;
+    background: transparent;
+    color: var(--project-context-option-text);
+    font-family: var(--constellation-font-sans);
+    text-align: left;
+    cursor: pointer;
+    transition:
+      background-color var(--constellation-motion-hover-duration) ease,
+      color var(--constellation-motion-hover-duration) ease,
+      box-shadow var(--constellation-motion-hover-duration) ease;
+  }
+
+  .project-context-profile-option:hover {
+    background: var(--project-context-option-hover-background);
+    color: var(--project-context-option-hover-text);
+  }
+
+  .project-context-profile-option.selected {
+    background: var(--project-context-option-active-background);
+    color: var(--project-context-option-active-text);
+  }
+
+  .project-context-profile-option-copy {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .project-context-profile-option-copy strong,
+  .project-context-profile-option-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .project-context-profile-option-copy strong {
+    font-size: 12px;
+    font-weight: 510;
+    line-height: 1.2;
+  }
+
+  .project-context-profile-option-copy small {
+    color: var(--project-context-option-description);
+    font-size: 10.5px;
+    line-height: 1.25;
+  }
+
+  .project-context-profile-check {
+    display: inline-flex;
+    width: 18px;
+    height: 18px;
+    align-items: center;
+    justify-content: center;
+    color: var(--project-context-option-active-text);
+  }
+
+  .project-context-profile-footer {
+    margin: 6px -6px -6px;
+    padding: 6px;
+    border-top: 1px solid var(--project-context-section-divider);
+  }
+
+  .project-context-add-project {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    border: 0;
+    border-radius: 9px;
+    padding: 6px 8px;
+    background: transparent;
+    color: var(--project-context-option-text);
+    font-family: var(--constellation-font-sans);
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+    transition:
+      background-color var(--constellation-motion-hover-duration) ease,
+      color var(--constellation-motion-hover-duration) ease;
+  }
+
+  .project-context-add-project:hover {
+    background: var(--project-context-option-hover-background);
+    color: var(--project-context-option-hover-text);
+  }
+
+  .project-context-actions,
+  .github-connect-row,
+  .github-repo-select-row,
+  .github-repo-select-actions,
+  .github-token-row,
+  .github-save-row,
+  .github-search-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .project-context-popover-header,
+  .project-context-actions {
+    justify-content: space-between;
+  }
+
+  .project-context-popover-header {
+    margin-bottom: 12px;
+  }
+
+  .project-context-popover-header strong {
+    color: var(--project-context-title);
+    font-size: 13px;
+  }
+
+  .project-context-modal-backdrop {
+    --project-context-modal-backdrop-background: rgba(2, 4, 10, 0.62);
+    --project-context-modal-border: rgba(240, 240, 250, 0.1);
+    --project-context-modal-background: rgba(9, 12, 18, 0.99);
+    --project-context-modal-shadow:
+      0 28px 72px rgba(0, 0, 0, 0.42),
+      0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+    --project-context-modal-divider: rgba(240, 240, 250, 0.075);
+    --project-context-title: rgba(249, 244, 232, 0.95);
+    --project-context-command-border: rgba(255, 255, 255, 0.08);
+    --project-context-command-background: rgba(255, 255, 255, 0.035);
+    --project-context-command-text: rgba(231, 238, 247, 0.68);
+    --project-context-field-text: rgba(231, 238, 247, 0.58);
+    --project-context-field-border: rgba(255, 255, 255, 0.08);
+    --project-context-field-background: rgba(255, 255, 255, 0.045);
+    --project-context-field-value: rgba(249, 244, 232, 0.92);
+    --project-context-muted-text: rgba(231, 238, 247, 0.56);
+    --project-context-error-text: #d4808f;
+    --project-context-section-divider: rgba(255, 255, 255, 0.07);
+    --project-context-pill-border: rgba(255, 255, 255, 0.08);
+    --project-context-pill-background: rgba(255, 255, 255, 0.04);
+    --project-context-pill-text: rgba(231, 238, 247, 0.68);
+    --project-context-button-border: rgba(255, 255, 255, 0.08);
+    --project-context-button-text: rgba(231, 238, 247, 0.68);
+    --project-context-button-active-background: rgba(240, 240, 250, 0.88);
+    --project-context-button-active-text: rgba(8, 11, 18, 0.96);
+    --project-context-tab-track-border: rgba(255, 255, 255, 0.07);
+    --project-context-tab-track-background: rgba(255, 255, 255, 0.028);
+    --project-context-tab-active-background: rgba(255, 255, 255, 0.075);
+    --project-context-tab-active-text: rgba(249, 244, 232, 0.94);
+    --project-context-card-border: rgba(255, 255, 255, 0.075);
+    --project-context-card-background: rgba(255, 255, 255, 0.035);
+    --project-context-card-text: rgba(249, 244, 232, 0.88);
+    --project-context-card-meta: rgba(231, 238, 247, 0.52);
+    --project-context-drop-border: rgba(255, 255, 255, 0.12);
+    --project-context-drop-background: rgba(255, 255, 255, 0.03);
+    --project-context-drop-text: rgba(249, 244, 232, 0.84);
+    --project-context-drop-active-border: rgba(141, 183, 255, 0.34);
+    --project-context-drop-active-background: rgba(141, 183, 255, 0.1);
+    --project-context-repo-title: rgba(249, 244, 232, 0.9);
+    --project-context-repo-meta: rgba(231, 238, 247, 0.54);
+    --project-context-repo-menu-border: rgba(255, 255, 255, 0.08);
+    --project-context-repo-menu-background: rgba(255, 255, 255, 0.035);
+    --project-context-repo-option-text: rgba(249, 244, 232, 0.84);
+    --project-context-repo-option-hover-border: rgba(255, 255, 255, 0.1);
+    --project-context-repo-option-hover-background: rgba(255, 255, 255, 0.055);
+    --project-context-repo-tick-border: rgba(255, 255, 255, 0.14);
+    --project-context-repo-tick-text: rgba(240, 240, 250, 0.86);
+    position: fixed;
+    inset: 0;
+    z-index: var(--constellation-layer-modal, 1000);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: clamp(16px, 3vw, 32px);
+    background: var(--project-context-modal-backdrop-background);
+    overscroll-behavior: contain;
+  }
+
+  .project-context-modal-scrim {
+    position: absolute;
+    inset: 0;
+    border: 0;
+    background: transparent;
+    cursor: default;
+  }
+
+  :root[data-color-scheme='light'] .project-context-modal-backdrop {
+    --project-context-modal-backdrop-background: rgba(228, 235, 238, 0.64);
+    --project-context-modal-border: rgba(49, 63, 76, 0.13);
+    --project-context-modal-background: rgba(255, 253, 247, 0.99);
+    --project-context-modal-shadow: 0 28px 68px rgba(54, 70, 82, 0.17);
+    --project-context-modal-divider: rgba(126, 92, 52, 0.09);
+    --project-context-title: #18212a;
+    --project-context-command-border: rgba(49, 63, 76, 0.11);
+    --project-context-command-background: rgba(248, 250, 248, 0.72);
+    --project-context-command-text: rgba(49, 63, 76, 0.72);
+    --project-context-field-text: rgba(82, 98, 111, 0.74);
+    --project-context-field-border: rgba(126, 92, 52, 0.11);
+    --project-context-field-background: rgba(248, 250, 248, 0.76);
+    --project-context-field-value: #18212a;
+    --project-context-muted-text: rgba(82, 98, 111, 0.72);
+    --project-context-error-text: #8f3347;
+    --project-context-section-divider: rgba(126, 92, 52, 0.09);
+    --project-context-pill-border: rgba(126, 92, 52, 0.1);
+    --project-context-pill-background: rgba(248, 250, 248, 0.72);
+    --project-context-pill-text: rgba(49, 63, 76, 0.82);
+    --project-context-button-border: rgba(49, 63, 76, 0.12);
+    --project-context-button-text: rgba(49, 63, 76, 0.76);
+    --project-context-button-active-background: rgba(33, 47, 61, 0.96);
+    --project-context-button-active-text: #fffdf7;
+    --project-context-tab-track-border: rgba(126, 92, 52, 0.1);
+    --project-context-tab-track-background: rgba(248, 250, 248, 0.62);
+    --project-context-tab-active-background: rgba(255, 253, 247, 0.96);
+    --project-context-tab-active-text: #18212a;
+    --project-context-card-border: rgba(126, 92, 52, 0.1);
+    --project-context-card-background: rgba(248, 250, 248, 0.62);
+    --project-context-card-text: #18212a;
+    --project-context-card-meta: rgba(82, 98, 111, 0.7);
+    --project-context-drop-border: rgba(49, 63, 76, 0.14);
+    --project-context-drop-background: rgba(248, 250, 248, 0.62);
+    --project-context-drop-text: #18212a;
+    --project-context-drop-active-border: rgba(49, 63, 76, 0.24);
+    --project-context-drop-active-background: rgba(49, 63, 76, 0.07);
+    --project-context-repo-title: #18212a;
+    --project-context-repo-meta: rgba(82, 98, 111, 0.72);
+    --project-context-repo-menu-border: rgba(126, 92, 52, 0.1);
+    --project-context-repo-menu-background: rgba(248, 250, 248, 0.62);
+    --project-context-repo-option-text: #18212a;
+    --project-context-repo-option-hover-border: rgba(49, 63, 76, 0.13);
+    --project-context-repo-option-hover-background: rgba(49, 63, 76, 0.055);
+    --project-context-repo-tick-border: rgba(49, 63, 76, 0.16);
+    --project-context-repo-tick-text: rgba(49, 63, 76, 0.82);
+  }
+
+  .project-context-modal {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    width: min(600px, calc(100vw - 32px));
+    max-height: min(720px, calc(100dvh - 48px));
+    overflow: hidden;
+    box-sizing: border-box;
+    padding: 0;
+    border: 1px solid var(--project-context-modal-border);
+    border-radius: 16px;
+    background: var(--project-context-modal-background);
+    box-shadow: var(--project-context-modal-shadow);
+    color: var(--project-context-field-value);
+  }
+
+  .project-context-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 52px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--project-context-modal-divider);
+    box-sizing: border-box;
+  }
+
+  .project-context-modal-title {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .project-context-modal-header strong {
+    color: var(--project-context-title);
+    font-family: var(--constellation-font-sans);
+    font-size: 14px;
+    font-weight: 510;
+    line-height: 1.2;
+  }
+
+  .project-context-modal-body {
+    display: grid;
+    gap: 12px;
+    min-height: 0;
+    overflow: auto;
+    padding: 14px;
+  }
+
+  .project-context-close,
+  .project-context-icon-command {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--project-context-command-border);
+    border-radius: 50%;
+    background: var(--project-context-command-background);
+    color: var(--project-context-command-text);
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+
+  .project-context-modal .project-context-close {
+    border-radius: 8px;
+  }
+
+  .project-context-field {
+    display: grid;
+    gap: 6px;
+    color: var(--project-context-field-text);
+    font-size: 10px;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+
+  .project-context-profile-select {
+    flex: 1 1 auto;
+  }
+
+  .project-create-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    gap: 8px;
+    margin-bottom: 0;
+  }
+
+  .project-create-intro {
+    display: grid;
+    gap: 3px;
+    margin-bottom: 0;
+    color: var(--project-context-field-value);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .project-create-intro span {
+    color: var(--project-context-muted-text);
+    font-size: 11px;
+  }
+
+  .project-empty-note {
+    margin: 2px 0 0;
+  }
+
+  .project-context-field select,
+  .project-create-fields input,
+  .connector-panel input,
+  .connector-panel select {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    border: 1px solid var(--project-context-field-border);
+    border-radius: 8px;
+    background: var(--project-context-field-background);
+    color: var(--project-context-field-value);
+    min-height: 34px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.25;
+    letter-spacing: 0;
+    outline: 0;
+  }
+
+  .project-context-field select:focus,
+  .project-create-fields input:focus,
+  .connector-panel input:focus,
+  .connector-panel select:focus {
+    border-color: color-mix(in srgb, var(--project-context-field-value) 28%, var(--project-context-field-border));
+  }
+
+  .project-create-fields input::placeholder,
+  .connector-panel input::placeholder {
+    color: var(--project-context-muted-text);
+  }
+
+  .project-context-profile-copy,
+  .project-context-muted,
+  .project-context-error {
+    font-size: 11px;
+    line-height: 1.45;
+  }
+
+  .project-context-profile-copy,
+  .project-context-muted {
+    color: var(--project-context-muted-text);
+  }
+
+  .project-context-error {
+    margin: 8px 0 0;
+    color: var(--project-context-error-text);
+  }
+
+  .project-context-profile-copy {
+    margin: 8px 0 0;
+  }
+
+  .project-context-muted {
+    margin: 10px 0 0;
+  }
+
+  .project-context-muted.compact {
+    margin: 0;
+  }
+
+  .project-context-resource-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 0;
+  }
+
+  .project-context-resource-list.selected {
+    padding-top: 12px;
+    border-top: 1px solid var(--project-context-section-divider);
+  }
+
+  .project-context-resource-pill {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border: 1px solid var(--project-context-pill-border);
+    border-radius: 999px;
+    padding: 4px 8px;
+    background: var(--project-context-pill-background);
+    color: var(--project-context-pill-text);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+
+  .project-context-resource-pill.removable {
+    cursor: pointer;
+  }
+
+  .project-connector-grid {
+    display: grid;
+    gap: 8px;
+  }
+
+  .connector-tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 0;
+    padding: 3px;
+    border: 1px solid var(--project-context-tab-track-border);
+    border-radius: 10px;
+    background: var(--project-context-tab-track-background);
+    overflow-x: auto;
+  }
+
+  .connector-tabs button,
+  .project-context-secondary,
+  .project-context-primary,
+  .github-connect-row button,
+  .github-error-actions button,
+  .github-repo-select-row button,
+  .github-repo-search-control button,
+  .github-token-row button,
+  .github-save-row button,
+  .github-search-row button {
+    border: 1px solid var(--project-context-button-border);
+    border-radius: 8px;
+    padding: 7px 10px;
+    background: transparent;
+    color: var(--project-context-button-text);
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .connector-tabs button {
+    flex: 1 0 auto;
+    min-height: 28px;
+    border: 0;
+    border-radius: 7px;
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+
+  .connector-tabs button.active {
+    background: var(--project-context-tab-active-background);
+    color: var(--project-context-tab-active-text);
+  }
+
+  .project-context-primary {
+    background: var(--project-context-button-active-background);
+    color: var(--project-context-button-active-text);
+  }
+
+  .project-context-primary:disabled,
+  .github-connect-row button:disabled,
+  .github-error-actions button:disabled,
+  .github-repo-select-row button:disabled,
+  .github-repo-search-control button:disabled,
+  .github-token-row button:disabled,
+  .github-save-row button:disabled,
+  .github-search-row button:disabled {
+    cursor: not-allowed;
+    opacity: 0.48;
+  }
+
+  .project-connector-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    min-height: 46px;
+    box-sizing: border-box;
+    border: 1px solid var(--project-context-card-border);
+    border-radius: 10px;
+    padding: 9px 10px;
+    background: var(--project-context-card-background);
+    color: var(--project-context-card-text);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .local-resource-panel {
+    gap: 10px;
+  }
+
+  .local-drop-zone {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 10px;
+    width: 100%;
+    min-height: 58px;
+    box-sizing: border-box;
+    border: 1px dashed var(--project-context-drop-border);
+    border-radius: 10px;
+    padding: 12px;
+    background: var(--project-context-drop-background);
+    color: var(--project-context-drop-text);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .local-drop-zone.active {
+    border-color: var(--project-context-drop-active-border);
+    background: var(--project-context-drop-active-background);
+  }
+
+  .project-connector-card {
+    justify-content: flex-start;
+  }
+
+  .project-connector-card span,
+  .local-drop-zone span {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .project-connector-card strong,
+  .local-drop-zone strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .project-connector-card small,
+  .local-drop-zone small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--project-context-card-meta);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .connector-panel {
+    display: grid;
+    gap: 8px;
+  }
+
+  .vault-token-panel {
+    display: grid;
+    gap: 8px;
+  }
+
+  .github-repo-selector {
+    display: grid;
+    gap: 6px;
+  }
+
+  .github-repo-select-row {
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .github-repo-select-actions {
+    justify-content: flex-end;
+    gap: 6px;
+    flex: 0 0 auto;
+  }
+
+  .github-agent-token-toggle {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    min-height: 30px;
+    color: var(--project-context-repo-title);
+    font-size: 10.5px;
+  }
+
+  .github-agent-token-toggle input {
+    width: 14px;
+    height: 14px;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border-radius: 3px;
+  }
+
+  .github-agent-token-toggle span {
+    display: grid;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .github-agent-token-toggle strong,
+  .github-agent-token-toggle small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .github-agent-token-toggle small {
+    color: var(--project-context-repo-meta);
+    font-size: 9.5px;
+  }
+
+  .github-repo-dropdown-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+    flex: 1 1 auto;
+    min-height: 34px;
+    text-align: left;
+  }
+
+  .github-repo-dropdown-trigger span {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .github-repo-dropdown-trigger strong,
+  .github-repo-dropdown-trigger small,
+  .github-repo-option-copy strong,
+  .github-repo-option-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .github-repo-dropdown-trigger strong {
+    color: var(--project-context-repo-title);
+    font-size: 11px;
+  }
+
+  .github-repo-dropdown-trigger small {
+    color: var(--project-context-repo-meta);
+    font-size: 10px;
+  }
+
+  .github-repo-menu {
+    display: grid;
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid var(--project-context-repo-menu-border);
+    border-radius: 10px;
+    background: var(--project-context-repo-menu-background);
+  }
+
+  .github-repo-search-control {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .github-repo-options {
+    display: grid;
+    gap: 3px;
+  }
+
+  .github-repo-option {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr);
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    min-height: 34px;
+    box-sizing: border-box;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 5px 6px;
+    background: transparent;
+    color: var(--project-context-repo-option-text);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .github-repo-option:hover,
+  .github-repo-option.selected {
+    border-color: var(--project-context-repo-option-hover-border);
+    background: var(--project-context-repo-option-hover-background);
+  }
+
+  .github-repo-tick {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: 1px solid var(--project-context-repo-tick-border);
+    border-radius: 50%;
+    color: var(--project-context-repo-tick-text);
+  }
+
+  .github-repo-option-copy {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .github-repo-option-copy strong {
+    color: var(--project-context-repo-title);
+    font-size: 10.5px;
+  }
+
+  .github-repo-option-copy small {
+    color: var(--project-context-repo-meta);
+    font-size: 9.5px;
+  }
+
+  .github-repo-search-control input {
+    padding: 7px 9px;
+  }
+
+  .github-error-actions {
+    display: flex;
+    margin-top: 6px;
+  }
+
+  .project-context-icon-command.compact {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border-radius: 50%;
+  }
+
+  .github-connect-row select,
+  .github-repo-dropdown-trigger,
+  .github-repo-search-control input,
+  .github-token-row input,
+  .github-save-row input,
+  .github-search-row input {
+    flex: 1 1 auto;
+  }
+
+  .github-connect-row button,
+  .github-error-actions button,
+  .github-repo-select-row button,
+  .github-repo-search-control button,
+  .github-token-row button,
+  .github-save-row button,
+  .github-search-row button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .project-context-actions {
+    justify-content: flex-end;
+    margin-top: 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--project-context-section-divider);
+  }
+
+  @media (max-height: 680px) {
+    .project-context-composer[data-mode='inline'] .project-context-popover {
+      bottom: calc(100% + 12px);
+      max-height: min(440px, calc(100vh - 148px));
+      overflow: auto;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .project-context-popover {
+      width: min(360px, calc(100vw - 28px));
+    }
+
+    .project-create-fields,
+    .github-connect-row,
+    .github-repo-select-row,
+    .github-token-row,
+    .github-save-row,
+    .github-search-row {
+      grid-template-columns: 1fr;
+      display: grid;
+    }
+
+    .project-context-composer[data-mode='inline'] .project-context-popover {
+      left: -38px;
+    }
+  }

@@ -1,0 +1,37 @@
+schema_version = 1
+name = "manage-projects"
+display_name = "Manage Projects"
+version = "1.0.0"
+description = "Create, attach, update, archive, and maintain reusable Cortex Project Context profiles for folders, repos, docs, and uploaded context."
+license = "Apache-2.0"
+source = "illo-core"
+visibility = "public"
+
+[routing]
+triggers = [
+  { pattern = "project", direction = "for" },
+  { pattern = "folder", direction = "for" },
+  { pattern = "project context", direction = "for" },
+  { pattern = "attach this repo", direction = "for" },
+  { pattern = "add files to project", direction = "for" },
+  { pattern = "delete project", direction = "for" },
+  { pattern = "archive project", direction = "for" },
+  { pattern = "reusable context", direction = "for" },
+  { pattern = "one-off attachment", direction = "against" },
+  { pattern = "image dropped in thread", direction = "against" },
+]
+
+[runtime]
+default_model_tier = "medium"
+default_thinking_tier = "medium"
+
+[permissions]
+toolsets = ["brain"]
+
+[loading]
+summary = "SKILL.md#role"
+procedure = "SKILL.md"
+evals = "evals/"
+
+[assets]
+asset_1 = "evals/routing.jsonl"

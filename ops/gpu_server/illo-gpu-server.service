@@ -1,0 +1,31 @@
+[Unit]
+Description=Illo Brain - GPU Model Server
+After=network.target
+Before=cortex-worker.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/illo-brain
+ExecStart=%h/illo-brain/venv/bin/python3 -m brain.platform.gpu
+Restart=always
+RestartSec=10
+Environment=CUDA_VISIBLE_DEVICES=0
+Environment=GPU_SERVER_PORT=9800
+Environment=PYTHONPATH=%h/illo-brain
+Environment=ILLO_ENV=production
+Environment=ILLO_VALIDATE_MIGRATIONS=1
+Environment=GPU_RECLAIM_CONFLICTING_PROCESSES=1
+Environment=GPU_EMBEDDING_VRAM_MB=15000
+Environment=GPU_LLM_VRAM_MB=9000
+Environment=GPU_EMBEDDING_LOAD_TIMEOUT_SECONDS=7200
+Environment=GPU_LLM_LOAD_TIMEOUT_SECONDS=300
+Environment=GPU_EMBEDDING_MAX_BATCH_SIZE=16
+Environment=EMBEDDING_WORKER_WARMUP_WAIT_SECONDS=180
+Environment=EMBEDDING_WORKER_RESTART_TIMEOUT_SECONDS=300
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+EnvironmentFile=-%h/.config/illo-brain/production.env
+StandardOutput=append:%h/illo-brain/logs/gpu_server.log
+StandardError=append:%h/illo-brain/logs/gpu_server.log
+
+[Install]
+WantedBy=default.target
