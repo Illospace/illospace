@@ -1,0 +1,32 @@
+# Core
+psycopg2-binary>=2.9
+alembic>=1.15
+sqlalchemy>=2.0
+numpy>=2.0
+scikit-learn>=1.8
+httpx>=0.28
+readability-lxml>=0.8
+pyyaml>=6.0
+rich>=14.0
+typer>=0.24
+anthropic>=0.52
+openai>=2.0
+pydantic>=2.0
+pgvector>=0.3
+browser-harness @ git+https://github.com/browser-use/browser-harness.git@5acfe37cf844a2f3ac97a5cf8cfa477a748c15f2
+croniter>=2.0
+predict-rlm @ git+https://github.com/Trampoline-AI/predict-rlm.git@75ed0d89b88896b2fd97282e12d93b71a50c51ae
+
+# API (FastAPI migration)
+fastapi>=0.115
+uvicorn[standard]>=0.34
+python-multipart>=0.0.18
+python-jose[cryptography]>=3.3
+bcrypt>=4.0
+itsdangerous>=2.1
+structlog>=24.0
+
+# Embeddings & GPU workers (sentence-transformers pulls torch)
+sentence-transformers>=5.0
+transformers>=5.0
+accelerate>=1.0

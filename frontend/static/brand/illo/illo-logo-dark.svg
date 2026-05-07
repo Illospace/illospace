@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 430 240" fill="none" role="img" aria-labelledby="illo-logo-title">
+  <title id="illo-logo-title">Illo logo for dark surfaces</title>
+  <g>
+    <rect x="38" y="47" width="22" height="156" rx="11" fill="#F7F3EA"/>
+    <rect x="92" y="47" width="22" height="156" rx="11" fill="#F7F3EA"/>
+    <rect x="146" y="47" width="22" height="156" rx="11" fill="#F7F3EA"/>
+    <path
+      fill="#F7F3EA"
+      fill-rule="evenodd"
+      d="M 298.6 62.4 A 72 72 0 1 0 333.5 180.2 L 317.2 165.5 A 50 50 0 1 1 292.9 83.7 Z"
+    />
+    <circle cx="295.8" cy="73.1" r="11" fill="#F7F3EA"/>
+    <circle cx="325.3" cy="172.8" r="11" fill="#F7F3EA"/>
+    <path
+      fill="#F7F3EA"
+      fill-rule="evenodd"
+      d="M 341.1 93.8 A 72 72 0 0 1 332.7 181.1 L 316.6 166.1 A 50 50 0 0 0 322.4 105.5 Z"
+    />
+    <circle cx="331.7" cy="99.7" r="11" fill="#F7F3EA"/>
+    <circle cx="324.6" cy="173.6" r="11" fill="#F7F3EA"/>
+    <circle cx="336" cy="64" r="17" fill="#F7F3EA"/>
+  </g>
+</svg>

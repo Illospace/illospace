@@ -1,0 +1,18 @@
+[Unit]
+Description=Illo Brain — Scheduler Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/illo-brain
+Environment=ILLO_ENV=production
+Environment=ILLO_VALIDATE_MIGRATIONS=1
+EnvironmentFile=-%h/.config/illo-brain/production.env
+ExecStart=%h/illo-brain/venv/bin/python3 -m brain.app.cli.scheduler daemon --owner-mode scheduler --poll-interval-seconds 15
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=300
+
+[Install]
+WantedBy=default.target

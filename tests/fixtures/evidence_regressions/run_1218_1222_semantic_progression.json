@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "scenario": "1218/1220/1221/1222 evidence preview and semantic verifier progression",
+  "stages": [
+    {
+      "run_id": 1218,
+      "label": "preview-lost-worker-evidence",
+      "expected": {
+        "worker_result_previewed": false,
+        "semantic_status": "failed"
+      },
+      "execution_artifacts": [
+        {
+          "type": "worker_activity",
+          "event": "tool_started",
+          "status": "running",
+          "worker_id": "w-audit",
+          "execution_id": "exec-1218-audit",
+          "node_id": "audit",
+          "skill": "debug",
+          "current_tool": "brain_skills/skill_view"
+        },
+        {
+          "type": "worker_activity",
+          "event": "heartbeat",
+          "status": "running",
+          "worker_id": "w-audit",
+          "execution_id": "exec-1218-audit",
+          "node_id": "audit",
+          "skill": "debug"
+        }
+      ],
+      "verification_runs": [
+        {
+          "verifier_type": "semantic_evidence_judge",
+          "status": "failed",
+          "severity": "required",
+          "evidence": {
+            "missing_evidence": [
+              "No worker_result artifact reached the semantic evidence preview."
+            ],
+            "unsupported_claims": [
+              "Final response reported skill catalog findings without surfaced evidence."
+            ]
+          },
+          "failure_reason": "Missing worker evidence in artifact preview."
+        }
+      ]
+    },
+    {
+      "run_id": 1220,
+      "label": "worker-result-present-but-schema-invalid",
+      "expected": {
+        "worker_result_previewed": true,
+        "schema_valid": false,
+        "semantic_status": "failed"
+      },
+      "execution_artifacts": [
+        {
+          "type": "worker_result",
+          "status": "completed",
+          "worker_id": "w-audit",
+          "execution_id": "exec-1220-audit",
+          "node_id": "audit",
+          "skill": "debug",
+          "trust_status": "untrusted",
+          "trust_reasons": [
+            "worker_evidence_schema_invalid"
+          ],
+          "output_preview": "{'summary': 'Catalog lists 14 skills', 'files': [], 'commands': []}",
+          "evidence": {
+            "summary": "Worker returned Python-literal evidence instead of strict JSON.",
+            "schema": {
+              "valid": false,
+              "source": "worker_output",
+              "error": "Expected strict JSON evidence object; got Python literal syntax."
+            },
+            "files": [],
+            "commands": [],
+            "artifacts": [],
+            "unresolved_uncertainty": [
+              "The catalog count was not backed by trusted tool telemetry."
+            ]
+          }
+        }
+      ],
+      "verification_runs": [
+        {
+          "verifier_type": "semantic_evidence_judge",
+          "status": "failed",
+          "severity": "required",
+          "evidence": {
+            "missing_evidence": [
+              "Worker evidence schema was invalid."
+            ],
+            "unsupported_claims": [
+              "Final response asserted skill catalog counts."
+            ]
+          },
+          "failure_reason": "Worker result was present but not trusted."
+        }
+      ]
+    },
+    {
+      "run_id": 1221,
+      "label": "worker-evidence-summary-without-raw-support",
+      "expected": {
+        "worker_result_previewed": true,
+        "schema_valid": true,
+        "commands": 0,
+        "semantic_status": "warning"
+      },
+      "execution_artifacts": [
+        {
+          "type": "worker_result",
+          "status": "completed",
+          "worker_id": "w-audit",
+          "execution_id": "exec-1221-audit",
+          "node_id": "audit",
+          "skill": "debug",
+          "trust_status": "trusted_with_uncertainty",
+          "trust_reasons": [
+            "structured_evidence_reported",
+            "missing_raw_tool_output"
+          ],
+          "output_preview": "Worker summary says the skill catalog was inspected.",
+          "evidence": {
+            "summary": "Skill catalog inspected; raw tool output was not captured.",
+            "schema": {
+              "valid": true,
+              "source": "worker_output"
+            },
+            "files": [],
+            "commands": [],
+            "artifacts": [
+              {
+                "type": "note",
+                "summary": "Worker reported skill catalog inspection."
+              }
+            ],
+            "unresolved_uncertainty": [
+              "No raw brain_skills/skill_view result was recorded."
+            ]
+          }
+        }
+      ],
+      "verification_runs": [
+        {
+          "verifier_type": "semantic_evidence_judge",
+          "status": "warning",
+          "severity": "warning",
+          "evidence": {
+            "missing_evidence": [
+              "Raw skill_view output was unavailable."
+            ],
+            "unsupported_claims": []
+          },
+          "failure_reason": "Only worker-summary-level evidence was present."
+        }
+      ]
+    },
+    {
+      "run_id": 1222,
+      "label": "trusted-worker-evidence-previewed",
+      "expected": {
+        "worker_result_previewed": true,
+        "schema_valid": true,
+        "commands": 1,
+        "semantic_status": "passed"
+      },
+      "execution_artifacts": [
+        {
+          "type": "worker_result",
+          "status": "completed",
+          "worker_id": "w-audit",
+          "execution_id": "exec-1222-audit",
+          "node_id": "audit",
+          "skill": "debug",
+          "trust_status": "trusted",
+          "trust_reasons": [
+            "structured_evidence_reported",
+            "tool_telemetry_recorded"
+          ],
+          "output_preview": "Worker reported that skill_view returned the catalog and schema counts.",
+          "evidence": {
+            "summary": "skill_view returned 14 skills; evidence contained one command/tool transcript and one artifact note.",
+            "schema": {
+              "valid": true,
+              "source": "worker_output"
+            },
+            "files": [
+              {
+                "path": "brain/systems/skills/catalog.py",
+                "status": "read",
+                "summary": "Catalog loader inspected."
+              }
+            ],
+            "commands": [
+              {
+                "command": "brain_skills/skill_view catalog",
+                "status": "passed",
+                "exit_code": 0,
+                "output": "{\"skills\":[\"debug\",\"develop\",\"review\"],\"total\":14}"
+              }
+            ],
+            "artifacts": [
+              {
+                "type": "note",
+                "summary": "Catalog total from strict JSON skill_view output."
+              }
+            ],
+            "unresolved_uncertainty": []
+          }
+        }
+      ],
+      "verification_runs": [
+        {
+          "verifier_type": "semantic_evidence_judge",
+          "status": "passed",
+          "severity": "required",
+          "evidence": {
+            "missing_evidence": [],
+            "unsupported_claims": []
+          },
+          "failure_reason": null
+        }
+      ]
+    }
+  ]
+}

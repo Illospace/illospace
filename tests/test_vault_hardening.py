@@ -1,0 +1,180 @@
+"""Regression tests for vault hardening boundaries."""
+from __future__ import annotations
+
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+from starlette.testclient import TestClient
+
+from brain.app.api.main import app
+
+
+USER = {
+    "id": "aaaa0000-0000-0000-0000-000000000001",
+    "email": "alice@example.test",
+    "name": "Alice",
+    "role": "owner",
+    "org_id": "org00000-0000-0000-0000-000000000001",
+    "org_name": "Example",
+    "permissions": ["vault:share", "vault:audit"],
+}
+
+
+@contextmanager
+def _client():
+    from brain.app.api.auth import get_current_user
+    from brain.app.api.deps import get_db
+
+    app.dependency_overrides[get_current_user] = lambda: USER
+    app.dependency_overrides[get_db] = lambda: MagicMock()
+    try:
+        yield TestClient(app, raise_server_exceptions=False)
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_reveal_requires_unlock_when_pin_is_configured():
+    with _client() as client, \
+         patch("brain.systems.vault.has_pin", return_value=True), \
+         patch("brain.systems.vault.validate_vault_token", return_value=False), \
+         patch("brain.systems.vault.reveal_secret") as reveal:
+        response = client.get("/api/vault/OPENAI_API_KEY")
+
+    assert response.status_code == 423
+    reveal.assert_not_called()
+
+
+def test_unlock_rejects_bad_pin_and_returns_session_token_for_good_pin():
+    expires = datetime.now(timezone.utc)
+    with _client() as client, \
+         patch("brain.systems.vault.unlock_vault", side_effect=[None, ("vault-token", expires)]):
+        bad = client.post("/api/vault/unlock", json={"pin": "wrong"})
+        good = client.post("/api/vault/unlock", json={"pin": "1234"})
+
+    assert bad.status_code == 403
+    assert good.status_code == 200
+    assert good.json()["token"] == "vault-token"
+
+
+def test_brain_vault_requires_user_context():
+    from brain.app.mcp.server import tool_brain_vault
+
+    result = tool_brain_vault("OPENAI_API_KEY")
+
+    assert "authenticated user context" in result["error"]
+
+
+def test_vault_secret_prompt_requires_user_context():
+    from brain.app.mcp.server import tool_vault_secret_prompt
+
+    result = tool_vault_secret_prompt("OPENAI_API_KEY")
+
+    assert "authenticated user context" in result["error"]
+
+
+def test_vault_secret_prompt_records_missing_and_broadcasts_thread_event():
+    from brain.app.mcp.server import tool_vault_secret_prompt
+
+    published = []
+
+    with patch("brain.systems.vault.record_missing_request") as record_missing, \
+         patch("brain.systems.cortex.events.publish_safe", side_effect=lambda event, payload: published.append((event, payload))):
+        result = tool_vault_secret_prompt(
+            "example_api_key",
+            description="Example API access for generated product workflows.",
+            category="api",
+            reason="Verify the newly created Example skill against the API.",
+            user_id=USER["id"],
+            org_id=USER["org_id"],
+            run_id=42,
+            idea_id="idea-1",
+            requested_by="coding-agent",
+        )
+
+    assert result["prompted"] is True
+    assert result["status"] == "opened"
+    assert result["key_name"] == "EXAMPLE_API_KEY"
+    assert "value" not in result
+    assert "secret" not in result
+    record_missing.assert_called_once_with(
+        "EXAMPLE_API_KEY",
+        user_id=USER["id"],
+        org_id=USER["org_id"],
+    )
+    assert published
+    event_type, payload = published[0]
+    assert event_type == "vault_secret_prompt"
+    assert payload["idea_id"] == "idea-1"
+    assert payload["prompt"]["key_name"] == "EXAMPLE_API_KEY"
+    assert payload["prompt"]["category"] == "api"
+    assert "value" not in payload["prompt"]
+
+
+def test_brain_vault_requests_grant_before_reading():
+    from brain.app.mcp.server import tool_brain_vault
+
+    with patch("brain.systems.vault.authorize_agent_secret_read", return_value={
+        "allowed": False,
+        "status": "pending",
+        "grant": {"id": 123},
+    }) as authorize, \
+         patch("brain.systems.vault.get_secret") as get_secret:
+        result = tool_brain_vault(
+            "OPENAI_API_KEY",
+            reason="Need provider access for this run",
+            user_id=USER["id"],
+            org_id=USER["org_id"],
+            run_id=42,
+        )
+
+    assert result == {
+        "error": "Vault grant required before this agent can read the secret",
+        "grant_id": 123,
+        "status": "pending",
+    }
+    authorize.assert_called_once()
+    get_secret.assert_not_called()
+
+
+def test_brain_vault_uses_scoped_agent_read_after_grant():
+    from brain.app.mcp.server import tool_brain_vault
+
+    with patch("brain.systems.vault.authorize_agent_secret_read", return_value={"allowed": True, "status": "approved"}), \
+         patch("brain.systems.vault.get_secret", return_value="secret-value") as get_secret:
+        result = tool_brain_vault(
+            "OPENAI_API_KEY",
+            reason="Need provider access for this run",
+            user_id=USER["id"],
+            org_id=USER["org_id"],
+            run_id=42,
+        )
+
+    assert result == {"key": "OPENAI_API_KEY", "value": "secret-value"}
+    get_secret.assert_called_once_with(
+        "OPENAI_API_KEY",
+        user_id=USER["id"],
+        org_id=USER["org_id"],
+        accessed_by="agent",
+    )
+
+
+def test_vault_tool_trace_result_is_redacted():
+    from brain.systems.runs.events import record_tool_call
+
+    recorded = []
+
+    def _record(run_id, event_type, payload, **kwargs):
+        recorded.append((run_id, event_type, payload, kwargs))
+
+    with patch("brain.systems.runs.event_log.record_run_event", side_effect=_record):
+        record_tool_call(
+            42,
+            "idea-1",
+            "brain_vault",
+            {"key": "OPENAI_API_KEY"},
+            '{"key":"OPENAI_API_KEY","value":"sk-secret"}',
+        )
+
+    assert recorded
+    assert recorded[0][2]["result"] == "[secret redacted]"

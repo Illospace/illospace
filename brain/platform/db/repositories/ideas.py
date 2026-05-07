@@ -1,0 +1,350 @@
+"""IdeaRepository — domain queries for ideas, threads, connections."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+from typing import Sequence
+
+from sqlalchemy import and_, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import aliased, load_only
+
+from brain.platform.db.models.idea import (
+    Idea,
+    IdeaConnection,
+    IdeaStateLog,
+    IdeaThread,
+    UserMention,
+)
+from brain.platform.db.models.org import User
+from brain.platform.db.repositories.base import BaseRepository
+
+
+IDEA_LIST_LOAD_COLUMNS = (
+    Idea.id,
+    Idea.title,
+    Idea.display_title,
+    Idea.description,
+    Idea.status,
+    Idea.origin,
+    Idea.origin_ref,
+    Idea.salience_score,
+    Idea.position_x,
+    Idea.position_y,
+    Idea.position_sticky,
+    Idea.orbit_anchor_type,
+    Idea.orbit_anchor_id,
+    Idea.parent_id,
+    Idea.created_at,
+    Idea.updated_at,
+    Idea.archived_at,
+    Idea.user_id,
+    Idea.org_id,
+    Idea.agent_details,
+)
+
+
+class IdeaRepository(BaseRepository[Idea]):
+    model = Idea
+    pk_column = "id"
+
+    def list_active(self, *, limit: int | None = None) -> Sequence[Idea]:
+        stmt = (
+            select(Idea)
+            .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
+            .where(Idea.archived_at.is_(None))
+            .order_by(Idea.updated_at.desc())
+        )
+        if limit:
+            stmt = stmt.limit(limit)
+        return self._session.scalars(stmt).all()
+
+    def list_by_org(
+        self, org_id: str, *, limit: int | None = None
+    ) -> Sequence[Idea]:
+        return self.list_active_for_org(org_id, limit=limit)
+
+    def get_for_org(self, idea_id: str, org_id: str) -> Idea | None:
+        stmt = select(Idea).where(Idea.id == idea_id, Idea.org_id == org_id)
+        return self._session.scalars(stmt).first()
+
+    def get_for_org_or_raise(self, idea_id: str, org_id: str) -> Idea:
+        idea = self.get_for_org(idea_id, org_id)
+        if idea is None:
+            raise LookupError(f"Idea {idea_id} not found")
+        return idea
+
+    def list_active_for_org(
+        self, org_id: str, *, limit: int | None = None
+    ) -> Sequence[Idea]:
+        stmt = (
+            select(Idea)
+            .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
+            .where(Idea.org_id == org_id, Idea.archived_at.is_(None))
+            .order_by(Idea.updated_at.desc())
+        )
+        if limit:
+            stmt = stmt.limit(limit)
+        return self._session.scalars(stmt).all()
+
+    def list_archived(self, *, limit: int | None = None) -> Sequence[Idea]:
+        stmt = (
+            select(Idea)
+            .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
+            .where(Idea.archived_at.is_not(None))
+            .order_by(Idea.archived_at.desc(), Idea.updated_at.desc())
+        )
+        if limit:
+            stmt = stmt.limit(limit)
+        return self._session.scalars(stmt).all()
+
+    def list_archived_for_org(
+        self, org_id: str, *, limit: int | None = None
+    ) -> Sequence[Idea]:
+        org_user_ids = select(User.id).where(User.org_id == str(org_id))
+        stmt = (
+            select(Idea)
+            .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
+            .where(
+                Idea.archived_at.is_not(None),
+                or_(
+                    Idea.org_id == org_id,
+                    and_(Idea.org_id.is_(None), Idea.user_id.in_(org_user_ids)),
+                ),
+            )
+            .order_by(Idea.archived_at.desc(), Idea.updated_at.desc())
+        )
+        if limit:
+            stmt = stmt.limit(limit)
+        return self._session.scalars(stmt).all()
+
+    def list_by_status(self, status: str) -> Sequence[Idea]:
+        stmt = (
+            select(Idea)
+            .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
+            .where(Idea.status == status, Idea.archived_at.is_(None))
+            .order_by(Idea.updated_at.desc())
+        )
+        return self._session.scalars(stmt).all()
+
+    def list_by_status_for_org(self, status: str, org_id: str) -> Sequence[Idea]:
+        stmt = (
+            select(Idea)
+            .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
+            .where(
+                Idea.org_id == org_id,
+                Idea.status == status,
+                Idea.archived_at.is_(None),
+            )
+            .order_by(Idea.updated_at.desc())
+        )
+        return self._session.scalars(stmt).all()
+
+    def update_status(
+        self, idea_id: str, new_status: str, trigger: str | None = None
+    ) -> Idea:
+        idea = self.get_or_raise(idea_id)
+        old_status = idea.status
+        idea.status = new_status
+        log = IdeaStateLog(
+            idea_id=idea_id,
+            from_state=old_status,
+            to_state=new_status,
+            trigger=trigger,
+        )
+        self._session.add(log)
+        return idea
+
+    def archive(self, idea_id: str) -> Idea:
+        from datetime import datetime, timezone
+
+        idea = self.get_or_raise(idea_id)
+        idea.archived_at = datetime.now(timezone.utc)
+        return idea
+
+
+class IdeaThreadRepository(BaseRepository[IdeaThread]):
+    model = IdeaThread
+
+    def list_by_idea(self, idea_id: str) -> Sequence[IdeaThread]:
+        stmt = (
+            select(IdeaThread)
+            .where(IdeaThread.idea_id == idea_id)
+            .order_by(IdeaThread.created_at.asc())
+        )
+        return self._session.scalars(stmt).all()
+
+    def add_message(
+        self,
+        idea_id: str,
+        role: str,
+        content: str,
+        user_id: str | None = None,
+    ) -> IdeaThread:
+        msg = IdeaThread(
+            idea_id=idea_id, role=role, content=content, user_id=user_id
+        )
+        self._session.add(msg)
+        return msg
+
+
+class IdeaConnectionRepository(BaseRepository[IdeaConnection]):
+    model = IdeaConnection
+    pk_column = "id"
+
+    def list_by_idea(self, idea_id: str) -> Sequence[IdeaConnection]:
+        stmt = select(IdeaConnection).where(
+            or_(
+                IdeaConnection.source_id == idea_id,
+                IdeaConnection.target_id == idea_id,
+            )
+        )
+        return self._session.scalars(stmt).all()
+
+    def list_all_active(self) -> Sequence[IdeaConnection]:
+        return self._session.scalars(select(IdeaConnection)).all()
+
+    def list_by_idea_for_org(
+        self, idea_id: str, org_id: str
+    ) -> Sequence[IdeaConnection]:
+        source = aliased(Idea)
+        target = aliased(Idea)
+        stmt = (
+            select(IdeaConnection)
+            .join(source, IdeaConnection.source_id == source.id)
+            .join(target, IdeaConnection.target_id == target.id)
+            .where(
+                and_(
+                    or_(
+                        IdeaConnection.source_id == idea_id,
+                        IdeaConnection.target_id == idea_id,
+                    ),
+                    source.org_id == org_id,
+                    target.org_id == org_id,
+                )
+            )
+            .order_by(IdeaConnection.created_at)
+        )
+        return self._session.scalars(stmt).all()
+
+    def list_all_active_for_org(self, org_id: str) -> Sequence[IdeaConnection]:
+        source = aliased(Idea)
+        target = aliased(Idea)
+        stmt = (
+            select(IdeaConnection)
+            .join(source, IdeaConnection.source_id == source.id)
+            .join(target, IdeaConnection.target_id == target.id)
+            .where(source.org_id == org_id, target.org_id == org_id)
+            .order_by(IdeaConnection.created_at)
+        )
+        return self._session.scalars(stmt).all()
+
+    def get_for_org(self, connection_id: str, org_id: str) -> IdeaConnection | None:
+        source = aliased(Idea)
+        target = aliased(Idea)
+        stmt = (
+            select(IdeaConnection)
+            .join(source, IdeaConnection.source_id == source.id)
+            .join(target, IdeaConnection.target_id == target.id)
+            .where(
+                IdeaConnection.id == connection_id,
+                source.org_id == org_id,
+                target.org_id == org_id,
+            )
+        )
+        return self._session.scalars(stmt).first()
+
+
+class UserMentionRepository(BaseRepository[UserMention]):
+    model = UserMention
+
+    def create_if_missing(
+        self,
+        *,
+        user_id: str,
+        idea_id: str,
+        mentioned_by: str,
+        thread_message_id: int | None = None,
+    ) -> tuple[UserMention, bool]:
+        mention_id = self._session.scalar(
+            insert(UserMention)
+            .values(
+                user_id=user_id,
+                idea_id=idea_id,
+                mentioned_by=mentioned_by,
+                thread_message_id=thread_message_id,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    UserMention.user_id,
+                    UserMention.idea_id,
+                    UserMention.thread_message_id,
+                ]
+            )
+            .returning(UserMention.id)
+        )
+        if mention_id is not None:
+            mention = self.get(int(mention_id))
+            if mention is None:
+                raise LookupError(f"UserMention {mention_id} was inserted but not found")
+            return mention, True
+
+        mention = self._session.scalars(
+            select(UserMention).where(
+                UserMention.user_id == user_id,
+                UserMention.idea_id == idea_id,
+                UserMention.thread_message_id == thread_message_id,
+            )
+        ).first()
+        if mention is None:
+            raise LookupError("Existing user mention could not be loaded after conflict")
+        return mention, False
+
+    def mark_seen_for_idea(self, *, user_id: str, idea_id: str) -> int:
+        result = self._session.execute(
+            update(UserMention)
+            .where(
+                UserMention.user_id == user_id,
+                UserMention.idea_id == idea_id,
+                UserMention.seen_at.is_(None),
+            )
+            .values(seen_at=datetime.now(timezone.utc))
+        )
+        return int(result.rowcount or 0)
+
+    def mark_seen_for_thread_message(
+        self,
+        *,
+        user_id: str,
+        idea_id: str,
+        thread_message_id: int,
+    ) -> int:
+        result = self._session.execute(
+            update(UserMention)
+            .where(
+                UserMention.user_id == user_id,
+                UserMention.idea_id == idea_id,
+                UserMention.thread_message_id == thread_message_id,
+                UserMention.seen_at.is_(None),
+            )
+            .values(seen_at=datetime.now(timezone.utc))
+        )
+        return int(result.rowcount or 0)
+
+    def list_unread_for_user(self, *, user_id: str) -> list[dict[str, Any]]:
+        rows = self._session.execute(
+            select(
+                UserMention.idea_id,
+                UserMention.created_at,
+                UserMention.mentioned_by,
+                User.name.label("mentioner_name"),
+                User.color.label("mentioner_color"),
+            )
+            .join(User, UserMention.mentioned_by == User.id)
+            .where(
+                UserMention.user_id == user_id,
+                UserMention.seen_at.is_(None),
+            )
+            .order_by(UserMention.created_at.desc())
+        ).mappings().all()
+        return [dict(row) for row in rows]

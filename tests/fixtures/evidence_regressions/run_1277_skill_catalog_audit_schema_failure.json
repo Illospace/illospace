@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "run_id": 1277,
+  "scenario": "read-only skill catalog audit returned Python-literal evidence and failed semantic support",
+  "history_row": {
+    "id": 1277,
+    "idea_id": "idea-evidence-1277",
+    "event": "thread_reply",
+    "message": "Audit the skill catalog using read-only workers.",
+    "priority": 0,
+    "status": "failed",
+    "settlement_state": "failed",
+    "settlement_reason": "Semantic evidence judge rejected unsupported skill catalog claims.",
+    "skill_used": "debug",
+    "skill_outcome": "failure",
+    "model_used": "openai/gpt-5-mini",
+    "thinking_used": "low",
+    "created_at": "2026-04-27T18:00:00+00:00",
+    "started_at": "2026-04-27T18:00:05+00:00",
+    "completed_at": "2026-04-27T18:02:00+00:00",
+    "contract_status": "failed",
+    "contract_type": "freeform",
+    "contract_requirements": {
+      "evidence": {
+        "require_worker_evidence": true,
+        "strict_json": true
+      }
+    },
+    "verification_attempts": 1,
+    "verification_last_error": "Unsupported claims: Final response says the skill catalog was audited; Missing evidence: no strict JSON or trusted tool telemetry backed the read-only worker result.",
+    "verification_warnings": [
+      {
+        "attempt": 1,
+        "max_attempts": 1,
+        "contract_type": "freeform",
+        "contract_status": "failed",
+        "message": "Worker evidence schema was invalid.",
+        "missing_conditions": [
+          "No strict JSON worker evidence was recorded.",
+          "No shell/file telemetry backed the skill catalog count."
+        ],
+        "final": true
+      }
+    ],
+    "run_steps": [
+      {
+        "node_id": "skill-catalog-audit",
+        "skill_name": "debug",
+        "task": "Use read-only tools to inspect the skill catalog.",
+        "wave": 0,
+        "status": "completed",
+        "tokens_total": 884,
+        "duration_sec": 42
+      }
+    ],
+    "tool_calls": [
+      {
+        "tool": "brain_skills/skill_view",
+        "args": "{\"name\":\"catalog\"}",
+        "at": "2026-04-27T18:00:40+00:00",
+        "node_id": "skill-catalog-audit"
+      }
+    ],
+    "execution_artifacts": [
+      {
+        "type": "worker_assignment",
+        "worker_id": "w-catalog",
+        "execution_id": "exec-1277-catalog",
+        "node_id": "skill-catalog-audit",
+        "skill": "debug",
+        "task": "Use read-only tools to inspect the skill catalog.",
+        "assignment_contract": {
+          "mode": "read_only",
+          "required_evidence": [
+            "strict_json_worker_evidence",
+            "tool_telemetry"
+          ]
+        },
+        "ownership_scope": {
+          "mode": "read_only",
+          "allowed_paths": [
+            "brain/systems/skills/**"
+          ]
+        }
+      },
+      {
+        "type": "worker_activity",
+        "event": "tool_completed",
+        "status": "completed",
+        "worker_id": "w-catalog",
+        "execution_id": "exec-1277-catalog",
+        "node_id": "skill-catalog-audit",
+        "skill": "debug",
+        "current_tool": "brain_skills/skill_view"
+      },
+      {
+        "type": "worker_result",
+        "status": "completed",
+        "worker_id": "w-catalog",
+        "execution_id": "exec-1277-catalog",
+        "node_id": "skill-catalog-audit",
+        "skill": "debug",
+        "trust_status": "untrusted",
+        "trust_reasons": [
+          "worker_evidence_schema_invalid",
+          "no_shell_or_file_telemetry"
+        ],
+        "output_preview": "{'summary': 'skill catalog contains 14 entries', 'evidence': {'commands': []}}",
+        "evidence": {
+          "summary": "Worker output used Python literal syntax and did not include trusted telemetry.",
+          "schema": {
+            "valid": false,
+            "source": "worker_output",
+            "error": "Expected strict JSON evidence object; got Python literal syntax."
+          },
+          "files": [],
+          "commands": [],
+          "artifacts": [],
+          "unresolved_uncertainty": [
+            "skill_view output was not recorded as JSON",
+            "catalog count is unsupported"
+          ]
+        }
+      }
+    ],
+    "output_artifact": "The skill catalog audit found 14 skills and no schema issues."
+  },
+  "verification_runs": [
+    {
+      "verifier_type": "semantic_evidence_judge",
+      "status": "failed",
+      "severity": "required",
+      "observed": {
+        "judge_status": "fail",
+        "risk_level": "high",
+        "missing_evidence": [
+          "No strict JSON worker evidence was recorded.",
+          "No shell/file telemetry backed the skill catalog count."
+        ],
+        "unsupported_claims": [
+          "Final response says the skill catalog audit found 14 skills.",
+          "Final response says there were no schema issues."
+        ]
+      },
+      "evidence": {
+        "missing_evidence": [
+          "No strict JSON worker evidence was recorded.",
+          "No shell/file telemetry backed the skill catalog count."
+        ],
+        "unsupported_claims": [
+          "Final response says the skill catalog audit found 14 skills.",
+          "Final response says there were no schema issues."
+        ],
+        "suggested_repair_prompt": "Rerun the read-only audit and record strict JSON worker evidence or raw skill_view telemetry before claiming catalog counts."
+      },
+      "failure_reason": "Unsupported claims: Final response says the skill catalog audit found 14 skills.; Missing evidence: No strict JSON worker evidence was recorded."
+    }
+  ]
+}

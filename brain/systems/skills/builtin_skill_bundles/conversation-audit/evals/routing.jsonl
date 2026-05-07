@@ -1,0 +1,2 @@
+{"prompt":"This run failed with Missing PR artifact even though it pushed a branch. What happened?","expected":{"route_to":"conversation-audit","triggers_include":["missing PR artifact"]}}
+{"prompt":"Please review this diff for bugs.","expected":{"should_not_route_to":["conversation-audit"],"reason":"normal code review"}}

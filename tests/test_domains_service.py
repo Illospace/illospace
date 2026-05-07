@@ -1,0 +1,256 @@
+from __future__ import annotations
+
+import re
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
+from sqlalchemy.orm import Session
+
+from brain.platform.db.models.domain import (
+    Domain,
+    DomainEvent,
+    DomainFieldDefinition,
+    DomainObjectType,
+    DomainRecord,
+    DomainRelation,
+    DomainRelationType,
+)
+from brain.systems.user_domains.service import DomainError, DomainService
+
+ORG_ID = "11111111-1111-4111-8111-111111111111"
+USER_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def _patch_sqlite_for_pg_types():
+    if not hasattr(SQLiteTypeCompiler, "visit_JSONB"):
+        SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "TEXT"
+
+    original = SQLiteDDLCompiler.get_column_default_string
+
+    def patched(self, column, **kw):
+        result = original(self, column, **kw)
+        if result:
+            result = re.sub(r"::jsonb", "", result)
+            result = result.replace("NOW()", "CURRENT_TIMESTAMP")
+        return result
+
+    SQLiteDDLCompiler.get_column_default_string = patched
+
+
+@pytest.fixture
+def session():
+    _patch_sqlite_for_pg_types()
+    engine = create_engine("sqlite://", echo=False)
+    for table in [
+        Domain.__table__,
+        DomainObjectType.__table__,
+        DomainFieldDefinition.__table__,
+        DomainRelationType.__table__,
+        DomainRecord.__table__,
+        DomainRelation.__table__,
+        DomainEvent.__table__,
+    ]:
+        table.create(engine, checkfirst=True)
+    db = Session(engine)
+    yield db
+    db.close()
+
+
+def test_create_custom_domain_schema_and_record(session):
+    service = DomainService(session)
+
+    domain = service.create_domain(
+        ORG_ID,
+        name="Hooks Tried",
+        objects=[
+            {
+                "key": "hook",
+                "name": "Hook",
+                "title_field": "text",
+                "fields": [
+                    {"key": "text", "field_type": "text", "required": True},
+                    {
+                        "key": "status",
+                        "field_type": "enum",
+                        "options": ["new", "tested", "winner"],
+                        "default_value": "new",
+                    },
+                    {"key": "score", "field_type": "number"},
+                ],
+            }
+        ],
+        actor_id=USER_ID,
+    )
+
+    schema = service.serialize_domain_schema(domain)
+    assert schema["slug"] == "hooks-tried"
+    assert schema["objects"][0]["key"] == "hook"
+    assert [field["key"] for field in schema["objects"][0]["fields"]] == [
+        "text",
+        "status",
+        "score",
+    ]
+
+    record = service.create_record(
+        ORG_ID,
+        domain.id,
+        "hook",
+        data={"text": "Start with the pain", "score": "8"},
+        actor_id=USER_ID,
+    )
+
+    assert record.title == "Start with the pain"
+    assert record.data == {"text": "Start with the pain", "status": "new", "score": 8}
+    assert record.version == 1
+    assert [event.event_type for event in service.list_events(ORG_ID, domain.id)] == [
+        "record.created",
+        "domain.created",
+    ]
+
+
+def test_record_validation_rejects_missing_unknown_and_bad_enum(session):
+    service = DomainService(session)
+    domain = service.create_domain(
+        ORG_ID,
+        name="Tasks",
+        objects=[
+            {
+                "key": "task",
+                "fields": [
+                    {"key": "title", "field_type": "text", "required": True},
+                    {"key": "state", "field_type": "enum", "options": ["open", "done"]},
+                ],
+            }
+        ],
+    )
+
+    with pytest.raises(DomainError, match="title"):
+        service.create_record(ORG_ID, domain.id, "task", data={})
+
+    with pytest.raises(DomainError, match="Unknown field"):
+        service.create_record(ORG_ID, domain.id, "task", data={"title": "One", "bogus": 1})
+
+    with pytest.raises(DomainError, match="state"):
+        service.create_record(
+            ORG_ID,
+            domain.id,
+            "task",
+            data={"title": "One", "state": "later"},
+        )
+
+
+def test_update_record_uses_expected_version_and_archives_or_deletes(session):
+    service = DomainService(session)
+    domain = service.create_domain(
+        ORG_ID,
+        name="Todos",
+        objects=[
+            {
+                "key": "todo",
+                "fields": [
+                    {"key": "title", "field_type": "text", "required": True},
+                    {"key": "done", "field_type": "boolean", "default_value": False},
+                ],
+            }
+        ],
+    )
+    record = service.create_record(
+        ORG_ID,
+        domain.id,
+        "todo",
+        data={"title": "Ship domains"},
+    )
+
+    updated = service.update_record(
+        ORG_ID,
+        domain.id,
+        record.id,
+        data_patch={"done": True},
+        expected_version=1,
+    )
+    assert updated.version == 2
+    assert updated.data["done"] is True
+
+    with pytest.raises(DomainError, match="version mismatch"):
+        service.update_record(
+            ORG_ID,
+            domain.id,
+            record.id,
+            data_patch={"done": False},
+            expected_version=1,
+        )
+
+    archived = service.remove_record(ORG_ID, domain.id, record.id, mode="archive")
+    assert archived["archived"] is True
+    assert service.get_record(ORG_ID, domain.id, record.id).archived_at is not None
+
+    second = service.create_record(
+        ORG_ID,
+        domain.id,
+        "todo",
+        data={"title": "Delete me"},
+    )
+    deleted = service.remove_record(ORG_ID, domain.id, second.id, mode="delete")
+    assert deleted["deleted"] is True
+    assert session.get(DomainRecord, second.id) is None
+
+
+def test_domain_slug_edges_and_archive_or_delete(session):
+    service = DomainService(session)
+    short = service.create_domain(ORG_ID, name="X")
+    assert short.slug == "x"
+
+    long = service.create_domain(ORG_ID, name="Very " * 30 + "Long Domain")
+    assert len(long.slug) <= 80
+    assert not long.slug.endswith("-")
+
+    archived = service.remove_domain(ORG_ID, short.id, mode="archive")
+    assert archived["archived"] is True
+    assert short not in service.list_domains(ORG_ID)
+    assert service.get_domain(ORG_ID, short.id, include_archived=True).archived_at is not None
+
+    deleted = service.remove_domain(ORG_ID, long.id, mode="delete")
+    assert deleted["deleted"] is True
+    assert session.get(Domain, long.id) is None
+
+
+def test_relations_validate_object_types(session):
+    service = DomainService(session)
+    domain = service.create_domain(
+        ORG_ID,
+        name="Hooks",
+        objects=[
+            {"key": "hook", "fields": [{"key": "text", "field_type": "text", "required": True}]},
+            {"key": "trial", "fields": [{"key": "name", "field_type": "text", "required": True}]},
+        ],
+        relations=[
+            {
+                "key": "trial_tests_hook",
+                "source_object": "trial",
+                "target_object": "hook",
+                "cardinality": "many_to_one",
+            }
+        ],
+    )
+    hook = service.create_record(ORG_ID, domain.id, "hook", data={"text": "Pain first"})
+    trial = service.create_record(ORG_ID, domain.id, "trial", data={"name": "TikTok A"})
+
+    relation = service.create_relation(
+        ORG_ID,
+        domain.id,
+        "trial_tests_hook",
+        source_record_id=trial.id,
+        target_record_id=hook.id,
+    )
+    assert service.serialize_relation(relation)["relation_key"] == "trial_tests_hook"
+
+    with pytest.raises(DomainError, match="source_record_id"):
+        service.create_relation(
+            ORG_ID,
+            domain.id,
+            "trial_tests_hook",
+            source_record_id=hook.id,
+            target_record_id=trial.id,
+        )

@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: var(--illo-font, Inter, system-ui, sans-serif);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      min-width: 0;
+      min-height: 100%;
+      margin: 0;
+      color: var(--illo-text);
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+  </style>
+</head>
+<body>
+  <main class="illo-app">
+    <section class="illo-panel illo-stack">
+      <div class="illo-toolbar">
+        <h1 class="illo-title" id="title">Workspace App</h1>
+        <button class="illo-button is-primary" type="button" id="refresh">Refresh</button>
+      </div>
+      <ul class="illo-list" id="root"></ul>
+    </section>
+  </main>
+  <script>
+    const root = document.getElementById('root');
+    const refresh = document.getElementById('refresh');
+
+    async function readState() {
+      return window.illo && window.illo.getState ? await window.illo.getState() : {};
+    }
+
+    function row(label, value) {
+      const item = document.createElement('li');
+      item.className = 'illo-row';
+      item.textContent = `${label}: ${value}`;
+      return item;
+    }
+
+    async function render() {
+      const state = await readState();
+      root.replaceChildren(row('State keys', Object.keys(state).length));
+    }
+
+    refresh.addEventListener('click', render);
+    window.addEventListener('illo:state', render);
+    render();
+  </script>
+</body>
+</html>

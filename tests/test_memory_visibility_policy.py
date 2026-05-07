@@ -1,0 +1,91 @@
+"""Canonical memory visibility policy tests."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from sqlalchemy.dialects import postgresql
+
+from brain.platform.db.models.memory import Memory
+from brain.platform.db.repositories.memory_visibility import (
+    MemoryVisibilityContext,
+    memory_is_visible,
+    memory_visibility_predicate,
+    memory_visibility_sql,
+)
+
+
+def _compile_predicate(context: MemoryVisibilityContext) -> str:
+    compiled = memory_visibility_predicate(Memory, context).compile(
+        dialect=postgresql.dialect(),
+        compile_kwargs={"literal_binds": True},
+    )
+    return str(compiled)
+
+
+def test_human_context_sees_own_private_and_org_shared_memories():
+    context = MemoryVisibilityContext(user_id="user-a", org_id="org-1")
+
+    assert memory_is_visible(
+        SimpleNamespace(user_id="user-a", org_id="org-1", visibility="private"),
+        context,
+    )
+    assert memory_is_visible(
+        SimpleNamespace(user_id="user-b", org_id="org-1", visibility="org"),
+        context,
+    )
+    assert not memory_is_visible(
+        SimpleNamespace(user_id="user-b", org_id="org-1", visibility="private"),
+        context,
+    )
+    assert not memory_is_visible(
+        SimpleNamespace(user_id="user-c", org_id="org-2", visibility="org"),
+        context,
+    )
+
+
+def test_sqlalchemy_predicate_matches_canonical_visibility_shape():
+    sql = _compile_predicate(MemoryVisibilityContext(user_id="usera", org_id="org1"))
+
+    assert "memories.user_id = 'usera'" in sql
+    assert "coalesce(memories.visibility, 'private') = 'private'" in sql
+    assert "memories.org_id = 'org1'" in sql
+    assert "coalesce(memories.visibility, 'private') IN ('team', 'org')" in sql
+
+
+def test_raw_sql_policy_is_deny_by_default_without_context():
+    clause, params = memory_visibility_sql(MemoryVisibilityContext(), alias="m")
+
+    assert clause == " AND FALSE"
+    assert params == {}
+
+
+def test_service_context_can_run_explicit_global_memory_maintenance():
+    context = MemoryVisibilityContext.from_user(
+        {"id": "service:internal-api", "principal_type": "service", "internal": True}
+    )
+
+    assert context.allow_global is True
+    assert str(memory_visibility_predicate(Memory, context).compile()) == "true"
+    assert memory_visibility_sql(context, alias="m") == ("", {})
+
+
+def test_repository_visible_search_applies_policy_to_query():
+    from brain.platform.db.repositories.memories import MemoryRepository
+
+    session = MagicMock()
+    session.scalars.return_value.all.return_value = []
+    repo = MemoryRepository(session)
+
+    repo.search_visible("roadmap", MemoryVisibilityContext(user_id="usera", org_id="org1"))
+
+    stmt = session.scalars.call_args.args[0]
+    compiled = str(
+        stmt.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "memories.content ILIKE '%%roadmap%%'" in compiled
+    assert "memories.user_id = 'usera'" in compiled
+    assert "memories.org_id = 'org1'" in compiled

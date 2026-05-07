@@ -1,0 +1,18 @@
+# Ephemeral Postgres+pgvector for testing.
+# Usage: docker compose -f docker-compose.test.yml up -d --wait
+services:
+  test-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: illo_test
+      POSTGRES_USER: illo_test
+      POSTGRES_PASSWORD: illo_test
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U illo_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /var/lib/postgresql/data

@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+ModelTier = Literal["low", "medium", "high"]
+ConnectionStatus = Literal["connected", "missing", "error"]
+EmbedderKey = Literal["local_gpu", "local_cpu", "openai", "gemini"]
+RerankerKey = Literal["weighted"]
+
+
+class RuntimeOption(BaseModel):
+    key: str
+    label: str
+    description: str | None = None
+    disabled: bool = False
+    group: str | None = None
+
+
+class RuntimeConnectionRead(BaseModel):
+    status: ConnectionStatus
+    setup_required: bool
+    method: str | None = None
+    source: str | None = None
+    label: str | None = None
+    detail: str | None = None
+
+
+class RuntimeModelsRead(BaseModel):
+    low: str
+    medium: str
+    high: str
+    options: list[RuntimeOption]
+
+
+class RuntimeMemoryRead(BaseModel):
+    scope: Literal["installation"] = "installation"
+    embedder: EmbedderKey
+    embedding_model: str | None = None
+    embedding_dimensions: int | None = None
+    embedding_status: str
+    embedding_detail: str | None = None
+    indexed_vectors: int = 0
+    api_key_statuses: dict[str, bool] = Field(default_factory=dict)
+    reranker: RerankerKey = "weighted"
+    embedder_options: list[RuntimeOption]
+    embedding_model_options: list[RuntimeOption]
+    reranker_options: list[RuntimeOption]
+
+
+class RuntimeMemoryCheckRead(BaseModel):
+    status: Literal["ok", "error"]
+    detail: str
+    dimensions: int | None = None
+    duration_ms: int | None = None
+
+
+class RuntimePermissionsRead(BaseModel):
+    can_manage_settings: bool
+
+
+class RuntimeSettingsRead(BaseModel):
+    connection: RuntimeConnectionRead
+    models: RuntimeModelsRead
+    memory: RuntimeMemoryRead
+    permissions: RuntimePermissionsRead
+
+
+class OpenAIKeyConnectRequest(BaseModel):
+    api_key: str = Field(min_length=1)
+
+
+class OpenAIOAuthExchangeRequest(BaseModel):
+    callback: str = Field(min_length=1)
+
+
+class OpenAIOAuthStartResponse(BaseModel):
+    url: str
+    state: str
+    redirect_uri: str
+    expires_in_seconds: int
+    callback_available: bool = True
+    callback_detail: str | None = None
+    callback_mode: Literal["server", "local_bridge", "manual"] = "local_bridge"
+
+
+class RuntimeModelsUpdate(BaseModel):
+    low: str = Field(min_length=1)
+    medium: str = Field(min_length=1)
+    high: str = Field(min_length=1)
+
+
+class RuntimeMemoryUpdate(BaseModel):
+    embedder: EmbedderKey
+    embedding_model: str | None = None
+    reranker: RerankerKey = "weighted"

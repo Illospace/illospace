@@ -1,0 +1,158 @@
+name: Brain CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: brain-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend-fast:
+    name: Backend fast suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: python3 -m pip install -r requirements.txt pytest pytest-asyncio
+
+      - name: Run backend fast suite
+        run: >-
+          python3 -m pytest tests/
+          -m "not requires_db and not requires_browser and not live_provider"
+          --ignore=tests/test_agency.py
+          --ignore=tests/test_agency_api.py
+          --ignore=tests/test_chat_api_routes.py
+          --ignore=tests/test_chat_websocket.py
+          --ignore=tests/test_cortex_palette.py
+          --ignore=tests/test_cycles_service.py
+          --ignore=tests/test_multiplayer_cortex.py
+          --ignore=tests/test_notifications_api.py
+          --ignore=tests/test_theme_and_workspace_app_design_contracts.py
+          -q
+
+  backend-review:
+    name: Backend review-fix suites
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: python3 -m pip install -r requirements.txt pytest pytest-asyncio
+
+      - name: Run focused review-fix suites
+        run: >-
+          python3 -m pytest
+          tests/test_api_ws.py
+          tests/test_ws_manager.py
+          tests/test_run_events.py
+          tests/test_api_main.py
+          tests/test_browser_sessions.py
+          tests/test_ws_auth.py
+          tests/test_scheduler.py
+          tests/test_alembic_config.py
+          tests/test_tool_policy.py
+          tests/test_agent_run_runtime.py
+          -q
+
+  frontend:
+    name: Frontend check and build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run frontend unit tests
+        working-directory: frontend
+        run: npm test
+
+      - name: Run Svelte check
+        working-directory: frontend
+        run: npm run check
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+  db-contract:
+    name: DB migration contract
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: illo_test
+          POSTGRES_USER: illo_test
+          POSTGRES_PASSWORD: illo_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U illo_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5433
+      DB_NAME: illo_test
+      DB_USER: illo_test
+      DB_PASSWORD: illo_test
+      TEST_DB_URL: postgresql://illo_test:illo_test@127.0.0.1:5433/illo_test
+      CI_BRAIN_DB: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: python3 -m pip install -r requirements.txt pytest pytest-asyncio
+
+      - name: Run database migrations
+        run: python3 -m alembic upgrade head
+
+      - name: Run schema contract tests
+        run: python3 -m pytest tests/test_schema_contract.py -v --tb=short

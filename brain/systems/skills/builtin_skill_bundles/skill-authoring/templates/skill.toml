@@ -1,0 +1,27 @@
+schema_version = 1
+name = "example-skill"
+display_name = "Example Skill"
+version = "0.1.0"
+description = "One repeatable workflow with clear routing."
+license = "UNLICENSED"
+source = "private_local"
+visibility = "private_local"
+
+[routing]
+triggers = [
+  { pattern = "example task", direction = "for" },
+  { pattern = "not this task", direction = "against" },
+]
+
+[runtime]
+default_model_tier = "medium"
+default_thinking_tier = "medium"
+
+[loading]
+summary = "SKILL.md#summary"
+procedure = "SKILL.md#procedure"
+examples = "examples/"
+templates = "templates/"
+schemas = "schemas/"
+evals = "evals/"
+references = "references/"

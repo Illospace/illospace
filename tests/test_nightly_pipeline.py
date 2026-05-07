@@ -1,0 +1,372 @@
+"""Integration tests for the full nightly sleep pipeline.
+
+Tests each phase individually and the full pipeline end-to-end.
+All LLM calls and database access are mocked — no real API calls.
+
+Public release note: internal issue links were removed from test comments.
+Lesson: "NIGHTLY CYCLE SHIPPED BROKEN — 4 crashers in production for 2+ nights.
+Root cause: (1) no integration test for full nightly cycle"
+"""
+import json
+import os
+import subprocess
+import sys
+from datetime import date, datetime, timezone
+from pathlib import Path
+from unittest.mock import MagicMock, patch, call
+
+import pytest
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
+
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def tmp_workspace(tmp_path):
+    """Create a temporary workspace structure matching production layout."""
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    logs_dir = tmp_path / "illo_private" / "logs"
+    logs_dir.mkdir(parents=True)
+    journal_dir = tmp_path / "illo_private" / "journal"
+    journal_dir.mkdir(parents=True)
+    blog_dir = tmp_path / "illo_private" / "blog"
+    blog_dir.mkdir(parents=True)
+    return tmp_path
+
+
+@pytest.fixture
+def mock_nightly_uow():
+    """Mock UnitOfWork for nightly pipeline tests."""
+    uow = MagicMock()
+    uow.__enter__ = MagicMock(return_value=uow)
+    uow.__exit__ = MagicMock(return_value=False)
+    # Default return values
+    uow.session.execute.return_value.mappings.return_value.fetchone.return_value = {"id": 1}
+    uow.session.execute.return_value.mappings.return_value.fetchall.return_value = []
+    uow.session.execute.return_value.mappings.return_value.all.return_value = []
+    uow.session.execute.return_value.mappings.return_value.first.return_value = {"id": 1}
+    uow.session.scalars.return_value.all.return_value = []
+    uow.session.scalars.return_value.first.return_value = None
+    return uow
+
+
+@pytest.fixture
+def target_date():
+    return date(2026, 3, 7)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Memory Consolidation
+# ---------------------------------------------------------------------------
+
+class TestPhaseConsolidation:
+    """Tests for pipelines/consolidate.py — Phase 1 of nightly cycle."""
+
+    def test_consolidation_runs_without_daily_log(self, mock_nightly_uow, target_date, tmp_workspace):
+        """When no daily log exists, consolidation should complete gracefully."""
+        with patch("brain.jobs.pipelines.consolidate.UnitOfWork", return_value=mock_nightly_uow), \
+             patch("brain.jobs.pipelines.consolidate.MEMORY_DIR", str(tmp_workspace / "memory")), \
+             patch("brain.jobs.pipelines.consolidate.WORKSPACE", str(tmp_workspace)):
+            from brain.jobs.pipelines.consolidate import phase_consolidation
+            result = phase_consolidation(target_date)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+    def test_consolidation_imports_daily_log(self, mock_nightly_uow, target_date, tmp_workspace):
+        """When a daily log exists, it should be processed."""
+        daily_log = tmp_workspace / "memory" / f"{target_date.isoformat()}.md"
+        daily_log.write_text("# March 7\nWorked on nightly pipeline fixes.")
+
+        with patch("brain.jobs.pipelines.consolidate.UnitOfWork", return_value=mock_nightly_uow), \
+             patch("brain.jobs.pipelines.consolidate.MEMORY_DIR", str(tmp_workspace / "memory")), \
+             patch("brain.jobs.pipelines.consolidate.WORKSPACE", str(tmp_workspace)), \
+             patch("brain.jobs.pipelines.consolidate.import_daily_log", return_value=3) as mock_import:
+            from brain.jobs.pipelines.consolidate import phase_consolidation
+            result = phase_consolidation(target_date)
+        mock_import.assert_called_once()
+
+    def test_consolidation_handles_empty_memory_dir(self, mock_nightly_uow, target_date, tmp_path):
+        """Consolidation should not crash with empty memory directory."""
+        empty_dir = tmp_path / "empty_memory"
+        empty_dir.mkdir()
+        with patch("brain.jobs.pipelines.consolidate.UnitOfWork", return_value=mock_nightly_uow), \
+             patch("brain.jobs.pipelines.consolidate.MEMORY_DIR", str(empty_dir)), \
+             patch("brain.jobs.pipelines.consolidate.WORKSPACE", str(tmp_path)):
+            from brain.jobs.pipelines.consolidate import phase_consolidation
+            result = phase_consolidation(target_date)
+            assert isinstance(result, tuple)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Skill Evolution
+# ---------------------------------------------------------------------------
+
+class TestPhaseSkillEvolution:
+    """Tests for cli/skills.py evolve — Phase 2 of nightly cycle."""
+
+    def test_skill_evolve_runs_without_executions(self, mock_nightly_uow):
+        """Evolution should handle the case where no skill executions exist."""
+        with patch("brain.app.cli.skills.UnitOfWork", return_value=mock_nightly_uow):
+            from brain.app.cli.skills import cmd_evolve
+            import argparse
+            args = argparse.Namespace()
+            cmd_evolve(args)
+
+    def test_skill_evolve_detects_gaps(self, mock_nightly_uow):
+        """Evolution should detect recurring tasks without skills."""
+        call_count = [0]
+        def execute_side_effect(*args, **kwargs):
+            call_count[0] += 1
+            result = MagicMock()
+            if call_count[0] == 1:
+                result.mappings.return_value.all.return_value = [
+                    {"task_description": "test task", "skill_id": None,
+                     "outcome": "success", "id": i,
+                     "skill_name": None, "error_analysis": None,
+                     "refinement_proposed": None, "pitfall_pattern": None}
+                    for i in range(5)
+                ]
+            else:
+                result.mappings.return_value.all.return_value = []
+                result.mappings.return_value.fetchall.return_value = []
+            return result
+
+        mock_nightly_uow.session.execute.side_effect = execute_side_effect
+        with patch("brain.app.cli.skills.UnitOfWork", return_value=mock_nightly_uow):
+            from brain.app.cli.skills import cmd_evolve
+            import argparse
+            args = argparse.Namespace()
+            cmd_evolve(args)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.7: Prompt Template Evolution
+# ---------------------------------------------------------------------------
+
+class TestPhasePromptEvolution:
+    """Tests for pipelines/nightly_evolve_prompts.py."""
+
+    def test_evolve_no_templates(self, mock_nightly_uow):
+        """When no templates exist, evolution should skip gracefully."""
+        with patch("brain.jobs.pipelines.nightly_evolve_prompts.UnitOfWork", return_value=mock_nightly_uow), \
+             patch("brain.systems.prompts.templates.UnitOfWork", return_value=mock_nightly_uow), \
+             patch("brain.jobs.pipelines.nightly_evolve_prompts.get_underperforming_templates", return_value=[]):
+            from brain.jobs.pipelines.nightly_evolve_prompts import evolve_templates
+            evolve_templates()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: LLM Reflection
+# ---------------------------------------------------------------------------
+
+class TestPhaseReflection:
+    """Tests for pipelines/nightly_reflect.py — Phase 3 of nightly cycle."""
+
+    def test_reflection_skips_when_no_data(self, mock_nightly_uow, target_date, capsys):
+        """When all context sections are empty, reflection should skip."""
+        with patch("brain.jobs.pipelines.nightly_reflect.UnitOfWork", return_value=mock_nightly_uow), \
+             patch("brain.jobs.pipelines.nightly_reflect.WORKSPACE", "/nonexistent"), \
+             patch("brain.jobs.pipelines.nightly_reflect.config.JOURNAL_DIR", Path("/nonexistent/journal")):
+            from brain.jobs.pipelines.nightly_reflect import run_reflection
+            run_reflection(target_date)
+
+        captured = capsys.readouterr()
+        assert "No data to reflect on" in captured.out or "Skipping" in captured.out
+
+    def test_reflection_uses_direct_api_not_subprocess(self):
+        """Regression: nightly_reflect must use core.agent.call_llm, not subprocess."""
+        import inspect
+        from brain.jobs.pipelines.nightly_reflect import run_reflection
+        source = inspect.getsource(run_reflection)
+        assert "subprocess.run" not in source, \
+            "nightly_reflect must use core.agent.call_llm, not subprocess"
+        assert "call_llm" in source
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.5: Dream
+# ---------------------------------------------------------------------------
+
+class TestPhaseDream:
+    """Tests for pipelines/nightly_dream.py — Phase 3.5 of nightly cycle."""
+
+    def test_dream_skips_when_no_today_memories(self, mock_nightly_uow, target_date, capsys):
+        """Dream should skip when there are no memories from today."""
+        mock_nightly_uow.session.execute.return_value.mappings.return_value.fetchall.return_value = []
+        with patch("brain.jobs.pipelines.nightly_dream.UnitOfWork", return_value=mock_nightly_uow):
+            from brain.jobs.pipelines.nightly_dream import main as dream_main
+            with patch("sys.argv", ["nightly_dream", "--date", target_date.isoformat()]):
+                dream_main()
+        captured = capsys.readouterr()
+        assert "No memories" in captured.out or "Skipping" in captured.out
+
+    def test_dream_uses_direct_api_not_subprocess(self):
+        """Regression: nightly_dream must use core.agent, not subprocess."""
+        import inspect
+        from brain.jobs.pipelines.nightly_dream import call_llm
+        source = inspect.getsource(call_llm)
+        assert "subprocess" not in source, \
+            "nightly_dream must use core.agent.call_llm, not subprocess"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Brain -> Files Sync
+# ---------------------------------------------------------------------------
+
+class TestPhaseSyncBrainToFiles:
+    """Tests for pipelines/sync_brain_to_files.py — Phase 5."""
+
+    def test_sync_lessons_creates_file(self, mock_nightly_uow, tmp_workspace):
+        """Sync should write lessons.md even with empty results."""
+        with patch("brain.jobs.pipelines.sync_brain_to_files.UnitOfWork", return_value=mock_nightly_uow), \
+             patch("brain.jobs.pipelines.sync_brain_to_files.MEMORY_DIR",
+                   str(tmp_workspace / "memory")), \
+             patch("brain.jobs.pipelines.sync_brain_to_files.WORKSPACE", str(tmp_workspace)):
+            from brain.jobs.pipelines.sync_brain_to_files import sync_lessons
+            sync_lessons()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.5: Experiment Assessment
+# ---------------------------------------------------------------------------
+
+class TestPhaseExperimentAssessment:
+    """Tests for pipelines/nightly_assess.py — Phase 5.5."""
+
+    def test_assess_no_experiments(self, mock_nightly_uow, target_date, capsys):
+        """Assessment should skip gracefully when no experiments are due."""
+        with patch("brain.jobs.pipelines.nightly_assess.UnitOfWork", return_value=mock_nightly_uow):
+            with patch("sys.argv", ["nightly_assess", "--date", target_date.isoformat()]):
+                from brain.jobs.pipelines.nightly_assess import main as assess_main
+                assess_main()
+        captured = capsys.readouterr()
+        assert "No experiments" in captured.out or captured.out == ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: Self-Improvement
+# ---------------------------------------------------------------------------
+
+class TestPhaseSelfImprovement:
+    """Tests for pipelines/nightly_implement.py — Phase 6."""
+
+    def test_implement_no_pending_reflection(self, mock_nightly_uow, target_date, tmp_workspace,
+                                              capsys):
+        """Self-improvement should handle missing PENDING_REFLECTION.json."""
+        ms_dir = str(tmp_workspace / "illo_private")
+        with patch("brain.jobs.pipelines.nightly_implement.UnitOfWork", return_value=mock_nightly_uow), \
+             patch("brain.jobs.pipelines.nightly_implement.PROJECT_ROOT", ms_dir), \
+             patch("brain.jobs.pipelines.nightly_implement.PENDING_PATH",
+                   str(Path(ms_dir) / "PENDING_REFLECTION.json")), \
+             patch("brain.jobs.pipelines.nightly_implement.LOG_DIR", str(Path(ms_dir) / "logs")), \
+             patch("sys.argv", ["nightly_implement", "--date", target_date.isoformat()]):
+            from brain.jobs.pipelines.nightly_implement import main as implement_main
+            implement_main()
+
+
+# ---------------------------------------------------------------------------
+# Ops public surface validation
+# ---------------------------------------------------------------------------
+
+class TestOpsPublicSurface:
+    """Validate that ops only ships current public helper surfaces."""
+
+    def test_legacy_ops_artifacts_are_removed(self):
+        root = Path(__file__).resolve().parents[1]
+        assert not any(path.is_file() for path in (root / "ops" / "cron").rglob("*"))
+        assert not any(path.is_file() for path in (root / "ops" / "hooks").rglob("*"))
+        assert not (root / "ops" / ("stamp-existing-" + "db.sh")).exists()
+
+
+# ---------------------------------------------------------------------------
+# Standalone repo (no workspace/memory/ dependency)
+# ---------------------------------------------------------------------------
+
+class TestStandaloneJournalDir:
+    """Ensure illo-brain uses its own journal/ dir, not workspace/memory/."""
+
+    def test_config_defines_journal_dir(self):
+        from brain.kernel.config import JOURNAL_DIR, PRIVATE_HOME
+        assert JOURNAL_DIR is not None
+        assert str(PRIVATE_HOME) in str(JOURNAL_DIR)
+
+    def test_consolidate_uses_journal_dir(self):
+        import inspect
+        from brain.jobs.pipelines.consolidate import MEMORY_DIR
+        from brain.kernel.config import JOURNAL_DIR
+        assert str(JOURNAL_DIR) == MEMORY_DIR
+
+    def test_no_workspace_memory_in_pipeline_code(self):
+        pipelines_dir = os.path.join(os.path.dirname(__file__), "..", "brain", "jobs", "pipelines")
+        violations = []
+        for fname in os.listdir(pipelines_dir):
+            if not fname.endswith(".py"):
+                continue
+            fpath = os.path.join(pipelines_dir, fname)
+            with open(fpath) as f:
+                for i, line in enumerate(f, 1):
+                    stripped = line.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    if 'WORKSPACE' in line and '"memory"' in line:
+                        violations.append(f"{fname}:{i}: {stripped}")
+                    if "workspace.*memory" in line.lower() and "import" not in line:
+                        violations.append(f"{fname}:{i}: {stripped}")
+        assert not violations, (
+            "Pipeline code still references workspace/memory/ "
+            "(should use config.JOURNAL_DIR):\n" + "\n".join(violations)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Full pipeline integration (scheduler-owned nightly structure)
+# ---------------------------------------------------------------------------
+
+class TestNightlySchedulerOwnership:
+    """Validate that nightly work is scheduler-owned, not cron-wrapper-owned."""
+
+    def test_legacy_cron_wrappers_are_removed(self):
+        root = Path(__file__).resolve().parents[1]
+        assert not any((root / "ops" / "cron").rglob("*.sh"))
+
+    def test_scheduler_program_owns_former_nightly_phases(self):
+        from brain.app.scheduler.programs import NIGHTLY_SLEEP_STEP_KEYS
+
+        expected_steps = {
+            "memory_consolidation",
+            "skill_evolution",
+            "reflection",
+            "dream",
+            "wake_up_index",
+            "file_sync",
+            "experiment_assessment",
+            "self_improvement",
+            "daily_blog",
+        }
+        assert expected_steps.issubset(set(NIGHTLY_SLEEP_STEP_KEYS))
+
+
+# ---------------------------------------------------------------------------
+# Datetime safety
+# ---------------------------------------------------------------------------
+
+class TestDatetimeSafety:
+    def test_no_utcnow_in_pipelines(self):
+        pipelines_dir = os.path.join(os.path.dirname(__file__), "..", "brain", "jobs", "pipelines")
+        violations = []
+        for fname in os.listdir(pipelines_dir):
+            if not fname.endswith(".py"):
+                continue
+            fpath = os.path.join(pipelines_dir, fname)
+            with open(fpath) as f:
+                for i, line in enumerate(f, 1):
+                    if "utcnow()" in line and "#" not in line.split("utcnow()")[0]:
+                        violations.append(f"{fname}:{i}: {line.strip()}")
+        assert not violations, (
+            "Found datetime.utcnow() usage (use datetime.now(timezone.utc) instead):\n"
+            + "\n".join(violations)
+        )

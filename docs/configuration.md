@@ -1,0 +1,121 @@
+# Configuration
+
+Illo Brain uses environment variables as the source of truth. A repo-root `.env`
+file is optional local convenience, not a production requirement.
+
+## Source Order
+
+Configuration can come from:
+
+1. already-exported process environment variables;
+2. optional local `.env` files, loaded only when present;
+3. generated checkout-local defaults in `.illo/runtime.env`;
+4. built-in development defaults for non-secret local values.
+
+Exported environment variables win over `.env` values, and `.env` wins over the
+generated local runtime file. `./illo setup` and `./illo start` create
+`SECRET_KEY` and `VAULT_MASTER_KEY` in `.illo/runtime.env` when those values are
+missing or left empty, which keeps self-hosted preview installs bootable without
+committing secrets. Production deployments should still inject values through
+the hosting platform, a secret manager, systemd `EnvironmentFile=`, or another
+external mechanism.
+
+## Local Development
+
+For the shortest local path:
+
+```bash
+./illo setup
+./illo
+```
+
+The launcher can create or start a local pgvector database using the development
+defaults. It prefers a Docker/Podman pgvector container, can use or bootstrap an
+existing local PostgreSQL when accessible, and can fall back to a repo-local
+PostgreSQL cluster under `.runtime/postgres` when PostgreSQL server tools and
+pgvector are installed. Copy `.env.example` to `.env` only when you want local
+file-based overrides such as provider keys, a different database, or a custom
+`ILLO_PRIVATE_HOME`.
+
+For the smoothest local path, leave `DB_PORT` unset unless you need a fixed
+port. If another local PostgreSQL is already listening on `5432`, the launcher
+can use an alternate port for its container or repo-local pgvector database and
+export that port to the app process.
+
+If you are testing a fresh install on a machine that already ran Illo, check for
+inherited database variables with `env | grep '^DB_'`. To ignore old shell
+settings for one manual setup run:
+
+```bash
+env -u DB_HOST -u DB_PORT -u DB_NAME -u DB_USER -u DB_PASSWORD ./illo setup
+```
+
+To reset a checkout completely before testing the first-run path again:
+
+```bash
+./illo uninstall
+./illo setup
+```
+
+`./illo uninstall` removes local generated runtime state, local config, the
+repo-local PostgreSQL runtime, and the Illo Docker/Podman database
+container/volume after confirmation. It does not delete the git checkout or
+external PostgreSQL databases.
+
+When `./illo uninstall` removes local config, it also records a one-time
+fresh-start marker. The next `./illo setup` or `./illo` run ignores inherited
+database environment variables such as `DB_HOST`, `DB_PORT`, and `DATABASE_URL`
+when no `.env` exists. A script cannot unset variables in your parent shell, so
+this gives fresh-install tests the same effect without requiring a manual
+`unset`.
+
+The launcher will stop known Illo processes that are still holding local app
+ports, but it refuses to kill unknown processes by default. Stop those processes
+yourself, change ports, or set `ILLO_FORCE_KILL_PORTS=1` only when you
+intentionally want `./illo` to reclaim `8000`, `5173`, or `9800`.
+
+## Production Contract
+
+Before starting production services, run:
+
+```bash
+./illo doctor --production
+```
+
+Production must provide:
+
+- `ILLO_ENV=production`
+- `SECRET_KEY` or `FLASK_SECRET_KEY`
+- database settings via `DATABASE_URL`, `DB_URL`, `BRAIN_DB_URL`, or complete
+  `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`
+- `VAULT_MASTER_KEY` for encrypted Vault storage
+- migration validation enabled through `ILLO_VALIDATE_MIGRATIONS=1`
+- local development auth fallbacks disabled
+
+When production is started through `./illo start`, missing local secrets are
+generated under `.illo/runtime.env` as a self-hosting convenience. Managed
+production services should provide their own durable secrets outside the git
+checkout instead.
+
+Production should also provide at least one model path:
+
+- provider credentials such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+  `GEMINI_API_KEY`, or database-backed provider credentials; or
+- local model settings such as `EMBEDDING_BACKEND=cpu` or `gpu` plus the needed
+  runtime/model configuration.
+
+## Private State
+
+Runtime-private files default to `.illo/` through `ILLO_PRIVATE_HOME`. This is
+where local journals, logs, operator context, exports, and generated checklists
+belong. Keep these paths outside git in production:
+
+- `.env` and external environment files
+- provider keys and Vault master keys
+- database dumps
+- uploads and logs
+- generated journals and operator context
+
+Root prompt files from early private development are not part of the public
+runtime contract. Personalized context belongs in `AGENT_CONTEXT_DIR`, and
+generated guardian checklists belong at `AGENT_CHECKLIST_PATH`.

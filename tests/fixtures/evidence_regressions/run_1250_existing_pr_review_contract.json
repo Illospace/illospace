@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "run_id": 1250,
+  "scenario": "existing PR review should not be treated as a created PR contract",
+  "history_row": {
+    "id": 1250,
+    "idea_id": "idea-evidence-1250",
+    "event": "thread_reply",
+    "message": "Review the existing frontend PRs and summarize risks.",
+    "priority": 0,
+    "status": "completed",
+    "settlement_state": "completed",
+    "settlement_reason": null,
+    "skill_used": "review",
+    "skill_outcome": "success",
+    "model_used": "openai/gpt-5-mini",
+    "thinking_used": "low",
+    "created_at": "2026-04-27T14:10:00+00:00",
+    "started_at": "2026-04-27T14:10:05+00:00",
+    "completed_at": "2026-04-27T14:12:30+00:00",
+    "contract_status": "satisfied",
+    "contract_type": "pr_review",
+    "contract_requirements": {
+      "minimum_reviewed_prs": 2,
+      "pull_requests": [
+        {
+          "repo": "example-org/example-repo",
+          "number": 1249,
+          "url": "https://github.com/example-org/example-repo/pull/1249"
+        },
+        {
+          "repo": "example-org/example-repo",
+          "number": 1250,
+          "url": "https://github.com/example-org/example-repo/pull/1250"
+        }
+      ]
+    },
+    "execution_artifacts": [
+      {
+        "type": "existing_pr_under_review",
+        "repo": "example-org/example-repo",
+        "number": 1249,
+        "url": "https://github.com/example-org/example-repo/pull/1249",
+        "state": "open",
+        "summary": "Reviewed existing PR 1249."
+      },
+      {
+        "type": "existing_pr_under_review",
+        "repo": "example-org/example-repo",
+        "number": 1250,
+        "url": "https://github.com/example-org/example-repo/pull/1250",
+        "state": "open",
+        "summary": "Reviewed existing PR 1250."
+      }
+    ],
+    "scout_trace": {
+      "candidate": {
+        "contract_type": "pr",
+        "contract_requirements": {
+          "traceability": {
+            "require_pr": true
+          }
+        }
+      },
+      "applied_contract": {
+        "contract_type": "pr_review",
+        "contract_requirements": {
+          "minimum_reviewed_prs": 2
+        }
+      },
+      "correction": "existing_pr_review_away_from_created_pr_contract"
+    }
+  },
+  "verification_runs": [
+    {
+      "verifier_type": "artifact_exists",
+      "status": "passed",
+      "severity": "required",
+      "observed": {
+        "observed_artifacts": [
+          {
+            "type": "existing_pr_under_review",
+            "number": 1249
+          },
+          {
+            "type": "existing_pr_under_review",
+            "number": 1250
+          }
+        ]
+      },
+      "evidence": {},
+      "failure_reason": null
+    },
+    {
+      "verifier_type": "semantic_evidence_judge",
+      "status": "passed",
+      "severity": "required",
+      "evidence": {
+        "missing_evidence": [],
+        "unsupported_claims": []
+      },
+      "failure_reason": null
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+
+# Models (large, download on setup) — root-level only
+/models/
+
+# Logs (runtime, not source)
+logs/
+
+# Runtime state
+WAKEUP_INDEX.md
+PENDING_REFLECTION.json
+PENDING_REFLECTION.json.done-*
+briefs/
+
+# Local coverage and scratch artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+Untitled
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment (contains secrets)
+.env
+dashboard/static/uploads/
+dashboard/
+
+# Hidden dotfiles/directories (tools, OS, agents)
+.*
+!.gitignore
+!.gitattributes
+!.github/
+!.github/**
+brain/uploads/
+
+# Illo runtime-private state (operator context, journals, logs, local exports)
+.illo/
+/journal/
+/memory/
+/content/blog/
+/content/journal/
+/content/readings/
+/artifacts/
+/briefs/
+/brain/logs/
+/brain/uploads/
+/brain/export/
+/export/
+
+# Optional private local tool notes
+/TOOLS.md
+
+# Internal historical content not shipped in the public repo
+/docs/archive/
+/content/
+
+# Local runtime snapshots and generated operator data
+/data/
+/brain/data/*.json
+/brain/platform/data/*.json
+/brain/briefs/
+/brain/readings/
+/brain/curiosity_state.json

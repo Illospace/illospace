@@ -1,0 +1,3 @@
+{"input":"Create a project for the YC application folder and attach it here","expected_skill":"manage-projects","reason":"durable reusable project context plus thread attachment"}
+{"input":"Add these docs to my product project","expected_skill":"manage-projects","reason":"resource management for an existing project"}
+{"input":"I dropped a screenshot, can you read it?","expected_skill":"coordinate","reason":"one-off thread attachment should not create a durable project"}

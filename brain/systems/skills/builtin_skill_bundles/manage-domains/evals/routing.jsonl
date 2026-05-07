@@ -1,0 +1,2 @@
+{"prompt":"Set up structured contact records for our outreach pipeline.","expected":{"route_to":"manage-domains","triggers_include":["structured data"]}}
+{"prompt":"Make a private toggle in this generated app.","expected":{"should_not_route_to":["manage-domains"],"reason":"app-local state"}}

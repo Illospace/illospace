@@ -1,0 +1,61 @@
+{
+  "type": "object",
+  "required": [
+    "goal",
+    "steps"
+  ],
+  "properties": {
+    "goal": {
+      "type": "string"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "skill",
+          "objective",
+          "scope",
+          "done_when",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "skill": {
+            "type": "string"
+          },
+          "objective": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "done_when": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "final_verification": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

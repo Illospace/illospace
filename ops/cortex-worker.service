@@ -1,0 +1,30 @@
+[Unit]
+Description=Illo Brain - Cortex AgentRun Worker
+# Worker does NOT depend on the dashboard — they are independent
+# Dashboard can restart freely without affecting running agents
+After=illo-embed.service illo-gpu-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/illo-brain
+Environment=PYTHONPATH=%h/illo-brain
+ExecStart=%h/illo-brain/venv/bin/python3 -m brain.systems.cortex.worker
+Restart=always
+RestartSec=5
+
+# Graceful shutdown: SIGTERM stops claims and lets active AgentRuns drain.
+KillSignal=SIGTERM
+TimeoutStopSec=infinity
+
+# Environment
+Environment=ILLO_ENV=production
+Environment=ILLO_VALIDATE_MIGRATIONS=1
+EnvironmentFile=-%h/.config/illo-brain/production.env
+Environment=CORTEX_MAX_CONCURRENT=10
+Environment=CORTEX_MAX_RUNTIME=600
+Environment=CORTEX_EMBEDDING_READY_TIMEOUT_SECONDS=300
+Environment=ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS=infinity
+Environment=ILLO_DASHBOARD_URL=http://127.0.0.1:8888
+
+[Install]
+WantedBy=default.target

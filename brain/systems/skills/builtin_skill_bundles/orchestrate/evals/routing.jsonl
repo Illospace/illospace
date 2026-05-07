@@ -1,0 +1,2 @@
+{"prompt":"Use parallel agents to update backend and frontend independently, then review.","expected":{"route_to":"orchestrate","triggers_include":["parallel workers"]}}
+{"prompt":"Fix this typo in one file.","expected":{"should_not_route_to":["orchestrate"],"reason":"one focused action"}}

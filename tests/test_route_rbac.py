@@ -1,0 +1,261 @@
+"""Focused RBAC coverage for privileged non-Cortex API routes."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+from brain.app.api.auth import get_current_user
+from brain.app.api.authorization import (
+    PERMISSION_SCHEDULER_MANAGE,
+    PERMISSION_SKILLS_MANAGE,
+    PERMISSION_VAULT_SHARE,
+)
+from brain.app.api.deps import get_db
+
+
+MEMBER = {
+    "id": "user-1",
+    "org_id": "org-1",
+    "role": "member",
+    "permissions": [],
+}
+
+
+@pytest_asyncio.fixture
+async def client():
+    from brain.app.api.main import app
+
+    app.dependency_overrides.clear()
+    app.dependency_overrides[get_db] = lambda: MagicMock()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c, app
+    app.dependency_overrides.clear()
+
+
+def _act_as(app, user: dict) -> None:
+    app.dependency_overrides[get_current_user] = lambda: user
+
+
+def _skill_obj(**overrides):
+    fields = {
+        "id": 1,
+        "name": "demo",
+        "description": "Demo skill",
+        "procedure": "Do the thing",
+        "version": 1,
+        "maturity": "emerging",
+        "confidence": 0.3,
+        "use_count": 0,
+        "success_count": 0,
+        "failure_count": 0,
+        "partial_count": 0,
+        "avg_duration_sec": None,
+        "last_used": None,
+        "pitfalls": [],
+        "refinements": [],
+        "triggers": [],
+        "guardrails": [],
+        "auto_emerged": False,
+        "provider": None,
+        "model_name": None,
+        "reasoning_effort": None,
+        "service_tier": None,
+        "auth_mode": None,
+        "model_tier": "medium",
+        "thinking_tier": "medium",
+        "success_rate": 0.0,
+        "children": [],
+        "executions": [],
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "url", "body"),
+    [
+        ("POST", "/api/skills/new", {"name": "demo", "procedure": "Do the thing"}),
+        ("POST", "/api/skills/import", [{"name": "demo", "procedure": "Do the thing"}]),
+        ("PATCH", "/api/skills/1", {"procedure": "Updated"}),
+        ("POST", "/api/skills/1/archive", None),
+        ("DELETE", "/api/skills/1", None),
+        ("PUT", "/api/skills/1/edit", {"procedure": "Updated"}),
+        ("POST", "/api/skills/1/assets", {"path": "references/context.md", "content": "context"}),
+        ("PUT", "/api/skills/1/assets/references/context.md", {"content": "updated"}),
+        ("DELETE", "/api/skills/1/assets/references/context.md", None),
+        ("POST", "/api/skills/demo/versions/1/restore", None),
+        ("POST", "/api/skills/demo/guardrail", {"text": "Do not leak secrets"}),
+        ("POST", "/api/skills/demo/procedure-step", {"text": "Check inputs"}),
+        ("POST", "/api/skills/demo/trigger", {"direction": "for", "pattern": "demo"}),
+        ("DELETE", "/api/skills/demo/trigger/0", None),
+    ],
+)
+async def test_member_cannot_mutate_skills(client, method, url, body):
+    c, app = client
+    _act_as(app, MEMBER)
+
+    response = await c.request(method, url, json=body)
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "url", "body"),
+    [
+        ("POST", "/api/system/scheduler/sync", {}),
+        ("POST", "/api/system/scheduler/materialize", {}),
+        ("POST", "/api/system/scheduler/drain", {}),
+        ("POST", "/api/system/scheduler/jobs", {"job_key": "demo", "cron_expr": "0 8 * * *", "handler_ref": "python -m demo"}),
+        ("DELETE", "/api/system/scheduler/jobs/demo", None),
+        ("POST", "/api/system/scheduler/jobs/demo/pause", {}),
+        ("POST", "/api/system/scheduler/jobs/demo/resume", None),
+        ("POST", "/api/system/scheduler/jobs/demo/owner-mode", {"owner_mode": "scheduler"}),
+        ("POST", "/api/system/scheduler/jobs/demo/load-shed", {"max_concurrency": 1}),
+        ("POST", "/api/system/scheduler/runs/1/resume", None),
+        ("POST", "/api/system/scheduler/runs/1/retry", None),
+    ],
+)
+async def test_member_cannot_mutate_scheduler(client, method, url, body):
+    c, app = client
+    _act_as(app, MEMBER)
+
+    response = await c.request(method, url, json=body)
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "url", "body"),
+    [
+        ("GET", "/api/vault/org-users", None),
+        ("DELETE", "/api/vault/shares/1", None),
+        ("GET", "/api/vault/missing", None),
+        ("GET", "/api/vault/log", None),
+        ("POST", "/api/vault/1/share", {"shared_with_user_id": "user-2"}),
+    ],
+)
+async def test_member_cannot_use_privileged_vault_surfaces(client, method, url, body):
+    c, app = client
+    _act_as(app, MEMBER)
+
+    with patch("brain.systems.vault.has_pin", return_value=False):
+        response = await c.request(method, url, json=body)
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_personal_vault_crud_remains_user_owned(client):
+    c, app = client
+    _act_as(app, MEMBER)
+
+    with patch("brain.systems.vault.has_pin", return_value=False), \
+         patch("brain.systems.vault.list_secrets", return_value=[]) as list_secrets:
+        response = await c.get("/api/vault/")
+
+    assert response.status_code == 200
+    assert response.json() == []
+    list_secrets.assert_called_once_with("user-1", category=None, org_id="org-1")
+
+
+@pytest.mark.asyncio
+async def test_explicit_skill_permission_can_mutate_skill(client):
+    c, app = client
+    _act_as(app, {**MEMBER, "permissions": [PERMISSION_SKILLS_MANAGE]})
+
+    with patch("brain.app.api.routers.skills.SkillRepository") as repo:
+        repo.return_value.add_guardrail.return_value = _skill_obj()
+        response = await c.post(
+            "/api/skills/demo/guardrail",
+            json={"text": "Do not leak secrets"},
+        )
+
+    assert response.status_code == 200
+    repo.return_value.add_guardrail.assert_called_once_with("demo", "Do not leak secrets", "warning")
+
+
+@pytest.mark.asyncio
+async def test_explicit_scheduler_permission_can_create_scheduler_job(client):
+    c, app = client
+    _act_as(app, {**MEMBER, "permissions": [PERMISSION_SCHEDULER_MANAGE]})
+
+    with patch("brain.app.api.routers.system.upsert_scheduler_job") as upsert_job:
+        upsert_job.return_value = SimpleNamespace(job_key="demo", cron_expr="0 8 * * *")
+        response = await c.post(
+            "/api/system/scheduler/jobs",
+            json={"job_key": "demo", "cron_expr": "0 8 * * *", "handler_ref": "python -m demo"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["schedule_human"] == "at 8:00 AM"
+    upsert_job.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_legacy_cron_mutation_routes_are_retired(client):
+    c, app = client
+    _act_as(app, {**MEMBER, "permissions": [PERMISSION_SCHEDULER_MANAGE]})
+
+    post_response = await c.post(
+        "/api/system/cron-jobs",
+        json={"name": "demo", "schedule": "0 8 * * *", "command": "python -m demo"},
+    )
+    patch_response = await c.patch("/api/system/cron-jobs/demo", json={"enabled": False})
+    delete_response = await c.delete("/api/system/cron-jobs/demo")
+
+    assert post_response.status_code in {404, 405}
+    assert patch_response.status_code in {404, 405}
+    assert delete_response.status_code in {404, 405}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", ["/api/system/embedding", "/api/system/llm"])
+async def test_legacy_system_setup_routes_are_removed(client, url):
+    c, app = client
+    _act_as(app, {**MEMBER, "role": "owner"})
+
+    response = await c.post(url, json={})
+
+    assert response.status_code in {404, 405}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "url", "body"),
+    [
+        ("POST", "/api/runtime-settings/connection/gemini/api-key", {"api_key": "gemini-key"}),
+        ("PATCH", "/api/runtime-settings/memory", {"embedder": "local_cpu", "reranker": "weighted"}),
+        ("POST", "/api/runtime-settings/memory/check", None),
+    ],
+)
+async def test_member_cannot_mutate_installation_memory(client, method, url, body):
+    c, app = client
+    _act_as(app, MEMBER)
+    member = SimpleNamespace(id="user-1", org_id="org-1", role="member")
+
+    with patch("brain.systems.runtime_settings.router.refresh_user", return_value=member):
+        response = await c.request(method, url, json=body)
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_explicit_vault_share_permission_can_share(client):
+    c, app = client
+    _act_as(app, {**MEMBER, "permissions": [PERMISSION_VAULT_SHARE]})
+
+    with patch("brain.systems.vault.has_pin", return_value=False), \
+         patch("brain.systems.vault.share_secret", return_value={"id": 7}) as share:
+        response = await c.post("/api/vault/1/share", json={"shared_with_user_id": "user-2"})
+
+    assert response.status_code == 200
+    assert response.json() == {"id": 7}
+    share.assert_called_once_with(1, "user-2", "user-1", org_id="org-1")

@@ -1,0 +1,1917 @@
+:root {
+  --constellation-font-sans: 'Inter', 'Segoe UI', sans-serif;
+  --constellation-font-display: 'Space Grotesk', 'Inter', sans-serif;
+  --constellation-font-mono: 'IBM Plex Mono', monospace;
+
+  --constellation-type-meta: 10px;
+  --constellation-type-meta-sm: 9px;
+  --constellation-type-body-sm: 14px;
+  --constellation-type-blob-hero: 18px;
+  --constellation-type-blob-compact: 12px;
+  --constellation-type-astre-hero: 58px;
+  --constellation-type-astre-standard: 44px;
+
+  --constellation-radius-panel: 16px;
+  --constellation-radius-pill: 999px;
+  --constellation-shape-alpha: 42% 58% 54% 46% / 47% 43% 57% 53%;
+  --constellation-shape-beta: 56% 44% 48% 52% / 41% 55% 45% 59%;
+  --constellation-shape-gamma: 49% 51% 59% 41% / 55% 40% 60% 45%;
+  --constellation-shape-delta: 53% 47% 43% 57% / 45% 59% 41% 55%;
+
+  --constellation-color-text-primary: rgba(240, 240, 250, 0.92);
+  --constellation-color-text-secondary: rgba(240, 240, 250, 0.72);
+  --constellation-color-text-tertiary: rgba(240, 240, 250, 0.6);
+  --constellation-color-text-muted: rgba(240, 240, 250, 0.38);
+
+  --constellation-color-spectral: #8db7ff;
+  --constellation-color-spectral-core: rgba(58, 90, 146, 0.98);
+  --constellation-color-spectral-owner: rgba(216, 231, 255, 0.96);
+
+  --constellation-color-amber: #d5a14d;
+  --constellation-color-amber-core: rgba(148, 108, 38, 0.98);
+  --constellation-color-amber-owner: rgba(255, 227, 172, 0.96);
+  --constellation-color-badge-ring: rgba(5, 9, 16, 0.92);
+  --constellation-shadow-astre-spectral: 0 0 0 1px rgba(240, 240, 250, 0.06), 0 0 36px rgba(141, 183, 255, 0.28);
+  --constellation-shadow-astre-amber: 0 0 0 1px rgba(240, 240, 250, 0.06), 0 0 36px rgba(213, 161, 77, 0.24);
+
+  --constellation-control-focus-ring: rgba(240, 240, 250, 0.52);
+  --constellation-control-summary: rgba(240, 240, 250, 0.56);
+  --constellation-control-unread: #7fb4ff;
+  --constellation-control-surface-border: rgba(255, 255, 255, 0.08);
+  --constellation-control-surface-background: rgba(8, 11, 18, 0.74);
+  --constellation-control-surface-shadow: 0 14px 36px rgba(0, 0, 0, 0.28);
+  --constellation-control-field-border: rgba(240, 240, 250, 0.08);
+  --constellation-control-field-background: rgba(240, 240, 250, 0.03);
+  --constellation-control-field-placeholder: rgba(240, 240, 250, 0.38);
+  --constellation-control-button-secondary-border: rgba(240, 240, 250, 0.08);
+  --constellation-control-button-secondary-text: rgba(240, 240, 250, 0.76);
+  --constellation-control-button-secondary-background: rgba(240, 240, 250, 0.04);
+  --constellation-control-button-secondary-hover-background: rgba(240, 240, 250, 0.08);
+  --constellation-control-button-secondary-hover-text: rgba(240, 240, 250, 0.94);
+  --constellation-control-button-secondary-active-background: rgba(240, 240, 250, 0.12);
+  --constellation-control-button-secondary-active-text: rgba(240, 240, 250, 0.98);
+  --constellation-control-toggle-active-background: rgba(240, 240, 250, 0.08);
+  --constellation-control-toggle-active-text: rgba(240, 240, 250, 0.92);
+  --constellation-system-chrome-background: linear-gradient(180deg, rgba(0, 0, 0, 0.94), rgba(4, 7, 13, 0.88));
+  --constellation-system-chrome-border: rgba(240, 240, 250, 0.08);
+  --constellation-system-chrome-shadow:
+    0 24px 80px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(240, 240, 250, 0.08);
+  --constellation-system-chrome-text: rgba(240, 240, 250, 0.72);
+  --constellation-system-chrome-text-hover: rgba(240, 240, 250, 0.94);
+  --constellation-system-chrome-active-background: rgba(240, 240, 250, 0.045);
+  --constellation-system-chrome-active-border: rgba(240, 240, 250, 0.14);
+  --constellation-system-chrome-active-text: #ffffff;
+  --constellation-system-chrome-active-shadow:
+    inset 0 0 0 1px rgba(240, 240, 250, 0.14),
+    0 0 24px rgba(141, 183, 255, 0.08);
+  --constellation-control-slider-track: rgba(240, 240, 250, 0.18);
+  --constellation-control-slider-knob: rgba(240, 240, 250, 0.9);
+
+  --constellation-control-pill-border: rgba(240, 240, 250, 0.08);
+  --constellation-control-pill-background: rgba(240, 240, 250, 0.06);
+  --constellation-control-pill-text: rgba(240, 240, 250, 0.6);
+
+  --constellation-control-pill-active-background: rgba(240, 240, 250, 0.05);
+  --constellation-control-pill-active-text: rgba(240, 240, 250, 0.6);
+
+  --constellation-control-pill-status-background: rgba(87, 207, 160, 0.12);
+  --constellation-control-pill-status-border: rgba(87, 207, 160, 0.24);
+  --constellation-control-pill-status-text: rgba(109, 245, 189, 0.9);
+
+  --constellation-control-pill-complete-background: rgba(87, 207, 160, 0.12);
+  --constellation-control-pill-complete-text: rgba(223, 255, 243, 0.92);
+
+  --constellation-control-pill-model-background: rgba(141, 183, 255, 0.14);
+  --constellation-control-pill-model-text: rgba(221, 232, 255, 0.94);
+
+  --constellation-control-pill-thinking-background: rgba(213, 161, 77, 0.14);
+  --constellation-control-pill-thinking-text: rgba(250, 231, 188, 0.96);
+
+  --constellation-control-pill-warning-background: rgba(213, 161, 77, 0.14);
+  --constellation-control-pill-warning-border: rgba(213, 161, 77, 0.24);
+  --constellation-control-pill-warning-text: rgba(250, 231, 188, 0.96);
+
+  --constellation-control-pill-muted-background: rgba(240, 240, 250, 0.05);
+  --constellation-control-pill-muted-border: rgba(240, 240, 250, 0.08);
+  --constellation-control-pill-muted-text: rgba(240, 240, 250, 0.6);
+  --constellation-control-pill-success-background: rgba(87, 207, 160, 0.14);
+  --constellation-control-pill-success-border: rgba(87, 207, 160, 0.24);
+  --constellation-control-pill-success-text: rgba(223, 255, 243, 0.94);
+  --constellation-control-pill-danger-background: rgba(219, 110, 130, 0.14);
+  --constellation-control-pill-danger-border: rgba(219, 110, 130, 0.24);
+  --constellation-control-pill-danger-text: rgba(255, 225, 232, 0.94);
+  --constellation-control-pill-info-background: rgba(141, 183, 255, 0.14);
+  --constellation-control-pill-info-border: rgba(141, 183, 255, 0.24);
+  --constellation-control-pill-info-text: rgba(221, 232, 255, 0.94);
+
+  --constellation-label-eyebrow: rgba(240, 240, 250, 0.56);
+  --constellation-label-meta: rgba(240, 240, 250, 0.54);
+  --constellation-section-divider: rgba(240, 240, 250, 0.08);
+  --constellation-section-title: rgba(255, 255, 255, 0.96);
+  --constellation-section-description: rgba(240, 240, 250, 0.5);
+
+  --constellation-surface-panel-border: rgba(255, 255, 255, 0.08);
+  --constellation-surface-panel-separator: rgba(255, 255, 255, 0.06);
+  --constellation-surface-panel-background: linear-gradient(180deg, rgba(13, 18, 29, 0.94), rgba(8, 11, 18, 0.88));
+  --constellation-surface-panel-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 24%);
+  --constellation-surface-panel-shadow:
+    0 16px 34px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --constellation-surface-panel-hover-border: rgba(255, 255, 255, 0.12);
+  --constellation-surface-panel-hover-shadow:
+    0 20px 44px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  --constellation-surface-nested-border: rgba(255, 255, 255, 0.08);
+  --constellation-surface-nested-background: rgba(255, 255, 255, 0.03);
+  --constellation-surface-nested-strong-background: rgba(255, 255, 255, 0.06);
+  --constellation-surface-nested-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  --constellation-surface-floating-border: rgba(255, 255, 255, 0.08);
+  --constellation-surface-floating-background: linear-gradient(180deg, rgba(20, 24, 35, 0.96), rgba(8, 11, 19, 0.98));
+  --constellation-surface-floating-shadow:
+    0 24px 44px rgba(0, 0, 0, 0.34),
+    0 0 0 1px rgba(255, 255, 255, 0.02) inset,
+    0 0 28px rgba(141, 183, 255, 0.08);
+  --constellation-surface-floating-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 18%);
+
+  --constellation-button-primary-background: linear-gradient(180deg, rgba(240, 240, 250, 0.12), rgba(240, 240, 250, 0.08));
+  --constellation-button-primary-background-hover: linear-gradient(180deg, rgba(240, 240, 250, 0.18), rgba(240, 240, 250, 0.12));
+  --constellation-button-primary-border: rgba(240, 240, 250, 0.28);
+  --constellation-button-primary-border-hover: rgba(240, 240, 250, 0.4);
+  --constellation-button-primary-text: var(--constellation-color-text-primary);
+  --constellation-button-primary-shadow:
+    0 12px 28px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --constellation-button-pressed-background: linear-gradient(180deg, rgba(213, 161, 77, 0.18), rgba(213, 161, 77, 0.08));
+  --constellation-button-pressed-border: rgba(213, 161, 77, 0.34);
+  --constellation-button-pressed-text: rgba(255, 247, 230, 0.94);
+  --constellation-button-pressed-shadow:
+    0 14px 30px rgba(0, 0, 0, 0.22),
+    0 0 0 1px rgba(255, 218, 140, 0.08) inset;
+  --constellation-button-secondary-background: rgba(240, 240, 250, 0.04);
+  --constellation-button-secondary-background-hover: rgba(240, 240, 250, 0.08);
+  --constellation-button-secondary-border-hover: rgba(240, 240, 250, 0.2);
+  --constellation-button-secondary-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --constellation-button-quiet-background: rgba(240, 240, 250, 0.02);
+  --constellation-button-quiet-background-hover: rgba(240, 240, 250, 0.06);
+  --constellation-button-quiet-border: rgba(240, 240, 250, 0.08);
+  --constellation-button-quiet-border-hover: rgba(240, 240, 250, 0.16);
+  --constellation-button-quiet-text: rgba(240, 240, 250, 0.72);
+  --constellation-button-quiet-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  --constellation-button-destructive-background: linear-gradient(180deg, rgba(219, 110, 130, 0.22), rgba(219, 110, 130, 0.12));
+  --constellation-button-destructive-background-hover: linear-gradient(180deg, rgba(219, 110, 130, 0.28), rgba(219, 110, 130, 0.16));
+  --constellation-button-destructive-border: rgba(219, 110, 130, 0.34);
+  --constellation-button-destructive-border-hover: rgba(219, 110, 130, 0.48);
+  --constellation-button-destructive-text: rgba(255, 233, 239, 0.96);
+  --constellation-button-destructive-shadow:
+    0 14px 30px rgba(34, 7, 13, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --constellation-button-destructive-pressed-background: linear-gradient(180deg, rgba(219, 110, 130, 0.32), rgba(219, 110, 130, 0.2));
+  --constellation-button-destructive-pressed-border: rgba(255, 196, 208, 0.36);
+  --constellation-button-destructive-pressed-text: rgba(255, 240, 244, 0.98);
+  --constellation-button-destructive-pressed-shadow:
+    0 16px 34px rgba(34, 7, 13, 0.34),
+    0 0 0 1px rgba(255, 214, 223, 0.12) inset;
+
+  --constellation-icon-button-border: rgba(240, 240, 250, 0.08);
+  --constellation-icon-button-text: rgba(240, 240, 250, 0.72);
+  --constellation-icon-button-pressed-text: rgba(255, 247, 230, 0.94);
+  --constellation-icon-button-pressed-border: rgba(213, 161, 77, 0.34);
+  --constellation-icon-button-pressed-background: rgba(213, 161, 77, 0.12);
+  --constellation-icon-button-quiet-background: rgba(240, 240, 250, 0.03);
+  --constellation-icon-button-quiet-background-hover: rgba(240, 240, 250, 0.06);
+  --constellation-icon-button-quiet-border-hover: rgba(240, 240, 250, 0.16);
+  --constellation-icon-button-quiet-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  --constellation-icon-button-secondary-background: rgba(240, 240, 250, 0.05);
+  --constellation-icon-button-secondary-background-hover: rgba(240, 240, 250, 0.08);
+  --constellation-icon-button-secondary-border-hover: rgba(240, 240, 250, 0.2);
+  --constellation-icon-button-secondary-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  --constellation-select-chip-trigger-border: rgba(240, 240, 250, 0.08);
+  --constellation-select-chip-trigger-background: rgba(240, 240, 250, 0.04);
+  --constellation-select-chip-trigger-text: rgba(240, 240, 250, 0.68);
+  --constellation-select-chip-trigger-bare-text: rgba(240, 240, 250, 0.66);
+  --constellation-select-chip-trigger-hover-background: rgba(240, 240, 250, 0.08);
+  --constellation-select-chip-trigger-hover-text: rgba(240, 240, 250, 0.92);
+  --constellation-select-chip-trigger-open-border: rgba(240, 240, 250, 0.14);
+  --constellation-select-chip-trigger-open-background: rgba(240, 240, 250, 0.09);
+  --constellation-select-chip-trigger-open-text: rgba(240, 240, 250, 0.94);
+  --constellation-select-chip-trigger-open-shadow: 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+  --constellation-select-chip-menu-border: var(--constellation-surface-floating-border);
+  --constellation-select-chip-menu-background: var(--constellation-surface-floating-background);
+  --constellation-select-chip-menu-shadow: var(--constellation-surface-floating-shadow);
+  --constellation-select-chip-option-text: rgba(240, 240, 250, 0.72);
+  --constellation-select-chip-option-hover-background: rgba(240, 240, 250, 0.06);
+  --constellation-select-chip-option-hover-text: rgba(240, 240, 250, 0.96);
+  --constellation-select-chip-option-active-background:
+    radial-gradient(circle at 0% 50%, rgba(141, 183, 255, 0.14), transparent 36%),
+    rgba(240, 240, 250, 0.06);
+  --constellation-select-chip-option-active-text: rgba(240, 240, 250, 0.98);
+  --constellation-select-chip-option-description: rgba(240, 240, 250, 0.46);
+  --constellation-select-chip-shortcut-background: rgba(240, 240, 250, 0.06);
+  --constellation-select-chip-shortcut-text: rgba(240, 240, 250, 0.54);
+  --constellation-select-chip-indicator-border: rgba(240, 240, 250, 0.14);
+  --constellation-select-chip-indicator-background: rgba(240, 240, 250, 0.04);
+  --constellation-select-chip-indicator-active-border: rgba(141, 183, 255, 0.38);
+  --constellation-select-chip-indicator-active-background: rgba(141, 183, 255, 0.9);
+  --constellation-select-chip-indicator-active-shadow: 0 0 16px rgba(141, 183, 255, 0.26);
+
+  --constellation-composer-action-accent: rgba(244, 246, 252, 0.78);
+  --constellation-composer-action-core: rgba(20, 24, 33, 0.96);
+  --constellation-composer-action-owner: rgba(255, 255, 255, 0.94);
+  --constellation-composer-action-glow: linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 62%);
+  --constellation-composer-orb-size: 32px;
+  --constellation-composer-action-button-size: 32px;
+  --constellation-composer-action-button-border: rgba(240, 240, 250, 0.14);
+  --constellation-composer-action-button-border-hover: rgba(240, 240, 250, 0.22);
+  --constellation-composer-action-button-background: linear-gradient(180deg, rgba(238, 240, 246, 0.92), rgba(198, 203, 214, 0.92));
+  --constellation-composer-action-button-background-hover: linear-gradient(180deg, rgba(250, 251, 255, 0.96), rgba(215, 220, 230, 0.95));
+  --constellation-composer-action-button-text: rgba(12, 15, 22, 0.82);
+  --constellation-composer-action-button-text-hover: rgba(6, 8, 13, 0.92);
+  --constellation-composer-action-button-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.42),
+    inset 0 -8px 12px rgba(0, 0, 0, 0.08);
+  --constellation-composer-action-button-shadow-hover:
+    inset 0 1px 0 rgba(255, 255, 255, 0.52),
+    inset 0 -8px 12px rgba(0, 0, 0, 0.08);
+  --constellation-composer-action-button-working-border: rgba(240, 240, 250, 0.16);
+  --constellation-composer-action-button-working-background: linear-gradient(180deg, rgba(49, 54, 66, 0.98), rgba(24, 28, 38, 0.98));
+  --constellation-composer-action-button-working-text: rgba(240, 240, 250, 0.88);
+  --constellation-composer-action-button-working-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -8px 12px rgba(0, 0, 0, 0.12);
+  --constellation-composer-orb-border: rgba(240, 240, 250, 0.08);
+  --constellation-composer-orb-background: rgba(240, 240, 250, 0.04);
+  --constellation-composer-orb-text: rgba(240, 240, 250, 0.68);
+  --constellation-composer-orb-bare-text: rgba(240, 240, 250, 0.64);
+  --constellation-composer-orb-hover-background: rgba(240, 240, 250, 0.08);
+  --constellation-composer-orb-hover-text: rgba(240, 240, 250, 0.92);
+  --constellation-composer-orb-disabled-opacity: 0.42;
+  --constellation-composer-action-working-background: linear-gradient(180deg, rgba(37, 43, 56, 0.98), rgba(16, 20, 29, 0.98));
+  --constellation-composer-action-working-shadow:
+    0 14px 32px rgba(0, 0, 0, 0.32),
+    0 0 0 1px color-mix(in srgb, var(--constellation-composer-action-accent) 16%, transparent) inset,
+    0 0 22px color-mix(in srgb, var(--constellation-composer-action-accent) 18%, transparent);
+  --constellation-composer-shell-background: linear-gradient(180deg, rgba(13, 17, 26, 0.88), rgba(8, 11, 18, 0.92));
+  --constellation-composer-shell-shadow:
+    0 24px 72px rgba(0, 0, 0, 0.28),
+    0 0 0 1px rgba(255, 255, 255, 0.02) inset,
+    0 0 20px rgba(213, 161, 77, 0.04);
+  --constellation-composer-shell-drag-border: rgba(240, 240, 250, 0.18);
+  --constellation-composer-shell-drag-shadow:
+    0 28px 90px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(240, 240, 250, 0.08) inset,
+    0 0 30px rgba(240, 240, 250, 0.08);
+  --constellation-composer-kicker: rgba(245, 214, 138, 0.56);
+  --constellation-composer-textarea: rgba(240, 240, 250, 0.9);
+  --constellation-composer-placeholder: rgba(240, 240, 250, 0.36);
+  --constellation-skill-mention-background: rgba(240, 240, 250, 0.08);
+  --constellation-skill-mention-border: rgba(240, 240, 250, 0.1);
+  --constellation-skill-mention-text: rgba(240, 240, 250, 0.96);
+  --constellation-skill-mention-sigil: rgba(240, 240, 250, 0.72);
+  --constellation-skill-mention-selection: rgba(240, 240, 250, 0.22);
+  --constellation-composer-attachment-background: rgba(255, 255, 255, 0.05);
+  --constellation-composer-attachment-border: rgba(255, 255, 255, 0.08);
+  --constellation-composer-attachment-text: var(--text-2);
+  --constellation-composer-attachment-remove: rgba(255, 255, 255, 0.56);
+  --constellation-chat-composer-background: linear-gradient(180deg, rgba(13, 17, 26, 0.84), rgba(8, 11, 18, 0.9));
+  --constellation-chat-composer-shadow:
+    0 16px 48px rgba(0, 0, 0, 0.2),
+    0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+  --constellation-chat-composer-thread-background: var(--constellation-chat-composer-background);
+  --constellation-chat-composer-thread-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.18),
+    0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+  --constellation-chat-composer-supporting: rgba(240, 240, 250, 0.5);
+
+  --constellation-toolbar-shell-border: rgba(255, 255, 255, 0.08);
+  --constellation-toolbar-shell-background: linear-gradient(180deg, rgba(18, 21, 31, 0.94), rgba(7, 10, 17, 0.96));
+  --constellation-toolbar-shell-shadow:
+    0 14px 40px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  --constellation-utility-panel-surface-border: rgba(255, 255, 255, 0.07);
+  --constellation-utility-panel-surface-background:
+    radial-gradient(circle at 18% 12%, rgba(141, 183, 255, 0.1), transparent 26%),
+    radial-gradient(circle at 82% 18%, rgba(213, 161, 77, 0.08), transparent 28%),
+    linear-gradient(180deg, rgba(12, 16, 26, 0.92), rgba(9, 13, 22, 0.86));
+  --constellation-utility-panel-surface-shadow:
+    0 24px 58px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --constellation-utility-panel-surface-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 18%);
+  --constellation-utility-panel-header-border: rgba(255, 255, 255, 0.05);
+  --constellation-utility-panel-tab-text: rgba(232, 235, 244, 0.56);
+  --constellation-utility-panel-tab-hover-text: rgba(255, 255, 255, 0.84);
+  --constellation-utility-panel-tab-active-text: #ffffff;
+  --constellation-utility-panel-tab-active-border: rgba(141, 183, 255, 0.56);
+  --constellation-utility-panel-close-border: rgba(255, 255, 255, 0.06);
+  --constellation-utility-panel-close-background: rgba(255, 255, 255, 0.02);
+  --constellation-utility-panel-close-text: rgba(232, 235, 244, 0.7);
+  --constellation-utility-panel-close-hover-background: rgba(255, 255, 255, 0.06);
+  --constellation-utility-panel-close-hover-border: rgba(255, 255, 255, 0.12);
+  --constellation-utility-panel-close-hover-text: #ffffff;
+  --constellation-utility-panel-scrollbar: rgba(255, 255, 255, 0.12);
+
+  --constellation-notification-menu-border: var(--constellation-surface-floating-border);
+  --constellation-notification-menu-background: linear-gradient(180deg, rgba(17, 20, 29, 0.98), rgba(8, 11, 18, 0.985));
+  --constellation-notification-menu-shadow:
+    0 26px 80px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --constellation-notification-title: rgba(245, 248, 255, 0.96);
+  --constellation-notification-subtitle: rgba(198, 209, 224, 0.64);
+  --constellation-notification-mark-all: rgba(213, 161, 77, 0.9);
+  --constellation-notification-empty-border: rgba(255, 255, 255, 0.08);
+  --constellation-notification-empty-text: rgba(198, 209, 224, 0.64);
+  --constellation-notification-row-border: rgba(255, 255, 255, 0.06);
+  --constellation-notification-row-background: rgba(255, 255, 255, 0.028);
+  --constellation-notification-row-hover-border: rgba(213, 161, 77, 0.2);
+  --constellation-notification-row-hover-background: rgba(255, 255, 255, 0.048);
+  --constellation-notification-avatar-text: rgba(243, 247, 255, 0.96);
+  --constellation-notification-meta: rgba(198, 209, 224, 0.58);
+  --constellation-notification-body: rgba(214, 223, 235, 0.7);
+  --constellation-notification-occurrence: rgba(213, 161, 77, 0.82);
+
+  --constellation-chat-shell-sidebar-border: rgba(255, 255, 255, 0.06);
+  --constellation-chat-shell-footer-fade: linear-gradient(180deg, rgba(8, 11, 18, 0), rgba(8, 11, 18, 0.88) 20%);
+  --constellation-chat-unread-muted-background: rgba(240, 240, 250, 0.06);
+  --constellation-chat-unread-muted-border: rgba(240, 240, 250, 0.1);
+  --constellation-chat-unread-muted-text: rgba(240, 240, 250, 0.66);
+  --constellation-chat-unread-divider-text: rgba(240, 240, 250, 0.52);
+  --constellation-chat-unread-divider-line:
+    linear-gradient(90deg, rgba(141, 183, 255, 0), rgba(141, 183, 255, 0.26), rgba(141, 183, 255, 0));
+  --constellation-chat-typing-text: rgba(240, 240, 250, 0.56);
+  --constellation-chat-typing-dot: rgba(141, 183, 255, 0.86);
+  --constellation-chat-typing-dot-shadow: 0 0 10px rgba(141, 183, 255, 0.24);
+  --constellation-chat-message-summary: rgba(255, 255, 255, 0.96);
+  --constellation-chat-message-system-border: rgba(240, 240, 250, 0.14);
+  --constellation-chat-message-system-text: rgba(240, 240, 250, 0.68);
+  --constellation-chat-attachment-border: rgba(255, 255, 255, 0.08);
+  --constellation-chat-attachment-background: rgba(255, 255, 255, 0.03);
+  --constellation-chat-attachment-image-border: rgba(255, 255, 255, 0.08);
+  --constellation-chat-attachment-label: rgba(255, 255, 255, 0.92);
+  --constellation-chat-attachment-detail: rgba(240, 240, 250, 0.56);
+  --constellation-chat-thread-summary-border: rgba(141, 183, 255, 0.18);
+  --constellation-chat-thread-summary-background: rgba(141, 183, 255, 0.06);
+  --constellation-chat-thread-summary-meta: rgba(240, 240, 250, 0.56);
+
+  --constellation-callout-border: rgba(213, 161, 77, 0.22);
+  --constellation-callout-title: rgba(250, 231, 188, 0.96);
+  --constellation-callout-text: rgba(240, 240, 250, 0.56);
+
+  --constellation-presence-seed-illo-accent: rgba(240, 240, 250, 0.34);
+  --constellation-presence-seed-illo-core: rgba(240, 240, 250, 0.05);
+  --constellation-presence-seed-illo-owner: rgba(240, 240, 250, 0.9);
+  --constellation-presence-seed-illo-ring: rgba(240, 240, 250, 0.14);
+  --constellation-presence-seed-illo-halo: rgba(240, 240, 250, 0.12);
+  --constellation-presence-seed-illo-shadow:
+    inset 0 0 0 1px rgba(240, 240, 250, 0.08),
+    0 0 calc(var(--seed-size) * 0.8) rgba(240, 240, 250, 0.08);
+  --constellation-presence-seed-user-core-base: #050910;
+  --constellation-presence-seed-user-core-accent-strength: 52%;
+  --constellation-presence-seed-user-owner-base: #f0f0fa;
+  --constellation-presence-seed-user-owner-accent-strength: 18%;
+
+  --constellation-workspace-theme-background:
+    radial-gradient(ellipse 66% 44% at 20% 18%, rgba(83, 116, 170, 0.16), transparent 68%),
+    radial-gradient(ellipse 58% 40% at 80% 22%, rgba(112, 87, 150, 0.1), transparent 68%),
+    radial-gradient(ellipse 74% 52% at 50% 76%, rgba(48, 104, 108, 0.075), transparent 72%),
+    radial-gradient(ellipse 88% 64% at 46% 46%, rgba(255, 255, 255, 0.028), transparent 78%),
+    linear-gradient(180deg, #0e1523 0%, #121929 48%, #0b111d 100%);
+  --constellation-workspace-theme-star-color-a: rgba(240, 240, 250, 0.38);
+  --constellation-workspace-theme-star-color-b: rgba(141, 183, 255, 0.22);
+  --constellation-workspace-theme-star-color-c: rgba(213, 161, 77, 0.16);
+  --constellation-workspace-theme-star-opacity: 0.3;
+  --constellation-workspace-theme-deep-field-opacity: 0.86;
+  --constellation-workspace-theme-deep-field-nebula:
+    radial-gradient(ellipse 64% 24% at 18% 26%, rgba(141, 183, 255, 0.085), transparent 72%),
+    radial-gradient(ellipse 52% 22% at 76% 22%, rgba(173, 126, 210, 0.07), transparent 72%),
+    radial-gradient(ellipse 74% 28% at 52% 80%, rgba(87, 207, 160, 0.042), transparent 76%),
+    radial-gradient(ellipse 84% 32% at 42% 50%, rgba(240, 240, 250, 0.026), transparent 78%);
+  --constellation-workspace-theme-deep-field-stars:
+    radial-gradient(circle at center, rgba(240, 240, 250, 0.66) 0 0.68px, transparent 0.9px),
+    radial-gradient(circle at center, rgba(141, 183, 255, 0.38) 0 0.82px, transparent 1.02px),
+    radial-gradient(circle at center, rgba(255, 225, 189, 0.24) 0 0.76px, transparent 1px),
+    radial-gradient(circle at center, rgba(240, 240, 250, 0.18) 0 1.1px, transparent 1.35px);
+  --constellation-workspace-theme-deep-field-dust:
+    radial-gradient(ellipse 56% 18% at 18% 30%, rgba(141, 183, 255, 0.11), transparent 74%),
+    radial-gradient(ellipse 44% 16% at 74% 24%, rgba(213, 161, 77, 0.068), transparent 72%),
+    radial-gradient(ellipse 62% 18% at 52% 78%, rgba(240, 240, 250, 0.05), transparent 76%);
+  --constellation-workspace-theme-scene-glow:
+    radial-gradient(ellipse 76% 52% at 28% 24%, rgba(141, 183, 255, 0.14), transparent 76%),
+    radial-gradient(ellipse 56% 42% at 60% 34%, rgba(240, 240, 250, 0.05), transparent 74%);
+  --constellation-workspace-theme-scene-warmth:
+    radial-gradient(ellipse 82% 56% at 72% 72%, rgba(213, 161, 77, 0.07), transparent 78%),
+    radial-gradient(ellipse 64% 48% at 42% 82%, rgba(87, 207, 160, 0.045), transparent 76%);
+
+  --constellation-screen-frame-scene-glow:
+    radial-gradient(circle at 34% 28%, rgba(141, 183, 255, 0.12), transparent 36%),
+    radial-gradient(circle at 66% 68%, rgba(141, 183, 255, 0.08), transparent 42%);
+  --constellation-screen-frame-scene-warmth:
+    radial-gradient(circle at 74% 78%, rgba(213, 161, 77, 0.12), transparent 38%),
+    radial-gradient(circle at 54% 52%, rgba(213, 161, 77, 0.04), transparent 46%);
+  --constellation-screen-frame-hero-border: rgba(240, 240, 250, 0.08);
+  --constellation-screen-frame-hero-eyebrow: rgba(240, 240, 250, 0.56);
+  --constellation-screen-frame-hero-title: #ffffff;
+  --constellation-screen-frame-hero-subtitle: rgba(240, 240, 250, 0.52);
+
+  --constellation-data-table-scroll-border: rgba(255, 255, 255, 0.06);
+  --constellation-data-table-scroll-background:
+    linear-gradient(180deg, rgba(11, 15, 24, 0.82), rgba(8, 11, 18, 0.72)),
+    radial-gradient(circle at 0% 0%, rgba(141, 183, 255, 0.08), transparent 32%);
+  --constellation-data-table-scroll-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 14px 30px rgba(0, 0, 0, 0.12);
+  --constellation-data-table-scrollbar: rgba(255, 255, 255, 0.16);
+  --constellation-data-table-cell-border: rgba(240, 240, 250, 0.06);
+  --constellation-data-table-column: rgba(240, 240, 250, 0.5);
+  --constellation-data-table-cell: rgba(240, 240, 250, 0.8);
+  --constellation-data-table-row-sheen: linear-gradient(90deg, rgba(255, 255, 255, 0.012), transparent 74%);
+  --constellation-data-table-row-hover: rgba(255, 255, 255, 0.035);
+  --constellation-data-table-row-info: rgba(141, 183, 255, 0.05);
+  --constellation-data-table-row-success: rgba(109, 245, 189, 0.05);
+  --constellation-data-table-row-warning: rgba(213, 161, 77, 0.06);
+  --constellation-data-table-row-danger: rgba(219, 110, 130, 0.06);
+  --constellation-data-table-cell-muted: rgba(240, 240, 250, 0.56);
+  --constellation-data-table-cell-info: rgba(196, 220, 255, 0.92);
+  --constellation-data-table-cell-success: rgba(176, 246, 214, 0.94);
+  --constellation-data-table-cell-warning: rgba(255, 228, 173, 0.92);
+  --constellation-data-table-cell-danger: rgba(255, 178, 192, 0.92);
+  --constellation-data-table-empty: rgba(240, 240, 250, 0.5);
+
+  --constellation-thread-header-title: #ffffff;
+  --constellation-thread-header-activity-text: rgba(240, 240, 250, 0.42);
+  --constellation-thread-header-activity-dot: rgba(240, 240, 250, 0.34);
+  --constellation-thread-header-activity-ring: rgba(240, 240, 250, 0.12);
+  --constellation-thread-header-working-text: rgba(159, 232, 196, 0.86);
+  --constellation-thread-header-working-dot: rgba(107, 220, 168, 0.96);
+  --constellation-thread-header-working-ring: rgba(107, 220, 168, 0.22);
+  --constellation-thread-header-working-glow: rgba(107, 220, 168, 0.24);
+  --constellation-thread-run-label: rgba(240, 240, 250, 0.72);
+  --constellation-thread-run-time: rgba(240, 240, 250, 0.4);
+  --constellation-thread-run-value: rgba(255, 255, 255, 0.86);
+  --constellation-thread-run-divider: rgba(240, 240, 250, 0.22);
+  --constellation-thread-scroll-cue-border: rgba(240, 240, 250, 0.08);
+  --constellation-thread-scroll-cue-background: rgba(10, 14, 22, 0.72);
+  --constellation-thread-scroll-cue-text: rgba(240, 240, 250, 0.72);
+  --constellation-thread-scroll-cue-shadow:
+    0 14px 28px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --constellation-thread-empty-border: rgba(255, 255, 255, 0.05);
+  --constellation-thread-empty-background: rgba(255, 255, 255, 0.03);
+  --constellation-thread-empty-text: rgba(240, 240, 250, 0.52);
+  --constellation-thread-stage-backdrop-filter: saturate(0.78) brightness(0.6) blur(3px);
+  --constellation-thread-stage-backdrop-opacity: 0.74;
+  --constellation-thread-stage-backdrop-scale: 0.985;
+  --constellation-thread-stage-panel-shadow-well:
+    radial-gradient(
+      116% 150% at 50% 48%,
+      rgba(2, 4, 9, 0.68) 0%,
+      rgba(3, 5, 11, 0.54) 32%,
+      rgba(4, 7, 13, 0.24) 62%,
+      rgba(4, 7, 13, 0.06) 82%,
+      transparent 100%
+    );
+  --constellation-thread-stage-panel-edge-glass:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(9, 14, 23, 0.18) 11%,
+      rgba(9, 14, 23, 0.34) 24%,
+      rgba(9, 14, 23, 0.38) 76%,
+      rgba(9, 14, 23, 0.18) 89%,
+      transparent 100%
+    );
+  --constellation-thread-reading-core-background:
+    linear-gradient(180deg, rgba(5, 8, 15, 1), rgba(4, 7, 13, 1));
+  --constellation-thread-reading-core-border: rgba(255, 255, 255, 0.045);
+  --constellation-thread-reading-core-shadow:
+    0 28px 88px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.032);
+  --constellation-thread-reading-edge-glow:
+    radial-gradient(80% 110% at 50% 50%, rgba(4, 7, 13, 0.4), rgba(4, 7, 13, 0.14) 52%, transparent 78%);
+  --constellation-thread-composer-background:
+    linear-gradient(180deg, rgba(11, 15, 23, 1), rgba(8, 11, 18, 1));
+  --constellation-thread-composer-border: rgba(255, 255, 255, 0.055);
+  --constellation-thread-composer-shadow: none;
+  --constellation-thread-message-illo-accent: rgba(240, 240, 250, 0.34);
+  --constellation-thread-message-illo-core: rgba(240, 240, 250, 0.04);
+  --constellation-thread-message-illo-owner: rgba(240, 240, 250, 0.92);
+  --constellation-thread-message-illo-body: rgba(240, 240, 250, 0.88);
+  --constellation-thread-message-illo-meta: rgba(240, 240, 250, 0.52);
+  --constellation-thread-message-user-shell-base: rgba(8, 12, 19, 0.96);
+  --constellation-thread-message-user-border-base: rgba(255, 255, 255, 0.065);
+  --constellation-thread-message-user-fill-strength: 0%;
+  --constellation-thread-message-user-border-strength: 0%;
+  --constellation-thread-message-user-shadow: none;
+  --constellation-thread-message-author: rgba(240, 240, 250, 0.92);
+  --constellation-thread-message-heading: rgba(240, 240, 250, 0.96);
+  --constellation-thread-message-image-border: rgba(255, 255, 255, 0.07);
+  --constellation-thread-message-image-background: rgba(8, 12, 19, 0.72);
+  --constellation-thread-message-file-border: rgba(255, 255, 255, 0.07);
+  --constellation-thread-message-file-background: rgba(255, 255, 255, 0.04);
+  --constellation-thread-message-file-text: rgba(240, 240, 250, 0.86);
+  --constellation-thread-run-surface-border: rgba(255, 255, 255, 0.07);
+  --constellation-thread-run-surface-background: linear-gradient(180deg, rgba(10, 14, 22, 0.94), rgba(8, 12, 19, 0.9));
+  --constellation-thread-run-surface-shadow: 0 14px 30px rgba(0, 0, 0, 0.16);
+  --constellation-thread-work-summary-text: rgba(240, 240, 250, 0.5);
+  --constellation-thread-work-summary-hover-text: rgba(240, 240, 250, 0.78);
+  --constellation-thread-work-divider: rgba(240, 240, 250, 0.08);
+  --constellation-thread-work-thought-text: rgba(240, 240, 250, 0.88);
+  --constellation-thread-work-tool-text: rgba(240, 240, 250, 0.48);
+  --constellation-thread-work-tool-icon-text: rgba(240, 240, 250, 0.38);
+  --constellation-thread-work-tool-code-background: rgba(240, 240, 250, 0.055);
+  --constellation-thread-work-tool-code-text: rgba(240, 240, 250, 0.62);
+
+  --constellation-motion-hover-duration: 180ms;
+  --constellation-motion-settle-duration: 240ms;
+  --constellation-motion-ease-lift: cubic-bezier(0.22, 1, 0.36, 1);
+  --constellation-motion-ease-float: cubic-bezier(0.42, 0, 0.18, 1);
+  --constellation-motion-halo-pulse-duration: 5.8s;
+  --constellation-motion-drift-duration: 6.4s;
+  --constellation-motion-ring-drift-duration: 12.8s;
+  --constellation-motion-ring-drift-slow-duration: 16.4s;
+  --constellation-motion-ring-drift-quick-duration: 9.6s;
+}
+
+:root[data-color-scheme='light'] {
+  --constellation-color-text-primary: rgba(21, 30, 39, 0.96);
+  --constellation-color-text-secondary: rgba(49, 63, 76, 0.78);
+  --constellation-color-text-tertiary: rgba(82, 98, 111, 0.66);
+  --constellation-color-text-muted: rgba(92, 108, 121, 0.52);
+
+  --constellation-color-spectral: #315fd6;
+  --constellation-color-spectral-core: rgba(236, 243, 249, 0.98);
+  --constellation-color-spectral-owner: rgba(20, 31, 45, 0.94);
+
+  --constellation-color-amber: #b66c2f;
+  --constellation-color-amber-core: rgba(249, 239, 222, 0.98);
+  --constellation-color-amber-owner: rgba(58, 39, 24, 0.94);
+  --constellation-color-badge-ring: rgba(250, 247, 239, 0.96);
+  --constellation-shadow-astre-spectral:
+    0 0 0 1px rgba(255, 255, 255, 0.82),
+    0 16px 34px rgba(26, 39, 49, 0.12),
+    0 0 32px rgba(49, 95, 214, 0.18);
+  --constellation-shadow-astre-amber:
+    0 0 0 1px rgba(255, 255, 255, 0.82),
+    0 16px 34px rgba(78, 55, 32, 0.13),
+    0 0 32px rgba(182, 108, 47, 0.18);
+
+  --constellation-control-focus-ring: rgba(49, 63, 76, 0.26);
+  --constellation-control-summary: rgba(49, 63, 76, 0.7);
+  --constellation-control-unread: #244fae;
+  --constellation-control-surface-border: rgba(126, 92, 52, 0.1);
+  --constellation-control-surface-background: rgba(255, 253, 247, 0.92);
+  --constellation-control-surface-shadow: 0 14px 34px rgba(54, 70, 82, 0.09);
+  --constellation-control-field-border: rgba(126, 92, 52, 0.11);
+  --constellation-control-field-background: rgba(247, 250, 248, 0.82);
+  --constellation-control-field-placeholder: rgba(82, 98, 111, 0.58);
+  --constellation-control-button-secondary-border: transparent;
+  --constellation-control-button-secondary-text: rgba(42, 55, 68, 0.86);
+  --constellation-control-button-secondary-background: rgba(255, 253, 247, 0.78);
+  --constellation-control-button-secondary-hover-background: rgba(255, 253, 247, 0.98);
+  --constellation-control-button-secondary-hover-text: rgba(18, 27, 36, 0.96);
+  --constellation-control-button-secondary-active-background: rgba(49, 63, 76, 0.075);
+  --constellation-control-button-secondary-active-text: rgba(18, 27, 36, 0.98);
+  --constellation-control-toggle-active-background: rgba(49, 63, 76, 0.08);
+  --constellation-control-toggle-active-text: #18212a;
+  --constellation-system-chrome-background: rgba(255, 253, 247, 0.9);
+  --constellation-system-chrome-border: transparent;
+  --constellation-system-chrome-shadow: 0 14px 34px rgba(54, 70, 82, 0.11);
+  --constellation-system-chrome-text: rgba(49, 63, 76, 0.78);
+  --constellation-system-chrome-text-hover: rgba(18, 27, 36, 0.96);
+  --constellation-system-chrome-active-background: rgba(49, 63, 76, 0.075);
+  --constellation-system-chrome-active-border: transparent;
+  --constellation-system-chrome-active-text: #18212a;
+  --constellation-system-chrome-active-shadow: inset 0 0 0 1px rgba(49, 63, 76, 0.09);
+  --constellation-control-slider-track: rgba(126, 92, 52, 0.16);
+  --constellation-control-slider-knob: #b66c2f;
+
+  --constellation-control-pill-border: rgba(126, 92, 52, 0.1);
+  --constellation-control-pill-background: rgba(247, 250, 248, 0.82);
+  --constellation-control-pill-text: rgba(50, 64, 76, 0.78);
+
+  --constellation-control-pill-active-background: rgba(49, 63, 76, 0.075);
+  --constellation-control-pill-active-text: rgba(18, 27, 36, 0.9);
+
+  --constellation-control-pill-status-background: rgba(20, 120, 93, 0.14);
+  --constellation-control-pill-status-border: rgba(20, 120, 93, 0.26);
+  --constellation-control-pill-status-text: #0f5f4a;
+
+  --constellation-control-pill-complete-background: rgba(20, 120, 93, 0.14);
+  --constellation-control-pill-complete-text: #0d503f;
+
+  --constellation-control-pill-model-background: rgba(49, 95, 214, 0.13);
+  --constellation-control-pill-model-text: #244fae;
+
+  --constellation-control-pill-thinking-background: rgba(182, 108, 47, 0.15);
+  --constellation-control-pill-thinking-text: #7c4617;
+
+  --constellation-control-pill-warning-background: rgba(182, 108, 47, 0.15);
+  --constellation-control-pill-warning-border: rgba(182, 108, 47, 0.28);
+  --constellation-control-pill-warning-text: #7c4617;
+
+  --constellation-control-pill-muted-background: rgba(126, 92, 52, 0.055);
+  --constellation-control-pill-muted-border: rgba(126, 92, 52, 0.09);
+  --constellation-control-pill-muted-text: rgba(82, 98, 111, 0.76);
+  --constellation-control-pill-success-background: rgba(20, 120, 93, 0.14);
+  --constellation-control-pill-success-border: rgba(20, 120, 93, 0.24);
+  --constellation-control-pill-success-text: #0f5f4a;
+  --constellation-control-pill-danger-background: rgba(178, 74, 97, 0.13);
+  --constellation-control-pill-danger-border: rgba(178, 74, 97, 0.24);
+  --constellation-control-pill-danger-text: #8d3148;
+  --constellation-control-pill-info-background: rgba(49, 95, 214, 0.12);
+  --constellation-control-pill-info-border: rgba(49, 95, 214, 0.24);
+  --constellation-control-pill-info-text: #244fae;
+
+  --constellation-label-eyebrow: rgba(82, 98, 111, 0.72);
+  --constellation-label-meta: rgba(82, 98, 111, 0.76);
+  --constellation-section-divider: rgba(126, 92, 52, 0.08);
+  --constellation-section-title: rgba(18, 27, 36, 0.96);
+  --constellation-section-description: rgba(82, 98, 111, 0.74);
+
+  --constellation-surface-panel-border: rgba(126, 92, 52, 0.11);
+  --constellation-surface-panel-separator: rgba(126, 92, 52, 0.08);
+  --constellation-surface-panel-background: rgba(255, 253, 247, 0.94);
+  --constellation-surface-panel-highlight: none;
+  --constellation-surface-panel-shadow: 0 16px 38px rgba(54, 70, 82, 0.11);
+  --constellation-surface-panel-hover-border: rgba(49, 63, 76, 0.14);
+  --constellation-surface-panel-hover-shadow: 0 20px 44px rgba(54, 70, 82, 0.13);
+
+  --constellation-surface-nested-border: rgba(126, 92, 52, 0.09);
+  --constellation-surface-nested-background: rgba(231, 240, 244, 0.62);
+  --constellation-surface-nested-strong-background: rgba(248, 250, 248, 0.84);
+  --constellation-surface-nested-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+
+  --constellation-surface-floating-border: rgba(126, 92, 52, 0.11);
+  --constellation-surface-floating-background: rgba(255, 253, 247, 0.98);
+  --constellation-surface-floating-shadow: 0 24px 56px rgba(54, 70, 82, 0.15);
+  --constellation-surface-floating-highlight: none;
+
+  --constellation-button-primary-background: rgba(33, 47, 61, 0.98);
+  --constellation-button-primary-background-hover: rgba(42, 58, 73, 0.98);
+  --constellation-button-primary-border: rgba(126, 92, 52, 0.16);
+  --constellation-button-primary-border-hover: rgba(126, 92, 52, 0.24);
+  --constellation-button-primary-text: #fffdf7;
+  --constellation-button-primary-shadow:
+    0 16px 34px rgba(54, 70, 82, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --constellation-button-pressed-background: rgba(49, 63, 76, 0.075);
+  --constellation-button-pressed-border: rgba(49, 63, 76, 0.16);
+  --constellation-button-pressed-text: #18212a;
+  --constellation-button-pressed-shadow:
+    0 14px 30px rgba(54, 70, 82, 0.09),
+    0 0 0 1px rgba(255, 255, 255, 0.42) inset;
+  --constellation-button-secondary-background: rgba(248, 250, 248, 0.8);
+  --constellation-button-secondary-background-hover: rgba(255, 253, 247, 0.98);
+  --constellation-button-secondary-border-hover: rgba(49, 63, 76, 0.14);
+  --constellation-button-secondary-shadow: 0 10px 24px rgba(54, 70, 82, 0.08);
+  --constellation-button-quiet-background: rgba(248, 250, 248, 0.58);
+  --constellation-button-quiet-background-hover: rgba(255, 253, 247, 0.88);
+  --constellation-button-quiet-border: transparent;
+  --constellation-button-quiet-border-hover: rgba(49, 63, 76, 0.14);
+  --constellation-button-quiet-text: rgba(49, 63, 76, 0.82);
+  --constellation-button-quiet-shadow: none;
+  --constellation-button-destructive-background: rgba(178, 74, 97, 0.12);
+  --constellation-button-destructive-background-hover: rgba(178, 74, 97, 0.17);
+  --constellation-button-destructive-border: rgba(178, 74, 97, 0.28);
+  --constellation-button-destructive-border-hover: rgba(178, 74, 97, 0.38);
+  --constellation-button-destructive-text: #7e2d43;
+  --constellation-button-destructive-shadow: 0 12px 26px rgba(54, 70, 82, 0.08);
+  --constellation-button-destructive-pressed-background: rgba(178, 74, 97, 0.18);
+  --constellation-button-destructive-pressed-border: rgba(178, 74, 97, 0.4);
+  --constellation-button-destructive-pressed-text: #712239;
+  --constellation-button-destructive-pressed-shadow: 0 14px 28px rgba(54, 70, 82, 0.1);
+
+  --constellation-icon-button-border: transparent;
+  --constellation-icon-button-text: rgba(49, 63, 76, 0.78);
+  --constellation-icon-button-pressed-text: #18212a;
+  --constellation-icon-button-pressed-border: transparent;
+  --constellation-icon-button-pressed-background: rgba(49, 63, 76, 0.075);
+  --constellation-icon-button-quiet-background: rgba(255, 253, 247, 0.74);
+  --constellation-icon-button-quiet-background-hover: rgba(255, 253, 247, 0.96);
+  --constellation-icon-button-quiet-border-hover: rgba(49, 63, 76, 0.14);
+  --constellation-icon-button-quiet-shadow: 0 10px 22px rgba(54, 70, 82, 0.08);
+  --constellation-icon-button-secondary-background: rgba(255, 253, 247, 0.86);
+  --constellation-icon-button-secondary-background-hover: rgba(255, 253, 247, 0.98);
+  --constellation-icon-button-secondary-border-hover: rgba(49, 63, 76, 0.14);
+  --constellation-icon-button-secondary-shadow: 0 12px 28px rgba(54, 70, 82, 0.1);
+
+  --constellation-select-chip-trigger-border: transparent;
+  --constellation-select-chip-trigger-background: rgba(248, 250, 248, 0.78);
+  --constellation-select-chip-trigger-text: rgba(49, 63, 76, 0.84);
+  --constellation-select-chip-trigger-bare-text: rgba(49, 63, 76, 0.72);
+  --constellation-select-chip-trigger-hover-background: rgba(255, 253, 247, 0.96);
+  --constellation-select-chip-trigger-hover-text: rgba(18, 27, 36, 0.96);
+  --constellation-select-chip-trigger-open-border: rgba(49, 63, 76, 0.14);
+  --constellation-select-chip-trigger-open-background: rgba(255, 253, 247, 0.98);
+  --constellation-select-chip-trigger-open-text: rgba(18, 27, 36, 0.96);
+  --constellation-select-chip-trigger-open-shadow: none;
+  --constellation-select-chip-menu-border: rgba(126, 92, 52, 0.11);
+  --constellation-select-chip-menu-background: rgba(255, 253, 247, 0.98);
+  --constellation-select-chip-menu-shadow: 0 24px 50px rgba(54, 70, 82, 0.15);
+  --constellation-select-chip-option-text: rgba(49, 63, 76, 0.84);
+  --constellation-select-chip-option-hover-background: rgba(255, 253, 247, 0.88);
+  --constellation-select-chip-option-hover-text: rgba(18, 27, 36, 0.96);
+  --constellation-select-chip-option-active-background: rgba(49, 63, 76, 0.075);
+  --constellation-select-chip-option-active-text: rgba(18, 27, 36, 0.98);
+  --constellation-select-chip-option-description: rgba(82, 98, 111, 0.66);
+  --constellation-select-chip-shortcut-background: rgba(126, 92, 52, 0.06);
+  --constellation-select-chip-shortcut-text: rgba(82, 98, 111, 0.76);
+  --constellation-select-chip-indicator-border: rgba(126, 92, 52, 0.12);
+  --constellation-select-chip-indicator-background: rgba(248, 250, 248, 0.88);
+  --constellation-select-chip-indicator-active-border: rgba(49, 95, 214, 0.36);
+  --constellation-select-chip-indicator-active-background: rgba(49, 95, 214, 0.9);
+  --constellation-select-chip-indicator-active-shadow: 0 0 16px rgba(49, 95, 214, 0.18);
+
+  --constellation-composer-action-accent: rgba(40, 56, 72, 0.78);
+  --constellation-composer-action-core: rgba(40, 56, 72, 0.96);
+  --constellation-composer-action-owner: rgba(255, 255, 255, 0.94);
+  --constellation-composer-action-glow: none;
+  --constellation-composer-action-button-border: rgba(126, 92, 52, 0.14);
+  --constellation-composer-action-button-border-hover: rgba(126, 92, 52, 0.22);
+  --constellation-composer-action-button-background: rgba(33, 47, 61, 0.98);
+  --constellation-composer-action-button-background-hover: rgba(42, 58, 73, 0.98);
+  --constellation-composer-action-button-text: rgba(255, 253, 247, 0.94);
+  --constellation-composer-action-button-text-hover: rgba(255, 255, 255, 0.98);
+  --constellation-composer-action-button-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -8px 12px rgba(0, 0, 0, 0.16);
+  --constellation-composer-action-button-shadow-hover:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    inset 0 -8px 12px rgba(0, 0, 0, 0.18);
+  --constellation-composer-action-button-working-border: rgba(126, 92, 52, 0.14);
+  --constellation-composer-action-button-working-background: rgba(33, 47, 61, 0.98);
+  --constellation-composer-action-button-working-text: rgba(255, 253, 247, 0.96);
+  --constellation-composer-action-button-working-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -8px 12px rgba(0, 0, 0, 0.14);
+  --constellation-composer-orb-border: rgba(126, 92, 52, 0.1);
+  --constellation-composer-orb-background: rgba(248, 250, 248, 0.8);
+  --constellation-composer-orb-text: rgba(49, 63, 76, 0.8);
+  --constellation-composer-orb-bare-text: rgba(49, 63, 76, 0.74);
+  --constellation-composer-orb-hover-background: rgba(255, 253, 247, 0.98);
+  --constellation-composer-orb-hover-text: rgba(18, 27, 36, 0.94);
+  --constellation-composer-orb-disabled-opacity: 0.46;
+  --constellation-composer-action-working-background: rgba(33, 47, 61, 0.98);
+  --constellation-composer-action-working-shadow:
+    0 16px 34px rgba(54, 70, 82, 0.12),
+    0 0 0 1px rgba(255, 255, 255, 0.28) inset,
+    0 0 20px rgba(54, 70, 82, 0.1);
+  --constellation-composer-shell-border: rgba(126, 92, 52, 0.12);
+  --constellation-composer-shell-edge: rgba(126, 92, 52, 0.08);
+  --constellation-composer-shell-background: rgba(255, 253, 247, 0.96);
+  --constellation-composer-shell-shadow:
+    0 22px 52px rgba(54, 70, 82, 0.11),
+    0 0 18px rgba(49, 95, 214, 0.045);
+  --constellation-composer-shell-drag-border: rgba(49, 95, 214, 0.28);
+  --constellation-composer-shell-drag-shadow:
+    0 28px 72px rgba(54, 70, 82, 0.14),
+    0 0 0 1px rgba(49, 95, 214, 0.14) inset,
+    0 0 30px rgba(49, 95, 214, 0.14);
+  --constellation-composer-kicker: #7c4617;
+  --constellation-composer-textarea: rgba(18, 27, 36, 0.94);
+  --constellation-composer-placeholder: rgba(82, 98, 111, 0.58);
+  --constellation-skill-mention-background: rgba(49, 63, 76, 0.075);
+  --constellation-skill-mention-border: rgba(49, 63, 76, 0.1);
+  --constellation-skill-mention-text: rgba(18, 27, 36, 0.98);
+  --constellation-skill-mention-sigil: rgba(49, 63, 76, 0.72);
+  --constellation-skill-mention-selection: rgba(49, 63, 76, 0.18);
+  --constellation-composer-attachment-background: rgba(248, 250, 248, 0.86);
+  --constellation-composer-attachment-border: rgba(126, 92, 52, 0.1);
+  --constellation-composer-attachment-text: rgba(49, 63, 76, 0.84);
+  --constellation-composer-attachment-remove: rgba(82, 98, 111, 0.76);
+  --constellation-chat-composer-background: rgba(255, 253, 247, 0.97);
+  --constellation-chat-composer-border: rgba(126, 92, 52, 0.1);
+  --constellation-chat-composer-shadow: 0 14px 34px rgba(54, 70, 82, 0.08);
+  --constellation-chat-composer-thread-background: rgba(255, 253, 247, 0.97);
+  --constellation-chat-composer-thread-border: rgba(126, 92, 52, 0.1);
+  --constellation-chat-composer-thread-shadow: 0 10px 26px rgba(54, 70, 82, 0.07);
+  --constellation-chat-composer-supporting: rgba(82, 98, 111, 0.72);
+
+  --constellation-toolbar-shell-border: transparent;
+  --constellation-toolbar-shell-background: rgba(255, 253, 247, 0.86);
+  --constellation-toolbar-shell-shadow: 0 14px 34px rgba(54, 70, 82, 0.1);
+
+  --constellation-utility-panel-surface-border: rgba(126, 92, 52, 0.1);
+  --constellation-utility-panel-surface-background: rgba(255, 253, 247, 0.98);
+  --constellation-utility-panel-surface-shadow: 0 24px 58px rgba(54, 70, 82, 0.14);
+  --constellation-utility-panel-surface-highlight: none;
+  --constellation-utility-panel-header-border: rgba(126, 92, 52, 0.08);
+  --constellation-utility-panel-tab-text: rgba(82, 98, 111, 0.74);
+  --constellation-utility-panel-tab-hover-text: rgba(18, 27, 36, 0.92);
+  --constellation-utility-panel-tab-active-text: rgba(18, 27, 36, 0.96);
+  --constellation-utility-panel-tab-active-border: rgba(49, 95, 214, 0.48);
+  --constellation-utility-panel-close-border: transparent;
+  --constellation-utility-panel-close-background: rgba(248, 250, 248, 0.78);
+  --constellation-utility-panel-close-text: rgba(49, 63, 76, 0.82);
+  --constellation-utility-panel-close-hover-background: rgba(255, 253, 247, 0.98);
+  --constellation-utility-panel-close-hover-border: rgba(182, 108, 47, 0.18);
+  --constellation-utility-panel-close-hover-text: rgba(18, 27, 36, 0.94);
+  --constellation-utility-panel-scrollbar: rgba(126, 92, 52, 0.16);
+
+  --constellation-notification-menu-border: rgba(126, 92, 52, 0.11);
+  --constellation-notification-menu-background: rgba(255, 253, 247, 0.98);
+  --constellation-notification-menu-shadow: 0 26px 64px rgba(54, 70, 82, 0.16);
+  --constellation-notification-title: rgba(18, 27, 36, 0.96);
+  --constellation-notification-subtitle: rgba(82, 98, 111, 0.72);
+  --constellation-notification-mark-all: #244fae;
+  --constellation-notification-empty-border: rgba(126, 92, 52, 0.12);
+  --constellation-notification-empty-text: rgba(82, 98, 111, 0.72);
+  --constellation-notification-row-border: transparent;
+  --constellation-notification-row-background: rgba(248, 250, 248, 0.78);
+  --constellation-notification-row-hover-border: rgba(182, 108, 47, 0.18);
+  --constellation-notification-row-hover-background: rgba(255, 253, 247, 0.96);
+  --constellation-notification-avatar-text: rgba(255, 253, 247, 0.96);
+  --constellation-notification-meta: rgba(82, 98, 111, 0.68);
+  --constellation-notification-body: rgba(49, 63, 76, 0.82);
+  --constellation-notification-occurrence: #7c4617;
+
+  --constellation-chat-shell-sidebar-border: rgba(126, 92, 52, 0.08);
+  --constellation-chat-shell-footer-fade: linear-gradient(180deg, rgba(248, 250, 248, 0), rgba(236, 245, 247, 0.94) 20%);
+  --constellation-chat-unread-muted-background: rgba(126, 92, 52, 0.055);
+  --constellation-chat-unread-muted-border: rgba(126, 92, 52, 0.09);
+  --constellation-chat-unread-muted-text: rgba(82, 98, 111, 0.76);
+  --constellation-chat-unread-divider-text: rgba(82, 98, 111, 0.74);
+  --constellation-chat-unread-divider-line:
+    linear-gradient(90deg, transparent, rgba(126, 92, 52, 0.16), transparent);
+  --constellation-chat-typing-text: rgba(82, 98, 111, 0.72);
+  --constellation-chat-typing-dot: rgba(49, 95, 214, 0.82);
+  --constellation-chat-typing-dot-shadow: 0 0 10px rgba(49, 95, 214, 0.2);
+  --constellation-chat-message-summary: rgba(18, 27, 36, 0.94);
+  --constellation-chat-message-system-border: rgba(126, 92, 52, 0.1);
+  --constellation-chat-message-system-text: rgba(49, 63, 76, 0.78);
+  --constellation-chat-attachment-border: rgba(126, 92, 52, 0.1);
+  --constellation-chat-attachment-background: rgba(248, 250, 248, 0.78);
+  --constellation-chat-attachment-image-border: rgba(126, 92, 52, 0.1);
+  --constellation-chat-attachment-label: rgba(18, 27, 36, 0.94);
+  --constellation-chat-attachment-detail: rgba(82, 98, 111, 0.72);
+  --constellation-chat-thread-summary-border: rgba(49, 95, 214, 0.22);
+  --constellation-chat-thread-summary-background: rgba(49, 95, 214, 0.1);
+  --constellation-chat-thread-summary-meta: rgba(82, 98, 111, 0.72);
+
+  --constellation-callout-border: rgba(182, 108, 47, 0.24);
+  --constellation-callout-title: #7c4617;
+  --constellation-callout-text: rgba(82, 98, 111, 0.76);
+
+  --constellation-presence-seed-illo-accent: rgba(49, 63, 76, 0.24);
+  --constellation-presence-seed-illo-core: rgba(49, 63, 76, 0.08);
+  --constellation-presence-seed-illo-owner: rgba(18, 27, 36, 0.92);
+  --constellation-presence-seed-illo-ring: rgba(49, 63, 76, 0.16);
+  --constellation-presence-seed-illo-halo: rgba(49, 63, 76, 0.12);
+  --constellation-presence-seed-illo-shadow:
+    inset 0 0 0 1px rgba(49, 63, 76, 0.08),
+    0 0 calc(var(--seed-size) * 0.8) rgba(49, 95, 214, 0.1);
+  --constellation-presence-seed-user-core-base: rgba(255, 252, 244, 0.94);
+  --constellation-presence-seed-user-core-accent-strength: 22%;
+  --constellation-presence-seed-user-owner-base: rgba(24, 34, 45, 0.9);
+  --constellation-presence-seed-user-owner-accent-strength: 20%;
+
+  --constellation-workspace-theme-background:
+    radial-gradient(ellipse 84% 48% at 50% -12%, rgba(255, 255, 255, 0.96), transparent 60%),
+    radial-gradient(ellipse 58% 34% at 18% 14%, rgba(56, 147, 205, 0.18), transparent 62%),
+    radial-gradient(ellipse 58% 38% at 84% 18%, rgba(77, 181, 169, 0.14), transparent 64%),
+    radial-gradient(ellipse 92% 62% at 50% 78%, rgba(47, 127, 158, 0.1), transparent 74%),
+    radial-gradient(ellipse 76% 54% at 30% 96%, rgba(182, 108, 47, 0.038), transparent 74%),
+    linear-gradient(180deg, #e5f8ff 0%, #f8fbf6 44%, #dceef1 100%);
+  --constellation-workspace-theme-star-color-a: rgba(21, 30, 39, 0.055);
+  --constellation-workspace-theme-star-color-b: rgba(47, 127, 158, 0.06);
+  --constellation-workspace-theme-star-color-c: rgba(255, 255, 255, 0.22);
+  --constellation-workspace-theme-star-opacity: 0.34;
+  --constellation-workspace-theme-deep-field-opacity: 0;
+  --constellation-workspace-theme-deep-field-nebula: none;
+  --constellation-workspace-theme-deep-field-stars: none;
+  --constellation-workspace-theme-deep-field-dust: none;
+  --constellation-workspace-theme-scene-glow:
+    radial-gradient(ellipse 72% 54% at 36% 28%, rgba(72, 159, 210, 0.18), transparent 76%),
+    radial-gradient(ellipse 56% 42% at 66% 34%, rgba(255, 255, 255, 0.24), transparent 78%);
+  --constellation-workspace-theme-scene-warmth:
+    radial-gradient(ellipse 82% 56% at 74% 72%, rgba(77, 181, 169, 0.12), transparent 78%),
+    radial-gradient(ellipse 64% 48% at 42% 82%, rgba(182, 108, 47, 0.045), transparent 76%);
+  --constellation-workspace-theme-surface-ripples:
+    radial-gradient(ellipse 70% 86% at 50% -20%, rgba(255, 255, 255, 0.72), transparent 58%),
+    repeating-radial-gradient(ellipse 92% 54% at 50% -18%, rgba(255, 255, 255, 0.22) 0 1px, transparent 1px 18px),
+    radial-gradient(ellipse 68% 24% at 50% 18%, rgba(47, 127, 158, 0.08), transparent 70%);
+  --constellation-workspace-theme-surface-opacity: 0.74;
+  --constellation-workspace-theme-color-tide:
+    radial-gradient(ellipse 44% 30% at 18% 30%, rgba(56, 147, 205, 0.3), transparent 72%),
+    radial-gradient(ellipse 38% 28% at 78% 24%, rgba(77, 181, 169, 0.26), transparent 72%),
+    radial-gradient(ellipse 52% 34% at 58% 78%, rgba(47, 127, 158, 0.18), transparent 74%),
+    radial-gradient(ellipse 34% 24% at 34% 72%, rgba(255, 255, 255, 0.32), transparent 72%);
+  --constellation-workspace-theme-color-tide-opacity: 0.82;
+  --constellation-workspace-theme-color-tide-blend-mode: normal;
+  --constellation-workspace-theme-color-current:
+    linear-gradient(
+      105deg,
+      transparent 0 9%,
+      rgba(255, 255, 255, 0.28) 17%,
+      rgba(56, 147, 205, 0.24) 27%,
+      transparent 42%,
+      rgba(77, 181, 169, 0.24) 58%,
+      rgba(255, 255, 255, 0.2) 68%,
+      transparent 84% 100%
+    );
+  --constellation-workspace-theme-color-current-alt:
+    linear-gradient(
+      78deg,
+      transparent 0 14%,
+      rgba(72, 159, 210, 0.2) 28%,
+      rgba(255, 255, 255, 0.22) 42%,
+      transparent 58%,
+      rgba(77, 181, 169, 0.2) 72%,
+      transparent 88% 100%
+    );
+  --constellation-workspace-theme-color-current-opacity: 0.86;
+  --constellation-workspace-theme-wave-color: rgba(255, 255, 255, 0.72);
+  --constellation-workspace-theme-wave-opacity: 0.38;
+  --constellation-workspace-theme-wave-stroke-width: 1.15px;
+  --constellation-workspace-theme-rays:
+    linear-gradient(104deg, transparent 0 18%, rgba(255, 255, 255, 0.32) 24%, transparent 36%),
+    linear-gradient(78deg, transparent 0 38%, rgba(77, 181, 169, 0.18) 47%, transparent 58%),
+    linear-gradient(126deg, transparent 0 54%, rgba(72, 159, 210, 0.14) 61%, transparent 70%);
+  --constellation-workspace-theme-rays-opacity: 0.46;
+  /* Keep Daylight's water field static; animating these blended full-screen layers is expensive. */
+  --constellation-workspace-theme-water-animation-state: paused;
+
+  --constellation-page-frame-theme-scene-glow:
+    radial-gradient(circle at 30% 24%, rgba(49, 95, 214, 0.12), transparent 34%),
+    radial-gradient(circle at 68% 66%, rgba(47, 127, 158, 0.08), transparent 42%);
+  --constellation-page-frame-theme-scene-warmth:
+    radial-gradient(circle at 74% 78%, rgba(182, 108, 47, 0.1), transparent 38%),
+    radial-gradient(circle at 56% 50%, rgba(173, 93, 132, 0.05), transparent 46%);
+  --constellation-page-frame-theme-header-border: rgba(126, 92, 52, 0.08);
+  --constellation-page-frame-theme-eyebrow: rgba(82, 98, 111, 0.72);
+  --constellation-page-frame-theme-title: rgba(18, 27, 36, 0.96);
+  --constellation-page-frame-theme-subtitle: rgba(82, 98, 111, 0.74);
+  --constellation-screen-frame-scene-glow:
+    radial-gradient(circle at 34% 28%, rgba(49, 95, 214, 0.12), transparent 36%),
+    radial-gradient(circle at 66% 68%, rgba(47, 127, 158, 0.08), transparent 42%);
+  --constellation-screen-frame-scene-warmth:
+    radial-gradient(circle at 74% 78%, rgba(182, 108, 47, 0.1), transparent 38%),
+    radial-gradient(circle at 54% 52%, rgba(173, 93, 132, 0.05), transparent 46%);
+  --constellation-screen-frame-hero-border: rgba(126, 92, 52, 0.08);
+  --constellation-screen-frame-hero-eyebrow: rgba(82, 98, 111, 0.72);
+  --constellation-screen-frame-hero-title: rgba(18, 27, 36, 0.96);
+  --constellation-screen-frame-hero-subtitle: rgba(82, 98, 111, 0.74);
+
+  --constellation-data-table-scroll-border: rgba(126, 92, 52, 0.09);
+  --constellation-data-table-scroll-background: rgba(255, 253, 247, 0.94);
+  --constellation-data-table-scroll-shadow: 0 12px 26px rgba(54, 70, 82, 0.08);
+  --constellation-data-table-scrollbar: rgba(126, 92, 52, 0.16);
+  --constellation-data-table-cell-border: rgba(126, 92, 52, 0.08);
+  --constellation-data-table-column: rgba(82, 98, 111, 0.72);
+  --constellation-data-table-cell: rgba(49, 63, 76, 0.86);
+  --constellation-data-table-row-sheen: none;
+  --constellation-data-table-row-hover: rgba(255, 253, 247, 0.66);
+  --constellation-data-table-row-info: rgba(49, 95, 214, 0.09);
+  --constellation-data-table-row-success: rgba(20, 120, 93, 0.09);
+  --constellation-data-table-row-warning: rgba(182, 108, 47, 0.1);
+  --constellation-data-table-row-danger: rgba(178, 74, 97, 0.09);
+  --constellation-data-table-cell-muted: rgba(82, 98, 111, 0.76);
+  --constellation-data-table-cell-info: #244fae;
+  --constellation-data-table-cell-success: #0f5f4a;
+  --constellation-data-table-cell-warning: #7c4617;
+  --constellation-data-table-cell-danger: #8d3148;
+  --constellation-data-table-empty: rgba(82, 98, 111, 0.74);
+
+  --constellation-thread-header-title: rgba(18, 27, 36, 0.96);
+  --constellation-thread-header-activity-text: rgba(82, 98, 111, 0.58);
+  --constellation-thread-header-activity-dot: rgba(82, 98, 111, 0.34);
+  --constellation-thread-header-activity-ring: rgba(82, 98, 111, 0.14);
+  --constellation-thread-header-working-text: rgba(20, 112, 82, 0.82);
+  --constellation-thread-header-working-dot: rgba(34, 150, 104, 0.9);
+  --constellation-thread-header-working-ring: rgba(34, 150, 104, 0.2);
+  --constellation-thread-header-working-glow: rgba(34, 150, 104, 0.16);
+  --constellation-thread-run-label: rgba(49, 63, 76, 0.74);
+  --constellation-thread-run-time: rgba(82, 98, 111, 0.56);
+  --constellation-thread-run-value: rgba(18, 27, 36, 0.86);
+  --constellation-thread-run-divider: rgba(82, 98, 111, 0.26);
+  --constellation-thread-scroll-cue-border: rgba(26, 39, 49, 0.12);
+  --constellation-thread-scroll-cue-background: rgba(248, 250, 248, 0.9);
+  --constellation-thread-scroll-cue-text: rgba(49, 63, 76, 0.82);
+  --constellation-thread-scroll-cue-shadow: 0 12px 26px rgba(54, 70, 82, 0.08);
+  --constellation-thread-empty-border: rgba(126, 92, 52, 0.1);
+  --constellation-thread-empty-background: rgba(248, 250, 248, 0.66);
+  --constellation-thread-empty-text: rgba(82, 98, 111, 0.72);
+  --constellation-thread-stage-backdrop-filter: saturate(0.98) brightness(1) blur(1.4px);
+  --constellation-thread-stage-backdrop-opacity: 0.94;
+  --constellation-thread-stage-backdrop-scale: 0.992;
+  --constellation-thread-stage-panel-shadow-well: none;
+  --constellation-thread-stage-panel-edge-glass: none;
+  --constellation-thread-reading-core-background: #fffdf7;
+  --constellation-thread-reading-core-border: rgba(126, 92, 52, 0.1);
+  --constellation-thread-reading-core-shadow: 0 24px 66px rgba(54, 70, 82, 0.11);
+  --constellation-thread-reading-edge-glow: none;
+  --constellation-thread-composer-background: #fffdf7;
+  --constellation-thread-composer-border: rgba(126, 92, 52, 0.1);
+  --constellation-thread-composer-shadow: none;
+  --constellation-thread-message-illo-accent: rgba(26, 39, 49, 0.2);
+  --constellation-thread-message-illo-core: rgba(248, 250, 248, 0.34);
+  --constellation-thread-message-illo-owner: rgba(18, 27, 36, 0.94);
+  --constellation-thread-message-illo-body: rgba(32, 45, 59, 0.92);
+  --constellation-thread-message-illo-meta: rgba(82, 98, 111, 0.6);
+  --constellation-thread-message-user-shell-base: rgba(248, 250, 248, 0.9);
+  --constellation-thread-message-user-border-base: rgba(126, 92, 52, 0.1);
+  --constellation-thread-message-user-fill-strength: 0%;
+  --constellation-thread-message-user-border-strength: 0%;
+  --constellation-thread-message-user-shadow: none;
+  --constellation-thread-message-author: rgba(18, 27, 36, 0.9);
+  --constellation-thread-message-heading: rgba(18, 27, 36, 0.92);
+  --constellation-thread-message-image-border: rgba(126, 92, 52, 0.1);
+  --constellation-thread-message-image-background: rgba(231, 240, 244, 0.84);
+  --constellation-thread-message-file-border: rgba(126, 92, 52, 0.1);
+  --constellation-thread-message-file-background: rgba(248, 250, 248, 0.68);
+  --constellation-thread-message-file-text: rgba(49, 63, 76, 0.88);
+  --constellation-thread-run-surface-border: rgba(26, 39, 49, 0.12);
+  --constellation-thread-run-surface-background: linear-gradient(180deg, rgba(255, 253, 247, 0.94), rgba(231, 240, 244, 0.9));
+  --constellation-thread-run-surface-shadow:
+    0 16px 30px rgba(26, 39, 49, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.38);
+  --constellation-thread-work-summary-text: rgba(82, 98, 111, 0.72);
+  --constellation-thread-work-summary-hover-text: rgba(32, 45, 59, 0.9);
+  --constellation-thread-work-divider: rgba(26, 39, 49, 0.1);
+  --constellation-thread-work-thought-text: rgba(32, 45, 59, 0.92);
+  --constellation-thread-work-tool-text: rgba(82, 98, 111, 0.66);
+  --constellation-thread-work-tool-icon-text: rgba(82, 98, 111, 0.56);
+  --constellation-thread-work-tool-code-background: rgba(26, 39, 49, 0.055);
+  --constellation-thread-work-tool-code-text: rgba(49, 63, 76, 0.76);
+
+  --constellation-nav-rail-brand-mark-background: #fffdf7;
+  --constellation-nav-rail-brand-mark-color: #18212a;
+  --constellation-nav-rail-background: rgba(255, 253, 247, 0.88);
+  --constellation-nav-rail-border: transparent;
+  --constellation-nav-rail-shadow: 0 14px 34px rgba(54, 70, 82, 0.11);
+  --constellation-nav-rail-backdrop-filter: none;
+  --constellation-nav-rail-header-border: transparent;
+  --constellation-nav-rail-item-color: rgba(49, 63, 76, 0.78);
+  --constellation-nav-rail-item-hover-color: rgba(18, 27, 36, 0.94);
+  --constellation-nav-rail-item-active-background: transparent;
+  --constellation-nav-rail-item-active-color: #18212a;
+  --constellation-nav-rail-item-active-shadow:
+    inset 0 0 0 1px rgba(49, 63, 76, 0.28),
+    0 8px 18px rgba(54, 70, 82, 0.06);
+  --constellation-nav-rail-glyph-color: rgba(49, 63, 76, 0.8);
+  --constellation-nav-rail-active-glyph-color: #18212a;
+  --constellation-nav-rail-footer-muted: rgba(82, 98, 111, 0.62);
+  --constellation-nav-rail-health-background: rgba(248, 250, 248, 0.72);
+  --constellation-nav-rail-health-color: rgba(49, 63, 76, 0.76);
+  --constellation-nav-rail-health-dot: #315fd6;
+
+  --constellation-page-frame-theme-scene-glow-opacity: 0.9;
+  --constellation-page-frame-theme-scene-warmth-opacity: 0.76;
+
+  --constellation-panel-border-color: var(--constellation-surface-panel-border);
+  --constellation-panel-background: var(--constellation-surface-panel-background);
+  --constellation-panel-backdrop-filter: blur(18px) saturate(1.02);
+  --constellation-panel-hover-border-color: var(--constellation-surface-panel-hover-border);
+
+  --constellation-signal-blob-shell: rgba(255, 253, 247, 0.98);
+  --constellation-signal-blob-fill-working: rgba(255, 253, 247, 0.98);
+  --constellation-signal-blob-fill-idle: rgba(255, 253, 247, 0.98);
+  --constellation-signal-blob-fill-done: rgba(255, 253, 247, 0.98);
+  --constellation-signal-blob-inner-stroke-strength: 7%;
+  --constellation-signal-blob-contour-strength: 18%;
+  --constellation-signal-blob-contour-opacity: 0.2;
+  --constellation-signal-blob-state-bloom-opacity: 0.075;
+  --constellation-signal-blob-rim-glint-opacity: 0.28;
+  --constellation-signal-blob-idle-inner-stroke-strength: 7%;
+  --constellation-signal-blob-idle-contour-strength: 18%;
+  --constellation-signal-blob-idle-contour-opacity: 0.18;
+  --constellation-signal-blob-idle-state-bloom-opacity: 0.07;
+  --constellation-signal-blob-working-inner-stroke-strength: 8%;
+  --constellation-signal-blob-working-contour-strength: 22%;
+  --constellation-signal-blob-working-contour-opacity: 0.24;
+  --constellation-signal-blob-working-state-bloom-opacity: 0.14;
+  --constellation-signal-blob-working-halo-opacity: 0.18;
+  --constellation-signal-blob-done-inner-stroke-strength: 5%;
+  --constellation-signal-blob-done-contour-strength: 12%;
+  --constellation-signal-blob-done-contour-opacity: 0.1;
+  --constellation-signal-blob-done-state-bloom-opacity: 0.055;
+  --constellation-signal-blob-bloom-treatment-contour-opacity: 0.16;
+  --constellation-signal-blob-symbol-contour-opacity: 0.14;
+  --constellation-signal-blob-symbol-state-bloom-opacity: 0.055;
+  --constellation-signal-blob-attention-contour-strength: 18%;
+  --constellation-signal-blob-attention-contour-opacity: 0.18;
+  --constellation-signal-blob-attention-state-bloom-opacity: 0.08;
+  --constellation-signal-blob-status-shell: rgba(255, 253, 247, 0.94);
+  --constellation-signal-blob-status-border: rgba(26, 39, 49, 0.14);
+  --constellation-signal-blob-status-icon: rgba(32, 43, 54, 0.9);
+  --constellation-signal-blob-halo-border: rgba(255, 253, 247, 0.5);
+  --constellation-signal-blob-halo-opacity: 0.1;
+  --constellation-signal-blob-halo-glow: rgba(49, 95, 214, 0.05);
+  --constellation-signal-blob-surface-border: rgba(255, 253, 247, 0.76);
+  --constellation-signal-blob-surface-background: #fffdf7;
+  --constellation-signal-blob-surface-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.74),
+    0 8px 15px rgba(26, 39, 49, 0.032),
+    0 0 10px rgba(49, 95, 214, 0.035);
+  --constellation-signal-blob-surface-bloom-background:
+    radial-gradient(
+      circle at 50% 48%,
+      rgba(49, 95, 214, 0.02) 0%,
+      rgba(49, 95, 214, 0.008) 46%,
+      transparent 80%
+    );
+  --constellation-signal-blob-surface-bloom-filter: blur(18px);
+  --constellation-signal-blob-surface-contour-shadow:
+    inset 0 0 0 1px rgba(49, 63, 76, 0.035),
+    inset 0 0 10px rgba(255, 255, 255, 0.06),
+    0 0 5px rgba(49, 95, 214, 0.025);
+  --constellation-signal-blob-surface-contour-filter: none;
+  --constellation-signal-blob-surface-contour-blend: normal;
+  --constellation-signal-blob-working-contour-shadow:
+    inset 0 0 0 1px rgba(49, 63, 76, 0.045),
+    inset 0 0 10px rgba(255, 255, 255, 0.065),
+    0 0 6px rgba(49, 95, 214, 0.03);
+  --constellation-signal-blob-icon-color: rgba(49, 63, 76, 0.72);
+  --constellation-signal-blob-icon-filter: none;
+  --constellation-signal-blob-icon-opacity: 0.78;
+  --constellation-signal-blob-owner-dot-shadow:
+    0 0 0 3px var(--constellation-color-badge-ring),
+    0 0 14px rgba(49, 95, 214, 0.12);
+  --constellation-signal-blob-status-cue-shadow:
+    0 0 0 3px var(--constellation-color-badge-ring),
+    0 0 14px color-mix(in srgb, currentColor 28%, transparent);
+  --constellation-signal-blob-attachment-border: rgba(26, 39, 49, 0.12);
+  --constellation-signal-blob-attachment-background: rgba(255, 253, 247, 0.94);
+  --constellation-signal-blob-attachment-color: rgba(49, 63, 76, 0.84);
+  --constellation-signal-blob-attachment-shadow:
+    0 8px 18px rgba(26, 39, 49, 0.1),
+    0 0 12px rgba(49, 95, 214, 0.08);
+  --constellation-signal-blob-working-surface-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.74),
+    0 9px 16px rgba(26, 39, 49, 0.038),
+    0 0 14px rgba(49, 95, 214, 0.05),
+    0 0 24px rgba(49, 95, 214, 0.025);
+  --constellation-signal-blob-done-surface-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.72),
+    0 8px 15px rgba(26, 39, 49, 0.03),
+    0 0 10px rgba(49, 95, 214, 0.025);
+  --constellation-signal-blob-presence-surface-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.74),
+    0 9px 16px rgba(26, 39, 49, 0.036),
+    0 0 14px rgba(49, 95, 214, 0.035);
+  --constellation-signal-blob-risk-surface-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.72),
+    0 10px 20px rgba(26, 39, 49, 0.046),
+    0 0 18px rgba(178, 74, 97, 0.08);
+  --constellation-signal-blob-contour-treatment-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.72),
+    0 8px 15px rgba(26, 39, 49, 0.032),
+    0 0 10px rgba(49, 95, 214, 0.025);
+  --constellation-signal-blob-seed-treatment-background: var(--constellation-signal-blob-surface-background);
+  --constellation-signal-blob-work-pulse-animation: constellation-signal-blob-work-pulse-light 5.6s var(--constellation-motion-ease-float) infinite;
+  --constellation-signal-blob-hover-contour-opacity: 0.5;
+  --constellation-signal-blob-hover-state-bloom-opacity: 0.16;
+  --constellation-signal-blob-hover-rim-glint-opacity: 0.46;
+  --constellation-signal-blob-hover-halo-opacity: 0.12;
+  --constellation-signal-blob-hover-surface-border: rgba(255, 253, 247, 0.82);
+  --constellation-signal-blob-hover-surface-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.76),
+    0 10px 18px rgba(26, 39, 49, 0.04),
+    0 0 16px rgba(49, 95, 214, 0.055),
+    0 0 30px rgba(49, 95, 214, 0.028);
+  --constellation-signal-blob-hover-bloom-background:
+    radial-gradient(
+      circle at 50% 48%,
+      rgba(49, 95, 214, 0.03) 0%,
+      rgba(49, 95, 214, 0.012) 48%,
+      transparent 80%
+    );
+  --constellation-signal-blob-hover-contour-shadow:
+    inset 0 0 0 1px rgba(49, 63, 76, 0.05),
+    inset 0 0 14px rgba(255, 255, 255, 0.08),
+    0 0 10px rgba(49, 95, 214, 0.04);
+
+  --constellation-astre-core-border-color: color-mix(in srgb, var(--astre-tone-color) 12%, rgba(255, 253, 247, 0.58));
+  --constellation-astre-halo-rest-opacity: 0.22;
+  --constellation-astre-halo-pulse-min: 0.16;
+  --constellation-astre-halo-pulse-max: 0.3;
+  --constellation-astre-ring-opacity: 0.52;
+  --constellation-astre-rim-opacity: 0.42;
+  --constellation-astre-archive-opacity: 0.62;
+  --constellation-astre-before-border-color: color-mix(in srgb, var(--astre-tone-color) 24%, rgba(49, 63, 76, 0.16));
+  --constellation-astre-halo-background:
+    radial-gradient(
+      circle at var(--astre-diffuse-x) var(--astre-diffuse-y),
+      color-mix(in srgb, var(--astre-tone-color) 12%, transparent) 0%,
+      color-mix(in srgb, var(--astre-tone-color) 4%, transparent) 40%,
+      transparent 76%
+    );
+  --constellation-astre-halo-filter: blur(20px) saturate(0.96);
+  --constellation-astre-ring-border-color: color-mix(in srgb, var(--astre-rim-soft) 30%, rgba(255, 253, 247, 0.56));
+  --constellation-astre-core-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.7),
+    inset 0 16px 28px rgba(255, 255, 255, 0.34),
+    inset 0 -24px 38px rgba(26, 39, 49, 0.045),
+    0 15px 30px rgba(26, 39, 49, 0.09),
+    0 0 20px var(--astre-core-glow-strong),
+    0 0 48px var(--astre-core-glow-soft);
+  --constellation-astre-core-sheen-background:
+    radial-gradient(circle at var(--astre-diffuse-x) var(--astre-diffuse-y), rgba(255, 255, 255, 0.64) 0%, transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.34), transparent 42%);
+  --constellation-astre-core-sheen-opacity: 0.54;
+  --constellation-astre-core-contour-shadow:
+    inset 0 0 22px rgba(255, 255, 255, 0.14),
+    inset 0 -18px 28px rgba(26, 39, 49, 0.036);
+  --constellation-astre-core-contour-filter: drop-shadow(0 0 3px color-mix(in srgb, var(--astre-rim-hot) 8%, transparent));
+  --constellation-astre-owner-color: color-mix(in srgb, var(--astre-core-color) 72%, rgba(41, 52, 63, 0.8));
+  --constellation-astre-owner-shadow: 0 0 8px color-mix(in srgb, var(--astre-tone-color) 14%, transparent);
+  --constellation-astre-disconnected-outer-ring-opacity: 0.16;
+  --constellation-astre-disconnected-halo-rest-opacity: 0.12;
+  --constellation-astre-disconnected-halo-inner-opacity: 0.1;
+  --constellation-astre-disconnected-halo-pulse-min: 0.1;
+  --constellation-astre-disconnected-halo-pulse-max: 0.16;
+  --constellation-astre-disconnected-ring-opacity: 0.32;
+  --constellation-astre-disconnected-ring-filter: none;
+  --constellation-astre-disconnected-archive-opacity: 0.28;
+  --constellation-astre-disconnected-archive-filter: none;
+  --constellation-astre-disconnected-core-opacity: 0.74;
+  --constellation-astre-disconnected-core-filter: none;
+
+  --constellation-orbit-lane-ring-border-color: color-mix(in srgb, var(--orbit-lane-accent) 18%, rgba(49, 63, 76, 0.48));
+  --constellation-orbit-lane-ring-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.28),
+    0 10px 26px rgba(26, 39, 49, 0.055),
+    0 0 16px color-mix(in srgb, var(--orbit-lane-accent) 10%, transparent);
+  --constellation-orbit-lane-dot-background:
+    radial-gradient(circle at 42% 36%, rgba(255, 255, 255, 0.98) 0 18%, rgba(235, 242, 240, 0.96) 30%, color-mix(in srgb, var(--orbit-lane-accent) 14%, rgba(70, 87, 101, 0.66)) 58%, transparent 78%);
+  --constellation-orbit-lane-dot-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--orbit-lane-accent) 10%, rgba(49, 63, 76, 0.34)),
+    0 1px 2px rgba(26, 39, 49, 0.16),
+    0 0 8px color-mix(in srgb, var(--orbit-lane-accent) 14%, rgba(49, 63, 76, 0.22));
+  --constellation-orbit-lane-dot-filter: saturate(0.98);
+  --constellation-orbit-lane-dot-blend: normal;
+  --constellation-orbit-lane-dot-before-background:
+    linear-gradient(90deg, transparent, color-mix(in srgb, var(--orbit-lane-accent) 10%, rgba(49, 63, 76, 0.5)), transparent);
+  --constellation-orbit-lane-dot-before-opacity: 0.34;
+  --constellation-orbit-lane-dot-after-background:
+    linear-gradient(180deg, transparent, color-mix(in srgb, var(--orbit-lane-accent) 8%, rgba(49, 63, 76, 0.44)), transparent);
+  --constellation-orbit-lane-dot-after-opacity: 0.3;
+  --constellation-orbit-lane-dot-working-background:
+    radial-gradient(circle at 42% 36%, rgba(255, 255, 255, 0.98) 0 18%, color-mix(in srgb, var(--orbit-lane-accent) 20%, rgba(235, 242, 240, 0.96)) 34%, color-mix(in srgb, var(--orbit-lane-accent) 20%, rgba(70, 87, 101, 0.58)) 60%, transparent 78%);
+  --constellation-orbit-lane-dot-working-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--orbit-lane-accent) 18%, rgba(49, 63, 76, 0.32)),
+    0 1px 2px rgba(26, 39, 49, 0.18),
+    0 0 11px color-mix(in srgb, var(--orbit-lane-accent) 28%, transparent),
+    0 0 24px color-mix(in srgb, var(--orbit-lane-accent) 12%, transparent);
+  --constellation-orbit-lane-dot-attention-background:
+    radial-gradient(circle at 42% 36%, rgba(255, 255, 255, 0.98) 0 18%, color-mix(in srgb, var(--orbit-lane-accent) 26%, rgba(244, 239, 226, 0.94)) 38%, color-mix(in srgb, var(--orbit-lane-accent) 22%, rgba(92, 75, 54, 0.6)) 62%, transparent 78%);
+  --constellation-orbit-lane-dot-attention-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--orbit-lane-accent) 20%, rgba(49, 63, 76, 0.32)),
+    0 1px 2px rgba(26, 39, 49, 0.16),
+    0 0 14px color-mix(in srgb, var(--orbit-lane-accent) 22%, transparent);
+  --constellation-orbit-lane-dot-risk-background:
+    radial-gradient(circle at 42% 36%, rgba(255, 255, 255, 0.98) 0 18%, rgba(244, 224, 226, 0.96) 38%, rgba(178, 74, 97, 0.38) 62%, transparent 78%);
+  --constellation-orbit-lane-dot-risk-shadow:
+    inset 0 0 0 1px rgba(130, 55, 73, 0.22),
+    0 1px 2px rgba(26, 39, 49, 0.14),
+    0 0 12px rgba(178, 74, 97, 0.16);
+  --constellation-orbit-lane-spoke-background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--orbit-lane-accent) 14%, rgba(49, 63, 76, 0.52)) 0 28%,
+      transparent 28% 100%
+    );
+  --constellation-orbit-lane-spoke-background-size: 9px 1px;
+  --constellation-orbit-lane-spoke-filter: none;
+}
+
+.generated-app-shell {
+  border: 1px solid var(--constellation-surface-floating-border);
+  background: var(--constellation-surface-floating-background);
+  color: var(--constellation-color-text-primary);
+  box-shadow: var(--constellation-surface-floating-shadow);
+  backdrop-filter: blur(22px) saturate(1.08);
+  -webkit-backdrop-filter: blur(22px) saturate(1.08);
+}
+
+.generated-app-shell.is-dock {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.generated-app-shell__header {
+  border-bottom: 1px solid var(--constellation-surface-panel-separator);
+}
+
+
+:root body .constellation-nav-rail {
+  --nav-brand-text: var(--constellation-nav-rail-brand-text, var(--constellation-system-chrome-active-text, #ffffff));
+  --nav-brand-mark-background: var(
+    --constellation-nav-rail-brand-mark-background,
+    var(--constellation-system-chrome-active-background, rgba(240, 240, 250, 0.1))
+  );
+  --nav-brand-mark-color: var(
+    --constellation-nav-rail-brand-mark-color,
+    var(--constellation-system-chrome-active-text, #f0f0fa)
+  );
+  --nav-rail-background: var(
+    --constellation-nav-rail-background,
+    var(--constellation-system-chrome-background, linear-gradient(180deg, rgba(0, 0, 0, 0.82), rgba(4, 7, 13, 0.72)))
+  );
+  --nav-rail-border: var(
+    --constellation-nav-rail-border,
+    var(--constellation-system-chrome-border, rgba(240, 240, 250, 0.08))
+  );
+  --nav-item-color: var(
+    --constellation-nav-rail-item-color,
+    var(--constellation-system-chrome-text, rgba(240, 240, 250, 0.58))
+  );
+  --nav-item-active-background: var(
+    --constellation-nav-rail-item-active-background,
+    var(--constellation-system-chrome-active-background, rgba(240, 240, 250, 0.06))
+  );
+  --nav-item-active-color: var(
+    --constellation-nav-rail-item-active-color,
+    var(--constellation-system-chrome-active-text, #ffffff)
+  );
+  --nav-glyph-color: var(--constellation-nav-rail-glyph-color, rgba(240, 240, 250, 0.72));
+  --nav-footer-muted: var(--constellation-nav-rail-footer-muted, rgba(240, 240, 250, 0.56));
+  --nav-health-background: var(--constellation-nav-rail-health-background, rgba(240, 240, 250, 0.05));
+  --nav-health-color: var(--constellation-nav-rail-health-color, rgba(240, 240, 250, 0.62));
+  --nav-health-dot: var(--constellation-nav-rail-health-dot, var(--constellation-color-amber, #d5a14d));
+  box-shadow: var(
+    --constellation-nav-rail-shadow,
+    var(--constellation-system-chrome-shadow, 0 24px 80px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(240, 240, 250, 0.08))
+  );
+}
+
+:root body .constellation-nav-rail-header {
+  border-bottom-color: var(--constellation-nav-rail-header-border, rgba(240, 240, 250, 0.06));
+}
+
+:root body .constellation-nav-rail-item:hover,
+:root body .constellation-nav-rail-item:focus-visible {
+  color: var(
+    --constellation-nav-rail-item-hover-color,
+    var(--constellation-system-chrome-text-hover, rgba(240, 240, 250, 0.78))
+  );
+}
+
+:root body .constellation-nav-rail-item.is-active {
+  box-shadow: var(
+    --constellation-nav-rail-item-active-shadow,
+    var(--constellation-system-chrome-active-shadow, inset 0 0 0 1px rgba(240, 240, 250, 0.14), 0 0 24px rgba(141, 183, 255, 0.08))
+  );
+}
+
+:root body .constellation-nav-rail-item.is-active .constellation-nav-rail-glyph {
+  color: var(--constellation-nav-rail-active-glyph-color, var(--nav-item-active-color));
+}
+
+:root body .constellation-page-frame-scene-glow {
+  background: var(
+    --constellation-page-frame-scene-glow-background,
+    var(--constellation-page-frame-theme-scene-glow)
+  );
+  opacity: var(--constellation-page-frame-theme-scene-glow-opacity, 0.78);
+}
+
+:root body .constellation-page-frame-scene-warmth {
+  background: var(
+    --constellation-page-frame-scene-warmth-background,
+    var(--constellation-page-frame-theme-scene-warmth)
+  );
+  opacity: var(--constellation-page-frame-theme-scene-warmth-opacity, 0.68);
+}
+
+:root body .constellation-page-frame-header {
+  border-bottom-color: var(
+    --constellation-page-frame-theme-header-border,
+    var(--constellation-surface-panel-separator)
+  );
+}
+
+:root body .constellation-page-frame-header-eyebrow {
+  color: var(--constellation-page-frame-theme-eyebrow, var(--constellation-label-eyebrow));
+}
+
+:root body .constellation-page-frame-header-title {
+  color: var(--constellation-page-frame-theme-title, var(--constellation-color-text-primary));
+}
+
+:root body .constellation-page-frame-header-subtitle {
+  color: var(--constellation-page-frame-theme-subtitle, var(--constellation-color-text-secondary));
+}
+
+:root body .constellation-panel {
+  --panel-separator: var(--constellation-surface-panel-separator);
+  border-color: var(
+    --constellation-panel-border-color,
+    color-mix(in srgb, var(--panel-accent) 28%, var(--constellation-surface-panel-border))
+  );
+  background: var(
+    --constellation-panel-background,
+    radial-gradient(circle at 16% 0%, var(--panel-accent-soft), transparent 34%),
+    radial-gradient(circle at 88% 12%, var(--panel-glow-secondary), transparent 32%),
+    var(--constellation-surface-panel-background)
+  );
+  box-shadow: var(--constellation-surface-panel-shadow);
+  backdrop-filter: var(--constellation-panel-backdrop-filter, blur(16px) saturate(1.04));
+  -webkit-backdrop-filter: var(--constellation-panel-backdrop-filter, blur(16px) saturate(1.04));
+}
+
+:root body .constellation-panel::before {
+  background: var(--constellation-surface-panel-highlight);
+}
+
+:root body .constellation-panel.is-interactive:hover {
+  border-color: var(
+    --constellation-panel-hover-border-color,
+    color-mix(in srgb, var(--panel-accent) 42%, var(--constellation-surface-panel-hover-border))
+  );
+  box-shadow: var(--constellation-surface-panel-hover-shadow);
+}
+
+:root body .constellation-signal-blob {
+  --blob-shell: var(--constellation-signal-blob-shell, rgba(5, 8, 14, 0.99));
+  --blob-fill-working: var(
+    --constellation-signal-blob-fill-working,
+    color-mix(in srgb, var(--blob-shell) 66%, var(--blob-core) 34%)
+  );
+  --blob-fill-idle: var(
+    --constellation-signal-blob-fill-idle,
+    color-mix(in srgb, var(--blob-shell) 78%, var(--blob-core) 22%)
+  );
+  --blob-fill-done: var(
+    --constellation-signal-blob-fill-done,
+    color-mix(in srgb, var(--blob-shell) 84%, var(--blob-core) 16%)
+  );
+  --blob-inner-stroke-strength: var(--constellation-signal-blob-inner-stroke-strength, 7%);
+  --blob-contour-strength: var(--constellation-signal-blob-contour-strength, 58%);
+  --blob-contour-opacity: var(--constellation-signal-blob-contour-opacity, 0.82);
+  --blob-state-bloom-opacity: var(--constellation-signal-blob-state-bloom-opacity, 0.58);
+  --blob-rim-glint-opacity: var(--constellation-signal-blob-rim-glint-opacity, 1);
+  --blob-status-shell: var(--constellation-signal-blob-status-shell, rgba(5, 9, 16, 0.94));
+  --blob-status-border: var(--constellation-signal-blob-status-border, rgba(240, 240, 250, 0.18));
+  --blob-status-icon: var(--constellation-signal-blob-status-icon, rgba(240, 240, 250, 0.92));
+  --blob-halo-border: var(
+    --constellation-signal-blob-halo-border,
+    color-mix(in srgb, var(--blob-owner) 58%, transparent)
+  );
+  --blob-halo-glow: var(
+    --constellation-signal-blob-halo-glow,
+    color-mix(in srgb, var(--blob-owner) 52%, transparent)
+  );
+  --blob-halo-opacity: var(--constellation-signal-blob-halo-opacity, 0.34);
+}
+
+:root body .constellation-signal-blob-surface {
+  border-color: var(
+    --constellation-signal-blob-surface-border,
+    color-mix(in srgb, var(--blob-rim-soft) 82%, rgba(244, 247, 252, 0.14))
+  );
+  background: var(
+    --constellation-signal-blob-surface-background,
+    linear-gradient(145deg, rgba(255, 255, 255, 0.085), transparent 28%),
+    radial-gradient(ellipse at 76% 78%, rgba(255, 255, 255, 0.036), transparent 45%),
+    radial-gradient(ellipse at 52% 106%, rgba(0, 0, 0, 0.34), transparent 54%),
+    var(--blob-fill-current)
+  );
+  box-shadow: var(
+    --constellation-signal-blob-surface-shadow,
+    inset 0 0 0 1px color-mix(in srgb, var(--blob-owner) var(--blob-inner-stroke-strength), transparent),
+    inset 0 16px 24px rgba(255, 255, 255, 0.024),
+    inset 0 -26px 36px rgba(0, 0, 0, 0.34),
+    0 13px 24px rgba(0, 0, 0, 0.34),
+    0 0 24px color-mix(in srgb, var(--blob-shadow) 92%, transparent),
+    0 0 64px color-mix(in srgb, var(--blob-shadow) 52%, transparent)
+  );
+}
+
+:root body .constellation-signal-blob-surface::before {
+  background: var(
+    --constellation-signal-blob-surface-bloom-background,
+    radial-gradient(
+      circle at 50% 48%,
+      color-mix(in srgb, var(--blob-owner) 22%, transparent) 0%,
+      color-mix(in srgb, var(--blob-owner) 9%, transparent) 44%,
+      transparent 80%
+    )
+  );
+  filter: var(--constellation-signal-blob-surface-bloom-filter, blur(22px) saturate(1.14));
+}
+
+:root body .constellation-signal-blob-surface::after {
+  box-shadow: var(
+    --constellation-signal-blob-surface-contour-shadow,
+    inset 0 0 0 1px color-mix(in srgb, var(--blob-rim) var(--blob-contour-strength), transparent),
+    inset 0 0 22px color-mix(in srgb, var(--blob-rim-soft) 46%, transparent),
+    0 0 18px color-mix(in srgb, var(--blob-rim-hot) 38%, transparent)
+  );
+  filter: var(
+    --constellation-signal-blob-surface-contour-filter,
+    drop-shadow(0 0 9px color-mix(in srgb, var(--blob-rim-hot) 58%, transparent))
+  );
+  mix-blend-mode: var(--constellation-signal-blob-surface-contour-blend, screen);
+}
+
+:root body .constellation-signal-blob-icon {
+  color: var(
+    --constellation-signal-blob-icon-color,
+    color-mix(in srgb, var(--blob-owner) 90%, rgba(240, 240, 250, 0.68))
+  );
+  filter: var(
+    --constellation-signal-blob-icon-filter,
+    drop-shadow(0 0 10px color-mix(in srgb, var(--blob-owner) 24%, transparent))
+  );
+  opacity: var(--constellation-signal-blob-icon-opacity, 0.9);
+}
+
+:root body .constellation-signal-blob-owner-seed,
+:root body .constellation-signal-blob-status-owner-dot {
+  box-shadow: var(
+    --constellation-signal-blob-owner-dot-shadow,
+    0 0 0 2px var(--constellation-color-badge-ring),
+    0 0 16px color-mix(in srgb, var(--blob-seed) 56%, transparent)
+  );
+}
+
+:root body .constellation-signal-blob-status-attention-dot,
+:root body .constellation-signal-blob-status-risk-dot {
+  box-shadow: var(
+    --constellation-signal-blob-status-cue-shadow,
+    0 0 0 3px rgba(5, 9, 16, 0.92),
+    0 0 18px color-mix(in srgb, currentColor 64%, transparent)
+  );
+}
+
+:root body .constellation-signal-blob-attachment-badge {
+  border-color: var(
+    --constellation-signal-blob-attachment-border,
+    color-mix(in srgb, var(--blob-owner) 18%, rgba(240, 240, 250, 0.1))
+  );
+  background: var(
+    --constellation-signal-blob-attachment-background,
+    color-mix(in srgb, var(--blob-shell) 82%, var(--blob-seed) 18%)
+  );
+  color: var(
+    --constellation-signal-blob-attachment-color,
+    color-mix(in srgb, var(--blob-owner) 78%, rgba(240, 240, 250, 0.72))
+  );
+  box-shadow: var(
+    --constellation-signal-blob-attachment-shadow,
+    0 8px 18px rgba(0, 0, 0, 0.22),
+    0 0 14px color-mix(in srgb, var(--blob-shadow) 72%, transparent)
+  );
+}
+
+:root body .constellation-signal-blob-working .constellation-signal-blob-surface,
+:root body .constellation-signal-blob-cue-attention .constellation-signal-blob-surface {
+  box-shadow: var(
+    --constellation-signal-blob-working-surface-shadow,
+    inset 0 0 0 1px color-mix(in srgb, var(--blob-owner) var(--blob-inner-stroke-strength), transparent),
+    inset 0 16px 24px rgba(255, 255, 255, 0.024),
+    inset 0 -26px 36px rgba(0, 0, 0, 0.4),
+    0 13px 24px rgba(0, 0, 0, 0.32),
+    0 0 30px color-mix(in srgb, var(--blob-shadow) 100%, transparent),
+    0 0 76px color-mix(in srgb, var(--blob-shadow) 62%, transparent)
+  );
+}
+
+:root body .constellation-signal-blob-presence-inside .constellation-signal-blob-surface,
+:root body .constellation-signal-blob-working.constellation-signal-blob-presence-inside .constellation-signal-blob-surface {
+  box-shadow: var(
+    --constellation-signal-blob-presence-surface-shadow,
+    inset 0 0 0 1px color-mix(in srgb, var(--blob-owner) var(--blob-inner-stroke-strength), transparent),
+    inset 0 16px 24px rgba(255, 255, 255, 0.02),
+    inset 0 -26px 36px rgba(0, 0, 0, 0.36),
+    0 14px 28px rgba(0, 0, 0, 0.22),
+    0 0 28px color-mix(in srgb, var(--blob-shadow) 48%, transparent)
+  );
+}
+
+:root body .constellation-signal-blob-treatment-contour .constellation-signal-blob-surface {
+  box-shadow: var(
+    --constellation-signal-blob-contour-treatment-shadow,
+    inset 0 0 0 1px color-mix(in srgb, var(--blob-owner) 5%, transparent),
+    0 18px 34px rgba(0, 0, 0, 0.2),
+    0 0 16px color-mix(in srgb, var(--blob-shadow) 56%, transparent)
+  );
+}
+
+:root body .constellation-signal-blob-treatment-seed .constellation-signal-blob-surface {
+  background: var(
+    --constellation-signal-blob-seed-treatment-background,
+    color-mix(in srgb, rgba(5, 9, 16, 0.98) 90%, var(--blob-seed))
+  );
+}
+
+:root body .is-animated.constellation-signal-blob-working:not(.constellation-signal-blob-presence-inside) .constellation-signal-blob-surface {
+  animation: var(
+    --constellation-signal-blob-work-pulse-animation,
+    constellation-signal-blob-work-pulse-theme 5.6s ease-in-out infinite
+  );
+}
+
+:root body .constellation-signal-blob-interactive:is(:hover, :focus-visible) {
+  --blob-contour-opacity: var(--constellation-signal-blob-hover-contour-opacity, 0.86);
+  --blob-state-bloom-opacity: var(--constellation-signal-blob-hover-state-bloom-opacity, 0.52);
+  --blob-rim-glint-opacity: var(--constellation-signal-blob-hover-rim-glint-opacity, 1);
+  --blob-halo-opacity: var(--constellation-signal-blob-hover-halo-opacity, 0.34);
+}
+
+:root body .constellation-signal-blob-interactive:is(:hover, :focus-visible) .constellation-signal-blob-surface {
+  animation: none;
+  border-color: var(
+    --constellation-signal-blob-hover-surface-border,
+    color-mix(in srgb, var(--blob-rim-hot) 64%, rgba(244, 247, 252, 0.18))
+  );
+  box-shadow: var(
+    --constellation-signal-blob-hover-surface-shadow,
+    inset 0 0 0 1px color-mix(in srgb, var(--blob-owner) 8%, transparent),
+    inset 0 16px 24px rgba(255, 255, 255, 0.034),
+    inset 0 -26px 36px rgba(0, 0, 0, 0.38),
+    0 16px 28px rgba(0, 0, 0, 0.36),
+    0 0 24px color-mix(in srgb, var(--blob-shadow) 96%, transparent),
+    0 0 62px color-mix(in srgb, var(--blob-shadow) 58%, transparent)
+  );
+}
+
+:root body .constellation-signal-blob-interactive:is(:hover, :focus-visible) .constellation-signal-blob-surface::before {
+  background: var(
+    --constellation-signal-blob-hover-bloom-background,
+    var(--constellation-signal-blob-surface-bloom-background)
+  );
+  transform: scale(1.1);
+}
+
+:root body .constellation-signal-blob-interactive:is(:hover, :focus-visible) .constellation-signal-blob-surface::after {
+  box-shadow: var(
+    --constellation-signal-blob-hover-contour-shadow,
+    inset 0 0 0 1px color-mix(in srgb, var(--blob-rim) 62%, transparent),
+    inset 0 0 22px color-mix(in srgb, var(--blob-rim-soft) 46%, transparent),
+    0 0 18px color-mix(in srgb, var(--blob-rim-hot) 42%, transparent)
+  );
+}
+
+@keyframes constellation-signal-blob-work-pulse-theme {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--blob-owner) 7%, transparent),
+      inset 0 16px 24px rgba(255, 255, 255, 0.024),
+      inset 0 -26px 36px rgba(0, 0, 0, 0.4),
+      0 13px 24px rgba(0, 0, 0, 0.32),
+      0 0 18px color-mix(in srgb, var(--blob-shadow) 80%, transparent),
+      0 0 40px color-mix(in srgb, var(--blob-shadow) 38%, transparent);
+  }
+
+  50% {
+    transform: scale(1.01);
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--blob-owner) 9%, transparent),
+      inset 0 16px 24px rgba(255, 255, 255, 0.028),
+      inset 0 -26px 36px rgba(0, 0, 0, 0.4),
+      0 14px 26px rgba(0, 0, 0, 0.34),
+      0 0 24px color-mix(in srgb, var(--blob-shadow) 98%, transparent),
+      0 0 58px color-mix(in srgb, var(--blob-shadow) 52%, transparent);
+  }
+}
+
+@keyframes constellation-signal-blob-work-pulse-light {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.74),
+      0 9px 16px rgba(26, 39, 49, 0.038),
+      0 0 14px color-mix(in srgb, var(--blob-seed) 8%, transparent),
+      0 0 24px color-mix(in srgb, var(--blob-seed) 3%, transparent);
+  }
+
+  50% {
+    transform: scale(1.006);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.76),
+      0 10px 18px rgba(26, 39, 49, 0.04),
+      0 0 16px color-mix(in srgb, var(--blob-seed) 10%, transparent),
+      0 0 30px color-mix(in srgb, var(--blob-seed) 4%, transparent);
+  }
+}
+
+:root body .constellation-astre {
+  --astre-core-border-color: var(--constellation-astre-core-border-color, rgba(255, 234, 196, 0.18));
+  --astre-halo-rest-opacity: var(--constellation-astre-halo-rest-opacity, 0.58);
+  --astre-halo-pulse-min: var(--constellation-astre-halo-pulse-min, 0.44);
+  --astre-halo-pulse-max: var(--constellation-astre-halo-pulse-max, 0.68);
+  --astre-ring-opacity: var(--constellation-astre-ring-opacity, 0.84);
+  --astre-rim-opacity: var(--constellation-astre-rim-opacity, 1);
+  --astre-archive-opacity: var(--constellation-astre-archive-opacity, 0.88);
+}
+
+:root body .constellation-astre::before {
+  border-color: var(--constellation-astre-before-border-color, var(--astre-before-border));
+}
+
+:root body .constellation-astre-halo {
+  background: var(
+    --constellation-astre-halo-background,
+    radial-gradient(
+      circle at var(--astre-diffuse-x) var(--astre-diffuse-y),
+      color-mix(in srgb, var(--astre-tone-color) 30%, transparent) 0%,
+      color-mix(in srgb, var(--astre-tone-color) 12%, transparent) 38%,
+      transparent 76%
+    )
+  );
+  filter: var(--constellation-astre-halo-filter, blur(24px) saturate(1.22));
+}
+
+:root body .constellation-astre-ring {
+  border-color: var(--constellation-astre-ring-border-color, var(--astre-ring-border));
+}
+
+:root body .constellation-astre-core {
+  box-shadow: var(--constellation-astre-core-shadow, var(--astre-core-shadow));
+}
+
+:root body .constellation-astre-core::before {
+  background: var(
+    --constellation-astre-core-sheen-background,
+    radial-gradient(circle at var(--astre-diffuse-x) var(--astre-diffuse-y), var(--astre-core-sheen-hot) 0%, transparent 18%),
+    linear-gradient(180deg, var(--astre-core-sheen-top), transparent 34%)
+  );
+  opacity: var(--constellation-astre-core-sheen-opacity, var(--astre-core-sheen-opacity));
+}
+
+:root body .constellation-astre-core::after {
+  box-shadow: var(
+    --constellation-astre-core-contour-shadow,
+    inset 0 0 30px rgba(0, 0, 0, 0.26),
+    inset 0 -22px 32px rgba(0, 0, 0, 0.34)
+  );
+  filter: var(
+    --constellation-astre-core-contour-filter,
+    drop-shadow(0 0 8px color-mix(in srgb, var(--astre-rim-hot) 54%, transparent))
+  );
+}
+
+:root body .constellation-astre-owner {
+  color: var(
+    --constellation-astre-owner-color,
+    color-mix(in srgb, var(--astre-core-color) 78%, rgba(255, 244, 220, 0.72))
+  );
+  text-shadow: var(
+    --constellation-astre-owner-shadow,
+    0 0 10px color-mix(in srgb, var(--astre-tone-color) 28%, transparent)
+  );
+}
+
+:root body .constellation-astre-disconnected {
+  --astre-outer-ring-opacity: var(--constellation-astre-disconnected-outer-ring-opacity, 0.2);
+  --astre-halo-rest-opacity: var(--constellation-astre-disconnected-halo-rest-opacity, 0.18);
+  --astre-halo-inner-opacity: var(--constellation-astre-disconnected-halo-inner-opacity, 0.2);
+  --astre-halo-pulse-min: var(--constellation-astre-disconnected-halo-pulse-min, 0.18);
+  --astre-halo-pulse-max: var(--constellation-astre-disconnected-halo-pulse-max, 0.28);
+  --astre-ring-opacity: var(--constellation-astre-disconnected-ring-opacity, 0.48);
+  --astre-ring-filter: var(--constellation-astre-disconnected-ring-filter, saturate(0.72) brightness(0.82));
+  --astre-archive-opacity: var(--constellation-astre-disconnected-archive-opacity, 0.42);
+  --astre-archive-filter: var(--constellation-astre-disconnected-archive-filter, saturate(0.72) brightness(0.82));
+  --astre-core-opacity: var(--constellation-astre-disconnected-core-opacity, 0.78);
+  --astre-core-filter: var(--constellation-astre-disconnected-core-filter, saturate(0.72) brightness(0.82));
+}
+
+:root body .cortex-orbit-lane-ring {
+  border-color: var(
+    --constellation-orbit-lane-ring-border-color,
+    color-mix(in srgb, var(--orbit-lane-accent) var(--orbit-ring-alpha, 54%), rgba(235, 241, 252, 0.16))
+  );
+  box-shadow: var(
+    --constellation-orbit-lane-ring-shadow,
+    inset 0 0 0 1px color-mix(in srgb, var(--orbit-lane-accent) 10%, transparent),
+    0 0 16px color-mix(in srgb, var(--orbit-lane-accent) 12%, transparent)
+  );
+}
+
+:root body .cortex-orbit-lane-dot {
+  background: var(
+    --constellation-orbit-lane-dot-background,
+    radial-gradient(circle, rgba(255, 255, 255, 0.98) 0 18%, color-mix(in srgb, var(--orbit-lane-accent) 46%, rgba(255, 255, 255, 0.9)) 28%, color-mix(in srgb, var(--orbit-lane-accent) 36%, transparent) 58%, transparent 74%)
+  );
+  box-shadow: var(
+    --constellation-orbit-lane-dot-shadow,
+    0 0 5px color-mix(in srgb, var(--orbit-lane-accent) 78%, rgba(255, 255, 255, 0.4)),
+    0 0 14px color-mix(in srgb, var(--orbit-lane-accent) 48%, transparent),
+    0 0 26px color-mix(in srgb, var(--orbit-lane-accent) 18%, transparent)
+  );
+  filter: var(--constellation-orbit-lane-dot-filter, saturate(1.18));
+  mix-blend-mode: var(--constellation-orbit-lane-dot-blend, screen);
+}
+
+:root body .cortex-orbit-lane-dot::before {
+  background: var(
+    --constellation-orbit-lane-dot-before-background,
+    linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.78), transparent)
+  );
+  opacity: var(--constellation-orbit-lane-dot-before-opacity, 0.54);
+}
+
+:root body .cortex-orbit-lane-dot::after {
+  background: var(
+    --constellation-orbit-lane-dot-after-background,
+    linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.66), transparent)
+  );
+  opacity: var(--constellation-orbit-lane-dot-after-opacity, 0.54);
+}
+
+:root body .cortex-orbit-lane-dot-working {
+  background: var(--constellation-orbit-lane-dot-working-background, var(--constellation-orbit-lane-dot-background));
+  box-shadow: var(
+    --constellation-orbit-lane-dot-working-shadow,
+    0 0 16px color-mix(in srgb, var(--orbit-lane-accent) 68%, transparent),
+    0 0 28px color-mix(in srgb, var(--orbit-lane-accent) 32%, transparent)
+  );
+}
+
+:root body .cortex-orbit-lane-dot-cue-attention {
+  background: var(
+    --constellation-orbit-lane-dot-attention-background,
+    color-mix(in srgb, var(--orbit-lane-accent) 68%, white 32%)
+  );
+  box-shadow: var(
+    --constellation-orbit-lane-dot-attention-shadow,
+    0 0 15px color-mix(in srgb, var(--orbit-lane-accent) 62%, transparent)
+  );
+}
+
+:root body .cortex-orbit-lane-dot-cue-risk {
+  background: var(--constellation-orbit-lane-dot-risk-background, #db6e82);
+  box-shadow: var(--constellation-orbit-lane-dot-risk-shadow, 0 0 16px rgba(219, 110, 130, 0.56));
+}
+
+:root body .cortex-orbit-lane-spoke {
+  background-image: var(
+    --constellation-orbit-lane-spoke-background,
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--orbit-lane-accent) 58%, rgba(235, 241, 252, 0.22)) 0 28%,
+      transparent 28% 100%
+    )
+  );
+  background-size: var(--constellation-orbit-lane-spoke-background-size, 8px 1px);
+  filter: var(
+    --constellation-orbit-lane-spoke-filter,
+    drop-shadow(0 0 7px color-mix(in srgb, var(--orbit-lane-accent) 28%, transparent))
+  );
+}
+
+
+/* Shared run/thread control contrast primitives */
+.constellation-control button,
+.constellation-control .button,
+.constellation-control .btn,
+.constellation-control [role='button'],
+.thread-control button,
+.thread-control .button,
+.thread-control .btn,
+.thread-control [role='button'],
+.run-control button,
+.run-control .button,
+.run-control .btn,
+.run-control [role='button'] {
+  color: var(--constellation-control-button-secondary-text);
+  background: var(--constellation-control-button-secondary-background);
+  border-color: var(--constellation-control-button-secondary-border);
+}
+
+.constellation-control button:hover,
+.constellation-control .button:hover,
+.constellation-control .btn:hover,
+.constellation-control [role='button']:hover,
+.thread-control button:hover,
+.thread-control .button:hover,
+.thread-control .btn:hover,
+.thread-control [role='button']:hover,
+.run-control button:hover,
+.run-control .button:hover,
+.run-control .btn:hover,
+.run-control [role='button']:hover {
+  color: var(--constellation-control-button-secondary-hover-text);
+  background: var(--constellation-control-button-secondary-hover-background);
+}
+
+.constellation-control button[aria-pressed='true'],
+.constellation-control .button[aria-pressed='true'],
+.constellation-control .btn[aria-pressed='true'],
+.constellation-control [role='button'][aria-pressed='true'],
+.thread-control button[aria-pressed='true'],
+.thread-control .button[aria-pressed='true'],
+.thread-control .btn[aria-pressed='true'],
+.thread-control [role='button'][aria-pressed='true'],
+.run-control button[aria-pressed='true'],
+.run-control .button[aria-pressed='true'],
+.run-control .btn[aria-pressed='true'],
+.run-control [role='button'][aria-pressed='true'] {
+  color: var(--constellation-control-button-secondary-active-text);
+  background: var(--constellation-control-button-secondary-active-background);
+}

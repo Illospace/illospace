@@ -1,0 +1,53 @@
+{
+  "type": "object",
+  "required": [
+    "app_name",
+    "data_ownership",
+    "renderer",
+    "verification"
+  ],
+  "properties": {
+    "app_name": {
+      "type": "string"
+    },
+    "data_ownership": {
+      "enum": [
+        "app_local",
+        "domain_backed",
+        "hybrid"
+      ]
+    },
+    "domain_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "renderer": {
+      "enum": [
+        "generated-ui-app",
+        "sandboxed-html-app"
+      ],
+      "default": "generated-ui-app"
+    },
+    "source_kind": {
+      "enum": [
+        "json",
+        "html"
+      ],
+      "default": "json"
+    },
+    "state_bridge_used": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verification": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

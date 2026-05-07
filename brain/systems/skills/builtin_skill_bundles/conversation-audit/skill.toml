@@ -1,0 +1,42 @@
+schema_version = 1
+name = "conversation-audit"
+display_name = "Conversation Audit"
+version = "1.0.0"
+description = "Forensic review of conversations, runs, worker handoffs, assignments, artifacts, costs, and missed commitments."
+license = "Apache-2.0"
+source = "illo-core"
+visibility = "public"
+
+[routing]
+triggers = [
+  { pattern = "audit conversation", direction = "for" },
+  { pattern = "run failed", direction = "for" },
+  { pattern = "missing PR artifact", direction = "for" },
+  { pattern = "handoff review", direction = "for" },
+  { pattern = "evidence warning", direction = "for" },
+  { pattern = "token spend", direction = "for" },
+  { pattern = "what happened", direction = "for" },
+  { pattern = "normal code review", direction = "against" },
+]
+
+[runtime]
+default_model_tier = "medium"
+default_thinking_tier = "high"
+
+[permissions]
+toolsets = ["brain"]
+
+[loading]
+summary = "SKILL.md#role"
+procedure = "SKILL.md"
+examples = "examples/"
+templates = "templates/"
+schemas = "schemas/"
+evals = "evals/"
+references = "references/"
+
+[assets]
+asset_1 = "evals/routing.jsonl"
+asset_2 = "examples/brittle-criteria.md"
+asset_3 = "schemas/audit-output.schema.json"
+asset_4 = "templates/audit-report.md"

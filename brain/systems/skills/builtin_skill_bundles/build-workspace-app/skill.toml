@@ -1,0 +1,46 @@
+schema_version = 1
+name = "build-workspace-app"
+display_name = "Build Workspace App"
+version = "1.0.0"
+description = "Create or update persistent generated Cortex workspace apps with Domain-backed records, structured generated UI, App Kit styling, and contract validation."
+license = "Apache-2.0"
+source = "illo-core"
+visibility = "public"
+
+[routing]
+triggers = [
+  { pattern = "workspace app", direction = "for" },
+  { pattern = "generated app", direction = "for" },
+  { pattern = "dashboard", direction = "for" },
+  { pattern = "tracker", direction = "for" },
+  { pattern = "persistent UI", direction = "for" },
+  { pattern = "review board", direction = "for" },
+  { pattern = "interactive tool", direction = "for" },
+  { pattern = "one-off chart", direction = "against" },
+  { pattern = "repo frontend change", direction = "against" },
+]
+
+[runtime]
+default_model_tier = "medium"
+default_thinking_tier = "high"
+
+[permissions]
+toolsets = ["brain"]
+
+[loading]
+summary = "SKILL.md#role"
+procedure = "SKILL.md"
+examples = "examples/"
+templates = "templates/"
+schemas = "schemas/"
+evals = "evals/"
+references = "references/"
+
+[assets]
+asset_1 = "evals/routing.jsonl"
+asset_2 = "examples/app-local-state.md"
+asset_3 = "examples/domain-backed-app.md"
+asset_4 = "references/host-bridge.md"
+asset_5 = "schemas/workspace-app-output.schema.json"
+asset_6 = "templates/sandboxed-html-app.html"
+asset_7 = "templates/thumbnail.html"

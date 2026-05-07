@@ -1,0 +1,45 @@
+schema_version = 1
+name = "skill-authoring"
+display_name = "Skill Authoring"
+version = "1.0.0"
+description = "Compile, improve, version, and package Illo skills with clear routing, anti-routing, guardrails, examples, evals, and trust boundaries."
+license = "Apache-2.0"
+source = "illo-core"
+visibility = "public"
+
+[routing]
+triggers = [
+  { pattern = "create skill", direction = "for" },
+  { pattern = "improve skill", direction = "for" },
+  { pattern = "skill bundle", direction = "for" },
+  { pattern = "skill audit", direction = "for" },
+  { pattern = "skill version", direction = "for" },
+  { pattern = "export skill", direction = "for" },
+  { pattern = "import skill", direction = "for" },
+  { pattern = "one-off preference", direction = "against" },
+]
+
+[runtime]
+default_model_tier = "medium"
+default_thinking_tier = "high"
+
+[permissions]
+toolsets = ["brain"]
+
+[loading]
+summary = "SKILL.md#role"
+procedure = "SKILL.md"
+examples = "examples/"
+templates = "templates/"
+schemas = "schemas/"
+evals = "evals/"
+references = "references/"
+
+[assets]
+asset_1 = "evals/routing.jsonl"
+asset_2 = "examples/private-db-skill.md"
+asset_3 = "examples/public-bundle.md"
+asset_4 = "references/versioning.md"
+asset_5 = "schemas/skill-authoring-output.schema.json"
+asset_6 = "templates/SKILL.md"
+asset_7 = "templates/skill.toml"

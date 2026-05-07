@@ -1,0 +1,1268 @@
+#!/usr/bin/env node
+/**
+ * Benchmark the Cortex frontend in a real Chrome page with deterministic API
+ * responses. This isolates browser/render/orchestration cost from backend
+ * variance while still preserving the app's normal fetch and navigation flow.
+ */
+
+import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { performance } from 'node:perf_hooks';
+
+const DEFAULT_BASE_URL = 'http://127.0.0.1:5178';
+const DEFAULT_CHROME_PATHS = [
+  process.env.CHROME_PATH,
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  '/usr/bin/google-chrome',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+].filter(Boolean);
+
+const SCENARIOS = {
+  workspace: {
+    name: 'cortex-workspace',
+    path: '/cortex',
+    readyExpression: `(() => {
+      const body = document.body?.textContent || '';
+      return Boolean(
+        document.querySelector('.cortex-container') &&
+        document.querySelector('.workspace-composer-shell') &&
+        !document.querySelector('.loading-overlay') &&
+        body.includes('Benchmark thread 1')
+      );
+    })()`,
+  },
+  thread: {
+    name: 'cortex-thread-direct',
+    path: '/cortex?idea=idea-1',
+    readyExpression: `(() => {
+      const body = document.body?.textContent || '';
+      return Boolean(
+        document.querySelector('.thread-stage-shell.ready') &&
+        document.querySelector('[data-cortex-thread-column="main"]') &&
+        !body.includes('Loading thread...') &&
+        body.includes('Benchmark assistant reply')
+      );
+    })()`,
+  },
+};
+
+function parseArgs(argv) {
+  const options = {
+    baseUrl: DEFAULT_BASE_URL,
+    runs: 5,
+    warmups: 1,
+    scenarios: ['workspace', 'thread'],
+    ideas: 120,
+    connections: 240,
+    streamItems: 80,
+    apiLatencyMs: 0,
+    sidecarLatencyMs: null,
+    timeoutMs: 20000,
+    chromePath: null,
+    phase: 'current',
+    out: null,
+    compare: null,
+    allowUnknownApi: false,
+    json: false,
+    keepChromeProfile: false,
+  };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    const next = () => {
+      i += 1;
+      if (i >= argv.length) throw new Error(`Missing value for ${arg}`);
+      return argv[i];
+    };
+
+    if (arg === '--base-url') options.baseUrl = next();
+    else if (arg === '--runs') options.runs = Number(next());
+    else if (arg === '--warmups') options.warmups = Number(next());
+    else if (arg === '--scenario') {
+      const value = next();
+      options.scenarios = value === 'all' ? ['workspace', 'thread'] : value.split(',').map((item) => item.trim());
+    } else if (arg === '--ideas') options.ideas = Number(next());
+    else if (arg === '--connections') options.connections = Number(next());
+    else if (arg === '--stream-items') options.streamItems = Number(next());
+    else if (arg === '--api-latency-ms') options.apiLatencyMs = Number(next());
+    else if (arg === '--sidecar-latency-ms') options.sidecarLatencyMs = Number(next());
+    else if (arg === '--timeout-ms') options.timeoutMs = Number(next());
+    else if (arg === '--chrome-path') options.chromePath = next();
+    else if (arg === '--phase') options.phase = next();
+    else if (arg === '--out') options.out = next();
+    else if (arg === '--compare') options.compare = next();
+    else if (arg === '--allow-unknown-api') options.allowUnknownApi = true;
+    else if (arg === '--json') options.json = true;
+    else if (arg === '--keep-chrome-profile') options.keepChromeProfile = true;
+    else if (arg === '--help' || arg === '-h') {
+      printHelp();
+      process.exit(0);
+    } else {
+      throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+
+  for (const scenario of options.scenarios) {
+    if (!SCENARIOS[scenario]) {
+      throw new Error(`Unknown scenario "${scenario}". Use one of: ${Object.keys(SCENARIOS).join(', ')}`);
+    }
+  }
+  if (!Number.isFinite(options.runs) || options.runs < 1) throw new Error('--runs must be >= 1');
+  if (!Number.isFinite(options.warmups) || options.warmups < 0) throw new Error('--warmups must be >= 0');
+  if (!Number.isFinite(options.ideas) || options.ideas < 1) throw new Error('--ideas must be >= 1');
+  if (!Number.isFinite(options.connections) || options.connections < 0) throw new Error('--connections must be >= 0');
+  if (!Number.isFinite(options.streamItems) || options.streamItems < 0) throw new Error('--stream-items must be >= 0');
+  return options;
+}
+
+function printHelp() {
+  console.log(`Usage: node scripts/benchmark_frontend.mjs [options]
+
+Options:
+  --base-url URL              Frontend dev/preview URL (default: ${DEFAULT_BASE_URL})
+  --runs N                    Measured runs per scenario (default: 5)
+  --warmups N                 Warmup runs per scenario before measuring (default: 1)
+  --scenario NAME             workspace, thread, or all (default: all)
+  --ideas N                   Mock thread count (default: 120)
+  --connections N             Mock connection count (default: 240)
+  --stream-items N            Mock thread transcript item count (default: 80)
+  --api-latency-ms N          Artificial latency for every mocked API call (default: 0)
+  --sidecar-latency-ms N      Latency for non-critical sidecar calls (default: api latency)
+  --timeout-ms N              Per-run ready timeout (default: 20000)
+  --chrome-path PATH          Chrome/Chromium executable path
+  --phase NAME                Label stored in JSON output (default: current)
+  --out PATH                  Write the full JSON report to PATH
+  --compare BEFORE,AFTER      Print a before/after win chart from two JSON reports
+  --allow-unknown-api         Do not fail when the app calls an unmocked API route
+  --json                      Print machine-readable JSON
+`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function percentile(values, pct) {
+  if (!values.length) return 0;
+  const ordered = [...values].sort((a, b) => a - b);
+  const index = (ordered.length - 1) * pct;
+  const lower = Math.floor(index);
+  const upper = Math.min(lower + 1, ordered.length - 1);
+  if (lower === upper) return ordered[lower];
+  const weight = index - lower;
+  return ordered[lower] * (1 - weight) + ordered[upper] * weight;
+}
+
+function summarizeNumbers(values) {
+  if (!values.length) {
+    return { min: 0, p50: 0, avg: 0, p95: 0, max: 0 };
+  }
+  return {
+    min: Math.min(...values),
+    p50: percentile(values, 0.5),
+    avg: values.reduce((sum, value) => sum + value, 0) / values.length,
+    p95: percentile(values, 0.95),
+    max: Math.max(...values),
+  };
+}
+
+function normalizeWsData(data) {
+  if (typeof data === 'string') return Promise.resolve(data);
+  if (data instanceof ArrayBuffer) return Promise.resolve(Buffer.from(data).toString('utf8'));
+  if (ArrayBuffer.isView(data)) return Promise.resolve(Buffer.from(data.buffer).toString('utf8'));
+  if (data && typeof data.text === 'function') return data.text();
+  return Promise.resolve(String(data));
+}
+
+class CdpClient {
+  constructor(wsUrl) {
+    this.wsUrl = wsUrl;
+    this.ws = null;
+    this.nextId = 1;
+    this.pending = new Map();
+    this.handlers = new Map();
+  }
+
+  async connect() {
+    this.ws = new WebSocket(this.wsUrl);
+    await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        this.ws.removeEventListener('open', onOpen);
+        this.ws.removeEventListener('error', onError);
+      };
+      const onOpen = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (event) => {
+        cleanup();
+        reject(new Error(`CDP WebSocket failed to open: ${event.message || 'unknown error'}`));
+      };
+      this.ws.addEventListener('open', onOpen);
+      this.ws.addEventListener('error', onError);
+    });
+
+    this.ws.addEventListener('message', (event) => {
+      void this.handleMessage(event.data);
+    });
+    this.ws.addEventListener('close', () => {
+      for (const { reject } of this.pending.values()) {
+        reject(new Error('CDP WebSocket closed'));
+      }
+      this.pending.clear();
+    });
+  }
+
+  async handleMessage(data) {
+    const text = await normalizeWsData(data);
+    const message = JSON.parse(text);
+    if (message.id) {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      this.pending.delete(message.id);
+      if (message.error) pending.reject(new Error(`${message.error.message}: ${JSON.stringify(message.error.data ?? '')}`));
+      else pending.resolve(message.result ?? {});
+      return;
+    }
+
+    if (message.method) {
+      const callbacks = this.handlers.get(message.method);
+      if (!callbacks) return;
+      for (const callback of callbacks) callback(message.params ?? {});
+    }
+  }
+
+  send(method, params = {}) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error(`CDP is not connected for ${method}`));
+    }
+    const id = this.nextId;
+    this.nextId += 1;
+    const payload = JSON.stringify({ id, method, params });
+    const promise = new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+    });
+    this.ws.send(payload);
+    return promise;
+  }
+
+  on(method, callback) {
+    const callbacks = this.handlers.get(method) ?? new Set();
+    callbacks.add(callback);
+    this.handlers.set(method, callbacks);
+    return () => callbacks.delete(callback);
+  }
+
+  close() {
+    this.ws?.close();
+  }
+}
+
+async function launchChrome(options) {
+  const chromePath = options.chromePath || DEFAULT_CHROME_PATHS.find(Boolean);
+  if (!chromePath) {
+    throw new Error('Could not find Chrome. Pass --chrome-path or set CHROME_PATH.');
+  }
+  const userDataDir = await mkdtemp(path.join(os.tmpdir(), 'illo-frontend-bench-'));
+  const args = [
+    '--headless=new',
+    '--remote-debugging-port=0',
+    `--user-data-dir=${userDataDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-extensions',
+    '--disable-gpu',
+    '--window-size=1440,1000',
+    'about:blank',
+  ];
+
+  const proc = spawn(chromePath, args, {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+
+  const browserWsUrl = await new Promise((resolve, reject) => {
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      reject(new Error(`Timed out waiting for Chrome DevTools endpoint. stderr:\n${stderr}`));
+    }, 10000);
+
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+      const match = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
+      if (match) {
+        clearTimeout(timeout);
+        resolve(match[1]);
+      }
+    });
+    proc.on('exit', (code) => {
+      clearTimeout(timeout);
+      reject(new Error(`Chrome exited before DevTools was ready (code ${code}). stderr:\n${stderr}`));
+    });
+  });
+
+  const endpoint = new URL(browserWsUrl);
+  const httpBase = `http://${endpoint.host}`;
+  let targets = await fetchJson(`${httpBase}/json/list`);
+  let pageTarget = targets.find((target) => target.type === 'page');
+  if (!pageTarget) {
+    pageTarget = await fetchJson(`${httpBase}/json/new?about:blank`, { method: 'PUT' });
+  }
+
+  return {
+    proc,
+    userDataDir,
+    pageWsUrl: pageTarget.webSocketDebuggerUrl,
+    async close() {
+      proc.kill('SIGTERM');
+      await Promise.race([
+        new Promise((resolve) => proc.once('exit', resolve)),
+        sleep(1500),
+      ]).catch(() => {});
+      if (!options.keepChromeProfile) {
+        await rm(userDataDir, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
+async function fetchJson(url, init) {
+  const response = await fetch(url, init);
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText} for ${url}`);
+  return response.json();
+}
+
+function isoMinutesAgo(minutes) {
+  return new Date(Date.now() - minutes * 60 * 1000).toISOString();
+}
+
+function buildFixture(options) {
+  const colors = ['#57CFA0', '#7DA7FF', '#F0B35B', '#D879A6', '#9BDA78', '#B89CFF'];
+  const members = colors.map((color, index) => ({
+    id: `user-${index + 1}`,
+    user_id: `user-${index + 1}`,
+    name: `Bench User ${index + 1}`,
+    email: `bench${index + 1}@example.test`,
+    color,
+    cortex_color: color,
+    approved: true,
+  }));
+
+  const ideas = Array.from({ length: options.ideas }, (_, index) => {
+    const member = members[index % members.length];
+    const ring = Math.floor(index / 18) + 1;
+    const angle = (index / Math.max(options.ideas, 1)) * Math.PI * 2 * 3;
+    return {
+      id: `idea-${index + 1}`,
+      title: `Benchmark thread ${index + 1}`,
+      display_title: `Benchmark thread ${index + 1}`,
+      description: `Synthetic benchmark thread ${index + 1}`,
+      status: index % 11 === 0 ? 'done' : 'idle',
+      origin: 'user',
+      salience_score: 0.4 + (index % 7) / 10,
+      position_x: Math.round(Math.cos(angle) * ring * 120),
+      position_y: Math.round(Math.sin(angle) * ring * 88),
+      created_at: isoMinutesAgo(2000 + index),
+      updated_at: isoMinutesAgo(index + 1),
+      user_id: member.id,
+      author_name: member.name,
+      author_color: member.color,
+      thread_count: 2 + (index % 6),
+      active_agents: 0,
+      attachments: [],
+      metadata: {},
+      archived_at: null,
+    };
+  });
+
+  const connections = [];
+  for (let index = 0; index < options.connections; index += 1) {
+    const source = ideas[index % ideas.length];
+    const target = ideas[(index * 7 + 13) % ideas.length];
+    if (!source || !target || source.id === target.id) continue;
+    connections.push({
+      id: `connection-${index + 1}`,
+      source_id: source.id,
+      target_id: target.id,
+      type: index % 4 === 0 ? 'reference' : 'related',
+      weight: 0.35 + (index % 5) / 10,
+    });
+  }
+
+  return {
+    user: {
+      id: 'user-1',
+      name: 'Bench User 1',
+      email: 'bench@example.test',
+      role: 'admin',
+      color: '#57CFA0',
+      org_id: 'org-bench',
+      org_name: 'Benchmark Org',
+      attribution_enabled: true,
+      approved: true,
+      default_provider: 'openai',
+      cortex_concurrency_limit: 4,
+    },
+    members,
+    ideas,
+    connections,
+    streamItems: buildStreamItems(options.streamItems),
+    chat: buildChatFixture(members),
+  };
+}
+
+function buildStreamItems(count) {
+  const items = [];
+  const total = Math.max(count, 1);
+  for (let index = 0; index < total; index += 1) {
+    if (index % 12 === 5) {
+      items.push({
+        type: 'run',
+        id: `run-${index}`,
+        timestamp: isoMinutesAgo(total - index),
+        title: 'Benchmark run',
+        status: 'completed',
+        skill_name: 'benchmark-runner',
+        model_used: 'gpt-bench',
+        thinking_used: 'medium',
+        tokens_total: 1200 + index * 21,
+        duration_sec: 8 + index,
+        outcome: 'ok',
+        estimated_cost: 0.01,
+        run_steps: [
+          { id: `phase-${index}-1`, node_id: 'plan', status: 'completed', duration_sec: 1.2 },
+          { id: `phase-${index}-2`, node_id: 'execute', status: 'completed', duration_sec: 4.8 },
+        ],
+        worker_lanes: [],
+        tool_calls: [
+          { tool: 'benchmark_tool', args: '{"ok":true}', at: isoMinutesAgo(total - index) },
+        ],
+        live_lines: ['Prepared benchmark data', 'Rendered synthetic transcript'],
+      });
+      continue;
+    }
+
+    const assistant = index % 2 === 1;
+    items.push({
+      type: 'message',
+      id: `message-${index}`,
+      timestamp: isoMinutesAgo(total - index),
+      role: assistant ? 'assistant' : 'user',
+      content: assistant
+        ? `Benchmark assistant reply ${index}. This paragraph includes **markdown**, a short list, and enough text to exercise readable rendering.\\n\\n- Render item ${index}\\n- Preserve transcript behavior\\n- Keep the benchmark deterministic`
+        : `Benchmark user prompt ${index}. Please reason about workspace performance for this synthetic thread.`,
+      attachments: [],
+      metadata: {},
+      user_id: assistant ? null : 'user-1',
+      user_name: assistant ? 'Illo' : 'Bench User 1',
+      user_color: assistant ? '#57CFA0' : '#57CFA0',
+      author_color: '#57CFA0',
+      message_type: 'message',
+    });
+  }
+  return items;
+}
+
+function buildChatFixture(members) {
+  const room = {
+    id: 'room-bench',
+    type: 'room',
+    stable_key: 'org-room',
+    title: 'Team room',
+    description: null,
+    visibility: 'org',
+    last_message_seq: 0,
+    unread_count: 0,
+    participant_count: members.length,
+    counterpart: null,
+    last_message: null,
+    created_at: isoMinutesAgo(5000),
+    updated_at: isoMinutesAgo(500),
+  };
+  return {
+    room,
+    bootstrap: {
+      room,
+      dms: [],
+      notifications: [],
+      unread_summary: { room: 0, dms: 0, total: 0 },
+      default_mode: 'room',
+      default_conversation_id: room.id,
+    },
+    conversationPage: {
+      conversation: room,
+      messages: [],
+      has_more: false,
+      next_before_seq: null,
+    },
+  };
+}
+
+function jsonResponse(status, body, extra = {}) {
+  return {
+    status,
+    body,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      ...extra.headers,
+    },
+    label: extra.label,
+    sidecar: Boolean(extra.sidecar),
+    unknown: Boolean(extra.unknown),
+  };
+}
+
+function mockApiResponse(method, url, fixture) {
+  const pathName = url.pathname;
+  const pathWithQuery = `${pathName}${url.search}`;
+  const methodUpper = method.toUpperCase();
+
+  if (pathName === '/api/me') return jsonResponse(200, fixture.user, { label: 'GET /api/me' });
+  if (pathName === '/api/auth/ws-token') {
+    return jsonResponse(200, {
+      token: 'bench-token',
+      expires_at: isoMinutesAgo(-60),
+      ttl_seconds: 3600,
+      session_id: 'bench-session',
+      tab_id: 'bench-tab',
+    }, { label: 'POST /api/auth/ws-token', sidecar: true });
+  }
+  if (pathName === '/api/cortex/keys/auto-import') {
+    return jsonResponse(200, { ok: true, imported: false }, { label: 'POST /api/cortex/keys/auto-import', sidecar: true });
+  }
+  if (pathName === '/api/cortex/auth/status') {
+    return jsonResponse(200, { setup_required: false, configured: true, provider: 'openai' }, {
+      label: 'GET /api/cortex/auth/status',
+      sidecar: true,
+    });
+  }
+
+  if (pathName === '/api/cortex/ideas') {
+    return jsonResponse(200, fixture.ideas, { label: 'GET /api/cortex/ideas' });
+  }
+  if (pathName === '/api/cortex/bootstrap') {
+    const include = new Set(
+      (url.searchParams.get('include') || 'core')
+        .split(',')
+        .map((part) => part.trim())
+        .filter(Boolean),
+    );
+    if (include.has('core')) {
+      include.add('ideas');
+      include.add('connections');
+      include.add('team_members');
+    }
+    if (include.has('workspace')) {
+      include.add('workspace_apps');
+      include.add('workspace_pins');
+    }
+    const body = {
+      ideas: include.has('ideas') ? fixture.ideas : null,
+      connections: include.has('connections') ? fixture.connections : null,
+      team_members: include.has('team_members') ? fixture.members : null,
+      workspace_apps: include.has('workspace_apps') ? [] : null,
+      workspace_pins: include.has('workspace_pins') ? [] : null,
+      selected_idea: include.has('selected_idea') ? fixture.ideas[0] : null,
+      auth_status: include.has('auth_status') ? { setup_required: false, configured: true, provider: 'openai' } : null,
+      meta: { include: [...include].sort() },
+    };
+    if (include.has('direct_thread')) {
+      body.direct_thread = {
+        idea_id: url.searchParams.get('idea_id') || 'idea-1',
+        stream: fixture.streamItems,
+      };
+    }
+    return jsonResponse(200, body, { label: 'GET /api/cortex/bootstrap' });
+  }
+  if (pathName === '/api/cortex/connections') {
+    return jsonResponse(200, fixture.connections, { label: 'GET /api/cortex/connections' });
+  }
+  if (pathName === '/api/cortex/ideas/archived') {
+    return jsonResponse(200, [], { label: 'GET /api/cortex/ideas/archived', sidecar: true });
+  }
+  const unifiedStreamMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/unified-stream$/);
+  if (unifiedStreamMatch) {
+    return jsonResponse(200, fixture.streamItems, { label: 'GET /api/cortex/ideas/{idea_id}/unified-stream' });
+  }
+  const browserSessionMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/browser\/session$/);
+  if (browserSessionMatch && methodUpper === 'GET') {
+    return jsonResponse(200, null, { label: 'GET /api/cortex/ideas/{idea_id}/browser/session', sidecar: true });
+  }
+  const markReadMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/mark-read$/);
+  if (markReadMatch) {
+    return jsonResponse(200, { ok: true }, { label: 'POST /api/cortex/ideas/{idea_id}/mark-read', sidecar: true });
+  }
+  if (pathName === '/api/cortex/mentions/unread') {
+    return jsonResponse(200, [], { label: 'GET /api/cortex/mentions/unread', sidecar: true });
+  }
+  if (pathName === '/api/cortex/similarity-matrix') {
+    return jsonResponse(200, { pairs: [] }, { label: 'GET /api/cortex/similarity-matrix', sidecar: true });
+  }
+  if (pathName === '/api/cortex/slash-commands') {
+    return jsonResponse(200, [
+      { name: 'summarize', description: 'Summarize the current thread', tier: 'medium' },
+      { name: 'plan', description: 'Turn the thread into a plan', tier: 'local' },
+    ], { label: 'GET /api/cortex/slash-commands', sidecar: true });
+  }
+  if (pathName === '/api/cortex/project-context/profiles') {
+    return jsonResponse(200, [], { label: 'GET /api/cortex/project-context/profiles', sidecar: true });
+  }
+  const ideaProjectContextMatch = pathName.match(/^\/api\/cortex\/ideas\/([^/]+)\/project-context$/);
+  if (ideaProjectContextMatch && methodUpper === 'GET') {
+    return jsonResponse(200, [], { label: 'GET /api/cortex/ideas/{idea_id}/project-context', sidecar: true });
+  }
+  if (ideaProjectContextMatch && methodUpper === 'POST') {
+    return jsonResponse(200, {
+      id: 'bench-project-context-attachment',
+      snapshot: {},
+      created_at: isoMinutesAgo(0),
+    }, { label: 'POST /api/cortex/ideas/{idea_id}/project-context', sidecar: true });
+  }
+
+  if (pathName === '/api/team/members') {
+    return jsonResponse(200, fixture.members, { label: 'GET /api/team/members', sidecar: true });
+  }
+  if (pathName === '/api/workspace-apps/' || pathName === '/api/workspace-apps') {
+    return jsonResponse(200, [], { label: 'GET /api/workspace-apps/', sidecar: true });
+  }
+  if (pathName === '/api/workspace-pins/' || pathName === '/api/workspace-pins') {
+    return jsonResponse(200, [], { label: 'GET /api/workspace-pins/', sidecar: true });
+  }
+
+  if (pathName === '/api/notifications/summary') {
+    return jsonResponse(200, {
+      chat_unread_total: 0,
+      workspace_attention_total: 0,
+      unread_notification_total: 0,
+      unread_chat_notification_total: 0,
+      unread_workspace_notification_total: 0,
+    }, { label: 'GET /api/notifications/summary', sidecar: true });
+  }
+  if (pathName === '/api/notifications') {
+    return jsonResponse(200, [], { label: `GET /api/notifications${url.search}`, sidecar: true });
+  }
+
+  if (pathName === '/api/chat/bootstrap') {
+    return jsonResponse(200, fixture.chat.bootstrap, { label: 'GET /api/chat/bootstrap', sidecar: true });
+  }
+  if (pathName === '/api/chat/conversations') {
+    return jsonResponse(200, [fixture.chat.room], { label: 'GET /api/chat/conversations', sidecar: true });
+  }
+  const chatMessagesMatch = pathName.match(/^\/api\/chat\/conversations\/([^/]+)\/messages$/);
+  if (chatMessagesMatch) {
+    return jsonResponse(200, fixture.chat.conversationPage, {
+      label: 'GET /api/chat/conversations/{conversation_id}/messages',
+      sidecar: true,
+    });
+  }
+  const chatReadMatch = pathName.match(/^\/api\/chat\/conversations\/([^/]+)\/read$/);
+  if (chatReadMatch) {
+    return jsonResponse(200, { room: 0, dms: 0, total: 0 }, {
+      label: 'POST /api/chat/conversations/{conversation_id}/read',
+      sidecar: true,
+    });
+  }
+  if (pathName === '/api/chat/notifications') {
+    return jsonResponse(200, [], { label: `GET /api/chat/notifications${url.search}`, sidecar: true });
+  }
+
+  return jsonResponse(200, fallbackBodyFor(pathName, methodUpper), {
+    label: `${methodUpper} ${pathWithQuery}`,
+    sidecar: true,
+    unknown: true,
+  });
+}
+
+function fallbackBodyFor(pathName, method) {
+  if (method !== 'GET') return { ok: true };
+  if (
+    pathName.endsWith('/notifications') ||
+    pathName.endsWith('/members') ||
+    pathName.endsWith('/connections') ||
+    pathName.endsWith('/ideas')
+  ) {
+    return [];
+  }
+  return {};
+}
+
+function latencyForResponse(response, options) {
+  if (!response.sidecar) return options.apiLatencyMs;
+  return options.sidecarLatencyMs ?? options.apiLatencyMs;
+}
+
+async function evaluate(client, expression) {
+  const result = await client.send('Runtime.evaluate', {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (result.exceptionDetails) {
+    throw new Error(result.exceptionDetails.text || 'Runtime.evaluate failed');
+  }
+  return result.result?.value;
+}
+
+async function waitForExpression(client, expression, timeoutMs) {
+  const started = performance.now();
+  const deadline = started + timeoutMs;
+  let lastError = null;
+  while (performance.now() < deadline) {
+    try {
+      if (await evaluate(client, expression)) {
+        return performance.now() - started;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(25);
+  }
+  const diagnostics = await evaluate(client, `(() => ({
+    href: location.href,
+    readyState: document.readyState,
+    title: document.title,
+    bodyText: document.body?.innerText?.slice(0, 1000) || '',
+    bodyHtml: document.body?.innerHTML?.slice(0, 1000) || '',
+    errors: window.__illoBench?.errors || [],
+  }))()`).catch(() => null);
+  const moduleFetch = await evaluate(client, `fetch('/.svelte-kit/generated/client/nodes/0.js')
+    .then(async (response) => ({
+      status: response.status,
+      contentType: response.headers.get('content-type'),
+      text: (await response.text()).slice(0, 500),
+    }))
+    .catch((error) => ({ error: String(error?.message || error) }))`).catch(() => null);
+  const moduleImport = await evaluate(client, `import('/.svelte-kit/generated/client/nodes/0.js')
+    .then((module) => ({ ok: true, keys: Object.keys(module) }))
+    .catch((error) => ({ ok: false, message: String(error?.message || error), stack: String(error?.stack || '') }))`).catch(() => null);
+  throw new Error(
+    `Timed out waiting for page readiness.${lastError ? ` Last error: ${lastError.message}` : ''}` +
+    `\nDiagnostics:\n${JSON.stringify(diagnostics, null, 2)}` +
+    `\nModule fetch:\n${JSON.stringify(moduleFetch, null, 2)}` +
+    `\nModule import:\n${JSON.stringify(moduleImport, null, 2)}`,
+  );
+}
+
+function installPageInstrumentationSource() {
+  return `(() => {
+    window.__illoBench = {
+      longTasks: [],
+      largestContentfulPaint: null,
+      errors: [],
+      wsMessages: [],
+    };
+
+    window.addEventListener('error', (event) => {
+      window.__illoBench.errors.push(String(event.message || 'unknown error'));
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+      window.__illoBench.errors.push(String(event.reason?.message || event.reason || 'unhandled rejection'));
+    });
+
+    try {
+      new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          window.__illoBench.longTasks.push({
+            startTime: entry.startTime,
+            duration: entry.duration,
+          });
+        }
+      }).observe({ entryTypes: ['longtask'] });
+    } catch {}
+
+    try {
+      new PerformanceObserver((list) => {
+        const entries = list.getEntries();
+        const latest = entries[entries.length - 1];
+        if (latest) {
+          window.__illoBench.largestContentfulPaint = {
+            startTime: latest.startTime,
+            size: latest.size,
+          };
+        }
+      }).observe({ type: 'largest-contentful-paint', buffered: true });
+    } catch {}
+
+    const NativeWebSocket = window.WebSocket;
+
+    class BenchWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      constructor(url) {
+        this.url = url;
+        this.readyState = BenchWebSocket.CONNECTING;
+        this.extensions = '';
+        this.protocol = '';
+        this.binaryType = 'blob';
+        this.onopen = null;
+        this.onmessage = null;
+        this.onerror = null;
+        this.onclose = null;
+        this.__listeners = new Map();
+        queueMicrotask(() => {
+          if (this.readyState !== BenchWebSocket.CONNECTING) return;
+          this.readyState = BenchWebSocket.OPEN;
+          this.__dispatch({ type: 'open' });
+        });
+      }
+
+      send(data) {
+        window.__illoBench.wsMessages.push(String(data));
+      }
+
+      close() {
+        if (this.readyState === BenchWebSocket.CLOSED) return;
+        this.readyState = BenchWebSocket.CLOSED;
+        this.__dispatch({ type: 'close', code: 1000, reason: '', wasClean: true });
+      }
+
+      addEventListener(type, listener) {
+        const listeners = this.__listeners.get(type) || new Set();
+        listeners.add(listener);
+        this.__listeners.set(type, listeners);
+      }
+
+      removeEventListener(type, listener) {
+        this.__listeners.get(type)?.delete(listener);
+      }
+
+      dispatchEvent(event) {
+        this.__dispatch(event);
+        return true;
+      }
+
+      __dispatch(event) {
+        const handler = this['on' + event.type];
+        if (typeof handler === 'function') handler.call(this, event);
+        for (const listener of this.__listeners.get(event.type) || []) {
+          listener.call(this, event);
+        }
+      }
+    }
+    function BenchmarkWebSocket(url, protocols) {
+      try {
+        const parsed = new URL(String(url), location.href);
+        if (parsed.pathname === '/ws') return new BenchWebSocket(url);
+      } catch {}
+      return protocols === undefined ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
+    }
+
+    BenchmarkWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
+    BenchmarkWebSocket.OPEN = NativeWebSocket.OPEN;
+    BenchmarkWebSocket.CLOSING = NativeWebSocket.CLOSING;
+    BenchmarkWebSocket.CLOSED = NativeWebSocket.CLOSED;
+    BenchmarkWebSocket.prototype = NativeWebSocket.prototype;
+    window.WebSocket = BenchmarkWebSocket;
+  })();`;
+}
+
+async function configurePage(client, fixture, options, apiCalls) {
+  await client.send('Page.enable');
+  await client.send('Runtime.enable');
+  await client.send('Network.enable');
+  await client.send('Fetch.enable', {
+    patterns: [{ urlPattern: '*://*/api/*', requestStage: 'Request' }],
+  });
+  await client.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: installPageInstrumentationSource(),
+  });
+
+  const pendingMocks = new Set();
+  const unsubscribe = client.on('Fetch.requestPaused', (params) => {
+    const task = (async () => {
+      const requestUrl = new URL(params.request.url);
+      const startedAt = performance.now();
+      const response = mockApiResponse(params.request.method, requestUrl, fixture);
+      const latencyMs = latencyForResponse(response, options);
+      if (latencyMs > 0) await sleep(latencyMs);
+      const bodyText = JSON.stringify(response.body);
+      const body = Buffer.from(bodyText).toString('base64');
+      const fulfilledAt = performance.now();
+      const call = {
+        method: params.request.method,
+        path: requestUrl.pathname,
+        query: requestUrl.search,
+        label: response.label,
+        status: response.status,
+        bytes: Buffer.byteLength(bodyText),
+        startedAt,
+        fulfilledAt,
+        durationMs: fulfilledAt - startedAt,
+        critical: !response.sidecar,
+        sidecar: response.sidecar,
+        unknown: response.unknown,
+      };
+      apiCalls.push(call);
+      await client.send('Fetch.fulfillRequest', {
+        requestId: params.requestId,
+        responseCode: response.status,
+        responseHeaders: Object.entries(response.headers).map(([name, value]) => ({ name, value })),
+        body,
+      });
+    })().catch(async (error) => {
+      await client.send('Fetch.failRequest', {
+        requestId: params.requestId,
+        errorReason: 'Failed',
+      }).catch(() => {});
+      apiCalls.push({
+        method: params.request.method,
+        path: new URL(params.request.url).pathname,
+        query: new URL(params.request.url).search,
+        label: 'mock-error',
+        status: 0,
+        bytes: 0,
+        sidecar: true,
+        unknown: true,
+        error: error.message,
+      });
+    }).finally(() => {
+      pendingMocks.delete(task);
+    });
+    pendingMocks.add(task);
+    void task;
+  });
+
+  return async () => {
+    await Promise.allSettled([...pendingMocks]);
+    unsubscribe();
+  };
+}
+
+async function runScenario(client, scenarioKey, fixture, options, measured) {
+  const scenario = SCENARIOS[scenarioKey];
+  const apiCalls = [];
+  const unsubscribers = [];
+  const requestUrls = new Map();
+  const networkFailures = [];
+  const consoleMessages = [];
+  unsubscribers.push(
+    client.on('Network.requestWillBeSent', (params) => {
+      requestUrls.set(params.requestId, params.request?.url);
+    }),
+    client.on('Network.loadingFailed', (params) => {
+      networkFailures.push({
+        url: requestUrls.get(params.requestId) || params.requestId,
+        errorText: params.errorText,
+        blockedReason: params.blockedReason,
+        canceled: params.canceled,
+      });
+    }),
+    client.on('Runtime.consoleAPICalled', (params) => {
+      consoleMessages.push({
+        type: params.type,
+        text: (params.args || []).map((arg) => arg.value || arg.description || '').join(' '),
+      });
+    }),
+    client.on('Runtime.exceptionThrown', (params) => {
+      consoleMessages.push({
+        type: 'exception',
+        text: params.exceptionDetails?.text || params.exceptionDetails?.exception?.description || 'exception',
+      });
+    }),
+  );
+  unsubscribers.push(await configurePage(client, fixture, options, apiCalls));
+
+  try {
+    const origin = new URL(options.baseUrl).origin;
+    await client.send('Storage.clearDataForOrigin', {
+      origin,
+      storageTypes: 'local_storage,indexeddb,websql,service_workers,cache_storage',
+    }).catch(() => {});
+
+    const targetUrl = new URL(scenario.path, options.baseUrl).toString();
+    const started = performance.now();
+    await client.send('Page.navigate', { url: targetUrl });
+    try {
+      await waitForExpression(client, scenario.readyExpression, options.timeoutMs);
+    } catch (error) {
+      error.message +=
+        `\nNetwork failures:\n${JSON.stringify(networkFailures.slice(-20), null, 2)}` +
+        `\nConsole:\n${JSON.stringify(consoleMessages.slice(-20), null, 2)}`;
+      throw error;
+    }
+    const readyMs = performance.now() - started;
+
+    await sleep(Math.max(80, options.sidecarLatencyMs ?? options.apiLatencyMs) + 80);
+    const pageMetrics = await evaluate(client, `(() => {
+      const paints = Object.fromEntries(performance.getEntriesByType('paint').map((entry) => [entry.name, entry.startTime]));
+      const navigation = performance.getEntriesByType('navigation')[0];
+      const bench = window.__illoBench || {};
+      return {
+        domNodes: document.getElementsByTagName('*').length,
+        deepFieldFeatureNodes: document.querySelectorAll('.cortex-deep-field__star, .cortex-deep-field__star-glow, .cortex-deep-field__fleck').length,
+        d3ShadowNodes: document.querySelectorAll('.cortex-svg-d3-layer svg *').length,
+        d3ShadowBubbles: document.querySelectorAll('.cortex-svg-d3-layer .bubble-group').length,
+        d3ShadowConnections: document.querySelectorAll('.cortex-svg-d3-layer .connection-path').length,
+        primitiveBlobs: document.querySelectorAll('[data-constellation-signal-id]').length,
+        fcpMs: paints['first-contentful-paint'] ?? null,
+        lcpMs: bench.largestContentfulPaint?.startTime ?? null,
+        longTaskCount: bench.longTasks?.length ?? 0,
+        longTaskTotalMs: (bench.longTasks || []).reduce((sum, task) => sum + task.duration, 0),
+        maxLongTaskMs: Math.max(0, ...(bench.longTasks || []).map((task) => task.duration)),
+        errors: bench.errors || [],
+        wsMessages: bench.wsMessages || [],
+        transferSize: navigation?.transferSize ?? 0,
+        decodedBodySize: navigation?.decodedBodySize ?? 0,
+      };
+    })()`);
+
+    return {
+      scenario: scenario.name,
+      measured,
+      readyMs,
+      apiCallCount: apiCalls.length,
+      uniqueApiRoutes: new Set(apiCalls.map((call) => call.label)).size,
+      sidecarApiCallCount: apiCalls.filter((call) => call.sidecar).length,
+      unknownApiCalls: apiCalls.filter((call) => call.unknown),
+      apiCalls,
+      ...pageMetrics,
+    };
+  } finally {
+    for (const unsubscribe of unsubscribers) await unsubscribe();
+    await client.send('Fetch.disable').catch(() => {});
+  }
+}
+
+function summarizeScenario(samples) {
+  const measuredSamples = samples.filter((sample) => sample.measured);
+  const apiLabels = new Map();
+  const callWindows = [];
+  for (const sample of measuredSamples) {
+    const calls = sample.apiCalls;
+    if (calls.length) {
+      callWindows.push({
+        first: Math.min(...calls.map((call) => call.startedAt ?? 0)),
+        last: Math.max(...calls.map((call) => call.fulfilledAt ?? 0)),
+      });
+    }
+    for (const call of sample.apiCalls) {
+      const entry = apiLabels.get(call.label) ?? { count: 0, bytes: 0 };
+      entry.count += 1;
+      entry.bytes += call.bytes;
+      apiLabels.set(call.label, entry);
+    }
+  }
+  const routes = [...apiLabels.entries()]
+    .map(([label, entry]) => ({
+      label,
+      total_calls: entry.count,
+      avg_calls_per_run: entry.count / Math.max(measuredSamples.length, 1),
+      avg_kb_per_run: entry.bytes / Math.max(measuredSamples.length, 1) / 1024,
+    }))
+    .sort((a, b) => b.total_calls - a.total_calls || a.label.localeCompare(b.label));
+
+  return {
+    runs: measuredSamples.length,
+    ready_ms: summarizeNumbers(measuredSamples.map((sample) => sample.readyMs)),
+    fcp_ms: summarizeNumbers(measuredSamples.map((sample) => sample.fcpMs ?? 0).filter((value) => value > 0)),
+    lcp_ms: summarizeNumbers(measuredSamples.map((sample) => sample.lcpMs ?? 0).filter((value) => value > 0)),
+    api_calls: summarizeNumbers(measuredSamples.map((sample) => sample.apiCalls.length)),
+    sidecar_api_calls: summarizeNumbers(measuredSamples.map((sample) => sample.apiCalls.filter((call) => call.sidecar).length)),
+    critical_api_calls: summarizeNumbers(measuredSamples.map((sample) => sample.apiCalls.filter((call) => call.critical).length)),
+    api_kb: summarizeNumbers(measuredSamples.map((sample) => sample.apiCalls.reduce((sum, call) => sum + call.bytes, 0) / 1024)),
+    api_window_ms: summarizeNumbers(callWindows.map((window) => window.last - window.first)),
+    unique_api_routes: summarizeNumbers(measuredSamples.map((sample) => new Set(sample.apiCalls.map((call) => call.label)).size)),
+    dom_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.domNodes)),
+    deep_field_feature_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.deepFieldFeatureNodes ?? 0)),
+    d3_shadow_nodes: summarizeNumbers(measuredSamples.map((sample) => sample.d3ShadowNodes ?? 0)),
+    d3_shadow_bubbles: summarizeNumbers(measuredSamples.map((sample) => sample.d3ShadowBubbles ?? 0)),
+    d3_shadow_connections: summarizeNumbers(measuredSamples.map((sample) => sample.d3ShadowConnections ?? 0)),
+    primitive_blobs: summarizeNumbers(measuredSamples.map((sample) => sample.primitiveBlobs ?? 0)),
+    long_task_total_ms: summarizeNumbers(measuredSamples.map((sample) => sample.longTaskTotalMs)),
+    max_long_task_ms: summarizeNumbers(measuredSamples.map((sample) => sample.maxLongTaskMs)),
+    routes,
+    unknown_routes: routes.filter((route) => route.label.includes('/api/') && measuredSamples.some((sample) =>
+      sample.unknownApiCalls.some((call) => call.label === route.label),
+    )),
+    errors: [...new Set(measuredSamples.flatMap((sample) => sample.errors || []))],
+  };
+}
+
+function printTextReport(result) {
+  console.log(`Frontend benchmark ${result.config.baseUrl}`);
+  console.log(`Fixture: ${result.config.ideas} ideas, ${result.config.connections} connections, ${result.config.streamItems} stream items`);
+  console.log(`Latency: api=${result.config.apiLatencyMs}ms sidecar=${result.config.sidecarLatencyMs ?? result.config.apiLatencyMs}ms`);
+  console.log('');
+
+  const rows = result.scenarios.map((scenario) => ({
+    name: scenario.name,
+    runs: String(scenario.summary.runs),
+    p50: scenario.summary.ready_ms.p50.toFixed(1),
+    p95: scenario.summary.ready_ms.p95.toFixed(1),
+    fcp: scenario.summary.fcp_ms.p50 ? scenario.summary.fcp_ms.p50.toFixed(1) : '-',
+    api: scenario.summary.api_calls.p50.toFixed(0),
+    routes: scenario.summary.unique_api_routes.p50.toFixed(0),
+    long: scenario.summary.long_task_total_ms.p95.toFixed(1),
+    dom: scenario.summary.dom_nodes.p50.toFixed(0),
+    d3: scenario.summary.d3_shadow_nodes.p50.toFixed(0),
+    links: scenario.summary.d3_shadow_connections.p50.toFixed(0),
+    field: scenario.summary.deep_field_feature_nodes.p50.toFixed(0),
+  }));
+  const headers = ['name', 'runs', 'p50', 'p95', 'fcp', 'api', 'routes', 'long', 'dom', 'd3', 'links', 'field'];
+  const widths = Object.fromEntries(headers.map((header) => [
+    header,
+    Math.max(header.length, ...rows.map((row) => row[header].length)),
+  ]));
+  console.log(headers.map((header) => header.padEnd(widths[header])).join('  '));
+  console.log(headers.map((header) => '-'.repeat(widths[header])).join('  '));
+  for (const row of rows) {
+    console.log(headers.map((header) => row[header].padEnd(widths[header])).join('  '));
+  }
+
+  for (const scenario of result.scenarios) {
+    console.log('');
+    console.log(`${scenario.name} API routes:`);
+    for (const route of scenario.summary.routes.slice(0, 20)) {
+      console.log(`  ${route.avg_calls_per_run.toFixed(1)}x/run  ${route.label}`);
+    }
+    if (scenario.summary.unknown_routes.length) {
+      console.log('  Unknown mocked routes:');
+      for (const route of scenario.summary.unknown_routes) {
+        console.log(`    ${route.label}`);
+      }
+    }
+    if (scenario.summary.errors.length) {
+      console.log('  Browser errors:');
+      for (const error of scenario.summary.errors) {
+        console.log(`    ${error}`);
+      }
+    }
+  }
+}
+
+function scenarioByName(result, name) {
+  return result.scenarios.find((scenario) => scenario.name === name || scenario.key === name);
+}
+
+function pctDelta(before, after) {
+  if (!before) return 0;
+  return ((after - before) / before) * 100;
+}
+
+function printComparison(before, after) {
+  console.log(`Frontend benchmark wins: ${before.config.phase || 'before'} -> ${after.config.phase || 'after'}`);
+  console.log('');
+  const rows = [];
+  for (const afterScenario of after.scenarios) {
+    const beforeScenario = scenarioByName(before, afterScenario.name);
+    if (!beforeScenario) continue;
+    const metrics = [
+      ['ready p50', beforeScenario.summary.ready_ms.p50, afterScenario.summary.ready_ms.p50, 'ms'],
+      ['ready p95', beforeScenario.summary.ready_ms.p95, afterScenario.summary.ready_ms.p95, 'ms'],
+      ['FCP p50', beforeScenario.summary.fcp_ms.p50, afterScenario.summary.fcp_ms.p50, 'ms'],
+      ['API calls p50', beforeScenario.summary.api_calls.p50, afterScenario.summary.api_calls.p50, ''],
+      ['API KB p50', beforeScenario.summary.api_kb.p50, afterScenario.summary.api_kb.p50, 'KB'],
+      ['DOM nodes p50', beforeScenario.summary.dom_nodes.p50, afterScenario.summary.dom_nodes.p50, ''],
+      ['D3 shadow nodes p50', beforeScenario.summary.d3_shadow_nodes?.p50 ?? 0, afterScenario.summary.d3_shadow_nodes?.p50 ?? 0, ''],
+      ['D3 shadow bubbles p50', beforeScenario.summary.d3_shadow_bubbles?.p50 ?? 0, afterScenario.summary.d3_shadow_bubbles?.p50 ?? 0, ''],
+      ['D3 shadow links p50', beforeScenario.summary.d3_shadow_connections?.p50 ?? 0, afterScenario.summary.d3_shadow_connections?.p50 ?? 0, ''],
+      ['field feature nodes p50', beforeScenario.summary.deep_field_feature_nodes.p50, afterScenario.summary.deep_field_feature_nodes.p50, ''],
+      ['long task p95', beforeScenario.summary.long_task_total_ms.p95, afterScenario.summary.long_task_total_ms.p95, 'ms'],
+    ];
+    for (const [metric, beforeValue, afterValue, unit] of metrics) {
+      rows.push({
+        scenario: afterScenario.name,
+        metric,
+        before: beforeValue,
+        after: afterValue,
+        delta: pctDelta(beforeValue, afterValue),
+        unit,
+      });
+    }
+  }
+
+  for (const row of rows) {
+    const arrow = row.delta <= 0 ? 'win' : 'reg';
+    console.log(`${row.scenario} ${row.metric}: ${row.before.toFixed(1)}${row.unit} -> ${row.after.toFixed(1)}${row.unit} (${arrow} ${Math.abs(row.delta).toFixed(1)}%)`);
+  }
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  if (options.compare) {
+    const [beforePath, afterPath] = options.compare.split(',').map((item) => item.trim());
+    if (!beforePath || !afterPath) throw new Error('--compare expects BEFORE,AFTER');
+    const before = JSON.parse(await readFile(beforePath, 'utf8'));
+    const after = JSON.parse(await readFile(afterPath, 'utf8'));
+    printComparison(before, after);
+    return;
+  }
+
+  const fixture = buildFixture(options);
+  const chrome = await launchChrome(options);
+  const client = new CdpClient(chrome.pageWsUrl);
+  await client.connect();
+
+  try {
+    const samplesByScenario = new Map();
+    for (const scenarioKey of options.scenarios) {
+      const samples = [];
+      const totalRuns = options.warmups + options.runs;
+      for (let index = 0; index < totalRuns; index += 1) {
+        const measured = index >= options.warmups;
+        const sample = await runScenario(client, scenarioKey, fixture, options, measured);
+        samples.push(sample);
+      }
+      samplesByScenario.set(scenarioKey, samples);
+    }
+
+    const result = {
+      config: {
+        phase: options.phase,
+        baseUrl: options.baseUrl,
+        runs: options.runs,
+        warmups: options.warmups,
+        scenarios: options.scenarios,
+        ideas: options.ideas,
+        connections: options.connections,
+        streamItems: options.streamItems,
+        apiLatencyMs: options.apiLatencyMs,
+        sidecarLatencyMs: options.sidecarLatencyMs,
+        timeoutMs: options.timeoutMs,
+      },
+      scenarios: options.scenarios.map((scenarioKey) => {
+        const samples = samplesByScenario.get(scenarioKey) ?? [];
+        return {
+          key: scenarioKey,
+          name: SCENARIOS[scenarioKey].name,
+          summary: summarizeScenario(samples),
+          samples,
+        };
+      }),
+    };
+
+    const unknownRoutes = result.scenarios.flatMap((scenario) => scenario.summary.unknown_routes);
+    if (unknownRoutes.length && !options.allowUnknownApi) {
+      throw new Error(`Unknown mocked API routes detected:\n${unknownRoutes.map((route) => `- ${route.label}`).join('\n')}`);
+    }
+
+    if (options.out) {
+      await mkdir(path.dirname(options.out), { recursive: true });
+      await writeFile(options.out, `${JSON.stringify(result, null, 2)}\n`);
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      printTextReport(result);
+    }
+  } finally {
+    client.close();
+    await chrome.close();
+  }
+}
+
+main().catch((error) => {
+  console.error(error.stack || error.message);
+  process.exit(1);
+});
