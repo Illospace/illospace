@@ -25,6 +25,7 @@
   let localDropActive = $state(false);
   let localDropError = $state('');
   let localUploading = $state(false);
+  let localUploadLabel = $state('');
   let localPickerMenuOpen = $state(false);
   let folderInputEl: HTMLInputElement | undefined = $state();
   let fileInputEl: HTMLInputElement | undefined = $state();
@@ -42,6 +43,9 @@
       return 0;
     }
     localUploading = true;
+    localUploadLabel = filtered.entries.length === 1
+      ? 'Uploading 1 file...'
+      : `Uploading ${filtered.entries.length} files...`;
     localDropError = '';
     try {
       const result = await uploadProjectContextFiles(
@@ -74,6 +78,7 @@
       return 0;
     } finally {
       localUploading = false;
+      localUploadLabel = '';
     }
   }
 
@@ -161,6 +166,7 @@
     const transfer = event.dataTransfer;
     if (!transfer) return;
     try {
+      localUploadLabel = 'Preparing files...';
       const entries = await entriesFromDataTransfer(transfer);
       const hasFolderPaths = entries.some((entry) => entry.relativePath.includes('/'));
       const added = entries.length
@@ -175,6 +181,8 @@
       }
     } catch {
       localDropError = 'Could not read dropped files.';
+    } finally {
+      if (!localUploading) localUploadLabel = '';
     }
   }
 </script>
@@ -217,7 +225,7 @@
     <span>
       <strong>
         {localUploading
-          ? 'Uploading snapshot...'
+          ? (localUploadLabel || 'Uploading files...')
           : (localDropActive ? 'Release to upload' : 'Drop files or folders')}
       </strong>
       <small>Select files, select a folder, or drop either here</small>

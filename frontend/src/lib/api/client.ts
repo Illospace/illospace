@@ -1,4 +1,10 @@
 const BASE = '';
+const DEFAULT_API_TIMEOUT_MS = 20_000;
+const PROJECT_CONTEXT_UPLOAD_TIMEOUT_MS = 30_000;
+
+type ApiRequestInit = RequestInit & {
+  timeoutMs?: number;
+};
 
 type PreloadedJson<T> = {
   ok: boolean;
@@ -6,7 +12,7 @@ type PreloadedJson<T> = {
   error?: unknown;
 };
 
-function takePreloadedJson<T>(path: string, init?: RequestInit): Promise<T> | null {
+function takePreloadedJson<T>(path: string, init?: ApiRequestInit): Promise<T> | null {
   if (typeof window === 'undefined') return null;
   const method = String(init?.method || 'GET').toUpperCase();
   if (method !== 'GET' || init?.body) return null;
@@ -22,20 +28,37 @@ function takePreloadedJson<T>(path: string, init?: RequestInit): Promise<T> | nu
   });
 }
 
-async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+async function fetchJson<T>(path: string, init?: ApiRequestInit): Promise<T> {
   const preloaded = takePreloadedJson<T>(path, init);
   if (preloaded) return preloaded;
 
-  const { headers: extraHeaders, ...rest } = init ?? {};
-  const res = await fetch(`${BASE}${path}`, {
-    ...rest,
-    headers: { 'Content-Type': 'application/json', ...(extraHeaders as Record<string, string>) },
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw { status: res.status, detail: err.error || err.detail || res.statusText };
+  const {
+    headers: extraHeaders,
+    timeoutMs = DEFAULT_API_TIMEOUT_MS,
+    signal,
+    ...rest
+  } = init ?? {};
+  const controller = !signal && timeoutMs > 0 ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      ...rest,
+      signal: signal ?? controller?.signal,
+      headers: { 'Content-Type': 'application/json', ...(extraHeaders as Record<string, string>) },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw { status: res.status, detail: err.error || err.detail || res.statusText };
+    }
+    return res.json();
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw { status: 0, detail: 'Request timed out. Check the local server and try again.' };
+    }
+    throw err;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
   }
-  return res.json();
 }
 
 function withQuery(
@@ -643,7 +666,7 @@ export const api = {
       form.append('relative_paths', relativePaths?.[index] || file.name);
     });
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60_000);
+    const timeoutId = setTimeout(() => controller.abort(), PROJECT_CONTEXT_UPLOAD_TIMEOUT_MS);
     return fetch('/api/cortex/project-context/local-files', {
       method: 'POST',
       body: form,
@@ -658,7 +681,7 @@ export const api = {
       })
       .catch((err) => {
         if (err?.name === 'AbortError') {
-          throw { detail: 'Project Context upload timed out. Try a smaller file or folder snapshot.' };
+          throw { detail: 'Project Context upload timed out before the local server responded.' };
         }
         throw err;
       })
