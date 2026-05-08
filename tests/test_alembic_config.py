@@ -13,6 +13,7 @@ ALEMBIC_DIR = ROOT / "brain" / "platform" / "db" / "alembic"
 VERSIONS_DIR = ALEMBIC_DIR / "versions"
 
 PUBLIC_BASELINE = "0001_public_schema_baseline.py"
+LEGACY_STAMP_BRIDGE = "0000_legacy_notification_preferences_bridge.py"
 BROAD_DESTRUCTIVE_SQL_PATTERNS = (
     r"\bDROP\s+DATABASE\b",
     r"\bDROP\s+SCHEMA\b",
@@ -28,6 +29,14 @@ def _migration_files() -> list[Path]:
         path
         for path in sorted(VERSIONS_DIR.glob("*.py"))
         if path.name != "__init__.py"
+    ]
+
+
+def _material_schema_migration_files() -> list[Path]:
+    return [
+        path
+        for path in _migration_files()
+        if path.name != LEGACY_STAMP_BRIDGE
     ]
 
 
@@ -182,7 +191,7 @@ def test_alembic_revision_headers_match_identifiers():
 
 def test_public_tree_has_single_schema_baseline():
     """Fresh public releases start from one current-state schema baseline."""
-    migration_files = _migration_files()
+    migration_files = _material_schema_migration_files()
     assert [path.name for path in migration_files] == [PUBLIC_BASELINE]
 
     content = (VERSIONS_DIR / PUBLIC_BASELINE).read_text()
