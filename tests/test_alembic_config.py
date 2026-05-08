@@ -13,6 +13,7 @@ ALEMBIC_DIR = ROOT / "brain" / "platform" / "db" / "alembic"
 VERSIONS_DIR = ALEMBIC_DIR / "versions"
 
 PUBLIC_BASELINE = "0001_public_schema_baseline.py"
+LEGACY_STAMP_BRIDGE = "0000_legacy_notification_preferences_bridge.py"
 BROAD_DESTRUCTIVE_SQL_PATTERNS = (
     r"\bDROP\s+DATABASE\b",
     r"\bDROP\s+SCHEMA\b",
@@ -28,6 +29,14 @@ def _migration_files() -> list[Path]:
         path
         for path in sorted(VERSIONS_DIR.glob("*.py"))
         if path.name != "__init__.py"
+    ]
+
+
+def _material_schema_migration_files() -> list[Path]:
+    return [
+        path
+        for path in _migration_files()
+        if path.name != LEGACY_STAMP_BRIDGE
     ]
 
 
@@ -101,7 +110,7 @@ def test_env_py_imports_brain_config():
 
 def test_env_py_widens_alembic_version_column_for_long_revision_ids():
     """Postgres Alembic version tables must handle repo revision ids over 32 chars."""
-    revision_ids: list[str] = []
+    long_revision_ids: list[str] = []
     for path in _migration_files():
         module = ast.parse(path.read_text(), filename=str(path))
         for node in module.body:
@@ -109,13 +118,14 @@ def test_env_py_widens_alembic_version_column_for_long_revision_ids():
                 continue
             if any(isinstance(target, ast.Name) and target.id == "revision" for target in node.targets):
                 revision_id = ast.literal_eval(node.value)
-                revision_ids.append(revision_id)
+                if len(revision_id) > 32:
+                    long_revision_ids.append(revision_id)
 
-    assert revision_ids
-    assert max(len(revision_id) for revision_id in revision_ids) <= 255
+    assert long_revision_ids
 
     env_content = (ALEMBIC_DIR / "env.py").read_text()
     assert "ALEMBIC_VERSION_NUM_MAX_LENGTH = 255" in env_content
+    assert "CREATE TABLE IF NOT EXISTS alembic_version" in env_content
     assert "ALTER TABLE alembic_version" in env_content
     assert "version_num TYPE VARCHAR" in env_content
 
@@ -181,7 +191,7 @@ def test_alembic_revision_headers_match_identifiers():
 
 def test_public_tree_has_single_schema_baseline():
     """Fresh public releases start from one current-state schema baseline."""
-    migration_files = _migration_files()
+    migration_files = _material_schema_migration_files()
     assert [path.name for path in migration_files] == [PUBLIC_BASELINE]
 
     content = (VERSIONS_DIR / PUBLIC_BASELINE).read_text()

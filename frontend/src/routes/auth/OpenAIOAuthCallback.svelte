@@ -52,19 +52,8 @@
   }
 
   async function cortexIntroUrl() {
-    try {
-      const intro = await api.startRuntimeReadyIntro();
-      if (intro?.idea_id) {
-        const params = new URLSearchParams({
-          idea: intro.idea_id,
-          onboarding: 'runtime-ready',
-        });
-        return `/cortex?${params.toString()}`;
-      }
-    } catch {
-      // The System page listener also starts the intro when this is a popup.
-    }
-    return '/cortex';
+    const params = new URLSearchParams({ onboarding: 'runtime-ready' });
+    return `/cortex?${params.toString()}`;
   }
 
   function scheduleCompletion(returnUrl: string) {

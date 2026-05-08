@@ -1065,6 +1065,21 @@ export const api = {
     fetchJson<any>('/api/runtime-settings/memory/check', { method: 'POST' }),
 
   // Onboarding
+  runtimeReadyIntroDraft: () =>
+    fetchJson<{
+      ok: boolean;
+      idea_id?: string | null;
+      should_play: boolean;
+      prompt: string;
+      title: string;
+      display_title: string;
+      origin: string;
+      origin_ref: string;
+      run_metadata?: Record<string, any> | null;
+    }>(
+      '/api/onboarding/runtime-ready-intro-draft',
+      { method: 'POST' },
+    ),
   startRuntimeReadyIntro: () =>
     fetchJson<{ ok: boolean; idea_id: string; created: boolean; run_id?: number | null }>(
       '/api/onboarding/runtime-ready-intro',

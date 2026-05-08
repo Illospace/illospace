@@ -335,20 +335,13 @@
     if (startingIntro) return;
     startingIntro = true;
     try {
-      const intro = await api.startRuntimeReadyIntro();
-      if (intro?.idea_id && (intro.created || openExisting)) {
-        const params = new URLSearchParams({
-          idea: intro.idea_id,
-          onboarding: 'runtime-ready',
-        });
-        await goto(`/cortex?${params.toString()}`);
-        return;
-      }
-      await goto('/cortex');
+      const params = new URLSearchParams({ onboarding: 'runtime-ready' });
+      if (openExisting) params.set('open_existing', '1');
+      await goto(`/cortex?${params.toString()}`);
     } catch (error) {
       await loadSettings();
       notice = errorNotice(
-        'Runtime connected, but the intro thread did not start.',
+        'Runtime connected, but Cortex did not open.',
         error,
         'Open Cortex to continue.',
       );

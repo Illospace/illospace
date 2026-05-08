@@ -193,6 +193,53 @@ run_psql_no_prompt() {
   env PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-3}" "$psql_bin" -w "$@"
 }
 
+db_connection_ok() {
+  local db_host="$1"
+  local db_port="$2"
+  local db_name="$3"
+  local db_user="$4"
+  local db_pass="$5"
+
+  if psql_available; then
+    export PGPASSWORD="$db_pass"
+    run_psql_no_prompt -h "$db_host" -p "$db_port" -U "$db_user" -d "$db_name" -c "SELECT 1" \
+      >/dev/null 2>&1
+    local status=$?
+    unset PGPASSWORD
+    return "$status"
+  fi
+
+  local python_bin
+  python_bin="$(launcher_python_bin)"
+  DB_HOST="$db_host" \
+  DB_PORT="$db_port" \
+  DB_NAME="$db_name" \
+  DB_USER="$db_user" \
+  DB_PASSWORD="$db_pass" \
+    "$python_bin" - <<'PY' >/dev/null 2>&1
+import os
+import sys
+
+try:
+    import psycopg2
+except Exception:
+    sys.exit(1)
+
+try:
+    conn = psycopg2.connect(
+        host=os.environ["DB_HOST"],
+        port=int(os.environ["DB_PORT"]),
+        dbname=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        connect_timeout=3,
+    )
+    conn.close()
+except Exception:
+    sys.exit(1)
+PY
+}
+
 # ── Source optional env files ─────────────────────────────
 
 runtime_env_file_path() {
@@ -1237,12 +1284,9 @@ ensure_db() {
   elif [ $db_reachable -ne 0 ] && tcp_port_listening "$db_host" "$db_port"; then
     postgres_listening=0
   fi
-  export PGPASSWORD="$db_pass"
-  if [ $db_reachable -ne 0 ] && psql_available && \
-     run_psql_no_prompt -h "$db_host" -p "$db_port" -U "$db_user" -d "$db_name" -c "SELECT 1" &>/dev/null 2>&1; then
+  if [ $db_reachable -ne 0 ] && db_connection_ok "$db_host" "$db_port" "$db_name" "$db_user" "$db_pass"; then
     db_reachable=0
   fi
-  unset PGPASSWORD
 
   if [ $db_reachable -eq 0 ]; then
     dim "Database reachable at $db_host:$db_port"
@@ -1253,12 +1297,9 @@ ensure_db() {
         warn "Postgres is listening at $db_host:$db_port, but Illo cannot connect to '$db_name' as '$db_user'"
         dim "No DB_* settings were provided — trying to bootstrap the default Illo database in local Postgres..."
         if bootstrap_local_postgres_db "$db_host" "$db_port" "$db_user" "$db_pass" "$db_name"; then
-          export PGPASSWORD="$db_pass"
-          if psql_available && \
-             run_psql_no_prompt -h "$db_host" -p "$db_port" -U "$db_user" -d "$db_name" -c "SELECT 1" &>/dev/null 2>&1; then
+          if db_connection_ok "$db_host" "$db_port" "$db_name" "$db_user" "$db_pass"; then
             db_reachable=0
           fi
-          unset PGPASSWORD
           if [ $db_reachable -eq 0 ]; then
             info "Database bootstrapped in local Postgres at $db_host:$db_port"
           fi
@@ -2288,219 +2329,6 @@ uninstall() {
   fi
 }
 
-# ── Compose deployment CLI ─────────────────────────────────
-
-deploy_compose_env_file() {
-  echo "${ILLO_COMPOSE_ENV_FILE:-$ROOT/deploy/compose/.env}"
-}
-
-deploy_compose_file() {
-  echo "$ROOT/deploy/compose/docker-compose.yml"
-}
-
-deploy_ensure_docker() {
-  if ! command -v docker >/dev/null 2>&1; then
-    err "docker not found — install Docker Engine with Docker Compose v2"
-    return 1
-  fi
-  if ! docker compose version >/dev/null 2>&1; then
-    err "docker compose is unavailable — install Docker Compose v2"
-    return 1
-  fi
-  if ! docker info >/dev/null 2>&1; then
-    err "Docker daemon is not reachable"
-    return 1
-  fi
-}
-
-deploy_compose() {
-  docker compose --env-file "$(deploy_compose_env_file)" -f "$(deploy_compose_file)" "$@"
-}
-
-deploy_env_value() {
-  local key="$1"
-  local env_file value
-  env_file="$(deploy_compose_env_file)"
-  value="$(
-    python3 - "$env_file" "$key" <<'PY'
-from pathlib import Path
-import re
-import sys
-
-path = Path(sys.argv[1])
-key = sys.argv[2]
-if not path.exists():
-    sys.exit(0)
-pattern = re.compile(rf"^{re.escape(key)}=(.*)$")
-for line in path.read_text(encoding="utf-8").splitlines():
-    match = pattern.match(line.strip())
-    if match:
-        value = match.group(1).strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        print(value)
-        break
-PY
-  )"
-  printf '%s' "$value"
-}
-
-deploy_require_env_file() {
-  local env_file
-  env_file="$(deploy_compose_env_file)"
-  if [ ! -f "$env_file" ]; then
-    err "Missing $env_file"
-    dim "Run: ./illo deploy init"
-    return 1
-  fi
-}
-
-deploy_usage() {
-  echo ""
-  echo -e "${BOLD}Usage:${NC} ./illo deploy <command>"
-  echo ""
-  echo -e "  ${GREEN}init${NC}       Create deploy/compose/.env and generate secrets"
-  echo -e "  ${GREEN}up${NC}         Pull/build images, start the Compose stack, then run doctor"
-  echo -e "  ${GREEN}doctor${NC}     Validate server config and running stack health"
-  echo -e "  ${GREEN}status${NC}     Show Compose service status"
-  echo -e "  ${GREEN}logs${NC}       Show Compose logs (pass -f to follow, service names to filter)"
-  echo -e "  ${GREEN}backup${NC}     Write a Postgres backup dump"
-  echo -e "  ${GREEN}restore${NC}    Restore a Postgres backup dump"
-  echo -e "  ${GREEN}upgrade${NC}    Pull/build, migrate, restart, and run doctor"
-  echo -e "  ${GREEN}smoke${NC}      Run the deployment smoke test"
-  echo -e "  ${GREEN}down${NC}       Stop the Compose stack"
-  echo -e "  ${GREEN}native${NC}     Run the advanced native/systemd deploy script"
-  echo ""
-}
-
-deploy_up() {
-  local build=0
-  local pull=1
-  local doctor=1
-
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --build)
-        build=1
-        shift
-        ;;
-      --no-pull)
-        pull=0
-        shift
-        ;;
-      --skip-doctor)
-        doctor=0
-        shift
-        ;;
-      -h|--help)
-        echo "Usage: ./illo deploy up [--build] [--no-pull] [--skip-doctor]"
-        return 0
-        ;;
-      *)
-        err "Unknown deploy up option: $1"
-        return 2
-        ;;
-    esac
-  done
-
-  deploy_require_env_file || return 1
-  deploy_ensure_docker || return 1
-
-  if [ "$pull" = "1" ]; then
-    if ! deploy_compose pull; then
-      warn "Image pull failed; building API and web images locally instead."
-      build=1
-    fi
-  fi
-  if [ "$build" = "1" ]; then
-    deploy_compose build api web || return 1
-  fi
-  deploy_compose up -d || return 1
-  if [ "$doctor" = "1" ]; then
-    "$ROOT/deploy/scripts/doctor.sh"
-  fi
-  local web_port
-  web_port="$(deploy_env_value ILLO_WEB_PORT)"
-  web_port="${web_port:-8080}"
-  dim ""
-  dim "Illospace is listening privately on the server at 127.0.0.1:${web_port}."
-  dim "From your workstation, run:"
-  dim "  ssh -L ${web_port}:127.0.0.1:${web_port} <ssh-user>@<server>"
-  dim "Then open: http://localhost:${web_port}"
-  dim "For team-wide access, put your own reverse proxy, VPN, or private network in front of this loopback port."
-}
-
-deploy_command() {
-  local subcommand="${1:-help}"
-  shift || true
-
-  case "$subcommand" in
-    init)
-      "$ROOT/deploy/scripts/init-secrets.sh" "$@"
-      ;;
-    up|start)
-      deploy_up "$@"
-      ;;
-    doctor)
-      "$ROOT/deploy/scripts/doctor.sh" "$@"
-      ;;
-    status|ps)
-      deploy_require_env_file || return 1
-      deploy_ensure_docker || return 1
-      deploy_compose ps "$@"
-      ;;
-    logs)
-      deploy_require_env_file || return 1
-      deploy_ensure_docker || return 1
-      deploy_compose logs "$@"
-      ;;
-    backup)
-      "$ROOT/deploy/scripts/backup.sh" "$@"
-      ;;
-    restore)
-      "$ROOT/deploy/scripts/restore.sh" "$@"
-      ;;
-    upgrade)
-      "$ROOT/deploy/scripts/upgrade.sh" "$@"
-      ;;
-    smoke)
-      "$ROOT/deploy/scripts/smoke-test.sh" "$@"
-      ;;
-    build)
-      deploy_require_env_file || return 1
-      deploy_ensure_docker || return 1
-      deploy_compose build api web "$@"
-      ;;
-    pull)
-      deploy_require_env_file || return 1
-      deploy_ensure_docker || return 1
-      deploy_compose pull "$@"
-      ;;
-    restart)
-      deploy_require_env_file || return 1
-      deploy_ensure_docker || return 1
-      deploy_compose restart "$@"
-      ;;
-    down|stop)
-      deploy_require_env_file || return 1
-      deploy_ensure_docker || return 1
-      deploy_compose down "$@"
-      ;;
-    native)
-      check_prereqs
-      "$ROOT/ops/deploy.sh" "$@"
-      ;;
-    help|-h|--help)
-      deploy_usage
-      ;;
-    *)
-      err "Unknown deploy command: $subcommand"
-      deploy_usage
-      return 1
-      ;;
-  esac
-}
-
 # ── CLI ────────────────────────────────────────────────────
 
 usage() {
@@ -2511,7 +2339,8 @@ usage() {
   echo -e "  ${GREEN}dev-start${NC}    Development mode alias (owns local runtime)"
   echo -e "  ${GREEN}setup${NC}        Run setup only"
   echo -e "  ${GREEN}start${NC}        Production-safe API mode (standalone worker owns AgentRuns)"
-  echo -e "  ${GREEN}deploy${NC}       Manage the recommended Compose team-server deploy"
+  echo -e "  ${GREEN}deploy${NC}       Run production-safe deploy script"
+  echo -e "  ${GREEN}native${NC}       Native deploy alias"
   echo -e "  ${GREEN}doctor${NC}       Validate configuration (pass --production for prod)"
   echo -e "  ${GREEN}uninstall${NC}    Remove local runtime, config, and Illo Docker DB"
   echo -e "  ${GREEN}worker-status${NC} Show active AgentRuns and worker service state"
@@ -2519,6 +2348,10 @@ usage() {
   echo -e "  ${GREEN}test${NC}         Run tests"
   echo -e "  ${GREEN}build${NC}        Build frontend only"
   echo ""
+}
+
+deploy_command() {
+  "$ROOT/ops/deploy.sh" "$@"
 }
 
 begin_launch_log "$*"
@@ -2539,6 +2372,11 @@ case "${1:-}" in
     run_dev
     ;;
   deploy)
+    check_prereqs
+    deploy_command "${@:2}"
+    ;;
+  native)
+    check_prereqs
     deploy_command "${@:2}"
     ;;
   doctor)
