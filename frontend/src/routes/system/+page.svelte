@@ -215,8 +215,8 @@
             title: 'Codex sign-in opened.',
             detail:
               oauthCallbackMode === 'server'
-                ? 'Finish in the OpenAI window. It will return to this Illo server automatically.'
-                : 'Finish in the OpenAI window. This page will update automatically.',
+                ? 'Finish in the OpenAI window. It should return to this Illo server automatically; paste the callback URL below if it does not.'
+                : 'Finish in the OpenAI window. This page should update automatically; paste the callback URL below if it does not.',
           }
         : {
             tone: 'warning',

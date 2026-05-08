@@ -60,13 +60,7 @@
     onSkipEmbedderPrompt: () => void;
   } = $props();
 
-  let showManualCallback = $state(false);
-
-  $effect(() => {
-    if (oauthPending && !oauthCallbackAvailable) {
-      showManualCallback = true;
-    }
-  });
+  const showManualCallback = $derived(Boolean(oauthPending));
 </script>
 
 <SetupCard
@@ -174,17 +168,6 @@
       </ConstellationButton>
     </div>
 
-    {#if oauthPending || showManualCallback}
-      <button
-        class="fallback-toggle"
-        type="button"
-        aria-expanded={showManualCallback}
-        onclick={() => (showManualCallback = !showManualCallback)}
-      >
-        {showManualCallback ? 'Hide callback field' : 'Paste localhost callback URL'}
-      </button>
-    {/if}
-
     {#if showManualCallback}
       <div class="callback-row">
         <label for="openai-callback">Callback URL</label>
@@ -279,30 +262,6 @@
     margin: 0;
     color: var(--constellation-text-muted);
     font-size: var(--constellation-type-body-sm);
-  }
-
-  .fallback-toggle {
-    justify-self: start;
-    border: 0;
-    background: transparent;
-    color: var(--constellation-text-muted);
-    font: inherit;
-    font-size: var(--constellation-type-body-sm);
-    padding: 0;
-    text-decoration: underline;
-    text-underline-offset: 3px;
-    cursor: pointer;
-  }
-
-  .fallback-toggle:hover,
-  .fallback-toggle:focus-visible {
-    color: var(--constellation-text-primary);
-  }
-
-  .fallback-toggle:focus-visible {
-    outline: 2px solid var(--constellation-control-focus-ring);
-    outline-offset: 4px;
-    border-radius: 4px;
   }
 
   .field-copy span {

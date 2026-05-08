@@ -39,7 +39,8 @@
   let activeStep = $state<OnboardingStep>('openai');
 
   const isWorking = $derived(status === 'loading' || status === 'connecting');
-  const showManualCallback = $derived(Boolean(!oauthCallbackAvailable && (oauthUrl || oauthState || status === 'connecting')));
+  const oauthPending = $derived(Boolean(oauthUrl || oauthState || status === 'connecting'));
+  const showManualCallback = $derived(Boolean(status !== 'connected' && oauthPending));
   const connectLabel = $derived(status === 'connected' ? 'Continue' : 'Connect OpenAI');
   const isMemoryStep = $derived(activeStep === 'memory');
   const embedderOptions = $derived(memoryEmbedderOptions());
@@ -261,8 +262,8 @@
             title: 'OpenAI sign-in opened.',
             detail:
               oauthCallbackMode === 'server'
-                ? 'Finish in the OpenAI window. It will return automatically.'
-                : 'Finish in the OpenAI window. This page will update when it returns.',
+                ? 'Finish in the OpenAI window. It should return automatically; paste the callback URL below if it does not.'
+                : 'Finish in the OpenAI window. This page should update when it returns; paste the callback URL below if it does not.',
           }
         : {
             tone: 'warning',
