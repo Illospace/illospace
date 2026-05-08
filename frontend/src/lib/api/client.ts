@@ -642,13 +642,27 @@ export const api = {
       form.append('files', file);
       form.append('relative_paths', relativePaths?.[index] || file.name);
     });
-    return fetch('/api/cortex/project-context/local-files', { method: 'POST', body: form }).then(async (r) => {
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({ detail: 'Upload failed' }));
-        throw { status: r.status, detail: err.error || err.detail || 'Upload failed' };
-      }
-      return r.json();
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60_000);
+    return fetch('/api/cortex/project-context/local-files', {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    })
+      .then(async (r) => {
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({ detail: 'Upload failed' }));
+          throw { status: r.status, detail: err.error || err.detail || 'Upload failed' };
+        }
+        return r.json();
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') {
+          throw { detail: 'Project Context upload timed out. Try a smaller file or folder snapshot.' };
+        }
+        throw err;
+      })
+      .finally(() => clearTimeout(timeoutId));
   },
   listIdeaProjectContext: (ideaId: string) =>
     fetchJson<any[]>(`/api/cortex/ideas/${ideaId}/project-context`),

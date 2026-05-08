@@ -8,7 +8,7 @@ export type ProjectContextProfile = {
   serverProfileId?: string;
 };
 
-export type ConnectorMode = 'menu' | 'github' | 'folder' | 'file';
+export type ConnectorMode = 'menu' | 'github' | 'local';
 
 const RESOURCE_TYPE_LABELS: Record<string, string> = {
   repo: 'GitHub',

@@ -36,6 +36,21 @@ export type ProjectContextUploadedFile = {
   size?: number;
 };
 
+export type ProjectContextUploadSkip = {
+  filename?: string;
+  reason?: string;
+};
+
+export type ProjectContextUploadFilterResult = {
+  entries: DroppedEntryFile[];
+  skippedFiles: ProjectContextUploadSkip[];
+};
+
+export const PROJECT_CONTEXT_UPLOAD_MAX_FILES = 200;
+export const PROJECT_CONTEXT_UPLOAD_MAX_FILE_SIZE = 10_000_000;
+export const PROJECT_CONTEXT_UPLOAD_MAX_TOTAL_SIZE = 20_000_000;
+const PROJECT_CONTEXT_ENTRY_READ_TIMEOUT_MS = 8_000;
+
 export function enableFolderPicker(node: HTMLInputElement) {
   const folderNode = node as HTMLInputElement & { webkitdirectory?: boolean; directory?: boolean };
   folderNode.webkitdirectory = true;
@@ -53,6 +68,64 @@ export function uploadSkippedSummary(skippedFiles: Array<{ filename?: string; re
   const first = skippedFiles[0];
   const suffix = skippedFiles.length > 1 ? ` (${skippedFiles.length} skipped)` : '';
   return `${first.filename ?? 'Some files'}: ${first.reason ?? 'Skipped'}${suffix}`;
+}
+
+function timeoutError(label: string): Error {
+  return new Error(`${label} took too long to read.`);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(timeoutError(label)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
+export function filterProjectContextUploadEntries(entries: DroppedEntryFile[]): ProjectContextUploadFilterResult {
+  const accepted: DroppedEntryFile[] = [];
+  const skippedFiles: ProjectContextUploadSkip[] = [];
+  let totalSize = 0;
+
+  for (const entry of entries) {
+    const filename = entry.relativePath || entry.file.name || 'file';
+    const size = typeof entry.file.size === 'number' ? entry.file.size : 0;
+
+    if (accepted.length >= PROJECT_CONTEXT_UPLOAD_MAX_FILES) {
+      skippedFiles.push({
+        filename,
+        reason: `Only the first ${PROJECT_CONTEXT_UPLOAD_MAX_FILES} supported files are attached`,
+      });
+      continue;
+    }
+    if (size > PROJECT_CONTEXT_UPLOAD_MAX_FILE_SIZE) {
+      skippedFiles.push({
+        filename,
+        reason: `File is larger than ${PROJECT_CONTEXT_UPLOAD_MAX_FILE_SIZE / 1_000_000} MB`,
+      });
+      continue;
+    }
+    if (totalSize + size > PROJECT_CONTEXT_UPLOAD_MAX_TOTAL_SIZE) {
+      skippedFiles.push({
+        filename,
+        reason: `Project Context upload is capped at ${PROJECT_CONTEXT_UPLOAD_MAX_TOTAL_SIZE / 1_000_000} MB`,
+      });
+      continue;
+    }
+
+    accepted.push(entry);
+    totalSize += size;
+  }
+
+  return { entries: accepted, skippedFiles };
 }
 
 export function uploadedFileResource(file: ProjectContextUploadedFile, source: string): ProjectContextResource {
@@ -100,32 +173,40 @@ export function uploadedFolderResources(
 }
 
 export function readFileEntry(entry: FileSystemFileEntryLike, relativePath: string): Promise<DroppedEntryFile> {
-  return new Promise((resolve, reject) => {
-    entry.file(
-      (file) => resolve({ file, relativePath }),
-      (error) => reject(error),
-    );
-  });
+  return withTimeout(
+    new Promise((resolve, reject) => {
+      entry.file(
+        (file) => resolve({ file, relativePath }),
+        (error) => reject(error),
+      );
+    }),
+    PROJECT_CONTEXT_ENTRY_READ_TIMEOUT_MS,
+    relativePath,
+  );
 }
 
 export function readDirectoryEntries(reader: FileSystemDirectoryReaderLike): Promise<FileSystemEntryLike[]> {
-  return new Promise((resolve, reject) => {
-    const entries: FileSystemEntryLike[] = [];
-    const readBatch = () => {
-      reader.readEntries(
-        (batch) => {
-          if (!batch.length) {
-            resolve(entries);
-            return;
-          }
-          entries.push(...batch);
-          readBatch();
-        },
-        (error) => reject(error),
-      );
-    };
-    readBatch();
-  });
+  return withTimeout(
+    new Promise((resolve, reject) => {
+      const entries: FileSystemEntryLike[] = [];
+      const readBatch = () => {
+        reader.readEntries(
+          (batch) => {
+            if (!batch.length) {
+              resolve(entries);
+              return;
+            }
+            entries.push(...batch);
+            readBatch();
+          },
+          (error) => reject(error),
+        );
+      };
+      readBatch();
+    }),
+    PROJECT_CONTEXT_ENTRY_READ_TIMEOUT_MS,
+    'Folder',
+  );
 }
 
 export async function readDroppedEntry(entry: FileSystemEntryLike, parentPath = ''): Promise<DroppedEntryFile[]> {
@@ -138,4 +219,29 @@ export async function readDroppedEntry(entry: FileSystemEntryLike, parentPath = 
   const entries = await readDirectoryEntries(reader);
   const groups = await Promise.all(entries.map((item) => readDroppedEntry(item, relativePath)));
   return groups.flat();
+}
+
+export function entriesFromFileList(files: File[]): DroppedEntryFile[] {
+  return files.map((file) => ({ file, relativePath: relativePathForFile(file) }));
+}
+
+export async function entriesFromDataTransfer(transfer: DataTransfer): Promise<DroppedEntryFile[]> {
+  const fallbackFiles = Array.from(transfer.files ?? []);
+  const fileSystemEntries = Array.from(transfer.items ?? []).reduce<FileSystemEntryLike[]>((acc, item) => {
+    const entry = (item as unknown as DataTransferItemWithEntry).webkitGetAsEntry?.();
+    if (entry) acc.push(entry);
+    return acc;
+  }, []);
+
+  if (!fileSystemEntries.length) {
+    return entriesFromFileList(fallbackFiles);
+  }
+
+  try {
+    const entryGroups = await Promise.all(fileSystemEntries.map((entry) => readDroppedEntry(entry)));
+    const entries = entryGroups.flat();
+    return entries.length ? entries : entriesFromFileList(fallbackFiles);
+  } catch {
+    return entriesFromFileList(fallbackFiles);
+  }
 }

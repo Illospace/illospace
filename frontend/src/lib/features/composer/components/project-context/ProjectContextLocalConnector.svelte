@@ -4,28 +4,28 @@
   import type { ProjectContextResource } from '$lib/utils/projectContext';
   import {
     enableFolderPicker,
-    readDroppedEntry,
-    relativePathForFile,
+    entriesFromDataTransfer,
+    entriesFromFileList,
+    filterProjectContextUploadEntries,
     uploadedFileResource,
     uploadedFolderResources,
     uploadSkippedSummary,
-    type DataTransferItemWithEntry,
     type DroppedEntryFile,
-    type FileSystemEntryLike,
   } from '$lib/utils/projectContextLocal';
   import { projectContextErrorDetail } from './projectContextProfiles';
 
   let {
-    mode = 'folder',
+    mode = 'local',
     onAddResources,
   }: {
-    mode?: 'folder' | 'file';
+    mode?: 'folder' | 'file' | 'local';
     onAddResources?: (resources: ProjectContextResource[]) => void;
   } = $props();
 
   let localDropActive = $state(false);
   let localDropError = $state('');
   let localUploading = $state(false);
+  let localPickerMenuOpen = $state(false);
   let folderInputEl: HTMLInputElement | undefined = $state();
   let fileInputEl: HTMLInputElement | undefined = $state();
 
@@ -35,16 +35,22 @@
     preferFolderResource: boolean,
   ) {
     if (!entries.length || localUploading) return 0;
+    const filtered = filterProjectContextUploadEntries(entries);
+    const clientSkipped = uploadSkippedSummary(filtered.skippedFiles);
+    if (!filtered.entries.length) {
+      localDropError = clientSkipped || 'No files found that fit the upload limits.';
+      return 0;
+    }
     localUploading = true;
     localDropError = '';
     try {
       const result = await uploadProjectContextFiles(
-        entries.map((entry) => entry.file),
-        entries.map((entry) => entry.relativePath),
+        filtered.entries.map((entry) => entry.file),
+        filtered.entries.map((entry) => entry.relativePath),
       );
       const uploadedFiles = Array.isArray(result?.files) ? result.files : [];
       if (!uploadedFiles.length) {
-        localDropError = 'No readable Project Context files were uploaded.';
+        localDropError = 'No Project Context files were uploaded.';
         return 0;
       }
       const shouldCreateFolders = preferFolderResource || uploadedFiles.some((file: any) => String(file.relative_path ?? '').includes('/'));
@@ -52,7 +58,10 @@
         ? uploadedFolderResources(uploadedFiles, source)
         : uploadedFiles.map((file: any) => uploadedFileResource(file, source));
       onAddResources?.(resources);
-      const skipped = uploadSkippedSummary(result?.skipped_files);
+      const skipped = uploadSkippedSummary([
+        ...filtered.skippedFiles,
+        ...(Array.isArray(result?.skipped_files) ? result.skipped_files : []),
+      ]);
       if (skipped) localDropError = skipped;
       return resources.length;
     } catch (err: any) {
@@ -68,25 +77,12 @@
     }
   }
 
-  async function handleFolderSelect(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    const files = Array.from(input.files ?? []);
-    if (files.length) {
-      await uploadLocalProjectFiles(
-        files.map((file) => ({ file, relativePath: relativePathForFile(file) })),
-        'browser-folder-upload',
-        true,
-      );
-    }
-    input.value = '';
-  }
-
   async function handleFileSelect(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
     const files = Array.from(input.files ?? []);
     if (files.length) {
       await uploadLocalProjectFiles(
-        files.map((file) => ({ file, relativePath: relativePathForFile(file) })),
+        entriesFromFileList(files),
         'browser-file-upload',
         false,
       );
@@ -94,25 +90,40 @@
     input.value = '';
   }
 
-  async function addDroppedFileList(files: File[]) {
-    if (!files.length) return 0;
-    const entries = files.map((file) => ({ file, relativePath: relativePathForFile(file) }));
-    const hasFolderPaths = entries.some((entry) => entry.relativePath.includes('/'));
-    return uploadLocalProjectFiles(entries, hasFolderPaths ? 'browser-folder-drop' : 'browser-file-drop', mode === 'folder' || hasFolderPaths);
-  }
-
-  async function addDroppedEntries(entries: FileSystemEntryLike[]) {
-    let added = 0;
-    for (const entry of entries) {
-      const files = await readDroppedEntry(entry);
-      if (!files.length) continue;
-      added += await uploadLocalProjectFiles(
-        files,
-        mode === 'file' && entry.isFile ? 'browser-file-drop' : 'browser-folder-drop',
-        !(mode === 'file' && entry.isFile),
+  async function handleFolderSelect(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    if (files.length) {
+      await uploadLocalProjectFiles(
+        entriesFromFileList(files),
+        'browser-folder-upload',
+        true,
       );
     }
-    return added;
+    input.value = '';
+  }
+
+  function toggleLocalPickerMenu() {
+    if (localUploading) return;
+    localPickerMenuOpen = !localPickerMenuOpen;
+    localDropError = '';
+  }
+
+  function chooseFiles() {
+    localPickerMenuOpen = false;
+    fileInputEl?.click();
+  }
+
+  function chooseFolder() {
+    localPickerMenuOpen = false;
+    folderInputEl?.click();
+  }
+
+  async function addDroppedFileList(files: File[]) {
+    if (!files.length) return 0;
+    const entries = entriesFromFileList(files);
+    const hasFolderPaths = entries.some((entry) => entry.relativePath.includes('/'));
+    return uploadLocalProjectFiles(entries, hasFolderPaths ? 'browser-folder-drop' : 'browser-file-drop', mode === 'folder' || hasFolderPaths);
   }
 
   function prepareLocalDrop(event: DragEvent) {
@@ -145,19 +156,21 @@
   async function handleLocalDrop(event: DragEvent) {
     prepareLocalDrop(event);
     localDropActive = false;
+    localPickerMenuOpen = false;
     localDropError = '';
     const transfer = event.dataTransfer;
     if (!transfer) return;
     try {
-      const entries = Array.from(transfer.items ?? []).reduce<FileSystemEntryLike[]>((acc, item) => {
-        const entry = (item as unknown as DataTransferItemWithEntry).webkitGetAsEntry?.();
-        if (entry) acc.push(entry);
-        return acc;
-      }, []);
+      const entries = await entriesFromDataTransfer(transfer);
+      const hasFolderPaths = entries.some((entry) => entry.relativePath.includes('/'));
       const added = entries.length
-        ? await addDroppedEntries(entries)
+        ? await uploadLocalProjectFiles(
+          entries,
+          hasFolderPaths ? 'browser-folder-drop' : 'browser-file-drop',
+          mode === 'folder' || hasFolderPaths,
+        )
         : await addDroppedFileList(Array.from(transfer.files ?? []));
-      if (!added) {
+      if (!added && !localDropError) {
         localDropError = 'No files found in this drop.';
       }
     } catch {
@@ -191,8 +204,10 @@
     class="local-drop-zone"
     class:active={localDropActive}
     disabled={localUploading}
-    aria-label={mode === 'folder' ? 'Upload a folder tree' : 'Upload individual files'}
-    onclick={() => mode === 'folder' ? folderInputEl?.click() : fileInputEl?.click()}
+    aria-label="Drop files or folders"
+    aria-expanded={localPickerMenuOpen}
+    aria-haspopup="menu"
+    onclick={toggleLocalPickerMenu}
     ondragenter={handleLocalDragEnter}
     ondragover={handleLocalDragOver}
     ondragleave={handleLocalDragLeave}
@@ -203,11 +218,23 @@
       <strong>
         {localUploading
           ? 'Uploading snapshot...'
-          : (localDropActive ? 'Release to upload' : (mode === 'folder' ? 'Choose or drop a folder tree' : 'Choose or drop files'))}
+          : (localDropActive ? 'Release to upload' : 'Drop files or folders')}
       </strong>
-      <small>{mode === 'folder' ? 'Best when related files live under one root folder' : 'Best for standalone docs, screenshots, or small source files'}</small>
+      <small>Select files, select a folder, or drop either here</small>
     </span>
   </button>
+  {#if localPickerMenuOpen}
+    <div class="local-picker-menu" role="menu" aria-label="Choose local resource type">
+      <button type="button" role="menuitem" disabled={localUploading} onclick={chooseFiles}>
+        <ConstellationIcon name="file" size={16} stroke={2} />
+        <span><strong>Files</strong><small>Select one or more files</small></span>
+      </button>
+      <button type="button" role="menuitem" disabled={localUploading} onclick={chooseFolder}>
+        <ConstellationIcon name="folder" size={16} stroke={2} />
+        <span><strong>Folder</strong><small>Preserve nested paths</small></span>
+      </button>
+    </div>
+  {/if}
   {#if localDropError}
     <p class="project-context-error">{localDropError}</p>
   {/if}
