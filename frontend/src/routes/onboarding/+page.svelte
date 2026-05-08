@@ -308,16 +308,8 @@
     status = 'connected';
     notice = { tone: 'success', title: 'OpenAI connected.' };
     try {
-      const intro = await api.startRuntimeReadyIntro();
-      if (intro?.idea_id) {
-        const params = new URLSearchParams({
-          idea: intro.idea_id,
-          onboarding: 'runtime-ready',
-        });
-        await goto(`/cortex?${params.toString()}`);
-        return;
-      }
-      await goto('/cortex');
+      const params = new URLSearchParams({ onboarding: 'runtime-ready' });
+      await goto(`/cortex?${params.toString()}`);
     } catch (error) {
       status = 'connected';
       notice = errorNotice('OpenAI connected, but Cortex did not open.', error, 'Open Cortex from the sidebar.');
