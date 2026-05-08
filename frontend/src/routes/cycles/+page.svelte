@@ -21,7 +21,7 @@
   import { ui } from '$lib/stores/ui.svelte';
 
   type ThinkingLevel = '' | 'none' | 'low' | 'medium' | 'high' | 'xhigh';
-  type ScheduleCadence = 'daily' | 'weekdays' | 'weekly' | 'monthly' | 'custom';
+  type ScheduleCadence = 'once' | 'daily' | 'weekdays' | 'weekly' | 'monthly' | 'custom';
   type FilterMode = 'all' | 'active' | 'attention';
   type PillTone = 'muted' | 'warning' | 'success' | 'danger' | 'info';
 
@@ -30,6 +30,7 @@
     prompt: string;
     schedule_expr: string;
     cadence: ScheduleCadence;
+    date: string;
     time: string;
     weekday: string;
     monthday: string;
@@ -43,7 +44,7 @@
 
   type ParsedSchedule = Pick<
     CycleForm,
-    'cadence' | 'time' | 'weekday' | 'monthday' | 'custom_schedule'
+    'cadence' | 'date' | 'time' | 'weekday' | 'monthday' | 'custom_schedule'
   >;
 
   const THINKING_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
@@ -56,6 +57,7 @@
   ];
 
   const CADENCE_OPTIONS: Array<{ value: ScheduleCadence; label: string; description: string }> = [
+    { value: 'once', label: 'Once', description: 'Single reminder' },
     { value: 'daily', label: 'Daily', description: 'Every day' },
     { value: 'weekdays', label: 'Weekdays', description: 'Monday to Friday' },
     { value: 'weekly', label: 'Weekly', description: 'One day each week' },
@@ -81,6 +83,7 @@
   const MONTHDAY_OPTIONS = Array.from({ length: 31 }, (_, index) => String(index + 1));
   const DEFAULT_SCHEDULE = '0 9 * * *';
   const DEFAULT_TIME = '09:00';
+  const ONE_TIME_PREFIX = 'at:';
 
   let cycles = $state<CycleRead[]>([]);
   let runs = $state<CycleRunRead[]>([]);
@@ -106,6 +109,7 @@
     prompt: '',
     schedule_expr: DEFAULT_SCHEDULE,
     cadence: 'daily',
+    date: defaultRunDate(),
     time: DEFAULT_TIME,
     weekday: '1',
     monthday: '1',
@@ -213,15 +217,18 @@
   }
 
   function cycleStatusDetail(cycle: CycleRead): string {
+    const isOnce = isOneTimeSchedule(cycle.schedule_expr);
     if (cycle.last_error) return 'Latest run failed';
-    if (cycle.next_run_at) return `Next ${formatDateTime(cycle.next_run_at)}`;
+    if (cycle.next_run_at) return `${isOnce ? 'Runs' : 'Next'} ${formatDateTime(cycle.next_run_at)}`;
+    if (isOnce && cycle.last_run_at) return `Ran ${timeAgo(cycle.last_run_at)}`;
     if (cycle.last_run_at) return `Last ${timeAgo(cycle.last_run_at)}`;
     return cycle.enabled ? 'No next run' : 'Paused schedule';
   }
 
   function cycleFactSummary(cycle: CycleRead): string {
     const cadence = parseSchedule(cycle.schedule_expr).cadence;
-    return `${cadence} / ${cycle.enabled ? 'active' : 'paused'} / ${threadLabel(cycle).toLowerCase()}`;
+    const state = cadence === 'once' && !cycle.enabled && cycle.last_run_at ? 'done' : cycle.enabled ? 'active' : 'paused';
+    return `${cadence} / ${state} / ${threadLabel(cycle).toLowerCase()}`;
   }
 
   function setFilter(key: string) {
@@ -232,6 +239,13 @@
 
   function previewIso(daysOffset: number, hoursOffset = 0): string {
     return new Date(Date.now() + daysOffset * 86400000 + hoursOffset * 3600000).toISOString();
+  }
+
+  function previewNextRunAtForSchedule(scheduleExpr: string, enabled = true): string | null {
+    if (!enabled) return null;
+    const onceDate = oneTimeDateFromExpression(scheduleExpr);
+    if (onceDate) return onceDate.toISOString();
+    return previewIso(1);
   }
 
   function previewCycle(
@@ -378,6 +392,44 @@
     return value.replaceAll('_', ' ');
   }
 
+  function pad2(value: number): string {
+    return String(value).padStart(2, '0');
+  }
+
+  function dateInputFromDate(date: Date): string {
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+  }
+
+  function defaultRunDate(): string {
+    return dateInputFromDate(new Date(Date.now() + 86400000));
+  }
+
+  function isOneTimeSchedule(expr: string | null | undefined): boolean {
+    return String(expr ?? '').trim().toLowerCase().startsWith(ONE_TIME_PREFIX);
+  }
+
+  function oneTimeDateFromExpression(expr: string | null | undefined): Date | null {
+    if (!isOneTimeSchedule(expr)) return null;
+    const raw = String(expr ?? '').trim().slice(ONE_TIME_PREFIX.length).trim();
+    if (!raw) return null;
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  function oneTimeExpressionFromForm(): string {
+    const date = form.date || defaultRunDate();
+    const time = normalizeTime(form.time);
+    return `${ONE_TIME_PREFIX}${date}T${time}:00`;
+  }
+
+  function formatDateLabel(value: string): string {
+    const [year, month, day] = value.split('-').map(Number);
+    if (!year || !month || !day) return value || 'selected date';
+    return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(
+      new Date(year, month - 1, day),
+    );
+  }
+
   function cycleDescription(cycle: CycleRead): string {
     const prompt = cycle.prompt.trim();
     if (!prompt) return scheduleLabelForCycle(cycle);
@@ -427,12 +479,25 @@
 
   function parseSchedule(expr: string | null | undefined): ParsedSchedule {
     const source = (expr || DEFAULT_SCHEDULE).trim();
+    const onceDate = oneTimeDateFromExpression(source);
+    if (onceDate) {
+      return {
+        cadence: 'once',
+        date: dateInputFromDate(onceDate),
+        time: normalizeTime(`${onceDate.getHours()}:${pad2(onceDate.getMinutes())}`),
+        weekday: '1',
+        monthday: '1',
+        custom_schedule: source,
+      };
+    }
+
     const [minute, hour, dayOfMonth, month, dayOfWeek, ...extra] = source.split(/\s+/);
     const time = timeFromCron(minute, hour);
 
     if (!time || !dayOfMonth || !month || !dayOfWeek || extra.length) {
       return {
         cadence: 'custom',
+        date: defaultRunDate(),
         time: DEFAULT_TIME,
         weekday: '1',
         monthday: '1',
@@ -443,6 +508,7 @@
     if (dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
       return {
         cadence: 'daily',
+        date: defaultRunDate(),
         time,
         weekday: '1',
         monthday: '1',
@@ -457,6 +523,7 @@
     ) {
       return {
         cadence: 'weekdays',
+        date: defaultRunDate(),
         time,
         weekday: '1',
         monthday: '1',
@@ -469,6 +536,7 @@
       if (WEEKDAY_OPTIONS.some((option) => option.value === normalizedWeekday)) {
         return {
           cadence: 'weekly',
+          date: defaultRunDate(),
           time,
           weekday: normalizedWeekday,
           monthday: '1',
@@ -482,6 +550,7 @@
       if (day >= 1 && day <= 31) {
         return {
           cadence: 'monthly',
+          date: defaultRunDate(),
           time,
           weekday: '1',
           monthday: String(day),
@@ -492,6 +561,7 @@
 
     return {
       cadence: 'custom',
+      date: defaultRunDate(),
       time,
       weekday: '1',
       monthday: '1',
@@ -500,6 +570,7 @@
   }
 
   function scheduleExprFromForm(): string {
+    if (form.cadence === 'once') return oneTimeExpressionFromForm();
     if (form.cadence === 'custom') return form.custom_schedule.trim();
 
     const { minute, hour } = cronPartsFromTime(form.time);
@@ -511,6 +582,7 @@
 
   function scheduleLabelForForm(value: CycleForm): string {
     const time = formatTimeLabel(value.time);
+    if (value.cadence === 'once') return `Once on ${formatDateLabel(value.date)} at ${time}`;
     if (value.cadence === 'weekdays') return `Weekdays at ${time}`;
     if (value.cadence === 'weekly') return `${weekdayOption(value.weekday).plural} at ${time}`;
     if (value.cadence === 'monthly') return `Monthly on day ${value.monthday} at ${time}`;
@@ -553,11 +625,12 @@
       prompt: cycle.prompt,
       schedule_expr: cycle.schedule_expr,
       cadence: parsed.cadence,
+      date: parsed.date,
       time: parsed.time,
       weekday: parsed.weekday,
       monthday: parsed.monthday,
       custom_schedule: parsed.custom_schedule,
-      timezone: localTimezone,
+      timezone: cycle.timezone || localTimezone,
       enabled: cycle.enabled,
       model_override: cycle.model_override || '',
       thinking_override: (cycle.thinking_override as ThinkingLevel) || '',
@@ -696,7 +769,7 @@
           model_override: payload.model_override,
           thinking_override: payload.thinking_override,
           target_idea_id: payload.target_idea_id ?? existing?.target_idea_id ?? `preview-cycle-${savedId}`,
-          next_run_at: payload.enabled ? previewIso(1) : null,
+          next_run_at: previewNextRunAtForSchedule(payload.schedule_expr, payload.enabled),
           last_run_at: existing?.last_run_at ?? null,
           last_status: existing?.last_status ?? 'idle',
           last_error: null,
@@ -789,7 +862,7 @@
             ? {
                 ...item,
                 enabled: !item.enabled,
-                next_run_at: !item.enabled ? previewIso(1) : null,
+                next_run_at: !item.enabled ? previewNextRunAtForSchedule(item.schedule_expr, true) : null,
                 updated_at: new Date().toISOString(),
               }
             : item,
@@ -976,6 +1049,13 @@
 
                       {#if form.cadence !== 'custom'}
                         <div class="schedule-fields">
+                          {#if form.cadence === 'once'}
+                            <label class="cycle-field">
+                              <span class="cycle-field-label">Date</span>
+                              <input bind:value={form.date} class="cycle-input" type="date" />
+                            </label>
+                          {/if}
+
                           <label class="cycle-field">
                             <span class="cycle-field-label">Time</span>
                             <input bind:value={form.time} class="cycle-input" type="time" />
@@ -1065,7 +1145,7 @@
                                 placeholder="0 9 * * *"
                               />
                               <span class="cycle-field-hint">
-                                Use this only when Daily, Weekdays, Weekly, or Monthly does not cover the cycle.
+                                Use this only when Once, Daily, Weekdays, Weekly, or Monthly does not cover the cycle.
                               </span>
                             </label>
                           {/if}
@@ -1220,6 +1300,13 @@
 
                         {#if form.cadence !== 'custom'}
                           <div class="schedule-fields">
+                            {#if form.cadence === 'once'}
+                              <label class="cycle-field">
+                                <span class="cycle-field-label">Date</span>
+                                <input bind:value={form.date} class="cycle-input" type="date" />
+                              </label>
+                            {/if}
+
                             <label class="cycle-field">
                               <span class="cycle-field-label">Time</span>
                               <input bind:value={form.time} class="cycle-input" type="time" />
@@ -1327,7 +1414,7 @@
                                   placeholder="0 9 * * *"
                                 />
                                 <span class="cycle-field-hint">
-                                  Use this only when Daily, Weekdays, Weekly, or Monthly does not cover the cycle.
+                                  Use this only when Once, Daily, Weekdays, Weekly, or Monthly does not cover the cycle.
                                 </span>
                               </label>
                             {/if}
@@ -1752,7 +1839,7 @@
   }
 
   .cadence-grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 8px;
   }
 

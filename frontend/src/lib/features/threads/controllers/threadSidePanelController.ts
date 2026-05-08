@@ -1,4 +1,4 @@
-export type ThreadStageRightDockTabKind = 'browser' | 'activity' | 'app' | 'vault';
+export type ThreadStageRightDockTabKind = 'browser' | 'activity' | 'app' | 'vault' | 'cycles';
 
 export type ThreadStageRightDockTab = {
   id: string;
@@ -48,6 +48,7 @@ export function buildThreadSidePanelAddMenuItems(
   const browserCount = tabs.filter((tab) => tab.kind === 'browser').length;
   const hasActivity = tabs.some((tab) => tab.kind === 'activity');
   const hasVault = tabs.some((tab) => tab.kind === 'vault');
+  const hasCycles = tabs.some((tab) => tab.kind === 'cycles');
   const openAppIds = new Set(
     tabs
       .filter((tab) => tab.kind === 'app' && tab.appId)
@@ -68,6 +69,15 @@ export function buildThreadSidePanelAddMenuItems(
       kind: 'vault',
       label: 'Vault',
       description: 'Add or review thread keys',
+    });
+  }
+
+  if (!hasCycles) {
+    items.push({
+      id: 'cycles',
+      kind: 'cycles',
+      label: 'Cycles',
+      description: 'Review scheduled Illo work',
     });
   }
 
@@ -140,12 +150,12 @@ export function openBrowserThreadSidePanelTab(
 
 export function openSingletonThreadSidePanelTab(
   state: ThreadSidePanelTabState,
-  kind: 'activity' | 'vault',
+  kind: 'activity' | 'vault' | 'cycles',
 ): ThreadSidePanelTabState {
   const existing = state.tabs.find((tab) => tab.kind === kind);
   if (existing) return { ...state, activeTabId: existing.id };
 
-  const label = kind === 'vault' ? 'Vault' : 'Activity';
+  const label = kind === 'vault' ? 'Vault' : kind === 'cycles' ? 'Cycles' : 'Activity';
   return {
     ...state,
     tabs: [
