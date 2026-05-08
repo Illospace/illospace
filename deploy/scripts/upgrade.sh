@@ -47,7 +47,7 @@ compose() {
 }
 
 if [ "$PULL" = "1" ]; then
-  compose pull postgres caddy api web || {
+  compose pull postgres api web || {
     echo "Image pull failed. If release images are not published yet, rerun with --build." >&2
     exit 1
   }

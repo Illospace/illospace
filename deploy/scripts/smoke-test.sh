@@ -15,9 +15,9 @@ usage() {
 Usage: ./illo deploy smoke [--build] [--keep-running] [--env-file path]
        deploy/scripts/smoke-test.sh [--build] [--keep-running] [--env-file path]
 
-Boots a disposable Compose project, runs migrations, starts the API, and checks
-/api/health/live plus /api/health/ready. By default it pulls published images;
-use --build when testing local Dockerfile changes.
+Boots a disposable Compose project, runs migrations, starts the API and web
+entrypoint, and checks API health through both loopback ports. By default it
+pulls published images; use --build when testing local Dockerfile changes.
 EOF
 }
 
@@ -65,9 +65,7 @@ if [ -z "$ENV_FILE" ]; then
   rm -f "$ENV_FILE"
   "$SCRIPT_DIR/init-secrets.sh" \
     --env-file "$ENV_FILE" \
-    --domain localhost \
-    --email ops@localhost \
-    --public-url http://127.0.0.1:18000 >/dev/null
+    --public-url http://127.0.0.1:18080 >/dev/null
 else
   case "$ENV_FILE" in
     /*) ;;
@@ -88,14 +86,9 @@ text = env_path.read_text(encoding="utf-8")
 
 updates = {
     "COMPOSE_PROJECT_NAME": project_name,
-    "ILLO_DOMAIN": "localhost",
-    "ILLO_ADMIN_EMAIL": "ops@localhost",
-    "ILLO_PUBLIC_URL": "http://127.0.0.1:18000",
-    "ILLO_PUBLIC_BIND": "127.0.0.1",
+    "ILLO_PUBLIC_URL": "http://127.0.0.1:18080",
     "ILLO_API_PORT": "18000",
-    "ILLO_HTTP_PORT": "18080",
-    "ILLO_HTTPS_PORT": "18443",
-    "ILLO_PRIVATE_HTTP_PORT": "18081",
+    "ILLO_WEB_PORT": "18080",
 }
 
 for key, value in updates.items():
@@ -167,28 +160,19 @@ done
 curl -fsS http://127.0.0.1:18000/api/health/live >/dev/null
 curl -fsS http://127.0.0.1:18000/api/health/ready >/dev/null
 
-echo "Starting web and Caddy..."
-compose up -d web caddy
+echo "Starting web entrypoint..."
+compose up -d web
 
-echo "Waiting for Caddy route health..."
+echo "Waiting for web route health..."
 deadline=$((SECONDS + 120))
 while [ "$SECONDS" -lt "$deadline" ]; do
-  if curl -kfsS https://localhost:18443/api/health/live >/dev/null 2>&1; then
-    break
-  fi
   if curl -fsSL http://localhost:18080/api/health/live >/dev/null 2>&1; then
     break
   fi
   sleep 2
 done
 
-curl -kfsS https://localhost:18443/api/health/live >/dev/null \
-  || curl -fsSL http://localhost:18080/api/health/live >/dev/null
-
-curl -kfsS https://localhost:18443/ >/dev/null \
-  || curl -fsSL http://localhost:18080/ >/dev/null
-
-curl -fsS http://127.0.0.1:18081/api/health/live >/dev/null
-curl -fsS http://127.0.0.1:18081/ >/dev/null
+curl -fsSL http://localhost:18080/api/health/live >/dev/null
+curl -fsSL http://localhost:18080/ >/dev/null
 
 echo "Smoke test passed."

@@ -7,9 +7,9 @@ Linux server.
 
 Collect these values before touching the server:
 
-- Domain name, for example `team.example.com`
-- Admin email for TLS certificate notices
 - Server SSH user and install directory
+- Browser-facing URL if the operator already has a private network, VPN,
+  tunnel, or reverse proxy; otherwise use the default `http://localhost:8080`
 - Confirmation that the owner/admin will add model provider credentials inside
   Illospace after first boot
 - Backup destination and retention expectation
@@ -22,9 +22,7 @@ native/systemd install.
 Required server state:
 
 - Linux host with Docker Engine and Docker Compose v2
-- DNS `A` or `AAAA` record pointing the domain to this server
-- SSH access for private first boot
-- inbound ports `80` and `443` ready to open after the owner account exists
+- SSH access
 - enough disk for Postgres volume data and backups
 
 ## Install Commands
@@ -34,12 +32,13 @@ Run these from the chosen install directory:
 ```bash
 git clone https://github.com/Illospace/illospace.git
 cd illospace
-./illo deploy init --domain team.example.com --email admin@example.com
+./illo deploy init
 ```
 
 Edit `deploy/compose/.env`:
 
-- replace `team.example.com` and `admin@example.com` if needed
+- leave `ILLO_PUBLIC_URL=http://localhost:8080` for SSH-tunnel access, or set it
+  to the operator's private network/reverse-proxy URL
 - keep `SECRET_KEY`, `VAULT_MASTER_KEY`, and `DB_PASSWORD` private
 
 Do not put model provider API keys in `deploy/compose/.env`. Production
@@ -53,10 +52,10 @@ Start:
 ./illo deploy up
 ```
 
-## Private First Boot
+## Private Access
 
-Fresh installs bind Caddy's public `80/443` listeners to server loopback only.
-This prevents a public first-owner race while the database has no users.
+The Compose stack does not install public TLS or domain ingress. The browser
+entrypoint binds to server loopback at `127.0.0.1:8080`.
 
 From your workstation, open an SSH tunnel:
 
@@ -67,23 +66,16 @@ ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>
 Then open `http://localhost:8080`, create the owner account, and add provider
 credentials in System/Access.
 
-When the owner account exists and you are ready for team access:
-
-```bash
-./illo deploy publish
-```
-
-For a private-only install, skip `publish` and keep using the SSH tunnel or
-your own private network.
-
-Now open inbound `80` and `443` in the server firewall/security group.
+For team-wide access, put your own reverse proxy, VPN, tunnel, or private
+network in front of `127.0.0.1:8080`, then update `ILLO_PUBLIC_URL` if browser
+users will not use `http://localhost:8080`.
 
 Expected result:
 
-- `./illo deploy status` shows `postgres`, `api`, `worker`, `scheduler`, `web`,
-  and `caddy` running
+- `./illo deploy status` shows `postgres`, `api`, `worker`, `scheduler`, and
+  `web` running
 - `./illo deploy doctor` exits successfully
-- `https://team.example.com` opens the dashboard
+- `http://localhost:8080` opens the dashboard through the SSH tunnel
 - an owner/admin can sign in and add provider credentials in System/Access
 
 ## Health Checks
@@ -93,6 +85,7 @@ Use the loopback API checks from the server:
 ```bash
 curl http://127.0.0.1:8000/api/health/live
 curl http://127.0.0.1:8000/api/health/ready
+curl http://127.0.0.1:8080/api/health/live
 ```
 
 Use the deployment doctor:
@@ -101,17 +94,11 @@ Use the deployment doctor:
 ./illo deploy doctor
 ```
 
-Before sending a domain to users, add provider credentials in System/Access,
-then run the stricter public check from the server:
+After adding provider credentials in System/Access, run the stricter checks
+from the server:
 
 ```bash
-./illo deploy doctor --strict-credentials --check-public-url
-```
-
-Use Caddy logs for public HTTP/TLS problems:
-
-```bash
-./illo deploy logs caddy
+./illo deploy doctor --strict-credentials --check-app-url
 ```
 
 Use API logs for backend startup, migration, or database problems:
@@ -162,11 +149,11 @@ If image pull fails, build local images with:
 ./illo deploy up --no-pull
 ```
 
-If Caddy cannot get a certificate:
+If the SSH tunnel does not open the app:
 
-- confirm DNS points at the server
-- confirm ports `80` and `443` are open
-- check `./illo deploy logs caddy`
+- confirm `./illo deploy status` shows `web` and `api` running
+- confirm the tunnel points to `127.0.0.1:8080` on the server
+- check `./illo deploy logs web`
 
 If readiness fails:
 

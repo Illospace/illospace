@@ -73,28 +73,27 @@ automatically.
 
 ## Team server deployment
 
-The recommended production path is Docker Compose on a single Linux VM with
-Caddy, Postgres + pgvector, the FastAPI API, the static web app, the AgentRun
-worker, and the scheduler.
+The recommended open-source team-server path is Docker Compose on a single
+Linux VM with Postgres + pgvector, the FastAPI API, the private web entrypoint,
+the AgentRun worker, and the scheduler. It does not install public TLS or
+domain ingress for you.
 
 ```bash
 git clone https://github.com/Illospace/illospace.git
 cd illospace
-./illo deploy init --domain team.example.com --email admin@example.com
+./illo deploy init
 ./illo deploy up
 ```
 
-Fresh server installs start with public HTTP/HTTPS bound to loopback so the
-first owner account can be created privately over SSH:
+The web entrypoint binds to server loopback. Access it over SSH:
 
 ```bash
 ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>
-# open http://localhost:8080, create the owner, then on the server:
-./illo deploy publish
+# open http://localhost:8080 and create the owner
 ```
 
-Skip `publish` if the team should keep using Illospace only over SSH or a
-private network.
+For team-wide access, bring your own reverse proxy, VPN, tunnel, or private
+network in front of `127.0.0.1:8080`.
 
 See [docs/server-setup.md](docs/server-setup.md) for the exact server runbook,
 backups, restore, upgrades, and troubleshooting.

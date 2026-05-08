@@ -1,13 +1,12 @@
 # Illospace Compose Deployment
 
-This is the canonical single-server production path for Illospace. It is meant
-to be easy for a human operator or an LLM agent to run without inventing a
-custom deployment.
+This is the canonical single-server open-source path for Illospace. It is meant
+to be easy for a human operator or an LLM agent to run without installing
+public ingress, TLS automation, or cloud-specific infrastructure.
 
 ## What It Runs
 
-- `caddy`: public HTTP/HTTPS entrypoint with automatic TLS
-- `web`: static SvelteKit dashboard
+- `web`: private HTTP entrypoint for the dashboard plus `/api` and `/ws` proxying
 - `api`: FastAPI backend
 - `worker`: standalone AgentRun worker
 - `scheduler`: recurring job daemon
@@ -22,21 +21,21 @@ after boot and stored encrypted in Postgres.
 
 Prerequisites on the server:
 
-- Linux VM with DNS pointed at the server
+- Linux VM
 - Docker Engine with Docker Compose v2
-- SSH access for private first boot
-- ports `80` and `443` ready to open after the owner account exists
+- SSH access
 
 From the repository root:
 
 ```bash
-./illo deploy init --domain team.example.com --email admin@example.com
+./illo deploy init
 ```
 
-Edit `deploy/compose/.env` only for server bootstrap settings such as domain,
-TLS email, generated app secrets, and database password. Do not put model
-provider API keys in this file; add them from the Illospace System/Access
-screens after first boot.
+Edit `deploy/compose/.env` only for server bootstrap settings such as generated
+app secrets, database password, and the browser-facing `ILLO_PUBLIC_URL` if you
+bring your own private network or reverse proxy. Do not put model provider API
+keys in this file; add them from the Illospace System/Access screens after
+first boot.
 
 Start the stack:
 
@@ -44,7 +43,7 @@ Start the stack:
 ./illo deploy up
 ```
 
-Fresh installs are private by default. From your workstation:
+The app listens on server loopback. From your workstation:
 
 ```bash
 ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>
@@ -53,16 +52,9 @@ ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>
 Open `http://localhost:8080`, create the owner account, and add provider
 credentials in System/Access.
 
-Publish the public HTTPS route only after the owner exists:
-
-```bash
-./illo deploy publish
-```
-
-For a private-only install, skip `publish` and keep using the SSH tunnel or
-your own private network.
-
-Then open the URL from `ILLO_PUBLIC_URL`.
+For team-wide access, put your own reverse proxy, VPN, tunnel, or private
+network in front of `127.0.0.1:8080`, then set `ILLO_PUBLIC_URL` to that
+browser-facing URL.
 
 ## Local Image Fallback
 
@@ -82,11 +74,12 @@ Until those images are published for a release, build on the server:
 
 ## Health Checks
 
-The API is also exposed on loopback for operators:
+The API and web entrypoint are exposed on loopback for operators:
 
 ```bash
 curl http://127.0.0.1:8000/api/health/live
 curl http://127.0.0.1:8000/api/health/ready
+curl http://127.0.0.1:8080/api/health/live
 ```
 
 The full deployment doctor is:

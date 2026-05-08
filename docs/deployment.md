@@ -8,13 +8,15 @@ Use [server-setup.md](server-setup.md) for the exact runbook.
 ```bash
 git clone https://github.com/Illospace/illospace.git
 cd illospace
-./illo deploy init --domain team.example.com --email admin@example.com
+./illo deploy init
 ./illo deploy up
 ```
 
-The Compose stack runs Caddy, the static web app, the FastAPI API, the AgentRun
+The Compose stack runs a private web entrypoint, the FastAPI API, the AgentRun
 worker, the scheduler, a one-shot migration job, and Postgres with pgvector.
-`./illo deploy` wraps the underlying Compose files and scripts in `deploy/`.
+It binds the browser entrypoint to `127.0.0.1:8080`; use SSH, a VPN, a tunnel,
+or your own reverse proxy for team access. `./illo deploy` wraps the underlying
+Compose files and scripts in `deploy/`.
 
 ## Local Development
 
@@ -40,7 +42,8 @@ operators who need to integrate with an existing host layout:
 - browser and frontend dependency helpers used by the launcher
 - `test-with-db.sh` for the Docker-backed test database
 
-Treat this as advanced. The Compose path is the public production contract.
+Treat this as advanced. The Compose path is the open-source team-server
+contract.
 
 ## Production Notes
 

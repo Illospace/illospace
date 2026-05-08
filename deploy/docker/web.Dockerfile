@@ -8,9 +8,9 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM caddy:2-alpine
+FROM nginx:1.27-alpine
 
-COPY deploy/docker/web.Caddyfile /etc/caddy/Caddyfile
-COPY --from=build /app/frontend/build /srv
+COPY deploy/docker/web.nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/frontend/build /usr/share/nginx/html
 
 EXPOSE 8080

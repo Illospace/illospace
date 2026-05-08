@@ -7,16 +7,19 @@ COMPOSE_DIR="$ROOT/deploy/compose"
 ENV_FILE="$COMPOSE_DIR/.env"
 EXAMPLE_FILE="$COMPOSE_DIR/.env.production.example"
 
-DOMAIN=""
-EMAIL=""
 PUBLIC_URL=""
+DOMAIN=""
 
 usage() {
   cat <<'EOF'
-Usage: ./illo deploy init [--domain team.example.com] [--email admin@example.com] [--public-url https://team.example.com] [--env-file path]
+Usage: ./illo deploy init [--public-url http://localhost:8080] [--domain team.example.com] [--env-file path]
 
 Creates or updates deploy/compose/.env from .env.production.example.
 Existing non-empty values are preserved. Missing secrets are generated.
+
+The Compose deployment stays private by default. Use --public-url only when
+you bring your own private network or reverse proxy. --domain is a convenience
+for setting --public-url https://<domain>.
 EOF
 }
 
@@ -24,10 +27,6 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --domain)
       DOMAIN="${2:-}"
-      shift 2
-      ;;
-    --email)
-      EMAIL="${2:-}"
       shift 2
       ;;
     --public-url)
@@ -70,7 +69,7 @@ if [ ! -f "$ENV_FILE" ]; then
   cp "$EXAMPLE_FILE" "$ENV_FILE"
 fi
 
-python3 - "$ENV_FILE" "$DOMAIN" "$EMAIL" "$PUBLIC_URL" <<'PY'
+python3 - "$ENV_FILE" "$DOMAIN" "$PUBLIC_URL" <<'PY'
 from __future__ import annotations
 
 import base64
@@ -83,8 +82,7 @@ from pathlib import Path
 
 env_path = Path(sys.argv[1])
 domain_arg = sys.argv[2].strip()
-email_arg = sys.argv[3].strip()
-public_url_arg = sys.argv[4].strip()
+public_url_arg = sys.argv[3].strip()
 
 assignment = re.compile(r"^(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>.*)$")
 
@@ -125,11 +123,8 @@ if not current.get("VAULT_MASTER_KEY"):
     updates["VAULT_MASTER_KEY"] = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")
 
 if domain_arg:
-    updates["ILLO_DOMAIN"] = domain_arg
-    if not current.get("ILLO_PUBLIC_URL") or current.get("ILLO_PUBLIC_URL") == "https://team.example.com":
+    if not current.get("ILLO_PUBLIC_URL") or current.get("ILLO_PUBLIC_URL") in {"http://localhost:8080", "https://team.example.com"}:
         updates["ILLO_PUBLIC_URL"] = f"https://{domain_arg}"
-if email_arg:
-    updates["ILLO_ADMIN_EMAIL"] = email_arg
 if public_url_arg:
     updates["ILLO_PUBLIC_URL"] = public_url_arg
 
@@ -154,13 +149,12 @@ env_path.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
 env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 print(f"Updated {env_path}")
-for key in ("ILLO_DOMAIN", "ILLO_ADMIN_EMAIL", "ILLO_PUBLIC_URL"):
-    value = updates.get(key) or current.get(key) or ""
-    if value in {"", "team.example.com", "admin@example.com", "https://team.example.com"}:
-        print(f"TODO: set {key} in {env_path}")
+value = updates.get("ILLO_PUBLIC_URL") or current.get("ILLO_PUBLIC_URL") or ""
+if not value:
+    print(f"TODO: set ILLO_PUBLIC_URL in {env_path}")
 PY
 
 echo
 echo "Next:"
 echo "  ./illo deploy up"
-echo "  ./illo deploy doctor"
+echo "  ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>"

@@ -12,12 +12,12 @@ warnings=0
 runtime_checks=1
 tmp_running=""
 strict_credentials=0
-check_public_url=0
+check_app_url=0
 
 usage() {
   cat <<'EOF'
-Usage: ./illo deploy doctor [--strict-credentials] [--check-public-url] [--no-runtime]
-       deploy/scripts/doctor.sh [--strict-credentials] [--check-public-url] [--no-runtime]
+Usage: ./illo deploy doctor [--strict-credentials] [--check-app-url] [--no-runtime]
+       deploy/scripts/doctor.sh [--strict-credentials] [--check-app-url] [--no-runtime]
 
 Validates the Compose deployment environment, rendered Compose config, and
 running service health when the stack is up.
@@ -34,8 +34,8 @@ while [ "$#" -gt 0 ]; do
       strict_credentials=1
       shift
       ;;
-    --check-public-url)
-      check_public_url=1
+    --check-app-url)
+      check_app_url=1
       shift
       ;;
     --no-runtime)
@@ -92,10 +92,10 @@ else
   # shellcheck disable=SC1090
   . "$ENV_FILE"
   set +a
-  [ "$check_public_url" = "0" ] || export ILLO_CHECK_PUBLIC_URL=1
+  [ "$check_app_url" = "0" ] || export ILLO_CHECK_APP_URL=1
 fi
 
-for key in ILLO_DOMAIN ILLO_ADMIN_EMAIL ILLO_PUBLIC_URL SECRET_KEY VAULT_MASTER_KEY DB_NAME DB_USER DB_PASSWORD; do
+for key in ILLO_PUBLIC_URL SECRET_KEY VAULT_MASTER_KEY DB_NAME DB_USER DB_PASSWORD; do
   value="${!key:-}"
   if [ -z "$value" ]; then
     fail "$key is empty in $ENV_FILE"
@@ -107,21 +107,18 @@ for key in ILLO_DOMAIN ILLO_ADMIN_EMAIL ILLO_PUBLIC_URL SECRET_KEY VAULT_MASTER_
 done
 
 if [ -n "${ILLO_PUBLIC_URL:-}" ]; then
-  if python3 - "$ILLO_PUBLIC_URL" "$ILLO_DOMAIN" <<'PY'
+  if python3 - "$ILLO_PUBLIC_URL" <<'PY'
 import sys
 from urllib.parse import urlparse
 
 url = urlparse(sys.argv[1])
-domain = sys.argv[2]
 if url.scheme not in {"http", "https"} or not url.netloc:
     sys.exit(1)
-if domain and domain not in {"localhost", "127.0.0.1"} and url.hostname != domain:
-    sys.exit(2)
 PY
   then
     pass "ILLO_PUBLIC_URL is a valid absolute URL"
   else
-    fail "ILLO_PUBLIC_URL must be an absolute http(s) URL whose host matches ILLO_DOMAIN"
+    fail "ILLO_PUBLIC_URL must be an absolute http(s) URL"
   fi
 fi
 
@@ -203,31 +200,12 @@ SELECT
   fi
 }
 
-check_public_first_owner_guard() {
-  local public_bind="${ILLO_PUBLIC_BIND:-127.0.0.1}"
-  local user_count
-  if [ "$public_bind" = "127.0.0.1" ] || [ "$public_bind" = "localhost" ]; then
-    pass "public Caddy bind is private for first boot"
-    return
-  fi
-
-  if user_count="$(compose exec -T postgres psql -U "${DB_USER:-}" -d "${DB_NAME:-}" -tAc "SELECT count(*) FROM users;" 2>/dev/null | tr -d '[:space:]')"; then
-    if [[ "$user_count" =~ ^[0-9]+$ ]] && [ "$user_count" -gt 0 ]; then
-      pass "owner/user account exists before public Caddy exposure"
-    else
-      fail "public Caddy bind is enabled before any owner/user account exists; use SSH first boot or run ./illo deploy publish after creating the owner"
-    fi
-  else
-    warn "could not inspect users table for first-owner exposure guard"
-  fi
-}
-
 if [ "$runtime_checks" = "0" ]; then
   :
 elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" && compose ps --services --status running >"$tmp_running" 2>/dev/null; then
   running="$(cat "$tmp_running")"
   if printf '%s\n' "$running" | grep -qx api; then
-    for service in postgres api web worker scheduler caddy; do
+    for service in postgres api web worker scheduler; do
       if printf '%s\n' "$running" | grep -qx "$service"; then
         health="$(container_health "$service" || true)"
         case "$health" in
@@ -252,12 +230,12 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
       else
         fail "pgvector extension is missing; check migration logs"
       fi
-      check_public_first_owner_guard
       check_db_provider_credentials
     fi
 
     if command -v curl >/dev/null 2>&1; then
       api_port="${ILLO_API_PORT:-8000}"
+      web_port="${ILLO_WEB_PORT:-8080}"
       if curl -fsS "http://127.0.0.1:${api_port}/api/health/live" >/dev/null; then
         pass "API liveness probe passed on 127.0.0.1:${api_port}"
       else
@@ -268,11 +246,21 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
       else
         fail "API readiness probe failed on 127.0.0.1:${api_port}"
       fi
-      if [ "${ILLO_CHECK_PUBLIC_URL:-0}" = "1" ]; then
+      if curl -fsS "http://127.0.0.1:${web_port}/api/health/live" >/dev/null; then
+        pass "web entrypoint API proxy passed on 127.0.0.1:${web_port}"
+      else
+        fail "web entrypoint API proxy failed on 127.0.0.1:${web_port}"
+      fi
+      if curl -fsS "http://127.0.0.1:${web_port}/" >/dev/null; then
+        pass "web entrypoint dashboard passed on 127.0.0.1:${web_port}"
+      else
+        fail "web entrypoint dashboard failed on 127.0.0.1:${web_port}"
+      fi
+      if [ "${ILLO_CHECK_APP_URL:-0}" = "1" ]; then
         if curl -fsS "${ILLO_PUBLIC_URL%/}/api/health/live" >/dev/null; then
-          pass "public URL liveness probe passed"
+          pass "configured app URL liveness probe passed"
         else
-          fail "public URL liveness probe failed at ${ILLO_PUBLIC_URL%/}/api/health/live"
+          fail "configured app URL liveness probe failed at ${ILLO_PUBLIC_URL%/}/api/health/live"
         fi
       fi
     else

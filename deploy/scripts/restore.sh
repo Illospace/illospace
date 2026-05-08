@@ -78,6 +78,6 @@ compose() {
 compose stop api worker scheduler >/dev/null || true
 compose exec -T postgres pg_restore --clean --if-exists -U "${DB_USER:?}" -d "${DB_NAME:?}" < "$DUMP_FILE"
 compose run --rm migrate
-compose up -d api worker scheduler web caddy
+compose up -d api worker scheduler web
 
 echo "Restore complete."

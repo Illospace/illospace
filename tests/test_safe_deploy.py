@@ -1,5 +1,6 @@
 """Tests for deployment safety hooks."""
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -139,3 +140,15 @@ def test_illo_exposes_dev_start_and_deploy_aliases():
     assert 'deploy_command "${@:2}"' in content
     assert "native)" in content
     assert '"$ROOT/ops/deploy.sh" "$@"' in content
+
+
+def test_compose_deploy_stays_private_without_builtin_public_ingress():
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "deploy" / "compose" / "docker-compose.yml").read_text()
+    launcher = (root / "illo").read_text()
+    services_section = compose.split("services:", 1)[1].rsplit("\nvolumes:", 1)[0]
+    service_names = re.findall(r"^  ([a-z][a-z0-9_-]+):$", services_section, flags=re.MULTILINE)
+
+    assert service_names == ["postgres", "migrate", "api", "worker", "scheduler", "web"]
+    assert "127.0.0.1:${ILLO_WEB_PORT:-8080}:8080" in compose
+    assert "deploy " + "publish" not in launcher
