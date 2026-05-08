@@ -52,9 +52,9 @@ class TestPublicImports:
         from brain.app.api.routers.cortex import _create_feedback_triggers
         assert callable(_create_feedback_triggers)
 
-    def test_generate_title_gpu(self):
-        from brain.app.api.routers.cortex import _generate_title_gpu
-        assert callable(_generate_title_gpu)
+    def test_generate_display_title(self):
+        from brain.app.api.routers.cortex import generate_display_title
+        assert callable(generate_display_title)
 
     def test_presence_join(self):
         from brain.app.api.routers.cortex import _presence_join

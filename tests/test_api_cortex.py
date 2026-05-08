@@ -929,7 +929,9 @@ async def test_create_idea(client, mock_session_factory):
     ) as MockRepo, patch(
         "brain.app.api.routers.cortex._ideas.ws_manager.broadcast_product_event",
         side_effect=_broadcast,
-    ):
+    ), patch(
+        "brain.app.api.routers.cortex._ideas.generate_and_store_idea_display_title"
+    ) as mock_generate_title:
         MockRepo.return_value.create.return_value = idea
         resp = await client.post(
             "/api/cortex/ideas",
@@ -944,6 +946,12 @@ async def test_create_idea(client, mock_session_factory):
             {"org_id": "test-org"},
         )
     ]
+    mock_generate_title.assert_called_once_with(
+        idea_id=str(idea.id),
+        raw_title="New Idea",
+        user_id="user-1",
+        org_id="test-org",
+    )
 
 
 @pytest.mark.asyncio
