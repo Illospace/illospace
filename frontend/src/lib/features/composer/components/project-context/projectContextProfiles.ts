@@ -76,15 +76,8 @@ export function projectContextErrorDetail(err: any, fallback: string): string {
 
 export function vaultProjectContextErrorMessage(err: any, fallback = 'Vault unavailable.'): string {
   const detail = projectContextErrorDetail(err, fallback);
-  const normalized = detail.toLowerCase();
   if (detail.includes('VAULT_MASTER_KEY') || detail.toLowerCase().includes('vault master key')) {
     return 'Vault is not configured on this server. Set VAULT_MASTER_KEY to save or reveal tokens.';
-  }
-  if (normalized === 'internal server error') {
-    return 'Vault is unavailable right now. Public GitHub search still works.';
-  }
-  if (normalized.includes('timed out')) {
-    return 'Vault check timed out. Public GitHub search still works.';
   }
   return detail;
 }
