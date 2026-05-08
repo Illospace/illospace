@@ -325,6 +325,13 @@ def _require_owner(user: dict[str, Any]):
         raise HTTPException(status_code=403, detail="Owner access required")
 
 
+def _require_workspace_member(user: dict[str, Any]) -> str:
+    org_id = user.get("org_id")
+    if user.get("principal_type") == "service" or not org_id or user.get("approved") is False:
+        raise HTTPException(status_code=403, detail="Workspace member access required")
+    return str(org_id)
+
+
 @router.get("/admin/pending")
 def list_pending_users(
     db: Session = Depends(get_db),
@@ -355,11 +362,15 @@ def approve_user(
     db: Session = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    """Approve a pending user. Owner only."""
-    _require_owner(user)
+    """Approve a pending user in the current workspace."""
+    org_id = _require_workspace_member(user)
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
+    if str(target.org_id) != org_id:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.approved:
+        raise HTTPException(status_code=409, detail="User is already approved")
     target.approved = True
     return {"ok": True, "user_id": user_id, "approved": True}
 
@@ -375,6 +386,10 @@ def reject_user(
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
+    if str(target.org_id) != str(user.get("org_id")):
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.approved:
+        raise HTTPException(status_code=409, detail="User is already approved")
     db.delete(target)
     return {"ok": True, "user_id": user_id, "rejected": True}
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import threading
 import time
 import uuid
@@ -66,16 +65,6 @@ UPLOAD_FALLBACK_CONTENT_TYPES = {
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "zip": "application/zip",
 }
-
-_TITLE_GENERATION_SYSTEM_PROMPT = (
-    "You generate concise display titles for raw thoughts and idea drafts. "
-    "Return only the title text. Keep it specific, descriptive, and compact. "
-    "Target 3 to 6 words when possible. Do not add explanations, quotes, bullets, or prefixes."
-)
-_TITLE_PREFIX_RE = re.compile(
-    r"^(?:title|suggested title|headline|summary title)\s*:\s*",
-    re.IGNORECASE,
-)
 
 _IMPLICIT_FEEDBACK_RULES = [
     ("memory_failure", ("does not remember", "forgot context", "not leverage memories", "doesn't remember", "remember anything")),
@@ -204,174 +193,6 @@ def _record_implicit_feedback(idea_id: str, content: str, tags: list[str]) -> No
                 run.metadata_ = metadata
     except Exception:
         logger.exception("Failed to persist implicit feedback for idea %s", idea_id)
-
-
-def _build_title_generation_prompt(raw_text: str) -> str:
-    thought = (raw_text or "").strip()[:500]
-    return (
-        f"{_TITLE_GENERATION_SYSTEM_PROMPT}\n\n"
-        "Raw thought or idea:\n"
-        f"{thought}\n\n"
-        "Title:"
-    )
-
-
-def _build_title_generation_user_prompt(raw_text: str) -> str:
-    thought = (raw_text or "").strip()[:500]
-    return (
-        "Raw thought or idea:\n"
-        f"{thought}\n\n"
-        "Return the best concise display title."
-    )
-
-
-def _normalize_generated_title(title: str | None) -> str | None:
-    title = (title or "").strip()
-    if not title:
-        return None
-
-    first_line = next((line.strip() for line in title.splitlines() if line.strip()), "")
-    candidate = _TITLE_PREFIX_RE.sub("", first_line).strip()
-    candidate = candidate.strip("`\"'“”‘’[](){} ")
-    candidate = re.sub(r"\s+", " ", candidate).strip()
-
-    if candidate.endswith((".", "!", "?", ";")) and len(candidate) > 4:
-        candidate = candidate[:-1].strip()
-
-    if candidate and 2 < len(candidate) < 60:
-        return candidate
-    return None
-
-
-def _generate_title_local(raw_text: str, *, client=None) -> str | None:
-    if client is None:
-        from brain.platform.gpu_client import get_client
-        client = get_client()
-    return _normalize_generated_title(
-        client.generate(
-            prompt=_build_title_generation_prompt(raw_text),
-            max_tokens=20,
-            temperature=0.3,
-            think=False,
-            fallback_policy="local-only",
-        )
-    )
-
-
-def _strip_model_provider_prefix(model: str | None) -> str:
-    value = (model or "").strip()
-    for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
-        if value.startswith(prefix):
-            return value[len(prefix):]
-    return value
-
-
-def _is_local_title_model(model: str | None) -> bool:
-    normalized = _strip_model_provider_prefix(model).strip().lower()
-    return (
-        normalized == "local"
-        or normalized == "gpu_server"
-        or normalized.startswith("local/")
-        or normalized.startswith("gpu_server/")
-        or normalized.startswith("brain.platform.gpu/")
-    )
-
-
-def _provider_model_spec(provider: str, model: str) -> str:
-    value = (model or "").strip()
-    if value.startswith(("anthropic/", "openai/")):
-        return value
-    if value.startswith("anthropic:"):
-        return f"anthropic/{value[len('anthropic:'):]}"
-    if value.startswith("openai:"):
-        return f"openai/{value[len('openai:'):]}"
-    return f"{provider}/{value}"
-
-
-def _local_title_runtime_ready(client) -> bool:
-    try:
-        return client.is_ready("llm")
-    except Exception:
-        # If health probing fails, still attempt generation once before falling back.
-        return True
-
-
-def _generate_title_with_provider_model(
-    raw_text: str,
-    *,
-    model: str,
-    user_id: str | None = None,
-    org_id: str | None = None,
-) -> str | None:
-    from brain.platform.integrations.completions import simple_text_completion
-
-    return _normalize_generated_title(
-        simple_text_completion(
-            _build_title_generation_user_prompt(raw_text),
-            model=model,
-            max_tokens=20,
-            user_id=user_id,
-            org_id=org_id,
-            system_prompt=_TITLE_GENERATION_SYSTEM_PROMPT,
-        )
-    )
-
-
-def _generate_title_gpu(
-    raw_text: str,
-    *,
-    user_id: str | None = None,
-    org_id: str | None = None,
-) -> str | None:
-    """Generate a title with the configured low-intelligence model.
-
-    Kept under the historical function name because tests and router exports
-    import it directly, but the runtime is no longer GPU-first. The org/user
-    low-tier mapping decides whether this call goes to the local GPU worker or
-    to the provider API with the authenticated user context.
-    """
-    try:
-        from brain.platform.providers.model_policy import get_model_for_tier, resolve_default_provider
-
-        provider = resolve_default_provider(user_id=user_id, org_id=org_id)
-        model = get_model_for_tier(
-            "low",
-            provider=provider,
-            include_provider_prefix=False,
-            user_id=user_id,
-            org_id=org_id,
-        )
-    except Exception as e:
-        logger.warning(f"Low-tier title model resolution failed: {e}")
-        return None
-
-    if not _is_local_title_model(model):
-        try:
-            return _generate_title_with_provider_model(
-                raw_text,
-                model=_provider_model_spec(provider, model),
-                user_id=user_id,
-                org_id=org_id,
-            )
-        except Exception as e:
-            logger.warning(f"Provider title generation failed: {e}")
-            return None
-
-    try:
-        from brain.platform.gpu_client import get_client
-
-        client = get_client()
-        if _local_title_runtime_ready(client):
-            title = _generate_title_local(raw_text, client=client)
-            if title:
-                return title
-            logger.info("Local title generation returned no usable title")
-        else:
-            logger.info("Local title generation skipped because the configured low-tier llm worker is not ready")
-    except Exception as e:
-        logger.warning(f"GPU server title generation failed: {e}")
-    return None
-
 
 def _create_feedback_triggers(skill_used: str, task_summary: str, note: str):
     from datetime import datetime as dt

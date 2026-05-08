@@ -31,7 +31,6 @@ from brain.app.api.routers.cortex._helpers import (  # noqa: F401
     _caller_is_service_principal,
     _create_feedback_triggers,
     _extract_mentions,
-    _generate_title_gpu,
     _infer_feedback_tags,
     _parse_message_type,
     _presence_cleanup,
@@ -47,6 +46,7 @@ from brain.app.api.routers.cortex._helpers import (  # noqa: F401
     _validate_idea_org,
     _validate_idea_org_orm,
 )
+from brain.systems.cortex.title_generation import generate_display_title  # noqa: F401
 
 # Re-export endpoint functions referenced by tests
 from brain.app.api.routers.cortex._auth_keys import (  # noqa: F401

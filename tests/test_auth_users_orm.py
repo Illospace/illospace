@@ -257,13 +257,33 @@ class TestApproveUser:
         assert approve_user("pending-1", "owner-1") is True
         assert pending.approved is True
 
-    def test_non_owner_cannot_approve(self, patch_uow):
+    def test_member_can_approve_same_org(self, patch_uow):
         from brain.systems.auth.users import approve_user
 
         member = _make_user(id="member-1", role="member")
+        pending = _make_user(id="pending-1", approved=False)
+        patch_uow.team.get_by_id.side_effect = lambda uid: member if uid == "member-1" else pending
+
+        assert approve_user("pending-1", "member-1") is True
+        assert pending.approved is True
+
+    def test_pending_member_cannot_approve(self, patch_uow):
+        from brain.systems.auth.users import approve_user
+
+        member = _make_user(id="member-1", role="member", approved=False)
         patch_uow.team.get_by_id.return_value = member
 
         assert approve_user("pending-1", "member-1") is False
+
+    def test_cannot_approve_outside_org(self, patch_uow):
+        from brain.systems.auth.users import approve_user
+
+        member = _make_user(id="member-1", role="member", org_id="org-1")
+        pending = _make_user(id="pending-1", approved=False, org_id="org-2")
+        patch_uow.team.get_by_id.side_effect = lambda uid: member if uid == "member-1" else pending
+
+        assert approve_user("pending-1", "member-1") is False
+        assert pending.approved is False
 
 
 # ── reject_user ────────────────────────────────────────────────
@@ -287,6 +307,16 @@ class TestRejectUser:
         patch_uow.team.get_by_id.side_effect = lambda uid: approver if uid == "owner-1" else approved
 
         assert reject_user("user-1", "owner-1") is False
+
+    def test_cannot_reject_outside_org(self, patch_uow):
+        from brain.systems.auth.users import reject_user
+
+        approver = _make_user(id="owner-1", role="owner", org_id="org-1")
+        pending = _make_user(id="pending-1", approved=False, org_id="org-2")
+        patch_uow.team.get_by_id.side_effect = lambda uid: approver if uid == "owner-1" else pending
+
+        assert reject_user("pending-1", "owner-1") is False
+        patch_uow.session.delete.assert_not_called()
 
 
 # ── safe_user_context ──────────────────────────────────────────

@@ -54,7 +54,6 @@ type CortexApiMethods = {
   splitIdea: typeof api.splitIdea;
   timelineData: (limit?: number) => Promise<CortexTimelineItem>;
   uploadFile: (file: File) => Promise<UploadedCortexFile>;
-  generateTitle: typeof api.generateTitle;
   notifyCortex: typeof api.notifyCortex;
   updateProfile: typeof api.updateProfile;
   listProjectContextProfiles: typeof api.listProjectContextProfiles;
@@ -99,7 +98,6 @@ export const cortexApi = pickTypedApiMethods<CortexApiMethods>([
   'splitIdea',
   'timelineData',
   'uploadFile',
-  'generateTitle',
   'notifyCortex',
   'updateProfile',
   'listProjectContextProfiles',
@@ -144,7 +142,6 @@ export const {
   splitIdea,
   timelineData,
   uploadFile,
-  generateTitle,
   notifyCortex,
   updateProfile,
   listProjectContextProfiles,

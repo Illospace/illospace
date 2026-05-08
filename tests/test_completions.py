@@ -38,6 +38,25 @@ class TestSimpleTextCompletion:
 
     @patch("brain.platform.integrations.completions.get_provider")
     @patch("brain.platform.integrations.completions.resolve_llm_client")
+    def test_passes_reasoning_effort_to_provider_request(self, mock_resolve, mock_get_provider):
+        from brain.platform.integrations.completions import simple_text_completion
+
+        llm = MagicMock()
+        llm.provider = "openai"
+        llm.client = object()
+        llm.build_request_headers.return_value = {}
+        mock_resolve.return_value = llm
+
+        provider = MagicMock()
+        provider.create.return_value = MagicMock(content=[MagicMock(type="text", text="ok")])
+        mock_get_provider.return_value = provider
+
+        assert simple_text_completion("hi", reasoning_effort="low") == "ok"
+        request = provider.create.call_args.args[0]
+        assert request.reasoning_effort == "low"
+
+    @patch("brain.platform.integrations.completions.get_provider")
+    @patch("brain.platform.integrations.completions.resolve_llm_client")
     def test_returns_none_when_no_text_blocks(self, mock_resolve, mock_get_provider):
         from brain.platform.integrations.completions import simple_text_completion
 
