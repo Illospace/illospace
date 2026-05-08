@@ -42,19 +42,48 @@
   } from '$lib/utils/projectContext';
   import type { SlashCommandToken } from '$lib/utils/slashCommand';
   import type { CortexWorkspacePoint } from '$lib/features/workspace-scene/domain/workspacePoint';
+  import type { CortexCreateIdeaOptions } from '$lib/stores/cortex.svelte';
+  import type { AgentRunOptions } from '$lib/types/cortex';
+
+  type WorkspaceComposerAutoDraft = {
+    id: string;
+    text: string;
+    origin?: string | null;
+    originRef?: string | null;
+    displayTitle?: string | null;
+    runMetadata?: Record<string, any> | null;
+    delayMs?: number;
+    typeIntervalMs?: number;
+    submitDelayMs?: number;
+  };
+
+  type AutoDraftCompletion = {
+    id: string;
+    status: 'submitted' | 'skipped' | 'cancelled';
+    ideaId?: string;
+  };
+
+  type SubmitPromptOptions = {
+    createOptions?: CortexCreateIdeaOptions;
+    runOptions?: AgentRunOptions;
+  };
 
   let {
     context = null,
     projectContextInitialOpen = false,
     projectContextInitialProfileId = 'none',
     projectContextLoadServerProfiles = true,
+    autoDraft = null,
     onthreadintent,
+    onAutoDraftComplete,
   }: {
     context?: CortexWorkspacePoint | null;
     projectContextInitialOpen?: boolean;
     projectContextInitialProfileId?: string;
     projectContextLoadServerProfiles?: boolean;
+    autoDraft?: WorkspaceComposerAutoDraft | null;
     onthreadintent?: (origin: { x: number; y: number }) => void;
+    onAutoDraftComplete?: (completion: AutoDraftCompletion) => void;
   } = $props();
 
   let inputValue = $state('');
@@ -68,6 +97,8 @@
   let projectContextSnapshot = $state<ProjectContextSnapshotLike | null>(null);
   let projectContextValid = $state(true);
   let projectContextError = $state<string | null>(null);
+  let autoDraftPlaybackId: string | null = null;
+  let autoDraftRunToken = 0;
   type CreationBehavior = 'open-thread' | 'keep-workspace';
 
   let viewportHeight = $state(800);
@@ -190,7 +221,10 @@
     await cortex.selectIdea(ideaId);
   }
 
-  async function submitPrompt(behavior: CreationBehavior = 'open-thread') {
+  async function submitPrompt(
+    behavior: CreationBehavior = 'open-thread',
+    submitOptions: SubmitPromptOptions = {},
+  ) {
     const text = inputValue.trim();
     const baseAttachments = [...pendingAttachments];
     if ((!text && baseAttachments.length === 0) || sending) return;
@@ -205,6 +239,10 @@
       const messageText = text || '(attachment)';
       const selectedProjectContext = projectContextSnapshot;
       const attachments = buildWorkspaceComposerAttachmentsWithProjectContext(baseAttachments, selectedProjectContext);
+      const runOptions = {
+        ...cortex.runSettingsOptions(),
+        ...(submitOptions.runOptions ?? {}),
+      };
       const idea = worldOrigin
         ? await cortex.createIdeaAt(
             messageText,
@@ -213,9 +251,17 @@
             undefined,
             attachments,
             text,
-            cortex.runSettingsOptions(),
+            runOptions,
+            submitOptions.createOptions,
           )
-        : await cortex.createIdea(messageText, undefined, attachments, text, cortex.runSettingsOptions());
+        : await cortex.createIdea(
+            messageText,
+            undefined,
+            attachments,
+            text,
+            runOptions,
+            submitOptions.createOptions,
+          );
       if (!idea?.id) return;
       await saveWorkspaceComposerProjectContext(
         idea.id,
@@ -234,11 +280,70 @@
         onthreadintent?.(composerOrigin());
         await openCreatedThread(idea.id);
       }
+      return idea;
     } finally {
       sending = false;
       await syncComposerHeight();
     }
   }
+
+  function sleep(ms: number) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  async function playAutoDraft(draft: WorkspaceComposerAutoDraft, token: number) {
+    await tick();
+    await sleep(draft.delayMs ?? 320);
+    if (token !== autoDraftRunToken) return;
+    if (inputValue.trim() || pendingAttachments.length > 0 || sending) {
+      onAutoDraftComplete?.({ id: draft.id, status: 'skipped' });
+      return;
+    }
+
+    textareaEl?.focus();
+    inputValue = '';
+    await syncComposerHeight();
+
+    const intervalMs = draft.typeIntervalMs ?? 18;
+    for (let index = 1; index <= draft.text.length; index += 1) {
+      if (token !== autoDraftRunToken) return;
+      inputValue = draft.text.slice(0, index);
+      await syncComposerHeight();
+      await sleep(intervalMs);
+    }
+
+    if (token !== autoDraftRunToken) return;
+    await sleep(draft.submitDelayMs ?? 520);
+    if (token !== autoDraftRunToken) return;
+
+    const idea = await submitPrompt('open-thread', {
+      createOptions: {
+        origin: draft.origin,
+        originRef: draft.originRef,
+        displayTitle: draft.displayTitle,
+      },
+      runOptions: draft.runMetadata ? { metadata: draft.runMetadata } : undefined,
+    });
+
+    onAutoDraftComplete?.({
+      id: draft.id,
+      status: idea?.id ? 'submitted' : 'cancelled',
+      ideaId: idea?.id,
+    });
+  }
+
+  $effect(() => {
+    const draft = autoDraft;
+    if (!draft || autoDraftPlaybackId === draft.id) return;
+    autoDraftPlaybackId = draft.id;
+    const token = autoDraftRunToken + 1;
+    autoDraftRunToken = token;
+    void playAutoDraft(draft, token);
+
+    return () => {
+      if (autoDraftRunToken === token) autoDraftRunToken += 1;
+    };
+  });
 
   function handleKeydown(event: KeyboardEvent) {
     if (mentionRef?.handleKey(event)) return;

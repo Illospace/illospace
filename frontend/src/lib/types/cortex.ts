@@ -5,6 +5,7 @@ export interface Idea {
   description: string | null;
   status: string;
   origin: string;
+  origin_ref?: string | null;
   salience_score: number;
   position_x: number | null;
   position_y: number | null;

@@ -238,16 +238,8 @@
         await goto('/onboarding');
         return;
       }
-      const intro = await api.startRuntimeReadyIntro();
-      if (intro?.created && intro.idea_id) {
-        const params = new URLSearchParams({
-          idea: intro.idea_id,
-          onboarding: 'runtime-ready',
-        });
-        await goto(`/cortex?${params.toString()}`);
-        return;
-      }
-      await goto('/cortex');
+      const params = new URLSearchParams({ onboarding: 'runtime-ready' });
+      await goto(`/cortex?${params.toString()}`);
     } catch {
       await goto('/onboarding');
     } finally {

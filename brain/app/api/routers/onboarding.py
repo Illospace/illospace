@@ -38,7 +38,7 @@ INTRO_RUN_SETTLED_STATUSES = {
     RunStatus.COMPLETED.value,
 }
 
-INTRO_PROMPT = "Introduce yourself to this new user and say how you can help them."
+INTRO_PROMPT = "Illo, introduce yourself and help me finish setting up this workspace."
 
 
 def _intro_ref(user_id: str) -> str:
@@ -73,11 +73,11 @@ def _latest_intro_run_status(session: Any, *, idea_id: str) -> str | None:
     return str(status) if status else None
 
 
-def _intro_metadata() -> dict[str, str]:
+def _intro_metadata(prompt_visibility: str = "hidden") -> dict[str, str]:
     return {
         "origin": "onboarding",
         "onboarding_step": "runtime_ready_intro",
-        "prompt_visibility": "hidden",
+        "prompt_visibility": prompt_visibility,
         "execution_profile": "fast",
         "provider": "openai",
         "model": INTRO_MODEL,
@@ -98,6 +98,32 @@ def _route_intro_run(session: Any, *, idea: Idea, user: dict[str, Any]) -> Any:
         priority=1,
     )
     return route_trigger(trigger, session=session)
+
+
+@router.post("/runtime-ready-intro-draft")
+def runtime_ready_intro_draft(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+    """Return the visible composer draft for the runtime-ready intro flow."""
+    user_id = str(user.get("id") or "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    org_id = require_org_context(user)
+    status = get_provider_auth_status(user_id=user_id, org_id=org_id, provider="openai")
+    if not status.get("runtime_key_available"):
+        raise HTTPException(status_code=409, detail="OpenAI runtime is not connected yet.")
+
+    with UnitOfWork() as uow:
+        existing = _find_existing_intro(uow.session, org_id=org_id, user_id=user_id)
+        return {
+            "ok": True,
+            "idea_id": str(existing.id) if existing is not None else None,
+            "should_play": existing is None,
+            "prompt": INTRO_PROMPT,
+            "title": INTRO_TITLE,
+            "display_title": INTRO_DISPLAY_TITLE,
+            "origin": INTRO_ORIGIN,
+            "origin_ref": _intro_ref(user_id),
+            "run_metadata": _intro_metadata("visible_composer"),
+        }
 
 
 @router.post("/runtime-ready-intro")

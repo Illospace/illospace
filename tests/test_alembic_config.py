@@ -116,6 +116,7 @@ def test_env_py_widens_alembic_version_column_for_long_revision_ids():
 
     env_content = (ALEMBIC_DIR / "env.py").read_text()
     assert "ALEMBIC_VERSION_NUM_MAX_LENGTH = 255" in env_content
+    assert "CREATE TABLE IF NOT EXISTS alembic_version" in env_content
     assert "ALTER TABLE alembic_version" in env_content
     assert "version_num TYPE VARCHAR" in env_content
 

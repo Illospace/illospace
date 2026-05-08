@@ -35,6 +35,18 @@ def _ensure_alembic_version_capacity(connection: Connection) -> None:
     if connection.dialect.name != "postgresql":
         return
 
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS alembic_version (
+                version_num VARCHAR(%d) NOT NULL,
+                CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+            )
+            """
+            % ALEMBIC_VERSION_NUM_MAX_LENGTH
+        )
+    )
+
     current_length = connection.execute(
         text(
             """

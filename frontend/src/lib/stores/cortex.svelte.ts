@@ -86,6 +86,12 @@ export type {
   VaultSecretPrompt,
 } from '$lib/types/cortex';
 
+export interface CortexCreateIdeaOptions {
+  origin?: string | null;
+  originRef?: string | null;
+  displayTitle?: string | null;
+}
+
 class CortexStore {
   ideas = $state<Idea[]>([]);
   connections = $state<Connection[]>([]);
@@ -1306,6 +1312,7 @@ class CortexStore {
     attachments: any[] = [],
     runContent = title,
     options: AgentRunOptions = {},
+    createOptions: CortexCreateIdeaOptions = {},
   ) {
     const origin = this.birthContext;
     return this.createIdeaAt(
@@ -1316,6 +1323,7 @@ class CortexStore {
       attachments,
       runContent,
       options,
+      createOptions,
     );
   }
 
@@ -1327,20 +1335,29 @@ class CortexStore {
     attachments: any[] = [],
     runContent = title,
     options: AgentRunOptions = {},
+    createOptions: CortexCreateIdeaOptions = {},
   ) {
     try {
-      const idea = await api.createIdea({ title, description });
+      const ideaInput: Record<string, any> = { title, description };
+      if (createOptions.origin) ideaInput.origin = createOptions.origin;
+      if (createOptions.originRef) ideaInput.origin_ref = createOptions.originRef;
+      const idea = await api.createIdea(ideaInput);
       bloop();
-      // Fire-and-forget: generate a concise display title via local LLM
-      api.generateTitle(title).then((r) => {
-        if (r?.title) {
-          api.updateIdea(idea.id, { display_title: r.title });
-          // Update local state so UI reflects the generated title immediately
-          this.ideas = this.ideas.map((i) =>
-            i.id === idea.id ? { ...i, display_title: r.title } : i,
-          );
-        }
-      }).catch(() => {});
+      if (createOptions.displayTitle) {
+        idea.display_title = createOptions.displayTitle;
+        api.updateIdea(idea.id, { display_title: createOptions.displayTitle }).catch(() => {});
+      } else {
+        // Fire-and-forget: generate a concise display title via local LLM
+        api.generateTitle(title).then((r) => {
+          if (r?.title) {
+            api.updateIdea(idea.id, { display_title: r.title });
+            // Update local state so UI reflects the generated title immediately
+            this.ideas = this.ideas.map((i) =>
+              i.id === idea.id ? { ...i, display_title: r.title } : i,
+            );
+          }
+        }).catch(() => {});
+      }
       // The typed text becomes the first thread message and queues Illo by default.
       // Set status optimistically BEFORE adding to ideas array so the
       // SVG birth animation renders with the correct color immediately.

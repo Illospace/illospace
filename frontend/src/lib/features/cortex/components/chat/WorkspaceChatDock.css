@@ -531,6 +531,11 @@
     scrollbar-color: var(--mini-chat-shell-border) transparent;
   }
 
+  .workspace-chat-dock.is-corner .chat-pane-stream > :first-child,
+  .workspace-chat-dock.is-corner .chat-dm-stream > :first-child {
+    margin-top: auto;
+  }
+
   .workspace-chat-dock.is-corner .chat-conversation-header,
   .workspace-chat-dock.is-corner .chat-message-actions,
   .workspace-chat-dock.is-corner .chat-thread-summary-arrow,
@@ -870,7 +875,12 @@
     font-size: var(--mini-chat-body-size);
     line-height: 1.38;
     overflow-y: auto;
+    scrollbar-width: none;
     text-shadow: var(--mini-chat-text-shadow);
+  }
+
+  .workspace-chat-dock.is-corner .chat-composer-shell.is-room .chat-composer-textarea::-webkit-scrollbar {
+    display: none;
   }
 
   .workspace-chat-dock.is-corner .chat-composer-textarea::placeholder {
