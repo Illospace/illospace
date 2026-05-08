@@ -2340,6 +2340,7 @@ usage() {
   echo -e "  ${GREEN}setup${NC}        Run setup only"
   echo -e "  ${GREEN}start${NC}        Production-safe API mode (standalone worker owns AgentRuns)"
   echo -e "  ${GREEN}deploy${NC}       Run production-safe deploy script"
+  echo -e "  ${GREEN}native${NC}       Native deploy alias"
   echo -e "  ${GREEN}doctor${NC}       Validate configuration (pass --production for prod)"
   echo -e "  ${GREEN}uninstall${NC}    Remove local runtime, config, and Illo Docker DB"
   echo -e "  ${GREEN}worker-status${NC} Show active AgentRuns and worker service state"
@@ -2347,6 +2348,10 @@ usage() {
   echo -e "  ${GREEN}test${NC}         Run tests"
   echo -e "  ${GREEN}build${NC}        Build frontend only"
   echo ""
+}
+
+deploy_command() {
+  "$ROOT/ops/deploy.sh" "$@"
 }
 
 begin_launch_log "$*"
@@ -2368,7 +2373,11 @@ case "${1:-}" in
     ;;
   deploy)
     check_prereqs
-    exec "$ROOT/ops/deploy.sh" "${@:2}"
+    deploy_command "${@:2}"
+    ;;
+  native)
+    check_prereqs
+    deploy_command "${@:2}"
     ;;
   doctor)
     check_prereqs
