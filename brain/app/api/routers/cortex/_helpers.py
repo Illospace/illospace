@@ -258,6 +258,36 @@ def _generate_title_local(raw_text: str, *, client=None) -> str | None:
     )
 
 
+def _strip_model_provider_prefix(model: str | None) -> str:
+    value = (model or "").strip()
+    for prefix in ("anthropic/", "openai/", "anthropic:", "openai:"):
+        if value.startswith(prefix):
+            return value[len(prefix):]
+    return value
+
+
+def _is_local_title_model(model: str | None) -> bool:
+    normalized = _strip_model_provider_prefix(model).strip().lower()
+    return (
+        normalized == "local"
+        or normalized == "gpu_server"
+        or normalized.startswith("local/")
+        or normalized.startswith("gpu_server/")
+        or normalized.startswith("brain.platform.gpu/")
+    )
+
+
+def _provider_model_spec(provider: str, model: str) -> str:
+    value = (model or "").strip()
+    if value.startswith(("anthropic/", "openai/")):
+        return value
+    if value.startswith("anthropic:"):
+        return f"anthropic/{value[len('anthropic:'):]}"
+    if value.startswith("openai:"):
+        return f"openai/{value[len('openai:'):]}"
+    return f"{provider}/{value}"
+
+
 def _local_title_runtime_ready(client) -> bool:
     try:
         return client.is_ready("llm")
@@ -266,23 +296,15 @@ def _local_title_runtime_ready(client) -> bool:
         return True
 
 
-def _generate_title_hosted_fallback(
+def _generate_title_with_provider_model(
     raw_text: str,
     *,
+    model: str,
     user_id: str | None = None,
     org_id: str | None = None,
 ) -> str | None:
     from brain.platform.integrations.completions import simple_text_completion
-    from brain.platform.providers.model_policy import get_model_for_tier, resolve_default_provider
 
-    provider = resolve_default_provider(user_id=user_id, org_id=org_id)
-    model = get_model_for_tier(
-        "low",
-        provider=provider,
-        include_provider_prefix=True,
-        user_id=user_id,
-        org_id=org_id,
-    )
     return _normalize_generated_title(
         simple_text_completion(
             _build_title_generation_user_prompt(raw_text),
@@ -301,6 +323,40 @@ def _generate_title_gpu(
     user_id: str | None = None,
     org_id: str | None = None,
 ) -> str | None:
+    """Generate a title with the configured low-intelligence model.
+
+    Kept under the historical function name because tests and router exports
+    import it directly, but the runtime is no longer GPU-first. The org/user
+    low-tier mapping decides whether this call goes to the local GPU worker or
+    to the provider API with the authenticated user context.
+    """
+    try:
+        from brain.platform.providers.model_policy import get_model_for_tier, resolve_default_provider
+
+        provider = resolve_default_provider(user_id=user_id, org_id=org_id)
+        model = get_model_for_tier(
+            "low",
+            provider=provider,
+            include_provider_prefix=False,
+            user_id=user_id,
+            org_id=org_id,
+        )
+    except Exception as e:
+        logger.warning(f"Low-tier title model resolution failed: {e}")
+        return None
+
+    if not _is_local_title_model(model):
+        try:
+            return _generate_title_with_provider_model(
+                raw_text,
+                model=_provider_model_spec(provider, model),
+                user_id=user_id,
+                org_id=org_id,
+            )
+        except Exception as e:
+            logger.warning(f"Provider title generation failed: {e}")
+            return None
+
     try:
         from brain.platform.gpu_client import get_client
 
@@ -309,17 +365,12 @@ def _generate_title_gpu(
             title = _generate_title_local(raw_text, client=client)
             if title:
                 return title
-            logger.info("Local title generation returned no usable title; falling back to hosted model")
+            logger.info("Local title generation returned no usable title")
         else:
-            logger.info("Local title generation skipped because the llm worker is not ready")
+            logger.info("Local title generation skipped because the configured low-tier llm worker is not ready")
     except Exception as e:
         logger.warning(f"GPU server title generation failed: {e}")
-
-    try:
-        return _generate_title_hosted_fallback(raw_text, user_id=user_id, org_id=org_id)
-    except Exception as e:
-        logger.warning(f"Hosted title generation fallback failed: {e}")
-        return None
+    return None
 
 
 def _create_feedback_triggers(skill_used: str, task_summary: str, note: str):

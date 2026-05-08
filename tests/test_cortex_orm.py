@@ -196,18 +196,29 @@ class TestExtractMentions:
         assert _extract_mentions("no mentions here") == []
 
 
-# ── GPU title generation ───────────────────────────────────────
+# ── Low-tier title generation ──────────────────────────────────
 
-class TestGenerateTitleGpu:
-    @patch("brain.platform.integrations.completions.simple_text_completion")
-    @patch("brain.platform.gpu_client.get_client")
-    def test_returns_local_title_without_fallback(self, mock_get_client, mock_simple_text_completion):
+class TestGenerateTitleLowTier:
+    def test_uses_local_gpu_when_configured_low_tier_model_is_local(self):
         from brain.app.api.routers.cortex import _generate_title_gpu
 
-        mock_get_client.return_value.generate.return_value = "Great Title"
-        mock_get_client.return_value.is_ready.return_value = True
+        with patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai") as mock_resolve_default_provider, \
+             patch("brain.platform.providers.model_policy.get_model_for_tier", return_value="brain.platform.gpu/qwen3.5:4b") as mock_get_model_for_tier, \
+             patch("brain.platform.gpu_client.get_client") as mock_get_client, \
+             patch("brain.platform.integrations.completions.simple_text_completion") as mock_simple_text_completion:
+            mock_get_client.return_value.generate.return_value = "Great Title"
+            mock_get_client.return_value.is_ready.return_value = True
 
-        assert _generate_title_gpu("some raw text") == "Great Title"
+            assert _generate_title_gpu("some raw text", user_id="user-1", org_id="org-1") == "Great Title"
+
+        mock_resolve_default_provider.assert_called_once_with(user_id="user-1", org_id="org-1")
+        mock_get_model_for_tier.assert_called_once_with(
+            "low",
+            provider="openai",
+            include_provider_prefix=False,
+            user_id="user-1",
+            org_id="org-1",
+        )
         mock_get_client.return_value.is_ready.assert_called_once_with("llm")
         mock_get_client.return_value.generate.assert_called_once()
         kwargs = mock_get_client.return_value.generate.call_args.kwargs
@@ -215,27 +226,20 @@ class TestGenerateTitleGpu:
         assert kwargs["think"] is False
         mock_simple_text_completion.assert_not_called()
 
-    @patch("brain.platform.providers.model_policy.get_model_for_tier")
-    @patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai")
-    @patch("brain.platform.integrations.completions.simple_text_completion", return_value="Fallback Title")
-    @patch("brain.platform.gpu_client.get_client", side_effect=Exception("no GPU"))
-    def test_falls_back_to_provider_low_tier_model(
-        self,
-        mock_get_client,
-        mock_simple_text_completion,
-        mock_resolve_default_provider,
-        mock_get_model_for_tier,
-    ):
+    def test_uses_configured_api_low_tier_model_with_user_context(self):
         from brain.app.api.routers.cortex import _generate_title_gpu
 
-        mock_get_model_for_tier.return_value = "openai/gpt-5-mini"
+        with patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai") as mock_resolve_default_provider, \
+             patch("brain.platform.providers.model_policy.get_model_for_tier", return_value="gpt-5-mini") as mock_get_model_for_tier, \
+             patch("brain.platform.integrations.completions.simple_text_completion", return_value="Provider Title") as mock_simple_text_completion, \
+             patch("brain.platform.gpu_client.get_client") as mock_get_client:
+            assert _generate_title_gpu("some raw text", user_id="user-1", org_id="org-1") == "Provider Title"
 
-        assert _generate_title_gpu("some raw text", user_id="user-1", org_id="org-1") == "Fallback Title"
         mock_resolve_default_provider.assert_called_once_with(user_id="user-1", org_id="org-1")
         mock_get_model_for_tier.assert_called_once_with(
             "low",
             provider="openai",
-            include_provider_prefix=True,
+            include_provider_prefix=False,
             user_id="user-1",
             org_id="org-1",
         )
@@ -245,35 +249,41 @@ class TestGenerateTitleGpu:
         assert kwargs["user_id"] == "user-1"
         assert kwargs["org_id"] == "org-1"
         assert kwargs["system_prompt"]
+        mock_get_client.assert_not_called()
 
-    @patch("brain.platform.integrations.completions.simple_text_completion", return_value=" x ")
-    @patch("brain.platform.gpu_client.get_client", side_effect=Exception("no GPU"))
-    def test_returns_none_when_fallback_title_invalid(self, mock_get_client, mock_simple_text_completion):
+    def test_returns_none_when_configured_api_title_invalid(self):
         from brain.app.api.routers.cortex import _generate_title_gpu
 
-        assert _generate_title_gpu("some raw text") is None
+        with patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai"), \
+             patch("brain.platform.providers.model_policy.get_model_for_tier", return_value="gpt-5-mini"), \
+             patch("brain.platform.integrations.completions.simple_text_completion", return_value=" x "):
+            assert _generate_title_gpu("some raw text") is None
 
-    @patch("brain.platform.integrations.completions.simple_text_completion")
-    @patch("brain.platform.gpu_client.get_client")
-    def test_normalizes_local_title_output(self, mock_get_client, mock_simple_text_completion):
+    def test_normalizes_local_title_output(self):
         from brain.app.api.routers.cortex import _generate_title_gpu
 
-        mock_get_client.return_value.is_ready.return_value = True
-        mock_get_client.return_value.generate.return_value = 'Title: "Sharper Idea Framing"\n\nExplanation'
+        with patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai"), \
+             patch("brain.platform.providers.model_policy.get_model_for_tier", return_value="brain.platform.gpu/qwen3.5:4b"), \
+             patch("brain.platform.gpu_client.get_client") as mock_get_client, \
+             patch("brain.platform.integrations.completions.simple_text_completion") as mock_simple_text_completion:
+            mock_get_client.return_value.is_ready.return_value = True
+            mock_get_client.return_value.generate.return_value = 'Title: "Sharper Idea Framing"\n\nExplanation'
 
-        assert _generate_title_gpu("some raw text") == "Sharper Idea Framing"
+            assert _generate_title_gpu("some raw text") == "Sharper Idea Framing"
         mock_simple_text_completion.assert_not_called()
 
-    @patch("brain.platform.integrations.completions.simple_text_completion", return_value="Fallback Title")
-    @patch("brain.platform.gpu_client.get_client")
-    def test_skips_local_generation_when_llm_worker_not_ready(self, mock_get_client, mock_simple_text_completion):
+    def test_returns_none_when_configured_local_worker_not_ready(self):
         from brain.app.api.routers.cortex import _generate_title_gpu
 
-        mock_get_client.return_value.is_ready.return_value = False
+        with patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="openai"), \
+             patch("brain.platform.providers.model_policy.get_model_for_tier", return_value="brain.platform.gpu/qwen3.5:4b"), \
+             patch("brain.platform.gpu_client.get_client") as mock_get_client, \
+             patch("brain.platform.integrations.completions.simple_text_completion") as mock_simple_text_completion:
+            mock_get_client.return_value.is_ready.return_value = False
 
-        assert _generate_title_gpu("some raw text") == "Fallback Title"
+            assert _generate_title_gpu("some raw text") is None
         mock_get_client.return_value.generate.assert_not_called()
-        mock_simple_text_completion.assert_called_once()
+        mock_simple_text_completion.assert_not_called()
 
 
 class TestTitleRoutes:
