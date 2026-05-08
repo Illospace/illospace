@@ -45,6 +45,7 @@ export interface CortexRealtimeStoreBindings {
   _stopSelectedIdeaReconcile(): void;
   _scheduleSelectedStreamRefresh(delayMs?: number): void;
   _handleRunUiEvent(msg: any): void;
+  _handleCycleChanged(msg: any): void;
   _handleBrowserSessionEvent(msg: any, frame?: BrowserFrame | null): void;
   _handleVaultSecretPrompt(msg: any): void;
   _upsertIdea(idea: Idea): void;
@@ -181,6 +182,12 @@ export function setupCortexRealtimeBindings(options: {
       }),
     );
   }
+
+  unsubs.push(
+    wsClient.on('cycles_changed', (msg) => {
+      store._handleCycleChanged(msg);
+    }),
+  );
 
   // Visual blocks — render inline in conversation stream
   unsubs.push(

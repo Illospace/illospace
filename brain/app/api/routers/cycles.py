@@ -11,7 +11,9 @@ from sqlalchemy.orm import Session
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.schemas.cycles import CycleCreate, CycleRead, CycleRunRead, CycleUpdate
+from brain.systems.cycles.events import publish_cycle_change
 from brain.systems.cycles.service import (
+    build_one_time_schedule_expr,
     compute_next_run_at,
     cycle_defaults,
     REUSABLE_THREAD_EXECUTION_MODE,
@@ -116,8 +118,13 @@ def create_cycle(
     db: Session = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    schedule_expr = validate_schedule_expr(body.schedule_expr)
     timezone_name = validate_timezone_name(body.timezone)
+    if body.run_at is not None:
+        schedule_expr = build_one_time_schedule_expr(body.run_at, timezone_name)
+    elif body.schedule_expr:
+        schedule_expr = validate_schedule_expr(body.schedule_expr, timezone_name)
+    else:
+        raise HTTPException(status_code=400, detail="schedule_expr or run_at is required")
     execution_mode = validate_execution_mode(body.execution_mode)
     thinking_override = validate_thinking_override(body.thinking_override)
     try:
@@ -146,7 +153,16 @@ def create_cycle(
     )
     db.add(cycle)
     db.flush()
-    return serialize_cycle(cycle)
+    payload = serialize_cycle(cycle)
+    db.commit()
+    publish_cycle_change(
+        action="create",
+        org_id=cycle.org_id,
+        user_id=cycle.user_id,
+        cycle_id=cycle.id,
+        target_idea_id=cycle.target_idea_id,
+    )
+    return payload
 
 
 @router.get("/{cycle_id}", response_model=CycleRead)
@@ -181,10 +197,12 @@ def update_cycle(
             cycle.prompt = validate_nonempty_trimmed(updates["prompt"], "prompt")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if "schedule_expr" in updates and updates["schedule_expr"] is not None:
-        cycle.schedule_expr = validate_schedule_expr(updates["schedule_expr"])
     if "timezone" in updates and updates["timezone"] is not None:
         cycle.timezone = validate_timezone_name(updates["timezone"])
+    if "run_at" in updates and updates["run_at"] is not None:
+        cycle.schedule_expr = build_one_time_schedule_expr(updates["run_at"], cycle.timezone)
+    if "schedule_expr" in updates and updates["schedule_expr"] is not None:
+        cycle.schedule_expr = validate_schedule_expr(updates["schedule_expr"], cycle.timezone)
     if "enabled" in updates and updates["enabled"] is not None:
         cycle.enabled = updates["enabled"]
     if "model_override" in updates:
@@ -208,7 +226,16 @@ def update_cycle(
 
     cycle.next_run_at = compute_next_run_at(cycle.schedule_expr, cycle.timezone)
     db.flush()
-    return serialize_cycle(cycle)
+    payload = serialize_cycle(cycle)
+    db.commit()
+    publish_cycle_change(
+        action="update",
+        org_id=cycle.org_id,
+        user_id=cycle.user_id,
+        cycle_id=cycle.id,
+        target_idea_id=cycle.target_idea_id,
+    )
+    return payload
 
 
 @router.delete("/{cycle_id}")
@@ -221,6 +248,14 @@ def delete_cycle(
     cycle.enabled = False
     cycle.deleted_at = datetime.now(timezone.utc)
     db.flush()
+    db.commit()
+    publish_cycle_change(
+        action="delete",
+        org_id=cycle.org_id,
+        user_id=cycle.user_id,
+        cycle_id=cycle_id,
+        target_idea_id=cycle.target_idea_id,
+    )
     return {"ok": True, "id": cycle_id}
 
 
@@ -247,5 +282,13 @@ def run_cycle(
     db: Session = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _get_cycle_or_404(db, cycle_id, user)
-    return run_cycle_now(cycle_id)
+    cycle = _get_cycle_or_404(db, cycle_id, user)
+    payload = run_cycle_now(cycle_id)
+    publish_cycle_change(
+        action="run",
+        org_id=cycle.org_id,
+        user_id=cycle.user_id,
+        cycle_id=cycle_id,
+        target_idea_id=cycle.target_idea_id,
+    )
+    return payload
