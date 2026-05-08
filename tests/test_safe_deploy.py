@@ -80,7 +80,7 @@ def test_ops_deploy_renders_systemd_services_for_current_checkout():
     assert "sync_production_service_env" in content
 
 
-def test_illo_start_uses_standalone_worker_by_default():
+def test_illo_native_mode_uses_standalone_worker_by_default():
     illo_path = Path(__file__).resolve().parents[1] / "illo"
     content = illo_path.read_text()
 
@@ -91,7 +91,16 @@ def test_illo_start_uses_standalone_worker_by_default():
     assert "Standalone worker service is unavailable; using inline AgentRun dispatcher" in content
 
 
-def test_illo_start_installs_current_checkout_worker_services():
+def test_illo_native_server_binds_to_loopback_by_default():
+    illo_path = Path(__file__).resolve().parents[1] / "illo"
+    content = illo_path.read_text()
+
+    assert 'local api_bind_host="${ILLO_API_HOST:-127.0.0.1}"' in content
+    assert '--host "$api_bind_host" --port 8000' in content
+    assert "secure with your firewall, tunnel, or reverse proxy" in content
+
+
+def test_illo_native_mode_installs_current_checkout_worker_services():
     illo_path = Path(__file__).resolve().parents[1] / "illo"
     content = illo_path.read_text()
 
@@ -102,7 +111,7 @@ def test_illo_start_installs_current_checkout_worker_services():
     assert "systemctl --user restart illo-scheduler.service" in content
 
 
-def test_illo_start_autostarts_gpu_when_embedding_backend_is_gpu():
+def test_illo_native_mode_autostarts_gpu_when_embedding_backend_is_gpu():
     illo_path = Path(__file__).resolve().parents[1] / "illo"
     content = illo_path.read_text()
 
@@ -130,16 +139,22 @@ def test_illo_refuses_to_kill_unknown_port_processes_without_force():
     assert "pids_look_illo_runtime" in content
 
 
-def test_illo_exposes_dev_start_and_deploy_aliases():
+def test_illo_exposes_native_default_dev_mode_and_compose_deploy():
     illo_path = Path(__file__).resolve().parents[1] / "illo"
     content = illo_path.read_text()
 
-    assert "dev-start" in content
+    assert "start|prod|production)" not in content
+    assert "dev-start" not in content
+    assert "development)" not in content
+    assert "prod|production" not in content
+    assert "  dev)" in content
+    assert 'run_prod' in content
+    assert 'run_dev' in content
     assert "deploy" in content
-    assert "dev-start|dev|development)" in content
     assert 'deploy_command "${@:2}"' in content
-    assert "native)" in content
-    assert '"$ROOT/ops/deploy.sh" "$@"' in content
+    assert "--no-next" in content
+    assert "worker-status" not in content
+    assert "worker-drain" not in content
 
 
 def test_compose_deploy_stays_private_without_builtin_public_ingress():

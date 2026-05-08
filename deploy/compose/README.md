@@ -28,20 +28,18 @@ Prerequisites on the server:
 From the repository root:
 
 ```bash
-./illo deploy init
+./illo deploy up
 ```
+
+`deploy up` creates `deploy/compose/.env` with generated secrets when the file
+does not exist. Run `./illo deploy init` only when you want to create or edit
+that file before the first start.
 
 Edit `deploy/compose/.env` only for server bootstrap settings such as generated
 app secrets, database password, and the browser-facing `ILLO_PUBLIC_URL` if you
 bring your own private network or reverse proxy. Do not put model provider API
 keys in this file; add them from the Illospace System/Access screens after
 first boot.
-
-Start the stack:
-
-```bash
-./illo deploy up
-```
 
 The app listens on server loopback. From your workstation:
 
@@ -68,8 +66,7 @@ ghcr.io/illospace/web:latest
 Until those images are published for a release, build on the server:
 
 ```bash
-./illo deploy build
-./illo deploy up --no-pull
+./illo deploy up --build --no-pull
 ```
 
 ## Health Checks

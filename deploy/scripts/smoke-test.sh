@@ -12,8 +12,7 @@ PROJECT_NAME="illospace-smoke-${RANDOM}${RANDOM}"
 
 usage() {
   cat <<'EOF'
-Usage: ./illo deploy smoke [--build] [--keep-running] [--env-file path]
-       deploy/scripts/smoke-test.sh [--build] [--keep-running] [--env-file path]
+Usage: deploy/scripts/smoke-test.sh [--build] [--keep-running] [--env-file path]
 
 Boots a disposable Compose project, runs migrations, starts the API and web
 entrypoint, and checks API health through both loopback ports. By default it
@@ -60,12 +59,28 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
+pick_free_port() {
+  python3 - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
+
+SMOKE_API_PORT="${ILLO_SMOKE_API_PORT:-$(pick_free_port)}"
+SMOKE_WEB_PORT="${ILLO_SMOKE_WEB_PORT:-$(pick_free_port)}"
+while [ "$SMOKE_WEB_PORT" = "$SMOKE_API_PORT" ]; do
+  SMOKE_WEB_PORT="$(pick_free_port)"
+done
+
 if [ -z "$ENV_FILE" ]; then
   ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/illospace-smoke-env.XXXXXX")"
   rm -f "$ENV_FILE"
   "$SCRIPT_DIR/init-secrets.sh" \
     --env-file "$ENV_FILE" \
-    --public-url http://127.0.0.1:18080 >/dev/null
+    --public-url "http://127.0.0.1:${SMOKE_WEB_PORT}" >/dev/null
 else
   case "$ENV_FILE" in
     /*) ;;
@@ -73,7 +88,7 @@ else
   esac
 fi
 
-python3 - "$ENV_FILE" "$PROJECT_NAME" <<'PY'
+python3 - "$ENV_FILE" "$PROJECT_NAME" "$SMOKE_API_PORT" "$SMOKE_WEB_PORT" <<'PY'
 from __future__ import annotations
 
 import re
@@ -82,13 +97,15 @@ from pathlib import Path
 
 env_path = Path(sys.argv[1])
 project_name = sys.argv[2]
+api_port = sys.argv[3]
+web_port = sys.argv[4]
 text = env_path.read_text(encoding="utf-8")
 
 updates = {
     "COMPOSE_PROJECT_NAME": project_name,
-    "ILLO_PUBLIC_URL": "http://127.0.0.1:18080",
-    "ILLO_API_PORT": "18000",
-    "ILLO_WEB_PORT": "18080",
+    "ILLO_PUBLIC_URL": f"http://127.0.0.1:{web_port}",
+    "ILLO_API_PORT": api_port,
+    "ILLO_WEB_PORT": web_port,
 }
 
 for key, value in updates.items():
@@ -151,14 +168,14 @@ compose up -d api
 echo "Waiting for API health..."
 deadline=$((SECONDS + 120))
 while [ "$SECONDS" -lt "$deadline" ]; do
-  if curl -fsS http://127.0.0.1:18000/api/health/live >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:${SMOKE_API_PORT}/api/health/live" >/dev/null 2>&1; then
     break
   fi
   sleep 2
 done
 
-curl -fsS http://127.0.0.1:18000/api/health/live >/dev/null
-curl -fsS http://127.0.0.1:18000/api/health/ready >/dev/null
+curl -fsS "http://127.0.0.1:${SMOKE_API_PORT}/api/health/live" >/dev/null
+curl -fsS "http://127.0.0.1:${SMOKE_API_PORT}/api/health/ready" >/dev/null
 
 echo "Starting web entrypoint..."
 compose up -d web
@@ -166,13 +183,13 @@ compose up -d web
 echo "Waiting for web route health..."
 deadline=$((SECONDS + 120))
 while [ "$SECONDS" -lt "$deadline" ]; do
-  if curl -fsSL http://localhost:18080/api/health/live >/dev/null 2>&1; then
+  if curl -fsSL "http://127.0.0.1:${SMOKE_WEB_PORT}/api/health/live" >/dev/null 2>&1; then
     break
   fi
   sleep 2
 done
 
-curl -fsSL http://localhost:18080/api/health/live >/dev/null
-curl -fsSL http://localhost:18080/ >/dev/null
+curl -fsSL "http://127.0.0.1:${SMOKE_WEB_PORT}/api/health/live" >/dev/null
+curl -fsSL "http://127.0.0.1:${SMOKE_WEB_PORT}/" >/dev/null
 
 echo "Smoke test passed."

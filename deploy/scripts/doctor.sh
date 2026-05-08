@@ -147,10 +147,14 @@ PY
 fi
 
 if [ "$runtime_checks" = "1" ]; then
-  if docker info >/dev/null 2>&1; then
+  docker_info_output=""
+  if docker_info_output="$(docker info 2>&1 >/dev/null)"; then
     pass "Docker daemon is reachable"
   else
-    fail "Docker daemon is not reachable"
+    fail "Docker CLI is installed, but the Docker daemon/socket is not reachable"
+    if [ -n "$docker_info_output" ]; then
+      warn "docker info said: $(printf '%s' "$docker_info_output" | head -n 1)"
+    fi
     runtime_checks=0
   fi
 else
