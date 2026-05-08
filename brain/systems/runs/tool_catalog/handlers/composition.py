@@ -54,7 +54,16 @@ from brain.systems.runs.tool_catalog.handlers.session_tools import (
 )
 from brain.systems.runs.tool_catalog.handlers.activity import _handle_my_activity
 from brain.systems.runs.tool_catalog.handlers.web import _handle_web_fetch, _handle_web_search
-from brain.systems.runs.tool_catalog.handlers.workspace_data import _handle_query_workspace_data
+from brain.systems.runs.tool_catalog.handlers.workspace_data import (
+    _handle_query_workspace_data,
+    _handle_read_cycles,
+    _handle_read_project_contexts,
+    _handle_read_team_activity,
+    _handle_read_team_members,
+    _handle_read_workspace_apps,
+    _handle_read_workspace_overview,
+    _handle_read_workspace_records,
+)
 from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
 
@@ -119,6 +128,13 @@ def _get_tool_handlers(
             org_id=getattr(_agent_context, "org_id", None),
         ),
         "query_workspace_data": _handle_query_workspace_data,
+        "read_workspace_overview": _handle_read_workspace_overview,
+        "read_team_activity": _handle_read_team_activity,
+        "read_project_contexts": _handle_read_project_contexts,
+        "read_team_members": _handle_read_team_members,
+        "read_workspace_records": _handle_read_workspace_records,
+        "read_cycles": _handle_read_cycles,
+        "read_workspace_apps": _handle_read_workspace_apps,
         "read_thread_messages": _handle_read_thread_messages,
         "post_chat_message": lambda **kw: _patched_private(
             "_handle_post_chat_message",

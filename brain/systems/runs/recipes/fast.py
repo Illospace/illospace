@@ -28,9 +28,30 @@ Operating rules:
 - Preserve user changes and avoid unrelated refactors.
 - Skills are optional accelerators. Load one when the user explicitly names it or when it clearly pays for itself.
 - A `/skill` mention is an explicit skill command. Treat it as a signal that the user is interested in that skill and it may be relevant context; load the card, summary, or procedure only if useful.
+- For onboarding/setup introductions, inspect the workspace first and distinguish configured context from things Illo can help set up next.
+- Do not describe low-level implementation tools such as browser primitives, shell commands, file readers, or raw tool names as product capabilities.
 - Do not build a coordinator run graph in Fast. Escalate to Deep only when autonomy, parallel workers, assignments, or long verification are genuinely useful.
 - Stream useful progress through activity updates and answer in normal conversational prose.
 """
+
+_ONBOARDING_HIDDEN_TOOL_PREFIXES = ("browser_",)
+
+
+def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:
+    tools = build_agent_tools("worker")
+    metadata = runtime.request.metadata if isinstance(runtime.request.metadata, dict) else {}
+    is_onboarding_intro = (
+        metadata.get("origin") == "onboarding"
+        or metadata.get("required_response") == "introduce_and_continue_setup"
+        or metadata.get("onboarding_step") == "runtime_ready_intro"
+    )
+    if not is_onboarding_intro:
+        return tools
+    return [
+        tool
+        for tool in tools
+        if not str(tool.get("name") or "").startswith(_ONBOARDING_HIDDEN_TOOL_PREFIXES)
+    ]
 
 
 def _workspace_root(workspace_ref: dict[str, Any]) -> str | None:
@@ -104,7 +125,7 @@ class FastRecipe(BaseRunRecipe):
             session_id=f"agent-run-{runtime.run.id}",
             model=str(model),
             thinking=str(thinking),
-            tools=build_agent_tools("worker"),
+            tools=_agent_tools_for_runtime(runtime),
             tool_handlers=tool_handlers,
             persist_session=True,
             workspace_root=workspace_root,

@@ -85,6 +85,13 @@ def normalize_tool_call_evidence(
         "list_files": _search_tool_record,
         "brain_recall": _brain_recall_record,
         "query_workspace_data": _workspace_data_record,
+        "read_workspace_overview": _workspace_data_record,
+        "read_team_activity": _workspace_data_record,
+        "read_project_contexts": _workspace_data_record,
+        "read_team_members": _workspace_data_record,
+        "read_workspace_records": _workspace_data_record,
+        "read_cycles": _workspace_data_record,
+        "read_workspace_apps": _workspace_data_record,
         "brain_skills": _brain_skills_record,
         "skill_view": _skill_view_record,
         "semantic_search": _semantic_search_record,
@@ -523,11 +530,11 @@ def _workspace_data_record(
         "warnings": warnings[:5],
         "scope": result.get("scope") if isinstance(result.get("scope"), Mapping) else None,
     }
-    summary = f"query_workspace_data {status}: {total or 0} records across {len(checked_sources)} sources"
+    summary = f"{tool_name} {status}: {total or 0} records across {len(checked_sources)} sources"
     person = _first_text(args.get("person"))
     if person:
         summary += f" for {_clean_text(person, 80)}"
-    return _make_record("workspace_data", "tool:query_workspace_data", status, summary, details, provenance)
+    return _make_record("workspace_data", f"tool:{tool_name}", status, summary, details, provenance)
 
 
 def _brain_skills_record(

@@ -79,7 +79,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "permission": "read_memory",
         "output_budget_chars": 8_000,
         "context_route": {
-            "description": "Search remembered context and prior lessons. Use for memory, recall, prior context, and temporal recaps that are about Illo/user memory rather than source-of-truth workspace records.",
+            "description": "Search long-term semantic memories. Use for remembered lessons, facts, patterns, and episodes; use read_workspace_* tools for source-of-truth workspace records and current team activity.",
             "domains": ["memory", "remembered context", "prior lessons", "broad memory recap"],
             "scopes": ["narrow", "broad"],
             "empty_result_policy": "fallback_full_pipeline_when_broad",
@@ -126,8 +126,8 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "parallel_safety": "safe",
         "output_budget_chars": 12_000,
         "context_route": {
-            "description": "Read raw stored messages from the current persistent agent thread when the durable handoff summary lacks an exact older detail.",
-            "domains": ["thread transcript", "raw conversation", "prior messages", "handoff provenance"],
+            "description": "Read raw stored messages from this agent run's persistent LLM session when the durable handoff summary lacks an exact older detail. This is not the user's Cortex workspace thread.",
+            "domains": ["agent session transcript", "thread transcript", "raw LLM conversation", "prior messages", "handoff provenance"],
             "scopes": ["narrow"],
         },
     },
@@ -137,10 +137,9 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "evidence_emitter": True,
         "context_route": {
             "description": (
-                "Query DB-backed workspace/product records outside memory: runs, thread messages, "
-                "ideas, tool calls, Domains, domain records/events, workspace apps, app state, and "
-                "optional memory recall. Use for teammate activity, workspace activity, product data, "
-                "artifacts, and operational records; read activity_items first for newest cross-source signals."
+                "Low-level read-only query over Illospace DB-backed workspace truth: team members, "
+                "Cortex ideas/thread messages, runs, tool calls, Project Contexts, Domains/records, "
+                "workspace apps/state, and Cycles. Prefer specific read_workspace_* tools for normal answers."
             ),
             "domains": [
                 "workspace records",
@@ -150,13 +149,86 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
                 "thread messages",
                 "ideas",
                 "tool calls",
+                "team members",
+                "project contexts",
                 "domains",
                 "domain records",
                 "workspace apps",
                 "artifacts",
                 "app state",
+                "cycles",
             ],
             "scopes": ["narrow"],
+        },
+    },
+    "read_workspace_overview": {
+        "permission": "read_activity",
+        "output_budget_chars": 22_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": "Read a curated overview of the workspace: team members, active thoughts, recent runs/messages, Project Context, Domains, apps, Cycles, and setup gaps. Use first for onboarding, setup, and broad 'what can you see?' questions.",
+            "domains": ["workspace overview", "workspace setup", "onboarding", "available context", "workspace awareness"],
+            "scopes": ["broad"],
+        },
+    },
+    "read_team_activity": {
+        "permission": "read_activity",
+        "output_budget_chars": 18_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": "Read recent human and Illo activity across Cortex messages, ideas, runs, tool calls, Domain events, Project Context attachments, apps, and Cycle runs.",
+            "domains": ["team activity", "teammate activity", "workspace activity", "recent activity", "what changed", "what Illo did"],
+            "scopes": ["narrow", "broad"],
+        },
+    },
+    "read_project_contexts": {
+        "permission": "read_activity",
+        "output_budget_chars": 18_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": "Read Project Context profiles and thread attachments: resources, repos, files, docs, validation, permission scope, and attached thoughts.",
+            "domains": ["project context", "projects", "connected repos", "connected docs", "workspace resources"],
+            "scopes": ["narrow", "broad"],
+        },
+    },
+    "read_team_members": {
+        "permission": "read_activity",
+        "output_budget_chars": 14_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": "Read the workspace roster and optional nearby activity for people. Use for who is here, roles, ownership, and named teammate activity.",
+            "domains": ["team members", "workspace roster", "people", "roles", "ownership", "who is working on what"],
+            "scopes": ["narrow", "broad"],
+        },
+    },
+    "read_workspace_records": {
+        "permission": "read_activity",
+        "output_budget_chars": 18_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": "Read user-created structured workspace data: Domain schemas, typed records, and Domain audit events.",
+            "domains": ["workspace records", "domains", "domain records", "structured data", "trackers", "team database"],
+            "scopes": ["narrow", "broad"],
+        },
+    },
+    "read_cycles": {
+        "permission": "read_activity",
+        "output_budget_chars": 14_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": "Read workspace Cycles and Cycle runs: recurring prompts, schedules, enabled state, last/next run, linked thoughts, and status.",
+            "domains": ["cycles", "recurring work", "scheduled work", "check-ins", "automations", "reports"],
+            "scopes": ["narrow", "broad"],
+        },
+    },
+    "read_workspace_apps": {
+        "permission": "read_activity",
+        "output_budget_chars": 18_000,
+        "evidence_emitter": True,
+        "context_route": {
+            "description": "Read generated workspace apps, dashboards, metadata, and app-local state.",
+            "domains": ["workspace apps", "dashboards", "generated apps", "app state", "workspace UI"],
+            "scopes": ["narrow", "broad"],
         },
     },
     "manage_cycle": {

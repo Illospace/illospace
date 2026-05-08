@@ -7,13 +7,44 @@ tier constants. These are pure data — no handlers, no side effects.
 from __future__ import annotations
 
 
+_WORKSPACE_TIME_WINDOW_VALUES = [
+    "all",
+    "today",
+    "yesterday",
+    "last_24h",
+    "this_week",
+    "last_7d",
+    "this_month",
+    "last_30d",
+    "custom",
+]
+
+
+_WORKSPACE_TIME_WINDOW_SCHEMA = {
+    "type": "string",
+    "enum": _WORKSPACE_TIME_WINDOW_VALUES,
+    "default": "last_7d",
+    "description": "Relative time window. Use custom with start_at/end_at.",
+}
+
+_WORKSPACE_ALL_TIME_WINDOW_SCHEMA = {
+    **_WORKSPACE_TIME_WINDOW_SCHEMA,
+    "default": "all",
+    "description": "Relative time window. Use all for current/existing workspace state, or custom with start_at/end_at.",
+}
+
+
 # ── Brain Tools ───────────────────────────────────────────────
 # Available to all agents (coordinator + workers)
 
 BRAIN_TOOLS = [
     {
         "name": "brain_recall",
-        "description": "Search brain memories semantically. Returns the most relevant memories for the query.",
+        "description": (
+            "Search Illo's long-term semantic memories: durable lessons, facts, patterns, and episodes. "
+            "Use this for remembered context. For current workspace truth, team activity, Domains, projects, "
+            "apps, Cycles, or thread records, use the read_workspace_* tools instead."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -198,10 +229,11 @@ BRAIN_TOOLS = [
     {
         "name": "read_thread_messages",
         "description": (
-            "Read or search raw stored messages from the current persistent agent thread when "
-            "the durable handoff summary is too thin or an older exact detail matters. Defaults "
-            "to the current session; use recent for latest turns, range for indexes, or search "
-            "for literal text."
+            "Read or search raw stored messages from this agent run's persistent LLM session when "
+            "the durable handoff summary is too thin or an older exact detail matters. This is not "
+            "the user's Cortex workspace thread; use read_team_activity or query_workspace_data for "
+            "Cortex idea/thread history. Defaults to the current session; use recent for latest turns, "
+            "range for indexes, or search for literal text."
         ),
         "input_schema": {
             "type": "object",
@@ -227,10 +259,11 @@ BRAIN_TOOLS = [
     {
         "name": "query_workspace_data",
         "description": (
-            "Query DB-backed workspace truth outside memories: runs, thread messages, "
-            "ideas, tool calls, Domains, workspace apps, app state, and optional memory recall. "
-            "Use for temporal or teammate activity questions before answering from memory alone; "
-            "read activity_items first for the newest cross-source signals."
+            "Low-level read-only query over Illospace DB-backed workspace truth: team members, "
+            "Cortex ideas/thread messages, agent runs, tool calls, Project Context profiles, "
+            "Domains and records, workspace apps/state, and Cycles. Prefer the more specific "
+            "read_workspace_* tools for normal answers; use this when you need exact source "
+            "selection or a cross-source query. This does not search semantic memories; use brain_recall for that."
         ),
         "input_schema": {
             "type": "object",
@@ -238,24 +271,36 @@ BRAIN_TOOLS = [
                 "sources": {
                     "type": "array",
                     "description": (
-                        "Data sources to inspect. Use ['activity'] for teammate/workspace "
-                        "activity or ['all'] for the default broad set."
+                        "DB-backed data sources to inspect. Use ['activity'] for recent teammate/workspace "
+                        "activity, ['project_contexts'] for project profiles/attachments, ['records'] for "
+                        "Domains and records, ['apps'] for workspace apps/state, or ['all'] for the default broad set."
                     ),
                     "items": {
                         "type": "string",
                         "enum": [
                             "all",
                             "activity",
+                            "team",
+                            "people",
+                            "team_members",
                             "runs",
                             "threads",
                             "ideas",
                             "tool_calls",
+                            "projects",
+                            "project_contexts",
+                            "project_profiles",
+                            "project_attachments",
+                            "records",
+                            "domain",
                             "domains",
                             "domain_records",
                             "domain_events",
+                            "apps",
                             "workspace_apps",
                             "app_state",
-                            "memories",
+                            "cycles",
+                            "cycle_runs",
                         ],
                     },
                 },
@@ -272,19 +317,7 @@ BRAIN_TOOLS = [
                     "description": "Optional teammate/user name or email to scope activity to.",
                 },
                 "time_window": {
-                    "type": "string",
-                    "enum": [
-                        "today",
-                        "yesterday",
-                        "last_24h",
-                        "this_week",
-                        "last_7d",
-                        "this_month",
-                        "last_30d",
-                        "custom",
-                    ],
-                    "default": "last_7d",
-                    "description": "Relative time window. Use custom with start_at/end_at.",
+                    **_WORKSPACE_TIME_WINDOW_SCHEMA,
                 },
                 "start_at": {"type": "string", "description": "ISO timestamp for custom lower bound."},
                 "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
@@ -297,11 +330,164 @@ BRAIN_TOOLS = [
         },
     },
     {
+        "name": "read_workspace_overview",
+        "description": (
+            "Read a curated overview of the current Illospace workspace before introducing Illo, "
+            "answering broad setup questions, or explaining what context is available. Returns team members, "
+            "active/recent Cortex thoughts, recent agent runs/messages, Project Context profiles and attachments, "
+            "Domains/records, workspace apps, Cycles, and setup gaps. Use this first for 'what is this workspace?', "
+            "'what can you see?', and onboarding setup guidance."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Reason for the overview lookup."},
+                "time_window": {**_WORKSPACE_ALL_TIME_WINDOW_SCHEMA},
+                "limit": {"type": "integer", "description": "Max records per source (default 10)", "default": 10},
+                "include_archived": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "read_team_activity",
+        "description": (
+            "Read recent human and Illo activity in this workspace: Cortex thread messages, ideas, agent runs, "
+            "tool-call summaries, Domain events, Project Context attachments, workspace app updates, and Cycle runs. "
+            "Use before answering questions like 'what happened?', 'what is the team working on?', "
+            "'what did Illo do?', or 'what changed recently?'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Reason for the activity lookup."},
+                "search": {
+                    "type": "string",
+                    "description": "Optional literal text filter for titles, messages, records, tool names, apps, or cycles.",
+                },
+                "person": {"type": "string", "description": "Optional teammate/user name or email to scope activity to."},
+                "time_window": {**_WORKSPACE_TIME_WINDOW_SCHEMA},
+                "start_at": {"type": "string", "description": "ISO timestamp for custom lower bound."},
+                "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
+                "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
+                "idea_id": {"type": "string", "description": "Optional Cortex idea/thread id filter."},
+            },
+        },
+    },
+    {
+        "name": "read_project_contexts",
+        "description": (
+            "Read reusable Project Context profiles and thread attachments: project names, resources, repos/files/docs, "
+            "validation status, permission scope, and which Cortex thoughts have attached context. Use for questions "
+            "about what projects Illo knows, which code/docs are connected, or how to improve project context."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Reason for the project context lookup."},
+                "search": {"type": "string", "description": "Optional text filter for profile names, slugs, descriptions, or idea titles."},
+                "idea_id": {"type": "string", "description": "Optional Cortex idea/thread id filter for attachments."},
+                "time_window": {**_WORKSPACE_ALL_TIME_WINDOW_SCHEMA},
+                "start_at": {"type": "string", "description": "ISO timestamp for custom lower bound."},
+                "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
+                "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
+                "include_inactive": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "read_team_members",
+        "description": (
+            "Read the workspace roster and, by default, nearby activity for those people. Use for questions about "
+            "who is in the workspace, roles, ownership, or what a named teammate appears to be working on. "
+            "This is read-only and should be used before answering teammate-activity questions from memory."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Reason for the team lookup."},
+                "search": {"type": "string", "description": "Optional text filter for names, emails, or roles."},
+                "person": {"type": "string", "description": "Optional teammate/user name or email to focus on."},
+                "time_window": {**_WORKSPACE_ALL_TIME_WINDOW_SCHEMA},
+                "limit": {"type": "integer", "description": "Max team/activity records per source (default 20)", "default": 20},
+                "include_activity": {
+                    "type": "boolean",
+                    "description": "Also include recent activity rows for the matched people.",
+                    "default": True,
+                },
+            },
+        },
+    },
+    {
+        "name": "read_workspace_records",
+        "description": (
+            "Read user-created structured workspace data: Domain schemas, typed records, and Domain audit events. "
+            "Use this for questions about trackers, leads, bugs, tasks, decisions, research records, or any team "
+            "database stored as a Domain. Use manage_domain only when you need to create or change records."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Reason for the records lookup."},
+                "search": {"type": "string", "description": "Optional literal text filter for domain names, record titles, or record text."},
+                "domain_id": {"type": "integer", "description": "Optional Domain id filter."},
+                "object_key": {"type": "string", "description": "Optional Domain object key filter."},
+                "time_window": {**_WORKSPACE_ALL_TIME_WINDOW_SCHEMA},
+                "start_at": {"type": "string", "description": "ISO timestamp for custom lower bound."},
+                "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
+                "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
+                "include_archived": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "read_cycles",
+        "description": (
+            "Read workspace Cycles and Cycle runs: recurring prompts, schedules, enabled state, last/next run, "
+            "linked thoughts, and recent run status. Use this for questions about recurring check-ins, reports, "
+            "automations, or what scheduled Illo work exists. Use manage_cycle only to create, update, delete, or run one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Reason for the Cycle lookup."},
+                "search": {"type": "string", "description": "Optional text filter for Cycle names, prompts, statuses, or linked ideas."},
+                "person": {"type": "string", "description": "Optional owner name or email to scope Cycles to."},
+                "time_window": {**_WORKSPACE_ALL_TIME_WINDOW_SCHEMA},
+                "start_at": {"type": "string", "description": "ISO timestamp for custom lower bound."},
+                "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
+                "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
+                "include_deleted": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "read_workspace_apps",
+        "description": (
+            "Read generated workspace apps/dashboards and optional app-local state. Use this for questions about "
+            "what apps exist, what dashboards are available, or what UI state an app currently stores. "
+            "Use manage_workspace_app only when creating, updating, archiving, restoring, or changing app state."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Reason for the workspace app lookup."},
+                "search": {"type": "string", "description": "Optional text filter for app names, keys, descriptions, or state keys."},
+                "time_window": {**_WORKSPACE_ALL_TIME_WINDOW_SCHEMA},
+                "start_at": {"type": "string", "description": "ISO timestamp for custom lower bound."},
+                "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
+                "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
+                "include_archived": {"type": "boolean", "default": False},
+                "include_state": {"type": "boolean", "description": "Include app-local state rows.", "default": True},
+            },
+        },
+    },
+    {
         "name": "manage_cycle",
         "description": (
-            "Create, list, update, delete, or run workspace Cycles. Use when the user asks "
-            "Illo to set up or manage recurring work. Actions: 'create', 'list', "
-            "'update', 'delete', 'run'."
+            "Create, update, delete, list, or manually run workspace Cycles, which are recurring "
+            "Illo prompts/check-ins/reports. This is the action tool. For answering questions about "
+            "which Cycles exist or what ran recently, prefer read_cycles first. Actions: 'create', "
+            "'list', 'update', 'delete', 'run'."
         ),
         "input_schema": {
             "type": "object",
@@ -352,10 +538,11 @@ DOMAIN_TOOLS = [
     {
         "name": "manage_domain",
         "description": (
-            "Create and maintain org-wide custom Domains: shared team databases with "
-            "object types, typed records, relations, and audit events. Use for requests "
-            "like creating a tracker, adding fields, recording items, querying records, "
-            "linking records, or deleting/archiving domains and domain records."
+            "Create and maintain org-wide custom Domains: user-created shared team databases with "
+            "object types, typed records, relations, and audit events. This is the action/exact-object "
+            "tool for creating trackers, adding fields, recording or updating items, linking records, "
+            "or deleting/archiving Domains and records. For broad awareness questions about existing "
+            "workspace records, prefer read_workspace_records first."
         ),
         "input_schema": {
             "type": "object",
@@ -444,7 +631,9 @@ CORTEX_IDEA_TOOLS = [
             "or use status=queued/working so a starter message and AgentRun are created. "
             "Use this for requests about thoughts, threads, idea threads, or ideas, such as "
             "'archive this thread', 'rename this thought', 'mark this resolved', or "
-            "'restore that idea'. idea_id defaults to the current Cortex thread/idea when one is bound."
+            "'restore that idea'. This is the action/exact-thread tool. For recent team-wide thread "
+            "activity, prefer read_team_activity first. idea_id defaults to the current Cortex "
+            "thread/idea when one is bound."
         ),
         "input_schema": {
             "type": "object",
@@ -563,8 +752,10 @@ PROJECT_TOOLS = [
         "name": "manage_project",
         "description": (
             "Create, list, update, archive, attach, and maintain Cortex Project Context profiles. "
-            "Use when the user asks to manage a project/folder/context bundle, add or remove files/repos/folders, "
-            "or attach reusable project context to the current thread. Thread attachments do not require a project."
+            "This is the action tool for managing project/folder/context bundles, adding or removing "
+            "files/repos/folders/docs, or attaching reusable project context to the current thread. "
+            "For awareness questions about what project context exists or what Illo can see, prefer "
+            "read_project_contexts first. Thread attachments do not require a project."
         ),
         "input_schema": {
             "type": "object",
@@ -629,11 +820,12 @@ WORKSPACE_APP_TOOLS = [
         "name": "manage_workspace_app",
         "description": (
             "Create, list, update, archive, and persist state for generated workspace apps. "
-            "Use after designing a small UI surface or dashboard that should remain available "
+            "This is the action tool to create or change a small UI surface or dashboard that should remain available "
             "inside Cortex. Prefer renderer_key='generated-ui-app' and source_kind='json' with "
             "a structured generated UI spec. Use renderer_key='sandboxed-html-app' only as a "
             "custom HTML escape-hatch runtime. Recordful apps must use manage_domain first; app-local "
             "state is only for UI preferences, filters, drafts, and ephemeral interface state. "
+            "For awareness questions about what apps exist or current app state, prefer read_workspace_apps first. "
             "New generated apps must pass the workspace app contract before they are persisted."
         ),
         "input_schema": {
@@ -1465,7 +1657,9 @@ COORDINATOR_TOOLS = (
 # Brain gate: these tool names satisfy the "brain context accessed" requirement
 _BRAIN_TOOL_NAMES = frozenset({
     "brain_recall", "brain_guardrails", "brain_skills", "skill_view", "skill_asset",
-    "brain_encode", "runtime_settings", "query_workspace_data",
+    "brain_encode", "runtime_settings", "query_workspace_data", "read_workspace_overview",
+    "read_team_activity", "read_project_contexts", "read_team_members", "read_workspace_records",
+    "read_cycles", "read_workspace_apps",
 })
 
 # Brain gate: these tools require brain context before first use

@@ -9,7 +9,7 @@ import json
 import uuid
 from typing import Any, Mapping
 
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, and_, cast, func, or_, select
 
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, logger
 
@@ -68,6 +68,8 @@ def _time_bounds(
     window = (time_window or "last_7d").strip().lower()
     end = _parse_datetime(end_at) or now
     start = _parse_datetime(start_at)
+    if window in {"all", "any", "none"}:
+        return None, None, "all"
     if window == "custom":
         return start, end, window
     if window == "today":
@@ -277,6 +279,75 @@ def _latest_run_final_answers(session: Any, run_ids: list[int]) -> dict[int, str
             if answer:
                 answers[run_id_int] = answer
     return answers
+
+
+def _project_context_resource_summary(context: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(context, Mapping):
+        return {"count": 0, "items": []}
+    resources = [item for item in (context.get("resources") or []) if isinstance(item, Mapping)]
+    return {
+        "count": len(resources),
+        "items": [
+            {
+                "id": item.get("id"),
+                "kind": item.get("kind") or item.get("type"),
+                "label": item.get("label") or item.get("name"),
+                "path": item.get("path"),
+                "repo": item.get("repo"),
+                "uri": item.get("uri"),
+            }
+            for item in resources[:10]
+        ],
+    }
+
+
+def _query_team_members(
+    session: Any,
+    payload: dict[str, Any],
+    *,
+    start: datetime | None,
+    end: datetime | None,
+    org_id: str | None,
+    user_id: str | None,
+    person_ids: list[str],
+    search: str | None,
+    limit: int,
+) -> None:
+    from brain.platform.db.models.org import User
+
+    stmt = select(User).order_by(User.created_at.desc()).limit(limit)
+    if org_id:
+        stmt = stmt.where(User.org_id == org_id)
+    elif user_id:
+        stmt = stmt.where(User.id == user_id)
+    else:
+        payload["warnings"].append({"source": "team_members", "error": "org_id or user_id required"})
+        payload["sources"]["team_members"] = []
+        return
+    if person_ids:
+        stmt = stmt.where(User.id.in_(person_ids))
+    text_match = _text_filter(search, User.name, User.email, User.role)
+    if text_match is not None:
+        stmt = stmt.where(text_match)
+
+    rows = session.scalars(stmt).all()
+    payload["sources"]["team_members"] = [
+        {
+            "id": str(user.id),
+            "type": "team_member",
+            "created_at": _serialize_dt(user.created_at),
+            "user_id": str(user.id),
+            "org_id": str(user.org_id) if user.org_id is not None else None,
+            "name": user.name,
+            "email": user.email,
+            "role": user.role,
+            "approved": bool(user.approved),
+            "attribution_enabled": bool(user.attribution_enabled),
+            "default_provider": user.default_provider,
+            "provenance": {"table": "users", "id": str(user.id)},
+        }
+        for user in rows
+    ]
 
 
 def _query_runs(
@@ -533,6 +604,140 @@ def _query_tool_calls(
             "provenance": {"table": "agent_run_events", "id": int(event.id)},
         }
         for event, run, idea in rows
+    ]
+
+
+def _query_project_profiles(
+    session: Any,
+    payload: dict[str, Any],
+    *,
+    start: datetime | None,
+    end: datetime | None,
+    org_id: str | None,
+    user_id: str | None,
+    person_ids: list[str],
+    search: str | None,
+    include_archived: bool,
+    limit: int,
+) -> None:
+    if not org_id:
+        payload["warnings"].append({"source": "project_profiles", "error": "org_id required"})
+        payload["sources"]["project_profiles"] = []
+        return
+    from brain.platform.db.models.idea import ProjectProfile
+    from brain.platform.db.models.org import User
+
+    stmt = (
+        select(ProjectProfile, User)
+        .outerjoin(User, User.id == ProjectProfile.user_id)
+        .where(ProjectProfile.org_id == org_id)
+        .order_by(ProjectProfile.created_at.desc())
+        .limit(limit)
+    )
+    stmt = _apply_date_bounds(stmt, ProjectProfile.created_at, start, end)
+    if person_ids:
+        stmt = stmt.where(ProjectProfile.user_id.in_(person_ids))
+    elif user_id and not org_id:
+        stmt = stmt.where(ProjectProfile.user_id == user_id)
+    if not include_archived:
+        stmt = stmt.where(ProjectProfile.active.is_(True))
+    text_match = _text_filter(
+        search,
+        ProjectProfile.slug,
+        ProjectProfile.name,
+        ProjectProfile.description,
+    )
+    if text_match is not None:
+        stmt = stmt.where(text_match)
+
+    rows = session.execute(stmt).all()
+    payload["sources"]["project_profiles"] = [
+        {
+            "id": str(profile.id),
+            "type": "project_profile",
+            "created_at": _serialize_dt(profile.created_at),
+            "slug": profile.slug,
+            "name": profile.name,
+            "description": _snippet(profile.description),
+            "active": bool(profile.active),
+            "user_id": str(profile.user_id) if profile.user_id is not None else None,
+            "user_name": user.name if user else None,
+            "org_id": str(profile.org_id) if profile.org_id is not None else None,
+            "default_environment_binding_id": profile.default_environment_binding_id,
+            "resources": _project_context_resource_summary(profile.project_context),
+            "metadata": _jsonable(profile.metadata_ or {}),
+            "provenance": {"table": "project_profiles", "id": str(profile.id)},
+        }
+        for profile, user in rows
+    ]
+
+
+def _query_project_attachments(
+    session: Any,
+    payload: dict[str, Any],
+    *,
+    start: datetime | None,
+    end: datetime | None,
+    org_id: str | None,
+    user_id: str | None,
+    person_ids: list[str],
+    idea_id: str | None,
+    search: str | None,
+    include_archived: bool,
+    limit: int,
+) -> None:
+    from brain.platform.db.models.idea import Idea, IdeaProjectAttachment, ProjectProfile
+    from brain.platform.db.models.org import User
+
+    stmt = (
+        select(IdeaProjectAttachment, Idea, ProjectProfile, User)
+        .join(Idea, Idea.id == IdeaProjectAttachment.idea_id)
+        .outerjoin(ProjectProfile, ProjectProfile.id == IdeaProjectAttachment.project_profile_id)
+        .outerjoin(User, User.id == IdeaProjectAttachment.attached_by)
+        .order_by(IdeaProjectAttachment.created_at.desc(), IdeaProjectAttachment.id.desc())
+        .limit(limit)
+    )
+    stmt = _scope_idea(stmt, Idea, org_id=org_id, user_id=user_id)
+    stmt = _apply_date_bounds(stmt, IdeaProjectAttachment.created_at, start, end)
+    if idea_id:
+        stmt = stmt.where(IdeaProjectAttachment.idea_id == idea_id)
+    if person_ids:
+        stmt = stmt.where(or_(IdeaProjectAttachment.attached_by.in_(person_ids), Idea.user_id.in_(person_ids)))
+    if not include_archived:
+        stmt = stmt.where(IdeaProjectAttachment.status != "invalid")
+    text_match = _text_filter(
+        search,
+        Idea.title,
+        Idea.display_title,
+        ProjectProfile.slug,
+        ProjectProfile.name,
+        IdeaProjectAttachment.status,
+    )
+    if text_match is not None:
+        stmt = stmt.where(text_match)
+
+    rows = session.execute(stmt).all()
+    payload["sources"]["project_attachments"] = [
+        {
+            "id": int(attachment.id),
+            "type": "project_attachment",
+            "created_at": _serialize_dt(attachment.created_at),
+            "idea_id": str(attachment.idea_id),
+            "idea_title": _idea_title(idea),
+            "project_profile_id": str(attachment.project_profile_id) if attachment.project_profile_id else None,
+            "project_name": profile.name if profile else None,
+            "project_slug": profile.slug if profile else None,
+            "attached_by": str(attachment.attached_by) if attachment.attached_by else None,
+            "user_id": str(attachment.attached_by) if attachment.attached_by else None,
+            "user_name": user.name if user else None,
+            "status": attachment.status,
+            "validation_errors": _jsonable(attachment.validation_errors or []),
+            "resources": _project_context_resource_summary(attachment.snapshot),
+            "permission_scope": _jsonable(attachment.permission_scope or {}),
+            "environment_binding_id": attachment.environment_binding_id,
+            "provenance": {"table": "idea_project_attachments", "id": int(attachment.id)},
+        }
+        for attachment, idea, profile, user in rows
     ]
 
 
@@ -801,42 +1006,164 @@ def _query_app_state(
     ]
 
 
-def _query_memories(
+def _scope_cycle(
+    stmt: Any,
+    Cycle: Any,
+    User: Any,
+    *,
+    org_id: str | None,
+    user_id: str | None,
+) -> Any:
+    if org_id:
+        org_user_ids = select(User.id).where(User.org_id == org_id)
+        return stmt.where(or_(Cycle.org_id == org_id, and_(Cycle.org_id.is_(None), Cycle.user_id.in_(org_user_ids))))
+    if user_id:
+        return stmt.where(Cycle.user_id == user_id)
+    return stmt
+
+
+def _query_cycles(
+    session: Any,
     payload: dict[str, Any],
     *,
-    query: str | None,
-    search: str | None,
-    user_id: str | None,
+    start: datetime | None,
+    end: datetime | None,
     org_id: str | None,
+    user_id: str | None,
+    person_ids: list[str],
+    search: str | None,
+    include_archived: bool,
     limit: int,
 ) -> None:
-    recall_query = (search or query or "").strip()
-    if not recall_query:
-        payload["sources"]["memories"] = []
-        payload["warnings"].append({"source": "memories", "error": "query or search required for memory recall"})
-        return
-    from brain.app.mcp.server import tool_brain_recall
+    from brain.platform.db.models.cycle import Cycle
+    from brain.platform.db.models.idea import Idea
+    from brain.platform.db.models.org import User
 
-    result = tool_brain_recall(
-        query=recall_query,
-        limit=min(max(limit, 1), 10),
-        user_id=user_id,
-        org_id=org_id,
-        expand_lazy_load=True,
+    stmt = (
+        select(Cycle, User, Idea)
+        .outerjoin(User, User.id == Cycle.user_id)
+        .outerjoin(Idea, Idea.id == Cycle.target_idea_id)
+        .order_by(Cycle.updated_at.desc().nullslast(), Cycle.created_at.desc())
+        .limit(limit)
     )
-    memories = result.get("memories") if isinstance(result, Mapping) else []
-    payload["sources"]["memories"] = [
+    stmt = _scope_cycle(stmt, Cycle, User, org_id=org_id, user_id=user_id)
+    stmt = _apply_date_bounds(stmt, Cycle.updated_at, start, end)
+    if person_ids:
+        stmt = stmt.where(Cycle.user_id.in_(person_ids))
+    if not include_archived:
+        stmt = stmt.where(Cycle.deleted_at.is_(None))
+    text_match = _text_filter(
+        search,
+        Cycle.name,
+        Cycle.prompt,
+        Cycle.schedule_expr,
+        Cycle.last_status,
+        Cycle.last_error,
+        Idea.title,
+        Idea.display_title,
+    )
+    if text_match is not None:
+        stmt = stmt.where(text_match)
+
+    rows = session.execute(stmt).all()
+    payload["sources"]["cycles"] = [
         {
-            "id": memory.get("id"),
-            "type": "memory",
-            "memory_type": memory.get("type"),
-            "created_at": memory.get("created_at"),
-            "content": _snippet(memory.get("content"), 520),
-            "score": memory.get("similarity") or memory.get("score"),
-            "provenance": {"table": "memories", "id": memory.get("id")},
+            "id": int(cycle.id),
+            "type": "cycle",
+            "created_at": _serialize_dt(cycle.created_at),
+            "updated_at": _serialize_dt(cycle.updated_at),
+            "user_id": str(cycle.user_id) if cycle.user_id is not None else None,
+            "user_name": user.name if user else None,
+            "org_id": str(cycle.org_id) if cycle.org_id is not None else None,
+            "name": cycle.name,
+            "prompt": _snippet(cycle.prompt, 520),
+            "schedule_expr": cycle.schedule_expr,
+            "timezone": cycle.timezone,
+            "enabled": bool(cycle.enabled),
+            "target_idea_id": str(cycle.target_idea_id) if cycle.target_idea_id else None,
+            "idea_id": str(cycle.target_idea_id) if cycle.target_idea_id else None,
+            "idea_title": _idea_title(idea),
+            "next_run_at": _serialize_dt(cycle.next_run_at),
+            "last_run_at": _serialize_dt(cycle.last_run_at),
+            "last_status": cycle.last_status,
+            "last_error": _snippet(cycle.last_error),
+            "deleted_at": _serialize_dt(cycle.deleted_at),
+            "provenance": {"table": "cycles", "id": int(cycle.id)},
         }
-        for memory in memories
-        if isinstance(memory, Mapping)
+        for cycle, user, idea in rows
+    ]
+
+
+def _query_cycle_runs(
+    session: Any,
+    payload: dict[str, Any],
+    *,
+    start: datetime | None,
+    end: datetime | None,
+    org_id: str | None,
+    user_id: str | None,
+    person_ids: list[str],
+    idea_id: str | None,
+    search: str | None,
+    include_archived: bool,
+    limit: int,
+) -> None:
+    from brain.platform.db.models.cycle import Cycle, CycleRun
+    from brain.platform.db.models.idea import Idea
+    from brain.platform.db.models.org import User
+
+    stmt = (
+        select(CycleRun, Cycle, User, Idea)
+        .join(Cycle, Cycle.id == CycleRun.cycle_id)
+        .outerjoin(User, User.id == Cycle.user_id)
+        .outerjoin(Idea, Idea.id == CycleRun.idea_id)
+        .order_by(CycleRun.created_at.desc(), CycleRun.id.desc())
+        .limit(limit)
+    )
+    stmt = _scope_cycle(stmt, Cycle, User, org_id=org_id, user_id=user_id)
+    stmt = _apply_date_bounds(stmt, CycleRun.created_at, start, end)
+    if idea_id:
+        stmt = stmt.where(CycleRun.idea_id == idea_id)
+    if person_ids:
+        stmt = stmt.where(Cycle.user_id.in_(person_ids))
+    if not include_archived:
+        stmt = stmt.where(Cycle.deleted_at.is_(None))
+    text_match = _text_filter(
+        search,
+        Cycle.name,
+        CycleRun.status,
+        CycleRun.error,
+        CycleRun.skip_reason,
+        CycleRun.prompt_snapshot,
+        Idea.title,
+        Idea.display_title,
+    )
+    if text_match is not None:
+        stmt = stmt.where(text_match)
+
+    rows = session.execute(stmt).all()
+    payload["sources"]["cycle_runs"] = [
+        {
+            "id": int(run.id),
+            "type": "cycle_run",
+            "created_at": _serialize_dt(run.created_at),
+            "scheduled_for": _serialize_dt(run.scheduled_for),
+            "started_at": _serialize_dt(run.started_at),
+            "completed_at": _serialize_dt(run.completed_at),
+            "cycle_id": int(run.cycle_id),
+            "cycle_name": cycle.name,
+            "status": run.status,
+            "error": _snippet(run.error),
+            "skip_reason": run.skip_reason,
+            "idea_id": str(run.idea_id) if run.idea_id else None,
+            "idea_title": _idea_title(idea),
+            "run_id": int(run.run_id) if run.run_id is not None else None,
+            "prompt_snapshot": _snippet(run.prompt_snapshot, 520),
+            "user_id": str(cycle.user_id) if cycle.user_id else None,
+            "user_name": user.name if user else None,
+            "provenance": {"table": "cycle_runs", "id": int(run.id)},
+        }
+        for run, cycle, user, idea in rows
     ]
 
 
@@ -854,7 +1181,17 @@ def _activity_sort_key(item: Mapping[str, Any]) -> datetime:
 
 
 def _activity_title(record: Mapping[str, Any]) -> str | None:
-    for key in ("idea_title", "title", "name", "app_name", "domain_name", "key", "slug"):
+    for key in (
+        "idea_title",
+        "title",
+        "name",
+        "project_name",
+        "cycle_name",
+        "app_name",
+        "domain_name",
+        "key",
+        "slug",
+    ):
         value = record.get(key)
         if value:
             return _snippet(value, 160)
@@ -878,6 +1215,25 @@ def _activity_summary(source: str, record: Mapping[str, Any]) -> str | None:
         )
     if source in {"ideas", "workspace_apps"}:
         return _snippet(record.get("working_memory") or record.get("description"), 280)
+    if source == "project_profiles":
+        resources = record.get("resources") if isinstance(record.get("resources"), Mapping) else {}
+        return _snippet(
+            record.get("description") or f"{resources.get('count', 0)} project resources",
+            280,
+        )
+    if source == "project_attachments":
+        resources = record.get("resources") if isinstance(record.get("resources"), Mapping) else {}
+        return _snippet(
+            f"Attached {resources.get('count', 0)} project resources; status {record.get('status')}",
+            280,
+        )
+    if source == "cycles":
+        return _snippet(
+            f"{record.get('schedule_expr')} {record.get('timezone')} next={record.get('next_run_at')} last={record.get('last_status')}",
+            280,
+        )
+    if source == "cycle_runs":
+        return _snippet(record.get("error") or record.get("prompt_snapshot"), 280)
     if source == "app_state":
         return _snippet(record.get("data"), 280)
     if source in {"domain_records", "domain_events", "domains"}:
@@ -895,6 +1251,7 @@ def _activity_user_id(record: Mapping[str, Any]) -> str | None:
         "updated_by_user_id",
         "anchor_user_id",
         "actor_id",
+        "attached_by",
     ):
         value = record.get(key)
         if value:
@@ -931,6 +1288,20 @@ def _build_activity_items(payload: Mapping[str, Any], *, limit: int = 30) -> lis
             })
     items.sort(key=_activity_sort_key, reverse=True)
     return items[: max(1, int(limit or 30))]
+
+
+def _run_team_members(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    _query_team_members(
+        session,
+        payload,
+        start=ctx.start,
+        end=ctx.end,
+        org_id=ctx.org_id,
+        user_id=ctx.user_id,
+        person_ids=ctx.person_ids,
+        search=ctx.search,
+        limit=ctx.limit,
+    )
 
 
 def _run_runs(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
@@ -991,6 +1362,37 @@ def _run_tool_calls(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQue
         person_ids=ctx.person_ids,
         idea_id=ctx.idea_id,
         search=ctx.search,
+        limit=ctx.limit,
+    )
+
+
+def _run_project_profiles(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    _query_project_profiles(
+        session,
+        payload,
+        start=ctx.start,
+        end=ctx.end,
+        org_id=ctx.org_id,
+        user_id=ctx.user_id,
+        person_ids=ctx.person_ids,
+        search=ctx.search,
+        include_archived=ctx.include_archived,
+        limit=ctx.limit,
+    )
+
+
+def _run_project_attachments(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    _query_project_attachments(
+        session,
+        payload,
+        start=ctx.start,
+        end=ctx.end,
+        org_id=ctx.org_id,
+        user_id=ctx.user_id,
+        person_ids=ctx.person_ids,
+        idea_id=ctx.idea_id,
+        search=ctx.search,
+        include_archived=ctx.include_archived,
         limit=ctx.limit,
     )
 
@@ -1067,18 +1469,44 @@ def _run_app_state(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQuer
     )
 
 
-def _run_memories(_session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_memories(
+def _run_cycles(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    _query_cycles(
+        session,
         payload,
-        query=ctx.query,
-        search=ctx.search,
-        user_id=ctx.user_id,
+        start=ctx.start,
+        end=ctx.end,
         org_id=ctx.org_id,
+        user_id=ctx.user_id,
+        person_ids=ctx.person_ids,
+        search=ctx.search,
+        include_archived=ctx.include_archived,
+        limit=ctx.limit,
+    )
+
+
+def _run_cycle_runs(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    _query_cycle_runs(
+        session,
+        payload,
+        start=ctx.start,
+        end=ctx.end,
+        org_id=ctx.org_id,
+        user_id=ctx.user_id,
+        person_ids=ctx.person_ids,
+        idea_id=ctx.idea_id,
+        search=ctx.search,
+        include_archived=ctx.include_archived,
         limit=ctx.limit,
     )
 
 
 _SOURCE_ADAPTERS: dict[str, WorkspaceDataSource] = {
+    "team_members": WorkspaceDataSource(
+        name="team_members",
+        description="Workspace roster: users, roles, emails, approval state, and attribution settings.",
+        groups=("all", "team", "people"),
+        handler=_run_team_members,
+    ),
     "runs": WorkspaceDataSource(
         name="runs",
         description="Cortex run/run records with statuses, messages, output summaries, and cost/tool metadata.",
@@ -1103,22 +1531,34 @@ _SOURCE_ADAPTERS: dict[str, WorkspaceDataSource] = {
         groups=("all", "activity"),
         handler=_run_tool_calls,
     ),
+    "project_profiles": WorkspaceDataSource(
+        name="project_profiles",
+        description="Reusable Project Context profiles with resources such as repos, files, folders, docs, and metadata.",
+        groups=("all", "projects", "project_contexts"),
+        handler=_run_project_profiles,
+    ),
+    "project_attachments": WorkspaceDataSource(
+        name="project_attachments",
+        description="Project Context snapshots attached to Cortex thoughts, including validation and resource summaries.",
+        groups=("all", "activity", "projects", "project_contexts"),
+        handler=_run_project_attachments,
+    ),
     "domains": WorkspaceDataSource(
         name="domains",
-        description="Domain schema records.",
-        groups=("all", "domain"),
+        description="Domain schema records for user-created structured workspace databases.",
+        groups=("all", "domain", "records"),
         handler=_run_domains,
     ),
     "domain_records": WorkspaceDataSource(
         name="domain_records",
         description="Domain object records and structured data.",
-        groups=("all", "domain"),
+        groups=("all", "domain", "records"),
         handler=_run_domain_records,
     ),
     "domain_events": WorkspaceDataSource(
         name="domain_events",
         description="Domain audit/event stream records.",
-        groups=("all", "activity", "domain"),
+        groups=("all", "activity", "domain", "records"),
         handler=_run_domain_events,
     ),
     "workspace_apps": WorkspaceDataSource(
@@ -1133,12 +1573,17 @@ _SOURCE_ADAPTERS: dict[str, WorkspaceDataSource] = {
         groups=("all", "apps"),
         handler=_run_app_state,
     ),
-    "memories": WorkspaceDataSource(
-        name="memories",
-        description="Optional semantic memory recall, included only when explicitly requested.",
-        groups=("memory",),
-        handler=_run_memories,
-        db_backed=False,
+    "cycles": WorkspaceDataSource(
+        name="cycles",
+        description="Workspace Cycles: recurring Illo prompts, schedules, enabled state, and last/next run status.",
+        groups=("all", "cycles"),
+        handler=_run_cycles,
+    ),
+    "cycle_runs": WorkspaceDataSource(
+        name="cycle_runs",
+        description="Individual Cycle run history with status, linked thought, run id, and prompt snapshot.",
+        groups=("all", "activity", "cycles"),
+        handler=_run_cycle_runs,
     ),
 }
 
@@ -1296,6 +1741,105 @@ def query_workspace_data(
     return payload
 
 
+def _workspace_query_scope(
+    *,
+    idea_id: str | None = None,
+    domain_id: int | None = None,
+    object_key: str | None = None,
+    include_archived: bool = False,
+    default_current_idea: bool = False,
+) -> dict[str, Any]:
+    run = getattr(_agent_context, "run", None)
+    execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
+    scoped_idea_id = idea_id
+    if scoped_idea_id is None and default_current_idea:
+        scoped_idea_id = getattr(_agent_context, "idea_id", None) or execution_metadata.get("idea_id")
+    return {
+        "idea_id": scoped_idea_id,
+        "domain_id": domain_id,
+        "object_key": object_key,
+        "include_archived": include_archived,
+        "user_id": getattr(_agent_context, "user_id", None) or execution_metadata.get("user_id"),
+        "org_id": getattr(_agent_context, "org_id", None) or execution_metadata.get("org_id"),
+        "run_id": getattr(run, "run_id", None) or execution_metadata.get("run_id"),
+    }
+
+
+def _query_workspace_data_for_agent(**kwargs: Any) -> dict[str, Any]:
+    scope_kwargs = _workspace_query_scope(
+        idea_id=kwargs.pop("idea_id", None),
+        domain_id=kwargs.pop("domain_id", None),
+        object_key=kwargs.pop("object_key", None),
+        include_archived=bool(kwargs.pop("include_archived", False)),
+        default_current_idea=bool(kwargs.pop("_default_current_idea", False)),
+    )
+    return query_workspace_data(**kwargs, **scope_kwargs)
+
+
+def _workspace_view_payload(view: str, payload: dict[str, Any]) -> dict[str, Any]:
+    payload["view"] = view
+    payload.setdefault("answering_guidance", [])
+    return payload
+
+
+def _build_workspace_overview(payload: Mapping[str, Any]) -> dict[str, Any]:
+    sources = payload.get("sources") if isinstance(payload.get("sources"), Mapping) else {}
+    counts = payload.get("counts") if isinstance(payload.get("counts"), Mapping) else {}
+    gaps: list[str] = []
+    if int(counts.get("project_profiles") or 0) == 0 and int(counts.get("project_attachments") or 0) == 0:
+        gaps.append("No reusable Project Context profiles or thread attachments were found.")
+    if int(counts.get("domains") or 0) == 0:
+        gaps.append("No user-created Domains were found for structured workspace records.")
+    if int(counts.get("workspace_apps") or 0) == 0:
+        gaps.append("No generated workspace apps or dashboards were found.")
+    if int(counts.get("cycles") or 0) == 0:
+        gaps.append("No recurring Cycles were found.")
+
+    return {
+        "team_members": (sources.get("team_members") or [])[:10],
+        "active_or_recent_thoughts": (sources.get("ideas") or [])[:10],
+        "recent_activity": (payload.get("activity_items") or [])[:10],
+        "project_contexts": {
+            "profiles": (sources.get("project_profiles") or [])[:10],
+            "attachments": (sources.get("project_attachments") or [])[:10],
+        },
+        "structured_records": {
+            "domains": (sources.get("domains") or [])[:10],
+            "recent_records": (sources.get("domain_records") or [])[:10],
+        },
+        "workspace_apps": (sources.get("workspace_apps") or [])[:10],
+        "cycles": (sources.get("cycles") or [])[:10],
+        "setup_gaps": gaps,
+    }
+
+
+def _add_team_member_activity_summary(payload: dict[str, Any]) -> None:
+    sources = payload.get("sources") if isinstance(payload.get("sources"), Mapping) else {}
+    members = sources.get("team_members") if isinstance(sources.get("team_members"), list) else []
+    activity = payload.get("activity_items") if isinstance(payload.get("activity_items"), list) else []
+    by_user: dict[str, dict[str, Any]] = {}
+    for item in activity:
+        if not isinstance(item, Mapping):
+            continue
+        user_id = str(item.get("user_id") or "")
+        if not user_id:
+            continue
+        summary = by_user.setdefault(user_id, {"count": 0, "latest": []})
+        summary["count"] += 1
+        if len(summary["latest"]) < 5:
+            summary["latest"].append(item)
+    payload["member_activity"] = [
+        {
+            "user_id": member.get("user_id") or member.get("id"),
+            "name": member.get("name"),
+            "email": member.get("email"),
+            **by_user.get(str(member.get("user_id") or member.get("id") or ""), {"count": 0, "latest": []}),
+        }
+        for member in members
+        if isinstance(member, Mapping)
+    ]
+
+
 def _handle_query_workspace_data(
     sources: list[str] | None = None,
     query: str | None = None,
@@ -1310,9 +1854,7 @@ def _handle_query_workspace_data(
     object_key: str | None = None,
     include_archived: bool = False,
 ) -> str:
-    run = getattr(_agent_context, "run", None)
-    execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
-    payload = query_workspace_data(
+    payload = _query_workspace_data_for_agent(
         sources=sources,
         query=query,
         search=search,
@@ -1321,12 +1863,216 @@ def _handle_query_workspace_data(
         start_at=start_at,
         end_at=end_at,
         limit=limit,
-        idea_id=idea_id or getattr(_agent_context, "idea_id", None) or execution_metadata.get("idea_id"),
+        idea_id=idea_id,
         domain_id=domain_id,
         object_key=object_key,
         include_archived=include_archived,
-        user_id=getattr(_agent_context, "user_id", None) or execution_metadata.get("user_id"),
-        org_id=getattr(_agent_context, "org_id", None) or execution_metadata.get("org_id"),
-        run_id=getattr(run, "run_id", None) or execution_metadata.get("run_id"),
+        _default_current_idea=True,
     )
+    return json.dumps(payload, default=str)
+
+
+def _handle_read_workspace_overview(
+    query: str | None = None,
+    time_window: str = "all",
+    limit: int = 10,
+    include_archived: bool = False,
+) -> str:
+    payload = _query_workspace_data_for_agent(
+        sources=[
+            "team_members",
+            "ideas",
+            "threads",
+            "runs",
+            "project_profiles",
+            "project_attachments",
+            "domains",
+            "domain_records",
+            "workspace_apps",
+            "cycles",
+        ],
+        query=query or "workspace overview",
+        time_window=time_window,
+        limit=limit,
+        include_archived=include_archived,
+    )
+    payload = _workspace_view_payload("workspace_overview", payload)
+    payload["overview"] = _build_workspace_overview(payload)
+    payload["answering_guidance"] = [
+        "Distinguish what already exists in this workspace from what Illo can help set up.",
+        "Use setup_gaps to avoid overclaiming configured project context, Domains, apps, or Cycles.",
+    ]
+    return json.dumps(payload, default=str)
+
+
+def _handle_read_team_activity(
+    query: str | None = None,
+    search: str | None = None,
+    person: str | None = None,
+    time_window: str = "last_7d",
+    start_at: str | None = None,
+    end_at: str | None = None,
+    limit: int = 20,
+    idea_id: str | None = None,
+) -> str:
+    payload = _query_workspace_data_for_agent(
+        sources=["activity"],
+        query=query or "team activity",
+        search=search,
+        person=person,
+        time_window=time_window,
+        start_at=start_at,
+        end_at=end_at,
+        limit=limit,
+        idea_id=idea_id,
+    )
+    payload = _workspace_view_payload("team_activity", payload)
+    payload["answering_guidance"] = [
+        "Base recaps on activity_items first, then use per-source rows for detail.",
+        "When results are empty, say what was checked instead of guessing from memory.",
+    ]
+    return json.dumps(payload, default=str)
+
+
+def _handle_read_project_contexts(
+    query: str | None = None,
+    search: str | None = None,
+    idea_id: str | None = None,
+    time_window: str = "all",
+    start_at: str | None = None,
+    end_at: str | None = None,
+    limit: int = 20,
+    include_inactive: bool = False,
+) -> str:
+    payload = _query_workspace_data_for_agent(
+        sources=["project_contexts"],
+        query=query or "project contexts",
+        search=search,
+        time_window=time_window,
+        start_at=start_at,
+        end_at=end_at,
+        limit=limit,
+        idea_id=idea_id,
+        include_archived=include_inactive,
+    )
+    payload = _workspace_view_payload("project_contexts", payload)
+    payload["answering_guidance"] = [
+        "Use profiles for reusable workspace-level context and attachments for context bound to a Cortex thought.",
+        "If no resources are present, explain that Illo can help create or attach Project Context.",
+    ]
+    return json.dumps(payload, default=str)
+
+
+def _handle_read_team_members(
+    query: str | None = None,
+    search: str | None = None,
+    person: str | None = None,
+    time_window: str = "all",
+    limit: int = 20,
+    include_activity: bool = True,
+) -> str:
+    sources = ["team_members", "runs", "threads", "ideas"] if include_activity else ["team_members"]
+    payload = _query_workspace_data_for_agent(
+        sources=sources,
+        query=query or "team members",
+        search=search,
+        person=person,
+        time_window=time_window,
+        limit=limit,
+    )
+    payload = _workspace_view_payload("team_members", payload)
+    if include_activity:
+        _add_team_member_activity_summary(payload)
+    payload["answering_guidance"] = [
+        "Use roster rows for identity/role facts and member_activity for recent work signals.",
+        "Avoid inferring availability, intent, or ownership beyond the records returned.",
+    ]
+    return json.dumps(payload, default=str)
+
+
+def _handle_read_workspace_records(
+    query: str | None = None,
+    search: str | None = None,
+    domain_id: int | None = None,
+    object_key: str | None = None,
+    time_window: str = "all",
+    start_at: str | None = None,
+    end_at: str | None = None,
+    limit: int = 20,
+    include_archived: bool = False,
+) -> str:
+    payload = _query_workspace_data_for_agent(
+        sources=["records"],
+        query=query or "workspace records",
+        search=search,
+        domain_id=domain_id,
+        object_key=object_key,
+        time_window=time_window,
+        start_at=start_at,
+        end_at=end_at,
+        limit=limit,
+        include_archived=include_archived,
+    )
+    payload = _workspace_view_payload("workspace_records", payload)
+    payload["answering_guidance"] = [
+        "Domains are user-created structured databases, not the system's raw database tables.",
+        "Use Domain schemas to explain what each record type is for before summarizing records.",
+    ]
+    return json.dumps(payload, default=str)
+
+
+def _handle_read_cycles(
+    query: str | None = None,
+    search: str | None = None,
+    person: str | None = None,
+    time_window: str = "all",
+    start_at: str | None = None,
+    end_at: str | None = None,
+    limit: int = 20,
+    include_deleted: bool = False,
+) -> str:
+    payload = _query_workspace_data_for_agent(
+        sources=["cycles"],
+        query=query or "workspace cycles",
+        search=search,
+        person=person,
+        time_window=time_window,
+        start_at=start_at,
+        end_at=end_at,
+        limit=limit,
+        include_archived=include_deleted,
+    )
+    payload = _workspace_view_payload("cycles", payload)
+    payload["answering_guidance"] = [
+        "Use cycles for recurring configuration and cycle_runs for actual execution history.",
+        "Distinguish enabled/disabled/deleted Cycles when summarizing scheduled work.",
+    ]
+    return json.dumps(payload, default=str)
+
+
+def _handle_read_workspace_apps(
+    query: str | None = None,
+    search: str | None = None,
+    time_window: str = "all",
+    start_at: str | None = None,
+    end_at: str | None = None,
+    limit: int = 20,
+    include_archived: bool = False,
+    include_state: bool = True,
+) -> str:
+    payload = _query_workspace_data_for_agent(
+        sources=["apps"] if include_state else ["workspace_apps"],
+        query=query or "workspace apps",
+        search=search,
+        time_window=time_window,
+        start_at=start_at,
+        end_at=end_at,
+        limit=limit,
+        include_archived=include_archived,
+    )
+    payload = _workspace_view_payload("workspace_apps", payload)
+    payload["answering_guidance"] = [
+        "Use workspace_apps for app identity/metadata and app_state only for app-local UI state.",
+        "Recordful apps should be backed by Domains; app-local state is not the workspace database.",
+    ]
     return json.dumps(payload, default=str)
