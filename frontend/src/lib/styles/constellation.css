@@ -386,28 +386,10 @@
   --constellation-workspace-theme-star-color-a: rgba(240, 240, 250, 0.26);
   --constellation-workspace-theme-star-color-b: rgba(122, 177, 255, 0.24);
   --constellation-workspace-theme-star-color-c: rgba(255, 208, 154, 0.14);
-  --constellation-workspace-theme-star-opacity: 0.2;
+  --constellation-workspace-theme-star-opacity: 0;
   --constellation-workspace-theme-deep-field-opacity: 0.96;
-  --constellation-workspace-theme-deep-field-nebula:
-    radial-gradient(ellipse 58% 20% at 16% 28%, rgba(115, 168, 255, 0.105), transparent 74%),
-    radial-gradient(ellipse 46% 18% at 78% 24%, rgba(176, 124, 226, 0.078), transparent 74%),
-    radial-gradient(ellipse 70% 24% at 50% 82%, rgba(62, 191, 157, 0.048), transparent 78%),
-    radial-gradient(ellipse 80% 28% at 42% 50%, rgba(240, 240, 250, 0.022), transparent 80%);
-  --constellation-workspace-theme-deep-field-stars:
-    radial-gradient(circle at center, rgba(240, 240, 250, 0.72) 0 0.58px, transparent 0.88px),
-    radial-gradient(circle at center, rgba(122, 177, 255, 0.44) 0 0.78px, transparent 1.04px),
-    radial-gradient(circle at center, rgba(255, 218, 176, 0.28) 0 0.72px, transparent 1px),
-    radial-gradient(circle at center, rgba(240, 240, 250, 0.16) 0 1.05px, transparent 1.38px);
-  --constellation-workspace-theme-deep-field-dust:
-    radial-gradient(ellipse 52% 16% at 18% 30%, rgba(122, 177, 255, 0.12), transparent 76%),
-    radial-gradient(ellipse 42% 14% at 74% 24%, rgba(218, 157, 89, 0.064), transparent 74%),
-    radial-gradient(ellipse 58% 16% at 52% 78%, rgba(240, 240, 250, 0.042), transparent 78%);
-  --constellation-workspace-theme-scene-glow:
-    radial-gradient(ellipse 76% 52% at 28% 24%, rgba(141, 183, 255, 0.14), transparent 76%),
-    radial-gradient(ellipse 56% 42% at 60% 34%, rgba(240, 240, 250, 0.05), transparent 74%);
-  --constellation-workspace-theme-scene-warmth:
-    radial-gradient(ellipse 82% 56% at 72% 72%, rgba(213, 161, 77, 0.07), transparent 78%),
-    radial-gradient(ellipse 64% 48% at 42% 82%, rgba(87, 207, 160, 0.045), transparent 76%);
+  --constellation-workspace-theme-scene-glow: none;
+  --constellation-workspace-theme-scene-warmth: none;
 
   --constellation-screen-frame-scene-glow:
     radial-gradient(circle at 34% 28%, rgba(141, 183, 255, 0.12), transparent 36%),
@@ -886,9 +868,6 @@
   --constellation-workspace-theme-star-color-c: rgba(255, 255, 255, 0.22);
   --constellation-workspace-theme-star-opacity: 0.34;
   --constellation-workspace-theme-deep-field-opacity: 0;
-  --constellation-workspace-theme-deep-field-nebula: none;
-  --constellation-workspace-theme-deep-field-stars: none;
-  --constellation-workspace-theme-deep-field-dust: none;
   --constellation-workspace-theme-scene-glow:
     radial-gradient(ellipse 72% 54% at 36% 28%, rgba(72, 159, 210, 0.18), transparent 76%),
     radial-gradient(ellipse 56% 42% at 66% 34%, rgba(255, 255, 255, 0.24), transparent 78%);
