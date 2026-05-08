@@ -10,6 +10,11 @@
     ConstellationNotice,
     ConstellationPageFrame,
   } from '$lib/components/constellation';
+  import {
+    closeOAuthPopup,
+    navigateOpenAIOAuthPopup,
+    openOpenAIOAuthPopup,
+  } from '$lib/utils/oauthPopup';
 
   import AccessCard from './AccessCard.svelte';
   import MemoryCard from './MemoryCard.svelte';
@@ -192,6 +197,7 @@
 
   async function startCodexSignIn(callbackMode: unknown = 'auto') {
     const requestedCallbackMode = normalizeCodexSignInCallbackMode(callbackMode);
+    const popup = openOpenAIOAuthPopup();
     savingConnection = true;
     notice = null;
     try {
@@ -200,14 +206,18 @@
       oauthState = result.state || '';
       oauthCallbackAvailable = result.callback_available ?? true;
       oauthCallbackMode = result.callback_mode || 'local_bridge';
-      if (oauthUrl && typeof window !== 'undefined') {
-        const popup = window.open('about:blank', 'illo-openai-oauth', 'popup,width=540,height=760');
-        if (!popup) {
-          window.location.assign(oauthUrl);
+      if (oauthUrl) {
+        const opened = navigateOpenAIOAuthPopup(popup, oauthUrl);
+        if (!opened) {
+          notice = {
+            tone: 'warning',
+            title: 'Popup blocked.',
+            detail: 'Allow popups for this site, then choose Sign in again. The main window will stay here.',
+          };
           return;
         }
-        popup.location.href = oauthUrl;
-        popup.focus();
+      } else {
+        closeOAuthPopup(popup);
       }
       notice = oauthCallbackAvailable
         ? {
@@ -224,6 +234,7 @@
             detail: result.callback_detail || 'The automatic callback bridge is unavailable. Use the manual callback fallback if the window cannot return here.',
           };
     } catch (error) {
+      closeOAuthPopup(popup);
       notice = errorNotice('Could not start Codex sign-in.', error, 'Try again from the System tab.');
     } finally {
       savingConnection = false;
