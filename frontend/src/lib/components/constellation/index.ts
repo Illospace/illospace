@@ -24,6 +24,11 @@ export { default as ConstellationPresenceStack } from './ConstellationPresenceSt
 export { default as ConstellationSelectChip } from './ConstellationSelectChip.svelte';
 export { default as ConstellationSection } from './ConstellationSection.svelte';
 export { default as ConstellationSectionHeader } from './ConstellationSectionHeader.svelte';
+export { default as ConstellationSignalStatusIndicator } from './ConstellationSignalStatusIndicator.svelte';
+export type {
+  ConstellationSignalStatusIndicatorPlacement,
+  ConstellationSignalStatusIndicatorState,
+} from './ConstellationSignalStatusIndicator.svelte';
 export { default as ConstellationSkeletonBlock } from './ConstellationSkeletonBlock.svelte';
 export { default as ConstellationSplitLayout } from './ConstellationSplitLayout.svelte';
 export { default as ConstellationTextInput } from './ConstellationTextInput.svelte';

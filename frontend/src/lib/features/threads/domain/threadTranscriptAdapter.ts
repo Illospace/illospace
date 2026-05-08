@@ -20,6 +20,7 @@ export const CORTEX_THREAD_STAGE_RUN_STATUSES = [
 ] as const;
 export type CortexThreadStageRunStatus =
   (typeof CORTEX_THREAD_STAGE_RUN_STATUSES)[number];
+export type CortexThreadStageHeaderStatusState = 'idle' | 'working' | 'unread';
 
 export const CORTEX_THREAD_STAGE_RUN_STEP_STATUSES = [
   'pending',
@@ -34,6 +35,7 @@ export type CortexThreadStageRunStepStatus =
 export interface CortexThreadStageHeaderConfig {
   title: string;
   statusLabel: string;
+  statusState?: CortexThreadStageHeaderStatusState;
   panelOpen?: boolean;
   onTogglePanel?: () => void;
   secondaryPanelOpen?: boolean;

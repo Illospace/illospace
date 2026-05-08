@@ -1,5 +1,6 @@
 <script lang="ts">
   import ConstellationIcon, { type ConstellationIconName } from './ConstellationIcon.svelte';
+  import ConstellationSignalStatusIndicator from './ConstellationSignalStatusIndicator.svelte';
   import type {
     ConstellationScale,
     ConstellationShape,
@@ -263,11 +264,11 @@
     {/if}
 
     {#if showUnreadNotification}
-      <span class="constellation-signal-blob-unread-beacon" aria-hidden="true"></span>
+      <ConstellationSignalStatusIndicator state="unread" placement="anchor" {animated} label="Unread thread" />
     {/if}
 
     {#if showWorkingIndicator}
-      <span class="constellation-signal-blob-working-spinner" aria-hidden="true"></span>
+      <ConstellationSignalStatusIndicator state="working" placement="anchor" {animated} label="Illo is working" />
     {/if}
 
     {#if attachmentCount > 0}
@@ -528,8 +529,6 @@
 
   .constellation-signal-blob-owner-seed,
   .constellation-signal-blob-status-anchor,
-  .constellation-signal-blob-working-spinner,
-  .constellation-signal-blob-unread-beacon,
   .constellation-signal-blob-attachment-badge {
     position: absolute;
     z-index: 2;
@@ -1058,38 +1057,6 @@
       0 0 14px color-mix(in srgb, var(--blob-shadow) 72%, transparent);
   }
 
-  .constellation-signal-blob-unread-beacon {
-    top: 7px;
-    right: 7px;
-    width: 16px;
-    height: 16px;
-    border-radius: 999px;
-    background:
-      radial-gradient(circle at 42% 35%, rgba(255, 255, 255, 0.36), transparent 34%),
-      color-mix(in srgb, var(--blob-unread-color) 74%, rgba(240, 240, 250, 0.22));
-    box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, var(--blob-unread-color) 34%, rgba(240, 240, 250, 0.18)),
-      0 0 14px color-mix(in srgb, var(--blob-unread-color) 48%, transparent);
-    opacity: 0.92;
-    transform: translate(38%, -34%);
-  }
-
-  .constellation-signal-blob-working-spinner {
-    top: 7px;
-    right: 7px;
-    width: 16px;
-    height: 16px;
-    box-sizing: border-box;
-    border-radius: 999px;
-    border: 4px solid transparent;
-    border-top-color: color-mix(in srgb, var(--blob-unread-color) 74%, rgba(240, 240, 250, 0.22));
-    border-right-color: color-mix(in srgb, var(--blob-unread-color) 74%, rgba(240, 240, 250, 0.22));
-    background: transparent;
-    filter: drop-shadow(0 0 14px color-mix(in srgb, var(--blob-unread-color) 48%, transparent));
-    opacity: 1;
-    transform: translate(38%, -34%) rotate(0deg);
-  }
-
   .is-animated.constellation-signal-blob-working .constellation-signal-blob-body {
     animation: constellation-signal-blob-working-heartbeat 1.25s ease-in-out infinite;
   }
@@ -1128,14 +1095,6 @@
 
   .is-animated .constellation-signal-blob-status-risk-dot {
     animation: constellation-signal-blob-cue-dot-pulse 2.5s ease-in-out infinite;
-  }
-
-  .is-animated .constellation-signal-blob-unread-beacon {
-    animation: constellation-signal-blob-unread-beacon 3.6s ease-in-out infinite;
-  }
-
-  .is-animated .constellation-signal-blob-working-spinner {
-    animation: constellation-signal-blob-working-spinner-sync-spin 1.25s ease-in-out infinite;
   }
 
   .constellation-signal-blob-interactive:is(:hover, :focus-visible) {
@@ -1279,29 +1238,6 @@
     }
   }
 
-  @keyframes constellation-signal-blob-unread-beacon {
-    0%,
-    100% {
-      opacity: 0.68;
-      box-shadow:
-        inset 0 0 0 1px color-mix(in srgb, var(--blob-unread-color) 28%, rgba(240, 240, 250, 0.14)),
-        0 0 10px color-mix(in srgb, var(--blob-unread-color) 36%, transparent);
-    }
-
-    50% {
-      opacity: 1;
-      box-shadow:
-        inset 0 0 0 1px color-mix(in srgb, var(--blob-unread-color) 38%, rgba(240, 240, 250, 0.18)),
-        0 0 20px color-mix(in srgb, var(--blob-unread-color) 62%, transparent);
-    }
-  }
-
-  @keyframes constellation-signal-blob-working-spinner-spin {
-    to {
-      transform: translate(38%, -34%) rotate(360deg);
-    }
-  }
-
   @keyframes constellation-signal-blob-working-heartbeat {
     0%,
     100% {
@@ -1330,38 +1266,6 @@
     }
   }
 
-  @keyframes constellation-signal-blob-working-spinner-sync-spin {
-    0% {
-      filter: drop-shadow(0 0 12px color-mix(in srgb, var(--blob-unread-color) 42%, transparent));
-      transform: translate(38%, -34%) rotate(0deg) scale(1);
-    }
-
-    16% {
-      filter: drop-shadow(0 0 18px color-mix(in srgb, var(--blob-unread-color) 66%, transparent));
-      transform: translate(38%, -34%) rotate(118deg) scale(1.1);
-    }
-
-    30% {
-      filter: drop-shadow(0 0 12px color-mix(in srgb, var(--blob-unread-color) 46%, transparent));
-      transform: translate(38%, -34%) rotate(174deg) scale(0.96);
-    }
-
-    46% {
-      filter: drop-shadow(0 0 16px color-mix(in srgb, var(--blob-unread-color) 58%, transparent));
-      transform: translate(38%, -34%) rotate(268deg) scale(1.06);
-    }
-
-    64% {
-      filter: drop-shadow(0 0 13px color-mix(in srgb, var(--blob-unread-color) 48%, transparent));
-      transform: translate(38%, -34%) rotate(312deg) scale(1);
-    }
-
-    100% {
-      filter: drop-shadow(0 0 12px color-mix(in srgb, var(--blob-unread-color) 42%, transparent));
-      transform: translate(38%, -34%) rotate(360deg) scale(1);
-    }
-  }
-
   @media (prefers-reduced-motion: reduce) {
     .is-animated .constellation-signal-blob-surface,
     .is-animated.constellation-signal-blob-working:not(.constellation-signal-blob-presence-inside) .constellation-signal-blob-surface,
@@ -1371,8 +1275,6 @@
     .is-animated .constellation-signal-blob-status-inside span,
     .is-animated .constellation-signal-blob-status-attention-dot,
     .is-animated .constellation-signal-blob-status-risk-dot,
-    .is-animated .constellation-signal-blob-unread-beacon,
-    .is-animated .constellation-signal-blob-working-spinner,
     .is-animated.constellation-signal-blob-working .constellation-signal-blob-body {
       animation: none;
     }
