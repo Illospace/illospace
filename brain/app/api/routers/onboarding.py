@@ -38,7 +38,7 @@ INTRO_RUN_SETTLED_STATUSES = {
     RunStatus.COMPLETED.value,
 }
 
-INTRO_PROMPT = "Illo, introduce yourself and help me finish setting up this workspace."
+INTRO_PROMPT = "Illo works well solo. Introduce yourself and help me finish setting up this workspace."
 
 
 def _intro_ref(user_id: str) -> str:
