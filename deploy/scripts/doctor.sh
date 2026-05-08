@@ -11,23 +11,27 @@ errors=0
 warnings=0
 runtime_checks=1
 tmp_running=""
-strict_providers=0
+strict_credentials=0
 check_public_url=0
 
 usage() {
   cat <<'EOF'
-Usage: ./illo deploy doctor [--strict-providers] [--check-public-url] [--no-runtime]
-       deploy/scripts/doctor.sh [--strict-providers] [--check-public-url] [--no-runtime]
+Usage: ./illo deploy doctor [--strict-credentials] [--check-public-url] [--no-runtime]
+       deploy/scripts/doctor.sh [--strict-credentials] [--check-public-url] [--no-runtime]
 
 Validates the Compose deployment environment, rendered Compose config, and
 running service health when the stack is up.
+
+Provider credentials for production self-hosting should be added inside
+Illospace after first boot, where they are encrypted and stored in Postgres.
+The strict credential check verifies those DB-backed credentials, not env vars.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --strict-providers)
-      strict_providers=1
+    --strict-credentials)
+      strict_credentials=1
       shift
       ;;
     --check-public-url)
@@ -88,7 +92,6 @@ else
   # shellcheck disable=SC1090
   . "$ENV_FILE"
   set +a
-  [ "$strict_providers" = "0" ] || export ILLO_REQUIRE_PROVIDER_KEYS=1
   [ "$check_public_url" = "0" ] || export ILLO_CHECK_PUBLIC_URL=1
 fi
 
@@ -123,11 +126,7 @@ PY
 fi
 
 if [ -n "${ANTHROPIC_API_KEY:-}${OPENAI_API_KEY:-}${GEMINI_API_KEY:-}${EMBEDDING_API_KEY:-}" ]; then
-  pass "at least one provider or embedding API key is set"
-elif [ "${ILLO_REQUIRE_PROVIDER_KEYS:-0}" = "1" ]; then
-  fail "no provider keys are set; configure ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or database-backed credentials"
-else
-  warn "no provider keys are set; LLM-backed agent work needs provider keys or database-backed credentials"
+  warn "provider API keys are present in $ENV_FILE; production credentials should be added inside Illospace so they are encrypted in Postgres"
 fi
 
 if [ -n "${VAULT_MASTER_KEY:-}" ]; then
@@ -171,12 +170,37 @@ else
   fail "Compose configuration failed to render"
 fi
 
+if [ "$strict_credentials" = "1" ] && [ "$runtime_checks" = "0" ]; then
+  fail "strict credential checks require a running Compose stack; remove --no-runtime and run after first boot"
+fi
+
 container_health() {
   local service="$1"
   local id
   id="$(compose ps -q "$service" 2>/dev/null || true)"
   [ -n "$id" ] || return 1
   docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null
+}
+
+check_db_provider_credentials() {
+  local count
+  if count="$(compose exec -T postgres psql -U "${DB_USER:-}" -d "${DB_NAME:-}" -tAc "
+SELECT
+  COALESCE((SELECT count(*) FROM user_api_keys WHERE is_active), 0) +
+  COALESCE((SELECT count(*) FROM org_api_keys), 0);
+" 2>/dev/null | tr -d '[:space:]')"; then
+    if [[ "$count" =~ ^[0-9]+$ ]] && [ "$count" -gt 0 ]; then
+      pass "DB-backed provider credentials are configured ($count key record(s))"
+    elif [ "$strict_credentials" = "1" ]; then
+      fail "no DB-backed provider credentials found; add provider credentials in Illospace System/Access after first boot"
+    else
+      warn "no DB-backed provider credentials found yet; add provider credentials in Illospace System/Access after first boot"
+    fi
+  elif [ "$strict_credentials" = "1" ]; then
+    fail "could not inspect DB-backed provider credentials; check migrations and Postgres logs"
+  else
+    warn "could not inspect DB-backed provider credentials; skipping credential inventory"
+  fi
 }
 
 if [ "$runtime_checks" = "0" ]; then
@@ -209,6 +233,7 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
       else
         fail "pgvector extension is missing; check migration logs"
       fi
+      check_db_provider_credentials
     fi
 
     if command -v curl >/dev/null 2>&1; then
@@ -235,9 +260,15 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
     fi
   else
     warn "Compose stack is not running yet; skipping API HTTP probes"
+    if [ "$strict_credentials" = "1" ]; then
+      fail "strict credential checks require the Compose stack to be running"
+    fi
   fi
 else
   warn "Could not inspect Compose services; skipping runtime probes"
+  if [ "$strict_credentials" = "1" ]; then
+    fail "strict credential checks require Compose service inspection"
+  fi
 fi
 
 if [ "$errors" -gt 0 ]; then

@@ -554,9 +554,8 @@ def resolve_llm_client(
         key, source = _resolve_key_from_env(provider=provider)
 
     if not key:
-        env_hint = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
         raise RuntimeError(
-            f"No API key found for {provider}. Add one in Settings or set {env_hint} in .env"
+            f"No API key found for {provider}. Add one in Settings. Environment keys are only a development fallback."
         )
 
     result = _build_anthropic_client(key)

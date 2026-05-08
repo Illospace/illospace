@@ -94,10 +94,6 @@ updates = {
     "ILLO_API_PORT": "18000",
     "ILLO_HTTP_PORT": "18080",
     "ILLO_HTTPS_PORT": "18443",
-    "ANTHROPIC_API_KEY": "",
-    "OPENAI_API_KEY": "",
-    "GEMINI_API_KEY": "",
-    "EMBEDDING_API_KEY": "",
 }
 
 for key, value in updates.items():

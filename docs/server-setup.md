@@ -10,8 +10,8 @@ Collect these values before touching the server:
 - Domain name, for example `team.example.com`
 - Admin email for TLS certificate notices
 - Server SSH user and install directory
-- At least one model provider key, or confirmation that credentials will be
-  added in the app after first boot
+- Confirmation that the owner/admin will add model provider credentials inside
+  Illospace after first boot
 - Backup destination and retention expectation
 
 ## Target Server
@@ -39,9 +39,12 @@ cd illospace
 Edit `deploy/compose/.env`:
 
 - replace `team.example.com` and `admin@example.com` if needed
-- set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or leave them
-  empty only if the operator will configure database-backed credentials
 - keep `SECRET_KEY`, `VAULT_MASTER_KEY`, and `DB_PASSWORD` private
+
+Do not put model provider API keys in `deploy/compose/.env`. Production
+provider credentials should be added from the Illospace System/Access screens
+after first boot so they are encrypted with `VAULT_MASTER_KEY` and stored in
+Postgres.
 
 Start:
 
@@ -55,6 +58,7 @@ Expected result:
   and `caddy` running
 - `./illo deploy doctor` exits successfully
 - `https://team.example.com` opens the dashboard
+- an owner/admin can sign in and add provider credentials in System/Access
 
 ## Health Checks
 
@@ -71,10 +75,11 @@ Use the deployment doctor:
 ./illo deploy doctor
 ```
 
-Before sending a domain to users, run the stricter public check from the server:
+Before sending a domain to users, add provider credentials in System/Access,
+then run the stricter public check from the server:
 
 ```bash
-./illo deploy doctor --strict-providers --check-public-url
+./illo deploy doctor --strict-credentials --check-public-url
 ```
 
 Use Caddy logs for public HTTP/TLS problems:
@@ -146,7 +151,9 @@ If readiness fails:
 If agent runs do not execute:
 
 - check `./illo deploy logs worker`
-- confirm provider keys or database-backed credentials are configured
+- confirm provider credentials have been added in System/Access
+- run `./illo deploy doctor --strict-credentials` to verify DB-backed
+  credential records are present
 - keep `EMBEDDING_BACKEND=api` unless the server is intentionally configured
   for local CPU/GPU embeddings
 - local CPU/GPU embeddings require an advanced image/runtime with

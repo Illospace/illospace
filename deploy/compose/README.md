@@ -14,7 +14,9 @@ custom deployment.
 - `migrate`: one-shot Alembic migration job
 - `postgres`: Postgres 16 with pgvector
 
-Persistent data lives in Docker volumes. Secrets live in `deploy/compose/.env`.
+Persistent data lives in Docker volumes. Server bootstrap secrets live in
+`deploy/compose/.env`; model provider credentials are added inside Illospace
+after boot and stored encrypted in Postgres.
 
 ## Fresh Server Setup
 
@@ -30,8 +32,10 @@ From the repository root:
 ./illo deploy init --domain team.example.com --email admin@example.com
 ```
 
-Edit `deploy/compose/.env` and set at least one model provider key or plan to
-add database-backed credentials after boot.
+Edit `deploy/compose/.env` only for server bootstrap settings such as domain,
+TLS email, generated app secrets, and database password. Do not put model
+provider API keys in this file; add them from the Illospace System/Access
+screens after first boot.
 
 Start the stack:
 
@@ -70,6 +74,13 @@ The full deployment doctor is:
 
 ```bash
 ./illo deploy doctor
+```
+
+After an owner/admin has added provider credentials in the app, verify that the
+running stack can see DB-backed credential records:
+
+```bash
+./illo deploy doctor --strict-credentials
 ```
 
 ## Operations

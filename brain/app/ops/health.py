@@ -371,7 +371,7 @@ def _embedding_health_check() -> HealthCheck:
                     summary="API embedding backend is missing credentials",
                     latency_ms=_elapsed_ms(start),
                     details=details,
-                    remediation="Set EMBEDDING_API_KEY or GEMINI_API_KEY, or switch EMBEDDING_BACKEND.",
+                    remediation="Add embedding credentials in System/Access, or switch EMBEDDING_BACKEND.",
                 )
             return HealthCheck(
                 name="embedding",

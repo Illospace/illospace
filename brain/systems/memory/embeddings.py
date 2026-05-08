@@ -210,8 +210,8 @@ def _embed_api_gemini(texts: list[str], mode: str) -> np.ndarray:
 
     if not EMBEDDING_API_KEY:
         raise RuntimeError(
-            "EMBEDDING_API_KEY (or GEMINI_API_KEY or GOOGLE_API_KEY) not set. "
-            "Get one at https://aistudio.google.com/apikey"
+            "Gemini embedding credentials are not configured. "
+            "Add them in System/Access or use a development-only EMBEDDING_API_KEY."
         )
 
     model = EMBEDDING_API_MODEL or "gemini-embedding-2"
@@ -252,7 +252,10 @@ def _embed_api_openai(texts: list[str], mode: str) -> np.ndarray:
 
     api_key = EMBEDDING_API_KEY or ""
     if not api_key:
-        raise RuntimeError("EMBEDDING_API_KEY not set for OpenAI embeddings")
+        raise RuntimeError(
+            "OpenAI embedding credentials are not configured. "
+            "Add them in System/Access or use a development-only EMBEDDING_API_KEY."
+        )
 
     model = EMBEDDING_API_MODEL or "text-embedding-3-small"
     resp = httpx.post(
