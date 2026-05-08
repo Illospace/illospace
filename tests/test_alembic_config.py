@@ -101,7 +101,7 @@ def test_env_py_imports_brain_config():
 
 def test_env_py_widens_alembic_version_column_for_long_revision_ids():
     """Postgres Alembic version tables must handle repo revision ids over 32 chars."""
-    long_revision_ids: list[str] = []
+    revision_ids: list[str] = []
     for path in _migration_files():
         module = ast.parse(path.read_text(), filename=str(path))
         for node in module.body:
@@ -109,10 +109,10 @@ def test_env_py_widens_alembic_version_column_for_long_revision_ids():
                 continue
             if any(isinstance(target, ast.Name) and target.id == "revision" for target in node.targets):
                 revision_id = ast.literal_eval(node.value)
-                if len(revision_id) > 32:
-                    long_revision_ids.append(revision_id)
+                revision_ids.append(revision_id)
 
-    assert long_revision_ids
+    assert revision_ids
+    assert max(len(revision_id) for revision_id in revision_ids) <= 255
 
     env_content = (ALEMBIC_DIR / "env.py").read_text()
     assert "ALEMBIC_VERSION_NUM_MAX_LENGTH = 255" in env_content
