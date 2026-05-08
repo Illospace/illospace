@@ -80,7 +80,7 @@ def test_ops_deploy_renders_systemd_services_for_current_checkout():
     assert "sync_production_service_env" in content
 
 
-def test_illo_start_uses_standalone_worker_by_default():
+def test_illo_native_mode_uses_standalone_worker_by_default():
     illo_path = Path(__file__).resolve().parents[1] / "illo"
     content = illo_path.read_text()
 
@@ -100,7 +100,7 @@ def test_illo_native_server_binds_to_loopback_by_default():
     assert "secure with your firewall, tunnel, or reverse proxy" in content
 
 
-def test_illo_start_installs_current_checkout_worker_services():
+def test_illo_native_mode_installs_current_checkout_worker_services():
     illo_path = Path(__file__).resolve().parents[1] / "illo"
     content = illo_path.read_text()
 
@@ -111,7 +111,7 @@ def test_illo_start_installs_current_checkout_worker_services():
     assert "systemctl --user restart illo-scheduler.service" in content
 
 
-def test_illo_start_autostarts_gpu_when_embedding_backend_is_gpu():
+def test_illo_native_mode_autostarts_gpu_when_embedding_backend_is_gpu():
     illo_path = Path(__file__).resolve().parents[1] / "illo"
     content = illo_path.read_text()
 
@@ -143,8 +143,11 @@ def test_illo_exposes_native_default_dev_mode_and_compose_deploy():
     illo_path = Path(__file__).resolve().parents[1] / "illo"
     content = illo_path.read_text()
 
-    assert "start|prod|production)" in content
-    assert "dev|dev-start|development)" in content
+    assert "start|prod|production)" not in content
+    assert "dev-start" not in content
+    assert "development)" not in content
+    assert "prod|production" not in content
+    assert "  dev)" in content
     assert 'run_prod' in content
     assert 'run_dev' in content
     assert "deploy" in content

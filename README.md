@@ -105,10 +105,9 @@ preview. It owns the native runtime, auto-runs setup when needed, builds the
 frontend, starts the API/dashboard on `localhost:8000`, and keeps AgentRuns
 self-contained.
 
-`./illo start` remains an alias for the same native server mode. Native mode
-binds to `127.0.0.1` by default; set `ILLO_API_HOST=0.0.0.0` only when you
-intentionally want direct network access and have your own firewall, tunnel, or
-reverse proxy in front of it.
+Native mode binds to `127.0.0.1` by default; set `ILLO_API_HOST=0.0.0.0` only
+when you intentionally want direct network access and have your own firewall,
+tunnel, or reverse proxy in front of it.
 
 Use `./illo dev` when you are editing the frontend or backend locally and want
 the Vite dashboard on `localhost:5173`.

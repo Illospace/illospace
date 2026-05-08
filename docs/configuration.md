@@ -100,12 +100,11 @@ Production must provide:
 - migration validation enabled through `ILLO_VALIDATE_MIGRATIONS=1`
 - local development auth fallbacks disabled
 
-Native server mode can be started with `./illo` or `./illo start`. It binds to
-`127.0.0.1` by default; set `ILLO_API_HOST=0.0.0.0` only when the host is
-intentionally exposed through your own firewall, tunnel, or reverse proxy. The
-recommended Compose deployment generates its own server secrets in
-`deploy/compose/.env`. Managed production services should provide durable
-secrets outside the git checkout.
+Native server mode is started with `./illo`. It binds to `127.0.0.1` by
+default; set `ILLO_API_HOST=0.0.0.0` only when the host is intentionally exposed
+through your own firewall, tunnel, or reverse proxy. The recommended Compose
+deployment generates its own server secrets in `deploy/compose/.env`. Managed
+production services should provide durable secrets outside the git checkout.
 
 Production should also provide at least one model path:
 
