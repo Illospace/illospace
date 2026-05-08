@@ -23,7 +23,8 @@ Required server state:
 
 - Linux host with Docker Engine and Docker Compose v2
 - DNS `A` or `AAAA` record pointing the domain to this server
-- inbound ports `80` and `443` open
+- SSH access for private first boot
+- inbound ports `80` and `443` ready to open after the owner account exists
 - enough disk for Postgres volume data and backups
 
 ## Install Commands
@@ -51,6 +52,31 @@ Start:
 ```bash
 ./illo deploy up
 ```
+
+## Private First Boot
+
+Fresh installs bind Caddy's public `80/443` listeners to server loopback only.
+This prevents a public first-owner race while the database has no users.
+
+From your workstation, open an SSH tunnel:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>
+```
+
+Then open `http://localhost:8080`, create the owner account, and add provider
+credentials in System/Access.
+
+When the owner account exists and you are ready for team access:
+
+```bash
+./illo deploy publish
+```
+
+For a private-only install, skip `publish` and keep using the SSH tunnel or
+your own private network.
+
+Now open inbound `80` and `443` in the server firewall/security group.
 
 Expected result:
 

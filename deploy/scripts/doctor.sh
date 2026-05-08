@@ -203,6 +203,25 @@ SELECT
   fi
 }
 
+check_public_first_owner_guard() {
+  local public_bind="${ILLO_PUBLIC_BIND:-127.0.0.1}"
+  local user_count
+  if [ "$public_bind" = "127.0.0.1" ] || [ "$public_bind" = "localhost" ]; then
+    pass "public Caddy bind is private for first boot"
+    return
+  fi
+
+  if user_count="$(compose exec -T postgres psql -U "${DB_USER:-}" -d "${DB_NAME:-}" -tAc "SELECT count(*) FROM users;" 2>/dev/null | tr -d '[:space:]')"; then
+    if [[ "$user_count" =~ ^[0-9]+$ ]] && [ "$user_count" -gt 0 ]; then
+      pass "owner/user account exists before public Caddy exposure"
+    else
+      fail "public Caddy bind is enabled before any owner/user account exists; use SSH first boot or run ./illo deploy publish after creating the owner"
+    fi
+  else
+    warn "could not inspect users table for first-owner exposure guard"
+  fi
+}
+
 if [ "$runtime_checks" = "0" ]; then
   :
 elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" && compose ps --services --status running >"$tmp_running" 2>/dev/null; then
@@ -233,6 +252,7 @@ elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" 
       else
         fail "pgvector extension is missing; check migration logs"
       fi
+      check_public_first_owner_guard
       check_db_provider_credentials
     fi
 

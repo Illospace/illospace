@@ -84,6 +84,18 @@ cd illospace
 ./illo deploy up
 ```
 
+Fresh server installs start with public HTTP/HTTPS bound to loopback so the
+first owner account can be created privately over SSH:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>
+# open http://localhost:8080, create the owner, then on the server:
+./illo deploy publish
+```
+
+Skip `publish` if the team should keep using Illospace only over SSH or a
+private network.
+
 See [docs/server-setup.md](docs/server-setup.md) for the exact server runbook,
 backups, restore, upgrades, and troubleshooting.
 

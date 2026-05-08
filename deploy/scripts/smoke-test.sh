@@ -91,9 +91,11 @@ updates = {
     "ILLO_DOMAIN": "localhost",
     "ILLO_ADMIN_EMAIL": "ops@localhost",
     "ILLO_PUBLIC_URL": "http://127.0.0.1:18000",
+    "ILLO_PUBLIC_BIND": "127.0.0.1",
     "ILLO_API_PORT": "18000",
     "ILLO_HTTP_PORT": "18080",
     "ILLO_HTTPS_PORT": "18443",
+    "ILLO_PRIVATE_HTTP_PORT": "18081",
 }
 
 for key, value in updates.items():
@@ -185,5 +187,8 @@ curl -kfsS https://localhost:18443/api/health/live >/dev/null \
 
 curl -kfsS https://localhost:18443/ >/dev/null \
   || curl -fsSL http://localhost:18080/ >/dev/null
+
+curl -fsS http://127.0.0.1:18081/api/health/live >/dev/null
+curl -fsS http://127.0.0.1:18081/ >/dev/null
 
 echo "Smoke test passed."

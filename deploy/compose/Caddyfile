@@ -2,7 +2,7 @@
 	email {$ILLO_ADMIN_EMAIL}
 }
 
-{$ILLO_DOMAIN} {
+(illo_routes) {
 	encode zstd gzip
 
 	@api path /api /api/* /ws /ws/* /static/uploads /static/uploads/*
@@ -13,4 +13,12 @@
 	handle {
 		reverse_proxy web:8080
 	}
+}
+
+{$ILLO_DOMAIN} {
+	import illo_routes
+}
+
+:8081 {
+	import illo_routes
 }

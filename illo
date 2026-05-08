@@ -2317,6 +2317,69 @@ deploy_compose() {
   docker compose --env-file "$(deploy_compose_env_file)" -f "$(deploy_compose_file)" "$@"
 }
 
+deploy_env_value() {
+  local key="$1"
+  local env_file value
+  env_file="$(deploy_compose_env_file)"
+  value="$(
+    python3 - "$env_file" "$key" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+if not path.exists():
+    sys.exit(0)
+pattern = re.compile(rf"^{re.escape(key)}=(.*)$")
+for line in path.read_text(encoding="utf-8").splitlines():
+    match = pattern.match(line.strip())
+    if match:
+        value = match.group(1).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        print(value)
+        break
+PY
+  )"
+  printf '%s' "$value"
+}
+
+deploy_set_env_value() {
+  local key="$1"
+  local value="$2"
+  local env_file
+  env_file="$(deploy_compose_env_file)"
+  python3 - "$env_file" "$key" "$value" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+assignment = re.compile(rf"^{re.escape(key)}=.*$")
+
+def shell_quote(raw: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_@%+=:,./-]*", raw):
+        return raw
+    return "'" + raw.replace("'", "'\"'\"'") + "'"
+
+lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+next_lines: list[str] = []
+written = False
+for line in lines:
+    if assignment.match(line.strip()):
+        next_lines.append(f"{key}={shell_quote(value)}")
+        written = True
+    else:
+        next_lines.append(line)
+if not written:
+    next_lines.append(f"{key}={shell_quote(value)}")
+path.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
+PY
+}
+
 deploy_require_env_file() {
   local env_file
   env_file="$(deploy_compose_env_file)"
@@ -2339,6 +2402,7 @@ deploy_usage() {
   echo -e "  ${GREEN}backup${NC}     Write a Postgres backup dump"
   echo -e "  ${GREEN}restore${NC}    Restore a Postgres backup dump"
   echo -e "  ${GREEN}upgrade${NC}    Pull/build, migrate, restart, and run doctor"
+  echo -e "  ${GREEN}publish${NC}    Bind Caddy publicly after first-owner setup"
   echo -e "  ${GREEN}smoke${NC}      Run the deployment smoke test"
   echo -e "  ${GREEN}down${NC}       Stop the Compose stack"
   echo -e "  ${GREEN}native${NC}     Run the advanced native/systemd deploy script"
@@ -2391,6 +2455,62 @@ deploy_up() {
   if [ "$doctor" = "1" ]; then
     "$ROOT/deploy/scripts/doctor.sh"
   fi
+  if [ "$(deploy_env_value ILLO_PUBLIC_BIND)" != "0.0.0.0" ]; then
+    local private_port
+    private_port="$(deploy_env_value ILLO_PRIVATE_HTTP_PORT)"
+    private_port="${private_port:-8080}"
+    dim ""
+    dim "First boot is private. From your workstation, run:"
+    dim "  ssh -L ${private_port}:127.0.0.1:${private_port} <ssh-user>@<server>"
+    dim "Then open: http://localhost:${private_port}"
+    dim "After creating the owner account, run: ./illo deploy publish"
+  fi
+}
+
+deploy_publish() {
+  local force=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --force)
+        force=1
+        shift
+        ;;
+      -h|--help)
+        echo "Usage: ./illo deploy publish [--force]"
+        echo
+        echo "Publishes Caddy on 0.0.0.0:80/443 after first-owner setup."
+        return 0
+        ;;
+      *)
+        err "Unknown deploy publish option: $1"
+        return 2
+        ;;
+    esac
+  done
+
+  deploy_require_env_file || return 1
+  deploy_ensure_docker || return 1
+
+  local user_count
+  user_count="$(deploy_compose exec -T postgres psql -U "$(deploy_env_value DB_USER)" -d "$(deploy_env_value DB_NAME)" -tAc "SELECT count(*) FROM users;" 2>/dev/null | tr -d '[:space:]' || true)"
+  if ! [[ "$user_count" =~ ^[0-9]+$ ]] && [ "$force" != "1" ]; then
+    err "Could not verify whether an owner account exists."
+    dim "Make sure the Compose stack is running, create the owner over the SSH tunnel, then rerun:"
+    dim "  ./illo deploy publish"
+    dim "Use --force only if you intentionally want public first-user setup."
+    return 1
+  fi
+  if [ "$user_count" = "0" ] && [ "$force" != "1" ]; then
+    err "Refusing to publish before an owner account exists."
+    dim "Use the SSH tunnel first-boot flow, create the owner account, then rerun:"
+    dim "  ./illo deploy publish"
+    dim "Use --force only if you intentionally want public first-user setup."
+    return 1
+  fi
+
+  deploy_set_env_value ILLO_PUBLIC_BIND "0.0.0.0"
+  deploy_compose up -d caddy || return 1
+  info "Caddy is now configured to bind public HTTP/HTTPS. Make sure DNS and firewall rules allow ports 80 and 443."
 }
 
 deploy_command() {
@@ -2425,6 +2545,9 @@ deploy_command() {
       ;;
     upgrade)
       "$ROOT/deploy/scripts/upgrade.sh" "$@"
+      ;;
+    publish)
+      deploy_publish "$@"
       ;;
     smoke)
       "$ROOT/deploy/scripts/smoke-test.sh" "$@"

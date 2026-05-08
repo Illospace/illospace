@@ -24,7 +24,8 @@ Prerequisites on the server:
 
 - Linux VM with DNS pointed at the server
 - Docker Engine with Docker Compose v2
-- ports `80` and `443` open
+- SSH access for private first boot
+- ports `80` and `443` ready to open after the owner account exists
 
 From the repository root:
 
@@ -43,7 +44,25 @@ Start the stack:
 ./illo deploy up
 ```
 
-Open the URL from `ILLO_PUBLIC_URL`.
+Fresh installs are private by default. From your workstation:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>
+```
+
+Open `http://localhost:8080`, create the owner account, and add provider
+credentials in System/Access.
+
+Publish the public HTTPS route only after the owner exists:
+
+```bash
+./illo deploy publish
+```
+
+For a private-only install, skip `publish` and keep using the SSH tunnel or
+your own private network.
+
+Then open the URL from `ILLO_PUBLIC_URL`.
 
 ## Local Image Fallback
 
