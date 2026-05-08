@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
@@ -569,7 +570,7 @@ class TestWorkerManager:
              patch("subprocess.Popen", return_value=fake_popen) as mock_popen:
             assert mgr.start_worker("embedding") is True
 
-        assert "illo-brain" in mock_popen.call_args.kwargs["cwd"]
+        assert Path(mock_popen.call_args.kwargs["cwd"]).resolve() == Path(__file__).resolve().parents[1]
 
     def test_start_lower_priority_worker_does_not_evict_embedding(self):
         from brain.platform.gpu.worker_manager import WorkerManager

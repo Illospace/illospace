@@ -38,7 +38,11 @@ INTRO_RUN_SETTLED_STATUSES = {
     RunStatus.COMPLETED.value,
 }
 
-INTRO_PROMPT = "Introduce yourself to this new user and say how you can help them."
+INTRO_PROMPT = (
+    "Introduce yourself to this new user. Mention that Illo works well solo "
+    "for personal AI work, and also works as a shared workspace when teammates "
+    "join. Help them continue setup by explaining the next useful steps."
+)
 
 
 def _intro_ref(user_id: str) -> str:

@@ -252,13 +252,13 @@ def get_pending_users(org_id: str) -> list[dict]:
 
 
 def approve_user(user_id: str, approver_id: str) -> bool:
-    """Approve a user. Only owners can approve. Returns True if approved."""
+    """Approve a pending user in the approver's org."""
     with UnitOfWork() as uow:
         approver = uow.team.get_by_id(approver_id)
-        if not approver or approver.role != "owner":
+        if not approver or not approver.approved:
             return False
         user = uow.team.get_by_id(user_id)
-        if not user or user.approved:
+        if not user or user.approved or str(user.org_id) != str(approver.org_id):
             return False
         user.approved = True
         return True
@@ -271,7 +271,7 @@ def reject_user(user_id: str, approver_id: str) -> bool:
         if not approver or approver.role != "owner":
             return False
         user = uow.team.get_by_id(user_id)
-        if not user or user.approved:
+        if not user or user.approved or str(user.org_id) != str(approver.org_id):
             return False
         uow.session.delete(user)
         return True
