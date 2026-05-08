@@ -11,6 +11,7 @@
     apiKey,
     openaiEmbedderApiKey,
     geminiApiKey,
+    oauthUrl,
     oauthCallback,
     oauthPending,
     oauthCallbackAvailable,
@@ -38,6 +39,7 @@
     apiKey: string;
     openaiEmbedderApiKey: string;
     geminiApiKey: string;
+    oauthUrl: string;
     oauthCallback: string;
     oauthPending: boolean;
     oauthCallbackAvailable: boolean;
@@ -169,6 +171,11 @@
     </div>
 
     {#if showManualCallback}
+      {#if oauthUrl}
+        <a class="oauth-sign-in-link" href={oauthUrl} target="_blank" rel="noreferrer">
+          Open OpenAI sign-in
+        </a>
+      {/if}
       <div class="callback-row">
         <label for="openai-callback">Callback URL</label>
         <input
@@ -268,6 +275,27 @@
     color: var(--constellation-text-muted);
     font-size: var(--constellation-type-body-sm);
     line-height: 1.35;
+  }
+
+  .oauth-sign-in-link {
+    display: inline-flex;
+    justify-self: start;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--constellation-control-button-secondary-border);
+    border-radius: 8px;
+    background: var(--constellation-button-secondary-background);
+    color: var(--constellation-control-button-secondary-text);
+    font-size: var(--constellation-type-body-sm);
+    font-weight: 650;
+    text-decoration: none;
+  }
+
+  .oauth-sign-in-link:focus-visible {
+    outline: 2px solid var(--constellation-control-focus-ring);
+    outline-offset: 2px;
   }
 
   input {

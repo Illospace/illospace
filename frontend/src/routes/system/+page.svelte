@@ -200,27 +200,29 @@
       oauthState = result.state || '';
       oauthCallbackAvailable = result.callback_available ?? true;
       oauthCallbackMode = result.callback_mode || 'local_bridge';
+      let openedOAuthWindow = false;
       if (oauthUrl && typeof window !== 'undefined') {
         const popup = window.open('about:blank', 'illo-openai-oauth', 'popup,width=540,height=760');
-        if (!popup) {
-          window.location.assign(oauthUrl);
-          return;
+        if (popup) {
+          popup.location.href = oauthUrl;
+          popup.focus();
+          openedOAuthWindow = true;
         }
-        popup.location.href = oauthUrl;
-        popup.focus();
       }
       notice = oauthCallbackAvailable
         ? {
             tone: 'info',
-            title: 'Codex sign-in opened.',
+            title: openedOAuthWindow ? 'Codex sign-in opened.' : 'Codex sign-in ready.',
             detail:
               oauthCallbackMode === 'server'
                 ? 'Finish in the OpenAI window. It should return to this Illo server automatically; paste the callback URL below if it does not.'
-                : 'Finish in the OpenAI window. This page should update automatically; paste the callback URL below if it does not.',
+                : openedOAuthWindow
+                  ? 'Finish in the OpenAI window. This page should update automatically; paste the callback URL below if it does not.'
+                  : 'Open OpenAI sign-in below. This page should update automatically; paste the callback URL below if it does not.',
           }
         : {
             tone: 'warning',
-            title: 'Codex sign-in opened.',
+            title: openedOAuthWindow ? 'Codex sign-in opened.' : 'Codex sign-in ready.',
             detail: result.callback_detail || 'The automatic callback bridge is unavailable. Use the manual callback fallback if the window cannot return here.',
           };
     } catch (error) {
@@ -724,6 +726,7 @@
           {apiKey}
           {openaiEmbedderApiKey}
           {geminiApiKey}
+          {oauthUrl}
           {oauthCallback}
           oauthPending={Boolean(oauthUrl)}
           {oauthCallbackAvailable}
