@@ -693,18 +693,15 @@
     gap: 8px;
   }
 
-  .connector-tabs {
+  .connector-view-header {
     display: flex;
-    gap: 2px;
-    margin-bottom: 0;
-    padding: 3px;
-    border: 1px solid var(--project-context-tab-track-border);
-    border-radius: 10px;
-    background: var(--project-context-tab-track-background);
-    overflow-x: auto;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 30px;
   }
 
-  .connector-tabs button,
+  .connector-back-button,
   .project-context-secondary,
   .project-context-primary,
   .github-connect-row button,
@@ -724,18 +721,23 @@
     cursor: pointer;
   }
 
-  .connector-tabs button {
-    flex: 1 0 auto;
+  .connector-back-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     min-height: 28px;
-    border: 0;
-    border-radius: 7px;
-    padding: 6px 8px;
-    font-size: 11px;
+    padding: 6px 9px 6px 7px;
   }
 
-  .connector-tabs button.active {
-    background: var(--project-context-tab-active-background);
-    color: var(--project-context-tab-active-text);
+  .connector-view-title {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--project-context-field-value);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .project-context-primary {
@@ -750,7 +752,9 @@
   .github-repo-search-control button:disabled,
   .github-token-row button:disabled,
   .github-save-row button:disabled,
-  .github-search-row button:disabled {
+  .github-search-row button:disabled,
+  .local-drop-zone:disabled,
+  .local-picker-menu button:disabled {
     cursor: not-allowed;
     opacity: 0.48;
   }
@@ -798,19 +802,53 @@
     background: var(--project-context-drop-active-background);
   }
 
+  .local-picker-menu {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    padding: 6px;
+    border: 1px solid var(--project-context-repo-menu-border);
+    border-radius: 10px;
+    background: var(--project-context-repo-menu-background);
+  }
+
+  .local-picker-menu button {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    min-height: 42px;
+    box-sizing: border-box;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 7px 8px;
+    background: transparent;
+    color: var(--project-context-card-text);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .local-picker-menu button:hover {
+    border-color: var(--project-context-repo-option-hover-border);
+    background: var(--project-context-repo-option-hover-background);
+  }
+
   .project-connector-card {
     justify-content: flex-start;
   }
 
+  .project-connector-card-copy,
   .project-connector-card span,
-  .local-drop-zone span {
+  .local-drop-zone span,
+  .local-picker-menu span {
     display: grid;
     gap: 3px;
     min-width: 0;
   }
 
   .project-connector-card strong,
-  .local-drop-zone strong {
+  .local-drop-zone strong,
+  .local-picker-menu strong {
     overflow: hidden;
     text-overflow: ellipsis;
     font-size: 12px;
@@ -818,12 +856,20 @@
   }
 
   .project-connector-card small,
-  .local-drop-zone small {
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .local-drop-zone small,
+  .local-picker-menu small {
+    overflow: visible;
+    text-overflow: clip;
     color: var(--project-context-card-meta);
     font-size: 11px;
-    white-space: nowrap;
+    line-height: 1.25;
+    white-space: normal;
+  }
+
+  .project-connector-card-caret {
+    margin-left: auto;
+    color: var(--project-context-card-meta);
+    flex: 0 0 auto;
   }
 
   .connector-panel {
@@ -1057,7 +1103,8 @@
     .github-repo-select-row,
     .github-token-row,
     .github-save-row,
-    .github-search-row {
+    .github-search-row,
+    .local-picker-menu {
       grid-template-columns: 1fr;
       display: grid;
     }

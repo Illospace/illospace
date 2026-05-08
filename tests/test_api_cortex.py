@@ -1540,6 +1540,25 @@ async def test_project_context_local_upload_keeps_duplicate_names_distinct(clien
 
 
 @pytest.mark.asyncio
+async def test_project_context_local_upload_accepts_binary_documents(client, tmp_path, monkeypatch):
+    from brain.app.api.routers.cortex import _project_context as pc_mod
+
+    monkeypatch.setattr(pc_mod, "UPLOAD_DIR", tmp_path)
+    content = b"%PDF-1.7\x00binary project context"
+    resp = await client.post(
+        "/api/cortex/project-context/local-files",
+        data={"relative_paths": "docs/karoid_ai.pdf"},
+        files={"files": ("karoid_ai.pdf", content, "application/pdf")},
+    )
+
+    assert resp.status_code == 200
+    uploaded = resp.json()["files"][0]
+    assert uploaded["relative_path"] == "docs/karoid_ai.pdf"
+    assert uploaded["mime"] == "application/pdf"
+    assert Path(uploaded["storage_path"]).read_bytes() == content
+
+
+@pytest.mark.asyncio
 async def test_attach_idea_project_context_persists_snapshot_scope_and_env_binding(client, mock_session_factory):
     idea = _make_idea(id="idea-1", org_id="org-1")
     mock_session_factory.get.return_value = idea
