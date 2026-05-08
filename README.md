@@ -52,6 +52,22 @@ have not pinned `DB_PORT`, it can choose an alternate port automatically.
 You will still need at least one model provider key, local model, or
 database-backed credential for LLM-backed agent work.
 
+## Team server deployment
+
+The recommended production path is Docker Compose on a single Linux VM with
+Caddy, Postgres + pgvector, the FastAPI API, the static web app, the AgentRun
+worker, and the scheduler.
+
+```bash
+git clone https://github.com/Illospace/illospace.git
+cd illospace
+./illo deploy init --domain team.example.com --email admin@example.com
+./illo deploy up
+```
+
+See [docs/server-setup.md](docs/server-setup.md) for the exact server runbook,
+backups, restore, upgrades, and troubleshooting.
+
 ## Which command should I run?
 
 Use `./illo` for a new checkout, local development, and the first self-hosted
@@ -64,6 +80,10 @@ the database without starting the app.
 Use `./illo start` only for production-style self-hosting. It builds the static
 frontend, starts the production API on port `8000`, and expects the standalone
 worker/systemd services to own background AgentRuns.
+
+Use `./illo deploy` for team servers. It manages the recommended Docker Compose
+deployment, including secret initialization, startup, doctor checks, backups,
+restore, upgrades, logs, and status.
 
 ## Configuration and secrets
 
@@ -96,6 +116,8 @@ configuration contract.
 ./illo              # Recommended for new users; auto-setup, then local preview
 ./illo setup        # Setup only
 ./illo start        # Production-style API mode for self-hosted service installs
+./illo deploy init  # Initialize the recommended Compose team-server deploy
+./illo deploy up    # Start the Compose team-server deploy and run doctor
 ./illo doctor       # Diagnose config and common setup issues
 ./illo uninstall    # Remove local runtime/config/local DB and reset next setup
 ./illo test         # Fast tests
