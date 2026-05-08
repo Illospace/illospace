@@ -378,30 +378,30 @@
   --constellation-presence-seed-user-owner-accent-strength: 18%;
 
   --constellation-workspace-theme-background:
-    radial-gradient(ellipse 66% 44% at 20% 18%, rgba(83, 116, 170, 0.16), transparent 68%),
-    radial-gradient(ellipse 58% 40% at 80% 22%, rgba(112, 87, 150, 0.1), transparent 68%),
-    radial-gradient(ellipse 74% 52% at 50% 76%, rgba(48, 104, 108, 0.075), transparent 72%),
-    radial-gradient(ellipse 88% 64% at 46% 46%, rgba(255, 255, 255, 0.028), transparent 78%),
-    linear-gradient(180deg, #0e1523 0%, #121929 48%, #0b111d 100%);
-  --constellation-workspace-theme-star-color-a: rgba(240, 240, 250, 0.38);
-  --constellation-workspace-theme-star-color-b: rgba(141, 183, 255, 0.22);
-  --constellation-workspace-theme-star-color-c: rgba(213, 161, 77, 0.16);
-  --constellation-workspace-theme-star-opacity: 0.3;
-  --constellation-workspace-theme-deep-field-opacity: 0.86;
+    radial-gradient(ellipse 54% 32% at 18% 16%, rgba(77, 115, 190, 0.13), transparent 70%),
+    radial-gradient(ellipse 46% 28% at 80% 20%, rgba(118, 84, 162, 0.09), transparent 72%),
+    radial-gradient(ellipse 62% 36% at 52% 82%, rgba(36, 100, 102, 0.07), transparent 76%),
+    radial-gradient(ellipse 92% 68% at 50% 46%, rgba(7, 12, 24, 0.24), transparent 68%),
+    linear-gradient(180deg, #02050c 0%, #07101d 46%, #02040a 100%);
+  --constellation-workspace-theme-star-color-a: rgba(240, 240, 250, 0.26);
+  --constellation-workspace-theme-star-color-b: rgba(122, 177, 255, 0.24);
+  --constellation-workspace-theme-star-color-c: rgba(255, 208, 154, 0.14);
+  --constellation-workspace-theme-star-opacity: 0.2;
+  --constellation-workspace-theme-deep-field-opacity: 0.96;
   --constellation-workspace-theme-deep-field-nebula:
-    radial-gradient(ellipse 64% 24% at 18% 26%, rgba(141, 183, 255, 0.085), transparent 72%),
-    radial-gradient(ellipse 52% 22% at 76% 22%, rgba(173, 126, 210, 0.07), transparent 72%),
-    radial-gradient(ellipse 74% 28% at 52% 80%, rgba(87, 207, 160, 0.042), transparent 76%),
-    radial-gradient(ellipse 84% 32% at 42% 50%, rgba(240, 240, 250, 0.026), transparent 78%);
+    radial-gradient(ellipse 58% 20% at 16% 28%, rgba(115, 168, 255, 0.105), transparent 74%),
+    radial-gradient(ellipse 46% 18% at 78% 24%, rgba(176, 124, 226, 0.078), transparent 74%),
+    radial-gradient(ellipse 70% 24% at 50% 82%, rgba(62, 191, 157, 0.048), transparent 78%),
+    radial-gradient(ellipse 80% 28% at 42% 50%, rgba(240, 240, 250, 0.022), transparent 80%);
   --constellation-workspace-theme-deep-field-stars:
-    radial-gradient(circle at center, rgba(240, 240, 250, 0.66) 0 0.68px, transparent 0.9px),
-    radial-gradient(circle at center, rgba(141, 183, 255, 0.38) 0 0.82px, transparent 1.02px),
-    radial-gradient(circle at center, rgba(255, 225, 189, 0.24) 0 0.76px, transparent 1px),
-    radial-gradient(circle at center, rgba(240, 240, 250, 0.18) 0 1.1px, transparent 1.35px);
+    radial-gradient(circle at center, rgba(240, 240, 250, 0.72) 0 0.58px, transparent 0.88px),
+    radial-gradient(circle at center, rgba(122, 177, 255, 0.44) 0 0.78px, transparent 1.04px),
+    radial-gradient(circle at center, rgba(255, 218, 176, 0.28) 0 0.72px, transparent 1px),
+    radial-gradient(circle at center, rgba(240, 240, 250, 0.16) 0 1.05px, transparent 1.38px);
   --constellation-workspace-theme-deep-field-dust:
-    radial-gradient(ellipse 56% 18% at 18% 30%, rgba(141, 183, 255, 0.11), transparent 74%),
-    radial-gradient(ellipse 44% 16% at 74% 24%, rgba(213, 161, 77, 0.068), transparent 72%),
-    radial-gradient(ellipse 62% 18% at 52% 78%, rgba(240, 240, 250, 0.05), transparent 76%);
+    radial-gradient(ellipse 52% 16% at 18% 30%, rgba(122, 177, 255, 0.12), transparent 76%),
+    radial-gradient(ellipse 42% 14% at 74% 24%, rgba(218, 157, 89, 0.064), transparent 74%),
+    radial-gradient(ellipse 58% 16% at 52% 78%, rgba(240, 240, 250, 0.042), transparent 78%);
   --constellation-workspace-theme-scene-glow:
     radial-gradient(ellipse 76% 52% at 28% 24%, rgba(141, 183, 255, 0.14), transparent 76%),
     radial-gradient(ellipse 56% 42% at 60% 34%, rgba(240, 240, 250, 0.05), transparent 74%);

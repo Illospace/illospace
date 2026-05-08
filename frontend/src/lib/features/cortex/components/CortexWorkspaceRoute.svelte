@@ -1232,7 +1232,7 @@
   }
 
   :global(.constellation-workspace-backdrop.cortex-workspace-backdrop.is-direct-thread) {
-    --constellation-workspace-theme-deep-field-opacity: 0;
+    --constellation-workspace-theme-deep-field-opacity: 0.82;
   }
 
   .workspace-composer-shell {
