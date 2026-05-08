@@ -136,4 +136,6 @@ def test_illo_exposes_dev_start_and_deploy_aliases():
     assert "dev-start" in content
     assert "deploy" in content
     assert "dev-start|dev|development)" in content
-    assert 'exec "$ROOT/ops/deploy.sh" "${@:2}"' in content
+    assert 'deploy_command "${@:2}"' in content
+    assert "native)" in content
+    assert '"$ROOT/ops/deploy.sh" "$@"' in content
