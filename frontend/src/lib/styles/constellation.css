@@ -445,6 +445,8 @@
   --constellation-data-table-empty: rgba(240, 240, 250, 0.5);
 
   --constellation-thread-header-title: #ffffff;
+  --constellation-thread-header-status-idle-dot: rgba(240, 240, 250, 0.34);
+  --constellation-thread-header-status-idle-ring: rgba(240, 240, 250, 0.12);
   --constellation-thread-header-activity-text: rgba(240, 240, 250, 0.42);
   --constellation-thread-header-activity-dot: rgba(240, 240, 250, 0.34);
   --constellation-thread-header-activity-ring: rgba(240, 240, 250, 0.12);
@@ -980,6 +982,8 @@
   --constellation-data-table-empty: rgba(82, 98, 111, 0.74);
 
   --constellation-thread-header-title: rgba(18, 27, 36, 0.96);
+  --constellation-thread-header-status-idle-dot: rgba(82, 98, 111, 0.34);
+  --constellation-thread-header-status-idle-ring: rgba(82, 98, 111, 0.14);
   --constellation-thread-header-activity-text: rgba(82, 98, 111, 0.58);
   --constellation-thread-header-activity-dot: rgba(82, 98, 111, 0.34);
   --constellation-thread-header-activity-ring: rgba(82, 98, 111, 0.14);

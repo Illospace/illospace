@@ -86,6 +86,7 @@
     visibleThreadStreamItems,
   } from '$lib/features/threads/domain/threadStreamAdapter';
   import type {
+    CortexThreadStageHeaderStatusState,
     CortexThreadStageTranscriptItem,
   } from '$lib/features/threads/domain/threadTranscriptAdapter';
 
@@ -174,6 +175,11 @@
   const statusLabel = $derived(
     STATUS_LABELS[idea?.status ?? 'idle'] ?? (idea?.status ? idea.status.replaceAll('_', ' ') : 'Idle'),
   );
+  const headerStatusState = $derived.by((): CortexThreadStageHeaderStatusState => {
+    if (runInfo || idea?.status === 'working') return 'working';
+    if (idea?.status === 'done') return 'unread';
+    return 'idle';
+  });
   const dockLayoutMaxWidth = $derived.by(() => {
     if (!browserOpen || threadStageContentWidth <= 0) return dockMaxWidth;
 
@@ -249,6 +255,7 @@
     return {
       title: ideaDisplayTitle(selectedIdea),
       statusLabel,
+      statusState: headerStatusState,
       panelOpen: browserOpen,
       onTogglePanel: () => {
         if (!browserOpen) void workspaceApps.load({ silent: true });

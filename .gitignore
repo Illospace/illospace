@@ -63,6 +63,7 @@ brain/uploads/
 
 # Optional private local tool notes
 /TOOLS.md
+/doc/
 
 # Internal historical content not shipped in the public repo
 /docs/archive/

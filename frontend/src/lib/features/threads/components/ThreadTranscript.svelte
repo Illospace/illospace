@@ -6,6 +6,7 @@
     ConstellationIconButton,
     ConstellationPill,
     ConstellationPresenceSeed,
+    ConstellationSignalStatusIndicator,
   } from '$lib/components/constellation';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
   import type { ConstellationIconName } from '$lib/components/constellation/ConstellationIcon.svelte';
@@ -125,20 +126,23 @@
     return item.status === 'queued' || item.status === 'starting' || item.status === 'running';
   }
 
-  function isHeaderWorking() {
+  function getHeaderStatusState() {
+    if (header?.statusState) return header.statusState;
+
     const status = header?.statusLabel?.toLowerCase() ?? '';
     const runStatus = header?.runStatus?.toLowerCase() ?? '';
-    return status.includes('working') || ['queued', 'starting', 'running'].some((value) => runStatus.includes(value));
+    if (status.includes('working') || ['queued', 'starting', 'running'].some((value) => runStatus.includes(value))) {
+      return 'working';
+    }
+    if (status.includes('unread') || status.includes('done')) return 'unread';
+    return 'idle';
   }
 
-  function getHeaderActivityLabel() {
-    return isHeaderWorking() ? 'Working' : 'Idle';
-  }
-
-  function getHeaderActivityClass() {
-    return ['thread-header-activity-cue', isHeaderWorking() ? 'is-working' : '']
-      .filter(Boolean)
-      .join(' ');
+  function getHeaderStatusLabel() {
+    const state = getHeaderStatusState();
+    if (state === 'working') return 'Illo is working';
+    if (state === 'unread') return 'Unread thread';
+    return 'Idle thread';
   }
 
   function isRunExpanded(item: CortexThreadStageRunItem, index: number) {
@@ -443,17 +447,12 @@
   {:else if header}
     <header class="thread-panel-header thread-column">
       <div class="thread-header-title-row">
-        <span class="thread-header-title-dot"></span>
+        <ConstellationSignalStatusIndicator
+          state={getHeaderStatusState()}
+          label={getHeaderStatusLabel()}
+          className="thread-header-status-indicator"
+        />
         <h1 class="thread-header-title" title={header.title}>{header.title}</h1>
-
-        <span
-          class={getHeaderActivityClass()}
-          aria-label={`Illo is ${getHeaderActivityLabel().toLowerCase()}`}
-          title={`Illo is ${getHeaderActivityLabel().toLowerCase()}`}
-        >
-          <span class="thread-header-activity-dot" aria-hidden="true"></span>
-          <span>{getHeaderActivityLabel()}</span>
-        </span>
 
         {#if header.onToggleSecondaryPanel || header.onTogglePanel}
           <div class="thread-header-panel-toggle-group">
@@ -1361,13 +1360,10 @@
     min-width: 0;
   }
 
-  .thread-header-title-dot {
-    width: 7px;
-    height: 7px;
-    flex-shrink: 0;
-    border-radius: var(--thread-radius-pill);
-    background: var(--thread-accent, var(--thread-color-spectral));
-    box-shadow: 0 0 10px rgba(var(--thread-accent-rgb, 141, 183, 255), 0.28);
+  .thread-header-title-row :global(.thread-header-status-indicator) {
+    --constellation-signal-status-color: var(--thread-accent, var(--thread-color-spectral));
+    --constellation-signal-status-idle-color: var(--constellation-thread-header-status-idle-dot);
+    --constellation-signal-status-idle-ring: var(--constellation-thread-header-status-idle-ring);
   }
 
   .thread-header-title {
@@ -1383,39 +1379,6 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .thread-header-activity-cue {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    flex: 0 0 auto;
-    min-width: 0;
-    color: var(--constellation-thread-header-activity-text);
-    font-family: var(--thread-font-mono);
-    font-size: 9px;
-    letter-spacing: 0.12em;
-    line-height: 1;
-    text-transform: uppercase;
-  }
-
-  .thread-header-activity-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: var(--thread-radius-pill);
-    background: var(--constellation-thread-header-activity-dot);
-    box-shadow: 0 0 0 1px var(--constellation-thread-header-activity-ring);
-  }
-
-  .thread-header-activity-cue.is-working {
-    color: var(--constellation-thread-header-working-text);
-  }
-
-  .thread-header-activity-cue.is-working .thread-header-activity-dot {
-    background: var(--constellation-thread-header-working-dot);
-    box-shadow:
-      0 0 0 1px var(--constellation-thread-header-working-ring),
-      0 0 12px var(--constellation-thread-header-working-glow);
   }
 
   .thread-header-panel-toggle-group {
