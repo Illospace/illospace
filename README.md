@@ -24,33 +24,52 @@ for that kind of human-agent teamwork.
 - **Agent runtime tooling** for model invocation, workspace tools, skill bundles, and recurring cycles.
 - **Optional local embedding/GPU workers** for lower-latency semantic retrieval.
 
-## Quick start
+## Local setup
 
-Prerequisites: Python 3.11+, Node.js 22+, and one local database path: Docker,
-Podman, or PostgreSQL 16+ server tools with pgvector.
+Use this path when you want to run Illospace on your own machine for local
+development, evaluation, or a personal preview.
+
+Prerequisites:
+
+- Python 3.11+
+- Node.js 22+
+- one local database path: Docker, Podman, or PostgreSQL 16+ server tools with
+  pgvector
 
 ```bash
 git clone https://github.com/Illospace/illospace.git
 cd illospace
-./illo doctor
 ./illo
 ```
 
 For a first install, `./illo` is the command to run. It performs setup when
-needed, then starts the local preview server:
+needed, prepares local secrets, syncs Python/frontend dependencies, starts a
+local pgvector database when needed, and then starts the local preview server:
 
 ```text
 API:       http://localhost:8000  (docs at /api/docs)
 Dashboard: http://localhost:5173
 ```
 
-The launcher starts a local pgvector database when no configured Postgres is
-reachable. It prefers a Docker/Podman pgvector container, but can also manage a
-repo-local PostgreSQL runtime under `.runtime/postgres` when server tools and
-pgvector are installed. If another local Postgres already owns `5432` and you
-have not pinned `DB_PORT`, it can choose an alternate port automatically.
-You will still need at least one model provider key, local model, or
-database-backed credential for LLM-backed agent work.
+After the app opens, add model/provider credentials from the System or
+onboarding screens. Illospace can boot without provider keys, but LLM-backed
+agent work needs at least one provider key, local model, or database-backed
+credential.
+
+Useful local commands:
+
+```bash
+./illo doctor     # Diagnose local setup and configuration
+./illo setup      # Prepare dependencies and database without starting the app
+./illo test       # Run the fast test suite
+./illo uninstall  # Remove local runtime/config/local DB and reset next setup
+```
+
+The launcher prefers a Docker/Podman pgvector container for local storage, but
+can also manage a repo-local PostgreSQL runtime under `.runtime/postgres` when
+server tools and pgvector are installed. If another local Postgres already owns
+`5432` and you have not pinned `DB_PORT`, it can choose an alternate port
+automatically.
 
 ## Team server deployment
 
