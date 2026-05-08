@@ -1,0 +1,38 @@
+name: Deployment Smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "brain/**"
+      - "frontend/**"
+      - "deploy/**"
+      - "requirements.txt"
+      - "requirements-production.txt"
+      - "pyproject.toml"
+      - "alembic.ini"
+      - ".github/workflows/deployment-smoke.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deployment-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compose-smoke:
+    name: Compose boot smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run Compose smoke test
+        run: deploy/scripts/smoke-test.sh --build
