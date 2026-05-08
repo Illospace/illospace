@@ -19,7 +19,10 @@ def test_remote_deploy_defaults_to_streaming_readiness():
     assert 'cd "$PWD"' not in content
     assert "git checkout -f -B main origin/main" in content
     assert "git reset --hard origin/main" in content
-    assert "source venv/bin/activate && exec ./ops/deploy.sh" in content
+    assert "source venv/bin/activate" not in content
+    assert 'DEPLOY_COMMAND="${ILLO_DEPLOY_COMMAND:-deploy/scripts/upgrade.sh --build --no-pull}"' in content
+    assert "--command CMD" in content
+    assert 'bash -lc "\\$deploy_command"' in content
     assert "Deploy process finished; waiting for readiness" in content
     assert 'if [ "\\$deploy_done" = "0" ] && ! kill -0 "\\$deploy_pid"' in content
     assert "exec ./illo start" not in content

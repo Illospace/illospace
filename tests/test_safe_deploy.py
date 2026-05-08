@@ -138,8 +138,12 @@ def test_illo_exposes_dev_start_and_deploy_aliases():
     assert "deploy" in content
     assert "dev-start|dev|development)" in content
     assert 'deploy_command "${@:2}"' in content
+    assert '"$ROOT/deploy/scripts/upgrade.sh" "${@:2}"' in content
+    assert 'deploy_compose ps "${@:2}"' in content
+    assert '"$ROOT/deploy/scripts/doctor.sh" "${@:2}"' in content
     assert "native)" in content
-    assert '"$ROOT/ops/deploy.sh" "$@"' in content
+    assert 'deploy_command native "${@:2}"' in content
+    assert '"$ROOT/ops/deploy.sh" "${@:2}"' in content
 
 
 def test_compose_deploy_stays_private_without_builtin_public_ingress():

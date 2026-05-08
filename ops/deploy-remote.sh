@@ -10,8 +10,7 @@
 #   git fetch origin main
 #   git checkout -f -B main origin/main
 #   git reset --hard origin/main
-#   source venv/bin/activate
-#   ./ops/deploy.sh
+#   deploy/scripts/upgrade.sh --build --no-pull
 #
 # Passwords are intentionally not stored here; SSH will prompt when needed.
 set -euo pipefail
@@ -21,6 +20,7 @@ REMOTE_HOST="${ILLO_DEPLOY_HOST:-}"
 REMOTE_DIR="${ILLO_DEPLOY_DIR:-illo-brain}"
 TRANSPORT="${ILLO_DEPLOY_TRANSPORT:-ssh}"
 MODE="${ILLO_DEPLOY_MODE:-stream}"
+DEPLOY_COMMAND="${ILLO_DEPLOY_COMMAND:-deploy/scripts/upgrade.sh --build --no-pull}"
 WAIT_FOR_HEALTH="1"
 HEALTH_TIMEOUT_SECONDS="${ILLO_DEPLOY_HEALTH_TIMEOUT_SECONDS:-600}"
 HEALTH_URL="${ILLO_DEPLOY_HEALTH_URL:-http://127.0.0.1:8000/api/health/ready}"
@@ -43,12 +43,15 @@ Options:
                  Use plain ssh or tailscale ssh. Default: ssh.
   --health-url URL
                  Override readiness URL. Default: http://127.0.0.1:8000/api/health/ready
+  --command CMD  Override remote deploy command.
+                 Default: deploy/scripts/upgrade.sh --build --no-pull
   -h, --help     Show this help.
 
 Environment overrides:
   ILLO_DEPLOY_HOST, ILLO_DEPLOY_USER, ILLO_DEPLOY_DIR,
   ILLO_DEPLOY_TRANSPORT, ILLO_DEPLOY_MODE,
-  ILLO_DEPLOY_HEALTH_TIMEOUT_SECONDS, ILLO_DEPLOY_HEALTH_URL
+  ILLO_DEPLOY_HEALTH_TIMEOUT_SECONDS, ILLO_DEPLOY_HEALTH_URL,
+  ILLO_DEPLOY_COMMAND
 USAGE
 }
 
@@ -90,6 +93,10 @@ while [[ $# -gt 0 ]]; do
       HEALTH_URL="${2:?--health-url requires a value}"
       shift 2
       ;;
+    --command)
+      DEPLOY_COMMAND="${2:?--command requires a value}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -120,6 +127,7 @@ fi
 
 TARGET="${REMOTE_USER}@${REMOTE_HOST}"
 REMOTE_DIR_Q="$(printf '%q' "$REMOTE_DIR")"
+DEPLOY_COMMAND_Q="$(printf '%q' "$DEPLOY_COMMAND")"
 HEALTH_TIMEOUT_Q="$(printf '%q' "$HEALTH_TIMEOUT_SECONDS")"
 HEALTH_URL_Q="$(printf '%q' "$HEALTH_URL")"
 
@@ -149,13 +157,14 @@ echo "Deploying Illo Brain on $TARGET"
 echo "Remote checkout: $REMOTE_DIR"
 echo "Transport: $TRANSPORT"
 echo "Mode: $MODE"
+echo "Deploy command: $DEPLOY_COMMAND"
 if [[ "$MODE" != "attach" && "$WAIT_FOR_HEALTH" == "1" ]]; then
   echo "Readiness URL: $HEALTH_URL"
 fi
 echo
 
 if [[ "$MODE" == "attach" ]]; then
-  remote_cmd="set -euo pipefail; cd $REMOTE_DIR_Q; $(remote_sync_main_cmd); source venv/bin/activate; exec ./ops/deploy.sh"
+  remote_cmd="set -euo pipefail; cd $REMOTE_DIR_Q; $(remote_sync_main_cmd); deploy_command=$DEPLOY_COMMAND_Q; exec bash -lc \"\$deploy_command\""
   ssh_run "$remote_cmd"
   exit $?
 fi
@@ -164,16 +173,16 @@ remote_cmd=$(cat <<REMOTE
 set -euo pipefail
 cd $REMOTE_DIR_Q
 $(remote_sync_main_cmd)
-source venv/bin/activate
+deploy_command=$DEPLOY_COMMAND_Q
 mkdir -p logs
 log_path="\$PWD/logs/illo-remote-deploy.log"
 pid_path="\$PWD/logs/illo-remote-deploy.pid"
 health_url=$HEALTH_URL_Q
 health_timeout=$HEALTH_TIMEOUT_Q
 deploy_done=0
-echo "Starting ./ops/deploy.sh in the background..."
+echo "Starting \$deploy_command in the background..."
 : >"\$log_path"
-nohup bash -c 'source venv/bin/activate && exec ./ops/deploy.sh' >"\$log_path" 2>&1 < /dev/null &
+nohup bash -lc "\$deploy_command" >"\$log_path" 2>&1 < /dev/null &
 deploy_pid=\$!
 echo "\$deploy_pid" > "\$pid_path"
 echo "Remote deploy process: \$deploy_pid"
