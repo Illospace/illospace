@@ -27,15 +27,26 @@ Required server state:
 
 ## Install Commands
 
-Run these from the chosen install directory:
+For the default one-command install, run these from the chosen install
+directory:
 
 ```bash
 git clone https://github.com/Illospace/illospace.git
 cd illospace
+./illo deploy up
+```
+
+`deploy up` creates `deploy/compose/.env` with generated secrets when the file
+does not exist.
+
+If you want to inspect or edit bootstrap settings before first start, use the
+two-step form instead:
+
+```bash
 ./illo deploy init
 ```
 
-Edit `deploy/compose/.env`:
+Edit `deploy/compose/.env` if needed, then run `./illo deploy up`:
 
 - leave `ILLO_PUBLIC_URL=http://localhost:8080` for SSH-tunnel access, or set it
   to the operator's private network/reverse-proxy URL
@@ -45,12 +56,6 @@ Do not put model provider API keys in `deploy/compose/.env`. Production
 provider credentials should be added from the Illospace System/Access screens
 after first boot so they are encrypted with `VAULT_MASTER_KEY` and stored in
 Postgres.
-
-Start:
-
-```bash
-./illo deploy up
-```
 
 ## Private Access
 
@@ -145,8 +150,7 @@ If release images are not available yet:
 If image pull fails, build local images with:
 
 ```bash
-./illo deploy build
-./illo deploy up --no-pull
+./illo deploy up --build --no-pull
 ```
 
 If the SSH tunnel does not open the app:

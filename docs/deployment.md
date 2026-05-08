@@ -8,7 +8,6 @@ Use [server-setup.md](server-setup.md) for the exact runbook.
 ```bash
 git clone https://github.com/Illospace/illospace.git
 cd illospace
-./illo deploy init
 ./illo deploy up
 ```
 
@@ -20,16 +19,15 @@ Compose files and scripts in `deploy/`.
 
 ## Local Development
 
-Use the native launcher for local development:
+Use the native launcher for a local preview:
 
 ```bash
-./illo setup
 ./illo
 ```
 
 The launcher can start a local pgvector database, install Python/frontend
 dependencies, and prepare browser runtime support. `.env` remains optional for
-local overrides.
+local overrides. For frontend hot reload, run `./illo dev`.
 
 ## Native/Systemd Path
 

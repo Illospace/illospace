@@ -43,13 +43,14 @@ cd illospace
 ```
 
 For a first install, `./illo` is the command to run. It performs setup when
-needed, prepares local secrets, syncs Python/frontend dependencies, starts a
-local pgvector database when needed, and then starts the local preview server:
+needed, prepares local secrets, syncs dependencies, starts a local pgvector
+database when needed, builds the frontend, and then starts the native server:
 
 ```text
-API:       http://localhost:8000  (docs at /api/docs)
-Dashboard: http://localhost:5173
+App: http://localhost:8000  (API docs at /api/docs)
 ```
+
+For frontend hot reload while developing, run `./illo dev`.
 
 After the app opens, add model/provider credentials from the System or
 onboarding screens. Illospace can boot without provider keys, but LLM-backed
@@ -81,7 +82,6 @@ domain ingress for you.
 ```bash
 git clone https://github.com/Illospace/illospace.git
 cd illospace
-./illo deploy init
 ./illo deploy up
 ```
 
@@ -100,16 +100,21 @@ backups, restore, upgrades, and troubleshooting.
 
 ## Which command should I run?
 
-Use `./illo` for a new checkout, local development, and the first self-hosted
-preview. It owns the local runtime, auto-runs setup when needed, starts the API
-and dashboard, and keeps AgentRuns self-contained.
+Use `./illo` for a new checkout, native server runs, and the first self-hosted
+preview. It owns the native runtime, auto-runs setup when needed, builds the
+frontend, starts the API/dashboard on `localhost:8000`, and keeps AgentRuns
+self-contained.
+
+`./illo start` remains an alias for the same native server mode. Native mode
+binds to `127.0.0.1` by default; set `ILLO_API_HOST=0.0.0.0` only when you
+intentionally want direct network access and have your own firewall, tunnel, or
+reverse proxy in front of it.
+
+Use `./illo dev` when you are editing the frontend or backend locally and want
+the Vite dashboard on `localhost:5173`.
 
 Use `./illo setup` only when you want to install/sync dependencies and prepare
 the database without starting the app.
-
-Use `./illo start` only for production-style self-hosting. It builds the static
-frontend, starts the production API on port `8000`, and expects the standalone
-worker/systemd services to own background AgentRuns.
 
 Use `./illo deploy` for team servers. It manages the recommended Docker Compose
 deployment, including secret initialization, startup, doctor checks, backups,
@@ -122,9 +127,9 @@ restore, upgrades, logs, and status.
 - In production, add model/provider credentials from Illospace System/Access so
   they are encrypted and stored in Postgres. Environment provider keys remain a
   development fallback, not the recommended self-hosted server path.
-- `./illo setup` and `./illo start` create ignored checkout-local defaults for
-  `SECRET_KEY` and `VAULT_MASTER_KEY` in `.illo/runtime.env` when they are not
-  provided, so a self-hosted preview can boot cleanly.
+- `./illo setup` creates ignored checkout-local defaults for `SECRET_KEY` and
+  `VAULT_MASTER_KEY` in `.illo/runtime.env` when they are not provided, so a
+  self-hosted preview can boot cleanly.
 - Codex sign-in uses OpenAI's localhost callback. On a remote/self-hosted
   server, System opens the manual fallback automatically: finish sign-in, copy
   the final `localhost:1455/auth/callback?...` URL from the sign-in tab, and
@@ -147,14 +152,12 @@ configuration contract.
 
 ```bash
 ./illo              # Recommended for new users; auto-setup, then local preview
+./illo dev          # Development mode with frontend hot reload
 ./illo setup        # Setup only
-./illo start        # Production-style API mode for self-hosted service installs
-./illo deploy init  # Initialize the recommended Compose team-server deploy
-./illo deploy up    # Start the Compose team-server deploy and run doctor
+./illo deploy up    # Initialize/start the Compose team-server deploy and run doctor
 ./illo doctor       # Diagnose config and common setup issues
 ./illo uninstall    # Remove local runtime/config/local DB and reset next setup
 ./illo test         # Fast tests
-./illo build        # Build frontend only
 make test           # Fast pytest selection
 make test-all       # Full DB-backed suite via Docker
 ```

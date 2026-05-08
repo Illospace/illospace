@@ -9,6 +9,7 @@ EXAMPLE_FILE="$COMPOSE_DIR/.env.production.example"
 
 PUBLIC_URL=""
 DOMAIN=""
+PRINT_NEXT=1
 
 usage() {
   cat <<'EOF'
@@ -36,6 +37,10 @@ while [ "$#" -gt 0 ]; do
     --env-file)
       ENV_FILE="${2:-}"
       shift 2
+      ;;
+    --no-next)
+      PRINT_NEXT=0
+      shift
       ;;
     -h|--help)
       usage
@@ -155,6 +160,8 @@ if not value:
 PY
 
 echo
-echo "Next:"
-echo "  ./illo deploy up"
-echo "  ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>"
+if [ "$PRINT_NEXT" = "1" ]; then
+  echo "Next:"
+  echo "  ./illo deploy up"
+  echo "  ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>"
+fi
