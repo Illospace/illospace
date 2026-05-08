@@ -276,7 +276,7 @@
               <ConstellationGlyphIcon label="team" />
             </div>
             <p class="auth-pending-title">Your request to join {pendingWorkspaceName} is pending approval.</p>
-            <p class="auth-pending-copy">A workspace owner needs to approve your account before you can enter.</p>
+            <p class="auth-pending-copy">An active workspace member needs to approve your account before you can enter.</p>
             <ConstellationButton variant="secondary" onclick={handleLogout}>
               Sign out
             </ConstellationButton>
@@ -300,7 +300,7 @@
                   tone="info"
                   compact
                   title={`Joining ${joinOrg.name}`}
-                  description="Create your account to request access. A workspace owner will approve it."
+                  description="Create your account to request access. An active workspace member can approve it."
                 />
               {:else}
                 <p class="auth-context">

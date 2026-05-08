@@ -260,8 +260,12 @@
     return String(member.id) === currentUserId;
   }
 
-  function isOwner() {
-    return true;
+  function canApproveAccess() {
+    return Boolean(currentMember);
+  }
+
+  function canRejectAccess() {
+    return auth.user?.role === 'owner' || auth.user?.role === 'admin';
   }
 </script>
 
@@ -271,7 +275,7 @@
   subtitle={loading ? 'Loading roster, approvals, and recent collaboration.' : `${approvedMembers.length} active member${approvedMembers.length === 1 ? '' : 's'}${pendingMembers.length ? ` · ${pendingMembers.length} pending approval` : ''}`}
 >
   {#snippet actions()}
-    {#if isOwner()}
+    {#if canApproveAccess()}
       <ConstellationButton variant="primary" size="sm" onclick={copyInviteLink}>
         Invite member
       </ConstellationButton>
@@ -321,7 +325,7 @@
       <ConstellationSection
         eyebrow="Pending approval"
         title="Approval queue"
-        description="Owners can approve new access requests without leaving the shared workspace."
+        description="Any active workspace member can approve new access requests."
       >
         <div class="team-row-stack">
           {#each pendingMembers as member (member.id)}
@@ -329,7 +333,7 @@
               title={member.name}
               description={memberSubtitle(member)}
               tone="warning"
-              meta="Awaiting owner review"
+              meta="Awaiting member review"
             >
               {#snippet leading()}
                 <ConstellationPresenceSeed
@@ -344,7 +348,7 @@
               {/snippet}
 
               {#snippet actions()}
-                {#if isOwner()}
+                {#if canRejectAccess()}
                   <ConstellationButton
                     variant="quiet"
                     size="sm"
@@ -353,6 +357,8 @@
                   >
                     Reject
                   </ConstellationButton>
+                {/if}
+                {#if canApproveAccess()}
                   <ConstellationButton
                     variant="secondary"
                     size="sm"
