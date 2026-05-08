@@ -71,6 +71,12 @@ ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>
 Then open `http://localhost:8080`, create the owner account, and add provider
 credentials in System/Access.
 
+For OpenAI/Codex sign-in, the manual callback fallback is expected in the
+Compose path. OpenAI redirects to `localhost:1455` in your browser, but the API
+container cannot receive that workstation-local callback. Copy the final
+`localhost:1455/auth/callback?...` URL from the sign-in tab and paste it into
+the callback field in Illospace.
+
 For team-wide access, put your own reverse proxy, VPN, tunnel, or private
 network in front of `127.0.0.1:8080`, then update `ILLO_PUBLIC_URL` if browser
 users will not use `http://localhost:8080`.
