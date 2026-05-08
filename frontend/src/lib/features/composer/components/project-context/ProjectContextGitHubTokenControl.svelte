@@ -51,6 +51,20 @@
     onSaveToken?: () => void;
     onClearVaultError?: () => void;
   } = $props();
+
+  const ADD_TOKEN_SELECT_VALUE = '__add_github_token__';
+
+  function handleVaultTokenChange(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement;
+    const nextValue = select.value;
+    if (nextValue === ADD_TOKEN_SELECT_VALUE) {
+      onOpenAuth?.();
+      select.value = vaultTokenKey;
+      return;
+    }
+    vaultTokenKey = nextValue;
+    onSelectVaultKey?.(vaultTokenKey);
+  }
 </script>
 
 <div class="github-connect-row">
@@ -62,25 +76,26 @@
     <select
       aria-label="GitHub Vault token"
       value={vaultTokenKey}
-      disabled={githubLoading || vaultSecrets.length === 0}
-      onchange={(event) => {
-        vaultTokenKey = (event.currentTarget as HTMLSelectElement).value;
-        onSelectVaultKey?.(vaultTokenKey);
-      }}
+      disabled={githubLoading}
+      onchange={handleVaultTokenChange}
     >
       {#if vaultSecrets.length === 0}
         <option value="">No GitHub token in Vault</option>
       {:else}
         <option value="">Choose Vault token</option>
-        {#each vaultSecrets as secret}
-          <option value={secret.key_name}>{secret.key_name}{secret.is_shared ? ' - shared' : ''}</option>
-        {/each}
+        <optgroup label="Saved tokens">
+          {#each vaultSecrets as secret}
+            <option value={secret.key_name}>{secret.key_name}{secret.is_shared ? ' - shared' : ''}</option>
+          {/each}
+        </optgroup>
       {/if}
+      <optgroup label="Actions">
+        <option value={ADD_TOKEN_SELECT_VALUE}>Add GitHub token...</option>
+      </optgroup>
     </select>
     <button type="button" onclick={onConnect} disabled={githubLoading || !vaultTokenKey}>
       {githubLoading && vaultTokenKey ? 'Connecting...' : 'Connect'}
     </button>
-    <button type="button" onclick={onOpenAuth}>Add token</button>
     <button
       class="project-context-icon-command compact"
       type="button"
