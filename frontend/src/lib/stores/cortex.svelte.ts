@@ -1331,16 +1331,6 @@ class CortexStore {
     try {
       const idea = await api.createIdea({ title, description });
       bloop();
-      // Fire-and-forget: generate a concise display title via local LLM
-      api.generateTitle(title).then((r) => {
-        if (r?.title) {
-          api.updateIdea(idea.id, { display_title: r.title });
-          // Update local state so UI reflects the generated title immediately
-          this.ideas = this.ideas.map((i) =>
-            i.id === idea.id ? { ...i, display_title: r.title } : i,
-          );
-        }
-      }).catch(() => {});
       // The typed text becomes the first thread message and queues Illo by default.
       // Set status optimistically BEFORE adding to ideas array so the
       // SVG birth animation renders with the correct color immediately.

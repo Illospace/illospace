@@ -24,7 +24,6 @@ from brain.app.api.routers.cortex._helpers import (
     UPLOAD_FALLBACK_CONTENT_TYPES,
     VIDEO_EXTENSIONS,
     _caller_is_service_principal,
-    _generate_title_gpu,
     _require_idea_for_user,
     _row_to_dict,
 )
@@ -38,6 +37,10 @@ from brain.app.api.routers.ws import ws_manager
 from brain.app.api.authorization import require_org_context
 from brain.platform.db.repositories.ideas import IdeaConnectionRepository
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.cortex.title_generation import (
+    generate_and_store_idea_display_title,
+    generate_display_title,
+)
 from brain.systems.services.runtime_introspection import get_provider_auth_status
 
 logger = logging.getLogger(__name__)
@@ -516,7 +519,7 @@ async def generate_title(request: Request, user: dict[str, Any] = Depends(get_cu
     text_content = data.get("text", "").strip()
     if not text_content:
         raise HTTPException(status_code=400, detail="text is required")
-    title = _generate_title_gpu(
+    title = generate_display_title(
         text_content,
         user_id=user.get("id"),
         org_id=user.get("org_id"),
@@ -528,7 +531,6 @@ async def generate_title(request: Request, user: dict[str, Any] = Depends(get_cu
 
 @router.post("/backfill-titles")
 def backfill_titles(user: dict[str, Any] = Depends(get_current_user)):
-    from brain.systems.cortex.events import publish
     org_id = user.get("org_id")
     user_id = user.get("id")
     with UnitOfWork() as uow:
@@ -543,17 +545,13 @@ def backfill_titles(user: dict[str, Any] = Depends(get_current_user)):
 
     count = 0
     for idea_id, idea_title in ideas_to_process:
-        title = _generate_title_gpu(
-            idea_title,
-            user_id=user.get("id"),
-            org_id=user.get("org_id"),
+        result = generate_and_store_idea_display_title(
+            str(idea_id),
+            user_id=user_id,
+            org_id=org_id,
+            raw_title=idea_title,
         )
-        if title:
-            with UnitOfWork() as uow:
-                idea = uow.session.get(Idea, idea_id)
-                if idea:
-                    idea.display_title = title
-            publish("title_generated", {"idea_id": str(idea_id), "title": title})
+        if result.updated:
             count += 1
     return {"ok": True, "generated": count, "total": len(ideas_to_process)}
 

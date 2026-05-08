@@ -37,6 +37,7 @@ def simple_text_completion(
     user_id: str | None = None,
     org_id: str | None = None,
     system_prompt: str | None = None,
+    reasoning_effort: str | None = None,
     operation_type: str | None = None,
 ) -> str | None:
     """Run a simple single-turn completion and return the text content."""
@@ -69,6 +70,7 @@ def simple_text_completion(
         max_output_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
         system=effective_system_prompt,
+        reasoning_effort=reasoning_effort,
         extra_headers=llm.build_request_headers() or None,
         operation_type=operation_type,
     ))

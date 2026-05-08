@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -40,6 +40,7 @@ from brain.platform.db.repositories.ideas import (
     IdeaThreadRepository,
 )
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
 
 
 def _last_human_thread_author(idea_id: str, db: Session):
@@ -394,6 +395,7 @@ def list_archived_ideas(
 @router.post("/ideas", response_model=IdeaRead, status_code=201)
 async def create_idea(
     body: IdeaCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
@@ -428,6 +430,13 @@ async def create_idea(
         )
     db.flush()
     db.commit()
+    background_tasks.add_task(
+        generate_and_store_idea_display_title,
+        idea_id=str(idea.id),
+        raw_title=idea.title,
+        user_id=str(user.get("id")) if user.get("id") else None,
+        org_id=str(org_id) if org_id else None,
+    )
     await ws_manager.broadcast_product_event(
         "idea_created",
         {"idea_id": idea.id, "title": idea.title},
