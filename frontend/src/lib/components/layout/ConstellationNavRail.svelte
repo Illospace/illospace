@@ -65,11 +65,8 @@
           <span class="constellation-nav-rail-brand-mark-text">{brandMark}</span>
         </span>
       {:else}
-        <span class="constellation-nav-rail-brand-icon" aria-hidden="true">
-          <IllospaceLogo variant="icon" />
-        </span>
-        <span class="constellation-nav-rail-brand-wordmark" aria-hidden="true">
-          <IllospaceLogo variant="logo" />
+        <span class="constellation-nav-rail-brand-logo" aria-hidden="true">
+          <IllospaceLogo className="constellation-nav-rail-animated-logo" variant="animated" />
         </span>
       {/if}
     </a>
@@ -169,8 +166,7 @@
       padding-inline 180ms ease;
   }
 
-  .constellation-nav-rail-brand-icon,
-  .constellation-nav-rail-brand-wordmark,
+  .constellation-nav-rail-brand-logo,
   .constellation-nav-rail-glyph {
     flex-shrink: 0;
   }
@@ -183,32 +179,21 @@
     justify-content: center;
   }
 
-  .constellation-nav-rail-brand-icon {
-    display: inline-flex;
-    width: 24px;
-    height: 24px;
-    align-items: center;
-    justify-content: center;
-    opacity: 1;
-    transition: opacity 80ms ease;
-  }
-
-  .constellation-nav-rail-brand-wordmark {
-    position: absolute;
-    top: 50%;
-    left: 50%;
+  .constellation-nav-rail-brand-logo {
+    --illospace-logo-color: var(--nav-item-active-color);
+    --illospace-logo-width: 24px;
+    --illospace-logo-shift: -18.25px;
+    --illospace-logo-letter-opacity: 0;
+    --illospace-logo-letter-translate: 70px;
+    --illospace-logo-letter-scale-y: 0.86;
+    --illospace-logo-near-delay: 90ms;
+    --illospace-logo-mid-delay: 45ms;
+    --illospace-logo-i-delay: 0ms;
     display: inline-flex;
     width: 64px;
     height: 24px;
     align-items: center;
     justify-content: center;
-    opacity: 0;
-    pointer-events: none;
-    transform: translate(-50%, -50%);
-    transition:
-      opacity 80ms ease,
-      visibility 0s linear 80ms;
-    visibility: hidden;
   }
 
   .constellation-nav-rail-brand-mark-text {
@@ -324,21 +309,17 @@
     padding-inline: 0;
   }
 
-  .constellation-nav-rail:hover .constellation-nav-rail-brand-icon,
-  .constellation-nav-rail:focus-within .constellation-nav-rail-brand-icon,
-  .constellation-nav-rail[data-expanded='true'] .constellation-nav-rail-brand-icon {
-    opacity: 0;
-    transition-delay: 0ms;
-  }
-
-  .constellation-nav-rail:hover .constellation-nav-rail-brand-wordmark,
-  .constellation-nav-rail:focus-within .constellation-nav-rail-brand-wordmark,
-  .constellation-nav-rail[data-expanded='true'] .constellation-nav-rail-brand-wordmark {
-    opacity: 1;
-    transition:
-      opacity 120ms ease 240ms,
-      visibility 0s linear 240ms;
-    visibility: visible;
+  .constellation-nav-rail:hover .constellation-nav-rail-brand-logo,
+  .constellation-nav-rail:focus-within .constellation-nav-rail-brand-logo,
+  .constellation-nav-rail[data-expanded='true'] .constellation-nav-rail-brand-logo {
+    --illospace-logo-width: 64px;
+    --illospace-logo-shift: 10.5px;
+    --illospace-logo-letter-opacity: 1;
+    --illospace-logo-letter-translate: 0px;
+    --illospace-logo-letter-scale-y: 1;
+    --illospace-logo-near-delay: 80ms;
+    --illospace-logo-mid-delay: 140ms;
+    --illospace-logo-i-delay: 200ms;
   }
 
   .constellation-nav-rail:hover .constellation-nav-rail-item,

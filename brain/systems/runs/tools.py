@@ -430,7 +430,7 @@ def classify_side_effect(tool_name: str) -> str:
         return "command"
     if name in CHAT_MESSAGE_TOOLS:
         return "chat_message"
-    return "external" if name.startswith(("web_", "browser_")) else "unknown"
+    return "external" if name == "browser" or name.startswith(("web_", "browser_")) else "unknown"
 
 
 def tool_activity_label(tool_name: str, args: dict[str, Any] | None = None) -> str:

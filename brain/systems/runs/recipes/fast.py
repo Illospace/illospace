@@ -36,27 +36,13 @@ Operating rules:
 """
 
 _FAST_HIDDEN_TOOL_NAMES = {"cortex_reply", "cortex_visual_reply"}
-_ONBOARDING_HIDDEN_TOOL_PREFIXES = ("browser_",)
 
 
 def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:
-    tools = [
+    return [
         tool
         for tool in build_agent_tools("coordinator")
         if str(tool.get("name") or "") not in _FAST_HIDDEN_TOOL_NAMES
-    ]
-    metadata = runtime.request.metadata if isinstance(runtime.request.metadata, dict) else {}
-    is_onboarding_intro = (
-        metadata.get("origin") == "onboarding"
-        or metadata.get("required_response") == "introduce_and_continue_setup"
-        or metadata.get("onboarding_step") == "runtime_ready_intro"
-    )
-    if not is_onboarding_intro:
-        return tools
-    return [
-        tool
-        for tool in tools
-        if not str(tool.get("name") or "").startswith(_ONBOARDING_HIDDEN_TOOL_PREFIXES)
     ]
 
 

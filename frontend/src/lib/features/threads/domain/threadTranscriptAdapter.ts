@@ -36,6 +36,12 @@ export interface CortexThreadStageHeaderConfig {
   title: string;
   statusLabel: string;
   statusState?: CortexThreadStageHeaderStatusState;
+  titleActionLabel?: string;
+  titleActionLoading?: boolean;
+  onTitleAction?: () => void;
+  archiveActionLabel?: string;
+  archiveActionLoading?: boolean;
+  onArchiveAction?: () => void;
   panelOpen?: boolean;
   onTogglePanel?: () => void;
   secondaryPanelOpen?: boolean;

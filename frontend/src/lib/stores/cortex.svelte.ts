@@ -1543,6 +1543,17 @@ class CortexStore {
     } catch { /* silent */ }
   }
 
+  async updateIdeaDisplayTitle(id: string, displayTitle: string) {
+    try {
+      const updated = await api.updateIdea(id, { display_title: displayTitle });
+      this._upsertIdea(updated);
+      return updated;
+    } catch (e) {
+      console.error('Failed to update idea display title:', e);
+      throw e;
+    }
+  }
+
   private async _refreshSelectedStream() {
     if (!this.selectedIdeaId) return;
     if (this._isLocalPreviewIdeaId(this.selectedIdeaId)) return;

@@ -1091,12 +1091,6 @@
     <CortexOpsComponent visible={workspaceOverlay.opsOpen} onclose={() => workspaceOverlay.closeOps()} />
   {/if}
 
-  <!-- Hint when no ideas -->
-  {#if !cortex.loading && cortex.ideas.length === 0}
-    <div class="empty-hint">
-      <p>Start from the composer to create your first thread.</p>
-    </div>
-  {/if}
 </div>
 
 <style>
@@ -1449,25 +1443,6 @@
     -webkit-backdrop-filter: blur(10px) saturate(1.08);
   }
 
-  .empty-hint {
-    position: absolute;
-    bottom: 112px;
-    left: 50%;
-    transform: translateX(-50%);
-    text-align: center;
-    color: color-mix(in srgb, var(--constellation-color-amber) 42%, transparent);
-    font-size: 13px;
-    font-weight: 300;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    animation: hint-pulse 4s ease-in-out infinite;
-  }
-
-  @keyframes hint-pulse {
-    0%, 100% { opacity: 0.5; }
-    50% { opacity: 1; }
-  }
-
   @keyframes cortex-own-astre-arrive {
     0% {
       opacity: 0;
@@ -1553,10 +1528,6 @@
     :global(.constellation-workspace-backdrop.cortex-workspace-backdrop) {
       --constellation-workspace-backdrop-composer-bottom: var(--workspace-bottom-surface-inset);
       --constellation-workspace-backdrop-composer-width: clamp(300px, 40vw, 440px);
-    }
-
-    .empty-hint {
-      bottom: 94px;
     }
 
     .workspace-app-overlay {

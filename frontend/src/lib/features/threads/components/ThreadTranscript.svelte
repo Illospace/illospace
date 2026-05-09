@@ -454,13 +454,25 @@
         />
         <h1 class="thread-header-title" title={header.title}>{header.title}</h1>
 
+        {#if header.onTitleAction}
+          <ConstellationIconButton
+            label={header.titleActionLabel ?? 'Generate a new thread title'}
+            title={header.titleActionLabel ?? 'Generate a new thread title'}
+            className={`thread-header-action-button thread-title-action-button ${header.titleActionLoading ? 'is-loading' : ''}`}
+            disabled={header.titleActionLoading}
+            onclick={header.onTitleAction}
+          >
+            <ConstellationIcon name="refresh" size={13} stroke={1.9} />
+          </ConstellationIconButton>
+        {/if}
+
         {#if header.onToggleSecondaryPanel || header.onTogglePanel}
           <div class="thread-header-panel-toggle-group">
             {#if header.onToggleSecondaryPanel}
               <ConstellationIconButton
                 label={(header.secondaryPanelOpen ? 'Hide ' : 'Show ') + (header.secondaryPanelLabel ?? 'activity').toLowerCase()}
                 title={header.secondaryPanelLabel ?? 'Activity'}
-                className="thread-panel-toggle-button"
+                className="thread-header-action-button thread-panel-toggle-button"
                 pressed={header.secondaryPanelOpen}
                 onclick={header.onToggleSecondaryPanel}
               >
@@ -468,11 +480,23 @@
               </ConstellationIconButton>
             {/if}
 
+            {#if header.onArchiveAction}
+              <ConstellationIconButton
+                label={header.archiveActionLabel ?? 'Archive thread'}
+                title="Archive thread"
+                className={`thread-header-action-button thread-archive-button ${header.archiveActionLoading ? 'is-loading' : ''}`}
+                disabled={header.archiveActionLoading}
+                onclick={header.onArchiveAction}
+              >
+                <ConstellationIcon name="archive-box" size={14} stroke={1.8} />
+              </ConstellationIconButton>
+            {/if}
+
             {#if header.onTogglePanel}
               <ConstellationIconButton
                 label={(header.panelOpen ? 'Hide ' : 'Show ') + (header.panelLabel ?? 'preview').toLowerCase()}
                 title={header.panelLabel ?? 'Preview'}
-                className="thread-panel-toggle-button"
+                className="thread-header-action-button thread-panel-toggle-button"
                 pressed={header.panelOpen}
                 onclick={header.onTogglePanel}
               >
@@ -1381,6 +1405,30 @@
     text-overflow: ellipsis;
   }
 
+  .thread-header-title-row :global(.thread-header-action-button) {
+    --constellation-icon-button-border: transparent;
+    --constellation-icon-button-quiet-background: transparent;
+    --constellation-icon-button-quiet-background-hover: color-mix(in srgb, var(--thread-accent, #57cfa0) 10%, transparent);
+    --constellation-icon-button-quiet-border-hover: transparent;
+    --constellation-icon-button-quiet-shadow: none;
+
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .thread-header-title-row :global(.thread-header-action-button:hover:not(:disabled)) {
+    color: var(--constellation-thread-header-title);
+  }
+
+  .thread-header-title-row :global(.thread-title-action-button.is-loading svg) {
+    animation: thread-title-action-spin 720ms linear infinite;
+  }
+
   .thread-header-panel-toggle-group {
     --constellation-icon-button-border: transparent;
     --constellation-icon-button-pressed-border: transparent;
@@ -1398,21 +1446,16 @@
     padding: 2px;
   }
 
-  .thread-header-panel-toggle-group :global(.constellation-icon-button) {
-    flex: 0 0 auto;
-  }
-
-  .thread-header-panel-toggle-group :global(.thread-panel-toggle-button) {
+  .thread-header-panel-toggle-group :global(.thread-header-action-button:hover:not(:disabled)),
+  .thread-header-panel-toggle-group :global(.thread-header-action-button[aria-pressed='true']) {
     background: transparent;
     box-shadow: none;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
   }
 
-  .thread-header-panel-toggle-group :global(.thread-panel-toggle-button:hover:not(:disabled)),
-  .thread-header-panel-toggle-group :global(.thread-panel-toggle-button[aria-pressed='true']) {
-    background: transparent;
-    box-shadow: none;
+  @keyframes thread-title-action-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .thread-content {

@@ -104,6 +104,165 @@ def _run_browser_async(coro):
         "Browser tools are not supported from an already-running event loop in this sync handler context"
     )
 
+_BROWSER_DISCOVER_DEFAULT_SELECTOR = "a,button,input,textarea,select,[role='button']"
+
+_BROWSER_ACTION_HELP: dict[str, dict[str, object]] = {
+    "open": {
+        "required": [],
+        "optional": ["url", "viewport_width", "viewport_height", "storage_mode", "allow_downloads", "allow_file_uploads"],
+        "effect": "create or reuse the browser session for this thought",
+        "aliases": ["session_open"],
+    },
+    "navigate": {"required": ["url"], "optional": [], "effect": "navigate the active browser tab"},
+    "click": {"required": ["selector or x/y"], "optional": [], "effect": "click an element or viewport point"},
+    "type": {"required": ["text"], "optional": ["selector", "press_enter"], "effect": "type text into the page"},
+    "key": {"required": ["key"], "optional": [], "effect": "press a keyboard key"},
+    "back": {"required": [], "optional": [], "effect": "go back in browser history"},
+    "forward": {"required": [], "optional": [], "effect": "go forward in browser history"},
+    "new_tab": {"required": [], "optional": ["url"], "effect": "open a new tab"},
+    "switch_tab": {"required": ["index"], "optional": [], "effect": "switch active tab by index"},
+    "close_tab": {"required": [], "optional": ["index"], "effect": "close a tab, defaulting to the current tab"},
+    "list_tabs": {"required": [], "optional": [], "effect": "read open tabs"},
+    "wait": {"required": [], "optional": ["selector", "wait_until", "timeout_ms"], "effect": "wait for page state or selector"},
+    "extract": {"required": [], "optional": ["selector", "mode", "max_chars"], "effect": "read text, HTML, or markdown"},
+    "discover": {"required": [], "optional": ["selector", "max_results"], "effect": "find likely interactive elements"},
+    "upload_attachment": {
+        "required": ["selector", "attachment_url"],
+        "optional": [],
+        "effect": "upload a Cortex attachment into a file input",
+    },
+    "snapshot": {"required": [], "optional": ["persist", "title"], "effect": "capture the current viewport"},
+    "save_screenshot": {"required": [], "optional": ["full_page"], "effect": "save a PNG screenshot artifact"},
+    "print_pdf": {"required": [], "optional": ["landscape"], "effect": "save the current page as a PDF artifact"},
+    "close": {"required": [], "optional": [], "effect": "close the active browser session"},
+}
+
+
+def _browser_help(operation: str | None = None) -> dict:
+    requested = str(operation or "").strip().lower()
+    if requested == "session_open":
+        requested = "open"
+    if requested:
+        detail = _BROWSER_ACTION_HELP.get(requested)
+        if detail is None:
+            return {
+                "tool": "browser",
+                "error": f"Unknown browser action: {operation}",
+                "available_actions": sorted(_BROWSER_ACTION_HELP),
+            }
+        return {"tool": "browser", "action": requested, **detail}
+    return {
+        "tool": "browser",
+        "usage": "Call browser with action set to one of these sub-actions. Use operation with action=help for one sub-action.",
+        "actions": _BROWSER_ACTION_HELP,
+    }
+
+
+def _missing_browser_args(action: str, *names: str) -> dict:
+    return {"error": f"browser action '{action}' requires: {', '.join(names)}"}
+
+
+def _handle_browser(
+    action: str,
+    operation: str | None = None,
+    url: str | None = None,
+    viewport_width: int = 1280,
+    viewport_height: int = 800,
+    storage_mode: str = "ephemeral",
+    allow_downloads: bool = False,
+    allow_file_uploads: bool = True,
+    selector: str | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    text: str | None = None,
+    press_enter: bool = False,
+    key: str | None = None,
+    index: int | None = None,
+    wait_until: str = "load",
+    timeout_ms: int = 10000,
+    mode: str = "text",
+    max_chars: int = 6000,
+    max_results: int = 40,
+    attachment_url: str | None = None,
+    persist: bool = False,
+    title: str | None = None,
+    full_page: bool = True,
+    landscape: bool = False,
+) -> dict:
+    normalized = str(action or "").strip().lower()
+    if normalized == "session_open":
+        normalized = "open"
+    if normalized == "help":
+        return _browser_help(operation)
+    if not normalized:
+        return {"error": "browser requires: action", "available_actions": sorted(_BROWSER_ACTION_HELP)}
+
+    if normalized == "open":
+        return _handle_browser_session_open(
+            url=url,
+            viewport_width=viewport_width,
+            viewport_height=viewport_height,
+            storage_mode=storage_mode,
+            allow_downloads=allow_downloads,
+            allow_file_uploads=allow_file_uploads,
+        )
+    if normalized == "navigate":
+        if not url:
+            return _missing_browser_args(normalized, "url")
+        return _handle_browser_navigate(url)
+    if normalized == "click":
+        if not selector and (x is None or y is None):
+            return _missing_browser_args(normalized, "selector or x/y")
+        return _handle_browser_click(selector=selector, x=x, y=y)
+    if normalized == "type":
+        if text is None:
+            return _missing_browser_args(normalized, "text")
+        return _handle_browser_type(text=text, selector=selector, press_enter=press_enter)
+    if normalized == "key":
+        if not key:
+            return _missing_browser_args(normalized, "key")
+        return _handle_browser_key(key)
+    if normalized == "back":
+        return _handle_browser_back()
+    if normalized == "forward":
+        return _handle_browser_forward()
+    if normalized == "new_tab":
+        return _handle_browser_new_tab(url=url)
+    if normalized == "switch_tab":
+        if index is None:
+            return _missing_browser_args(normalized, "index")
+        return _handle_browser_switch_tab(index=index)
+    if normalized == "close_tab":
+        return _handle_browser_close_tab(index=index)
+    if normalized == "list_tabs":
+        return _handle_browser_list_tabs()
+    if normalized == "wait":
+        return _handle_browser_wait(selector=selector, wait_until=wait_until, timeout_ms=timeout_ms)
+    if normalized == "extract":
+        return _handle_browser_extract(selector=selector, mode=mode, max_chars=max_chars)
+    if normalized == "discover":
+        return _handle_browser_discover(
+            selector=selector or _BROWSER_DISCOVER_DEFAULT_SELECTOR,
+            max_results=max_results,
+        )
+    if normalized == "upload_attachment":
+        if not selector or not attachment_url:
+            return _missing_browser_args(normalized, "selector", "attachment_url")
+        return _handle_browser_upload_attachment(selector=selector, attachment_url=attachment_url)
+    if normalized == "snapshot":
+        return _handle_browser_snapshot(persist=persist, title=title)
+    if normalized == "save_screenshot":
+        return _handle_browser_save_screenshot(full_page=full_page)
+    if normalized == "print_pdf":
+        return _handle_browser_print_pdf(landscape=landscape)
+    if normalized == "close":
+        return _handle_browser_close()
+
+    return {
+        "error": f"Unknown browser action: {action}",
+        "available_actions": sorted(_BROWSER_ACTION_HELP),
+    }
+
 
 def _handle_browser_session_open(
     url: str | None = None,

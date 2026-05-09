@@ -27,6 +27,7 @@
     uploadWorkspaceComposerFiles,
   } from '$lib/features/composer/controllers/attachmentController';
   import {
+    generateTitle,
     listIdeaProjectContext,
     uploadFile,
   } from '$lib/features/threads/api/threadApi';
@@ -163,9 +164,13 @@
   let threadStagePanelEl: HTMLElement | undefined = $state();
   let threadStageContentWidth = $state(0);
   let threadStageGutterPx = $state(24);
+  let titleGenerating = $state(false);
+  let threadArchiving = $state(false);
 
   const THREAD_STAGE_MIN_THREAD_WIDTH = 380;
   const THREAD_STAGE_DEFAULT_GUTTER = 24;
+  const THREAD_TITLE_SOURCE_ITEM_LIMIT = 8;
+  const THREAD_TITLE_SOURCE_ITEM_CHARS = 420;
   const STATUS_LABELS: Record<string, string> = {
     idle: 'Idle',
     working: 'Working',
@@ -258,6 +263,12 @@
       title: ideaDisplayTitle(selectedIdea),
       statusLabel,
       statusState: headerStatusState,
+      titleActionLabel: titleGenerating ? 'Generating a new thread title' : 'Generate a new thread title',
+      titleActionLoading: titleGenerating,
+      onTitleAction: () => void regenerateThreadTitle(),
+      archiveActionLabel: threadArchiving ? 'Archiving thread' : 'Archive thread',
+      archiveActionLoading: threadArchiving,
+      onArchiveAction: () => void archiveThread(),
       panelOpen: browserOpen,
       onTogglePanel: () => {
         if (!browserOpen) void workspaceApps.load({ silent: true });
@@ -303,6 +314,84 @@
 
   function composerKicker(): string {
     return '';
+  }
+
+  function compactTitleSourceText(value: unknown, maxChars = THREAD_TITLE_SOURCE_ITEM_CHARS): string {
+    const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    return text.length > maxChars ? `${text.slice(0, Math.max(0, maxChars - 3))}...` : text;
+  }
+
+  function threadTitleSourceLine(item: any): string | null {
+    if (item?.type === 'message') {
+      const text = compactTitleSourceText(item.content);
+      if (!text) return null;
+      const role = item.role === 'assistant' || item.role === 'illo' ? 'Illo' : item.user_name || 'User';
+      return `${role}: ${text}`;
+    }
+
+    if (item?.type === 'visual_block') {
+      const title = compactTitleSourceText(item.title, 120);
+      const content = compactTitleSourceText(item.content);
+      if (!title && !content) return null;
+      return `Visual: ${[title, content].filter(Boolean).join(' - ')}`;
+    }
+
+    return null;
+  }
+
+  function threadTitleSourceText(selectedIdea: typeof idea): string {
+    const recentLines = visibleStreamItems
+      .slice()
+      .reverse()
+      .map(threadTitleSourceLine)
+      .filter((line): line is string => Boolean(line))
+      .slice(0, THREAD_TITLE_SOURCE_ITEM_LIMIT);
+
+    const fallbackLines = [
+      selectedIdea?.title ? `Original title: ${compactTitleSourceText(selectedIdea.title, 240)}` : '',
+      selectedIdea?.description ? `Description: ${compactTitleSourceText(selectedIdea.description)}` : '',
+    ].filter(Boolean);
+    const contextLines = recentLines.length ? [...recentLines, ...fallbackLines] : fallbackLines;
+
+    return contextLines.length ? ['Current thread, newest items first:', ...contextLines].join('\n') : '';
+  }
+
+  async function regenerateThreadTitle() {
+    const selectedIdea = idea;
+    if (!selectedIdea?.id || titleGenerating) return;
+
+    const ideaId = selectedIdea.id;
+    const sourceText = threadTitleSourceText(selectedIdea);
+    if (!sourceText.trim()) {
+      ui.toast('There is not enough thread context to title yet.', 'info');
+      return;
+    }
+
+    titleGenerating = true;
+    try {
+      const result = await generateTitle(sourceText);
+      const nextTitle = compactTitleSourceText(result?.title, 80);
+      if (!nextTitle) throw new Error('Title generation returned no title');
+      await cortex.updateIdeaDisplayTitle(ideaId, nextTitle);
+      ui.toast('Thread title refreshed', 'success');
+    } catch (err: any) {
+      ui.toast(err?.detail || err?.message || 'Failed to refresh thread title', 'error');
+    } finally {
+      titleGenerating = false;
+    }
+  }
+
+  async function archiveThread() {
+    const selectedIdea = idea;
+    if (!selectedIdea?.id || threadArchiving) return;
+
+    threadArchiving = true;
+    try {
+      await cortex.deleteIdea(selectedIdea.id);
+    } finally {
+      threadArchiving = false;
+    }
   }
 
   const replyAccent = $derived.by(() => {

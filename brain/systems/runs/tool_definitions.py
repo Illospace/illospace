@@ -493,15 +493,20 @@ BRAIN_TOOLS = [
             "Create, update, delete, list, or manually run workspace Cycles, which are recurring "
             "Illo prompts/check-ins/reports or one-time reminders. This is the action tool. For answering questions about "
             "which Cycles exist or what ran recently, prefer read_cycles first. Actions: 'create', "
-            "'list', 'update', 'delete', 'run'."
+            "'list', 'update', 'delete', 'run'. Use action='help' or action='schema' with operation to inspect "
+            "arguments before mutating."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "list", "update", "delete", "run"],
-                    "description": "What to do: create/list/update/delete/run",
+                    "enum": ["help", "schema", "create", "list", "update", "delete", "run"],
+                    "description": "What to do. Use help/schema to inspect cycle operations before mutating.",
+                },
+                "operation": {
+                    "type": "string",
+                    "description": "Optional operation name to inspect when action is help or schema.",
                 },
                 "id": {"type": "integer", "description": "Cycle id (required for update/delete/run)"},
                 "name": {"type": "string", "description": "Cycle name"},
@@ -590,7 +595,8 @@ DOMAIN_TOOLS = [
             "object types, typed records, relations, and audit events. This is the action/exact-object "
             "tool for creating trackers, adding fields, recording or updating items, linking records, "
             "or deleting/archiving Domains and records. For broad awareness questions about existing "
-            "workspace records, prefer read_workspace_records first."
+            "workspace records, prefer read_workspace_records first. Use action='help' or action='schema' with "
+            "operation to inspect domain operations before mutating."
         ),
         "input_schema": {
             "type": "object",
@@ -598,6 +604,7 @@ DOMAIN_TOOLS = [
                 "action": {
                     "type": "string",
                     "enum": [
+                        "help",
                         "list",
                         "create_domain",
                         "remove_domain",
@@ -614,6 +621,10 @@ DOMAIN_TOOLS = [
                         "events",
                     ],
                     "description": "The domain operation to run.",
+                },
+                "operation": {
+                    "type": "string",
+                    "description": "Optional operation name to inspect when action is help or schema.",
                 },
                 "domain_id": {"type": "integer", "description": "Domain id for existing-domain actions."},
                 "name": {"type": "string", "description": "Domain/object/field/relation display name."},
@@ -681,7 +692,8 @@ CORTEX_IDEA_TOOLS = [
             "'archive this thread', 'rename this thought', 'mark this resolved', or "
             "'restore that idea'. This is the action/exact-thread tool. For recent team-wide thread "
             "activity, prefer read_team_activity first. idea_id defaults to the current Cortex "
-            "thread/idea when one is bound."
+            "thread/idea when one is bound. Use action='help' or action='schema' with operation to inspect "
+            "arguments before mutating."
         ),
         "input_schema": {
             "type": "object",
@@ -689,6 +701,8 @@ CORTEX_IDEA_TOOLS = [
                 "action": {
                     "type": "string",
                     "enum": [
+                        "help",
+                        "schema",
                         "list",
                         "get",
                         "create",
@@ -699,6 +713,10 @@ CORTEX_IDEA_TOOLS = [
                         "mark_read",
                     ],
                     "description": "The thought/thread operation to run.",
+                },
+                "operation": {
+                    "type": "string",
+                    "description": "Optional operation name to inspect when action is help or schema.",
                 },
                 "idea_id": {
                     "type": "string",
@@ -803,7 +821,8 @@ PROJECT_TOOLS = [
             "This is the action tool for managing project/folder/context bundles, adding or removing "
             "files/repos/folders/docs, or attaching reusable project context to the current thread. "
             "For awareness questions about what project context exists or what Illo can see, prefer "
-            "read_project_contexts first. Thread attachments do not require a project."
+            "read_project_contexts first. Thread attachments do not require a project. Use action='help' or "
+            "action='schema' with operation to inspect arguments before mutating."
         ),
         "input_schema": {
             "type": "object",
@@ -811,6 +830,8 @@ PROJECT_TOOLS = [
                 "action": {
                     "type": "string",
                     "enum": [
+                        "help",
+                        "schema",
                         "list",
                         "get",
                         "create",
@@ -824,6 +845,10 @@ PROJECT_TOOLS = [
                         "attach_to_thread",
                     ],
                     "description": "The project operation to run. delete archives the project profile.",
+                },
+                "operation": {
+                    "type": "string",
+                    "description": "Optional operation name to inspect when action is help or schema.",
                 },
                 "project_id": {"type": "string", "description": "Project profile id for existing-project actions."},
                 "profile_id": {"type": "string", "description": "Alias for project_id."},
@@ -874,7 +899,8 @@ WORKSPACE_APP_TOOLS = [
             "custom HTML escape-hatch runtime. Recordful apps must use manage_domain first; app-local "
             "state is only for UI preferences, filters, drafts, and ephemeral interface state. "
             "For awareness questions about what apps exist or current app state, prefer read_workspace_apps first. "
-            "New generated apps must pass the workspace app contract before they are persisted."
+            "New generated apps must pass the workspace app contract before they are persisted. Use action='help' "
+            "or action='schema' with operation to inspect arguments before mutating."
         ),
         "input_schema": {
             "type": "object",
@@ -882,6 +908,8 @@ WORKSPACE_APP_TOOLS = [
                 "action": {
                     "type": "string",
                     "enum": [
+                        "help",
+                        "schema",
                         "list",
                         "get",
                         "create",
@@ -892,6 +920,10 @@ WORKSPACE_APP_TOOLS = [
                         "update_state",
                     ],
                     "description": "The workspace app operation to run.",
+                },
+                "operation": {
+                    "type": "string",
+                    "description": "Optional operation name to inspect when action is help or schema.",
                 },
                 "app_id": {"type": "string", "description": "Workspace app id for existing-app actions."},
                 "key": {"type": "string", "description": "Stable app key; generated from name when omitted."},
@@ -1496,6 +1528,87 @@ BROWSER_CLOSE_TOOL = {
     },
 }
 
+BROWSER_TOOL = {
+    "name": "browser",
+    "description": (
+        "Namespace tool for controlling or inspecting the live browser session attached to the current Cortex thought. "
+        "Set action='help' to see sub-actions and their required arguments. Use action='open' before navigation or interaction."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": [
+                    "help",
+                    "open",
+                    "navigate",
+                    "click",
+                    "type",
+                    "key",
+                    "back",
+                    "forward",
+                    "new_tab",
+                    "switch_tab",
+                    "close_tab",
+                    "list_tabs",
+                    "wait",
+                    "extract",
+                    "discover",
+                    "upload_attachment",
+                    "snapshot",
+                    "save_screenshot",
+                    "print_pdf",
+                    "close",
+                ],
+                "description": "Browser sub-action to run.",
+            },
+            "operation": {
+                "type": "string",
+                "description": "Optional sub-action name to inspect when action is help.",
+            },
+            "url": {"type": "string", "description": "URL for open, navigate, or new_tab."},
+            "viewport_width": {"type": "integer", "default": 1280},
+            "viewport_height": {"type": "integer", "default": 800},
+            "storage_mode": {
+                "type": "string",
+                "enum": ["ephemeral", "idea"],
+                "default": "ephemeral",
+                "description": "Whether login/session state persists for the current thought.",
+            },
+            "allow_downloads": {"type": "boolean", "default": False},
+            "allow_file_uploads": {"type": "boolean", "default": True},
+            "selector": {"type": "string", "description": "CSS selector for click/type/wait/extract/discover/upload."},
+            "x": {"type": "number", "description": "Viewport X coordinate for click."},
+            "y": {"type": "number", "description": "Viewport Y coordinate for click."},
+            "text": {"type": "string", "description": "Text to type."},
+            "press_enter": {"type": "boolean", "default": False},
+            "key": {"type": "string", "description": "Keyboard key, e.g. Enter or Escape."},
+            "index": {"type": "integer", "description": "Tab index for switch_tab or close_tab."},
+            "wait_until": {
+                "type": "string",
+                "enum": ["load", "domcontentloaded", "networkidle"],
+                "default": "load",
+            },
+            "timeout_ms": {"type": "integer", "default": 10000},
+            "mode": {
+                "type": "string",
+                "enum": ["text", "html", "markdown"],
+                "default": "text",
+                "description": "Extraction mode for extract.",
+            },
+            "max_chars": {"type": "integer", "default": 6000},
+            "max_results": {"type": "integer", "default": 40},
+            "attachment_url": {"type": "string", "description": "Cortex /static/uploads/... attachment URL for upload_attachment."},
+            "persist": {"type": "boolean", "default": False},
+            "title": {"type": "string", "description": "Optional snapshot title."},
+            "full_page": {"type": "boolean", "default": True},
+            "landscape": {"type": "boolean", "default": False},
+        },
+        "required": ["action"],
+    },
+}
+
 # Self-introspection tool — lets agents see their own activity
 MY_ACTIVITY_TOOL = {
     "name": "my_activity",
@@ -1640,25 +1753,7 @@ WORKER_TOOLS = (
     + SESSION_TOOLS
     + [
         CORTEX_VISUAL_REPLY_TOOL,
-        BROWSER_SESSION_OPEN_TOOL,
-        BROWSER_NAVIGATE_TOOL,
-        BROWSER_CLICK_TOOL,
-        BROWSER_TYPE_TOOL,
-        BROWSER_KEY_TOOL,
-        BROWSER_BACK_TOOL,
-        BROWSER_FORWARD_TOOL,
-        BROWSER_NEW_TAB_TOOL,
-        BROWSER_SWITCH_TAB_TOOL,
-        BROWSER_CLOSE_TAB_TOOL,
-        BROWSER_LIST_TABS_TOOL,
-        BROWSER_WAIT_TOOL,
-        BROWSER_EXTRACT_TOOL,
-        BROWSER_DISCOVER_TOOL,
-        BROWSER_UPLOAD_ATTACHMENT_TOOL,
-        BROWSER_SNAPSHOT_TOOL,
-        BROWSER_SAVE_SCREENSHOT_TOOL,
-        BROWSER_PRINT_PDF_TOOL,
-        BROWSER_CLOSE_TOOL,
+        BROWSER_TOOL,
     ]
 )
 
@@ -1679,25 +1774,7 @@ COORDINATOR_TOOLS = (
         CORTEX_REPLY_TOOL,
         CORTEX_VISUAL_REPLY_TOOL,
         MY_ACTIVITY_TOOL,
-        BROWSER_SESSION_OPEN_TOOL,
-        BROWSER_NAVIGATE_TOOL,
-        BROWSER_CLICK_TOOL,
-        BROWSER_TYPE_TOOL,
-        BROWSER_KEY_TOOL,
-        BROWSER_BACK_TOOL,
-        BROWSER_FORWARD_TOOL,
-        BROWSER_NEW_TAB_TOOL,
-        BROWSER_SWITCH_TAB_TOOL,
-        BROWSER_CLOSE_TAB_TOOL,
-        BROWSER_LIST_TABS_TOOL,
-        BROWSER_WAIT_TOOL,
-        BROWSER_EXTRACT_TOOL,
-        BROWSER_DISCOVER_TOOL,
-        BROWSER_UPLOAD_ATTACHMENT_TOOL,
-        BROWSER_SNAPSHOT_TOOL,
-        BROWSER_SAVE_SCREENSHOT_TOOL,
-        BROWSER_PRINT_PDF_TOOL,
-        BROWSER_CLOSE_TOOL,
+        BROWSER_TOOL,
     ]
 )
 

@@ -357,15 +357,15 @@ def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance(monke
     assert any(_artifact_type(artifact) == "file_observation" for artifact in runtime.store.artifacts)
 
 
-def test_fast_onboarding_tool_surface_hides_browser_primitives(monkeypatch):
+def test_fast_onboarding_tool_surface_uses_standard_fast_surface(monkeypatch):
     from brain.systems.runs.recipes.fast import _agent_tools_for_runtime
 
     monkeypatch.setattr(
         "brain.systems.runs.recipes.fast.build_agent_tools",
         lambda role: [
             {"name": "read_workspace_overview"},
-            {"name": "browser_session_open"},
-            {"name": "browser_click"},
+            {"name": "browser"},
+            {"name": "cortex_reply"},
         ],
     )
 
@@ -378,7 +378,7 @@ def test_fast_onboarding_tool_surface_hides_browser_primitives(monkeypatch):
         )
     )
 
-    assert [tool["name"] for tool in _agent_tools_for_runtime(runtime)] == ["read_workspace_overview"]
+    assert [tool["name"] for tool in _agent_tools_for_runtime(runtime)] == ["read_workspace_overview", "browser"]
 
 
 def test_fast_tool_surface_is_direct_coordinator_without_staged_reply_tools(monkeypatch):
@@ -1144,20 +1144,20 @@ def test_runtime_tool_executor_audits_high_risk_actions_autonomously(monkeypatch
     executor = RunToolExecutor(runtime.store, stream=runtime.stream)
     calls = []
     audited_handler = wrap_action_manifest_audit(
-        "browser_click",
+        "browser",
         lambda **kwargs: calls.append(kwargs) or {"clicked": True},
         context_factory=lambda: {"run_id": 42, "org_id": "org-1", "idea_id": "idea-1"},
     )
     tool = ToolExecution(
-        name="browser_click",
-        args={"selector": "#ship"},
+        name="browser",
+        args={"action": "click", "selector": "#ship"},
         handler=audited_handler,
     )
 
     result = executor.execute(42, tool, root_run_id=42)
 
     assert result == {"clicked": True}
-    assert calls == [{"selector": "#ship"}]
+    assert calls == [{"action": "click", "selector": "#ship"}]
     assert len(records) == 1
     assert records[0]["policy_result"] == "allow_audit"
     assert records[0]["approval_required"] is False
