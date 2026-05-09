@@ -235,6 +235,29 @@ disable_user_service_if_present() {
   fi
 }
 
+stop_legacy_docker_app_containers() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local names=(
+    illospace-api-1
+    illospace-web-1
+    illospace-worker-1
+    illospace-scheduler-1
+  )
+  local running
+  running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+  local to_stop=()
+  local name
+  for name in "${names[@]}"; do
+    if printf '%s\n' "$running" | grep -qx "$name"; then
+      to_stop+=("$name")
+    fi
+  done
+  if [ "${#to_stop[@]}" -gt 0 ]; then
+    echo "Stopping legacy Docker app containers: ${to_stop[*]}"
+    docker stop "${to_stop[@]}" >/dev/null 2>&1 || true
+  fi
+}
+
 install_user_service() {
   local source_path="$1"
   local dest_path="$HOME/.config/systemd/user/$(basename "$source_path")"
@@ -399,6 +422,7 @@ if [ -f ops/illo-embed.service ]; then
 fi
 systemctl --user daemon-reload
 disable_user_service_if_present illo-dashboard
+stop_legacy_docker_app_containers
 
 echo "=== Restarting services ==="
 ACTIVE_RUNS="$(active_agent_run_count)"
