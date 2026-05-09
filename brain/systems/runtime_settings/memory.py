@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import HTTPException
+from sqlalchemy import select
 
 from brain.kernel import config as cfg
 from brain.platform.db.models.org import User
+from brain.platform.db.models.vault import VaultConfig
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 from .embedding_registry import (
@@ -25,7 +28,14 @@ from .schemas import RuntimeMemoryCheckRead, RuntimeMemoryRead, RuntimeMemoryUpd
 
 logger = logging.getLogger(__name__)
 
-ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
+RUNTIME_MEMORY_SETTINGS_KEY = "runtime_memory"
+RUNTIME_MEMORY_SECRET_PREFIX = "runtime_memory_key_"
+RUNTIME_SETTINGS_UNAVAILABLE_DETAIL = (
+    "Runtime memory settings could not be saved. Check that Postgres is available and try again."
+)
+VAULT_NOT_CONFIGURED_DETAIL = (
+    "Vault master key is not configured. Set VAULT_MASTER_KEY before saving memory API keys."
+)
 EMBEDDING_MODEL_OPTIONS = embedding_model_options()
 EMBEDDER_OPTIONS = embedder_options()
 RERANKER_OPTIONS = [
@@ -33,23 +43,146 @@ RERANKER_OPTIONS = [
 ]
 
 
-def _update_env_var(key: str, value: str | None) -> None:
-    lines: list[str] = []
-    if ENV_PATH.exists():
-        lines = ENV_PATH.read_text().splitlines()
+def _provider_key(provider: str | None) -> str:
+    provider = (provider or "").strip().lower()
+    if provider in {"google", "gemini"}:
+        return "gemini"
+    if provider == "openai":
+        return "openai"
+    return provider
 
-    written = False
-    updated: list[str] = []
-    for line in lines:
-        if line.startswith(f"{key}="):
-            if value is not None:
-                updated.append(f"{key}={value}")
-            written = True
-        else:
-            updated.append(line)
-    if not written and value is not None:
-        updated.append(f"{key}={value}")
-    ENV_PATH.write_text("\n".join(updated) + ("\n" if updated else ""))
+
+def _runtime_secret_config_key(provider: str | None) -> str:
+    return f"{RUNTIME_MEMORY_SECRET_PREFIX}{_provider_key(provider)}"
+
+
+def _read_runtime_config_value(key: str) -> str | None:
+    try:
+        with UnitOfWork() as uow:
+            config = uow.session.scalars(select(VaultConfig).where(VaultConfig.key == key)).first()
+            return config.value if config else None
+    except Exception:
+        logger.debug("Could not read runtime memory config key %s", key, exc_info=True)
+        return None
+
+
+def _write_runtime_config_value(key: str, value: str) -> None:
+    try:
+        with UnitOfWork() as uow:
+            config = uow.session.scalars(select(VaultConfig).where(VaultConfig.key == key)).first()
+            if config:
+                config.value = value
+            else:
+                uow.session.add(VaultConfig(key=key, value=value))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Could not persist runtime memory config key %s: %s", key, exc)
+        raise HTTPException(status_code=503, detail=RUNTIME_SETTINGS_UNAVAILABLE_DETAIL) from exc
+
+
+def _read_persisted_runtime_settings() -> dict[str, str]:
+    raw = _read_runtime_config_value(RUNTIME_MEMORY_SETTINGS_KEY)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Ignoring invalid runtime memory settings JSON")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): str(value) for key, value in data.items() if value is not None}
+
+
+def _persist_runtime_settings(updates: dict[str, str]) -> None:
+    current = _read_persisted_runtime_settings()
+    current.update({key: str(value) for key, value in updates.items() if value is not None})
+    _write_runtime_config_value(RUNTIME_MEMORY_SETTINGS_KEY, json.dumps(current, sort_keys=True))
+
+
+def _persist_embedding_api_key(provider: str, api_key: str) -> None:
+    if not api_key:
+        return
+    try:
+        from brain.systems.vault import _encrypt
+
+        encrypted = base64.b64encode(_encrypt(api_key)).decode("ascii")
+    except RuntimeError as exc:
+        if "VAULT_MASTER_KEY is required" in str(exc):
+            raise HTTPException(status_code=503, detail=VAULT_NOT_CONFIGURED_DETAIL) from exc
+        raise
+    _write_runtime_config_value(_runtime_secret_config_key(provider), encrypted)
+
+
+def _read_persisted_embedding_api_key(provider: str) -> str | None:
+    raw = _read_runtime_config_value(_runtime_secret_config_key(provider))
+    if not raw:
+        return None
+    try:
+        from brain.systems.vault import _decrypt
+
+        return _decrypt(base64.b64decode(raw.encode("ascii"))).strip() or None
+    except RuntimeError as exc:
+        if "VAULT_MASTER_KEY is required" in str(exc):
+            logger.warning("Memory API key is encrypted, but VAULT_MASTER_KEY is not configured")
+            return None
+        raise
+    except Exception:
+        logger.warning("Could not decrypt persisted %s memory API key", provider, exc_info=True)
+        return None
+
+
+def _runtime_setting(key: str, persisted: dict[str, str], default: Any) -> str:
+    value = persisted.get(key)
+    if value not in (None, ""):
+        return str(value)
+    if default not in (None, ""):
+        return str(default)
+    return os.getenv(key, "")
+
+
+def get_effective_embedding_runtime_config() -> dict[str, str]:
+    """Return durable runtime memory settings with env/config fallbacks.
+
+    This is intentionally read dynamically by embedding callers so API, worker,
+    and scheduler processes observe settings stored through the UI without
+    mutating the application checkout or relying on one process' environment.
+    """
+    persisted = _read_persisted_runtime_settings()
+    backend = _runtime_setting("EMBEDDING_BACKEND", persisted, cfg.EMBEDDING_BACKEND).lower()
+    provider = _provider_key(_runtime_setting("EMBEDDING_API_PROVIDER", persisted, cfg.EMBEDDING_API_PROVIDER))
+    api_model = _runtime_setting("EMBEDDING_API_MODEL", persisted, cfg.EMBEDDING_API_MODEL)
+    cpu_model = _runtime_setting("EMBEDDING_CPU_MODEL", persisted, cfg.EMBEDDING_CPU_MODEL)
+    dim = _runtime_setting("EMBEDDING_DIM", persisted, cfg.EMBEDDING_DIM)
+    reranker = _runtime_setting("MEMORY_RERANKER", persisted, getattr(cfg, "MEMORY_RERANKER", "weighted"))
+    api_key = _installation_embedding_api_key(provider, persisted=persisted)
+    return {
+        "EMBEDDING_BACKEND": backend,
+        "EMBEDDING_API_PROVIDER": provider,
+        "EMBEDDING_API_MODEL": api_model,
+        "EMBEDDING_CPU_MODEL": cpu_model,
+        "EMBEDDING_DIM": str(dim),
+        "EMBEDDING_API_KEY": api_key or "",
+        "MEMORY_RERANKER": reranker,
+    }
+
+
+def _sync_process_embedding_config(runtime: dict[str, str]) -> None:
+    """Keep legacy cfg readers in this process aligned with DB-backed settings."""
+    semantic_dim = int(runtime["EMBEDDING_DIM"])
+    cfg.EMBEDDING_BACKEND = runtime["EMBEDDING_BACKEND"]
+    cfg.EMBEDDING_API_PROVIDER = runtime["EMBEDDING_API_PROVIDER"]
+    cfg.EMBEDDING_API_MODEL = runtime["EMBEDDING_API_MODEL"]
+    cfg.EMBEDDING_CPU_MODEL = runtime["EMBEDDING_CPU_MODEL"]
+    cfg.EMBEDDING_API_KEY = runtime.get("EMBEDDING_API_KEY", "")
+    cfg.EMBEDDING_DIM = semantic_dim
+    cfg.MEMORY_RERANKER = runtime["MEMORY_RERANKER"]
+    cfg.MEMORY_SEMANTIC_EMBEDDING_DIM = semantic_dim
+    cfg.SUMMARY_SEMANTIC_EMBEDDING_DIM = semantic_dim
+    cfg.NARRATIVE_SEMANTIC_EMBEDDING_DIM = semantic_dim
+    cfg.SKILL_SEMANTIC_EMBEDDING_DIM = semantic_dim
+    cfg.SKILL_TASK_CENTROID_EMBEDDING_DIM = semantic_dim
 
 
 def _sync_gpu_embedding_worker(backend: str) -> None:
@@ -66,22 +199,24 @@ def _sync_gpu_embedding_worker(backend: str) -> None:
 
 
 def _apply_embedding_runtime_settings(updates: dict[str, str], *, sync_worker: bool = True) -> None:
-    for key, value in updates.items():
-        _update_env_var(key, value)
-        os.environ[key] = value
-        if key == "EMBEDDING_DIM":
-            setattr(cfg, key, int(value))
-        else:
-            setattr(cfg, key, value)
+    updates = dict(updates)
+    secret = updates.pop("EMBEDDING_API_KEY", None)
+    provider = _provider_key(updates.get("EMBEDDING_API_PROVIDER") or _current_api_provider())
+    if secret:
+        _persist_embedding_api_key(provider, secret)
+    _persist_runtime_settings(updates)
+    runtime = get_effective_embedding_runtime_config()
+    _sync_process_embedding_config(runtime)
 
     try:
         from brain.systems.memory import embeddings as emb_mod
 
         emb_mod._cpu_model = None
+        emb_mod._cpu_model_name = None
     except Exception:
         pass
     if sync_worker:
-        _sync_gpu_embedding_worker(updates.get("EMBEDDING_BACKEND", str(cfg.EMBEDDING_BACKEND)))
+        _sync_gpu_embedding_worker(runtime.get("EMBEDDING_BACKEND", str(cfg.EMBEDDING_BACKEND)))
 
 
 def _standard_openai_api_key(token: str | None) -> str | None:
@@ -102,14 +237,17 @@ def _standard_openai_api_key(token: str | None) -> str | None:
 
 
 def _current_api_provider() -> str:
-    return (os.getenv("EMBEDDING_API_PROVIDER") or cfg.EMBEDDING_API_PROVIDER or "gemini").lower()
+    persisted = _read_persisted_runtime_settings()
+    return _provider_key(_runtime_setting("EMBEDDING_API_PROVIDER", persisted, cfg.EMBEDDING_API_PROVIDER or "gemini"))
 
 
-def _installation_embedding_api_key(provider: str) -> str | None:
-    provider = (provider or "").lower()
-    key = ""
-    if _current_api_provider() == provider:
-        key = os.getenv("EMBEDDING_API_KEY") or cfg.EMBEDDING_API_KEY
+def _installation_embedding_api_key(provider: str, *, persisted: dict[str, str] | None = None) -> str | None:
+    provider = _provider_key(provider)
+    key = _read_persisted_embedding_api_key(provider) or ""
+    if not key:
+        persisted = persisted if persisted is not None else _read_persisted_runtime_settings()
+        if _provider_key(_runtime_setting("EMBEDDING_API_PROVIDER", persisted, cfg.EMBEDDING_API_PROVIDER)) == provider:
+            key = os.getenv("EMBEDDING_API_KEY", "")
     if not key and provider == "openai":
         key = os.getenv("OPENAI_API_KEY", "")
     elif not key and provider == "gemini":
@@ -167,11 +305,12 @@ def _embedder_from_backend_provider(backend: str, provider: str | None) -> str:
 
 
 def get_embedding_info(user: User | None = None) -> dict[str, Any]:
-    backend = (os.getenv("EMBEDDING_BACKEND") or cfg.EMBEDDING_BACKEND or "gpu").lower()
-    provider = (os.getenv("EMBEDDING_API_PROVIDER") or cfg.EMBEDDING_API_PROVIDER or "gemini").lower()
-    api_model = os.getenv("EMBEDDING_API_MODEL") or cfg.EMBEDDING_API_MODEL
-    cpu_model = os.getenv("EMBEDDING_CPU_MODEL") or cfg.EMBEDDING_CPU_MODEL
-    dim = int(os.getenv("EMBEDDING_DIM") or cfg.EMBEDDING_DIM)
+    runtime = get_effective_embedding_runtime_config()
+    backend = runtime["EMBEDDING_BACKEND"].lower()
+    provider = runtime["EMBEDDING_API_PROVIDER"].lower()
+    api_model = runtime["EMBEDDING_API_MODEL"]
+    cpu_model = runtime["EMBEDDING_CPU_MODEL"]
+    dim = int(runtime["EMBEDDING_DIM"])
     api_key_set = bool(_installation_embedding_api_key(provider))
     info: dict[str, Any] = {
         "backend": backend,
@@ -252,7 +391,8 @@ def _indexed_vector_count() -> int:
 
 def get_runtime_memory(user: User) -> RuntimeMemoryRead:
     info = get_embedding_info(user)
-    reranker = os.getenv("MEMORY_RERANKER") or getattr(cfg, "MEMORY_RERANKER", "weighted") or "weighted"
+    runtime = get_effective_embedding_runtime_config()
+    reranker = runtime["MEMORY_RERANKER"] or "weighted"
     if reranker != "weighted":
         reranker = "weighted"
     embedder = _embedder_from_info(info)
@@ -306,21 +446,22 @@ def update_runtime_memory(user: User, update: RuntimeMemoryUpdate) -> RuntimeMem
             ),
         )
 
+    runtime = get_effective_embedding_runtime_config()
     if embedder_spec.backend == "api":
         backend = "api"
         provider = embedder_spec.provider or "openai"
-        cpu_model = os.getenv("EMBEDDING_CPU_MODEL") or cfg.EMBEDDING_CPU_MODEL
+        cpu_model = runtime["EMBEDDING_CPU_MODEL"]
         model = api_model or embedder_spec.default_model
     elif embedder == "local_cpu":
         backend = "cpu"
-        provider = os.getenv("EMBEDDING_API_PROVIDER") or cfg.EMBEDDING_API_PROVIDER
-        model = os.getenv("EMBEDDING_API_MODEL") or cfg.EMBEDDING_API_MODEL
-        cpu_model = os.getenv("EMBEDDING_CPU_MODEL") or cfg.EMBEDDING_CPU_MODEL
+        provider = runtime["EMBEDDING_API_PROVIDER"]
+        model = runtime["EMBEDDING_API_MODEL"]
+        cpu_model = runtime["EMBEDDING_CPU_MODEL"]
     else:
         backend = "gpu"
-        provider = os.getenv("EMBEDDING_API_PROVIDER") or cfg.EMBEDDING_API_PROVIDER
-        model = os.getenv("EMBEDDING_API_MODEL") or cfg.EMBEDDING_API_MODEL
-        cpu_model = os.getenv("EMBEDDING_CPU_MODEL") or cfg.EMBEDDING_CPU_MODEL
+        provider = runtime["EMBEDDING_API_PROVIDER"]
+        model = runtime["EMBEDDING_API_MODEL"]
+        cpu_model = runtime["EMBEDDING_CPU_MODEL"]
 
     dimensions = embedding_dimensions(embedder, model)
     updates = {
@@ -347,7 +488,7 @@ def check_runtime_memory(user: User) -> RuntimeMemoryCheckRead:
         vector = embed_query("illo brain memory setup check")
         shape = getattr(vector, "shape", None)
         dimensions = int(shape[0] if shape else len(vector))
-        expected = int(os.getenv("EMBEDDING_DIM") or cfg.EMBEDDING_DIM)
+        expected = int(get_effective_embedding_runtime_config()["EMBEDDING_DIM"])
         duration_ms = int(round((time.perf_counter() - started) * 1000))
         if dimensions != expected:
             return RuntimeMemoryCheckRead(
@@ -364,7 +505,7 @@ def check_runtime_memory(user: User) -> RuntimeMemoryCheckRead:
         )
     except Exception as exc:
         detail = str(exc)
-        provider = (os.getenv("EMBEDDING_API_PROVIDER") or cfg.EMBEDDING_API_PROVIDER or "").lower()
+        provider = get_effective_embedding_runtime_config()["EMBEDDING_API_PROVIDER"].lower()
         if "EMBEDDING_API_KEY" in detail:
             if provider in {"gemini", "google"}:
                 detail = "Gemini memory needs a Google AI Studio API key. Add a Gemini key in Access or choose Local CPU."

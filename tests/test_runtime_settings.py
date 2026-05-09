@@ -398,6 +398,93 @@ def test_update_runtime_memory_writes_installation_reranker(monkeypatch):
     assert captured["MEMORY_RERANKER"] == "weighted"
 
 
+def test_openai_memory_key_persists_in_encrypted_runtime_store(monkeypatch):
+    import base64
+    import json
+
+    import brain.systems.runtime_settings.memory as memory_settings
+    import brain.systems.vault as vault
+
+    stored_config = {}
+
+    monkeypatch.setattr(memory_settings, "_read_runtime_config_value", lambda key: stored_config.get(key))
+    monkeypatch.setattr(memory_settings, "_write_runtime_config_value", lambda key, value: stored_config.__setitem__(key, value))
+    monkeypatch.setattr(memory_settings, "_sync_gpu_embedding_worker", lambda backend: None)
+    monkeypatch.setattr(vault, "_encrypt", lambda value: f"encrypted:{value}".encode())
+    monkeypatch.setattr(vault, "_decrypt", lambda token: token.decode().removeprefix("encrypted:"))
+
+    memory_settings.configure_openai_embedding_api_key("sk-test-memory")
+
+    runtime = json.loads(stored_config[memory_settings.RUNTIME_MEMORY_SETTINGS_KEY])
+    assert runtime["EMBEDDING_BACKEND"] == "api"
+    assert runtime["EMBEDDING_API_PROVIDER"] == "openai"
+    assert runtime["EMBEDDING_API_MODEL"] == "text-embedding-3-small"
+    assert runtime["EMBEDDING_DIM"] == "768"
+    assert "EMBEDDING_API_KEY" not in runtime
+
+    encrypted = stored_config[memory_settings._runtime_secret_config_key("openai")]
+    assert encrypted != "sk-test-memory"
+    assert base64.b64decode(encrypted).decode() == "encrypted:sk-test-memory"
+    assert memory_settings._installation_embedding_api_key("openai") == "sk-test-memory"
+
+
+def test_openai_memory_key_reports_missing_vault_master_key(monkeypatch):
+    import pytest
+
+    import brain.systems.runtime_settings.memory as memory_settings
+    import brain.systems.vault as vault
+
+    def missing_key(_value):
+        raise RuntimeError("VAULT_MASTER_KEY is required. Refusing to auto-generate a vault key.")
+
+    monkeypatch.setattr(vault, "_encrypt", missing_key)
+
+    with pytest.raises(memory_settings.HTTPException) as exc:
+        memory_settings.configure_openai_embedding_api_key("sk-test-memory")
+
+    assert exc.value.status_code == 503
+    assert "VAULT_MASTER_KEY" in exc.value.detail
+
+
+def test_embedding_api_reads_persisted_runtime_config(monkeypatch):
+    import numpy as np
+
+    import brain.systems.memory.embeddings as embeddings
+
+    captured = {}
+
+    class Response:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
+
+    def post(url, *, headers, json, timeout):
+        captured.update({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return Response()
+
+    monkeypatch.setattr(
+        embeddings,
+        "_runtime_embedding_config",
+        lambda: {
+            "EMBEDDING_BACKEND": "api",
+            "EMBEDDING_API_PROVIDER": "openai",
+            "EMBEDDING_API_MODEL": "text-embedding-3-small",
+            "EMBEDDING_CPU_MODEL": "all-MiniLM-L6-v2",
+            "EMBEDDING_API_KEY": "sk-db-memory",
+            "EMBEDDING_DIM": "768",
+        },
+    )
+    monkeypatch.setattr("httpx.post", post)
+
+    vector = embeddings._embed_api_openai(["hello"], "query")
+
+    assert isinstance(vector, np.ndarray)
+    assert captured["headers"]["Authorization"] == "Bearer sk-db-memory"
+    assert captured["json"]["dimensions"] == 768
+
+
 def test_connect_gemini_api_key_requires_installation_admin(monkeypatch):
     from types import SimpleNamespace
 

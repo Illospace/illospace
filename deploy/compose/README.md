@@ -50,6 +50,10 @@ ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>
 Open `http://localhost:8080`, create the owner account, and add provider
 credentials in System/Access.
 
+Memory setup is also runtime-managed: choosing OpenAI/Gemini memory saves the
+non-secret embedding settings in Postgres and encrypts the embedding API key
+with `VAULT_MASTER_KEY`. The Compose app image and `/app/.env` are not mutated.
+
 OpenAI/Codex sign-in uses OpenAI's registered localhost callback. In this
 Compose deployment, the API runs inside a container, so the browser's
 `localhost:1455` is your workstation, not the API container. Illospace therefore

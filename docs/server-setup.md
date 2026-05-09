@@ -57,6 +57,10 @@ provider credentials should be added from the Illospace System/Access screens
 after first boot so they are encrypted with `VAULT_MASTER_KEY` and stored in
 Postgres.
 
+The memory setup screen follows the same rule. OpenAI/Gemini embedding choices
+are saved as runtime DB settings, and embedding API keys are encrypted in
+Postgres rather than written back to `/app/.env`.
+
 ## Private Access
 
 The Compose stack does not install public TLS or domain ingress. The browser

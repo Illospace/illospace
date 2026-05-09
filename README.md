@@ -126,6 +126,9 @@ restore, upgrades, logs, and status.
 - In production, add model/provider credentials from Illospace System/Access so
   they are encrypted and stored in Postgres. Environment provider keys remain a
   development fallback, not the recommended self-hosted server path.
+- Memory provider settings are saved as runtime DB settings. Embedding API keys
+  are encrypted with `VAULT_MASTER_KEY`; the app does not rewrite `.env` after
+  first boot.
 - `./illo setup` creates ignored checkout-local defaults for `SECRET_KEY` and
   `VAULT_MASTER_KEY` in `.illo/runtime.env` when they are not provided, so a
   self-hosted preview can boot cleanly.
