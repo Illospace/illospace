@@ -18,6 +18,7 @@ export type AttachThreadProjectContextInput = Parameters<typeof api.attachIdeaPr
 export type ThreadActivityTimelineItem = Awaited<ReturnType<typeof api.activityTimeline>>[number];
 export type IdeaAudit = Awaited<ReturnType<typeof api.ideaAudit>>;
 export type IdeaAuditAnalysisResult = Awaited<ReturnType<typeof api.ideaAuditAnalysisResult>>;
+export type GeneratedThreadTitle = Awaited<ReturnType<typeof api.generateTitle>>;
 
 type ThreadApiMethods = {
   unifiedStream: (ideaId: string, includeDebug?: boolean) => Promise<StreamItem[]>;
@@ -37,6 +38,7 @@ type ThreadApiMethods = {
   getIdea: (id: string) => Promise<Idea>;
   ideaConnections: (ideaId: string) => Promise<Connection[]>;
   activityTimeline: typeof api.activityTimeline;
+  generateTitle: typeof api.generateTitle;
   uploadFile: (file: File) => Promise<UploadedThreadFile>;
   listIdeaProjectContext: typeof api.listIdeaProjectContext;
   attachIdeaProjectContext: typeof api.attachIdeaProjectContext;
@@ -93,6 +95,7 @@ export const {
   getIdea,
   ideaConnections,
   activityTimeline,
+  generateTitle,
   uploadFile,
   listIdeaProjectContext,
   attachIdeaProjectContext,

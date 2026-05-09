@@ -454,6 +454,18 @@
         />
         <h1 class="thread-header-title" title={header.title}>{header.title}</h1>
 
+        {#if header.onTitleAction}
+          <ConstellationIconButton
+            label={header.titleActionLabel ?? 'Generate a new thread title'}
+            title={header.titleActionLabel ?? 'Generate a new thread title'}
+            className={`thread-title-action-button ${header.titleActionLoading ? 'is-loading' : ''}`}
+            disabled={header.titleActionLoading}
+            onclick={header.onTitleAction}
+          >
+            <ConstellationIcon name="refresh" size={13} stroke={1.9} />
+          </ConstellationIconButton>
+        {/if}
+
         {#if header.onToggleSecondaryPanel || header.onTogglePanel}
           <div class="thread-header-panel-toggle-group">
             {#if header.onToggleSecondaryPanel}
@@ -1381,6 +1393,31 @@
     text-overflow: ellipsis;
   }
 
+  .thread-header-title-row :global(.thread-title-action-button) {
+    --constellation-icon-button-border: transparent;
+    --constellation-icon-button-quiet-background: transparent;
+    --constellation-icon-button-quiet-background-hover: color-mix(in srgb, var(--thread-accent, #57cfa0) 10%, transparent);
+    --constellation-icon-button-quiet-border-hover: transparent;
+    --constellation-icon-button-quiet-shadow: none;
+
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    color: var(--constellation-thread-header-meta);
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .thread-header-title-row :global(.thread-title-action-button:hover:not(:disabled)) {
+    color: var(--constellation-thread-header-title);
+  }
+
+  .thread-header-title-row :global(.thread-title-action-button.is-loading svg) {
+    animation: thread-title-action-spin 720ms linear infinite;
+  }
+
   .thread-header-panel-toggle-group {
     --constellation-icon-button-border: transparent;
     --constellation-icon-button-pressed-border: transparent;
@@ -1413,6 +1450,12 @@
   .thread-header-panel-toggle-group :global(.thread-panel-toggle-button[aria-pressed='true']) {
     background: transparent;
     box-shadow: none;
+  }
+
+  @keyframes thread-title-action-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .thread-content {
