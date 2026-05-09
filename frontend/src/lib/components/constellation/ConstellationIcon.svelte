@@ -3,6 +3,7 @@
     IconArrowLeft,
     IconArrowRight,
     IconArrowUp,
+    IconArchive,
     IconBell,
     IconBolt,
     IconBrain,
@@ -58,6 +59,7 @@
   export type ConstellationIconName =
     | 'activity'
     | 'archive'
+    | 'archive-box'
     | 'attach'
     | 'back'
     | 'bolt'
@@ -117,6 +119,7 @@
   const ICONS = {
     activity: IconListDetails,
     archive: IconFileZip,
+    'archive-box': IconArchive,
     attach: IconPaperclip,
     back: IconArrowLeft,
     bolt: IconBolt,

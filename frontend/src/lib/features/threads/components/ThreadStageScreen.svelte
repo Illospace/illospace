@@ -165,6 +165,7 @@
   let threadStageContentWidth = $state(0);
   let threadStageGutterPx = $state(24);
   let titleGenerating = $state(false);
+  let threadArchiving = $state(false);
 
   const THREAD_STAGE_MIN_THREAD_WIDTH = 380;
   const THREAD_STAGE_DEFAULT_GUTTER = 24;
@@ -265,6 +266,9 @@
       titleActionLabel: titleGenerating ? 'Generating a new thread title' : 'Generate a new thread title',
       titleActionLoading: titleGenerating,
       onTitleAction: () => void regenerateThreadTitle(),
+      archiveActionLabel: threadArchiving ? 'Archiving thread' : 'Archive thread',
+      archiveActionLoading: threadArchiving,
+      onArchiveAction: () => void archiveThread(),
       panelOpen: browserOpen,
       onTogglePanel: () => {
         if (!browserOpen) void workspaceApps.load({ silent: true });
@@ -375,6 +379,18 @@
       ui.toast(err?.detail || err?.message || 'Failed to refresh thread title', 'error');
     } finally {
       titleGenerating = false;
+    }
+  }
+
+  async function archiveThread() {
+    const selectedIdea = idea;
+    if (!selectedIdea?.id || threadArchiving) return;
+
+    threadArchiving = true;
+    try {
+      await cortex.deleteIdea(selectedIdea.id);
+    } finally {
+      threadArchiving = false;
     }
   }
 
