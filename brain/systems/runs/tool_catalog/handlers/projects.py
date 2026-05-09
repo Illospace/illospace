@@ -119,6 +119,7 @@ def _resource_matches(resource: dict[str, Any], resource_id: str) -> bool:
 
 def _handle_manage_project(
     action: str,
+    operation: str | None = None,
     project_id: str | None = None,
     profile_id: str | None = None,
     slug: str | None = None,
@@ -135,6 +136,10 @@ def _handle_manage_project(
     idea_id: str | None = None,
     include_inactive: bool = False,
 ) -> str:
+    action = str(action or "").strip().lower()
+    if action in {"help", "schema"}:
+        return _manage_tool_guide("manage_project", operation)
+
     from sqlalchemy import select
 
     from brain.app.api.routers.cortex._helpers import _require_idea_for_user

@@ -215,8 +215,8 @@ def test_action_policy_comes_from_registry_metadata():
         kwargs={"command": "git push origin main"},
     )["risk"] == "high"
     assert action_policy_for_tool(
-        "browser_snapshot",
-        kwargs={"persist": False},
+        "browser",
+        kwargs={"action": "snapshot", "persist": False},
     ) is None
 
 

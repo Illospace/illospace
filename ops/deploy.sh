@@ -235,6 +235,29 @@ disable_user_service_if_present() {
   fi
 }
 
+stop_legacy_docker_app_containers() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local names=(
+    illospace-api-1
+    illospace-web-1
+    illospace-worker-1
+    illospace-scheduler-1
+  )
+  local running
+  running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+  local to_stop=()
+  local name
+  for name in "${names[@]}"; do
+    if printf '%s\n' "$running" | grep -qx "$name"; then
+      to_stop+=("$name")
+    fi
+  done
+  if [ "${#to_stop[@]}" -gt 0 ]; then
+    echo "Stopping legacy Docker app containers: ${to_stop[*]}"
+    docker stop "${to_stop[@]}" >/dev/null 2>&1 || true
+  fi
+}
+
 install_user_service() {
   local source_path="$1"
   local dest_path="$HOME/.config/systemd/user/$(basename "$source_path")"
@@ -326,6 +349,36 @@ sys.exit(1)
 PY
 }
 
+wait_for_api_readiness() {
+  "$PYTHON_BIN" - <<'PY'
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+url = os.environ.get("ILLO_DEPLOY_HEALTH_URL", "http://127.0.0.1:8000/api/health/ready")
+wait_seconds = int(os.environ.get("ILLO_API_RESTART_TIMEOUT_SECONDS", "120"))
+deadline = time.time() + wait_seconds
+last = None
+
+while time.time() < deadline:
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            body = resp.read(200).decode("utf-8", "replace")
+        if 200 <= resp.status < 300:
+            print(f"API readiness passed: {url}")
+            sys.exit(0)
+        last = f"HTTP {resp.status}: {body}"
+    except Exception as exc:
+        last = str(exc)
+    time.sleep(1)
+
+print(f"API readiness did not pass within {wait_seconds}s: {last}", file=sys.stderr)
+sys.exit(1)
+PY
+}
+
 echo "=== Pulling latest code ==="
 git checkout main
 git pull origin main
@@ -369,6 +422,7 @@ if [ -f ops/illo-embed.service ]; then
 fi
 systemctl --user daemon-reload
 disable_user_service_if_present illo-dashboard
+stop_legacy_docker_app_containers
 
 echo "=== Restarting services ==="
 ACTIVE_RUNS="$(active_agent_run_count)"
@@ -407,6 +461,13 @@ systemctl --user restart illo-scheduler
 if have_user_service illo-api; then
   systemctl --user enable illo-api
   systemctl --user restart illo-api
+  wait_for_api_readiness || {
+    echo "Last API service status:" >&2
+    systemctl --user status illo-api --no-pager -l >&2 || true
+    echo "Last API log lines:" >&2
+    tail -n 160 "$ROOT/logs/api.log" >&2 || true
+    exit 1
+  }
 else
   echo "API:       missing user service (expected illo-api)"
 fi

@@ -1536,6 +1536,7 @@ class CortexStore {
     } catch { /* silent */ }
   }
 
+<<<<<<< HEAD
   async regenerateIdeaTitle(id: string, options: CortexRegenerateTitleOptions = {}) {
     try {
       const updated = await api.regenerateIdeaTitle(id);
@@ -1545,6 +1546,16 @@ class CortexStore {
     } catch (err: any) {
       if (!options.silent) ui.toast(err?.detail || 'Failed to regenerate title', 'error');
       return undefined;
+=======
+  async updateIdeaDisplayTitle(id: string, displayTitle: string) {
+    try {
+      const updated = await api.updateIdea(id, { display_title: displayTitle });
+      this._upsertIdea(updated);
+      return updated;
+    } catch (e) {
+      console.error('Failed to update idea display title:', e);
+      throw e;
+>>>>>>> origin/main
     }
   }
 

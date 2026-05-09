@@ -8,25 +8,7 @@ from typing import Any, Literal
 
 from brain.systems.runs.tool_definitions import (
     BRAIN_TOOLS,
-    BROWSER_BACK_TOOL,
-    BROWSER_CLICK_TOOL,
-    BROWSER_CLOSE_TAB_TOOL,
-    BROWSER_CLOSE_TOOL,
-    BROWSER_DISCOVER_TOOL,
-    BROWSER_EXTRACT_TOOL,
-    BROWSER_FORWARD_TOOL,
-    BROWSER_KEY_TOOL,
-    BROWSER_LIST_TABS_TOOL,
-    BROWSER_NAVIGATE_TOOL,
-    BROWSER_NEW_TAB_TOOL,
-    BROWSER_PRINT_PDF_TOOL,
-    BROWSER_SAVE_SCREENSHOT_TOOL,
-    BROWSER_SESSION_OPEN_TOOL,
-    BROWSER_SNAPSHOT_TOOL,
-    BROWSER_SWITCH_TAB_TOOL,
-    BROWSER_TYPE_TOOL,
-    BROWSER_UPLOAD_ATTACHMENT_TOOL,
-    BROWSER_WAIT_TOOL,
+    BROWSER_TOOL,
     CHAT_TOOLS,
     CORTEX_REPLY_TOOL,
     CORTEX_VISUAL_REPLY_TOOL,
@@ -55,25 +37,7 @@ from brain.systems.runs.tool_catalog.metadata import (
 _DEFAULT_OUTPUT_BUDGET_CHARS = 10_000
 
 _BROWSER_TOOLS = [
-    BROWSER_SESSION_OPEN_TOOL,
-    BROWSER_NAVIGATE_TOOL,
-    BROWSER_CLICK_TOOL,
-    BROWSER_TYPE_TOOL,
-    BROWSER_KEY_TOOL,
-    BROWSER_BACK_TOOL,
-    BROWSER_FORWARD_TOOL,
-    BROWSER_NEW_TAB_TOOL,
-    BROWSER_SWITCH_TAB_TOOL,
-    BROWSER_CLOSE_TAB_TOOL,
-    BROWSER_LIST_TABS_TOOL,
-    BROWSER_WAIT_TOOL,
-    BROWSER_EXTRACT_TOOL,
-    BROWSER_DISCOVER_TOOL,
-    BROWSER_UPLOAD_ATTACHMENT_TOOL,
-    BROWSER_SNAPSHOT_TOOL,
-    BROWSER_SAVE_SCREENSHOT_TOOL,
-    BROWSER_PRINT_PDF_TOOL,
-    BROWSER_CLOSE_TOOL,
+    BROWSER_TOOL,
 ]
 
 _STATIC_METADATA: dict[str, dict[str, Any]] = {
@@ -436,115 +400,16 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
             "scopes": ["narrow"],
         },
     },
-}
-
-_BROWSER_METADATA: dict[str, dict[str, Any]] = {
-    "browser_session_open": {
-        "risk_class": "medium",
-        "side_effect_class": "browser_session",
-        "reversibility": "reversible",
-        "expected_effect": "open or reuse a browser session",
-    },
-    "browser_navigate": {
-        "risk_class": "medium",
-        "side_effect_class": "browser_navigation",
-        "reversibility": "reversible",
-        "expected_effect": "navigate browser session",
-    },
-    "browser_click": {
-        "risk_class": "high",
-        "side_effect_class": "browser_interaction",
-        "reversibility": "variable",
-        "expected_effect": "click in browser session",
-    },
-    "browser_type": {
-        "risk_class": "high",
-        "side_effect_class": "browser_interaction",
-        "reversibility": "variable",
-        "expected_effect": "type into browser session",
-    },
-    "browser_key": {
-        "risk_class": "high",
-        "side_effect_class": "browser_interaction",
-        "reversibility": "variable",
-        "expected_effect": "send keypress to browser session",
-    },
-    "browser_back": {
-        "risk_class": "medium",
-        "side_effect_class": "browser_navigation",
-        "reversibility": "reversible",
-        "expected_effect": "navigate browser session backward",
-    },
-    "browser_forward": {
-        "risk_class": "medium",
-        "side_effect_class": "browser_navigation",
-        "reversibility": "reversible",
-        "expected_effect": "navigate browser session forward",
-    },
-    "browser_new_tab": {
-        "risk_class": "medium",
-        "side_effect_class": "browser_session",
-        "reversibility": "reversible",
-        "expected_effect": "open browser tab",
-    },
-    "browser_switch_tab": {
-        "risk_class": "low",
-        "side_effect_class": "browser_session",
-        "reversibility": "reversible",
-        "expected_effect": "switch active browser tab",
-    },
-    "browser_close_tab": {
-        "risk_class": "medium",
-        "side_effect_class": "browser_session",
-        "reversibility": "reversible",
-        "expected_effect": "close browser tab",
-    },
-    "browser_list_tabs": {"side_effect_class": "read_only", "reversibility": "none"},
-    "browser_wait": {"side_effect_class": "read_only", "reversibility": "none"},
-    "browser_extract": {"side_effect_class": "read_only", "reversibility": "none", "evidence_emitter": True},
-    "browser_discover": {"side_effect_class": "read_only", "reversibility": "none", "evidence_emitter": True},
-    "browser_upload_attachment": {
-        "risk_class": "high",
-        "side_effect_class": "browser_interaction",
-        "reversibility": "variable",
-        "expected_effect": "upload attachment through browser",
-    },
-    "browser_snapshot": {
-        "side_effect_class": "browser_artifact",
-        "reversibility": "reversible",
-        "expected_effect": "persist browser snapshot artifact",
-    },
-    "browser_save_screenshot": {
-        "side_effect_class": "browser_artifact",
-        "reversibility": "reversible",
-        "expected_effect": "persist browser screenshot artifact",
-    },
-    "browser_print_pdf": {
-        "side_effect_class": "browser_artifact",
-        "reversibility": "reversible",
-        "expected_effect": "persist browser PDF artifact",
-    },
-    "browser_close": {
-        "risk_class": "medium",
-        "side_effect_class": "browser_session",
-        "reversibility": "reversible",
-        "expected_effect": "close browser session",
-    },
-}
-
-for _browser_name, _metadata in _BROWSER_METADATA.items():
-    _STATIC_METADATA.setdefault(_browser_name, {})
-    _STATIC_METADATA[_browser_name].update({
+    "browser": {
         "permission": "automate_browser",
-        "action_manifest": _browser_name not in {
-            "browser_list_tabs",
-            "browser_wait",
-            "browser_extract",
-            "browser_discover",
-        },
-        **_metadata,
-    })
-
+        "risk_class": "high",
+        "side_effect_class": "browser_interaction",
+        "reversibility": "variable",
+        "action_manifest": True,
+        "expected_effect": "control or inspect the live browser session",
+        "output_budget_chars": 14_000,
+    },
+}
 
 def _definition_sources() -> list[tuple[str, tuple[str, ...], list[Mapping[str, Any]]]]:
     sources: list[tuple[str, tuple[str, ...], list[Mapping[str, Any]]]] = [
@@ -779,18 +644,24 @@ def action_policy_for_tool(
     """Return action policy metadata for a concrete invocation."""
     args_tuple = tuple(args)
     kwargs_dict = dict(kwargs or {})
-    if tool_name in {"manage_cycle", "manage_cron_job"} and _arg_at(args_tuple, kwargs_dict, "action", 0) == "list":
+    if tool_name in {"manage_cycle", "manage_cron_job"} and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list"}:
         return None
-    if tool_name == "manage_idea" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"list", "get"}:
+    if tool_name == "manage_domain" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "query_records", "get_record", "events"}:
         return None
-    if tool_name == "manage_project" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"list", "get"}:
+    if tool_name == "manage_idea" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get"}:
         return None
-    if tool_name == "manage_workspace_app" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"list", "get", "get_state"}:
+    if tool_name == "manage_project" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get"}:
+        return None
+    if tool_name == "manage_workspace_app" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get", "get_state"}:
         return None
     if tool_name == "manage_soul" and _arg_at(args_tuple, kwargs_dict, "action", 0) == "read":
         return None
-    if tool_name == "browser_snapshot" and not bool(_arg_at(args_tuple, kwargs_dict, "persist", 0, False)):
-        return None
+    if tool_name == "browser":
+        browser_action = str(_arg_at(args_tuple, kwargs_dict, "action", 0, "") or "").strip().lower()
+        if browser_action in {"help", "list_tabs", "wait", "extract", "discover"}:
+            return None
+        if browser_action == "snapshot" and not bool(_arg_at(args_tuple, kwargs_dict, "persist", 21, False)):
+            return None
     if tool_name == "exec_command":
         command = str(_arg_at(args_tuple, kwargs_dict, "command", 0, ""))
         policy = {

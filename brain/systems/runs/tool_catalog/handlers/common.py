@@ -83,6 +83,152 @@ _BLOCKED_REPLY_MARKERS = (
     "missing",
 )
 
+_MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
+    "manage_cycle": {
+        "list": {"required": [], "optional": [], "effect": "read scheduled cycles"},
+        "create": {
+            "required": ["name", "prompt", "timezone", "schedule_expr or run_at"],
+            "optional": ["enabled", "target_idea_id", "model_override", "thinking_override"],
+            "effect": "create a recurring cycle or one-time reminder",
+        },
+        "update": {
+            "required": ["id"],
+            "optional": ["name", "prompt", "timezone", "schedule_expr", "run_at", "enabled", "target_idea_id"],
+            "effect": "change an existing cycle",
+        },
+        "delete": {"required": ["id"], "optional": [], "effect": "archive/disable a cycle"},
+        "run": {"required": ["id"], "optional": [], "effect": "run a cycle immediately"},
+    },
+    "manage_domain": {
+        "list": {"required": [], "optional": ["include_archived"], "effect": "read available domains"},
+        "create_domain": {
+            "required": ["name"],
+            "optional": ["slug", "description", "objects", "relations"],
+            "effect": "create a shared custom database",
+        },
+        "schema": {"required": ["domain_id"], "optional": ["include_archived"], "effect": "read a domain schema"},
+        "remove_domain": {"required": ["domain_id"], "optional": ["mode"], "effect": "archive or delete a domain"},
+        "add_object": {
+            "required": ["domain_id", "object_key", "name"],
+            "optional": ["description", "fields"],
+            "effect": "add an object type to a domain",
+        },
+        "add_field": {
+            "required": ["domain_id", "object_key", "field"],
+            "optional": [],
+            "effect": "add a field definition to an object type",
+        },
+        "add_relation_type": {
+            "required": ["domain_id", "relation_type"],
+            "optional": [],
+            "effect": "add a relation type to a domain",
+        },
+        "query_records": {
+            "required": ["domain_id"],
+            "optional": ["object_key", "search", "limit", "include_archived"],
+            "effect": "read records in a domain",
+        },
+        "get_record": {"required": ["domain_id", "record_id"], "optional": [], "effect": "read one record"},
+        "create_record": {
+            "required": ["domain_id", "object_key", "data"],
+            "optional": ["title"],
+            "effect": "create a record",
+        },
+        "update_record": {
+            "required": ["domain_id", "record_id", "data_patch"],
+            "optional": ["title", "expected_version"],
+            "effect": "update a record",
+        },
+        "remove_record": {"required": ["domain_id", "record_id"], "optional": ["mode"], "effect": "archive or delete a record"},
+        "link_records": {
+            "required": ["domain_id", "relation_key", "source_record_id", "target_record_id"],
+            "optional": ["properties"],
+            "effect": "create a relation between records",
+        },
+        "events": {"required": ["domain_id"], "optional": ["record_id", "limit"], "effect": "read domain audit events"},
+    },
+    "manage_idea": {
+        "list": {"required": [], "optional": ["status", "search", "include_archived", "limit"], "effect": "read Cortex thoughts"},
+        "get": {"required": ["idea_id unless a current thread is bound"], "optional": [], "effect": "read one thought"},
+        "create": {
+            "required": ["title"],
+            "optional": ["thread_message", "description", "status", "start_run", "parent_id"],
+            "effect": "create a Cortex thought",
+        },
+        "update": {
+            "required": ["idea_id unless a current thread is bound", "at least one changed field"],
+            "optional": ["title", "display_title", "description", "status", "position_x", "position_y", "user_id"],
+            "effect": "update thought metadata",
+        },
+        "archive": {"required": ["idea_id unless a current thread is bound"], "optional": [], "effect": "archive a thought"},
+        "restore": {"required": ["idea_id"], "optional": [], "effect": "restore an archived thought"},
+        "set_status": {"required": ["idea_id unless a current thread is bound", "status"], "optional": [], "effect": "change status"},
+        "mark_read": {"required": ["idea_id unless a current thread is bound"], "optional": [], "effect": "mark a thought read"},
+    },
+    "manage_project": {
+        "list": {"required": [], "optional": ["include_inactive"], "effect": "read project context profiles"},
+        "get": {"required": ["project_id"], "optional": ["include_inactive"], "effect": "read one project profile"},
+        "create": {
+            "required": ["slug", "name"],
+            "optional": ["description", "project_context", "resources", "metadata", "default_environment_binding_id"],
+            "effect": "create a reusable project context profile",
+        },
+        "update": {
+            "required": ["project_id"],
+            "optional": ["slug", "name", "description", "project_context", "resources", "metadata"],
+            "effect": "update a project context profile",
+        },
+        "archive": {"required": ["project_id"], "optional": [], "effect": "archive a project profile"},
+        "delete": {"required": ["project_id"], "optional": [], "effect": "archive a project profile"},
+        "add_resource": {"required": ["project_id", "resource or resources"], "optional": [], "effect": "add project resources"},
+        "update_resource": {"required": ["project_id", "resource_id", "resource"], "optional": [], "effect": "update a project resource"},
+        "remove_resource": {"required": ["project_id", "resource_id"], "optional": [], "effect": "remove a project resource"},
+        "reorder_resources": {"required": ["project_id", "resource_ids"], "optional": [], "effect": "reorder resources"},
+        "attach_to_thread": {
+            "required": ["project_id or project_context", "idea_id unless a current thread is bound"],
+            "optional": ["environment_binding_id", "metadata"],
+            "effect": "attach project context to a thought",
+        },
+    },
+    "manage_workspace_app": {
+        "list": {"required": [], "optional": ["include_archived", "include_prototypes"], "effect": "read workspace apps"},
+        "get": {"required": ["app_id or key"], "optional": ["include_archived"], "effect": "read one workspace app"},
+        "create": {
+            "required": ["name"],
+            "optional": ["key", "description", "renderer_key", "source_kind", "source_code", "manifest", "visual_spec", "initial_state"],
+            "effect": "create a generated workspace app",
+        },
+        "update": {
+            "required": ["app_id or key"],
+            "optional": ["name", "description", "renderer_key", "source_kind", "source_code", "manifest", "visual_spec"],
+            "effect": "update a generated workspace app",
+        },
+        "archive": {"required": ["app_id or key"], "optional": [], "effect": "archive an app"},
+        "restore": {"required": ["app_id or key"], "optional": [], "effect": "restore an archived app"},
+        "get_state": {"required": ["app_id"], "optional": ["state_key"], "effect": "read app-local state"},
+        "update_state": {"required": ["app_id"], "optional": ["state_key", "data", "data_patch"], "effect": "write app-local state"},
+    },
+}
+
+
+def _manage_tool_guide(tool_name: str, operation: str | None = None) -> str:
+    operations = _MANAGE_TOOL_OPERATIONS.get(tool_name, {})
+    requested = str(operation or "").strip().lower()
+    if requested:
+        detail = operations.get(requested)
+        if detail is None:
+            return json.dumps({
+                "tool": tool_name,
+                "error": f"Unknown operation: {requested}",
+                "available_operations": sorted(operations),
+            })
+        return json.dumps({"tool": tool_name, "operation": requested, **detail}, default=str)
+    return json.dumps({
+        "tool": tool_name,
+        "usage": "Call this tool again with action set to one of these operations. Use operation with action=help/schema for one operation.",
+        "operations": operations,
+    }, default=str)
+
 
 def _is_missing_cycle_schema_error(exc: Exception) -> bool:
     message = str(exc).lower()

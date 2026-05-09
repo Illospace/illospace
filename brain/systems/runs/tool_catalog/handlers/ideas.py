@@ -348,6 +348,7 @@ def _apply_idea_updates(
 
 def _handle_manage_idea(
     action: str,
+    operation: str | None = None,
     idea_id: str | None = None,
     thread_id: str | None = None,
     title: str | None = None,
@@ -370,6 +371,10 @@ def _handle_manage_idea(
     include_archived: bool = False,
     limit: int | None = 20,
 ) -> str:
+    normalized_action = str(action or "").strip().lower()
+    if normalized_action in {"help", "schema"}:
+        return _manage_tool_guide("manage_idea", operation)
+
     from brain.app.api.routers.cortex._helpers import _require_idea_for_user
     from brain.systems.cortex.events import publish_safe
     from brain.platform.db.models.idea import Idea
@@ -377,7 +382,6 @@ def _handle_manage_idea(
 
     org_id, actor_user_id, context_idea_id = _idea_tool_context()
     actor = _idea_actor(org_id=org_id, actor_user_id=actor_user_id)
-    normalized_action = str(action or "").strip().lower()
     target_idea_id = _target_idea_id(idea_id, thread_id, context_idea_id)
     event: tuple[str, dict[str, Any]] | None = None
 

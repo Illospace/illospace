@@ -25,6 +25,7 @@ from brain.systems.runs.tool_catalog.handlers.workspace_apps import *  # noqa: F
 from brain.systems.runs.tool_catalog.handlers.composition import get_tools_with_extended
 
 _COMPOSITION_PATCH_NAMES = (
+    "_handle_browser",
     "_handle_browser_back",
     "_handle_browser_click",
     "_handle_browser_close",
@@ -49,6 +50,7 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_post_chat_message",
     "_handle_read_thread_messages",
     "_handle_manage_cycle",
+    "_handle_manage_domain",
     "_handle_manage_idea",
     "_handle_manage_project",
     "_handle_manage_workspace_app",

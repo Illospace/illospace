@@ -343,6 +343,14 @@ def build_action_target(
             )),
             "visibility": _json_safe(kwargs_dict.get("visibility")),
         })
+    if tool_name == "browser":
+        return ActionTarget({
+            "action": _json_safe(_arg_at(args, kwargs_dict, "action", 0)),
+            "url": _json_safe(kwargs_dict.get("url") or _arg_at(args, kwargs_dict, "url", 2)),
+            "selector": _json_safe(kwargs_dict.get("selector") or _arg_at(args, kwargs_dict, "selector", 8)),
+            "index": _json_safe(kwargs_dict.get("index") or _arg_at(args, kwargs_dict, "index", 14)),
+            "argument_keys": sorted(kwargs_dict.keys()),
+        })
     if tool_name.startswith("browser_"):
         return ActionTarget({
             "url": _json_safe(kwargs_dict.get("url") or _arg_at(args, kwargs_dict, "url", 0)),

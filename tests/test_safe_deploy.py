@@ -97,6 +97,8 @@ def test_ops_deploy_renders_systemd_services_for_current_checkout():
     assert "systemctl --user enable illo-api" in content
     assert "disable_user_service_if_present illo-dashboard" in content
     assert "systemctl --user restart illo-dashboard" not in content
+    assert "stop_legacy_docker_app_containers" in content
+    assert "illospace-api-1" in content
 
 
 def test_ops_deploy_installs_api_service_that_runs_uvicorn():
@@ -106,6 +108,8 @@ def test_ops_deploy_installs_api_service_that_runs_uvicorn():
 
     assert "install_user_service ops/illo-api.service" in deploy_content
     assert "systemctl --user restart illo-api" in deploy_content
+    assert "wait_for_api_readiness" in deploy_content
+    assert "Last API log lines" in deploy_content
     assert "ExecStart=%h/illo-brain/venv/bin/uvicorn brain.app.api.main:app" in service_content
     assert "CORTEX_INLINE_DISPATCHER=0" in service_content
 
