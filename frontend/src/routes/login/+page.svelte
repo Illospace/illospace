@@ -12,6 +12,7 @@
   import IllospaceLogo from '$lib/components/layout/IllospaceLogo.svelte';
   import { api } from '$lib/api/client';
   import { auth } from '$lib/stores/auth.svelte';
+  import { requiresPersonalOpenAIOnboarding } from '$lib/utils/runtimeOnboarding';
 
   type View = 'login' | 'register' | 'pending';
   type PublicOrg = { id: string; name: string; slug: string };
@@ -234,7 +235,7 @@
         return;
       }
       const runtime = await api.runtimeSettings();
-      if (runtime?.connection?.setup_required) {
+      if (requiresPersonalOpenAIOnboarding(runtime)) {
         await goto('/onboarding');
         return;
       }

@@ -16,6 +16,7 @@
     navigateOpenAIOAuthPopup,
     openOpenAIOAuthPopup,
   } from '$lib/utils/oauthPopup';
+  import { hasPersonalOpenAIRuntimeConnection } from '$lib/utils/runtimeOnboarding';
   import type { EmbedderKey, RuntimeOption, RuntimeSettings } from '../system/types';
 
   type OnboardingStatus = 'loading' | 'missing' | 'connecting' | 'connected' | 'error';
@@ -116,7 +117,7 @@
   }
 
   function runtimeHasOnboardingOpenAIConnection(runtime: RuntimeSettings) {
-    return Boolean(runtime?.connection?.status === 'connected' && ['user_default', 'org_main'].includes(runtime.connection.source || ''));
+    return hasPersonalOpenAIRuntimeConnection(runtime);
   }
 
   function selectEmbedder(embedder: EmbedderKey) {

@@ -10,6 +10,10 @@ def _uow_with_session(session):
     return uow
 
 
+def _personal_openai_status():
+    return {"runtime_key_available": True, "runtime_key_source": "user_default"}
+
+
 def test_runtime_ready_intro_reuses_existing_thread():
     from brain.app.api.routers.onboarding import start_runtime_ready_intro
 
@@ -23,7 +27,7 @@ def test_runtime_ready_intro_reuses_existing_thread():
         return_value=_uow_with_session(session),
     ), patch(
         "brain.app.api.routers.onboarding.get_provider_auth_status",
-        return_value={"runtime_key_available": True},
+        return_value=_personal_openai_status(),
     ), patch("brain.app.api.routers.onboarding.route_trigger") as route_trigger:
         result = start_runtime_ready_intro(
             {"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
@@ -52,7 +56,7 @@ def test_runtime_ready_intro_recovers_failed_existing_thread():
         return_value=_uow_with_session(session),
     ), patch(
         "brain.app.api.routers.onboarding.get_provider_auth_status",
-        return_value={"runtime_key_available": True},
+        return_value=_personal_openai_status(),
     ), patch(
         "brain.app.api.routers.onboarding.route_trigger",
         return_value=TriggerRouteResult(ok=True, route="run", run_id=77),
@@ -92,7 +96,7 @@ def test_runtime_ready_intro_creates_thread_and_run():
         return_value=_uow_with_session(session),
     ), patch(
         "brain.app.api.routers.onboarding.get_provider_auth_status",
-        return_value={"runtime_key_available": True},
+        return_value=_personal_openai_status(),
     ), patch(
         "brain.app.api.routers.onboarding.route_trigger",
         return_value=TriggerRouteResult(ok=True, route="run", run_id=42),
@@ -134,4 +138,26 @@ def test_runtime_ready_intro_requires_openai_runtime():
             )
 
     assert exc.value.status_code == 409
-    assert "OpenAI runtime is not connected" in exc.value.detail
+    assert "personal OpenAI account" in exc.value.detail
+
+
+def test_runtime_ready_intro_rejects_workspace_openai_runtime():
+    import pytest
+    from fastapi import HTTPException
+
+    from brain.app.api.routers.onboarding import runtime_ready_intro_draft, start_runtime_ready_intro
+
+    user = {"id": "user-1", "org_id": "org-1", "role": "member", "name": "Alice"}
+    with patch(
+        "brain.app.api.routers.onboarding.get_provider_auth_status",
+        return_value={"runtime_key_available": True, "runtime_key_source": "org_main"},
+    ):
+        with pytest.raises(HTTPException) as exc:
+            runtime_ready_intro_draft(user)
+        assert exc.value.status_code == 409
+        assert "personal OpenAI account" in exc.value.detail
+
+        with pytest.raises(HTTPException) as exc:
+            start_runtime_ready_intro(user)
+        assert exc.value.status_code == 409
+        assert "personal OpenAI account" in exc.value.detail
