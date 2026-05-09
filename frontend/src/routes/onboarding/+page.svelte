@@ -44,7 +44,8 @@
   let activeStep = $state<OnboardingStep>('openai');
 
   const isWorking = $derived(status === 'loading' || status === 'connecting');
-  const showManualCallback = $derived(Boolean(!oauthCallbackAvailable && (oauthUrl || oauthState || status === 'connecting')));
+  const oauthPending = $derived(Boolean(oauthUrl || oauthState || status === 'connecting'));
+  const showManualCallback = $derived(Boolean(status !== 'connected' && oauthPending));
   const connectLabel = $derived(status === 'connected' ? 'Continue' : 'Connect OpenAI');
   const isMemoryStep = $derived(activeStep === 'memory');
   const embedderOptions = $derived(memoryEmbedderOptions());
@@ -250,16 +251,11 @@
       oauthCallbackAvailable = result.callback_available ?? true;
       oauthCallbackMode = result.callback_mode || 'local_bridge';
 
+      let openedOAuthWindow = false;
       if (oauthUrl) {
-        const opened = navigateOpenAIOAuthPopup(popup, oauthUrl);
-        if (!opened) {
-          notice = {
-            tone: 'warning',
-            title: 'Popup blocked.',
-            detail: 'Allow popups for this site, then choose Connect OpenAI again. The main window will stay here.',
-          };
-          status = 'missing';
-          return;
+        openedOAuthWindow = navigateOpenAIOAuthPopup(popup, oauthUrl);
+        if (!openedOAuthWindow) {
+          closeOAuthPopup(popup);
         }
       } else {
         closeOAuthPopup(popup);
@@ -268,15 +264,17 @@
       notice = oauthCallbackAvailable
         ? {
             tone: 'info',
-            title: 'OpenAI sign-in opened.',
+            title: openedOAuthWindow ? 'OpenAI sign-in opened.' : 'OpenAI sign-in ready.',
             detail:
               oauthCallbackMode === 'server'
-                ? 'Finish in the OpenAI window. It will return automatically.'
-                : 'Finish in the OpenAI window. This page will update when it returns.',
+                ? 'Finish in the OpenAI window. It should return automatically; paste the callback URL below if it does not.'
+                : openedOAuthWindow
+                  ? 'Finish in the OpenAI window. This page should update when it returns; paste the callback URL below if it does not.'
+                  : 'Open OpenAI sign-in below. This page should update when it returns; paste the callback URL below if it does not.',
           }
         : {
             tone: 'warning',
-            title: 'OpenAI sign-in opened.',
+            title: openedOAuthWindow ? 'OpenAI sign-in opened.' : 'OpenAI sign-in ready.',
             detail: result.callback_detail || 'Finish sign-in, then paste the callback URL below.',
           };
     } catch (error) {
@@ -480,6 +478,11 @@
           {#if showManualCallback}
             <div class="manual-callback">
               <label for="openai-callback">Callback URL</label>
+              {#if oauthUrl}
+                <a class="oauth-sign-in-link" href={oauthUrl} target="_blank" rel="noreferrer">
+                  Open OpenAI sign-in
+                </a>
+              {/if}
               <div class="manual-row">
                 <ConstellationTextInput
                   id="openai-callback"
@@ -816,6 +819,27 @@
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 12px;
     align-items: center;
+  }
+
+  .oauth-sign-in-link {
+    display: inline-flex;
+    justify-self: start;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--constellation-control-button-secondary-border);
+    border-radius: 8px;
+    background: var(--constellation-button-secondary-background);
+    color: var(--constellation-control-button-secondary-text);
+    font-size: var(--constellation-type-body-sm);
+    font-weight: 650;
+    text-decoration: none;
+  }
+
+  .oauth-sign-in-link:focus-visible {
+    outline: 2px solid var(--constellation-control-focus-ring);
+    outline-offset: 2px;
   }
 
   @media (max-width: 760px) {

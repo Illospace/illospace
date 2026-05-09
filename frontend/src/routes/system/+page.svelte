@@ -206,15 +206,11 @@
       oauthState = result.state || '';
       oauthCallbackAvailable = result.callback_available ?? true;
       oauthCallbackMode = result.callback_mode || 'local_bridge';
+      let openedOAuthWindow = false;
       if (oauthUrl) {
-        const opened = navigateOpenAIOAuthPopup(popup, oauthUrl);
-        if (!opened) {
-          notice = {
-            tone: 'warning',
-            title: 'Popup blocked.',
-            detail: 'Allow popups for this site, then choose Sign in again. The main window will stay here.',
-          };
-          return;
+        openedOAuthWindow = navigateOpenAIOAuthPopup(popup, oauthUrl);
+        if (!openedOAuthWindow) {
+          closeOAuthPopup(popup);
         }
       } else {
         closeOAuthPopup(popup);
@@ -222,15 +218,17 @@
       notice = oauthCallbackAvailable
         ? {
             tone: 'info',
-            title: 'Codex sign-in opened.',
+            title: openedOAuthWindow ? 'Codex sign-in opened.' : 'Codex sign-in ready.',
             detail:
               oauthCallbackMode === 'server'
-                ? 'Finish in the OpenAI window. It will return to this Illo server automatically.'
-                : 'Finish in the OpenAI window. This page will update automatically.',
+                ? 'Finish in the OpenAI window. It should return to this Illo server automatically; paste the callback URL below if it does not.'
+                : openedOAuthWindow
+                  ? 'Finish in the OpenAI window. This page should update automatically; paste the callback URL below if it does not.'
+                  : 'Open OpenAI sign-in below. This page should update automatically; paste the callback URL below if it does not.',
           }
         : {
             tone: 'warning',
-            title: 'Codex sign-in opened.',
+            title: openedOAuthWindow ? 'Codex sign-in opened.' : 'Codex sign-in ready.',
             detail: result.callback_detail || 'The automatic callback bridge is unavailable. Use the manual callback fallback if the window cannot return here.',
           };
     } catch (error) {
@@ -735,6 +733,7 @@
           {apiKey}
           {openaiEmbedderApiKey}
           {geminiApiKey}
+          {oauthUrl}
           {oauthCallback}
           oauthPending={Boolean(oauthUrl)}
           {oauthCallbackAvailable}

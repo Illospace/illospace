@@ -130,9 +130,10 @@ restore, upgrades, logs, and status.
   `VAULT_MASTER_KEY` in `.illo/runtime.env` when they are not provided, so a
   self-hosted preview can boot cleanly.
 - Codex sign-in uses OpenAI's localhost callback. On a remote/self-hosted
-  server, System opens the manual fallback automatically: finish sign-in, copy
-  the final `localhost:1455/auth/callback?...` URL from the sign-in tab, and
-  paste it into System. Custom server callbacks are opt-in with
+  server or Docker Compose install, Illospace opens the manual fallback
+  automatically: finish sign-in, copy the final
+  `localhost:1455/auth/callback?...` URL from the sign-in tab, and paste it
+  back into Illospace. Custom server callbacks are opt-in with
   `ILLO_OPENAI_OAUTH_SERVER_CALLBACK=1` only for OAuth clients that accept your
   deployed callback URL.
 - For local file-based overrides, copy `.env.example` to `.env` and fill in the
