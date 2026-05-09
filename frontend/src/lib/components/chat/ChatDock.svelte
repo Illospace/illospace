@@ -461,18 +461,9 @@
       const createdAt = parseServerDate(timestamp);
       if (!createdAt) return timestamp;
       const now = new Date();
-      const diffMs = now.getTime() - createdAt.getTime();
+      const diffMs = Math.max(0, now.getTime() - createdAt.getTime());
       const diffMinutes = Math.floor(diffMs / 60000);
       const diffHours = Math.floor(diffMs / 3600000);
-
-      if (diffMs < 0) {
-        return createdAt.toLocaleString([], {
-          month: 'short',
-          day: 'numeric',
-          hour: 'numeric',
-          minute: '2-digit',
-        });
-      }
 
       if (diffMs < 60000) return 'just now';
       if (diffMinutes < 60) return `${diffMinutes} minute${diffMinutes === 1 ? '' : 's'} ago`;

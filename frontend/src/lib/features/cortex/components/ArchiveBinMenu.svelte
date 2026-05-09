@@ -5,6 +5,7 @@
   import { ConstellationIcon, ConstellationIconButton } from '$lib/components/constellation';
   import { cortex, type Idea } from '$lib/stores/cortex.svelte';
   import { workspaceApps } from '$lib/stores/workspaceApps.svelte';
+  import { relativeTimeAgo } from '$lib/utils/datetime';
 
   let {
     dragging = false,
@@ -25,15 +26,7 @@
   const recentArchivedApps = $derived(workspaceApps.archivedApps.slice(0, 12));
 
   function timeAgo(value: string | null | undefined): string {
-    if (!value) return 'recently';
-    const diffSeconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
-    if (diffSeconds < 60) return `${diffSeconds}s ago`;
-    const minutes = Math.floor(diffSeconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+    return relativeTimeAgo(value) || 'recently';
   }
 
   function threadTitle(idea: Idea): string {

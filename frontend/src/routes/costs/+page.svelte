@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { api } from '$lib/api/client';
   import { ui } from '$lib/stores/ui.svelte';
+  import { relativeTimeAgo } from '$lib/utils/datetime';
 
   let data = $state<any>(null);
   let loading = $state(true);
@@ -50,14 +51,7 @@
   }
 
   function timeAgo(ts: string): string {
-    const diff = Date.now() - new Date(ts).getTime();
-    const mins = Math.floor(diff / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return `${mins}m ago`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+    return relativeTimeAgo(ts) || 'just now';
   }
 
   function drawDailyChart() {

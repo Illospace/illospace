@@ -15,6 +15,7 @@ import {
   shouldShowRunInTranscript,
 } from '$lib/utils/cortexRunPresentation';
 import { streamItemRunId } from '$lib/utils/cortexRunStream';
+import { parseServerDate, parseServerTimeMs, relativeTimeAgo } from '$lib/utils/datetime';
 import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
 import { buildRunEvidenceDebug } from '$lib/utils/runEvidenceDebug';
 import type { Idea, StreamItem } from '$lib/types/cortex';
@@ -85,16 +86,7 @@ export function visibleThreadStreamItems(stream: readonly StreamItem[]): StreamI
 }
 
 export function timeAgo(isoStr: string | undefined, nowMs = Date.now()): string {
-  if (!isoStr) return '';
-  const diff = nowMs - new Date(isoStr).getTime();
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  return relativeTimeAgo(isoStr, nowMs);
 }
 
 export function formatDuration(sec: number | undefined): string {
@@ -109,7 +101,9 @@ export function formatDuration(sec: number | undefined): string {
 
 export function elapsedLabel(isoStr: string | undefined, nowMs = Date.now()): string {
   if (!isoStr) return '';
-  const seconds = Math.floor((nowMs - new Date(isoStr).getTime()) / 1000);
+  const startMs = parseServerTimeMs(isoStr);
+  if (!startMs) return '';
+  const seconds = Math.max(0, Math.floor((nowMs - startMs) / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
@@ -119,7 +113,7 @@ export function elapsedLabel(isoStr: string | undefined, nowMs = Date.now()): st
 export function formatRunClock(isoStr: string | undefined): string {
   if (!isoStr) return '';
   try {
-    return new Date(isoStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return parseServerDate(isoStr)?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) ?? '';
   } catch {
     return '';
   }

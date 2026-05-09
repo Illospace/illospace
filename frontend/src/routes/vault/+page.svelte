@@ -14,6 +14,7 @@
     ConstellationSegmentedToggle,
   } from '$lib/components/constellation';
   import { ui } from '$lib/stores/ui.svelte';
+  import { parseServerDate, relativeTimeAgo } from '$lib/utils/datetime';
 
   interface Secret {
     id: number;
@@ -897,21 +898,13 @@
   }
 
   function timeAgo(iso: string | undefined): string {
-    if (!iso) return 'never';
-    const ms = Date.now() - new Date(iso).getTime();
-    const days = Math.floor(ms / 86400000);
-    if (days < 1) {
-      const hrs = Math.floor(ms / 3600000);
-      if (hrs < 1) return `${Math.floor(ms / 60000)}m ago`;
-      return `${hrs}h ago`;
-    }
-    return `${days}d ago`;
+    return relativeTimeAgo(iso) || 'never';
   }
 
   function relativeTime(iso: string | undefined): string {
     if (!iso) return 'never';
-    const time = new Date(iso).getTime();
-    if (Number.isNaN(time)) return 'unknown';
+    const time = parseServerDate(iso)?.getTime();
+    if (!time) return 'unknown';
     const ms = time - Date.now();
     if (ms <= 0) return timeAgo(iso);
     const mins = Math.ceil(ms / 60000);
