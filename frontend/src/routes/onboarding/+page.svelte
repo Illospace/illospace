@@ -11,6 +11,11 @@
     ConstellationTextInput,
   } from '$lib/components/constellation';
   import IllospaceLogo from '$lib/components/layout/IllospaceLogo.svelte';
+  import {
+    closeOAuthPopup,
+    navigateOpenAIOAuthPopup,
+    openOpenAIOAuthPopup,
+  } from '$lib/utils/oauthPopup';
   import type { EmbedderKey, RuntimeOption, RuntimeSettings } from '../system/types';
 
   type OnboardingStatus = 'loading' | 'missing' | 'connecting' | 'connected' | 'error';
@@ -235,6 +240,7 @@
   }
 
   async function startOpenAI() {
+    const popup = openOpenAIOAuthPopup();
     status = 'connecting';
     notice = null;
     try {
@@ -244,15 +250,19 @@
       oauthCallbackAvailable = result.callback_available ?? true;
       oauthCallbackMode = result.callback_mode || 'local_bridge';
 
-      if (oauthUrl && typeof window !== 'undefined') {
-        const popup = window.open('about:blank', 'illo-openai-oauth', 'popup,width=540,height=760');
-        if (popup) {
-          popup.location.href = oauthUrl;
-          popup.focus();
-        } else {
-          window.location.assign(oauthUrl);
+      if (oauthUrl) {
+        const opened = navigateOpenAIOAuthPopup(popup, oauthUrl);
+        if (!opened) {
+          notice = {
+            tone: 'warning',
+            title: 'Popup blocked.',
+            detail: 'Allow popups for this site, then choose Connect OpenAI again. The main window will stay here.',
+          };
+          status = 'missing';
           return;
         }
+      } else {
+        closeOAuthPopup(popup);
       }
 
       notice = oauthCallbackAvailable
@@ -270,6 +280,7 @@
             detail: result.callback_detail || 'Finish sign-in, then paste the callback URL below.',
           };
     } catch (error) {
+      closeOAuthPopup(popup);
       status = 'missing';
       notice = errorNotice('Could not start OpenAI sign-in.', error, 'Try again.');
     }
