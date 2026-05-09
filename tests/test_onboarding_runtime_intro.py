@@ -29,8 +29,8 @@ def test_runtime_ready_intro_reuses_existing_thread():
         return_value={"runtime_key_available": True},
     ), patch("brain.app.api.routers.onboarding.route_trigger") as route_trigger:
         result = start_runtime_ready_intro(
-            background_tasks,
-            user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+            {"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+            background_tasks=background_tasks,
         )
 
     assert result == {
@@ -64,8 +64,8 @@ def test_runtime_ready_intro_recovers_failed_existing_thread():
         return_value=TriggerRouteResult(ok=True, route="run", run_id=77),
     ) as route_trigger:
         result = start_runtime_ready_intro(
-            background_tasks,
-            user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+            {"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+            background_tasks=background_tasks,
         )
 
     assert result["created"] is False
@@ -107,8 +107,8 @@ def test_runtime_ready_intro_creates_thread_and_run():
         return_value=TriggerRouteResult(ok=True, route="run", run_id=42),
     ) as route_trigger:
         result = start_runtime_ready_intro(
-            background_tasks,
-            user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+            {"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+            background_tasks=background_tasks,
         )
 
     idea = next(obj for obj in added if isinstance(obj, Idea))
@@ -144,15 +144,13 @@ def test_runtime_ready_intro_requires_openai_runtime():
 
     from brain.app.api.routers.onboarding import start_runtime_ready_intro
 
-    background_tasks = BackgroundTasks()
     with patch(
         "brain.app.api.routers.onboarding.get_provider_auth_status",
         return_value={"runtime_key_available": False},
     ):
         with pytest.raises(HTTPException) as exc:
             start_runtime_ready_intro(
-                background_tasks,
-                user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+                {"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
             )
 
     assert exc.value.status_code == 409

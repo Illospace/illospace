@@ -141,8 +141,8 @@ def runtime_ready_intro_draft(user: dict[str, Any] = Depends(get_current_user)) 
 
 @router.post("/runtime-ready-intro")
 def start_runtime_ready_intro(
-    background_tasks: BackgroundTasks,
     user: dict[str, Any] = Depends(get_current_user),
+    background_tasks: BackgroundTasks = None,
 ) -> dict[str, Any]:
     """Create or reuse the Cortex intro thread after model runtime setup."""
     user_id = str(user.get("id") or "")
@@ -195,13 +195,14 @@ def start_runtime_ready_intro(
         uow.session.flush()
 
         result = _route_intro_run(uow.session, idea=idea, user=user)
-        _queue_intro_display_title(
-            background_tasks,
-            idea_id=str(idea.id),
-            user_id=user_id,
-            org_id=org_id,
-            raw_title=idea.title,
-        )
+        if background_tasks is not None:
+            _queue_intro_display_title(
+                background_tasks,
+                idea_id=str(idea.id),
+                user_id=user_id,
+                org_id=org_id,
+                raw_title=idea.title,
+            )
 
         return {
             "ok": True,
