@@ -3,9 +3,8 @@
 Routes to the configured backend (gpu, cpu, or api).
 All other modules import embedding functions from here.
 
-Config (brain/kernel/config.py / env vars):
-    EMBEDDING_BACKEND = "gpu" | "cpu" | "api"
-    EMBEDDING_DIM     = vector dimensions (must match DB)
+Runtime config is DB-backed once an admin saves memory settings. Process
+configuration only seeds first-boot non-secret defaults.
 """
 
 from __future__ import annotations
@@ -17,11 +16,7 @@ import time
 
 import numpy as np
 
-from brain.kernel.config import (
-    EMBEDDING_BACKEND,
-    EMBEDDING_DIM,
-    MEMORY_EMOTIONAL_EMBEDDING_DIM,
-)
+from brain.kernel.config import MEMORY_EMOTIONAL_EMBEDDING_DIM
 
 logger = logging.getLogger("brain.systems.memory.embeddings")
 
@@ -146,9 +141,7 @@ def wait_for_embedding_backend_ready(
     Returns True when embeddings are ready to serve requests. For non-GPU
     backends, this is always True because those backends are loaded inline.
     """
-    import brain.kernel.config as _cfg
-
-    if _cfg.EMBEDDING_BACKEND != "gpu":
+    if _runtime_embedding_config().backend != "gpu":
         return True
 
     if client is None:
@@ -168,18 +161,41 @@ def wait_for_embedding_backend_ready(
 # ---------------------------------------------------------------------------
 
 _cpu_model = None
+_cpu_model_name = None
 _cpu_lock = threading.Lock()
 
 
+def _runtime_embedding_config():
+    try:
+        from brain.systems.runtime_settings.memory import get_embedding_runtime_config
+
+        return get_embedding_runtime_config()
+    except Exception:
+        logger.debug("Could not load DB-backed embedding runtime config; using process config", exc_info=True)
+        import brain.kernel.config as _cfg
+        from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
+
+        return EmbeddingRuntimeConfig(
+            backend=str(_cfg.EMBEDDING_BACKEND),
+            provider=str(_cfg.EMBEDDING_API_PROVIDER),
+            api_model=str(_cfg.EMBEDDING_API_MODEL),
+            cpu_model=str(_cfg.EMBEDDING_CPU_MODEL),
+            dimensions=int(_cfg.EMBEDDING_DIM),
+            reranker=str(getattr(_cfg, "MEMORY_RERANKER", "weighted")),
+            api_key="",
+        )
+
+
 def _get_cpu_model():
-    global _cpu_model
-    if _cpu_model is None:
+    global _cpu_model, _cpu_model_name
+    model_name = _runtime_embedding_config().cpu_model
+    if _cpu_model is None or _cpu_model_name != model_name:
         with _cpu_lock:
-            if _cpu_model is None:
+            if _cpu_model is None or _cpu_model_name != model_name:
                 from sentence_transformers import SentenceTransformer
-                from brain.kernel.config import EMBEDDING_CPU_MODEL
-                logger.info("Loading CPU embedding model: %s", EMBEDDING_CPU_MODEL)
-                _cpu_model = SentenceTransformer(EMBEDDING_CPU_MODEL)
+                logger.info("Loading CPU embedding model: %s", model_name)
+                _cpu_model = SentenceTransformer(model_name)
+                _cpu_model_name = model_name
     return _cpu_model
 
 
@@ -206,15 +222,17 @@ def _prepare_gemini_text(text: str, mode: str, model: str) -> str:
 
 def _embed_api_gemini(texts: list[str], mode: str) -> np.ndarray:
     import httpx
-    from brain.kernel.config import EMBEDDING_API_KEY, EMBEDDING_API_MODEL
+    runtime = _runtime_embedding_config()
+    api_key = runtime.api_key
+    embedding_dim = runtime.dimensions
 
-    if not EMBEDDING_API_KEY:
+    if not api_key:
         raise RuntimeError(
             "Gemini embedding credentials are not configured. "
-            "Add them in System/Access or use a development-only EMBEDDING_API_KEY."
+            "Add them in System/Access."
         )
 
-    model = EMBEDDING_API_MODEL or "gemini-embedding-2"
+    model = runtime.api_model or "gemini-embedding-2"
     task_type = "RETRIEVAL_QUERY" if mode == "query" else "RETRIEVAL_DOCUMENT"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent"
 
@@ -222,7 +240,7 @@ def _embed_api_gemini(texts: list[str], mode: str) -> np.ndarray:
     for text in texts:
         payload = {
             "content": {"parts": [{"text": _prepare_gemini_text(text, mode, model)}]},
-            "output_dimensionality": EMBEDDING_DIM,
+            "output_dimensionality": embedding_dim,
         }
         if model != "gemini-embedding-2":
             payload["taskType"] = task_type
@@ -230,7 +248,7 @@ def _embed_api_gemini(texts: list[str], mode: str) -> np.ndarray:
             url,
             headers={
                 "Content-Type": "application/json",
-                "x-goog-api-key": EMBEDDING_API_KEY,
+                "x-goog-api-key": api_key,
             },
             json=payload,
             timeout=30,
@@ -248,23 +266,23 @@ def _embed_api_gemini(texts: list[str], mode: str) -> np.ndarray:
 
 def _embed_api_openai(texts: list[str], mode: str) -> np.ndarray:
     import httpx
-    from brain.kernel.config import EMBEDDING_API_KEY, EMBEDDING_API_MODEL
+    runtime = _runtime_embedding_config()
 
-    api_key = EMBEDDING_API_KEY or ""
+    api_key = runtime.api_key or ""
     if not api_key:
         raise RuntimeError(
             "OpenAI embedding credentials are not configured. "
-            "Add them in System/Access or use a development-only EMBEDDING_API_KEY."
+            "Add them in System/Access."
         )
 
-    model = EMBEDDING_API_MODEL or "text-embedding-3-small"
+    model = runtime.api_model or "text-embedding-3-small"
     resp = httpx.post(
         "https://api.openai.com/v1/embeddings",
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
         },
-        json={"model": model, "input": texts, "dimensions": EMBEDDING_DIM},
+        json={"model": model, "input": texts, "dimensions": runtime.dimensions},
         timeout=30,
     )
     if resp.status_code != 200:
@@ -274,8 +292,8 @@ def _embed_api_openai(texts: list[str], mode: str) -> np.ndarray:
 
 
 def _embed_api(texts: list[str], mode: str) -> np.ndarray:
-    from brain.kernel.config import EMBEDDING_API_PROVIDER
-    if EMBEDDING_API_PROVIDER == "openai":
+    runtime = _runtime_embedding_config()
+    if runtime.provider == "openai":
         return _embed_api_openai(texts, mode)
     return _embed_api_gemini(texts, mode)
 
@@ -293,9 +311,7 @@ _BACKENDS = {
 
 def embed_batch(texts: list[str], mode: str = "document") -> np.ndarray:
     """Embed multiple texts. Returns (N, dims) numpy array."""
-    # Read backend dynamically so hot-reload from settings works
-    import brain.kernel.config as _cfg
-    backend = _cfg.EMBEDDING_BACKEND
+    backend = _runtime_embedding_config().backend
     fn = _BACKENDS.get(backend)
     if not fn:
         raise ValueError(f"Unknown EMBEDDING_BACKEND: {backend!r}. Use gpu, cpu, or api.")
@@ -377,14 +393,20 @@ def make_emotional_embedding(
 def server_health() -> dict | None:
     """Return embedding backend health info."""
     try:
-        if EMBEDDING_BACKEND == "gpu":
+        runtime = _runtime_embedding_config()
+        backend = runtime.backend
+        if backend == "gpu":
             from brain.platform.gpu_client import get_client
             return get_client().health()
-        elif EMBEDDING_BACKEND == "cpu":
+        elif backend == "cpu":
             model = _get_cpu_model()
             return {"status": "ok", "backend": "cpu", "model": model.get_config_dict().get("model_name_or_path", "?")}
-        elif EMBEDDING_BACKEND == "api":
-            from brain.kernel.config import EMBEDDING_API_PROVIDER, EMBEDDING_API_MODEL
-            return {"status": "ok", "backend": "api", "provider": EMBEDDING_API_PROVIDER, "model": EMBEDDING_API_MODEL}
+        elif backend == "api":
+            return {
+                "status": "ok",
+                "backend": "api",
+                "provider": runtime.provider,
+                "model": runtime.api_model,
+            }
     except Exception:
         return None

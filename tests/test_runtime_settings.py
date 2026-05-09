@@ -327,19 +327,30 @@ def test_get_llm_info_exposes_provider_health(monkeypatch):
 
 
 def test_runtime_memory_reports_installation_scope_and_installation_keys(monkeypatch):
+    import base64
+    import json
     from types import SimpleNamespace
 
     import brain.kernel.config as cfg
     import brain.systems.runtime_settings.memory as memory_settings
+    import brain.systems.vault as vault
 
-    monkeypatch.setenv("EMBEDDING_BACKEND", "api")
-    monkeypatch.setenv("EMBEDDING_API_PROVIDER", "gemini")
-    monkeypatch.setenv("EMBEDDING_API_KEY", "gemini-key")
-    monkeypatch.setenv("EMBEDDING_API_MODEL", "gemini-embedding-2")
-    monkeypatch.setenv("EMBEDDING_DIM", "768")
+    stored_config = {
+        memory_settings.RUNTIME_MEMORY_SETTINGS_KEY: json.dumps({
+            "backend": "api",
+            "provider": "gemini",
+            "api_model": "gemini-embedding-2",
+            "cpu_model": "all-MiniLM-L6-v2",
+            "dimensions": 768,
+            "reranker": "weighted",
+        }),
+        memory_settings._runtime_secret_config_key("gemini"): base64.b64encode(b"encrypted:gemini-key").decode(),
+    }
+
     monkeypatch.setattr(cfg, "EMBEDDING_BACKEND", "api", raising=False)
     monkeypatch.setattr(cfg, "EMBEDDING_API_PROVIDER", "gemini", raising=False)
-    monkeypatch.setattr(cfg, "EMBEDDING_API_KEY", "gemini-key", raising=False)
+    monkeypatch.setattr(memory_settings, "_read_runtime_config_value", lambda key: stored_config.get(key))
+    monkeypatch.setattr(vault, "_decrypt", lambda token: token.decode().removeprefix("encrypted:"))
     monkeypatch.setattr(memory_settings, "_indexed_vector_count", lambda: 0)
 
     data = memory_settings.get_runtime_memory(SimpleNamespace(id="user-1", org_id="org-1"))
@@ -348,6 +359,16 @@ def test_runtime_memory_reports_installation_scope_and_installation_keys(monkeyp
     assert data.embedder == "gemini"
     assert data.embedding_model == "gemini-embedding-2"
     assert data.api_key_statuses == {"openai": False, "gemini": True}
+
+
+def test_runtime_memory_does_not_use_env_api_keys(monkeypatch):
+    import brain.systems.runtime_settings.memory as memory_settings
+
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-env-key")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "embedding-env-key")
+    monkeypatch.setattr(memory_settings, "_read_runtime_config_value", lambda key: None)
+
+    assert memory_settings._installation_embedding_api_key("gemini") is None
 
 
 def test_update_runtime_memory_blocks_embedder_change_when_installation_vectors_exist(monkeypatch):
@@ -387,15 +408,107 @@ def test_update_runtime_memory_writes_installation_reranker(monkeypatch):
     monkeypatch.setattr(cfg, "EMBEDDING_BACKEND", "cpu", raising=False)
     monkeypatch.setattr(cfg, "EMBEDDING_DIM", 384, raising=False)
     monkeypatch.setattr(memory_settings, "_indexed_vector_count", lambda: 0)
-    monkeypatch.setattr(memory_settings, "_apply_embedding_runtime_settings", lambda updates: captured.update(updates))
+    monkeypatch.setattr(
+        memory_settings,
+        "_save_embedding_runtime_config",
+        lambda config, **kwargs: captured.update(config.stored_settings()),
+    )
 
     memory_settings.update_runtime_memory(
         SimpleNamespace(id="user-1", org_id="org-1"),
         RuntimeMemoryUpdate(embedder="local_cpu", embedding_model=None, reranker="weighted"),
     )
 
-    assert captured["EMBEDDING_BACKEND"] == "cpu"
-    assert captured["MEMORY_RERANKER"] == "weighted"
+    assert captured["backend"] == "cpu"
+    assert captured["reranker"] == "weighted"
+
+
+def test_openai_memory_key_persists_in_encrypted_runtime_store(monkeypatch):
+    import base64
+    import json
+
+    import brain.systems.runtime_settings.memory as memory_settings
+    import brain.systems.vault as vault
+
+    stored_config = {}
+
+    monkeypatch.setattr(memory_settings, "_read_runtime_config_value", lambda key: stored_config.get(key))
+    monkeypatch.setattr(memory_settings, "_write_runtime_config_value", lambda key, value: stored_config.__setitem__(key, value))
+    monkeypatch.setattr(memory_settings, "_sync_gpu_embedding_worker", lambda backend: None)
+    monkeypatch.setattr(vault, "_encrypt", lambda value: f"encrypted:{value}".encode())
+    monkeypatch.setattr(vault, "_decrypt", lambda token: token.decode().removeprefix("encrypted:"))
+
+    memory_settings.configure_openai_embedding_api_key("sk-test-memory")
+
+    runtime = json.loads(stored_config[memory_settings.RUNTIME_MEMORY_SETTINGS_KEY])
+    assert runtime["backend"] == "api"
+    assert runtime["provider"] == "openai"
+    assert runtime["api_model"] == "text-embedding-3-small"
+    assert runtime["dimensions"] == 768
+    assert "api_key" not in runtime
+
+    encrypted = stored_config[memory_settings._runtime_secret_config_key("openai")]
+    assert encrypted != "sk-test-memory"
+    assert base64.b64decode(encrypted).decode() == "encrypted:sk-test-memory"
+    assert memory_settings._installation_embedding_api_key("openai") == "sk-test-memory"
+
+
+def test_openai_memory_key_reports_missing_vault_master_key(monkeypatch):
+    import pytest
+
+    import brain.systems.runtime_settings.memory as memory_settings
+    import brain.systems.vault as vault
+
+    def missing_key(_value):
+        raise RuntimeError("VAULT_MASTER_KEY is required. Refusing to auto-generate a vault key.")
+
+    monkeypatch.setattr(vault, "_encrypt", missing_key)
+
+    with pytest.raises(memory_settings.HTTPException) as exc:
+        memory_settings.configure_openai_embedding_api_key("sk-test-memory")
+
+    assert exc.value.status_code == 503
+    assert "VAULT_MASTER_KEY" in exc.value.detail
+
+
+def test_embedding_api_reads_persisted_runtime_config(monkeypatch):
+    import numpy as np
+
+    import brain.systems.memory.embeddings as embeddings
+    from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
+
+    captured = {}
+
+    class Response:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
+
+    def post(url, *, headers, json, timeout):
+        captured.update({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return Response()
+
+    monkeypatch.setattr(
+        embeddings,
+        "_runtime_embedding_config",
+        lambda: EmbeddingRuntimeConfig(
+            backend="api",
+            provider="openai",
+            api_model="text-embedding-3-small",
+            cpu_model="all-MiniLM-L6-v2",
+            dimensions=768,
+            api_key="sk-db-memory",
+        ),
+    )
+    monkeypatch.setattr("httpx.post", post)
+
+    vector = embeddings._embed_api_openai(["hello"], "query")
+
+    assert isinstance(vector, np.ndarray)
+    assert captured["headers"]["Authorization"] == "Bearer sk-db-memory"
+    assert captured["json"]["dimensions"] == 768
 
 
 def test_connect_gemini_api_key_requires_installation_admin(monkeypatch):

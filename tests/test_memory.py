@@ -158,7 +158,7 @@ class TestEmbeddingsClient:
     def test_server_health_calls_gpu_client(self):
         from brain.systems.memory.embeddings import server_health
         with patch("brain.platform.gpu_client.get_client") as mock_get, \
-             patch("brain.systems.memory.embeddings.EMBEDDING_BACKEND", "gpu"):
+             patch("brain.kernel.config.EMBEDDING_BACKEND", "gpu"):
             mock_client = MagicMock()
             mock_client.health.return_value = {"status": "ok"}
             mock_get.return_value = mock_client
@@ -168,7 +168,7 @@ class TestEmbeddingsClient:
     def test_server_health_returns_none_on_failure(self):
         from brain.systems.memory.embeddings import server_health
         with patch("brain.platform.gpu_client.get_client") as mock_get, \
-             patch("brain.systems.memory.embeddings.EMBEDDING_BACKEND", "gpu"):
+             patch("brain.kernel.config.EMBEDDING_BACKEND", "gpu"):
             mock_get.return_value.health.side_effect = RuntimeError("down")
             result = server_health()
             assert result is None
