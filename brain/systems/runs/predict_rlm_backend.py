@@ -661,7 +661,7 @@ def _build_predict_rlm_lm(
         if not token:
             raise RuntimeError(
                 "PredictRLM requires an Anthropic API key. "
-                "Add one in Settings or set ANTHROPIC_API_KEY."
+                "Add one in Settings. ANTHROPIC_API_KEY is only a development fallback."
             )
         return dspy.LM(model, api_key=token, cache=False)
 

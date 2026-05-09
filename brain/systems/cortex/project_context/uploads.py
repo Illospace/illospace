@@ -9,59 +9,8 @@ from typing import Any
 
 
 PROJECT_CONTEXT_UPLOAD_MAX_FILES = 200
-PROJECT_CONTEXT_UPLOAD_MAX_FILE_SIZE = 1_000_000
+PROJECT_CONTEXT_UPLOAD_MAX_FILE_SIZE = 10_000_000
 PROJECT_CONTEXT_UPLOAD_MAX_TOTAL_SIZE = 20_000_000
-PROJECT_CONTEXT_ALLOWED_FILENAMES = {
-    "Dockerfile",
-    "Makefile",
-    "README",
-    "LICENSE",
-    "NOTICE",
-    ".env.example",
-}
-PROJECT_CONTEXT_ALLOWED_EXTENSIONS = {
-    "c",
-    "cc",
-    "cfg",
-    "conf",
-    "cpp",
-    "cs",
-    "css",
-    "csv",
-    "dockerfile",
-    "env",
-    "go",
-    "graphql",
-    "h",
-    "hpp",
-    "html",
-    "ini",
-    "java",
-    "js",
-    "json",
-    "jsx",
-    "kt",
-    "lock",
-    "log",
-    "md",
-    "mdx",
-    "mjs",
-    "py",
-    "rb",
-    "rs",
-    "scss",
-    "sh",
-    "sql",
-    "svelte",
-    "toml",
-    "ts",
-    "tsx",
-    "txt",
-    "vue",
-    "xml",
-    "yaml",
-    "yml",
-}
 
 
 def safe_upload_relative_path(value: str, fallback: str) -> str:
@@ -78,16 +27,6 @@ def safe_upload_relative_path(value: str, fallback: str) -> str:
     if not parts:
         parts = [re.sub(r"[^A-Za-z0-9._ -]+", "_", fallback or "file").strip(" .") or "file"]
     return str(PurePosixPath(*parts))
-
-
-def project_context_upload_allowed(relative_path: str) -> bool:
-    name = Path(relative_path).name
-    if name in PROJECT_CONTEXT_ALLOWED_FILENAMES:
-        return True
-    if "." not in name:
-        return name in PROJECT_CONTEXT_ALLOWED_FILENAMES
-    ext = name.rsplit(".", 1)[-1].lower()
-    return ext in PROJECT_CONTEXT_ALLOWED_EXTENSIONS
 
 
 def unique_upload_relative_path(relative_path: str, used_paths: set[str]) -> str:
@@ -150,13 +89,7 @@ async def save_project_context_uploads(
             continue
         relative_hint = relative_paths[index] if index < len(relative_paths) else original_name
         relative_path = safe_upload_relative_path(relative_hint, original_name)
-        if not project_context_upload_allowed(relative_path):
-            skip_upload(skipped, original_name, "File type is not supported for Project Context snapshots")
-            continue
         data = await upload.read(PROJECT_CONTEXT_UPLOAD_MAX_FILE_SIZE + 1)
-        if b"\x00" in data[:4096]:
-            skip_upload(skipped, original_name, "Binary files are not attached to Project Context")
-            continue
         if len(data) > PROJECT_CONTEXT_UPLOAD_MAX_FILE_SIZE:
             skip_upload(
                 skipped,
@@ -191,7 +124,7 @@ async def save_project_context_uploads(
         raise ProjectContextUploadError(
             422,
             {
-                "error": "No readable Project Context files could be uploaded",
+                "error": "No Project Context files could be uploaded",
                 "skipped_files": skipped[:20],
             },
         )

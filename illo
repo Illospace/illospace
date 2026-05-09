@@ -193,6 +193,53 @@ run_psql_no_prompt() {
   env PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-3}" "$psql_bin" -w "$@"
 }
 
+db_connection_ok() {
+  local db_host="$1"
+  local db_port="$2"
+  local db_name="$3"
+  local db_user="$4"
+  local db_pass="$5"
+
+  if psql_available; then
+    export PGPASSWORD="$db_pass"
+    run_psql_no_prompt -h "$db_host" -p "$db_port" -U "$db_user" -d "$db_name" -c "SELECT 1" \
+      >/dev/null 2>&1
+    local status=$?
+    unset PGPASSWORD
+    return "$status"
+  fi
+
+  local python_bin
+  python_bin="$(launcher_python_bin)"
+  DB_HOST="$db_host" \
+  DB_PORT="$db_port" \
+  DB_NAME="$db_name" \
+  DB_USER="$db_user" \
+  DB_PASSWORD="$db_pass" \
+    "$python_bin" - <<'PY' >/dev/null 2>&1
+import os
+import sys
+
+try:
+    import psycopg2
+except Exception:
+    sys.exit(1)
+
+try:
+    conn = psycopg2.connect(
+        host=os.environ["DB_HOST"],
+        port=int(os.environ["DB_PORT"]),
+        dbname=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        connect_timeout=3,
+    )
+    conn.close()
+except Exception:
+    sys.exit(1)
+PY
+}
+
 # ── Source optional env files ─────────────────────────────
 
 runtime_env_file_path() {
@@ -270,11 +317,6 @@ source_env_file_defaults() {
 source_env() {
   source_env_file_defaults ".env"
   source_env_file_defaults "$(runtime_env_file_path)" 0
-}
-
-source_service_env() {
-  source_env_file_defaults "$(production_env_file_path)" 0
-  source_env
 }
 
 generate_runtime_secret() {
@@ -715,31 +757,6 @@ guard_api_port_kill() {
     err "Let the runs finish, drain the worker, or set ILLO_FORCE_KILL_ACTIVE_RUNS=1 if you intend to kill them."
     exit 1
   fi
-}
-
-worker_status() {
-  source_service_env
-  local active="unknown"
-  if [ -x "$ROOT/venv/bin/python3" ]; then
-    active="$(active_agent_run_count || echo unknown)"
-  fi
-  echo "Active AgentRuns: $active"
-  if command -v systemctl &>/dev/null && run_logged_timeout 5 systemctl --user cat cortex-worker; then
-    echo "cortex-worker: $(systemctl --user is-active cortex-worker 2>/dev/null || echo unknown)"
-  fi
-}
-
-worker_drain() {
-  source_service_env
-  if ! command -v systemctl &>/dev/null || ! run_logged_timeout 5 systemctl --user cat cortex-worker; then
-    err "cortex-worker user service is not installed or systemd is unavailable"
-    exit 1
-  fi
-  info "Draining cortex-worker: it will stop claiming new runs and finish active runs."
-  run_logged_timeout 10 systemctl --user kill --kill-who=main --signal=TERM cortex-worker || {
-    err "Failed to signal cortex-worker"
-    exit 1
-  }
 }
 
 configure_gpu_environment() {
@@ -1237,12 +1254,9 @@ ensure_db() {
   elif [ $db_reachable -ne 0 ] && tcp_port_listening "$db_host" "$db_port"; then
     postgres_listening=0
   fi
-  export PGPASSWORD="$db_pass"
-  if [ $db_reachable -ne 0 ] && psql_available && \
-     run_psql_no_prompt -h "$db_host" -p "$db_port" -U "$db_user" -d "$db_name" -c "SELECT 1" &>/dev/null 2>&1; then
+  if [ $db_reachable -ne 0 ] && db_connection_ok "$db_host" "$db_port" "$db_name" "$db_user" "$db_pass"; then
     db_reachable=0
   fi
-  unset PGPASSWORD
 
   if [ $db_reachable -eq 0 ]; then
     dim "Database reachable at $db_host:$db_port"
@@ -1253,12 +1267,9 @@ ensure_db() {
         warn "Postgres is listening at $db_host:$db_port, but Illo cannot connect to '$db_name' as '$db_user'"
         dim "No DB_* settings were provided — trying to bootstrap the default Illo database in local Postgres..."
         if bootstrap_local_postgres_db "$db_host" "$db_port" "$db_user" "$db_pass" "$db_name"; then
-          export PGPASSWORD="$db_pass"
-          if psql_available && \
-             run_psql_no_prompt -h "$db_host" -p "$db_port" -U "$db_user" -d "$db_name" -c "SELECT 1" &>/dev/null 2>&1; then
+          if db_connection_ok "$db_host" "$db_port" "$db_name" "$db_user" "$db_pass"; then
             db_reachable=0
           fi
-          unset PGPASSWORD
           if [ $db_reachable -eq 0 ]; then
             info "Database bootstrapped in local Postgres at $db_host:$db_port"
           fi
@@ -1400,7 +1411,7 @@ ensure_db() {
     unset PGPASSWORD
     if [ "$vector_available" != "1" ]; then
       err "Postgres at $db_host:$db_port is missing the pgvector extension"
-      err "Install pgvector for this Postgres, or stop it and let ./illo start the pgvector Docker database"
+      err "Install pgvector for this Postgres, or stop it and let the launcher start the pgvector Docker database"
       exit 1
     fi
   fi
@@ -1942,6 +1953,7 @@ run_prod() {
   fi
   source_env
   export ILLO_ENV="${ILLO_ENV:-production}"
+  local api_bind_host="${ILLO_API_HOST:-127.0.0.1}"
   ensure_runtime_secrets
   local cortex_inline_defaulted=0
   # Production-safe start keeps API/dashboard restarts independent from
@@ -2030,6 +2042,11 @@ run_prod() {
   echo ""
   echo -e "${BOLD}Illospace${NC} ${DIM}(production)${NC}"
   echo -e "  App: ${GREEN}http://localhost:8000${NC}"
+  if [ "$api_bind_host" = "127.0.0.1" ] || [ "$api_bind_host" = "localhost" ]; then
+    echo -e "  Bind: ${GREEN}${api_bind_host}:8000${NC} ${DIM}(private to this host)${NC}"
+  else
+    echo -e "  Bind: ${YELLOW}${api_bind_host}:8000${NC} ${DIM}(secure with your firewall, tunnel, or reverse proxy)${NC}"
+  fi
   if [ -n "$GPU_PID" ]; then
     echo -e "  GPU: ${GREEN}http://localhost:9800${NC}"
   elif lsof -ti tcp:9800 >/dev/null 2>&1; then
@@ -2063,7 +2080,7 @@ run_prod() {
   fi
   : > /tmp/illo-api.log
   log_phase "production: start API server"
-  PYTHONUNBUFFERED=1 "$ROOT/venv/bin/uvicorn" brain.app.api.main:app --host 0.0.0.0 --port 8000 \
+  PYTHONUNBUFFERED=1 "$ROOT/venv/bin/uvicorn" brain.app.api.main:app --host "$api_bind_host" --port 8000 \
     2>&1 | tee -a /tmp/illo-api.log
 }
 
@@ -2288,23 +2305,225 @@ uninstall() {
   fi
 }
 
+# ── Compose deployment CLI ─────────────────────────────────
+
+deploy_compose_env_file() {
+  echo "${ILLO_COMPOSE_ENV_FILE:-$ROOT/deploy/compose/.env}"
+}
+
+deploy_compose_file() {
+  echo "$ROOT/deploy/compose/docker-compose.yml"
+}
+
+deploy_ensure_docker() {
+  if ! command -v docker >/dev/null 2>&1; then
+    err "docker not found — install Docker Engine with Docker Compose v2"
+    return 1
+  fi
+  if ! docker compose version >/dev/null 2>&1; then
+    err "docker compose is unavailable — install Docker Compose v2"
+    return 1
+  fi
+  local docker_info_output
+  if ! docker_info_output="$(docker info 2>&1 >/dev/null)"; then
+    err "Docker CLI is installed, but the Docker daemon/socket is not reachable."
+    if [ -n "$docker_info_output" ]; then
+      dim "docker info said:"
+      printf '%s\n' "$docker_info_output" | sed 's/^/  /' >&2
+    fi
+    dim "Try: docker info"
+    dim "If the service is stopped: sudo systemctl enable --now docker"
+    dim "If you see permission denied: sudo usermod -aG docker \$USER, then log out and back in."
+    return 1
+  fi
+}
+
+deploy_compose() {
+  docker compose --env-file "$(deploy_compose_env_file)" -f "$(deploy_compose_file)" "$@"
+}
+
+deploy_env_value() {
+  local key="$1"
+  local env_file value
+  env_file="$(deploy_compose_env_file)"
+  value="$(
+    python3 - "$env_file" "$key" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+if not path.exists():
+    sys.exit(0)
+pattern = re.compile(rf"^{re.escape(key)}=(.*)$")
+for line in path.read_text(encoding="utf-8").splitlines():
+    match = pattern.match(line.strip())
+    if match:
+        value = match.group(1).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        print(value)
+        break
+PY
+  )"
+  printf '%s' "$value"
+}
+
+deploy_require_env_file() {
+  local env_file
+  env_file="$(deploy_compose_env_file)"
+  if [ ! -f "$env_file" ]; then
+    err "Missing $env_file"
+    dim "Run: ./illo deploy init"
+    return 1
+  fi
+}
+
+deploy_ensure_env_file() {
+  if [ -f "$(deploy_compose_env_file)" ]; then
+    return 0
+  fi
+
+  dim "Creating Compose env file with generated secrets..."
+  "$ROOT/deploy/scripts/init-secrets.sh" --env-file "$(deploy_compose_env_file)" --no-next
+}
+
+deploy_usage() {
+  echo ""
+  echo -e "${BOLD}Usage:${NC} ./illo deploy <command>"
+  echo ""
+  echo -e "  ${GREEN}init${NC}       Create deploy/compose/.env and generate secrets"
+  echo -e "  ${GREEN}up${NC}         Pull/build images, start the Compose stack, then run doctor"
+  echo -e "  ${GREEN}doctor${NC}     Validate server config and running stack health"
+  echo -e "  ${GREEN}status${NC}     Show Compose service status"
+  echo -e "  ${GREEN}logs${NC}       Show Compose logs (pass -f to follow, service names to filter)"
+  echo -e "  ${GREEN}backup${NC}     Write a Postgres backup dump"
+  echo -e "  ${GREEN}restore${NC}    Restore a Postgres backup dump"
+  echo -e "  ${GREEN}upgrade${NC}    Pull/build, migrate, restart, and run doctor"
+  echo -e "  ${GREEN}down${NC}       Stop the Compose stack"
+  echo ""
+}
+
+deploy_up() {
+  local build=0
+  local pull=1
+  local doctor=1
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --build)
+        build=1
+        shift
+        ;;
+      --no-pull)
+        pull=0
+        shift
+        ;;
+      --skip-doctor)
+        doctor=0
+        shift
+        ;;
+      -h|--help)
+        echo "Usage: ./illo deploy up [--build] [--no-pull] [--skip-doctor]"
+        return 0
+        ;;
+      *)
+        err "Unknown deploy up option: $1"
+        return 2
+        ;;
+    esac
+  done
+
+  deploy_ensure_env_file || return 1
+  deploy_ensure_docker || return 1
+
+  if [ "$pull" = "1" ]; then
+    if ! deploy_compose pull; then
+      warn "Image pull failed; building API and web images locally instead."
+      build=1
+    fi
+  fi
+  if [ "$build" = "1" ]; then
+    deploy_compose build api web || return 1
+  fi
+  deploy_compose up -d || return 1
+  if [ "$doctor" = "1" ]; then
+    "$ROOT/deploy/scripts/doctor.sh"
+  fi
+  local web_port
+  web_port="$(deploy_env_value ILLO_WEB_PORT)"
+  web_port="${web_port:-8080}"
+  dim ""
+  dim "Illospace is listening privately on the server at 127.0.0.1:${web_port}."
+  dim "From your workstation, run:"
+  dim "  ssh -L ${web_port}:127.0.0.1:${web_port} <ssh-user>@<server>"
+  dim "Then open: http://localhost:${web_port}"
+  dim "For team-wide access, put your own reverse proxy, VPN, or private network in front of this loopback port."
+}
+
+deploy_command() {
+  local subcommand="${1:-help}"
+  shift || true
+
+  case "$subcommand" in
+    init)
+      "$ROOT/deploy/scripts/init-secrets.sh" "$@"
+      ;;
+    up)
+      deploy_up "$@"
+      ;;
+    doctor)
+      "$ROOT/deploy/scripts/doctor.sh" "$@"
+      ;;
+    status|ps)
+      deploy_require_env_file || return 1
+      deploy_ensure_docker || return 1
+      deploy_compose ps "$@"
+      ;;
+    logs)
+      deploy_require_env_file || return 1
+      deploy_ensure_docker || return 1
+      deploy_compose logs "$@"
+      ;;
+    backup)
+      "$ROOT/deploy/scripts/backup.sh" "$@"
+      ;;
+    restore)
+      "$ROOT/deploy/scripts/restore.sh" "$@"
+      ;;
+    upgrade)
+      "$ROOT/deploy/scripts/upgrade.sh" "$@"
+      ;;
+    down)
+      deploy_require_env_file || return 1
+      deploy_ensure_docker || return 1
+      deploy_compose down "$@"
+      ;;
+    help|-h|--help)
+      deploy_usage
+      ;;
+    *)
+      err "Unknown deploy command: $subcommand"
+      deploy_usage
+      return 1
+      ;;
+  esac
+}
+
 # ── CLI ────────────────────────────────────────────────────
 
 usage() {
   echo ""
   echo -e "${BOLD}Usage:${NC} ./illo [command]"
   echo ""
-  echo -e "  ${GREEN}(no args)${NC}    Start in development mode (setup first if needed)"
-  echo -e "  ${GREEN}dev-start${NC}    Development mode alias (owns local runtime)"
+  echo -e "  ${GREEN}(no args)${NC}    Start native server mode (setup first if needed)"
+  echo -e "  ${GREEN}dev${NC}          Start development mode with frontend hot reload"
   echo -e "  ${GREEN}setup${NC}        Run setup only"
-  echo -e "  ${GREEN}start${NC}        Production-safe API mode (standalone worker owns AgentRuns)"
-  echo -e "  ${GREEN}deploy${NC}       Run production-safe deploy script"
-  echo -e "  ${GREEN}doctor${NC}       Validate configuration (pass --production for prod)"
+  echo -e "  ${GREEN}deploy${NC}       Manage the recommended Compose team-server deploy"
+  echo -e "  ${GREEN}doctor${NC}       Validate local configuration"
   echo -e "  ${GREEN}uninstall${NC}    Remove local runtime, config, and Illo Docker DB"
-  echo -e "  ${GREEN}worker-status${NC} Show active AgentRuns and worker service state"
-  echo -e "  ${GREEN}worker-drain${NC}  Stop worker claims and let active AgentRuns finish"
   echo -e "  ${GREEN}test${NC}         Run tests"
-  echo -e "  ${GREEN}build${NC}        Build frontend only"
   echo ""
 }
 
@@ -2315,19 +2534,13 @@ case "${1:-}" in
     check_prereqs
     setup
     ;;
-  start|prod|production)
-    check_prereqs
-    needs_setup && setup
-    run_prod
-    ;;
-  dev-start|dev|development)
+  dev)
     check_prereqs
     needs_setup && setup
     run_dev
     ;;
   deploy)
-    check_prereqs
-    exec "$ROOT/ops/deploy.sh" "${@:2}"
+    deploy_command "${@:2}"
     ;;
   doctor)
     check_prereqs
@@ -2341,21 +2554,9 @@ case "${1:-}" in
   uninstall)
     uninstall "${@:2}"
     ;;
-  worker-status|runs-status)
-    check_prereqs
-    worker_status
-    ;;
-  worker-drain)
-    check_prereqs
-    worker_drain
-    ;;
   test)
     [ -f "venv/bin/activate" ] && source venv/bin/activate
     "$ROOT/venv/bin/python3" -m pytest tests/ -m "not requires_db" -q "${@:2}"
-    ;;
-  build)
-    sync_frontend_dependencies
-    cd frontend && npm run build
     ;;
   help|-h|--help)
     usage
@@ -2363,7 +2564,7 @@ case "${1:-}" in
   "")
     check_prereqs
     needs_setup && setup
-    run_dev
+    run_prod
     ;;
   *)
     err "Unknown command: $1"

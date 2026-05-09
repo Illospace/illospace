@@ -11,9 +11,15 @@
     ConstellationTextInput,
   } from '$lib/components/constellation';
   import IllospaceLogo from '$lib/components/layout/IllospaceLogo.svelte';
+  import {
+    closeOAuthPopup,
+    navigateOpenAIOAuthPopup,
+    openOpenAIOAuthPopup,
+  } from '$lib/utils/oauthPopup';
   import type { EmbedderKey, RuntimeOption, RuntimeSettings } from '../system/types';
 
   type OnboardingStatus = 'loading' | 'missing' | 'connecting' | 'connected' | 'error';
+  type OnboardingStep = 'openai' | 'memory';
   type NoticeState = {
     tone: 'success' | 'warning' | 'danger' | 'info';
     title: string;
@@ -35,10 +41,13 @@
   let embedderApiKey = $state('');
   let savingMemory = $state(false);
   let memorySaved = $state(false);
+  let activeStep = $state<OnboardingStep>('openai');
 
   const isWorking = $derived(status === 'loading' || status === 'connecting');
-  const showManualCallback = $derived(Boolean(oauthUrl && !oauthCallbackAvailable));
+  const oauthPending = $derived(Boolean(oauthUrl || oauthState || status === 'connecting'));
+  const showManualCallback = $derived(Boolean(status !== 'connected' && oauthPending));
   const connectLabel = $derived(status === 'connected' ? 'Continue' : 'Connect OpenAI');
+  const isMemoryStep = $derived(activeStep === 'memory');
   const embedderOptions = $derived(memoryEmbedderOptions());
   const selectedEmbedderNeedsKey = $derived(usesApiEmbedder(selectedEmbedder));
   const selectedEmbedderHasKey = $derived(hasApiKeyForEmbedder(selectedEmbedder));
@@ -46,6 +55,14 @@
   const selectedEmbedderLabel = $derived(embedderLabel(selectedEmbedder));
   const selectedEmbedderArticle = $derived(selectedEmbedder === 'openai' ? 'an' : 'a');
   const selectedEmbedderPlaceholder = $derived(selectedEmbedder === 'gemini' ? 'Google AI Studio key' : 'sk-...');
+  const canManageMemorySetup = $derived(runtimeSettings?.permissions?.can_manage_settings ?? false);
+  const showMemorySetup = $derived(canManageMemorySetup && !memorySaved);
+  const pageTitle = $derived(isMemoryStep ? 'Set up memory' : 'Connect OpenAI');
+  const pageLede = $derived(
+    isMemoryStep
+      ? 'Choose how Illo should remember, retrieve, and summarize workspace context.'
+      : 'Connect your OpenAI account so Illo can start working with you in Cortex.',
+  );
 
   onMount(() => {
     void loadRuntime();
@@ -69,15 +86,37 @@
     notice = null;
     try {
       const runtime = await api.runtimeSettings();
-      runtimeSettings = runtime;
-      status = runtime?.connection?.status === 'connected' ? 'connected' : 'missing';
-      selectedEmbedder = runtime?.memory?.embedder || 'local_gpu';
-      selectedEmbeddingModel = runtime?.memory?.embedding_model || defaultEmbeddingModel(selectedEmbedder, runtime);
-      memorySaved = runtime?.memory?.embedding_status === 'ready';
+      hydrateRuntime(runtime);
+      if (runtimeHasOnboardingOpenAIConnection(runtime)) {
+        status = 'connected';
+        if (runtimeNeedsMemorySetup(runtime)) {
+          activeStep = 'memory';
+          return;
+        }
+        await openCortexIntro();
+        return;
+      }
+      activeStep = 'openai';
+      status = 'missing';
     } catch (error) {
       status = 'error';
       notice = errorNotice('Could not load onboarding.', error, 'Refresh and try again.');
     }
+  }
+
+  function hydrateRuntime(runtime: RuntimeSettings) {
+    runtimeSettings = runtime;
+    selectedEmbedder = runtime?.memory?.embedder || 'local_gpu';
+    selectedEmbeddingModel = runtime?.memory?.embedding_model || defaultEmbeddingModel(selectedEmbedder, runtime);
+    memorySaved = runtime?.memory?.embedding_status === 'ready';
+  }
+
+  function runtimeNeedsMemorySetup(runtime: RuntimeSettings) {
+    return Boolean(runtime?.permissions?.can_manage_settings && runtime?.memory?.embedding_status !== 'ready');
+  }
+
+  function runtimeHasOnboardingOpenAIConnection(runtime: RuntimeSettings) {
+    return Boolean(runtime?.connection?.status === 'connected' && ['user_default', 'org_main'].includes(runtime.connection.source || ''));
   }
 
   function selectEmbedder(embedder: EmbedderKey) {
@@ -91,7 +130,7 @@
   }
 
   async function saveMemorySetup() {
-    if (!runtimeSettings) return;
+    if (!runtimeSettings || !showMemorySetup) return;
     const value = embedderApiKey.trim();
     if (selectedEmbedderNeedsKey && !selectedEmbedderHasKey && !value) {
       notice = { tone: 'warning', title: `Paste ${selectedEmbedderArticle} ${selectedEmbedderLabel} API key first.` };
@@ -113,17 +152,28 @@
       });
       embedderApiKey = '';
       runtimeSettings = { ...runtimeSettings, memory };
-      memorySaved = true;
+      memorySaved = memory?.embedding_status === 'ready';
       notice = {
         tone: 'success',
         title: 'Memory setup saved.',
         detail: `${selectedEmbedderLabel} will power memory, retrieval, and summaries.`,
       };
+      if (memorySaved) activeStep = 'openai';
+      await openCortexIntro();
     } catch (error) {
-      notice = errorNotice('Memory setup was not saved.', error, 'You can continue to Cortex and add it later.');
+      notice = errorNotice('Memory setup was not saved.', error, 'Skip for now, or update it later in AI Runtime.');
     } finally {
       savingMemory = false;
     }
+  }
+
+  async function skipMemorySetup() {
+    notice = {
+      tone: 'info',
+      title: 'Memory setup skipped.',
+      detail: 'You can configure memory later in AI Runtime.',
+    };
+    await openCortexIntro();
   }
 
   function memoryEmbedderOptions(): RuntimeOption[] {
@@ -191,6 +241,7 @@
   }
 
   async function startOpenAI() {
+    const popup = openOpenAIOAuthPopup();
     status = 'connecting';
     notice = null;
     try {
@@ -200,26 +251,34 @@
       oauthCallbackAvailable = result.callback_available ?? true;
       oauthCallbackMode = result.callback_mode || 'local_bridge';
 
-      if (oauthUrl && typeof window !== 'undefined') {
-        const popup = window.open('about:blank', 'illo-openai-oauth', 'popup,width=540,height=760');
-        if (popup) {
-          popup.location.href = oauthUrl;
-          popup.focus();
-        } else {
-          window.location.assign(oauthUrl);
-          return;
+      let openedOAuthWindow = false;
+      if (oauthUrl) {
+        openedOAuthWindow = navigateOpenAIOAuthPopup(popup, oauthUrl);
+        if (!openedOAuthWindow) {
+          closeOAuthPopup(popup);
         }
+      } else {
+        closeOAuthPopup(popup);
       }
 
-      notice = {
-        tone: 'info',
-        title: 'OpenAI sign-in opened.',
-        detail:
-          oauthCallbackMode === 'server'
-            ? 'Finish in the OpenAI window. It will return automatically.'
-            : 'Finish in the OpenAI window. This page will continue when it returns.',
-      };
+      notice = oauthCallbackAvailable
+        ? {
+            tone: 'info',
+            title: openedOAuthWindow ? 'OpenAI sign-in opened.' : 'OpenAI sign-in ready.',
+            detail:
+              oauthCallbackMode === 'server'
+                ? 'Finish in the OpenAI window. It should return automatically; paste the callback URL below if it does not.'
+                : openedOAuthWindow
+                  ? 'Finish in the OpenAI window. This page should update when it returns; paste the callback URL below if it does not.'
+                  : 'Open OpenAI sign-in below. This page should update when it returns; paste the callback URL below if it does not.',
+          }
+        : {
+            tone: 'warning',
+            title: openedOAuthWindow ? 'OpenAI sign-in opened.' : 'OpenAI sign-in ready.',
+            detail: result.callback_detail || 'Finish sign-in, then paste the callback URL below.',
+          };
     } catch (error) {
+      closeOAuthPopup(popup);
       status = 'missing';
       notice = errorNotice('Could not start OpenAI sign-in.', error, 'Try again.');
     }
@@ -241,7 +300,7 @@
     notice = null;
     try {
       await api.exchangeRuntimeOpenAIOAuth({ callback });
-      await openCortexIntro();
+      await confirmOpenAIConnection();
     } catch (error) {
       status = 'missing';
       notice = errorNotice('OpenAI sign-in failed.', error, 'Start the sign-in again.');
@@ -267,7 +326,7 @@
     }
 
     if (data.status === 'success') {
-      await confirmOpenAIAndContinue();
+      await confirmOpenAIConnection();
       return;
     }
 
@@ -284,11 +343,27 @@
     }
   }
 
-  async function confirmOpenAIAndContinue() {
+  async function confirmOpenAIConnection() {
     status = 'connecting';
     try {
       const runtime = await api.runtimeSettings();
-      if (runtime?.connection?.status === 'connected') {
+      if (runtimeHasOnboardingOpenAIConnection(runtime)) {
+        hydrateRuntime(runtime);
+        oauthUrl = '';
+        oauthState = '';
+        oauthCallback = '';
+        oauthCallbackAvailable = true;
+        oauthCallbackMode = 'local_bridge';
+        status = 'connected';
+        if (runtimeNeedsMemorySetup(runtime)) {
+          activeStep = 'memory';
+          notice = {
+            tone: 'success',
+            title: 'OpenAI connected.',
+            detail: 'Set up memory now, or skip and configure it later in AI Runtime.',
+          };
+          return;
+        }
         await openCortexIntro();
         return;
       }
@@ -308,16 +383,8 @@
     status = 'connected';
     notice = { tone: 'success', title: 'OpenAI connected.' };
     try {
-      const intro = await api.startRuntimeReadyIntro();
-      if (intro?.idea_id) {
-        const params = new URLSearchParams({
-          idea: intro.idea_id,
-          onboarding: 'runtime-ready',
-        });
-        await goto(`/cortex?${params.toString()}`);
-        return;
-      }
-      await goto('/cortex');
+      const params = new URLSearchParams({ onboarding: 'runtime-ready' });
+      await goto(`/cortex?${params.toString()}`);
     } catch (error) {
       status = 'connected';
       notice = errorNotice('OpenAI connected, but Cortex did not open.', error, 'Open Cortex from the sidebar.');
@@ -350,7 +417,7 @@
 </script>
 
 <svelte:head>
-  <title>Connect OpenAI</title>
+  <title>{pageTitle}</title>
 </svelte:head>
 
 <main class="onboarding-shell">
@@ -362,103 +429,128 @@
     <ConstellationPanel padding="lg" tone={status === 'connected' ? 'success' : 'info'} className="onboarding-panel">
       <div class="onboarding-copy">
         <p class="eyebrow">Workspace ready</p>
-        <h1>Connect OpenAI</h1>
-        <p class="lede">Connect your OpenAI account so Illo can start working with you in Cortex.</p>
+        <h1>{pageTitle}</h1>
+        <p class="lede">{pageLede}</p>
+      </div>
+
+      <div class="step-strip" aria-label="Onboarding progress">
+        <div class:active={!isMemoryStep} class:complete={status === 'connected'} class="step-pill">
+          <span>1</span>
+          <strong>OpenAI</strong>
+        </div>
+        <div class:active={isMemoryStep} class:pending={!isMemoryStep} class="step-pill">
+          <span>2</span>
+          <strong>Memory</strong>
+        </div>
       </div>
 
       {#if notice}
         <ConstellationNotice title={notice.title} description={notice.detail || ''} tone={notice.tone} compact />
       {/if}
 
-      <div class="setup-section">
-        <div class="section-copy">
-          <div class="section-title">
-            <span class:connected={status === 'connected'}></span>
-            <div>
-              <strong>{status === 'connected' ? 'OpenAI connected' : 'OpenAI account'}</strong>
-              <p>
-                {#if status === 'connecting'}
-                  Waiting for OpenAI to finish.
-                {:else if status === 'connected'}
-                  Continue and Illo will introduce itself.
-                {:else}
-                  Required for Illo to think and respond.
-                {/if}
-              </p>
+      {#if !isMemoryStep}
+        <div class="setup-section">
+          <div class="section-copy">
+            <div class="section-title">
+              <span class:connected={status === 'connected'}></span>
+              <div>
+                <strong>{status === 'connected' ? 'OpenAI connected' : 'OpenAI account'}</strong>
+                <p>
+                  {#if status === 'connecting'}
+                    Waiting for OpenAI to finish.
+                  {:else if status === 'connected'}
+                    Continue and Illo will introduce itself.
+                  {:else}
+                    Required for Illo to think and respond.
+                  {/if}
+                </p>
+              </div>
             </div>
           </div>
-        </div>
 
-        <ConstellationButton onclick={primaryAction} loading={isWorking} loadingLabel="Working">
-          {#snippet leadingVisual()}
-            <ConstellationIcon name={status === 'connected' ? 'cortex' : 'external-link'} size={14} />
-          {/snippet}
-          {connectLabel}
-        </ConstellationButton>
-      </div>
-
-      <div class="setup-section memory-section">
-        <div class="section-copy memory-copy">
-          <div class="section-title">
-            <span class:connected={memorySaved}></span>
-            <div>
-              <strong>{memorySaved ? `${selectedEmbedderLabel} memory saved` : 'Memory setup'}</strong>
-              <p>Optional, but recommended for memory, retrieval, and summaries.</p>
-            </div>
-          </div>
-        </div>
-
-        <div class="memory-controls" class:has-key-input={needsMemoryApiKeyInput}>
-          <div class="embedder-choice" aria-label="Memory embedder">
-            {#each embedderOptions as option}
-              <button
-                type="button"
-                class:selected={selectedEmbedder === option.key}
-                disabled={option.disabled}
-                onclick={() => selectEmbedder(option.key as EmbedderKey)}
-              >
-                {optionLabel(option)}
-              </button>
-            {/each}
-          </div>
-
-          {#if needsMemoryApiKeyInput}
-            <ConstellationTextInput
-              bind:value={embedderApiKey}
-              type="password"
-              placeholder={selectedEmbedderPlaceholder}
-              autocomplete="off"
-            />
-          {/if}
-
-          <ConstellationButton
-            variant="secondary"
-            className="memory-save-button"
-            onclick={saveMemorySetup}
-            loading={savingMemory}
-            loadingLabel="Saving"
-          >
-            Save memory
+          <ConstellationButton onclick={primaryAction} loading={isWorking} loadingLabel="Working">
+            {#snippet leadingVisual()}
+              <ConstellationIcon name={status === 'connected' ? 'cortex' : 'external-link'} size={14} />
+            {/snippet}
+            {connectLabel}
           </ConstellationButton>
-        </div>
-      </div>
 
-      {#if showManualCallback}
-        <div class="manual-callback">
-          <label for="openai-callback">Callback URL</label>
-          <div class="manual-row">
-            <ConstellationTextInput
-              id="openai-callback"
-              bind:value={oauthCallback}
-              placeholder="http://localhost:1455/auth/callback?code=..."
-              autocomplete="off"
-            />
-            <ConstellationButton variant="secondary" onclick={finishManualCallback} loading={oauthExchangeInFlight}>
-              Finish
-            </ConstellationButton>
+          {#if showManualCallback}
+            <div class="manual-callback">
+              <label for="openai-callback">Callback URL</label>
+              {#if oauthUrl}
+                <a class="oauth-sign-in-link" href={oauthUrl} target="_blank" rel="noreferrer">
+                  Open OpenAI sign-in
+                </a>
+              {/if}
+              <div class="manual-row">
+                <ConstellationTextInput
+                  id="openai-callback"
+                  bind:value={oauthCallback}
+                  placeholder="http://localhost:1455/auth/callback?code=..."
+                  autocomplete="off"
+                />
+                <ConstellationButton variant="secondary" onclick={finishManualCallback} loading={oauthExchangeInFlight}>
+                  Finish
+                </ConstellationButton>
+              </div>
+            </div>
+          {/if}
+        </div>
+      {:else if showMemorySetup}
+        <div class="setup-section memory-section">
+          <div class="section-copy memory-copy">
+            <div class="section-title">
+              <span></span>
+              <div>
+                <strong>Memory setup</strong>
+                <p>Optional for onboarding, recommended for context-aware work.</p>
+              </div>
+            </div>
           </div>
+
+          <div class="memory-controls" class:has-key-input={needsMemoryApiKeyInput}>
+            <div class="embedder-choice" aria-label="Memory embedder">
+              {#each embedderOptions as option}
+                <button
+                  type="button"
+                  class:selected={selectedEmbedder === option.key}
+                  disabled={option.disabled}
+                  onclick={() => selectEmbedder(option.key as EmbedderKey)}
+                >
+                  {optionLabel(option)}
+                </button>
+              {/each}
+            </div>
+
+            {#if needsMemoryApiKeyInput}
+              <ConstellationTextInput
+                bind:value={embedderApiKey}
+                type="password"
+                placeholder={selectedEmbedderPlaceholder}
+                autocomplete="off"
+              />
+            {/if}
+
+            <div class="memory-actions">
+              <ConstellationButton
+                className="memory-save-button"
+                onclick={saveMemorySetup}
+                loading={savingMemory}
+                loadingLabel="Saving"
+              >
+                Confirm and continue
+              </ConstellationButton>
+              <ConstellationButton variant="secondary" onclick={skipMemorySetup} disabled={savingMemory}>
+                Skip for now
+              </ConstellationButton>
+            </div>
+          </div>
+
+          <p class="runtime-note">You can configure this later in AI Runtime.</p>
         </div>
       {/if}
+
     </ConstellationPanel>
   </section>
 </main>
@@ -507,7 +599,8 @@
   h1,
   .lede,
   .section-title p,
-  .manual-callback label {
+  .manual-callback label,
+  .runtime-note {
     margin: 0;
   }
 
@@ -530,10 +623,66 @@
   }
 
   .lede,
-  .section-title p {
+  .section-title p,
+  .runtime-note {
     color: var(--constellation-color-text-secondary);
     font-size: 13px;
     line-height: 1.45;
+  }
+
+  .step-strip {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .step-pill {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+    min-height: 42px;
+    padding: 8px 10px;
+    border: 1px solid var(--constellation-surface-panel-separator);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--constellation-surface-nested-background) 64%, transparent);
+    color: var(--constellation-color-text-secondary);
+  }
+
+  .step-pill span {
+    display: inline-grid;
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+    place-items: center;
+    border-radius: var(--constellation-radius-pill);
+    background: var(--constellation-control-field-background);
+    color: var(--constellation-color-text-secondary);
+    font-family: var(--constellation-font-mono);
+    font-size: var(--constellation-type-meta);
+    font-weight: 700;
+  }
+
+  .step-pill strong {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  .step-pill.active {
+    border-color: color-mix(in srgb, var(--constellation-color-accent, #5ecfa0) 42%, var(--constellation-surface-panel-separator));
+    background: color-mix(in srgb, var(--constellation-color-accent, #5ecfa0) 10%, var(--constellation-surface-nested-background));
+    color: var(--constellation-color-text-primary);
+  }
+
+  .step-pill.complete span {
+    background: var(--constellation-control-pill-success-text);
+    color: var(--constellation-surface-panel-background);
+  }
+
+  .step-pill.pending {
+    opacity: 0.66;
   }
 
   .setup-section {
@@ -593,7 +742,7 @@
   }
 
   .memory-controls.has-key-input {
-    grid-template-columns: minmax(210px, 0.9fr) minmax(210px, 1fr) auto;
+    grid-template-columns: minmax(210px, 0.9fr) minmax(210px, 1fr);
   }
 
   .memory-controls :global(.constellation-text-input) {
@@ -602,6 +751,19 @@
 
   .memory-controls :global(.memory-save-button) {
     justify-self: end;
+  }
+
+  .memory-controls.has-key-input .memory-actions {
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
+
+  .memory-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: flex-end;
+    min-width: 0;
   }
 
   .embedder-choice {
@@ -648,6 +810,7 @@
 
   .manual-callback {
     display: grid;
+    grid-column: 1 / -1;
     gap: 10px;
   }
 
@@ -656,6 +819,27 @@
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 12px;
     align-items: center;
+  }
+
+  .oauth-sign-in-link {
+    display: inline-flex;
+    justify-self: start;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--constellation-control-button-secondary-border);
+    border-radius: 8px;
+    background: var(--constellation-button-secondary-background);
+    color: var(--constellation-control-button-secondary-text);
+    font-size: var(--constellation-type-body-sm);
+    font-weight: 650;
+    text-decoration: none;
+  }
+
+  .oauth-sign-in-link:focus-visible {
+    outline: 2px solid var(--constellation-control-focus-ring);
+    outline-offset: 2px;
   }
 
   @media (max-width: 760px) {
@@ -670,6 +854,25 @@
     .manual-row {
       grid-template-columns: 1fr;
       align-items: stretch;
+    }
+
+    .step-strip {
+      grid-template-columns: 1fr;
+    }
+
+    .memory-controls.has-key-input .memory-actions {
+      grid-column: auto;
+      justify-self: stretch;
+    }
+
+    .memory-actions {
+      display: grid;
+      grid-template-columns: 1fr;
+      justify-content: stretch;
+    }
+
+    .memory-actions :global(.constellation-button) {
+      width: 100%;
     }
 
     .memory-controls :global(.memory-save-button) {

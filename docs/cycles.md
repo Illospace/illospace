@@ -6,6 +6,9 @@ Cycles are database-backed recurring jobs owned by the Illo scheduler.
 
 - Recurring prompts and background work live in the database as `cycles` and
   `cycle_runs`.
+- One-time reminders use the same table with a schedule expression of
+  `at:<ISO datetime>`. The scheduler runs them once, clears `next_run_at`, and
+  disables the cycle after it claims the run.
 - Built-in nightly work is registered through scheduler catalog jobs.
 - The scheduler daemon is started from `ops/illo-scheduler.service` in
   self-hosted production.

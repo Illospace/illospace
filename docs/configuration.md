@@ -1,7 +1,10 @@
 # Configuration
 
-Illo Brain uses environment variables as the source of truth. A repo-root `.env`
-file is optional local convenience, not a production requirement.
+Illo Brain uses environment variables for server/runtime configuration. Model
+provider credentials are application data: in production they should be added
+inside Illospace and stored encrypted in Postgres, not kept in process env. A
+repo-root `.env` file is optional local convenience, not a production
+requirement.
 
 ## Source Order
 
@@ -25,17 +28,22 @@ manager, systemd `EnvironmentFile=`, or another external mechanism.
 For the shortest local path:
 
 ```bash
-./illo setup
 ./illo
 ```
 
-The launcher can create or start a local pgvector database using the development
-defaults. It prefers a Docker/Podman pgvector container, can use or bootstrap an
-existing local PostgreSQL when accessible, and can fall back to a repo-local
-PostgreSQL cluster under `.runtime/postgres` when PostgreSQL server tools and
-pgvector are installed. Copy `.env.example` to `.env` only when you want local
-file-based overrides such as provider keys, a different database, or a custom
-`ILLO_PRIVATE_HOME`.
+For frontend hot reload while developing, use:
+
+```bash
+./illo dev
+```
+
+The launcher can create or start a local pgvector database. It prefers a
+Docker/Podman pgvector container, can use or bootstrap an existing local
+PostgreSQL when accessible, and can fall back to a repo-local PostgreSQL
+cluster under `.runtime/postgres` when PostgreSQL server tools and pgvector are
+installed. Copy `.env.example` to `.env` only when you want local file-based
+overrides such as a different database, a custom `ILLO_PRIVATE_HOME`, or
+development-only provider-key fallbacks.
 
 For the smoothest local path, leave `DB_PORT` unset unless you need a fixed
 port. If another local PostgreSQL is already listening on `5432`, the launcher
@@ -69,7 +77,7 @@ when no `.env` exists. A script cannot unset variables in your parent shell, so
 this gives fresh-install tests the same effect without requiring a manual
 `unset`.
 
-The launcher will stop known Illo processes that are still holding local app
+The launcher will stop known Illo processes that are still holding native app
 ports, but it refuses to kill unknown processes by default. Stop those processes
 yourself, change ports, or set `ILLO_FORCE_KILL_PORTS=1` only when you
 intentionally want `./illo` to reclaim `8000`, `5173`, or `9800`.
@@ -92,17 +100,29 @@ Production must provide:
 - migration validation enabled through `ILLO_VALIDATE_MIGRATIONS=1`
 - local development auth fallbacks disabled
 
-When production is started through `./illo start`, missing local secrets are
-generated under `.illo/runtime.env` as a self-hosting convenience. Managed
-production services should provide their own durable secrets outside the git
-checkout instead.
+Native server mode is started with `./illo`. It binds to `127.0.0.1` by
+default; set `ILLO_API_HOST=0.0.0.0` only when the host is intentionally exposed
+through your own firewall, tunnel, or reverse proxy. The recommended Compose
+deployment generates its own server secrets in `deploy/compose/.env`. Managed
+production services should provide durable secrets outside the git checkout.
 
 Production should also provide at least one model path:
 
-- provider credentials such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
-  `GEMINI_API_KEY`, or database-backed provider credentials; or
+- DB-backed provider credentials added from Illospace System/Access after first
+  boot; or
 - local model settings such as `EMBEDDING_BACKEND=cpu` or `gpu` plus the needed
   runtime/model configuration.
+
+For the recommended Compose deployment, server bootstrap settings live in
+`deploy/compose/.env`, generated automatically by `./illo deploy up` or
+manually by `./illo deploy init` from `deploy/compose/.env.production.example`.
+That file is a private server secret file and should not be committed, but it
+is not the place for model provider API keys.
+
+The default production container installs `requirements-production.txt`, which
+is optimized for `EMBEDDING_BACKEND=api`. Local CPU/GPU embeddings require the
+optional packages in `requirements-gpu.txt` and should be treated as an advanced
+deployment profile.
 
 ## Private State
 
@@ -111,7 +131,7 @@ where local journals, logs, operator context, exports, and generated checklists
 belong. Keep these paths outside git in production:
 
 - `.env` and external environment files
-- provider keys and Vault master keys
+- provider keys, Vault master keys, and database-backed credential exports
 - database dumps
 - uploads and logs
 - generated journals and operator context

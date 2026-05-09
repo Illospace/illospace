@@ -77,9 +77,9 @@ class OpenAIOAuthExchangeRequest(BaseModel):
 
 
 class OpenAIOAuthStartResponse(BaseModel):
-    url: str
-    state: str
-    redirect_uri: str
+    url: str = Field(min_length=1)
+    state: str = Field(min_length=1)
+    redirect_uri: str = Field(min_length=1)
     expires_in_seconds: int
     callback_available: bool = True
     callback_detail: str | None = None

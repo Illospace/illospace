@@ -6,8 +6,10 @@ trusted local automation system, not as a hardened multi-tenant sandbox.
 
 ## Secrets
 
-- `.env`, `production.env`, provider keys, database dumps, logs, uploads, and
-  operator notes must stay out of git.
+- `.env`, `production.env`, database dumps, logs, uploads, and operator notes
+  must stay out of git.
+- Provider credentials should live in Illospace's encrypted DB-backed
+  credential storage; never paste them into repo files, logs, issues, or PRs.
 - Runtime-private local state should live under `.illo/` or another
   `ILLO_PRIVATE_HOME`.
 - Database-backed vault entries are encrypted and scoped by user/org metadata,

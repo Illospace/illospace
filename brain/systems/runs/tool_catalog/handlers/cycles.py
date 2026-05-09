@@ -10,6 +10,7 @@ def _handle_manage_cycle(
     name: str | None = None,
     prompt: str | None = None,
     schedule_expr: str | None = None,
+    run_at: str | None = None,
     timezone: str | None = None,
     enabled: bool | None = None,
     model_override: str | None = None,
@@ -21,6 +22,7 @@ def _handle_manage_cycle(
     from sqlalchemy import and_, or_, select
 
     from brain.systems.cycles.service import (
+        build_one_time_schedule_expr,
         compute_next_run_at,
         cycle_defaults,
         REUSABLE_THREAD_EXECUTION_MODE,
@@ -32,6 +34,7 @@ def _handle_manage_cycle(
         validate_thinking_override,
         validate_timezone_name,
     )
+    from brain.systems.cycles.events import publish_cycle_change
     from brain.platform.db.models.cycle import Cycle
     from brain.platform.db.models.idea import Idea
     from brain.platform.db.models.org import User
@@ -82,10 +85,14 @@ def _handle_manage_cycle(
                 cycles = [serialize_cycle(cycle) for cycle in uow.session.scalars(stmt).all()]
             return json.dumps({"cycles": cycles}, default=str)
         elif action == "create":
-            if not name or not prompt or not schedule_expr or not timezone:
-                return json.dumps({"error": "create requires: name, prompt, schedule_expr, timezone"})
-            expr = validate_schedule_expr(schedule_expr)
+            if not name or not prompt or not timezone or (not schedule_expr and not run_at):
+                return json.dumps({"error": "create requires: name, prompt, timezone, and schedule_expr or run_at"})
             tz_name = validate_timezone_name(timezone)
+            expr = (
+                build_one_time_schedule_expr(run_at, tz_name)
+                if run_at
+                else validate_schedule_expr(schedule_expr or "", tz_name)
+            )
             mode = validate_execution_mode(execution_mode)
             thinking = validate_thinking_override(thinking_override)
             normalized_name = validate_nonempty_trimmed(name, "name")
@@ -116,6 +123,13 @@ def _handle_manage_cycle(
                 uow.session.add(cycle)
                 uow.session.flush()
                 payload = serialize_cycle(cycle)
+            publish_cycle_change(
+                action="create",
+                org_id=payload.get("org_id"),
+                user_id=payload.get("user_id"),
+                cycle_id=payload.get("id"),
+                target_idea_id=payload.get("target_idea_id"),
+            )
             return json.dumps({"created": payload}, default=str)
         elif action == "update":
             if not id:
@@ -136,10 +150,12 @@ def _handle_manage_cycle(
                     cycle.name = validate_nonempty_trimmed(name, "name")
                 if prompt is not None:
                     cycle.prompt = validate_nonempty_trimmed(prompt, "prompt")
-                if schedule_expr is not None:
-                    cycle.schedule_expr = validate_schedule_expr(schedule_expr)
                 if timezone is not None:
                     cycle.timezone = validate_timezone_name(timezone)
+                if run_at is not None:
+                    cycle.schedule_expr = build_one_time_schedule_expr(run_at, cycle.timezone)
+                if schedule_expr is not None:
+                    cycle.schedule_expr = validate_schedule_expr(schedule_expr, cycle.timezone)
                 if enabled is not None:
                     cycle.enabled = enabled
                 if model_override is not None:
@@ -162,6 +178,13 @@ def _handle_manage_cycle(
                 cycle.updated_at = datetime.now(dt_timezone.utc)
                 cycle.next_run_at = compute_next_run_at(cycle.schedule_expr, cycle.timezone)
                 payload = serialize_cycle(cycle)
+            publish_cycle_change(
+                action="update",
+                org_id=payload.get("org_id"),
+                user_id=payload.get("user_id"),
+                cycle_id=payload.get("id"),
+                target_idea_id=payload.get("target_idea_id"),
+            )
             return json.dumps({"updated": payload}, default=str)
         elif action == "delete":
             if not id:
@@ -174,20 +197,42 @@ def _handle_manage_cycle(
                 cycle = uow.session.scalars(stmt).first()
                 if not cycle:
                     return json.dumps({"error": f"Cycle {id} not found"})
+                cycle_org_id = cycle.org_id
+                cycle_user_id = cycle.user_id
+                cycle_target_id = cycle.target_idea_id
                 cycle.enabled = False
                 cycle.deleted_at = datetime.now(dt_timezone.utc)
+            publish_cycle_change(
+                action="delete",
+                org_id=cycle_org_id,
+                user_id=cycle_user_id,
+                cycle_id=id,
+                target_idea_id=cycle_target_id,
+            )
             return json.dumps({"deleted": {"id": id}})
         elif action == "run":
             if not id:
                 return json.dumps({"error": "run requires: id"})
             with UnitOfWork() as uow:
-                stmt = select(Cycle.id).where(
+                stmt = select(Cycle).where(
                     Cycle.id == id,
                     *_cycle_scope(),
                 )
-                if not uow.session.execute(stmt).first():
+                cycle = uow.session.scalars(stmt).first()
+                if not cycle:
                     return json.dumps({"error": f"Cycle {id} not found"})
-            return json.dumps({"run": run_cycle_now(id)}, default=str)
+                cycle_org_id = cycle.org_id
+                cycle_user_id = cycle.user_id
+                cycle_target_id = cycle.target_idea_id
+            payload = run_cycle_now(id)
+            publish_cycle_change(
+                action="run",
+                org_id=cycle_org_id,
+                user_id=cycle_user_id,
+                cycle_id=id,
+                target_idea_id=cycle_target_id,
+            )
+            return json.dumps({"run": payload}, default=str)
         else:
             return json.dumps({"error": f"Unknown action: {action}"})
     except ValueError as e:

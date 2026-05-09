@@ -1,4 +1,10 @@
 const BASE = '';
+const DEFAULT_API_TIMEOUT_MS = 20_000;
+const PROJECT_CONTEXT_UPLOAD_TIMEOUT_MS = 30_000;
+
+type ApiRequestInit = RequestInit & {
+  timeoutMs?: number;
+};
 
 type PreloadedJson<T> = {
   ok: boolean;
@@ -6,7 +12,7 @@ type PreloadedJson<T> = {
   error?: unknown;
 };
 
-function takePreloadedJson<T>(path: string, init?: RequestInit): Promise<T> | null {
+function takePreloadedJson<T>(path: string, init?: ApiRequestInit): Promise<T> | null {
   if (typeof window === 'undefined') return null;
   const method = String(init?.method || 'GET').toUpperCase();
   if (method !== 'GET' || init?.body) return null;
@@ -22,20 +28,37 @@ function takePreloadedJson<T>(path: string, init?: RequestInit): Promise<T> | nu
   });
 }
 
-async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+async function fetchJson<T>(path: string, init?: ApiRequestInit): Promise<T> {
   const preloaded = takePreloadedJson<T>(path, init);
   if (preloaded) return preloaded;
 
-  const { headers: extraHeaders, ...rest } = init ?? {};
-  const res = await fetch(`${BASE}${path}`, {
-    ...rest,
-    headers: { 'Content-Type': 'application/json', ...(extraHeaders as Record<string, string>) },
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw { status: res.status, detail: err.error || err.detail || res.statusText };
+  const {
+    headers: extraHeaders,
+    timeoutMs = DEFAULT_API_TIMEOUT_MS,
+    signal,
+    ...rest
+  } = init ?? {};
+  const controller = !signal && timeoutMs > 0 ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      ...rest,
+      signal: signal ?? controller?.signal,
+      headers: { 'Content-Type': 'application/json', ...(extraHeaders as Record<string, string>) },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw { status: res.status, detail: err.error || err.detail || res.statusText };
+    }
+    return res.json();
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw { status: 0, detail: 'Request timed out. Check the local server and try again.' };
+    }
+    throw err;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
   }
-  return res.json();
 }
 
 function withQuery(
@@ -642,13 +665,27 @@ export const api = {
       form.append('files', file);
       form.append('relative_paths', relativePaths?.[index] || file.name);
     });
-    return fetch('/api/cortex/project-context/local-files', { method: 'POST', body: form }).then(async (r) => {
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({ detail: 'Upload failed' }));
-        throw { status: r.status, detail: err.error || err.detail || 'Upload failed' };
-      }
-      return r.json();
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), PROJECT_CONTEXT_UPLOAD_TIMEOUT_MS);
+    return fetch('/api/cortex/project-context/local-files', {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    })
+      .then(async (r) => {
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({ detail: 'Upload failed' }));
+          throw { status: r.status, detail: err.error || err.detail || 'Upload failed' };
+        }
+        return r.json();
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') {
+          throw { detail: 'Project Context upload timed out before the local server responded.' };
+        }
+        throw err;
+      })
+      .finally(() => clearTimeout(timeoutId));
   },
   listIdeaProjectContext: (ideaId: string) =>
     fetchJson<any[]>(`/api/cortex/ideas/${ideaId}/project-context`),
@@ -747,7 +784,8 @@ export const api = {
   createCycle: (data: {
     name: string;
     prompt: string;
-    schedule_expr: string;
+    schedule_expr?: string | null;
+    run_at?: string | null;
     timezone: string;
     enabled?: boolean;
     model_override?: string | null;
@@ -763,6 +801,7 @@ export const api = {
       name: string;
       prompt: string;
       schedule_expr: string;
+      run_at: string | null;
       timezone: string;
       enabled: boolean;
       model_override: string | null;
@@ -1028,6 +1067,21 @@ export const api = {
     fetchJson<any>('/api/runtime-settings/memory/check', { method: 'POST' }),
 
   // Onboarding
+  runtimeReadyIntroDraft: () =>
+    fetchJson<{
+      ok: boolean;
+      idea_id?: string | null;
+      should_play: boolean;
+      prompt: string;
+      title: string;
+      display_title: string;
+      origin: string;
+      origin_ref: string;
+      run_metadata?: Record<string, any> | null;
+    }>(
+      '/api/onboarding/runtime-ready-intro-draft',
+      { method: 'POST' },
+    ),
   startRuntimeReadyIntro: () =>
     fetchJson<{ ok: boolean; idea_id: string; created: boolean; run_id?: number | null }>(
       '/api/onboarding/runtime-ready-intro',

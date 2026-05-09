@@ -143,6 +143,13 @@ class TestToolDefinitionContracts:
             "runtime_settings",
             "read_thread_messages",
             "query_workspace_data",
+            "read_workspace_overview",
+            "read_team_activity",
+            "read_project_contexts",
+            "read_team_members",
+            "read_workspace_records",
+            "read_cycles",
+            "read_workspace_apps",
             "manage_cycle",
         }
         actual = {t["name"] for t in BRAIN_TOOLS}

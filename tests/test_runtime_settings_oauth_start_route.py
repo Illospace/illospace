@@ -3,11 +3,14 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from fastapi import FastAPI
+from pydantic import ValidationError
 from starlette.testclient import TestClient
 
 from brain.app.api.deps import rate_limit
 from brain.systems.runtime_settings import router as runtime_router
+from brain.systems.runtime_settings.schemas import OpenAIOAuthStartResponse
 
 
 def _client() -> TestClient:
@@ -37,6 +40,14 @@ def test_openai_oauth_start_accepts_empty_post_body():
     assert response.status_code == 200
     assert response.json()["state"] == "state-123"
     assert start.call_args.kwargs["callback_mode"] == "auto"
+
+
+def test_openai_oauth_start_response_requires_authorize_values():
+    payload = _oauth_response()
+    payload["url"] = ""
+
+    with pytest.raises(ValidationError):
+        OpenAIOAuthStartResponse.model_validate(payload)
 
 
 def test_openai_oauth_start_accepts_valid_callback_mode_json():

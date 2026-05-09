@@ -1,5 +1,16 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
+
+  type GradientStop = readonly [number, string];
+  type NebulaPatch = {
+    x: number;
+    y: number;
+    radius: number;
+    scaleX: number;
+    scaleY: number;
+    stops: GradientStop[];
+  };
 
   type Props = {
     className?: string;
@@ -16,6 +27,198 @@
     canvasUtility?: Snippet;
     overlays?: Snippet;
   };
+
+  let deepFieldCanvas: HTMLCanvasElement | null = null;
+
+  const DEEP_FIELD_SEED = 0x9e3779b9;
+
+  function seededRandom(seed: number) {
+    let value = seed;
+    return () => {
+      value += 0x6d2b79f5;
+      let next = value;
+      next = Math.imul(next ^ (next >>> 15), next | 1);
+      next ^= next + Math.imul(next ^ (next >>> 7), next | 61);
+      return ((next ^ (next >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function clamp(value: number, min: number, max: number) {
+    return Math.min(Math.max(value, min), max);
+  }
+
+  function drawNebulaPatch(context: CanvasRenderingContext2D, patch: NebulaPatch) {
+    context.save();
+    context.translate(patch.x, patch.y);
+    context.scale(patch.scaleX, patch.scaleY);
+
+    const gradient = context.createRadialGradient(0, 0, 0, 0, 0, patch.radius);
+    for (const [offset, color] of patch.stops) {
+      gradient.addColorStop(offset, color);
+    }
+
+    context.fillStyle = gradient;
+    context.fillRect(-patch.radius, -patch.radius, patch.radius * 2, patch.radius * 2);
+    context.restore();
+  }
+
+  function drawDeepField(canvasElement: HTMLCanvasElement) {
+    const rect = canvasElement.getBoundingClientRect();
+    const width = Math.max(1, Math.round(rect.width));
+    const height = Math.max(1, Math.round(rect.height));
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const pixelWidth = Math.round(width * pixelRatio);
+    const pixelHeight = Math.round(height * pixelRatio);
+    const context = canvasElement.getContext('2d');
+
+    if (!context) {
+      return;
+    }
+
+    if (canvasElement.width !== pixelWidth || canvasElement.height !== pixelHeight) {
+      canvasElement.width = pixelWidth;
+      canvasElement.height = pixelHeight;
+    }
+
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    context.globalCompositeOperation = 'screen';
+
+    const rand = seededRandom(DEEP_FIELD_SEED + width * 31 + height * 17);
+    const span = Math.max(width, height);
+    const patches: NebulaPatch[] = [
+      {
+        x: width * 0.18,
+        y: height * 0.26,
+        radius: span * 0.48,
+        scaleX: 1.55,
+        scaleY: 0.78,
+        stops: [
+          [0, 'rgba(58, 95, 154, 0.18)'],
+          [0.34, 'rgba(37, 70, 124, 0.1)'],
+          [1, 'rgba(37, 70, 124, 0)'],
+        ],
+      },
+      {
+        x: width * 0.72,
+        y: height * 0.3,
+        radius: span * 0.42,
+        scaleX: 1.22,
+        scaleY: 0.68,
+        stops: [
+          [0, 'rgba(82, 74, 136, 0.12)'],
+          [0.42, 'rgba(52, 64, 122, 0.07)'],
+          [1, 'rgba(52, 64, 122, 0)'],
+        ],
+      },
+      {
+        x: width * 0.52,
+        y: height * 0.86,
+        radius: span * 0.52,
+        scaleX: 1.82,
+        scaleY: 0.52,
+        stops: [
+          [0, 'rgba(31, 104, 126, 0.12)'],
+          [0.46, 'rgba(18, 72, 104, 0.075)'],
+          [1, 'rgba(18, 72, 104, 0)'],
+        ],
+      },
+      {
+        x: width * 0.92,
+        y: height * 0.76,
+        radius: span * 0.34,
+        scaleX: 1.16,
+        scaleY: 0.92,
+        stops: [
+          [0, 'rgba(124, 92, 78, 0.08)'],
+          [0.5, 'rgba(94, 72, 90, 0.045)'],
+          [1, 'rgba(94, 72, 90, 0)'],
+        ],
+      },
+    ];
+
+    context.filter = 'blur(18px) saturate(1.08)';
+    for (const patch of patches) {
+      drawNebulaPatch(context, patch);
+    }
+    context.filter = 'none';
+
+    const dustCount = clamp(Math.round((width * height) / 850), 260, 2600);
+    for (let i = 0; i < dustCount; i += 1) {
+      const x = rand() * width;
+      const y = rand() * height;
+      const alpha = 0.01 + rand() * 0.035;
+      const size = 0.24 + rand() * 0.72;
+      const hueRoll = rand();
+      const color =
+        hueRoll > 0.9
+          ? `rgba(255, 207, 162, ${alpha * 0.7})`
+          : hueRoll > 0.62
+            ? `rgba(111, 174, 226, ${alpha})`
+            : `rgba(226, 238, 255, ${alpha})`;
+
+      context.fillStyle = color;
+      context.fillRect(x, y, size, size);
+    }
+
+    const starCount = clamp(Math.round((width * height) / 5400), 150, 520);
+    for (let i = 0; i < starCount; i += 1) {
+      const x = rand() * width;
+      const y = rand() * height;
+      const bright = Math.pow(rand(), 3);
+      const radius = 0.32 + bright * 1.42;
+      const alpha = 0.18 + bright * 0.62 + (rand() > 0.988 ? 0.18 : 0);
+      const tint = rand();
+      const core =
+        tint > 0.92
+          ? [255, 222, 180]
+          : tint > 0.58
+            ? [160, 204, 255]
+            : [235, 244, 255];
+
+      if (radius > 0.76) {
+        const halo = context.createRadialGradient(x, y, 0, x, y, radius * 5.4);
+        halo.addColorStop(0, `rgba(${core[0]}, ${core[1]}, ${core[2]}, ${alpha * 0.28})`);
+        halo.addColorStop(0.32, `rgba(${core[0]}, ${core[1]}, ${core[2]}, ${alpha * 0.08})`);
+        halo.addColorStop(1, `rgba(${core[0]}, ${core[1]}, ${core[2]}, 0)`);
+        context.fillStyle = halo;
+        context.beginPath();
+        context.arc(x, y, radius * 5.4, 0, Math.PI * 2);
+        context.fill();
+      }
+
+      context.fillStyle = `rgba(${core[0]}, ${core[1]}, ${core[2]}, ${Math.min(alpha, 0.86)})`;
+      context.beginPath();
+      context.arc(x, y, radius, 0, Math.PI * 2);
+      context.fill();
+    }
+  }
+
+  onMount(() => {
+    let frame = 0;
+    const scheduleDraw = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (deepFieldCanvas) {
+          drawDeepField(deepFieldCanvas);
+        }
+      });
+    };
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined' && deepFieldCanvas ? new ResizeObserver(scheduleDraw) : null;
+
+    scheduleDraw();
+    if (deepFieldCanvas && resizeObserver) {
+      resizeObserver.observe(deepFieldCanvas);
+    }
+    window.addEventListener('resize', scheduleDraw);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', scheduleDraw);
+    };
+  });
 
   let {
     className = '',
@@ -62,7 +265,7 @@
   <div class="constellation-workspace-backdrop-underlay" aria-hidden="true">
     <div class="constellation-workspace-backdrop-surface"></div>
     <div class="constellation-workspace-backdrop-tide"></div>
-    <div class="constellation-workspace-backdrop-deep-field"></div>
+    <canvas bind:this={deepFieldCanvas} class="constellation-workspace-backdrop-deep-field"></canvas>
     <svg
       class="constellation-workspace-backdrop-waves"
       viewBox="0 0 1440 900"
@@ -185,9 +388,6 @@
     --constellation-workspace-caustics-size: var(--constellation-workspace-theme-caustics-size, auto);
     --constellation-workspace-caustics-blend-mode: var(--constellation-workspace-theme-caustics-blend-mode, normal);
     --constellation-workspace-deep-field-opacity: var(--constellation-workspace-theme-deep-field-opacity, 0);
-    --constellation-workspace-deep-field-nebula: var(--constellation-workspace-theme-deep-field-nebula, none);
-    --constellation-workspace-deep-field-stars: var(--constellation-workspace-theme-deep-field-stars, none);
-    --constellation-workspace-deep-field-dust: var(--constellation-workspace-theme-deep-field-dust, none);
     --constellation-workspace-water-animation-state: var(
       --constellation-workspace-theme-water-animation-state,
       paused
@@ -314,46 +514,12 @@
 
   .constellation-workspace-backdrop-deep-field {
     inset: 0;
-    overflow: hidden;
+    display: block;
+    width: 100%;
+    height: 100%;
     opacity: var(--constellation-workspace-deep-field-opacity);
     mix-blend-mode: screen;
-    background: var(--constellation-workspace-deep-field-nebula);
-  }
-
-  .constellation-workspace-backdrop-deep-field::before,
-  .constellation-workspace-backdrop-deep-field::after {
-    content: '';
-    position: absolute;
-    inset: -4%;
-    pointer-events: none;
-  }
-
-  .constellation-workspace-backdrop-deep-field::before {
-    background-image: var(--constellation-workspace-deep-field-stars);
-    background-position:
-      18px 28px,
-      92px 10px,
-      160px 140px,
-      0 0;
-    background-size:
-      154px 154px,
-      263px 263px,
-      391px 391px,
-      520px 520px;
-    opacity: 0.82;
-  }
-
-  .constellation-workspace-backdrop-deep-field::after {
-    background-image: var(--constellation-workspace-deep-field-dust);
-    background-position:
-      12% 18%,
-      76% 24%,
-      50% 82%;
-    background-size:
-      420px 320px,
-      520px 380px,
-      680px 440px;
-    opacity: 0.74;
+    background: transparent;
   }
 
   .constellation-workspace-backdrop-waves {
@@ -435,6 +601,12 @@
     width: 420px;
     height: 320px;
     background: var(--constellation-workspace-scene-warmth);
+  }
+
+  :global(:root:not([data-color-scheme='light'])) .constellation-workspace-backdrop::before,
+  :global(:root:not([data-color-scheme='light'])) .constellation-workspace-backdrop-scene-glow,
+  :global(:root:not([data-color-scheme='light'])) .constellation-workspace-backdrop-scene-warmth {
+    display: none;
   }
 
   .constellation-workspace-backdrop-canvas {

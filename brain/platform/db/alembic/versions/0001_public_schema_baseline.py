@@ -1,7 +1,7 @@
 """Public schema baseline.
 
 Revision ID: 0001_public_schema_baseline
-Revises:
+Revises: 0006_user_notification_preferences
 Create Date: 2026-05-07
 """
 
@@ -11,7 +11,7 @@ from alembic import op
 
 
 revision = "0001_public_schema_baseline"
-down_revision = None
+down_revision = "0006_user_notification_preferences"
 branch_labels = None
 depends_on = None
 

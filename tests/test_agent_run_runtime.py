@@ -349,6 +349,30 @@ def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance(monke
     assert any(_artifact_type(artifact) == "file_observation" for artifact in runtime.store.artifacts)
 
 
+def test_fast_onboarding_tool_surface_hides_browser_primitives(monkeypatch):
+    from brain.systems.runs.recipes.fast import _agent_tools_for_runtime
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.fast.build_agent_tools",
+        lambda role: [
+            {"name": "read_workspace_overview"},
+            {"name": "browser_session_open"},
+            {"name": "browser_click"},
+        ],
+    )
+
+    runtime = SimpleNamespace(
+        request=SimpleNamespace(
+            metadata={
+                "origin": "onboarding",
+                "required_response": "introduce_and_continue_setup",
+            }
+        )
+    )
+
+    assert [tool["name"] for tool in _agent_tools_for_runtime(runtime)] == ["read_workspace_overview"]
+
+
 def test_runtime_drain_steering_can_use_isolated_durable_drain():
     from brain.systems.runs.steering import SteeringMessage
 

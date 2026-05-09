@@ -24,6 +24,7 @@ export const CORTEX_REALTIME_EVENT_TYPES = [
   'browser_session_delta',
   'browser_session_closed',
   'browser_session_error',
+  'cycles_changed',
   'vault_secret_prompt',
   'idea_created',
   'idea_upserted',
@@ -74,6 +75,12 @@ export type CortexRealtimePayloadByType = {
   browser_session_delta: Record<string, unknown>;
   browser_session_closed: { idea_id?: string; session_id?: string };
   browser_session_error: { session_id?: string; error?: string };
+  cycles_changed: {
+    action?: string;
+    cycle_id?: string | number | null;
+    idea_id?: string | null;
+    target_idea_id?: string | null;
+  };
   vault_secret_prompt: VaultSecretPrompt | Record<string, unknown>;
   idea_created: { idea_id?: string };
   idea_upserted: { idea?: Idea };

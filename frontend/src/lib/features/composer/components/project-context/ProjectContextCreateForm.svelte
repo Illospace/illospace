@@ -1,6 +1,9 @@
 <script lang="ts">
+  import { ConstellationIcon } from '$lib/components/constellation';
   import type { ProjectContextResource } from '$lib/utils/projectContext';
   import ProjectContextConnectorMenu from './ProjectContextConnectorMenu.svelte';
+  import ProjectContextGitHubConnector from './ProjectContextGitHubConnector.svelte';
+  import ProjectContextLocalConnector from './ProjectContextLocalConnector.svelte';
   import ProjectContextResourcePills from './ProjectContextResourcePills.svelte';
   import type { ConnectorMode } from './projectContextProfiles';
 
@@ -31,31 +34,23 @@
   } = $props();
 
   let connectorMode = $state<ConnectorMode>('menu');
-  let ProjectContextGitHubConnector = $state<any>(null);
-  let ProjectContextLocalConnector = $state<any>(null);
-
-  async function loadGitHubConnector() {
-    if (ProjectContextGitHubConnector) return;
-    const module = await import('./ProjectContextGitHubConnector.svelte');
-    ProjectContextGitHubConnector = module.default;
-  }
-
-  async function loadLocalConnector() {
-    if (ProjectContextLocalConnector) return;
-    const module = await import('./ProjectContextLocalConnector.svelte');
-    ProjectContextLocalConnector = module.default;
-  }
 
   function openConnector(nextMode: ConnectorMode) {
     connectorMode = nextMode;
-    if (nextMode === 'github') void loadGitHubConnector();
-    if (nextMode === 'folder' || nextMode === 'file') void loadLocalConnector();
   }
+
+  const connectorTitle = $derived(
+    connectorMode === 'github'
+      ? 'GitHub repo'
+      : connectorMode === 'local'
+        ? 'Files or folders'
+        : '',
+  );
 </script>
 
 <div class="project-create-intro">
   <strong>Projects are saved context containers.</strong>
-  <span>Create one empty, or add resources now. A resource can be a GitHub repo, a folder tree, or individual files.</span>
+  <span>Create one empty, or add resources now. A resource can be a GitHub repo or local files and folders.</span>
 </div>
 
 <div class="project-create-fields">
@@ -71,29 +66,29 @@
   />
 </div>
 
-<div class="connector-tabs" aria-label="Project resource options">
-  <button type="button" class:active={connectorMode === 'menu'} onclick={() => { connectorMode = 'menu'; }}>Add resources</button>
-  <button type="button" class:active={connectorMode === 'github'} onclick={() => openConnector('github')}>Repo</button>
-  <button type="button" class:active={connectorMode === 'folder'} onclick={() => openConnector('folder')}>Folder</button>
-  <button type="button" class:active={connectorMode === 'file'} onclick={() => openConnector('file')}>Files</button>
-</div>
-
 {#if connectorMode === 'menu'}
   <ProjectContextConnectorMenu onOpen={openConnector} />
-{:else if connectorMode === 'github'}
-  {#if ProjectContextGitHubConnector}
+{:else}
+  <div class="connector-view-header">
+    <button
+      type="button"
+      class="connector-back-button"
+      aria-label="Back to resource options"
+      onclick={() => { connectorMode = 'menu'; }}
+    >
+      <ConstellationIcon name="chevron-left" size={14} stroke={2} />
+      <span>Resources</span>
+    </button>
+    <span class="connector-view-title">{connectorTitle}</span>
+  </div>
+
+  {#if connectorMode === 'github'}
     <ProjectContextGitHubConnector onAddResources={onAddResources} />
   {:else}
-    <div class="project-context-muted compact">Loading connector...</div>
-  {/if}
-{:else}
-  {#if ProjectContextLocalConnector}
     <ProjectContextLocalConnector
-      mode={connectorMode === 'file' ? 'file' : 'folder'}
+      mode="local"
       onAddResources={onAddResources}
     />
-  {:else}
-    <div class="project-context-muted compact">Loading connector...</div>
   {/if}
 {/if}
 

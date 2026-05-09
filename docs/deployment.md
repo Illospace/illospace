@@ -1,31 +1,21 @@
 # Deployment
 
-Illo Brain is currently an early self-hosted preview. The supported public path
-is local development or a single self-managed Linux host.
+Illospace has one blessed team-server path: Docker Compose on a single Linux VM.
+Use [server-setup.md](server-setup.md) for the exact runbook.
 
-## Local Development
+## Recommended Production Path
 
 ```bash
-./illo setup
-./illo
+git clone https://github.com/Illospace/illospace.git
+cd illospace
+./illo deploy up
 ```
 
-`.env` is optional. Copy `.env.example` to `.env` only when you want file-based
-local overrides; otherwise export environment variables in your shell or use
-your platform's secret manager.
-
-See [configuration.md](configuration.md) for the full environment contract.
-
-The launcher can start a local pgvector Docker container when PostgreSQL is not
-already reachable. It also installs Python/frontend dependencies and browser
-runtime support.
-
-On a fresh Linux host with another PostgreSQL already listening on `DB_PORT`,
-the launcher will not take over that port. If `DB_PORT` was not explicitly set
-and the host is local, it can choose an alternate port for the Docker pgvector
-database automatically. If `DB_PORT` is pinned, either install pgvector and
-create the configured Illo database/user in that server, update the DB settings,
-or unset `DB_PORT` so the launcher can choose a Docker fallback port.
+The Compose stack runs a private web entrypoint, the FastAPI API, the AgentRun
+worker, the scheduler, a one-shot migration job, and Postgres with pgvector.
+It binds the browser entrypoint to `127.0.0.1:8080`; use SSH, a VPN, a tunnel,
+or your own reverse proxy for team access. `./illo deploy` wraps the underlying
+Compose files and scripts in `deploy/`.
 
 GPU embedding models are lazy by default. Configure GPU embeddings from the
 System tab after first boot, or set `ILLO_DOWNLOAD_GPU_MODELS=1` before setup to
@@ -76,32 +66,38 @@ curl -fsSL https://illospace.ai/install.sh | bash -s -- --no-deploy
    migrations, install user services, and restart the app.
 6. Run `./illo doctor --production` when changing production configuration.
 
-The included `ops/deploy-remote.sh` is a generic SSH helper. It intentionally has
-no project-specific host defaults:
+Use the native launcher for a local preview:
 
 ```bash
-./ops/deploy-remote.sh --host example.com --user illo --dir illo-brain
+./illo
 ```
 
-## Ops Directory
+The launcher can start a local pgvector database, install Python/frontend
+dependencies, and prepare browser runtime support. `.env` remains optional for
+local overrides. For frontend hot reload, run `./illo dev`.
 
-The public `ops/` tree is intentionally small:
+## Native/Systemd Path
+
+The `ops/` directory still contains native virtualenv and systemd templates for
+operators who need to integrate with an existing host layout:
 
 - `deploy.sh` and `deploy-remote.sh` for single-host deployments. They render
   systemd user services for the current checkout path.
 - systemd user-service templates for the scheduler, Cortex worker, and optional
-  embedding/GPU server.
-- browser and frontend dependency helpers used by the launcher.
-- `test-with-db.sh` for the Docker-backed test database.
+  embedding/GPU server
+- browser and frontend dependency helpers used by the launcher
+- `test-with-db.sh` for the Docker-backed test database
 
-Deployment-specific secrets, one-off production migrations, cron wrappers, and
-private hook bundles do not belong in the public tree.
+Treat this as advanced. The Compose path is the open-source team-server
+contract.
 
 ## Production Notes
 
-- Keep `.env`, `production.env`, database dumps, uploads, logs, and operator
-  notes out of git.
-- Prefer `EMBEDDING_BACKEND=api` for the simplest install.
+- Keep `deploy/compose/.env`, `.env`, database dumps, uploads, logs, and
+  operator notes out of git.
+- Prefer `EMBEDDING_BACKEND=api` for the simplest team-server install.
 - Use GPU workers only when the host has the right CUDA/PyTorch stack.
-- Run Alembic migrations before starting workers.
-- Treat browser automation and tool execution as privileged local capabilities.
+- Let the `migrate` service run Alembic migrations before API, worker, and
+  scheduler start.
+- Treat browser automation and tool execution as privileged server
+  capabilities.

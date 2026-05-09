@@ -60,6 +60,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
 
   import BrowserThoughtPanel from '$lib/features/browser-sessions/components/BrowserThoughtPanel.svelte';
+  import ThreadCyclesPane from '$lib/features/cycles/components/ThreadCyclesPane.svelte';
   import ProjectContextPicker from '$lib/features/composer/components/ProjectContextPicker.svelte';
   import SkillMentionOverlay from '$lib/features/composer/components/SkillMentionOverlay.svelte';
   import SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
@@ -86,6 +87,7 @@
     visibleThreadStreamItems,
   } from '$lib/features/threads/domain/threadStreamAdapter';
   import type {
+    CortexThreadStageHeaderStatusState,
     CortexThreadStageTranscriptItem,
   } from '$lib/features/threads/domain/threadTranscriptAdapter';
 
@@ -130,6 +132,7 @@
   let nextBrowserTabIndex = $state(1);
   let lastAutoOpenedBrowserSessionId = $state<string | null>(null);
   let lastAutoOpenedVaultPromptId = $state<string | null>(null);
+  let lastAutoOpenedCycleSignal = $state<number | null>(null);
   let lastAutoSelectedAppId = $state<string | null>(null);
   let teamMembers = $state<any[]>([]);
   let teamMembersLoading = false;
@@ -174,6 +177,11 @@
   const statusLabel = $derived(
     STATUS_LABELS[idea?.status ?? 'idle'] ?? (idea?.status ? idea.status.replaceAll('_', ' ') : 'Idle'),
   );
+  const headerStatusState = $derived.by((): CortexThreadStageHeaderStatusState => {
+    if (runInfo || idea?.status === 'working') return 'working';
+    if (idea?.status === 'done') return 'unread';
+    return 'idle';
+  });
   const dockLayoutMaxWidth = $derived.by(() => {
     if (!browserOpen || threadStageContentWidth <= 0) return dockMaxWidth;
 
@@ -249,6 +257,7 @@
     return {
       title: ideaDisplayTitle(selectedIdea),
       statusLabel,
+      statusState: headerStatusState,
       panelOpen: browserOpen,
       onTogglePanel: () => {
         if (!browserOpen) void workspaceApps.load({ silent: true });
@@ -699,6 +708,10 @@
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'vault'));
   }
 
+  function openCyclesTab() {
+    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'cycles'));
+  }
+
   function openAppTab(appId: string | null | undefined) {
     applySidePanelState(openAppThreadSidePanelTab(sidePanelState(), appId, workspaceApps.appById(appId ?? '')));
   }
@@ -732,6 +745,10 @@
     }
     if (item.kind === 'vault') {
       openVaultTab();
+      return;
+    }
+    if (item.kind === 'cycles') {
+      openCyclesTab();
       return;
     }
     if (item.kind === 'app') {
@@ -769,6 +786,14 @@
     if (promptId === lastAutoOpenedVaultPromptId) return;
     lastAutoOpenedVaultPromptId = promptId;
     openVaultTab();
+  });
+
+  $effect(() => {
+    const signal = cortex.cyclePanelSignal;
+    if (!signal || signal.ideaId !== idea?.id) return;
+    if (signal.serial === lastAutoOpenedCycleSignal) return;
+    lastAutoOpenedCycleSignal = signal.serial;
+    openCyclesTab();
   });
 
   let pendingInitialScrollIdeaId = $state<string | null>(null);
@@ -994,6 +1019,13 @@
     />
   {/snippet}
 
+  {#snippet cyclesPane()}
+    <ThreadCyclesPane
+      focusCycleId={cortex.cyclePanelSignal?.ideaId === idea?.id ? cortex.cyclePanelSignal.cycleId : null}
+      refreshSerial={cortex.cyclePanelSignal?.ideaId === idea?.id ? cortex.cyclePanelSignal.serial : null}
+    />
+  {/snippet}
+
   <ThreadStageShell
     {entering}
     {ready}
@@ -1047,6 +1079,7 @@
               utilityPane={utilityPane}
               appsPane={appsPane}
               vaultPane={vaultPane}
+              cyclesPane={cyclesPane}
             />
           </div>
         {/if}

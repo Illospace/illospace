@@ -24,10 +24,17 @@ for that kind of human-agent teamwork.
 - **Agent runtime tooling** for model invocation, workspace tools, skill bundles, and recurring cycles.
 - **Optional local embedding/GPU workers** for lower-latency semantic retrieval.
 
-## Quick start
+## Local setup
 
-Prerequisites: Python 3.11+, Node.js 22+, and one local database path: Docker,
-Podman, or PostgreSQL 16+ server tools with pgvector.
+Use this path when you want to run Illospace on your own machine for local
+development, evaluation, or a personal preview.
+
+Prerequisites:
+
+- Python 3.11+
+- Node.js 22+
+- one local database path: Docker, Podman, or PostgreSQL 16+ server tools with
+  pgvector
 
 Single-host Linux install. If no database is configured, the installer uses
 Docker/Podman to create a local pgvector container:
@@ -41,50 +48,101 @@ Local development checkout:
 ```bash
 git clone https://github.com/Illospace/illospace.git
 cd illospace
-./illo doctor
 ./illo
 ```
 
 For a first install, `./illo` is the command to run. It performs setup when
-needed, then starts the local preview server:
+needed, prepares local secrets, syncs dependencies, starts a local pgvector
+database when needed, builds the frontend, and then starts the native server:
 
 ```text
-API:       http://localhost:8000  (docs at /api/docs)
-Dashboard: http://localhost:5173
+App: http://localhost:8000  (API docs at /api/docs)
 ```
 
-The launcher starts a local pgvector database when no configured Postgres is
-reachable. It prefers a Docker/Podman pgvector container, but can also manage a
-repo-local PostgreSQL runtime under `.runtime/postgres` when server tools and
-pgvector are installed. If another local Postgres already owns `5432` and you
-have not pinned `DB_PORT`, it can choose an alternate port automatically.
-You will still need at least one model provider key, local model, or
-database-backed credential for LLM-backed agent work.
+For frontend hot reload while developing, run `./illo dev`.
+
+After the app opens, add model/provider credentials from the System or
+onboarding screens. Illospace can boot without provider keys, but LLM-backed
+agent work needs at least one provider key, local model, or database-backed
+credential.
+
+Useful local commands:
+
+```bash
+./illo doctor     # Diagnose local setup and configuration
+./illo setup      # Prepare dependencies and database without starting the app
+./illo test       # Run the fast test suite
+./illo uninstall  # Remove local runtime/config/local DB and reset next setup
+```
+
+The launcher prefers a Docker/Podman pgvector container for local storage, but
+can also manage a repo-local PostgreSQL runtime under `.runtime/postgres` when
+server tools and pgvector are installed. If another local Postgres already owns
+`5432` and you have not pinned `DB_PORT`, it can choose an alternate port
+automatically.
+
+## Team server deployment
+
+The recommended open-source team-server path is Docker Compose on a single
+Linux VM with Postgres + pgvector, the FastAPI API, the private web entrypoint,
+the AgentRun worker, and the scheduler. It does not install public TLS or
+domain ingress for you.
+
+```bash
+git clone https://github.com/Illospace/illospace.git
+cd illospace
+./illo deploy up
+```
+
+The web entrypoint binds to server loopback. Access it over SSH:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 <ssh-user>@<server>
+# open http://localhost:8080 and create the owner
+```
+
+For team-wide access, bring your own reverse proxy, VPN, tunnel, or private
+network in front of `127.0.0.1:8080`.
+
+See [docs/server-setup.md](docs/server-setup.md) for the exact server runbook,
+backups, restore, upgrades, and troubleshooting.
 
 ## Which command should I run?
 
-Use `./illo` for a new checkout, local development, and the first self-hosted
-preview. It owns the local runtime, auto-runs setup when needed, starts the API
-and dashboard, and keeps AgentRuns self-contained.
+Use `./illo` for a new checkout, native server runs, and the first self-hosted
+preview. It owns the native runtime, auto-runs setup when needed, builds the
+frontend, starts the API/dashboard on `localhost:8000`, and keeps AgentRuns
+self-contained.
+
+Native mode binds to `127.0.0.1` by default; set `ILLO_API_HOST=0.0.0.0` only
+when you intentionally want direct network access and have your own firewall,
+tunnel, or reverse proxy in front of it.
+
+Use `./illo dev` when you are editing the frontend or backend locally and want
+the Vite dashboard on `localhost:5173`.
 
 Use `./illo setup` only when you want to install/sync dependencies and prepare
 the database without starting the app.
 
-Use `./illo start` only for production-style self-hosting. It builds the static
-frontend, starts the production API on port `8000`, and expects the standalone
-worker/systemd services to own background AgentRuns.
+Use `./illo deploy` for team servers. It manages the recommended Docker Compose
+deployment, including secret initialization, startup, doctor checks, backups,
+restore, upgrades, logs, and status.
 
 ## Configuration and secrets
 
 - `.env` is optional. The app reads real environment variables first and only
   loads `.env` when the file exists.
-- `./illo setup` and `./illo start` create ignored checkout-local defaults for
-  `SECRET_KEY` and `VAULT_MASTER_KEY` in `.illo/runtime.env` when they are not
-  provided, so a self-hosted preview can boot cleanly.
+- In production, add model/provider credentials from Illospace System/Access so
+  they are encrypted and stored in Postgres. Environment provider keys remain a
+  development fallback, not the recommended self-hosted server path.
+- `./illo setup` creates ignored checkout-local defaults for `SECRET_KEY` and
+  `VAULT_MASTER_KEY` in `.illo/runtime.env` when they are not provided, so a
+  self-hosted preview can boot cleanly.
 - Codex sign-in uses OpenAI's localhost callback. On a remote/self-hosted
-  server, System opens the manual fallback automatically: finish sign-in, copy
-  the final `localhost:1455/auth/callback?...` URL from the sign-in tab, and
-  paste it into System. Custom server callbacks are opt-in with
+  server or Docker Compose install, Illospace opens the manual fallback
+  automatically: finish sign-in, copy the final
+  `localhost:1455/auth/callback?...` URL from the sign-in tab, and paste it
+  back into Illospace. Custom server callbacks are opt-in with
   `ILLO_OPENAI_OAUTH_SERVER_CALLBACK=1` only for OAuth clients that accept your
   deployed callback URL.
 - For local file-based overrides, copy `.env.example` to `.env` and fill in the
@@ -103,12 +161,12 @@ configuration contract.
 
 ```bash
 ./illo              # Recommended for new users; auto-setup, then local preview
+./illo dev          # Development mode with frontend hot reload
 ./illo setup        # Setup only
-./illo start        # Production-style API mode for self-hosted service installs
+./illo deploy up    # Initialize/start the Compose team-server deploy and run doctor
 ./illo doctor       # Diagnose config and common setup issues
 ./illo uninstall    # Remove local runtime/config/local DB and reset next setup
 ./illo test         # Fast tests
-./illo build        # Build frontend only
 make test           # Fast pytest selection
 make test-all       # Full DB-backed suite via Docker
 ```

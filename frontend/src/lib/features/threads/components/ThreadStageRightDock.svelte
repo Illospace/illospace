@@ -47,6 +47,7 @@
     utilityPane,
     appsPane,
     vaultPane,
+    cyclesPane,
     empty,
   }: {
     activeTabId?: string | null;
@@ -67,6 +68,7 @@
     utilityPane?: Snippet;
     appsPane?: Snippet;
     vaultPane?: Snippet;
+    cyclesPane?: Snippet;
     empty?: Snippet;
   } = $props();
 
@@ -74,6 +76,7 @@
   const hasUtilityPane = $derived(!!utilityPane);
   const hasAppsPane = $derived(!!appsPane);
   const hasVaultPane = $derived(!!vaultPane);
+  const hasCyclesPane = $derived(!!cyclesPane);
   const availableTabs = $derived(
     tabs.filter((tab) => (
       tab.kind === 'browser'
@@ -84,6 +87,8 @@
             ? hasAppsPane
             : tab.kind === 'vault'
               ? hasVaultPane
+              : tab.kind === 'cycles'
+                ? hasCyclesPane
               : true
     )),
   );
@@ -187,6 +192,7 @@
     if (kind === 'browser') return 'preview';
     if (kind === 'activity') return 'activity';
     if (kind === 'vault') return 'vault';
+    if (kind === 'cycles') return 'cycles';
     return 'code';
   }
 
@@ -345,6 +351,10 @@
         {:else if resolvedActiveTab?.kind === 'vault' && hasVaultPane}
           <section class="right-dock-pane right-dock-vault" aria-label="Vault">
             {@render vaultPane?.()}
+          </section>
+        {:else if resolvedActiveTab?.kind === 'cycles' && hasCyclesPane}
+          <section class="right-dock-pane right-dock-cycles" aria-label="Cycles">
+            {@render cyclesPane?.()}
           </section>
         {:else if hasEmptyState}
           <div class="right-dock-empty">
@@ -793,7 +803,8 @@
   }
 
   .right-dock-content[data-active-tab='activity'],
-  .right-dock-content[data-active-tab='vault'] {
+  .right-dock-content[data-active-tab='vault'],
+  .right-dock-content[data-active-tab='cycles'] {
     overflow-y: auto;
     padding: 8px 10px 10px;
     scrollbar-color: var(--constellation-utility-panel-scrollbar) transparent;
@@ -833,17 +844,23 @@
     overflow: visible;
   }
 
+  .right-dock-cycles {
+    overflow: visible;
+  }
+
   .right-dock-apps {
     overflow: hidden;
   }
 
   .right-dock-content[data-active-tab='activity']::-webkit-scrollbar,
-  .right-dock-content[data-active-tab='vault']::-webkit-scrollbar {
+  .right-dock-content[data-active-tab='vault']::-webkit-scrollbar,
+  .right-dock-content[data-active-tab='cycles']::-webkit-scrollbar {
     width: 4px;
   }
 
   .right-dock-content[data-active-tab='activity']::-webkit-scrollbar-thumb,
-  .right-dock-content[data-active-tab='vault']::-webkit-scrollbar-thumb {
+  .right-dock-content[data-active-tab='vault']::-webkit-scrollbar-thumb,
+  .right-dock-content[data-active-tab='cycles']::-webkit-scrollbar-thumb {
     border-radius: 999px;
     background: var(--constellation-utility-panel-scrollbar);
   }

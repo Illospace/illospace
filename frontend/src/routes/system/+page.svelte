@@ -10,6 +10,11 @@
     ConstellationNotice,
     ConstellationPageFrame,
   } from '$lib/components/constellation';
+  import {
+    closeOAuthPopup,
+    navigateOpenAIOAuthPopup,
+    openOpenAIOAuthPopup,
+  } from '$lib/utils/oauthPopup';
 
   import AccessCard from './AccessCard.svelte';
   import MemoryCard from './MemoryCard.svelte';
@@ -192,6 +197,7 @@
 
   async function startCodexSignIn(callbackMode: unknown = 'auto') {
     const requestedCallbackMode = normalizeCodexSignInCallbackMode(callbackMode);
+    const popup = openOpenAIOAuthPopup();
     savingConnection = true;
     notice = null;
     try {
@@ -200,30 +206,33 @@
       oauthState = result.state || '';
       oauthCallbackAvailable = result.callback_available ?? true;
       oauthCallbackMode = result.callback_mode || 'local_bridge';
-      if (oauthUrl && typeof window !== 'undefined') {
-        const popup = window.open('about:blank', 'illo-openai-oauth', 'popup,width=540,height=760');
-        if (!popup) {
-          window.location.assign(oauthUrl);
-          return;
+      let openedOAuthWindow = false;
+      if (oauthUrl) {
+        openedOAuthWindow = navigateOpenAIOAuthPopup(popup, oauthUrl);
+        if (!openedOAuthWindow) {
+          closeOAuthPopup(popup);
         }
-        popup.location.href = oauthUrl;
-        popup.focus();
+      } else {
+        closeOAuthPopup(popup);
       }
       notice = oauthCallbackAvailable
         ? {
             tone: 'info',
-            title: 'Codex sign-in opened.',
+            title: openedOAuthWindow ? 'Codex sign-in opened.' : 'Codex sign-in ready.',
             detail:
               oauthCallbackMode === 'server'
-                ? 'Finish in the OpenAI window. It will return to this Illo server automatically.'
-                : 'Finish in the OpenAI window. This page will update automatically.',
+                ? 'Finish in the OpenAI window. It should return to this Illo server automatically; paste the callback URL below if it does not.'
+                : openedOAuthWindow
+                  ? 'Finish in the OpenAI window. This page should update automatically; paste the callback URL below if it does not.'
+                  : 'Open OpenAI sign-in below. This page should update automatically; paste the callback URL below if it does not.',
           }
         : {
             tone: 'warning',
-            title: 'Codex sign-in opened.',
+            title: openedOAuthWindow ? 'Codex sign-in opened.' : 'Codex sign-in ready.',
             detail: result.callback_detail || 'The automatic callback bridge is unavailable. Use the manual callback fallback if the window cannot return here.',
           };
     } catch (error) {
+      closeOAuthPopup(popup);
       notice = errorNotice('Could not start Codex sign-in.', error, 'Try again from the System tab.');
     } finally {
       savingConnection = false;
@@ -335,20 +344,13 @@
     if (startingIntro) return;
     startingIntro = true;
     try {
-      const intro = await api.startRuntimeReadyIntro();
-      if (intro?.idea_id && (intro.created || openExisting)) {
-        const params = new URLSearchParams({
-          idea: intro.idea_id,
-          onboarding: 'runtime-ready',
-        });
-        await goto(`/cortex?${params.toString()}`);
-        return;
-      }
-      await goto('/cortex');
+      const params = new URLSearchParams({ onboarding: 'runtime-ready' });
+      if (openExisting) params.set('open_existing', '1');
+      await goto(`/cortex?${params.toString()}`);
     } catch (error) {
       await loadSettings();
       notice = errorNotice(
-        'Runtime connected, but the intro thread did not start.',
+        'Runtime connected, but Cortex did not open.',
         error,
         'Open Cortex to continue.',
       );
@@ -731,6 +733,7 @@
           {apiKey}
           {openaiEmbedderApiKey}
           {geminiApiKey}
+          {oauthUrl}
           {oauthCallback}
           oauthPending={Boolean(oauthUrl)}
           {oauthCallbackAvailable}

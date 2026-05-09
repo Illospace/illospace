@@ -47,7 +47,6 @@ def test_start_openai_oauth_stashes_pkce_state_in_runtime_settings_session():
 
 def test_start_openai_oauth_uses_localhost_fallback_for_public_base_url_by_default():
     from brain.systems.runtime_settings.auth import OPENAI_OAUTH_SESSION_KEY, start_openai_oauth
-    from brain.systems.runtime_settings.oauth_callback_server import CallbackServerStatus
 
     request = _RequestStub(
         headers={"origin": "https://illo.example.com"},
@@ -57,8 +56,7 @@ def test_start_openai_oauth_uses_localhost_fallback_for_public_base_url_by_defau
 
     with patch(
         "brain.systems.runtime_settings.auth.ensure_callback_server",
-        return_value=CallbackServerStatus(available=True),
-    ), patch(
+    ) as ensure_callback, patch(
         "brain.systems.runtime_settings.auth.build_codex_oauth_authorize_url",
         return_value=("https://auth.openai.com/oauth/authorize?state=state-123", "state-123", "verifier-123"),
     ) as mock_build, patch("brain.systems.runtime_settings.auth.register_callback_target") as register_target:
@@ -73,12 +71,42 @@ def test_start_openai_oauth_uses_localhost_fallback_for_public_base_url_by_defau
     assert request.session[OPENAI_OAUTH_SESSION_KEY]["return_url"] == "https://illo.example.com/auth/callback"
     assert request.session[OPENAI_OAUTH_SESSION_KEY]["callback_mode"] == "local_bridge"
     mock_build.assert_called_once_with(redirect_uri="http://localhost:1455/auth/callback")
-    register_target.assert_called_once_with("state-123", "https://illo.example.com/auth/callback")
+    ensure_callback.assert_not_called()
+    register_target.assert_not_called()
+
+
+def test_start_openai_oauth_disables_local_bridge_for_compose_loopback_origin(monkeypatch):
+    from brain.systems.runtime_settings.auth import OPENAI_OAUTH_SESSION_KEY, start_openai_oauth
+
+    monkeypatch.setenv("ILLO_OPENAI_OAUTH_LOCAL_BRIDGE", "0")
+    request = _RequestStub(
+        headers={"origin": "http://localhost:8080"},
+        base_url="http://localhost:8080/",
+        session={},
+    )
+
+    with patch(
+        "brain.systems.runtime_settings.auth.ensure_callback_server",
+    ) as ensure_callback, patch(
+        "brain.systems.runtime_settings.auth.build_codex_oauth_authorize_url",
+        return_value=("https://auth.openai.com/oauth/authorize?state=state-123", "state-123", "verifier-123"),
+    ) as mock_build, patch("brain.systems.runtime_settings.auth.register_callback_target") as register_target:
+        result = start_openai_oauth(request=request)
+
+    assert result["redirect_uri"] == "http://localhost:1455/auth/callback"
+    assert result["callback_available"] is False
+    assert result["callback_mode"] == "local_bridge"
+    assert "browser-local callback" in str(result["callback_detail"])
+    assert "paste" in str(result["callback_detail"]).lower()
+    assert request.session[OPENAI_OAUTH_SESSION_KEY]["redirect_uri"] == "http://localhost:1455/auth/callback"
+    assert request.session[OPENAI_OAUTH_SESSION_KEY]["return_url"] == "http://localhost:8080/auth/callback"
+    mock_build.assert_called_once_with(redirect_uri="http://localhost:1455/auth/callback")
+    ensure_callback.assert_not_called()
+    register_target.assert_not_called()
 
 
 def test_start_openai_oauth_requires_opt_in_for_server_callback_for_public_base_url():
     from brain.systems.runtime_settings.auth import OPENAI_OAUTH_SESSION_KEY, start_openai_oauth
-    from brain.systems.runtime_settings.oauth_callback_server import CallbackServerStatus
 
     request = _RequestStub(
         headers={"origin": "https://illo.example.com"},
@@ -88,8 +116,7 @@ def test_start_openai_oauth_requires_opt_in_for_server_callback_for_public_base_
 
     with patch(
         "brain.systems.runtime_settings.auth.ensure_callback_server",
-        return_value=CallbackServerStatus(available=True),
-    ), patch(
+    ) as ensure_callback, patch(
         "brain.systems.runtime_settings.auth.build_codex_oauth_authorize_url",
         return_value=("https://auth.openai.com/oauth/authorize?state=state-123", "state-123", "verifier-123"),
     ) as mock_build, patch("brain.systems.runtime_settings.auth.register_callback_target") as register_target:
@@ -99,7 +126,8 @@ def test_start_openai_oauth_requires_opt_in_for_server_callback_for_public_base_
     assert result["callback_mode"] == "local_bridge"
     assert request.session[OPENAI_OAUTH_SESSION_KEY]["redirect_uri"] == "http://localhost:1455/auth/callback"
     mock_build.assert_called_once_with(redirect_uri="http://localhost:1455/auth/callback")
-    register_target.assert_called_once_with("state-123", "https://illo.example.com/auth/callback")
+    ensure_callback.assert_not_called()
+    register_target.assert_not_called()
 
 
 def test_start_openai_oauth_can_opt_in_server_callback_for_public_base_url(monkeypatch):
@@ -134,7 +162,6 @@ def test_start_openai_oauth_can_opt_in_server_callback_for_public_base_url(monke
 
 def test_start_openai_oauth_can_force_localhost_fallback_for_public_base_url():
     from brain.systems.runtime_settings.auth import OPENAI_OAUTH_SESSION_KEY, start_openai_oauth
-    from brain.systems.runtime_settings.oauth_callback_server import CallbackServerStatus
 
     request = _RequestStub(
         headers={"origin": "https://illo.example.com"},
@@ -144,8 +171,7 @@ def test_start_openai_oauth_can_force_localhost_fallback_for_public_base_url():
 
     with patch(
         "brain.systems.runtime_settings.auth.ensure_callback_server",
-        return_value=CallbackServerStatus(available=True),
-    ), patch(
+    ) as ensure_callback, patch(
         "brain.systems.runtime_settings.auth.build_codex_oauth_authorize_url",
         return_value=("https://auth.openai.com/oauth/authorize?state=state-123", "state-123", "verifier-123"),
     ) as mock_build, patch("brain.systems.runtime_settings.auth.register_callback_target") as register_target:
@@ -159,7 +185,8 @@ def test_start_openai_oauth_can_force_localhost_fallback_for_public_base_url():
     assert request.session[OPENAI_OAUTH_SESSION_KEY]["redirect_uri"] == "http://localhost:1455/auth/callback"
     assert request.session[OPENAI_OAUTH_SESSION_KEY]["return_url"] == "https://illo.example.com/auth/callback"
     mock_build.assert_called_once_with(redirect_uri="http://localhost:1455/auth/callback")
-    register_target.assert_called_once_with("state-123", "https://illo.example.com/auth/callback")
+    ensure_callback.assert_not_called()
+    register_target.assert_not_called()
 
 
 def test_exchange_openai_oauth_stores_chatgpt_session_payload():

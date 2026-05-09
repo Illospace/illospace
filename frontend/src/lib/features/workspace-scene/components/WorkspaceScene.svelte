@@ -1376,6 +1376,7 @@
 
   function primitiveAstreClass(astre: PrimitiveAstreVisual) {
     return [
+      astre.id === auth.user?.id ? 'constellation-astre-own' : '',
       primitiveAstreIsLit(astre) ? 'constellation-astre-emphasis' : '',
       astre.id === dragTargetAnchorId ? 'constellation-astre-drop-target' : '',
     ]

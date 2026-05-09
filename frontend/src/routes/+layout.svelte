@@ -27,7 +27,11 @@
     dev && currentPath === '/cycles' && $page.url.searchParams.get('preview') === '1',
   );
   let isPreviewPage = $derived(isVaultPreviewPage || isCyclesPreviewPage);
+  let showNavRail = $derived(!auth.loading && !isLoginPage && !isPreviewPage && !isOnboardingPage);
   let showSearch = $state(false);
+  let navRailArrivalActive = $state(false);
+  let navRailArrivalPlayed = $state(false);
+  let navRailArrivalTimer: ReturnType<typeof setTimeout> | null = null;
   const wsTabId =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
@@ -39,6 +43,25 @@
       showSearch = !showSearch;
     }
   }
+
+  $effect(() => {
+    if (!showNavRail || navRailArrivalPlayed) return;
+    navRailArrivalPlayed = true;
+
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+
+    navRailArrivalActive = true;
+    const timeout = window.setTimeout(() => {
+      navRailArrivalActive = false;
+      if (navRailArrivalTimer === timeout) navRailArrivalTimer = null;
+    }, 620);
+    navRailArrivalTimer = timeout;
+
+    return () => {
+      if (navRailArrivalTimer === timeout) navRailArrivalTimer = null;
+      window.clearTimeout(timeout);
+    };
+  });
 
   onMount(async () => {
     theme.init();
@@ -73,6 +96,10 @@
   });
 
   onDestroy(() => {
+    if (navRailArrivalTimer) {
+      clearTimeout(navRailArrivalTimer);
+      navRailArrivalTimer = null;
+    }
     document.removeEventListener('keydown', handleKeydown);
   });
 
@@ -84,8 +111,8 @@
   {@render children()}
 {:else}
   <div class="app-layout" class:cortex-layout={isCortexPage}>
-    {#if !isPreviewPage && !isOnboardingPage}
-      <ConstellationNavRail />
+    {#if showNavRail}
+      <ConstellationNavRail className={navRailArrivalActive ? 'constellation-nav-rail-arriving' : ''} />
     {/if}
     <main
       class="main-content"
@@ -114,6 +141,9 @@
   }
   .app-layout.cortex-layout {
     overflow: hidden;
+  }
+  :global(.constellation-nav-rail.constellation-nav-rail-arriving) {
+    animation: cortex-nav-rail-arrive 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
   .main-content {
     flex: 1;
@@ -162,5 +192,23 @@
     height: 100vh;
     color: var(--text-2);
     font-family: var(--font-sans);
+  }
+  @keyframes cortex-nav-rail-arrive {
+    0% {
+      opacity: 0;
+      filter: blur(3px);
+      transform: translate3d(-24px, 0, 0);
+    }
+
+    100% {
+      opacity: 1;
+      filter: none;
+      transform: translate3d(0, 0, 0);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :global(.constellation-nav-rail.constellation-nav-rail-arriving) {
+      animation: none !important;
+    }
   }
 </style>

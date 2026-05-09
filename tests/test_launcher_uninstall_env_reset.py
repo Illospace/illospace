@@ -154,32 +154,6 @@ test "$VAULT_MASTER_KEY" = "from-dotenv-vault"
     )
 
 
-def test_service_env_supplies_worker_status_database_settings(tmp_path):
-    functions_file = _write_launcher_functions(tmp_path)
-    home = tmp_path / "home"
-    prod_dir = home / ".config" / "illo-brain"
-    prod_dir.mkdir(parents=True)
-    (prod_dir / "production.env").write_text("DB_PORT=55432\nVAULT_MASTER_KEY=service-vault\n", encoding="utf-8")
-    env = os.environ.copy()
-    env["HOME"] = str(home)
-
-    script = """
-set -euo pipefail
-cd "$1"
-source "$2"
-unset DB_PORT VAULT_MASTER_KEY ILLO_PRIVATE_HOME ILLO_RUNTIME_ENV_FILE
-source_service_env
-test "$DB_PORT" = "55432"
-test "$VAULT_MASTER_KEY" = "service-vault"
-"""
-
-    subprocess.run(
-        ["bash", "-c", script, "bash", str(tmp_path), str(functions_file)],
-        env=env,
-        check=True,
-    )
-
-
 def test_production_service_env_mirrors_active_runtime(tmp_path):
     functions_file = _write_launcher_functions(tmp_path)
     home = tmp_path / "home"

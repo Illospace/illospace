@@ -45,7 +45,8 @@ VAULT_NOT_CONFIGURED_DETAIL = (
 )
 REMOTE_OAUTH_CALLBACK_DETAIL = (
     "OpenAI returns Codex sign-in to localhost:1455 in the browser. "
-    "This System tab is not on localhost, so paste the final localhost callback URL from the sign-in tab into System."
+    "This Illospace deployment cannot receive that browser-local callback automatically, "
+    "so paste the final localhost callback URL from the sign-in tab into Illospace."
 )
 SERVER_OAUTH_CALLBACK_DETAIL = "OpenAI will return directly to this Illo server after sign-in."
 
@@ -167,6 +168,10 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _local_bridge_enabled() -> bool:
+    return _env_flag("ILLO_OPENAI_OAUTH_LOCAL_BRIDGE", True)
+
+
 def _request_origin(request: Request) -> str | None:
     candidates = [
         _origin_from_header(request.headers.get("origin")),
@@ -214,7 +219,14 @@ def start_openai_oauth(request: Request, *, callback_mode: str = "auto") -> dict
         mode = "local_bridge"
         redirect_uri = OPENAI_OAUTH_REDIRECT_URI
 
-    callback_status = None if mode == "server" else ensure_callback_server()
+    local_browser_callback_available = (
+        mode == "local_bridge"
+        and _local_bridge_enabled()
+        and _is_loopback_origin(_request_origin(request))
+    )
+    callback_status = None
+    if local_browser_callback_available:
+        callback_status = ensure_callback_server()
     authorize_url, state, code_verifier = build_codex_oauth_authorize_url(redirect_uri=redirect_uri)
     request.session[OPENAI_OAUTH_SESSION_KEY] = {
         "state": state,
@@ -224,10 +236,9 @@ def start_openai_oauth(request: Request, *, callback_mode: str = "auto") -> dict
         "return_url": return_url,
         "callback_mode": mode,
     }
-    if mode == "local_bridge":
+    if local_browser_callback_available:
         register_callback_target(state, return_url)
 
-    local_browser_callback_available = _is_loopback_origin(_request_origin(request))
     callback_available = True if mode == "server" else bool(callback_status and callback_status.available and local_browser_callback_available)
     if mode == "server":
         callback_detail = SERVER_OAUTH_CALLBACK_DETAIL

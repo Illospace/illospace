@@ -76,6 +76,8 @@ def test_workspace_data_tool_is_read_only_agent_run_surface():
     assert "team activity" in registration.context_route.domains
     assert "query_workspace_data" in context_route_tool_names()
     assert "query_workspace_data" in _get_tool_handlers()
+    assert "read_workspace_overview" in _get_tool_handlers()
+    assert "read_team_activity" in _get_tool_handlers()
 
 
 def test_context_route_surface_is_registry_driven():
@@ -84,12 +86,26 @@ def test_context_route_surface_is_registry_driven():
     names = context_route_tool_names()
     routes = {route["name"]: route for route in context_route_payload()}
 
-    assert names == {"brain_recall", "my_activity", "query_workspace_data", "read_thread_messages", "runtime_settings"}
+    assert names == {
+        "brain_recall",
+        "my_activity",
+        "query_workspace_data",
+        "read_cycles",
+        "read_project_contexts",
+        "read_team_activity",
+        "read_team_members",
+        "read_thread_messages",
+        "read_workspace_apps",
+        "read_workspace_overview",
+        "read_workspace_records",
+        "runtime_settings",
+    }
     assert set(routes) == names
     assert "broad" in routes["brain_recall"]["scopes"]
     assert "thread transcript" in routes["read_thread_messages"]["domains"]
     assert routes["query_workspace_data"]["empty_result_policy"] == "answer_honestly"
     assert "workspace records" in routes["query_workspace_data"]["domains"]
+    assert "workspace setup" in routes["read_workspace_overview"]["domains"]
 
 
 def test_workspace_activity_question_requires_workspace_data():
@@ -97,9 +113,19 @@ def test_workspace_activity_question_requires_workspace_data():
 
     tool, message = required_introspection_tool("Hey illo what is Alex working on?")
 
-    assert tool == "query_workspace_data"
+    assert tool == "read_team_activity"
     assert message is not None
     assert "current workspace/team activity" in message
+
+
+def test_onboarding_intro_requires_workspace_overview():
+    from brain.systems.runs.introspection import required_introspection_tool
+
+    tool, message = required_introspection_tool("Illo, introduce yourself and help me finish setting up this workspace.")
+
+    assert tool == "read_workspace_overview"
+    assert message is not None
+    assert "workspace overview" in message
 
 
 def test_memory_question_does_not_force_workspace_data():
@@ -114,19 +140,28 @@ def test_workspace_data_sources_are_adapter_registered():
     adapters = _source_adapters()
 
     assert "runs" in adapters
-    assert "memories" in adapters
-    assert adapters["memories"].db_backed is False
+    assert "team_members" in adapters
+    assert "project_profiles" in adapters
+    assert "project_attachments" in adapters
+    assert "cycles" in adapters
+    assert "cycle_runs" in adapters
+    assert "memories" not in adapters
     assert "memories" not in _normalize_sources(None)
-    assert _normalize_sources(["memory"]) == ["memories"]
+    assert _normalize_sources(["memory"]) == _normalize_sources(None)
     assert _normalize_sources(["activity"]) == [
         "runs",
         "threads",
         "ideas",
         "tool_calls",
+        "project_attachments",
         "domain_events",
         "workspace_apps",
+        "cycle_runs",
     ]
     assert _normalize_sources(["apps"]) == ["workspace_apps", "app_state"]
+    assert _normalize_sources(["records"]) == ["domains", "domain_records", "domain_events"]
+    assert _normalize_sources(["project_contexts"]) == ["project_profiles", "project_attachments"]
+    assert _normalize_sources(["cycles"]) == ["cycles", "cycle_runs"]
 
 
 def test_side_effecting_tools_declare_action_metadata():

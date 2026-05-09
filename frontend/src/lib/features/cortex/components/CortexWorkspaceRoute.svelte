@@ -36,8 +36,22 @@
   import CortexLocalPreviewControls from '$lib/features/cortex/components/LocalPreviewControls.svelte';
   import WorkspaceChatDock from '$lib/features/cortex/components/chat/WorkspaceChatDock.svelte';
   import type { CortexChatDockTopLevelMode } from '$lib/features/cortex/components/chat/ChatDockSeam.svelte';
+  import { api } from '$lib/api/client';
 
   const RUNTIME_READY_ONBOARDING_PARAM = 'runtime-ready';
+  const WORKSPACE_ARRIVAL_DURATION_MS = 1320;
+  const RUNTIME_READY_INTRO_DELAY_MS = 1560;
+  type RuntimeReadyComposerDraft = {
+    id: string;
+    text: string;
+    origin?: string | null;
+    originRef?: string | null;
+    displayTitle?: string | null;
+    runMetadata?: Record<string, any> | null;
+    delayMs?: number;
+    typeIntervalMs?: number;
+    submitDelayMs?: number;
+  };
   const workspaceOverlay = createWorkspaceOverlayController();
   const threadStage = createWorkspaceThreadStageController();
   const lazyComponents = createLazyComponentController();
@@ -50,6 +64,12 @@
   let workspacePinsWsReady = false;
   let workspaceEl: HTMLDivElement | undefined = $state();
   let workspaceSceneSidecarsReady = $state(false);
+  let workspaceArrivalActive = $state(true);
+  let workspaceArrivalSettled = $state(false);
+  let runtimeReadyIntroHandled = $state(false);
+  let runtimeReadyIntroStarting = $state(false);
+  let runtimeReadyIntroTimer: ReturnType<typeof setTimeout> | null = null;
+  let runtimeReadyComposerDraft = $state<RuntimeReadyComposerDraft | null>(null);
   let lastRequestedIdeaId = $state<string | null>(null);
   let initialDirectThreadIdeaId = $state<string | null>($page.url.searchParams.get('idea'));
   let directThreadUrlPending = $state(Boolean($page.url.searchParams.get('idea')));
@@ -85,16 +105,71 @@
   }
 
   function isRuntimeReadyIntroIdea(idea: Idea | null | undefined) {
-    return idea?.origin === 'onboarding' && idea.agent_details?.onboarding?.intro === true;
+    return (
+      idea?.origin === 'onboarding'
+      && (
+        idea.agent_details?.onboarding?.intro === true
+        || idea.origin_ref?.startsWith('runtime-ready-intro:')
+      )
+    );
   }
 
-  function clearRuntimeReadyOnboardingUrl() {
-    if (!browser || !isRuntimeReadyOnboardingUrl() || !isRuntimeReadyIntroIdea(cortex.selectedIdea)) return;
+  function runtimeReadyIntroIsDeferred() {
+    return isRuntimeReadyOnboardingUrl() && !$page.url.searchParams.get('idea');
+  }
+
+  function runtimeReadyIntroOpenExisting() {
+    return $page.url.searchParams.get('open_existing') === '1';
+  }
+
+  function clearRuntimeReadyOnboardingUrl(options: { requireIntroIdea?: boolean } = {}) {
+    const { requireIntroIdea = true } = options;
+    if (!browser || !isRuntimeReadyOnboardingUrl()) return;
+    if (requireIntroIdea && !isRuntimeReadyIntroIdea(cortex.selectedIdea)) return;
     const url = new URL(window.location.href);
     url.searchParams.delete('idea');
     url.searchParams.delete('onboarding');
+    url.searchParams.delete('open_existing');
     const nextPath = `${url.pathname}${url.search}${url.hash}`;
     window.history.replaceState(window.history.state, '', nextPath);
+  }
+
+  async function startDeferredRuntimeReadyIntro() {
+    if (runtimeReadyIntroHandled || runtimeReadyIntroStarting) return;
+    runtimeReadyIntroHandled = true;
+    runtimeReadyIntroStarting = true;
+    try {
+      const intro = await api.runtimeReadyIntroDraft();
+      if (!intro?.should_play) {
+        if (intro?.idea_id && runtimeReadyIntroOpenExisting()) {
+          threadStage.setCenteredOrigin('50%', '54%');
+          await cortex.loadDirectThread(intro.idea_id);
+        }
+        clearRuntimeReadyOnboardingUrl({ requireIntroIdea: false });
+        return;
+      }
+      runtimeReadyComposerDraft = {
+        id: `${intro.origin_ref}:${Date.now()}`,
+        text: intro.prompt,
+        origin: intro.origin,
+        originRef: intro.origin_ref,
+        displayTitle: intro.display_title,
+        runMetadata: intro.run_metadata,
+        delayMs: 360,
+        typeIntervalMs: 18,
+        submitDelayMs: 620,
+      };
+    } catch (err: any) {
+      ui.toast(err?.detail || err?.message || 'Illo intro did not start.', 'error');
+      clearRuntimeReadyOnboardingUrl({ requireIntroIdea: false });
+    } finally {
+      runtimeReadyIntroStarting = false;
+    }
+  }
+
+  function handleRuntimeReadyAutoDraftComplete() {
+    runtimeReadyComposerDraft = null;
+    clearRuntimeReadyOnboardingUrl({ requireIntroIdea: false });
   }
 
   $effect(() => {
@@ -462,6 +537,29 @@
   const cortexWorkspaceLoading = $derived(
     cortex.loading || (!directThreadUrlPending && !directThreadActive && !workspaceSceneSidecarsReady),
   );
+  const workspaceVisualReady = $derived(
+    shouldRenderWorkspaceScene
+      ? (cortex.view === 'list' ? Boolean(CortexListViewComponent) : Boolean(WorkspaceSceneComponent))
+      : cortexSurfaceReady,
+  );
+  const workspaceArrivalReady = $derived(cortexSurfaceReady && workspaceVisualReady);
+
+  $effect(() => {
+    if (!browser || workspaceArrivalSettled || !workspaceArrivalReady) return;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      workspaceArrivalActive = false;
+      workspaceArrivalSettled = true;
+      return;
+    }
+
+    workspaceArrivalActive = true;
+    const timeout = window.setTimeout(() => {
+      workspaceArrivalActive = false;
+      workspaceArrivalSettled = true;
+    }, WORKSPACE_ARRIVAL_DURATION_MS);
+
+    return () => window.clearTimeout(timeout);
+  });
 
   const createLazyComponentLoader = lazyComponents.createLoader;
 
@@ -711,6 +809,33 @@
     }
   });
 
+  $effect(() => {
+    if (
+      !browser
+      || runtimeReadyIntroHandled
+      || runtimeReadyIntroStarting
+      || !runtimeReadyIntroIsDeferred()
+      || cortexWorkspaceLoading
+      || !workspaceArrivalReady
+      || !WorkspaceComposerComponent
+      || cortex.panelOpen
+      || runtimeReadyComposerDraft
+    ) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      runtimeReadyIntroTimer = null;
+      void startDeferredRuntimeReadyIntro();
+    }, RUNTIME_READY_INTRO_DELAY_MS);
+    runtimeReadyIntroTimer = timeout;
+
+    return () => {
+      if (runtimeReadyIntroTimer === timeout) runtimeReadyIntroTimer = null;
+      window.clearTimeout(timeout);
+    };
+  });
+
   onMount(() => {
     const requestedIdeaId = $page.url.searchParams.get('idea');
     initialDirectThreadIdeaId = requestedIdeaId;
@@ -740,6 +865,10 @@
   });
 
   onDestroy(() => {
+    if (runtimeReadyIntroTimer) {
+      clearTimeout(runtimeReadyIntroTimer);
+      runtimeReadyIntroTimer = null;
+    }
     if (isRuntimeReadyIntroIdea(cortex.selectedIdea)) {
       void cortex.selectIdea(null);
     }
@@ -763,6 +892,7 @@
   class="cortex-page"
   class:panel-open={cortex.panelOpen}
   class:canvas-open={cortex.canvasOpen}
+  class:is-arriving={workspaceArrivalActive}
   style={threadWorkspaceStyle}
 >
   <div class="cortex-workspace" bind:this={workspaceEl}>
@@ -783,6 +913,8 @@
         'cortex-workspace-backdrop',
         directThreadActive ? 'is-direct-thread' : '',
       ].filter(Boolean).join(' ')}
+      toolbarClassName="workspace-toolbar-slot"
+      composerClassName="workspace-composer-slot"
     >
           {#snippet canvas()}
             <div class="cortex-main">
@@ -860,7 +992,12 @@
                 out:fly={{ y: 14, duration: 180 }}
               >
                 {#if WorkspaceComposerComponent}
-                  <WorkspaceComposerComponent context={workspaceOverlay.composerContext} onthreadintent={handleWorkspaceThreadIntent} />
+                  <WorkspaceComposerComponent
+                    context={workspaceOverlay.composerContext}
+                    autoDraft={runtimeReadyComposerDraft}
+                    onthreadintent={handleWorkspaceThreadIntent}
+                    onAutoDraftComplete={handleRuntimeReadyAutoDraftComplete}
+                  />
                 {/if}
               </div>
             {/if}
@@ -1095,7 +1232,7 @@
   }
 
   :global(.constellation-workspace-backdrop.cortex-workspace-backdrop.is-direct-thread) {
-    --constellation-workspace-theme-deep-field-opacity: 0;
+    --constellation-workspace-theme-deep-field-opacity: 0.82;
   }
 
   .workspace-composer-shell {
@@ -1136,6 +1273,26 @@
     justify-content: flex-end;
     gap: 12px;
     pointer-events: auto;
+  }
+
+  .cortex-page.is-arriving :global(.workspace-toolbar-slot) {
+    animation: cortex-toolbar-arrive 640ms cubic-bezier(0.22, 1, 0.36, 1) 240ms both;
+  }
+
+  .cortex-page.is-arriving .workspace-archive-bin-shell {
+    animation: cortex-edge-bin-arrive 640ms cubic-bezier(0.22, 1, 0.36, 1) 420ms both;
+  }
+
+  .cortex-page.is-arriving :global(.workspace-composer-slot) {
+    animation: cortex-composer-arrive 680ms cubic-bezier(0.22, 1, 0.36, 1) 360ms both;
+  }
+
+  .cortex-page.is-arriving .cortex-main :global(.constellation-astre-own) {
+    animation: cortex-own-astre-arrive 780ms cubic-bezier(0.16, 1, 0.3, 1) 120ms both;
+  }
+
+  .cortex-page.is-arriving .cortex-main :global(.constellation-astre:not(.constellation-astre-own)) {
+    animation: cortex-field-astre-arrive 640ms cubic-bezier(0.22, 1, 0.36, 1) 260ms both;
   }
 
   .cortex-page :global(.workspace-theme-toggle) {
@@ -1311,6 +1468,82 @@
     50% { opacity: 1; }
   }
 
+  @keyframes cortex-own-astre-arrive {
+    0% {
+      opacity: 0;
+      filter: blur(12px) saturate(1.28) brightness(1.14);
+      transform: translate(-50%, -50%) scale(0.22);
+    }
+
+    62% {
+      opacity: 1;
+      filter: blur(0) saturate(1.16) brightness(1.08);
+      transform: translate(-50%, -50%) scale(1.08);
+    }
+
+    100% {
+      opacity: 1;
+      filter: none;
+      transform: translate(-50%, -50%) scale(var(--astre-scale));
+    }
+  }
+
+  @keyframes cortex-field-astre-arrive {
+    0% {
+      opacity: 0;
+      filter: blur(5px) saturate(1.16);
+      transform: translate(-50%, -50%) scale(0.72);
+    }
+
+    100% {
+      opacity: 1;
+      filter: none;
+      transform: translate(-50%, -50%) scale(var(--astre-scale));
+    }
+  }
+
+  @keyframes cortex-toolbar-arrive {
+    0% {
+      opacity: 0;
+      filter: blur(3px);
+      transform: translate3d(34px, -2px, 0);
+    }
+
+    100% {
+      opacity: 1;
+      filter: none;
+      transform: translate3d(0, 0, 0);
+    }
+  }
+
+  @keyframes cortex-edge-bin-arrive {
+    0% {
+      opacity: 0;
+      filter: blur(3px);
+      transform: translate3d(30px, 0, 0) scale(0.985);
+    }
+
+    100% {
+      opacity: 1;
+      filter: none;
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+  }
+
+  @keyframes cortex-composer-arrive {
+    0% {
+      opacity: 0;
+      filter: blur(3px);
+      transform: translateX(-50%) translateY(30px) scale(0.985);
+    }
+
+    100% {
+      opacity: 1;
+      filter: none;
+      transform: translateX(-50%) translateY(0) scale(1);
+    }
+  }
+
   @media (max-width: 900px) {
     .cortex-page {
       --workspace-bottom-surface-idle-height: clamp(132px, 20svh, 190px);
@@ -1342,6 +1575,15 @@
 
     :global(.constellation-workspace-backdrop.cortex-workspace-backdrop) {
       --constellation-workspace-backdrop-composer-width: min(calc(100% - 28px), 360px);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cortex-page.is-arriving :global(.workspace-toolbar-slot),
+    .cortex-page.is-arriving .workspace-archive-bin-shell,
+    .cortex-page.is-arriving :global(.workspace-composer-slot),
+    .cortex-page.is-arriving .cortex-main :global(.constellation-astre) {
+      animation: none !important;
     }
   }
 

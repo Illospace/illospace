@@ -111,7 +111,7 @@ def test_runtime_ready_intro_creates_thread_and_run():
     assert idea.display_title == "Welcome to Illo"
     route_trigger.assert_called_once()
     trigger = route_trigger.call_args.args[0]
-    assert "Illo works well solo" in trigger.payload["thread_message"]
+    assert trigger.payload["thread_message"] == "Hi Illo, what can you help me with?"
     assert trigger.payload["metadata"]["prompt_visibility"] == "hidden"
     assert trigger.payload["metadata"]["provider"] == "openai"
     assert trigger.payload["metadata"]["model"] == "openai/gpt-5.5"

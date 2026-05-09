@@ -43,8 +43,10 @@ dashboard/
 .*
 !.gitignore
 !.gitattributes
+!.dockerignore
 !.github/
 !.github/**
+!/deploy/compose/.env.production.example
 brain/uploads/
 
 # Illo runtime-private state (operator context, journals, logs, local exports)
@@ -63,6 +65,7 @@ brain/uploads/
 
 # Optional private local tool notes
 /TOOLS.md
+/doc/
 
 # Internal historical content not shipped in the public repo
 /docs/archive/
@@ -70,6 +73,7 @@ brain/uploads/
 
 # Local runtime snapshots and generated operator data
 /data/
+/deploy/backups/
 /brain/data/*.json
 /brain/platform/data/*.json
 /brain/briefs/

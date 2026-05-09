@@ -194,7 +194,6 @@ def _record_implicit_feedback(idea_id: str, content: str, tags: list[str]) -> No
     except Exception:
         logger.exception("Failed to persist implicit feedback for idea %s", idea_id)
 
-
 def _create_feedback_triggers(skill_used: str, task_summary: str, note: str):
     from datetime import datetime as dt
     with UnitOfWork() as uow:
