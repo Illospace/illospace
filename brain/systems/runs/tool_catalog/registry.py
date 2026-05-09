@@ -38,6 +38,7 @@ from brain.systems.runs.tool_definitions import (
     PROJECT_TOOLS,
     SOUL_TOOLS,
     SESSION_TOOLS,
+    WORKSPACE_OVERVIEW_SPARSE_GUIDANCE,
     WORKSPACE_APP_TOOLS,
 )
 from brain.systems.runs.tool_catalog.metadata import (
@@ -176,7 +177,12 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "output_budget_chars": 22_000,
         "evidence_emitter": True,
         "context_route": {
-            "description": "Read a curated overview of the workspace: team members, active thoughts, recent runs/messages, Project Context, Domains, apps, Cycles, and setup gaps. Use first for onboarding, setup, and broad 'what can you see?' questions. If it is empty or sparse, ask the user for team, project, and workflow details so Illo can fill in workspace context and help better.",
+            "description": (
+                "Read a curated overview of the workspace: team members, active thoughts, recent runs/messages, "
+                "Project Context, Domains, apps, Cycles, and setup gaps. Use first for onboarding, setup, and broad "
+                "'what can you see?' questions. "
+                + WORKSPACE_OVERVIEW_SPARSE_GUIDANCE
+            ),
             "domains": ["workspace overview", "workspace setup", "onboarding", "available context", "workspace awareness"],
             "scopes": ["broad"],
         },

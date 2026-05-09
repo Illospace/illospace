@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from sqlalchemy import String, and_, cast, func, or_, select
 
+from brain.systems.runs.tool_definitions import WORKSPACE_OVERVIEW_SPARSE_GUIDANCE
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, logger
 
 _ZERO_UUID = "00000000-0000-0000-0000-000000000000"
@@ -1901,7 +1902,7 @@ def _handle_read_workspace_overview(
     payload["answering_guidance"] = [
         "Distinguish what already exists in this workspace from what Illo can help set up.",
         "Use setup_gaps to avoid overclaiming configured project context, Domains, apps, or Cycles.",
-        "If the overview is empty or sparse, ask the user for a few team, project, and workflow details so Illo can fill in workspace context and help better.",
+        WORKSPACE_OVERVIEW_SPARSE_GUIDANCE,
     ]
     return json.dumps(payload, default=str)
 

@@ -26,7 +26,11 @@ from brain.systems.runs.recipes.phase_barrier import (
 from brain.systems.runs.recipes.scout import ScoutHandoff, scout_request
 from brain.systems.runs.recipes.shared import workspace_root_from_ref
 from brain.systems.runs.status import RunStatus
-from brain.systems.runs.verification.evidence import verification_evidence, worker_evidence_from_artifacts
+from brain.systems.runs.verification.evidence import (
+    artifact_payloads,
+    verification_evidence,
+    worker_evidence_from_artifacts,
+)
 from brain.systems.runs.verification.gates import VerificationResult, verify_worker_evidence
 from brain.systems.runs.verification.policy import VerificationMode, verification_mode_for_run
 
@@ -566,14 +570,16 @@ class DeepRecipe(BaseRunRecipe):
             result = invoke_direct_agent(spec)
             success = bool(getattr(result, "success", False))
             output = str(getattr(result, "output", "") or "").strip()
+            used_fallback = False
             if not success or not output:
                 output = fallback
+                used_fallback = True
             runtime.store.append_event(
                 run_event(
                     runtime.run.id,
                     "run.coordinator_synthesis_completed",
                     {
-                        "used_fallback": output == fallback,
+                        "used_fallback": used_fallback,
                         "success": success,
                     },
                     root_run_id=_root_run_id(runtime),
@@ -596,15 +602,11 @@ class DeepRecipe(BaseRunRecipe):
 
     def _synthesize_output(self, node_results: dict[str, dict[str, Any]]) -> str:
         scout = _scout_from_payload(node_results.get("scout"))
-        worker_results = [result for result in node_results.values() if result.get("assignment")]
+        worker_rows = _worker_synthesis_rows(node_results)
         lines = ["Deep completed using native AgentRun workers.", "", f"Scout: {scout.summary}", "", "Worker results:"]
-        for result in worker_results:
-            assignment_payload = result.get("assignment") if isinstance(result.get("assignment"), dict) else {}
-            assignment = WorkerAssignment.from_payload(
-                {"id": str(result.get("node_id") or "worker"), **dict(assignment_payload)}
-            )
-            detail = _truncate(str(result.get("output") or "")) or str(result.get("warning") or "No worker output recorded.")
-            lines.append(f"- {assignment.role} (run {result.get('run_id')}, {result.get('status')}): {detail}")
+        for row in worker_rows:
+            detail = _truncate(str(row.get("output") or "")) or str(row.get("warning") or "No worker output recorded.")
+            lines.append(f"- {row.get('role')} (run {row.get('run_id')}, {row.get('status')}): {detail}")
         return "\n".join(lines).strip()
 
     def _verification_result(self, payload: dict[str, Any] | None) -> VerificationResult | None:
@@ -788,25 +790,6 @@ def _coordinator_model_and_thinking(runtime: RunRuntime) -> tuple[str, str]:
 
 def _coordinator_synthesis_payload(runtime: RunRuntime, node_results: dict[str, dict[str, Any]]) -> dict[str, Any]:
     scout = _scout_from_payload(node_results.get("scout"))
-    worker_results = [result for result in node_results.values() if result.get("assignment")]
-    workers: list[dict[str, Any]] = []
-    for result in worker_results:
-        assignment_payload = result.get("assignment") if isinstance(result.get("assignment"), dict) else {}
-        assignment = WorkerAssignment.from_payload(
-            {"id": str(result.get("node_id") or "worker"), **dict(assignment_payload)}
-        )
-        workers.append(
-            {
-                "node_id": result.get("node_id"),
-                "run_id": result.get("run_id") or result.get("child_run_id"),
-                "role": assignment.role,
-                "status": result.get("status"),
-                "objective": assignment.objective,
-                "output": _truncate(str(result.get("output") or ""), limit=4000),
-                "warning": result.get("warning"),
-                "evidence": _synthesis_artifact_summaries(result.get("artifacts")),
-            }
-        )
     verification = dict(node_results.get("verify") or {})
     return {
         "task": runtime.request.message,
@@ -818,16 +801,41 @@ def _coordinator_synthesis_payload(runtime: RunRuntime, node_results: dict[str, 
             "warning": verification.get("warning"),
             "details": verification.get("details") or {},
         },
-        "workers": workers,
+        "workers": _worker_synthesis_rows(node_results),
     }
 
 
-def _synthesis_artifact_summaries(value: Any) -> list[dict[str, Any]]:
-    artifacts = value if isinstance(value, list) else []
-    summaries: list[dict[str, Any]] = []
-    for artifact in artifacts[:8]:
-        if not isinstance(artifact, Mapping):
+def _worker_synthesis_rows(node_results: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for result in node_results.values():
+        if not result.get("assignment"):
             continue
+        assignment = _assignment_from_worker_result(result)
+        rows.append(
+            {
+                "node_id": result.get("node_id"),
+                "run_id": result.get("run_id") or result.get("child_run_id"),
+                "role": assignment.role,
+                "status": result.get("status"),
+                "objective": assignment.objective,
+                "output": _truncate(str(result.get("output") or ""), limit=4000),
+                "warning": result.get("warning"),
+                "evidence": _synthesis_artifact_summaries(result.get("artifacts")),
+            }
+        )
+    return rows
+
+
+def _assignment_from_worker_result(result: Mapping[str, Any]) -> WorkerAssignment:
+    assignment_payload = result.get("assignment") if isinstance(result.get("assignment"), Mapping) else {}
+    return WorkerAssignment.from_payload(
+        {"id": str(result.get("node_id") or "worker"), **dict(assignment_payload)}
+    )
+
+
+def _synthesis_artifact_summaries(value: Any) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for artifact in artifact_payloads(value)[:8]:
         payload = artifact.get("payload") if isinstance(artifact.get("payload"), Mapping) else {}
         summaries.append(
             {

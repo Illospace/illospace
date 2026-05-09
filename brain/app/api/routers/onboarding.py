@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 
 from brain.app.api.auth import get_current_user
@@ -14,6 +14,7 @@ from brain.app.triggers.router import route_trigger
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
 from brain.systems.services.runtime_introspection import get_provider_auth_status
 from brain.systems.runs.status import RunStatus
 
@@ -97,6 +98,23 @@ def _route_intro_run(session: Any, *, idea: Idea, user: dict[str, Any]) -> Any:
     return route_trigger(trigger, session=session)
 
 
+def _queue_intro_display_title(
+    background_tasks: BackgroundTasks,
+    *,
+    idea_id: str,
+    user_id: str,
+    org_id: str,
+    raw_title: str,
+) -> None:
+    background_tasks.add_task(
+        generate_and_store_idea_display_title,
+        idea_id,
+        raw_title=raw_title,
+        user_id=user_id,
+        org_id=org_id,
+    )
+
+
 @router.post("/runtime-ready-intro-draft")
 def runtime_ready_intro_draft(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
     """Return the visible composer draft for the runtime-ready intro flow."""
@@ -122,7 +140,10 @@ def runtime_ready_intro_draft(user: dict[str, Any] = Depends(get_current_user)) 
 
 
 @router.post("/runtime-ready-intro")
-def start_runtime_ready_intro(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+def start_runtime_ready_intro(
+    background_tasks: BackgroundTasks,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     """Create or reuse the Cortex intro thread after model runtime setup."""
     user_id = str(user.get("id") or "")
     if not user_id:
@@ -174,6 +195,13 @@ def start_runtime_ready_intro(user: dict[str, Any] = Depends(get_current_user)) 
         uow.session.flush()
 
         result = _route_intro_run(uow.session, idea=idea, user=user)
+        _queue_intro_display_title(
+            background_tasks,
+            idea_id=str(idea.id),
+            user_id=user_id,
+            org_id=org_id,
+            raw_title=idea.title,
+        )
 
         return {
             "ok": True,
