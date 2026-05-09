@@ -36,6 +36,15 @@ Prerequisites:
 - one local database path: Docker, Podman, or PostgreSQL 16+ server tools with
   pgvector
 
+Single-host Linux install. If no database is configured, the installer uses
+Docker/Podman to create a local pgvector container:
+
+```bash
+curl -fsSL https://illospace.com/install.sh | bash
+```
+
+Local development checkout:
+
 ```bash
 git clone https://github.com/Illospace/illospace.git
 cd illospace

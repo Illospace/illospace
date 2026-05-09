@@ -1,0 +1,25 @@
+[Unit]
+Description=Illo Brain - API
+After=network-online.target illo-embed.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/illo-brain
+Environment=PYTHONPATH=%h/illo-brain
+Environment=ILLO_ENV=production
+Environment=ILLO_VALIDATE_MIGRATIONS=1
+Environment=CORTEX_INLINE_DISPATCHER=0
+EnvironmentFile=-%h/.config/illo-brain/production.env
+ExecStart=%h/illo-brain/venv/bin/uvicorn brain.app.api.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Logging
+StandardOutput=append:%h/illo-brain/logs/api.log
+StandardError=append:%h/illo-brain/logs/api.log
+
+[Install]
+WantedBy=default.target
