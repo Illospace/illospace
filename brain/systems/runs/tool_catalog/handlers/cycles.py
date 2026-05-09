@@ -6,6 +6,7 @@ from brain.systems.runs.tool_catalog.handlers.common import *
 
 def _handle_manage_cycle(
     action: str,
+    operation: str | None = None,
     id: int | None = None,
     name: str | None = None,
     prompt: str | None = None,
@@ -19,6 +20,10 @@ def _handle_manage_cycle(
     target_idea_id: str | None = None,
     reopen_archived: bool | None = None,
 ) -> str:
+    action = str(action or "").strip().lower()
+    if action in {"help", "schema"}:
+        return _manage_tool_guide("manage_cycle", operation)
+
     from sqlalchemy import and_, or_, select
 
     from brain.systems.cycles.service import (

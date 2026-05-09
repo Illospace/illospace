@@ -19,6 +19,7 @@ def _workspace_app_context() -> tuple[str | None, str | None]:
 
 def _handle_manage_workspace_app(
     action: str,
+    operation: str | None = None,
     app_id: str | None = None,
     key: str | None = None,
     name: str | None = None,
@@ -37,6 +38,10 @@ def _handle_manage_workspace_app(
     include_archived: bool = False,
     include_prototypes: bool = False,
 ) -> str:
+    action = str(action or "").strip().lower()
+    if action in {"help", "schema"}:
+        return _manage_tool_guide("manage_workspace_app", operation)
+
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
     from brain.systems.workspace_apps.service import (
         WorkspaceAppContractError,

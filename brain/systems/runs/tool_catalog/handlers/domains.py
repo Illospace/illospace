@@ -17,6 +17,7 @@ def _domain_context() -> tuple[str | None, str | None, int | None, str | None]:
 
 def _handle_manage_domain(
     action: str,
+    operation: str | None = None,
     domain_id: int | None = None,
     name: str | None = None,
     slug: str | None = None,
@@ -41,6 +42,12 @@ def _handle_manage_domain(
     target_record_id: int | None = None,
     properties: dict | None = None,
 ) -> str:
+    action = str(action or "").strip().lower()
+    if action == "help":
+        return _manage_tool_guide("manage_domain", operation)
+    if action == "schema" and (operation or domain_id is None):
+        return _manage_tool_guide("manage_domain", operation or "schema")
+
     from brain.systems.user_domains.service import DomainError, DomainNotFound
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
