@@ -25,8 +25,8 @@ router = APIRouter(
 
 INTRO_ORIGIN = "onboarding"
 INTRO_ORIGIN_REF_PREFIX = "runtime-ready-intro"
-INTRO_TITLE = "Illo, help me finish setting up this workspace."
-INTRO_DISPLAY_TITLE = "Welcome to Illo"
+INTRO_PROMPT = "Hey Illo, help me understand what you can do to help me."
+INTRO_TITLE = INTRO_PROMPT
 INTRO_DESCRIPTION = "Runtime is connected. Illo can finish setup from here."
 INTRO_MODEL = "openai/gpt-5.5"
 INTRO_RUN_SETTLED_STATUSES = {
@@ -37,9 +37,6 @@ INTRO_RUN_SETTLED_STATUSES = {
     RunStatus.VERIFYING.value,
     RunStatus.COMPLETED.value,
 }
-
-INTRO_PROMPT = "Hi Illo, what can you help me with?"
-
 
 def _intro_ref(user_id: str) -> str:
     return f"{INTRO_ORIGIN_REF_PREFIX}:{user_id}"
@@ -118,8 +115,6 @@ def runtime_ready_intro_draft(user: dict[str, Any] = Depends(get_current_user)) 
             "idea_id": str(existing.id) if existing is not None else None,
             "should_play": existing is None,
             "prompt": INTRO_PROMPT,
-            "title": INTRO_TITLE,
-            "display_title": INTRO_DISPLAY_TITLE,
             "origin": INTRO_ORIGIN,
             "origin_ref": _intro_ref(user_id),
             "run_metadata": _intro_metadata("visible_composer"),
@@ -160,7 +155,6 @@ def start_runtime_ready_intro(user: dict[str, Any] = Depends(get_current_user)) 
 
         idea = Idea(
             title=INTRO_TITLE,
-            display_title=INTRO_DISPLAY_TITLE,
             description=INTRO_DESCRIPTION,
             status="active",
             origin=INTRO_ORIGIN,

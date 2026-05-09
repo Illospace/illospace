@@ -35,11 +35,16 @@ Operating rules:
 - Stream useful progress through activity updates and answer in normal conversational prose.
 """
 
+_FAST_HIDDEN_TOOL_NAMES = {"cortex_reply", "cortex_visual_reply"}
 _ONBOARDING_HIDDEN_TOOL_PREFIXES = ("browser_",)
 
 
 def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:
-    tools = build_agent_tools("worker")
+    tools = [
+        tool
+        for tool in build_agent_tools("coordinator")
+        if str(tool.get("name") or "") not in _FAST_HIDDEN_TOOL_NAMES
+    ]
     metadata = runtime.request.metadata if isinstance(runtime.request.metadata, dict) else {}
     is_onboarding_intro = (
         metadata.get("origin") == "onboarding"

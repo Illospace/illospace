@@ -336,7 +336,8 @@ BRAIN_TOOLS = [
             "answering broad setup questions, or explaining what context is available. Returns team members, "
             "active/recent Cortex thoughts, recent agent runs/messages, Project Context profiles and attachments, "
             "Domains/records, workspace apps, Cycles, and setup gaps. Use this first for 'what is this workspace?', "
-            "'what can you see?', and onboarding setup guidance."
+            "'what can you see?', and onboarding setup guidance. If the overview is empty or sparse, ask the "
+            "user for a few team, project, and workflow details so Illo can fill in workspace context and help better."
         ),
         "input_schema": {
             "type": "object",
@@ -1625,7 +1626,6 @@ LIFECYCLE_TOOLS = [
 # is AgentRun-owned, not model-visible.
 WORKER_TOOLS = (
     BRAIN_TOOLS
-    + SOUL_TOOLS
     + DOMAIN_TOOLS
     + CORTEX_IDEA_TOOLS
     + CHAT_TOOLS

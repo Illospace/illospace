@@ -196,6 +196,14 @@ def _stub_phase_reviews(monkeypatch, decisions_by_node=None):
         return SimpleNamespace(output=json.dumps(decision), success=True)
 
     monkeypatch.setattr("brain.systems.runs.recipes.phase_barrier.invoke_direct_agent", fake_phase_review)
+    _stub_deep_synthesis(monkeypatch)
+
+
+def _stub_deep_synthesis(monkeypatch, output="Deep completed using native AgentRun workers."):
+    def fake_deep_synthesis(spec):
+        return SimpleNamespace(output=output, success=True)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.deep.invoke_direct_agent", fake_deep_synthesis)
 
 
 def _runtime(recipe: str = "fast", *, message: str = "Read the README", store=None, workspace_ref=None):
@@ -373,6 +381,32 @@ def test_fast_onboarding_tool_surface_hides_browser_primitives(monkeypatch):
     assert [tool["name"] for tool in _agent_tools_for_runtime(runtime)] == ["read_workspace_overview"]
 
 
+def test_fast_tool_surface_is_direct_coordinator_without_staged_reply_tools(monkeypatch):
+    from brain.systems.runs.recipes.fast import _agent_tools_for_runtime
+
+    roles = []
+
+    def fake_build_agent_tools(role):
+        roles.append(role)
+        return [
+            {"name": "manage_soul"},
+            {"name": "cortex_reply"},
+            {"name": "cortex_visual_reply"},
+            {"name": "read_workspace_overview"},
+        ]
+
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", fake_build_agent_tools)
+
+    runtime = SimpleNamespace(request=SimpleNamespace(metadata={}))
+
+    assert roles == []
+    assert [tool["name"] for tool in _agent_tools_for_runtime(runtime)] == [
+        "manage_soul",
+        "read_workspace_overview",
+    ]
+    assert roles == ["coordinator"]
+
+
 def test_runtime_drain_steering_can_use_isolated_durable_drain():
     from brain.systems.runs.steering import SteeringMessage
 
@@ -531,6 +565,63 @@ def test_deep_recipe_uses_native_child_runs(monkeypatch):
         and event.payload.get("completed_node_id") in {"investigate", "execute"}
     ]
     assert max(worker_completion_positions) < min(worker_review_positions)
+
+
+def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkeypatch):
+    from brain.systems.runs.domain import AgentRunArtifact
+    from brain.systems.runs.recipes.deep import DeepRecipe
+    from brain.systems.runs.status import RunStatus
+
+    _stub_phase_reviews(monkeypatch)
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.deep.soul_prompt_section",
+        lambda: "## Agent Soul\nUse the coordinator voice.",
+    )
+    captured = {}
+
+    def fake_deep_synthesis(spec):
+        captured["spec"] = spec
+        return SimpleNamespace(output="Coordinator final answer.", success=True)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.deep.invoke_direct_agent", fake_deep_synthesis)
+
+    class _ChildEngine:
+        def __init__(self, session, **kwargs):
+            self.store = session
+
+        def run_existing(self, run_id):
+            run = self.store.runs[run_id]
+            artifact_type = "worker_result" if str(getattr(run.recipe, "value", run.recipe)) == "worker" else "final_answer"
+            self.store.append_artifact(
+                AgentRunArtifact(
+                    run_id=run_id,
+                    root_run_id=42,
+                    artifact_type=artifact_type,
+                    title="Worker result" if artifact_type == "worker_result" else "Scout result",
+                    text=f"child {run_id} evidence",
+                )
+            )
+            return SimpleNamespace(status=RunStatus.COMPLETED, id=run.id)
+
+    request_message = "Implement the README cleanup and verify the result."
+    store = _Store()
+    runtime = _runtime("deep", message=request_message, store=store)
+    runtime.engine = _ChildEngine(store)
+
+    result = DeepRecipe().execute(runtime)
+
+    assert result.output == "Coordinator final answer."
+    spec = captured["spec"]
+    assert spec.tool_call_source == "coordinator"
+    assert spec.tools == []
+    assert spec.persist_session is False
+    assert "## Agent Soul\nUse the coordinator voice." in spec.system_prompt
+    assert "## Deep Coordinator Mode" in spec.system_prompt
+    payload = json.loads(spec.message)
+    assert payload["task"] == request_message
+    assert "child 101 evidence" in spec.message
+    assert any(event.event_type == "run.coordinator_synthesis_started" for event in store.events)
+    assert any(event.event_type == "run.coordinator_synthesis_completed" for event in store.events)
 
 
 def test_deep_recipe_failed_verification_returns_failed_status(monkeypatch):

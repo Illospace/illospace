@@ -68,7 +68,7 @@ def test_runtime_ready_intro_recovers_failed_existing_thread():
 
 
 def test_runtime_ready_intro_creates_thread_and_run():
-    from brain.app.api.routers.onboarding import INTRO_ORIGIN, start_runtime_ready_intro
+    from brain.app.api.routers.onboarding import INTRO_ORIGIN, INTRO_PROMPT, start_runtime_ready_intro
     from brain.app.triggers.contracts import TriggerRouteResult
     from brain.platform.db.models.idea import Idea
 
@@ -108,10 +108,11 @@ def test_runtime_ready_intro_creates_thread_and_run():
     assert result["run_id"] == 42
     assert idea.origin == INTRO_ORIGIN
     assert idea.origin_ref == "runtime-ready-intro:user-1"
-    assert idea.display_title == "Welcome to Illo"
+    assert idea.title == INTRO_PROMPT
+    assert idea.display_title is None
     route_trigger.assert_called_once()
     trigger = route_trigger.call_args.args[0]
-    assert trigger.payload["thread_message"] == "Hi Illo, what can you help me with?"
+    assert trigger.payload["thread_message"] == INTRO_PROMPT
     assert trigger.payload["metadata"]["prompt_visibility"] == "hidden"
     assert trigger.payload["metadata"]["provider"] == "openai"
     assert trigger.payload["metadata"]["model"] == "openai/gpt-5.5"

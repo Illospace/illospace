@@ -29,10 +29,14 @@ _WORKSPACE_ACTIVITY_PHRASES = (
 )
 _WORKSPACE_OVERVIEW_PHRASES = (
     "finish setting up this workspace",
+    "help me understand this workspace",
+    "help me understand what you can do to help me",
     "help me finish setting up this workspace",
     "introduce yourself",
+    "what can you do to help me",
     "what can you see",
     "what do you know about this workspace",
+    "what you should know about the team",
     "what is this workspace",
     "workspace overview",
     "workspace setup",

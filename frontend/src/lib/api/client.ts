@@ -1073,8 +1073,8 @@ export const api = {
       idea_id?: string | null;
       should_play: boolean;
       prompt: string;
-      title: string;
-      display_title: string;
+      title?: string | null;
+      display_title?: string | null;
       origin: string;
       origin_ref: string;
       run_metadata?: Record<string, any> | null;

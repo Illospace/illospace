@@ -176,7 +176,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "output_budget_chars": 22_000,
         "evidence_emitter": True,
         "context_route": {
-            "description": "Read a curated overview of the workspace: team members, active thoughts, recent runs/messages, Project Context, Domains, apps, Cycles, and setup gaps. Use first for onboarding, setup, and broad 'what can you see?' questions.",
+            "description": "Read a curated overview of the workspace: team members, active thoughts, recent runs/messages, Project Context, Domains, apps, Cycles, and setup gaps. Use first for onboarding, setup, and broad 'what can you see?' questions. If it is empty or sparse, ask the user for team, project, and workflow details so Illo can fill in workspace context and help better.",
             "domains": ["workspace overview", "workspace setup", "onboarding", "available context", "workspace awareness"],
             "scopes": ["broad"],
         },
@@ -543,7 +543,7 @@ for _browser_name, _metadata in _BROWSER_METADATA.items():
 def _definition_sources() -> list[tuple[str, tuple[str, ...], list[Mapping[str, Any]]]]:
     sources: list[tuple[str, tuple[str, ...], list[Mapping[str, Any]]]] = [
         ("brain", ("coordinator", "worker"), BRAIN_TOOLS),
-        ("soul", ("coordinator", "worker"), SOUL_TOOLS),
+        ("soul", ("coordinator",), SOUL_TOOLS),
         ("domains", ("coordinator", "worker"), DOMAIN_TOOLS),
         ("ideas", ("coordinator", "worker"), CORTEX_IDEA_TOOLS),
         ("chat", ("coordinator", "worker"), CHAT_TOOLS),

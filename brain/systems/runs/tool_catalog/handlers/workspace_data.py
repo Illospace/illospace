@@ -1901,6 +1901,7 @@ def _handle_read_workspace_overview(
     payload["answering_guidance"] = [
         "Distinguish what already exists in this workspace from what Illo can help set up.",
         "Use setup_gaps to avoid overclaiming configured project context, Domains, apps, or Cycles.",
+        "If the overview is empty or sparse, ask the user for a few team, project, and workflow details so Illo can fill in workspace context and help better.",
     ]
     return json.dumps(payload, default=str)
 

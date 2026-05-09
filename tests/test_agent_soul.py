@@ -92,12 +92,18 @@ def test_manage_soul_blocks_prompt_override(monkeypatch, tmp_path):
 
 
 def test_manage_soul_tool_has_handler_and_read_is_not_action():
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
     from brain.systems.runs.tool_catalog.registry import action_policy_for_tool, get_tool_registration
     from brain.systems.runs.tool_handlers import _get_tool_handlers
 
     registration = get_tool_registration("manage_soul")
+    coordinator_names = {tool["name"] for tool in COORDINATOR_TOOLS}
+    worker_names = {tool["name"] for tool in WORKER_TOOLS}
 
     assert registration is not None
+    assert [role.value for role in registration.availability] == ["coordinator"]
+    assert "manage_soul" in coordinator_names
+    assert "manage_soul" not in worker_names
     assert registration.permission == "manage_soul"
     assert registration.side_effect_class == "soul_management"
     assert "manage_soul" in _get_tool_handlers()
