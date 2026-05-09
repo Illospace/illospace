@@ -454,8 +454,20 @@
         />
         <h1 class="thread-header-title" title={header.title}>{header.title}</h1>
 
-        {#if header.onToggleSecondaryPanel || header.onTogglePanel}
+        {#if header.onRegenerateTitle || header.onToggleSecondaryPanel || header.onTogglePanel}
           <div class="thread-header-panel-toggle-group">
+            {#if header.onRegenerateTitle}
+              <ConstellationIconButton
+                label={header.titleRegenerating ? 'Regenerating title' : 'Regenerate title'}
+                title={header.titleRegenerating ? 'Regenerating title' : 'Regenerate title'}
+                className="thread-panel-toggle-button thread-title-regenerate-button"
+                disabled={header.titleRegenerating}
+                onclick={header.onRegenerateTitle}
+              >
+                <ConstellationIcon name="refresh" size={14} stroke={1.8} />
+              </ConstellationIconButton>
+            {/if}
+
             {#if header.onToggleSecondaryPanel}
               <ConstellationIconButton
                 label={(header.secondaryPanelOpen ? 'Hide ' : 'Show ') + (header.secondaryPanelLabel ?? 'activity').toLowerCase()}

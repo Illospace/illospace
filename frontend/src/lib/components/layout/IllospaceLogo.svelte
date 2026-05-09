@@ -51,7 +51,7 @@
   }
 
   .illospace-logo-icon .illospace-logo-image {
-    transform: translateX(6%);
+    transform: translateX(var(--illospace-logo-icon-shift, 6%));
   }
 
   .illospace-logo-on-light {

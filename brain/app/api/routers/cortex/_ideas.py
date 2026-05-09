@@ -571,6 +571,30 @@ async def update_idea_put(
     return _idea_read_with_author(idea, db)
 
 
+@router.post("/ideas/{idea_id}/regenerate-title", response_model=IdeaRead)
+async def regenerate_idea_title(
+    idea_id: str,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    idea = _require_idea_for_user(db, idea_id, user)
+    result = generate_and_store_idea_display_title(
+        str(idea.id),
+        raw_title=idea.title,
+        user_id=str(user.get("id")) if user.get("id") else None,
+        org_id=str(getattr(idea, "org_id", None) or "") or None,
+        overwrite=True,
+    )
+    if not result.updated:
+        detail = "Title generation failed"
+        if result.skipped_reason and result.skipped_reason != "generation_failed":
+            detail = f"Title generation skipped: {result.skipped_reason}"
+        raise HTTPException(status_code=400, detail=detail)
+
+    db.refresh(idea)
+    return _idea_read_with_author(idea, db)
+
+
 @router.delete("/ideas/{idea_id}")
 async def archive_idea(
     idea_id: str,

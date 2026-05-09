@@ -163,6 +163,7 @@
   let threadStagePanelEl: HTMLElement | undefined = $state();
   let threadStageContentWidth = $state(0);
   let threadStageGutterPx = $state(24);
+  let titleRegenerating = $state(false);
 
   const THREAD_STAGE_MIN_THREAD_WIDTH = 380;
   const THREAD_STAGE_DEFAULT_GUTTER = 24;
@@ -258,6 +259,8 @@
       title: ideaDisplayTitle(selectedIdea),
       statusLabel,
       statusState: headerStatusState,
+      titleRegenerating,
+      onRegenerateTitle: handleRegenerateTitle,
       panelOpen: browserOpen,
       onTogglePanel: () => {
         if (!browserOpen) void workspaceApps.load({ silent: true });
@@ -284,6 +287,18 @@
 
   function hasLiveFastReply(): boolean {
     return streamHasLiveFastReply(visibleStreamItems);
+  }
+
+  async function handleRegenerateTitle() {
+    const selectedIdea = idea;
+    if (!selectedIdea || titleRegenerating) return;
+
+    titleRegenerating = true;
+    try {
+      await cortex.regenerateIdeaTitle(selectedIdea.id);
+    } finally {
+      titleRegenerating = false;
+    }
   }
 
   function activeFastRun(): any | null {

@@ -92,6 +92,10 @@ export interface CortexCreateIdeaOptions {
   displayTitle?: string | null;
 }
 
+type CortexRegenerateTitleOptions = {
+  silent?: boolean;
+};
+
 class CortexStore {
   ideas = $state<Idea[]>([]);
   connections = $state<Connection[]>([]);
@@ -1404,17 +1408,6 @@ class CortexStore {
       if (createOptions.displayTitle) {
         idea.display_title = createOptions.displayTitle;
         api.updateIdea(idea.id, { display_title: createOptions.displayTitle }).catch(() => {});
-      } else {
-        // Fire-and-forget: generate a concise display title via local LLM
-        api.generateTitle(title).then((r) => {
-          if (r?.title) {
-            api.updateIdea(idea.id, { display_title: r.title });
-            // Update local state so UI reflects the generated title immediately
-            this.ideas = this.ideas.map((i) =>
-              i.id === idea.id ? { ...i, display_title: r.title } : i,
-            );
-          }
-        }).catch(() => {});
       }
       // The typed text becomes the first thread message and queues Illo by default.
       // Set status optimistically BEFORE adding to ideas array so the
@@ -1541,6 +1534,18 @@ class CortexStore {
       await api.updateIdea(id, { title, display_title: title });
       this.ideas = this.ideas.map((i) => (i.id === id ? { ...i, title, display_title: title } : i));
     } catch { /* silent */ }
+  }
+
+  async regenerateIdeaTitle(id: string, options: CortexRegenerateTitleOptions = {}) {
+    try {
+      const updated = await api.regenerateIdeaTitle(id);
+      this._upsertIdea(updated);
+      if (!options.silent) ui.toast('Title regenerated', 'success');
+      return this.ideas.find((i) => i.id === id);
+    } catch (err: any) {
+      if (!options.silent) ui.toast(err?.detail || 'Failed to regenerate title', 'error');
+      return undefined;
+    }
   }
 
   private async _refreshSelectedStream() {

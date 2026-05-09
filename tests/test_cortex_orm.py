@@ -309,6 +309,54 @@ class TestTitleRoutes:
             org_id="org-1",
         )
 
+    def test_regenerate_idea_title_triggers_store_generation_with_overwrite(self):
+        import asyncio
+        from brain.app.api.routers.cortex._ideas import regenerate_idea_title
+        from brain.systems.cortex.title_generation import StoredDisplayTitle
+
+        db = MagicMock()
+        idea = _make_idea(id="idea-1", title="Raw idea", display_title="Old Title", org_id="org-1")
+
+        with patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea) as mock_require, \
+             patch(
+                 "brain.app.api.routers.cortex._ideas.generate_and_store_idea_display_title",
+                 return_value=StoredDisplayTitle(idea_id="idea-1", title="New Title", updated=True),
+             ) as mock_generate_title, \
+             patch("brain.app.api.routers.cortex._ideas._idea_read_with_author", return_value={"id": "idea-1"}) as mock_read:
+            result = asyncio.run(regenerate_idea_title("idea-1", db=db, user={"id": "user-1", "org_id": "org-1"}))
+
+        assert result == {"id": "idea-1"}
+        mock_require.assert_called_once_with(db, "idea-1", {"id": "user-1", "org_id": "org-1"})
+        mock_generate_title.assert_called_once_with(
+            "idea-1",
+            raw_title="Raw idea",
+            user_id="user-1",
+            org_id="org-1",
+            overwrite=True,
+        )
+        db.refresh.assert_called_once_with(idea)
+        mock_read.assert_called_once_with(idea, db)
+
+    def test_regenerate_idea_title_surfaces_generation_failure(self):
+        import asyncio
+        from fastapi import HTTPException
+
+        from brain.app.api.routers.cortex._ideas import regenerate_idea_title
+        from brain.systems.cortex.title_generation import StoredDisplayTitle
+
+        idea = _make_idea(id="idea-1", title="Raw idea", display_title="Old Title", org_id="org-1")
+
+        with patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea), \
+             patch(
+                 "brain.app.api.routers.cortex._ideas.generate_and_store_idea_display_title",
+                 return_value=StoredDisplayTitle(idea_id="idea-1", skipped_reason="generation_failed"),
+             ):
+            with pytest.raises(HTTPException) as exc_info:
+                asyncio.run(regenerate_idea_title("idea-1", db=MagicMock(), user={"id": "user-1", "org_id": "org-1"}))
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Title generation failed"
+
     @patch("brain.app.api.routers.cortex._misc.UnitOfWork")
     def test_backfill_titles_threads_authenticated_user_context(self, mock_uow_cls):
         from brain.app.api.routers.cortex._misc import backfill_titles
@@ -426,6 +474,39 @@ class TestStoredIdeaTitleGeneration:
         mock_generate.assert_not_called()
         read_uow.session.execute.assert_not_called()
         mock_publish.assert_not_called()
+
+    @patch("brain.systems.cortex.title_generation._publish_generated_display_title")
+    @patch("brain.platform.db.repositories.unit_of_work.UnitOfWork")
+    def test_overwrites_existing_display_title_when_requested(self, mock_uow_cls, mock_publish):
+        from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
+
+        idea = _make_idea(id="idea-1", title="Raw idea", display_title="Manual Title", org_id="org-1")
+        read_uow = MagicMock()
+        read_uow.__enter__.return_value = read_uow
+        read_uow.session.get.return_value = idea
+        write_uow = MagicMock()
+        write_uow.__enter__.return_value = write_uow
+        write_uow.session.execute.return_value.rowcount = 1
+        mock_uow_cls.side_effect = [read_uow, write_uow]
+
+        with patch("brain.systems.cortex.title_generation.generate_display_title", return_value="Generated Title") as mock_generate:
+            result = generate_and_store_idea_display_title(
+                "idea-1",
+                raw_title="Raw idea",
+                user_id="user-1",
+                org_id="org-1",
+                overwrite=True,
+            )
+
+        assert result.updated is True
+        assert result.title == "Generated Title"
+        mock_generate.assert_called_once_with(
+            "Raw idea",
+            user_id="user-1",
+            org_id="org-1",
+        )
+        write_uow.session.execute.assert_called_once()
+        mock_publish.assert_called_once_with("idea-1", "Generated Title", org_id="org-1")
 
     @patch("brain.systems.cortex.title_generation._publish_generated_display_title")
     @patch("brain.platform.db.repositories.unit_of_work.UnitOfWork")

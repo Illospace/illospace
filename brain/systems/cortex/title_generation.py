@@ -201,6 +201,7 @@ def _idea_title_source(
     user_id: str | None,
     org_id: str | None,
     raw_title: str | None,
+    overwrite: bool = False,
 ) -> tuple[str | None, str | None]:
     from brain.platform.db.models.idea import Idea
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -211,7 +212,7 @@ def _idea_title_source(
             return None, "missing"
         if getattr(idea, "archived_at", None) is not None:
             return None, "archived"
-        if not _blank(getattr(idea, "display_title", None)):
+        if not overwrite and not _blank(getattr(idea, "display_title", None)):
             return None, "already_titled"
         if org_id and str(getattr(idea, "org_id", "") or "") != str(org_id):
             return None, "scope_mismatch"
@@ -233,6 +234,7 @@ def _store_generated_display_title(
     display_title: str,
     user_id: str | None,
     org_id: str | None,
+    overwrite: bool = False,
 ) -> bool:
     from sqlalchemy import func, or_, update
 
@@ -240,14 +242,17 @@ def _store_generated_display_title(
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
     with UnitOfWork() as uow:
+        conditions = [
+            Idea.id == str(idea_id),
+            Idea.title == source_title,
+            Idea.archived_at.is_(None),
+        ]
+        if not overwrite:
+            conditions.append(or_(Idea.display_title.is_(None), func.trim(Idea.display_title) == ""))
+
         stmt = (
             update(Idea)
-            .where(
-                Idea.id == str(idea_id),
-                Idea.title == source_title,
-                Idea.archived_at.is_(None),
-                or_(Idea.display_title.is_(None), func.trim(Idea.display_title) == ""),
-            )
+            .where(*conditions)
             .values(display_title=display_title)
         )
         if org_id:
@@ -280,6 +285,7 @@ def generate_and_store_idea_display_title(
     org_id: str | None = None,
     raw_title: str | None = None,
     publish_update: bool = True,
+    overwrite: bool = False,
 ) -> StoredDisplayTitle:
     """Generate, store, and publish a display title for an idea if it still needs one."""
     source_title, skipped_reason = _idea_title_source(
@@ -287,6 +293,7 @@ def generate_and_store_idea_display_title(
         user_id=user_id,
         org_id=org_id,
         raw_title=raw_title,
+        overwrite=overwrite,
     )
     if skipped_reason or not source_title:
         return StoredDisplayTitle(idea_id=str(idea_id), skipped_reason=skipped_reason or "empty_title")
@@ -301,6 +308,7 @@ def generate_and_store_idea_display_title(
         display_title=title,
         user_id=user_id,
         org_id=org_id,
+        overwrite=overwrite,
     )
     if not updated:
         return StoredDisplayTitle(idea_id=str(idea_id), title=title, skipped_reason="stale")

@@ -760,6 +760,8 @@ export const api = {
   },
   generateTitle: (text: string) =>
     fetchJson<any>('/api/cortex/generate-title', { method: 'POST', body: JSON.stringify({ text }) }),
+  regenerateIdeaTitle: (ideaId: string) =>
+    fetchJson<any>(`/api/cortex/ideas/${ideaId}/regenerate-title`, { method: 'POST' }),
   notifyCortex: (data: { event: string; idea_id?: string; [key: string]: any }) =>
     fetchJson<any>('/api/cortex/notify', { method: 'POST', body: JSON.stringify(data) }),
   getBrowserSession: (ideaId: string) =>

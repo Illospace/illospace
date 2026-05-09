@@ -184,6 +184,8 @@
   }
 
   .constellation-nav-rail-brand-icon {
+    --illospace-logo-icon-shift: 12%;
+
     display: inline-flex;
     width: 24px;
     height: 24px;
