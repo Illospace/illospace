@@ -15,11 +15,11 @@ export function parseServerTimeMs(timestamp: string | null | undefined): number 
   return parseServerDate(timestamp)?.getTime() ?? 0;
 }
 
-export function relativeTimeAgo(timestamp: string | null | undefined): string {
+export function relativeTimeAgo(timestamp: string | null | undefined, nowMs = Date.now()): string {
   const parsed = parseServerDate(timestamp);
   if (!parsed) return '';
 
-  const diff = Date.now() - parsed.getTime();
+  const diff = Math.max(0, nowMs - parsed.getTime());
   const seconds = Math.floor(diff / 1000);
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);

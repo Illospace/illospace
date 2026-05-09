@@ -3,6 +3,7 @@
   import { cortex } from '$lib/stores/cortex.svelte';
   import { cancelRun as cancelRunRequest, opsActive, opsRecent } from '$lib/features/threads/api/threadApi';
   import { wsClient } from '$lib/stores/ws.svelte';
+  import { parseServerDate, parseServerTimeMs } from '$lib/utils/datetime';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
 
   let { visible = false, onclose }: { visible: boolean; onclose: () => void } = $props();
@@ -38,7 +39,9 @@
   // ── Helpers ───────────────────────────────────────────────
   function liveElapsed(isoStr: string | null): string {
     if (!isoStr) return '--:--';
-    const sec = Math.max(0, Math.floor((now - new Date(isoStr).getTime()) / 1000));
+    const timeMs = parseServerTimeMs(isoStr);
+    if (!timeMs) return '--:--';
+    const sec = Math.max(0, Math.floor((now - timeMs) / 1000));
     const h = Math.floor(sec / 3600);
     const m = Math.floor((sec % 3600) / 60);
     const s = sec % 60;
@@ -48,8 +51,9 @@
 
   function timeAgo(isoStr: string | null): string {
     if (!isoStr) return '';
-    const diff = now - new Date(isoStr).getTime();
-    const s = Math.floor(diff / 1000);
+    const timeMs = parseServerTimeMs(isoStr);
+    if (!timeMs) return '';
+    const s = Math.max(0, Math.floor((now - timeMs) / 1000));
     if (s < 60) return `${s}s ago`;
     const m = Math.floor(s / 60);
     if (m < 60) return `${m}m ago`;
@@ -70,7 +74,7 @@
 
   function traceTime(isoStr: string): string {
     try {
-      return new Date(isoStr).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+      return parseServerDate(isoStr)?.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) ?? '';
     } catch { return ''; }
   }
 
@@ -79,12 +83,18 @@
     const trace = d.activity_trace || [];
     if (trace.length === 0) return { pct: 50, label: 'unknown', color: '#888' };
     const lastEntry = trace[trace.length - 1];
-    const lastTime = new Date(lastEntry.at).getTime();
+    const lastTime = parseServerTimeMs(lastEntry.at);
+    if (!lastTime) return { pct: 50, label: 'unknown', color: '#888' };
     const staleSec = (now - lastTime) / 1000;
     if (staleSec < 30) return { pct: 100, label: 'active', color: '#34d399' };
     if (staleSec < 120) return { pct: 75, label: 'working', color: '#E8A94B' };
     if (staleSec < 300) return { pct: 40, label: 'slow', color: '#fb923c' };
     return { pct: 15, label: 'stalled', color: '#f87171' };
+  }
+
+  function isElapsedLong(isoStr: string | null | undefined): boolean {
+    const timeMs = parseServerTimeMs(isoStr);
+    return Boolean(timeMs && now - timeMs > 600000);
   }
 
   function runGraphProgress(d: any): { done: number; total: number; pct: number } {
@@ -347,7 +357,7 @@
 
                 <!-- Elapsed + cost -->
                 <div class="lane-metrics">
-                  <div class="lane-elapsed" class:elapsed-long={now - new Date(d.started_at || d.created_at).getTime() > 600000}>
+                  <div class="lane-elapsed" class:elapsed-long={isElapsedLong(d.started_at || d.created_at)}>
                     {liveElapsed(d.started_at || d.created_at)}
                   </div>
                   {#if d.estimated_cost}

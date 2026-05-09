@@ -19,6 +19,7 @@
   } from '$lib/components/constellation';
   import AiPromptComposer from '$lib/features/composer/components/AiPromptComposer.svelte';
   import { ui } from '$lib/stores/ui.svelte';
+  import { parseServerDate, relativeTimeAgo } from '$lib/utils/datetime';
 
   type ThinkingLevel = '' | 'none' | 'low' | 'medium' | 'high' | 'xhigh';
   type ScheduleCadence = 'once' | 'daily' | 'weekdays' | 'weekly' | 'monthly' | 'custom';
@@ -363,8 +364,8 @@
 
   function formatDateTime(value: string | null | undefined): string {
     if (!value) return '--';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return '--';
+    const date = parseServerDate(value);
+    if (!date) return '--';
     return new Intl.DateTimeFormat(undefined, {
       dateStyle: 'medium',
       timeStyle: 'short',
@@ -372,15 +373,7 @@
   }
 
   function timeAgo(value: string | null | undefined): string {
-    if (!value) return '--';
-    const deltaMs = Date.now() - new Date(value).getTime();
-    if (Number.isNaN(deltaMs)) return '--';
-    const mins = Math.floor(deltaMs / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return `${mins}m ago`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours}h ago`;
-    return `${Math.floor(hours / 24)}d ago`;
+    return relativeTimeAgo(value) || '--';
   }
 
   function sentenceCase(value: string | null | undefined): string {

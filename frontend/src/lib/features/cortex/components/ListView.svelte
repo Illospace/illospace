@@ -7,6 +7,7 @@
     normalizeHexColor,
     presenceToneForColor,
   } from '$lib/utils/constellationPresence';
+  import { parseServerDate } from '$lib/utils/datetime';
 
   const STATUS_COLORS: Record<string, string> = {
     idle: '#57CFA0',
@@ -21,11 +22,13 @@
   };
 
   function timeAgo(ts: string) {
-    const diff = Date.now() - new Date(ts).getTime();
+    const parsed = parseServerDate(ts);
+    if (!parsed) return '';
+    const diff = Math.max(0, Date.now() - parsed.getTime());
     if (diff < 60_000) return 'just now';
     if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
     if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-    return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return parsed.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
 
   function teamMemberFor(userId: string | null | undefined) {

@@ -28,3 +28,16 @@ def test_system_oauth_start_keeps_page_open_when_popup_is_blocked():
     source = (ROOT / "frontend/src/routes/system/+page.svelte").read_text()
 
     assert "window.location.assign(oauthUrl)" not in source
+
+
+def test_onboarding_routes_require_personal_openai_connection():
+    helper = (ROOT / "frontend/src/lib/utils/runtimeOnboarding.ts").read_text()
+    login = (ROOT / "frontend/src/routes/login/+page.svelte").read_text()
+    layout = (ROOT / "frontend/src/routes/+layout.svelte").read_text()
+    onboarding = (ROOT / "frontend/src/routes/onboarding/+page.svelte").read_text()
+
+    assert "connection?.source === 'user_default'" in helper
+    assert "requiresPersonalOpenAIOnboarding(runtime)" in login
+    assert "requiresPersonalOpenAIOnboarding(runtime)" in layout
+    assert "hasPersonalOpenAIRuntimeConnection(runtime)" in onboarding
+    assert "org_main'].includes" not in onboarding

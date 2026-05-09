@@ -45,6 +45,22 @@ def _intro_ref(user_id: str) -> str:
     return f"{INTRO_ORIGIN_REF_PREFIX}:{user_id}"
 
 
+def _has_personal_openai_connection(status: dict[str, Any]) -> bool:
+    return bool(
+        status.get("runtime_key_available")
+        and status.get("runtime_key_source") == "user_default"
+    )
+
+
+def _require_personal_openai_connection(*, user_id: str, org_id: str) -> None:
+    status = get_provider_auth_status(user_id=user_id, org_id=org_id, provider="openai")
+    if not _has_personal_openai_connection(status):
+        raise HTTPException(
+            status_code=409,
+            detail="Connect a personal OpenAI account before starting onboarding.",
+        )
+
+
 def _find_existing_intro(session: Any, *, org_id: str, user_id: str) -> Idea | None:
     stmt = (
         select(Idea)
@@ -107,9 +123,7 @@ def runtime_ready_intro_draft(user: dict[str, Any] = Depends(get_current_user)) 
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
     org_id = require_org_context(user)
-    status = get_provider_auth_status(user_id=user_id, org_id=org_id, provider="openai")
-    if not status.get("runtime_key_available"):
-        raise HTTPException(status_code=409, detail="OpenAI runtime is not connected yet.")
+    _require_personal_openai_connection(user_id=user_id, org_id=org_id)
 
     with UnitOfWork() as uow:
         existing = _find_existing_intro(uow.session, org_id=org_id, user_id=user_id)
@@ -133,9 +147,7 @@ def start_runtime_ready_intro(user: dict[str, Any] = Depends(get_current_user)) 
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
     org_id = require_org_context(user)
-    status = get_provider_auth_status(user_id=user_id, org_id=org_id, provider="openai")
-    if not status.get("runtime_key_available"):
-        raise HTTPException(status_code=409, detail="OpenAI runtime is not connected yet.")
+    _require_personal_openai_connection(user_id=user_id, org_id=org_id)
 
     with UnitOfWork() as uow:
         existing = _find_existing_intro(uow.session, org_id=org_id, user_id=user_id)

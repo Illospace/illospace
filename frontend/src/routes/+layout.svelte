@@ -7,6 +7,7 @@
   import { auth } from '$lib/stores/auth.svelte';
   import { theme } from '$lib/stores/theme.svelte';
   import { wsClient } from '$lib/stores/ws.svelte';
+  import { requiresPersonalOpenAIOnboarding } from '$lib/utils/runtimeOnboarding';
   import { onMount, onDestroy } from 'svelte';
   import { dev } from '$app/environment';
   import { goto } from '$app/navigation';
@@ -83,7 +84,7 @@
 
         try {
           const runtime = await api.runtimeSettings();
-          if (runtime?.connection?.setup_required && !isSystemPage) {
+          if (requiresPersonalOpenAIOnboarding(runtime) && !isSystemPage) {
             goto('/onboarding');
           }
         } catch {

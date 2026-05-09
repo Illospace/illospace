@@ -21,6 +21,7 @@
   import { auth } from '$lib/stores/auth.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import { buildPresenceSeedStyle } from '$lib/utils/constellationPresence';
+  import { parseServerDate } from '$lib/utils/datetime';
 
   interface TeamMember {
     id: number;
@@ -142,7 +143,9 @@
 
   function timeAgo(iso: string | undefined): string {
     if (!iso) return 'unknown';
-    const ms = Date.now() - new Date(iso).getTime();
+    const createdAt = parseServerDate(iso);
+    if (!createdAt) return 'unknown';
+    const ms = Math.max(0, Date.now() - createdAt.getTime());
     const days = Math.floor(ms / 86400000);
 
     if (days < 1) {
