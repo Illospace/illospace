@@ -45,6 +45,7 @@ if not PRIVATE_HOME.is_absolute():
 JOURNAL_DIR = Path(os.getenv("JOURNAL_DIR", PRIVATE_HOME / "journal"))
 AGENT_CONTEXT_DIR = Path(os.getenv("AGENT_CONTEXT_DIR", PRIVATE_HOME / "agent-context"))
 AGENT_CHECKLIST_PATH = Path(os.getenv("AGENT_CHECKLIST_PATH", AGENT_CONTEXT_DIR / "pre-flight-checklist.md"))
+AGENT_SOUL_PATH = Path(os.getenv("AGENT_SOUL_PATH", AGENT_CONTEXT_DIR / "SOUL.md"))
 BRAIN_LOG_DIR = Path(os.getenv("BRAIN_LOG_DIR", PRIVATE_HOME / "logs"))
 
 # ---------------------------------------------------------------------------

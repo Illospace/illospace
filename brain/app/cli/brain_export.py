@@ -158,6 +158,7 @@ checklists under `ILLO_PRIVATE_HOME` (defaults to `.illo/`) or set
 Suggested local files:
 
 - `agent-context/operator.md` — local operating principles and identity.
+- `agent-context/SOUL.md` — Illo's editable default personality and voice.
 - `agent-context/user.md` — private user/workspace preferences.
 - `agent-context/heartbeat.md` — local recurring reminders.
 - `agent-context/pre-flight-checklist.md` — generated guardian checklist.

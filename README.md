@@ -156,6 +156,8 @@ restore, upgrades, logs, and status.
 - Runtime-private state defaults to `.illo/` via `ILLO_PRIVATE_HOME` and is ignored by git.
 - Personalized operator prompt/context files should live under `.illo/agent-context/`
   (or another private `AGENT_CONTEXT_DIR`), not in the public repo root.
+  Illo's editable personality file defaults to `.illo/agent-context/SOUL.md`
+  and can be overridden with `AGENT_SOUL_PATH`.
 
 See [docs/configuration.md](docs/configuration.md) for the production
 configuration contract.

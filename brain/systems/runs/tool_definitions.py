@@ -535,6 +535,44 @@ BRAIN_TOOLS = [
     },
 ]
 
+# ── Soul Tools ────────────────────────────────────────────────
+# Controlled access to private operator/personality context.
+
+SOUL_TOOLS = [
+    {
+        "name": "manage_soul",
+        "description": (
+            "Read or update Illo's private SOUL.md file: default voice, personality, identity, "
+            "tone, and collaboration posture. Use only when the user explicitly asks to view, "
+            "change, refine, reset, or otherwise customize Illo's soul/personality/voice. "
+            "Read first before replacing so edits preserve the parts the user did not ask to "
+            "change. Project rules and technical conventions belong elsewhere."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["read", "replace", "reset"],
+                    "description": (
+                        "read returns the current effective soul; replace writes content; "
+                        "reset restores the built-in default."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Full replacement SOUL.md content. Required for replace.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Short reason for the personality change, preferably reflecting the user's request.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+]
+
 # ── Domain Tools ─────────────────────────────────────────────
 # Org-wide custom databases/knowledge structures.
 
@@ -1587,6 +1625,7 @@ LIFECYCLE_TOOLS = [
 # is AgentRun-owned, not model-visible.
 WORKER_TOOLS = (
     BRAIN_TOOLS
+    + SOUL_TOOLS
     + DOMAIN_TOOLS
     + CORTEX_IDEA_TOOLS
     + CHAT_TOOLS
@@ -1622,6 +1661,7 @@ WORKER_TOOLS = (
 # introspection tools. Deep planning/workers are runtime state transitions.
 COORDINATOR_TOOLS = (
     BRAIN_TOOLS
+    + SOUL_TOOLS
     + DOMAIN_TOOLS
     + CORTEX_IDEA_TOOLS
     + CHAT_TOOLS

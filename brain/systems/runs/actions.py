@@ -374,6 +374,14 @@ def build_action_target(
             "schedule": _json_safe(kwargs_dict.get("schedule") or kwargs_dict.get("schedule_expr")),
             "cycle_id": _json_safe(kwargs_dict.get("id")),
         })
+    if tool_name == "manage_soul":
+        content = kwargs_dict.get("content") or _arg_at(args, kwargs_dict, "content", 1, "")
+        reason = kwargs_dict.get("reason") or _arg_at(args, kwargs_dict, "reason", 2, "")
+        return ActionTarget({
+            "action": _json_safe(_arg_at(args, kwargs_dict, "action", 0)),
+            "content_chars": len(str(content or "")),
+            "has_reason": bool(reason),
+        })
     if tool_name == "manage_workspace_app":
         source_code = kwargs_dict.get("source_code")
         manifest = kwargs_dict.get("manifest") or {}
