@@ -11,6 +11,11 @@
     ConstellationTextInput,
   } from '$lib/components/constellation';
   import IllospaceLogo from '$lib/components/layout/IllospaceLogo.svelte';
+  import {
+    closeOAuthPopup,
+    navigateOpenAIOAuthPopup,
+    openOpenAIOAuthPopup,
+  } from '$lib/utils/oauthPopup';
   import type { EmbedderKey, RuntimeOption, RuntimeSettings } from '../system/types';
 
   type OnboardingStatus = 'loading' | 'missing' | 'connecting' | 'connected' | 'error';
@@ -236,6 +241,7 @@
   }
 
   async function startOpenAI() {
+    const popup = openOpenAIOAuthPopup();
     status = 'connecting';
     notice = null;
     try {
@@ -246,13 +252,13 @@
       oauthCallbackMode = result.callback_mode || 'local_bridge';
 
       let openedOAuthWindow = false;
-      if (oauthUrl && typeof window !== 'undefined') {
-        const popup = window.open('about:blank', 'illo-openai-oauth', 'popup,width=540,height=760');
-        if (popup) {
-          popup.location.href = oauthUrl;
-          popup.focus();
-          openedOAuthWindow = true;
+      if (oauthUrl) {
+        openedOAuthWindow = navigateOpenAIOAuthPopup(popup, oauthUrl);
+        if (!openedOAuthWindow) {
+          closeOAuthPopup(popup);
         }
+      } else {
+        closeOAuthPopup(popup);
       }
 
       notice = oauthCallbackAvailable
@@ -272,6 +278,7 @@
             detail: result.callback_detail || 'Finish sign-in, then paste the callback URL below.',
           };
     } catch (error) {
+      closeOAuthPopup(popup);
       status = 'missing';
       notice = errorNotice('Could not start OpenAI sign-in.', error, 'Try again.');
     }

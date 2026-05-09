@@ -784,7 +784,8 @@ export const api = {
   createCycle: (data: {
     name: string;
     prompt: string;
-    schedule_expr: string;
+    schedule_expr?: string | null;
+    run_at?: string | null;
     timezone: string;
     enabled?: boolean;
     model_override?: string | null;
@@ -800,6 +801,7 @@ export const api = {
       name: string;
       prompt: string;
       schedule_expr: string;
+      run_at: string | null;
       timezone: string;
       enabled: boolean;
       model_override: string | null;

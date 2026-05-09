@@ -102,6 +102,35 @@ def test_compute_next_run_at_uses_timezone():
     assert next_run == datetime(2026, 4, 22, 13, 0, tzinfo=timezone.utc)
 
 
+def test_one_time_schedule_uses_timezone_and_expires_after_run():
+    expr = service.validate_schedule_expr(
+        "at:2026-05-08T09:30:00",
+        "America/Toronto",
+    )
+
+    next_run = service.compute_next_run_at(expr, "America/Toronto")
+
+    assert expr.startswith("at:")
+    assert next_run == datetime(2026, 5, 8, 13, 30, tzinfo=timezone.utc)
+    assert (
+        service.compute_next_run_at(
+            expr,
+            "America/Toronto",
+            from_dt=next_run,
+        )
+        is None
+    )
+
+
+def test_humanize_one_time_schedule():
+    label = service.humanize_schedule(
+        "at:2026-05-08T09:30:00",
+        "America/Toronto",
+    )
+
+    assert label == "Once at May 8, 2026 9:30 AM (America/Toronto)"
+
+
 def test_cycle_defaults_reuse_same_idea_reopens_by_default():
     assert service.cycle_defaults(execution_mode="reuse_same_idea", reopen_archived=None) is True
     assert service.cycle_defaults(execution_mode="new_idea_per_run", reopen_archived=None) is True

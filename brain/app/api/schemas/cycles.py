@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field
 class CycleCreate(BaseModel):
     name: str = Field(min_length=1, max_length=500)
     prompt: str = Field(min_length=1, max_length=20000)
-    schedule_expr: str = Field(min_length=1, max_length=100)
+    schedule_expr: str | None = Field(default=None, min_length=1, max_length=100)
+    run_at: datetime | None = None
     timezone: str = Field(min_length=1, max_length=64)
     enabled: bool = True
     model_override: str | None = None
@@ -22,6 +23,7 @@ class CycleUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=500)
     prompt: str | None = Field(default=None, min_length=1, max_length=20000)
     schedule_expr: str | None = Field(default=None, min_length=1, max_length=100)
+    run_at: datetime | None = None
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
     enabled: bool | None = None
     model_override: str | None = None

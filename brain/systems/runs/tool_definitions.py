@@ -442,7 +442,7 @@ BRAIN_TOOLS = [
     {
         "name": "read_cycles",
         "description": (
-            "Read workspace Cycles and Cycle runs: recurring prompts, schedules, enabled state, last/next run, "
+            "Read workspace Cycles and Cycle runs: recurring prompts, one-time reminders, schedules, enabled state, last/next run, "
             "linked thoughts, and recent run status. Use this for questions about recurring check-ins, reports, "
             "automations, or what scheduled Illo work exists. Use manage_cycle only to create, update, delete, or run one."
         ),
@@ -485,7 +485,7 @@ BRAIN_TOOLS = [
         "name": "manage_cycle",
         "description": (
             "Create, update, delete, list, or manually run workspace Cycles, which are recurring "
-            "Illo prompts/check-ins/reports. This is the action tool. For answering questions about "
+            "Illo prompts/check-ins/reports or one-time reminders. This is the action tool. For answering questions about "
             "which Cycles exist or what ran recently, prefer read_cycles first. Actions: 'create', "
             "'list', 'update', 'delete', 'run'."
         ),
@@ -502,7 +502,11 @@ BRAIN_TOOLS = [
                 "prompt": {"type": "string", "description": "Prompt Illo should run each cycle"},
                 "schedule_expr": {
                     "type": "string",
-                    "description": "5-field cron expression like '0 8 * * *'",
+                    "description": "5-field cron expression like '0 8 * * *', or a one-time expression like 'at:2026-05-08T15:30:00-04:00'",
+                },
+                "run_at": {
+                    "type": "string",
+                    "description": "ISO timestamp for a one-time reminder/run. Use instead of schedule_expr when the user asks for a reminder at a specific time.",
                 },
                 "timezone": {"type": "string", "description": "IANA timezone name"},
                 "enabled": {"type": "boolean", "description": "Whether the cycle is active"},

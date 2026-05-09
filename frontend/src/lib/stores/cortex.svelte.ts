@@ -112,6 +112,13 @@ class CortexStore {
   browserDiscovery = $state<BrowserDiscoveryResult | null>(null);
   browserExtraction = $state<BrowserExtractResult | null>(null);
   vaultSecretPrompt = $state<VaultSecretPrompt | null>(null);
+  cyclePanelSignal = $state<{
+    ideaId: string;
+    toolName: string;
+    cycleId: number | null;
+    action: string | null;
+    serial: number;
+  } | null>(null);
   teamMembers = $state<TeamMember[]>([]);
   birthContext = $state<{ x: number; y: number } | null>(null);
   filters = $state<{ statuses: Set<string>; search: string; staleOnly?: boolean }>({
@@ -131,6 +138,7 @@ class CortexStore {
   private _ideasSnapshotReconcile: ReturnType<typeof setInterval> | null = null;
   private _pendingBrowserSessionRefresh: ReturnType<typeof setTimeout> | null = null;
   private _seenRunUiEvents = new Set<string>();
+  private _cyclePanelSignalSerial = 0;
   private _browserFocusLoads = new Set<string>();
   private _pendingBrowserEvents = new Map<string, {
     state?: BrowserSessionState | null;
@@ -616,6 +624,55 @@ class CortexStore {
     return String(runId) === String(rootRunId);
   }
 
+  private _nextCyclePanelSignalSerial(): number {
+    this._cyclePanelSignalSerial += 1;
+    if (!Number.isSafeInteger(this._cyclePanelSignalSerial)) this._cyclePanelSignalSerial = 1;
+    return this._cyclePanelSignalSerial;
+  }
+
+  private _triggerCyclePanelSignal(options: {
+    ideaId: string;
+    toolName: string;
+    cycleId?: unknown;
+    action?: unknown;
+  }) {
+    const ideaId = String(options.ideaId || '').trim();
+    if (!ideaId) return;
+    const cycleId = Number(options.cycleId ?? 0);
+    const action = String(options.action ?? '').trim() || null;
+    this.cyclePanelSignal = {
+      ideaId,
+      toolName: options.toolName,
+      cycleId: Number.isFinite(cycleId) && cycleId > 0 ? cycleId : null,
+      action,
+      serial: this._nextCyclePanelSignalSerial(),
+    };
+  }
+
+  private _maybeTriggerCyclePanelFromRunUiEvent(msg: any) {
+    if (msg.idea_id !== this.selectedIdeaId) return;
+    if (msg.type !== 'tool_started' && msg.type !== 'tool_finished') return;
+    const toolName = typeof msg.tool_name === 'string' ? msg.tool_name.trim() : '';
+    if (!['manage_cycle', 'read_cycles'].includes(toolName)) return;
+    this._triggerCyclePanelSignal({
+      ideaId: String(msg.idea_id),
+      toolName,
+      cycleId: msg.id ?? msg.cycle_id ?? msg.args?.id ?? msg.args?.cycle_id ?? msg.tool_input?.id,
+      action: msg.action ?? msg.args?.action ?? msg.tool_input?.action,
+    });
+  }
+
+  _handleCycleChanged(msg: any) {
+    const ideaId = String(msg?.idea_id ?? msg?.target_idea_id ?? '').trim();
+    if (!ideaId || ideaId !== this.selectedIdeaId) return;
+    this._triggerCyclePanelSignal({
+      ideaId,
+      toolName: 'cycles_changed',
+      cycleId: msg?.cycle_id,
+      action: msg?.action,
+    });
+  }
+
   private _markIdeaWorkingForRootRun(ideaId: string) {
     const current = this.ideas.find((i) => i.id === ideaId);
     if (current && ['archived', 'resolved'].includes(String(current.status || ''))) return;
@@ -630,6 +687,7 @@ class CortexStore {
     if (msg.type === 'run_started' && isRootRunEvent) {
       this._markIdeaWorkingForRootRun(msg.idea_id);
     }
+    this._maybeTriggerCyclePanelFromRunUiEvent(msg);
     if (msg.idea_id !== this.selectedIdeaId || !isRootRunEvent) return;
     const eventKey = runUiEventKey(msg);
     if (eventKey) {
