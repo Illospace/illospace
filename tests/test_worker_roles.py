@@ -98,5 +98,6 @@ class TestWorkerScope:
         )
 
         assert "Worker Assignment" in prompt
+        assert "Agent Soul" not in prompt
         assert "Review the AgentRun child artifacts" in prompt
         assert "brain/systems/runs/store.py" in prompt

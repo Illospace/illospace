@@ -34,12 +34,18 @@ def worker_evidence_from_artifacts(
         "output": output,
         "artifact_count": len(artifacts),
         "assignment": assignment.to_payload(),
-        "artifacts": [_artifact_payload(artifact) for artifact in artifacts],
+        "artifacts": artifact_payloads(artifacts),
         "warning": None if status == "completed" else f"worker ended with status {status}",
     }
 
 
-def _artifact_payload(artifact: Any) -> dict[str, Any]:
+def artifact_payloads(artifacts: Any) -> list[dict[str, Any]]:
+    if not isinstance(artifacts, (list, tuple)):
+        return []
+    return [artifact_payload(artifact) for artifact in artifacts]
+
+
+def artifact_payload(artifact: Any) -> dict[str, Any]:
     if isinstance(artifact, dict):
         artifact_type = artifact.get("artifact_type") or artifact.get("type")
         payload = artifact.get("payload")
@@ -64,4 +70,4 @@ def _artifact_payload(artifact: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["verification_evidence", "worker_evidence_from_artifacts"]
+__all__ = ["artifact_payload", "artifact_payloads", "verification_evidence", "worker_evidence_from_artifacts"]

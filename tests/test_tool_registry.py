@@ -121,7 +121,7 @@ def test_workspace_activity_question_requires_workspace_data():
 def test_onboarding_intro_requires_workspace_overview():
     from brain.systems.runs.introspection import required_introspection_tool
 
-    tool, message = required_introspection_tool("Illo, introduce yourself and help me finish setting up this workspace.")
+    tool, message = required_introspection_tool("Hey Illo, help me understand what you can do to help me.")
 
     assert tool == "read_workspace_overview"
     assert message is not None
