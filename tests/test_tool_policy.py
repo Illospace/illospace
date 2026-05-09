@@ -303,15 +303,15 @@ def test_high_risk_action_is_audited_autonomously(monkeypatch):
         calls.append(kwargs)
         return {"clicked": True}
 
-    wrapped = wrap_action_manifest_audit("browser_click", handler, context_factory=_manifest_context)
+    wrapped = wrap_action_manifest_audit("browser", handler, context_factory=_manifest_context)
 
     with patch("brain.systems.runs.actions.record_action_manifest", side_effect=record), \
          patch("brain.systems.runs.actions.complete_action_manifest", side_effect=complete):
-        result = wrapped(selector="#submit")
+        result = wrapped(action="click", selector="#submit")
 
     assert result == {"clicked": True}
-    assert calls == [{"selector": "#submit"}]
-    assert records[0]["tool_name"] == "browser_click"
+    assert calls == [{"action": "click", "selector": "#submit"}]
+    assert records[0]["tool_name"] == "browser"
     assert records[0]["policy_result"] == "allow_audit"
     assert records[0]["approval_required"] is False
     assert records[0]["approval_requirement"] == "not_required_autonomous_policy"
