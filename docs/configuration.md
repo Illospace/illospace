@@ -13,12 +13,12 @@ Configuration can come from:
 4. built-in development defaults for non-secret local values.
 
 Exported environment variables win over `.env` values, and `.env` wins over the
-generated local runtime file. `./illo setup` and `./illo start` create
-`SECRET_KEY` and `VAULT_MASTER_KEY` in `.illo/runtime.env` when those values are
-missing or left empty, which keeps self-hosted preview installs bootable without
-committing secrets. Production deployments should still inject values through
-the hosting platform, a secret manager, systemd `EnvironmentFile=`, or another
-external mechanism.
+generated local runtime file. `./illo setup`, `./illo start`, and
+`./ops/deploy.sh` create `SECRET_KEY` and `VAULT_MASTER_KEY` in
+`.illo/runtime.env` when those values are missing or left empty, which keeps
+self-hosted preview installs bootable without committing secrets. Production
+deployments should still inject values through the hosting platform, a secret
+manager, systemd `EnvironmentFile=`, or another external mechanism.
 
 ## Local Development
 

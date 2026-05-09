@@ -33,15 +33,48 @@ prefetch the repo-local Hugging Face model copies.
 
 ## Generic Self-Hosting
 
+For a fresh single-host install, run the installer on the target Linux user:
+
+```bash
+curl -fsSL https://illospace.ai/install.sh | bash
+```
+
+The installer clones or updates `~/illospace`, writes
+`~/.config/illo-brain/production.env`, installs user services, runs migrations,
+builds the frontend, and starts the API. If no `DATABASE_URL` or complete
+`DB_*` settings are present, it creates a local `pgvector/pgvector:pg16`
+container named `illo-db` and writes the generated `DB_*` values to the
+production env file. Provider keys can be supplied before running it, for
+example:
+
+```bash
+export OPENAI_API_KEY='sk-...'
+curl -fsSL https://illospace.ai/install.sh | bash
+```
+
+To use an external database instead:
+
+```bash
+export DATABASE_URL='postgresql+psycopg://user:password@host:5432/illospace'
+curl -fsSL https://illospace.ai/install.sh | bash
+```
+
+Useful overrides:
+
+```bash
+curl -fsSL https://illospace.ai/install.sh | bash -s -- --dir /home/uwear/illospace
+curl -fsSL https://illospace.ai/install.sh | bash -s -- --no-deploy
+```
+
 1. Clone the repository onto the target host.
 2. Create a private environment file, for example
    `~/.config/illo-brain/production.env`.
 3. Set `ILLO_ENV=production`, database settings, `SECRET_KEY`,
    `VAULT_MASTER_KEY`, and provider keys or database-backed credentials.
 4. Run `./illo setup`.
-5. Install the systemd templates in `ops/` after adjusting paths if your checkout
-   is not `~/illo-brain`.
-6. Run `./illo doctor --production` before restarting services.
+5. Run `./ops/deploy.sh` to sync dependencies, build the frontend, run
+   migrations, install user services, and restart the app.
+6. Run `./illo doctor --production` when changing production configuration.
 
 The included `ops/deploy-remote.sh` is a generic SSH helper. It intentionally has
 no project-specific host defaults:
@@ -54,7 +87,8 @@ no project-specific host defaults:
 
 The public `ops/` tree is intentionally small:
 
-- `deploy.sh` and `deploy-remote.sh` for single-host deployments.
+- `deploy.sh` and `deploy-remote.sh` for single-host deployments. They render
+  systemd user services for the current checkout path.
 - systemd user-service templates for the scheduler, Cortex worker, and optional
   embedding/GPU server.
 - browser and frontend dependency helpers used by the launcher.

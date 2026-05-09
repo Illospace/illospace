@@ -31,9 +31,11 @@ def test_ops_deploy_runs_config_doctor_before_restart():
     deploy_path = Path(__file__).resolve().parents[1] / "ops" / "deploy.sh"
     content = deploy_path.read_text()
 
+    secrets_idx = content.index("ensure_runtime_secrets")
     doctor_idx = content.index("brain.app.cli.config_doctor --production")
     restart_idx = content.index('echo "=== Restarting services ==="')
 
+    assert secrets_idx < doctor_idx
     assert doctor_idx < restart_idx
 
 
@@ -62,11 +64,24 @@ def test_ops_deploy_leaves_embedder_running_when_agent_runs_are_active():
     deploy_path = Path(__file__).resolve().parents[1] / "ops" / "deploy.sh"
     content = deploy_path.read_text()
 
+    skip_idx = content.index("if ! should_run_local_embedder; then")
     active_idx = content.index('if [ "$ACTIVE_RUNS" != "0" ]; then')
     leave_idx = content.index("leaving $EMBED_SERVICE running")
     restart_idx = content.index("restart_user_service_if_present illo-embed")
 
+    assert skip_idx < active_idx
     assert active_idx < leave_idx < restart_idx
+
+
+def test_ops_deploy_skips_local_embedder_when_embedding_backend_is_api():
+    deploy_path = Path(__file__).resolve().parents[1] / "ops" / "deploy.sh"
+    content = deploy_path.read_text()
+
+    assert "should_run_local_embedder" in content
+    assert '[ "${EMBEDDING_BACKEND:-api}" = "gpu" ]' in content
+    assert "1|true|TRUE|yes|YES|on|ON" in content
+    assert "Embedder:  skipped (EMBEDDING_BACKEND=${EMBEDDING_BACKEND:-api})" in content
+    assert "systemctl --user disable --now illo-embed" in content
 
 
 def test_ops_deploy_renders_systemd_services_for_current_checkout():
@@ -75,8 +90,23 @@ def test_ops_deploy_renders_systemd_services_for_current_checkout():
 
     assert "install_user_service" in content
     assert 'replace("%h/illo-brain", root)' in content
+    assert "install_user_service ops/illo-api.service" in content
     assert "install_user_service ops/illo-embed.service" in content
     assert "sync_production_service_env" in content
+    assert "systemctl --user enable illo-api" in content
+    assert "disable_user_service_if_present illo-dashboard" in content
+    assert "systemctl --user restart illo-dashboard" not in content
+
+
+def test_ops_deploy_installs_api_service_that_runs_uvicorn():
+    root = Path(__file__).resolve().parents[1]
+    deploy_content = (root / "ops" / "deploy.sh").read_text()
+    service_content = (root / "ops" / "illo-api.service").read_text()
+
+    assert "install_user_service ops/illo-api.service" in deploy_content
+    assert "systemctl --user restart illo-api" in deploy_content
+    assert "ExecStart=%h/illo-brain/venv/bin/uvicorn brain.app.api.main:app" in service_content
+    assert "CORTEX_INLINE_DISPATCHER=0" in service_content
 
 
 def test_illo_start_uses_standalone_worker_by_default():

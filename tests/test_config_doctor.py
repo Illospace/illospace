@@ -154,6 +154,7 @@ def test_config_doctor_uses_git_ls_files_for_tracked_secret_scan():
 
 def test_systemd_units_use_home_specifier_and_production_env():
     for relative in (
+        "ops/illo-api.service",
         "ops/cortex-worker.service",
         "ops/illo-scheduler.service",
         "ops/illo-embed.service",

@@ -10,7 +10,6 @@
 #   git fetch origin main
 #   git checkout -f -B main origin/main
 #   git reset --hard origin/main
-#   source venv/bin/activate
 #   ./ops/deploy.sh
 #
 # Passwords are intentionally not stored here; SSH will prompt when needed.
@@ -155,7 +154,7 @@ fi
 echo
 
 if [[ "$MODE" == "attach" ]]; then
-  remote_cmd="set -euo pipefail; cd $REMOTE_DIR_Q; $(remote_sync_main_cmd); source venv/bin/activate; exec ./ops/deploy.sh"
+  remote_cmd="set -euo pipefail; cd $REMOTE_DIR_Q; $(remote_sync_main_cmd); exec ./ops/deploy.sh"
   ssh_run "$remote_cmd"
   exit $?
 fi
@@ -164,7 +163,6 @@ remote_cmd=$(cat <<REMOTE
 set -euo pipefail
 cd $REMOTE_DIR_Q
 $(remote_sync_main_cmd)
-source venv/bin/activate
 mkdir -p logs
 log_path="\$PWD/logs/illo-remote-deploy.log"
 pid_path="\$PWD/logs/illo-remote-deploy.pid"
@@ -173,7 +171,7 @@ health_timeout=$HEALTH_TIMEOUT_Q
 deploy_done=0
 echo "Starting ./ops/deploy.sh in the background..."
 : >"\$log_path"
-nohup bash -c 'source venv/bin/activate && exec ./ops/deploy.sh' >"\$log_path" 2>&1 < /dev/null &
+nohup ./ops/deploy.sh >"\$log_path" 2>&1 < /dev/null &
 deploy_pid=\$!
 echo "\$deploy_pid" > "\$pid_path"
 echo "Remote deploy process: \$deploy_pid"
