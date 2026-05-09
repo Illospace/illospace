@@ -137,5 +137,7 @@ belong. Keep these paths outside git in production:
 - generated journals and operator context
 
 Root prompt files from early private development are not part of the public
-runtime contract. Personalized context belongs in `AGENT_CONTEXT_DIR`, and
-generated guardian checklists belong at `AGENT_CHECKLIST_PATH`.
+runtime contract. Personalized context belongs in `AGENT_CONTEXT_DIR`, Illo's
+editable personality lives at `AGENT_SOUL_PATH` (default
+`.illo/agent-context/SOUL.md`), and generated guardian checklists belong at
+`AGENT_CHECKLIST_PATH`.

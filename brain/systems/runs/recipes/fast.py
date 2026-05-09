@@ -14,6 +14,7 @@ from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import workspace_root_from_ref
+from brain.systems.personality import soul_prompt_section
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,9 @@ class FastRecipe(BaseRunRecipe):
         )
 
         system_prompt = (
-            FAST_AGENT_INSTRUCTIONS
+            soul_prompt_section()
+            + "\n\n"
+            + FAST_AGENT_INSTRUCTIONS
             + _json_block("Target", runtime.request.target_ref)
             + _json_block("Workspace", runtime.request.workspace_ref)
             + (f"\n\n## Context\n{context.prompt_context()}" if context.prompt_context() else "")

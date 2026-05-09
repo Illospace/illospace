@@ -36,6 +36,7 @@ from brain.systems.runs.tool_definitions import (
     LIFECYCLE_TOOLS,
     MY_ACTIVITY_TOOL,
     PROJECT_TOOLS,
+    SOUL_TOOLS,
     SESSION_TOOLS,
     WORKSPACE_APP_TOOLS,
 )
@@ -120,6 +121,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
             "domains": ["runtime settings", "provider", "auth status", "model routing", "credentials"],
             "scopes": ["narrow"],
         },
+    },
+    "manage_soul": {
+        "permission": "manage_soul",
+        "risk_class": "medium",
+        "side_effect_class": "soul_management",
+        "reversibility": "reversible",
+        "action_manifest": True,
+        "expected_effect": "read or mutate Illo's private SOUL.md personality file",
+        "output_budget_chars": 8_000,
     },
     "read_thread_messages": {
         "permission": "read_session",
@@ -533,6 +543,7 @@ for _browser_name, _metadata in _BROWSER_METADATA.items():
 def _definition_sources() -> list[tuple[str, tuple[str, ...], list[Mapping[str, Any]]]]:
     sources: list[tuple[str, tuple[str, ...], list[Mapping[str, Any]]]] = [
         ("brain", ("coordinator", "worker"), BRAIN_TOOLS),
+        ("soul", ("coordinator", "worker"), SOUL_TOOLS),
         ("domains", ("coordinator", "worker"), DOMAIN_TOOLS),
         ("ideas", ("coordinator", "worker"), CORTEX_IDEA_TOOLS),
         ("chat", ("coordinator", "worker"), CHAT_TOOLS),
@@ -769,6 +780,8 @@ def action_policy_for_tool(
     if tool_name == "manage_project" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"list", "get"}:
         return None
     if tool_name == "manage_workspace_app" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"list", "get", "get_state"}:
+        return None
+    if tool_name == "manage_soul" and _arg_at(args_tuple, kwargs_dict, "action", 0) == "read":
         return None
     if tool_name == "browser_snapshot" and not bool(_arg_at(args_tuple, kwargs_dict, "persist", 0, False)):
         return None

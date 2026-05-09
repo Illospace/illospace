@@ -16,6 +16,7 @@ from brain.systems.runs.tools import RunToolExecutor, ToolRecord, ToolScope, wra
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent
 from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
+from brain.systems.personality import soul_prompt_section
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +203,9 @@ def build_worker_prompt(
     evidence_so_far: Any = None,
 ) -> str:
     return (
-        WORKER_AGENT_INSTRUCTIONS
+        soul_prompt_section()
+        + "\n\n"
+        + WORKER_AGENT_INSTRUCTIONS
         + _json_block("Worker Assignment", assignment.to_payload())
         + _json_block("Target", target_ref)
         + _json_block("Workspace", workspace_ref)

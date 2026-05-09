@@ -91,6 +91,7 @@ def _get_tool_handlers(
         tool_vault_secret_prompt,
         tool_runtime_settings,
     )
+    from brain.systems.personality import manage_agent_soul
 
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
@@ -126,6 +127,12 @@ def _get_tool_handlers(
             provider=provider,
             user_id=getattr(_agent_context, "user_id", None),
             org_id=getattr(_agent_context, "org_id", None),
+        ),
+        "manage_soul": lambda action, content=None, reason=None: manage_agent_soul(
+            action,
+            content=content,
+            reason=reason,
+            actor_user_id=getattr(_agent_context, "user_id", None),
         ),
         "query_workspace_data": _handle_query_workspace_data,
         "read_workspace_overview": _handle_read_workspace_overview,
