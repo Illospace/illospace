@@ -12,7 +12,9 @@
     ConstellationSearchField,
     ConstellationSectionHeader,
     ConstellationSegmentedToggle,
+    ConstellationTextInput,
   } from '$lib/components/constellation';
+  import { auth } from '$lib/stores/auth.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import { parseServerDate, relativeTimeAgo } from '$lib/utils/datetime';
 
@@ -64,6 +66,17 @@
     active: boolean;
   }
 
+  interface VaultUnlockResponse {
+    token: string;
+    expires_at?: string | null;
+  }
+
+  interface StoredVaultSession {
+    token: string;
+    expiresAt: string;
+    savedAt: string;
+  }
+
   type FilterMode = 'all' | 'attention' | 'grants';
   type PillTone = 'muted' | 'warning' | 'success' | 'danger' | 'info';
   type VaultRow =
@@ -73,6 +86,8 @@
     | { id: string; kind: 'pin' };
 
   const CATEGORIES = ['general', 'api', 'aws', 'auth', 'analytics', 'database', 'messaging', 'monitoring', 'payments', 'service'];
+  const VAULT_SESSION_STORAGE_PREFIX = 'illo:vault:unlock:v1';
+  const VAULT_SESSION_EXPIRY_SKEW_MS = 5000;
   const FILTER_OPTIONS: Array<{ key: FilterMode; label: string }> = [
     { key: 'all', label: 'All' },
     { key: 'attention', label: 'Needs Work' },
@@ -150,6 +165,9 @@
   let copiedKey = $state('');
 
   const isVaultPreview = $derived(dev && $page.url.searchParams.get('preview') === '1');
+  const vaultSessionStorageKey = $derived(
+    auth.user?.id ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.id)}` : '',
+  );
   const categoryCount = $derived.by(
     () => new Set(secrets.map((secret) => secret.category || 'general')).size,
   );
@@ -331,11 +349,77 @@
     ui.toast('Preview mode: no backend user or real secrets attached.', 'info');
   }
 
+  function getVaultSessionStorage(): Storage | null {
+    if (typeof sessionStorage === 'undefined') return null;
+    try {
+      return sessionStorage;
+    } catch {
+      return null;
+    }
+  }
+
+  function clearPersistedVaultSession() {
+    const storage = getVaultSessionStorage();
+    if (!storage || !vaultSessionStorageKey) return;
+    try {
+      storage.removeItem(vaultSessionStorageKey);
+    } catch {
+      // Storage can be unavailable in hardened browser modes.
+    }
+  }
+
+  function readPersistedVaultSession(): string | null {
+    const storage = getVaultSessionStorage();
+    if (!storage || !vaultSessionStorageKey) return null;
+    try {
+      const raw = storage.getItem(vaultSessionStorageKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as Partial<StoredVaultSession>;
+      if (!parsed.token || !parsed.expiresAt) {
+        clearPersistedVaultSession();
+        return null;
+      }
+      const expiresAt = Date.parse(parsed.expiresAt);
+      if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() + VAULT_SESSION_EXPIRY_SKEW_MS) {
+        clearPersistedVaultSession();
+        return null;
+      }
+      return parsed.token;
+    } catch {
+      clearPersistedVaultSession();
+      return null;
+    }
+  }
+
+  function persistVaultSession(unlocked: VaultUnlockResponse) {
+    const storage = getVaultSessionStorage();
+    if (!storage || !vaultSessionStorageKey || !unlocked.token || !unlocked.expires_at) return;
+    const expiresAt = String(unlocked.expires_at);
+    try {
+      storage.setItem(
+        vaultSessionStorageKey,
+        JSON.stringify({
+          token: unlocked.token,
+          expiresAt,
+          savedAt: new Date().toISOString(),
+        } satisfies StoredVaultSession),
+      );
+    } catch {
+      // Unlock should still succeed if browser storage is blocked.
+    }
+  }
+
   async function checkPin() {
     try {
       const status = await api.pinStatus();
       hasPin = status.has_pin;
-      vaultLocked = hasPin;
+      if (!hasPin) {
+        vaultLocked = false;
+        clearPersistedVaultSession();
+        return;
+      }
+      vaultToken = readPersistedVaultSession();
+      vaultLocked = !vaultToken;
     } catch {
       // PIN check failed — assume no PIN
     }
@@ -344,8 +428,9 @@
   async function unlockVault() {
     if (!pinInput) return;
     try {
-      const unlocked = await api.vaultUnlock(pinInput);
+      const unlocked: VaultUnlockResponse = await api.vaultUnlock(pinInput);
       vaultToken = unlocked.token;
+      persistVaultSession(unlocked);
       vaultLocked = false;
       pinInput = '';
       pinAttempts = 0;
@@ -375,8 +460,9 @@
       const data: { new_pin: string; current_pin?: string } = { new_pin: newPin };
       if (hasPin) data.current_pin = currentPin;
       await api.vaultSetupPin(data);
-      const unlocked = await api.vaultUnlock(newPin);
+      const unlocked: VaultUnlockResponse = await api.vaultUnlock(newPin);
       vaultToken = unlocked.token;
+      persistVaultSession(unlocked);
       hasPin = true;
       vaultLocked = false;
       showPinSetup = false;
@@ -400,6 +486,7 @@
 
   function markVaultLocked(showToast = false) {
     vaultToken = null;
+    clearPersistedVaultSession();
     vaultLocked = true;
     clearRevealedSecrets();
     if (showToast) {
@@ -964,20 +1051,21 @@
     <div class="vault-constellation-lock-panel">
       <ConstellationPanel tone="warning">
         <div class="vault-constellation-lock-shell">
-          <div class="vault-constellation-lock-icon">LOCK</div>
+          <ConstellationPill variant="warning">Locked</ConstellationPill>
           <div class="vault-constellation-lock-copy">
             <h2 class="vault-constellation-lock-title">Vault locked</h2>
             <p class="vault-constellation-lock-subtitle">Enter your PIN to unlock protected secrets.</p>
           </div>
           <form class="vault-constellation-lock-form" onsubmit={(e) => { e.preventDefault(); unlockVault(); }}>
             <!-- svelte-ignore a11y_autofocus -->
-            <input
+            <ConstellationTextInput
               type="password"
-              class="input lock-input vault-constellation-lock-input"
+              className="vault-constellation-lock-input"
               placeholder="Enter PIN"
               bind:value={pinInput}
-              maxlength="32"
+              maxlength={32}
               autofocus
+              mono
             />
             {#if pinAttempts > 0}
               <p class="vault-constellation-lock-attempts">
@@ -1491,41 +1579,16 @@
 {/if}
 
 <style>
-  .lock-input {
-    text-align: center;
-    font-size: var(--text-lg);
-    letter-spacing: 4px;
-    margin-bottom: var(--sp-3);
-  }
-
   .vault-constellation-lock-panel {
-    max-width: 520px;
+    width: min(100%, 360px);
     margin: 0 auto;
   }
 
   .vault-constellation-lock-shell {
     display: grid;
-    gap: 18px;
+    gap: 16px;
     justify-items: center;
     text-align: center;
-  }
-
-  .vault-constellation-lock-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 78px;
-    min-height: 32px;
-    padding: 0 14px;
-    border-radius: 999px;
-    border: 1px solid rgba(213, 161, 77, 0.24);
-    background: rgba(213, 161, 77, 0.12);
-    color: rgba(250, 231, 188, 0.94);
-    font-family: var(--constellation-font-mono);
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
   }
 
   .vault-constellation-lock-copy {
@@ -1536,7 +1599,7 @@
 
   .vault-constellation-lock-title {
     margin: 0;
-    color: rgba(255, 255, 255, 0.96);
+    color: var(--constellation-color-text-primary);
     font-family: var(--constellation-font-sans);
     font-size: 18px;
     font-weight: 560;
@@ -1545,7 +1608,7 @@
 
   .vault-constellation-lock-subtitle {
     margin: 0;
-    color: rgba(240, 240, 250, 0.56);
+    color: var(--constellation-color-text-secondary);
     font-size: 13px;
     line-height: 1.55;
   }
@@ -1556,13 +1619,19 @@
     width: min(100%, 280px);
   }
 
-  .vault-constellation-lock-input {
+  :global(.vault-constellation-lock-input) {
+    min-height: 40px;
     width: 100%;
+  }
+
+  :global(.vault-constellation-lock-input .constellation-text-input-control) {
+    text-align: center;
+    font-size: 16px;
   }
 
   .vault-constellation-lock-attempts {
     margin: 0;
-    color: rgba(255, 195, 205, 0.9);
+    color: var(--constellation-control-pill-danger-text);
     font-size: 11px;
     line-height: 1.45;
   }
