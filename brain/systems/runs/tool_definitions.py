@@ -1499,7 +1499,7 @@ BROWSER_SNAPSHOT_TOOL = {
 
 BROWSER_SAVE_SCREENSHOT_TOOL = {
     "name": "browser_save_screenshot",
-    "description": "Save a PNG screenshot of the current page into the thought workspace uploads area.",
+    "description": "Save a PNG screenshot of the current page into the thought workspace uploads area. Use the returned download_url when giving the user a link.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -1510,7 +1510,7 @@ BROWSER_SAVE_SCREENSHOT_TOOL = {
 
 BROWSER_PRINT_PDF_TOOL = {
     "name": "browser_print_pdf",
-    "description": "Export the current page as a PDF into the thought workspace uploads area.",
+    "description": "Export the current page as a PDF into the thought workspace uploads area. Use the returned download_url when giving the user a link.",
     "input_schema": {
         "type": "object",
         "properties": {

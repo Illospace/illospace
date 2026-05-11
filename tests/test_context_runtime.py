@@ -259,6 +259,63 @@ def test_structured_checkpoint_falls_back_and_retains_constraints():
     assert compacted[-1]["content"] == "Latest raw request: retry after overflow."
 
 
+def test_structured_checkpoint_fallback_uses_latest_user_intent_as_objective():
+    import json
+
+    from brain.systems.context.semantic_compaction import compact_session_messages_with_checkpoint
+
+    messages = [{"role": "user", "content": "First stale question: which project is attached?"}]
+    for index in range(12):
+        messages.append({"role": "assistant", "content": [{"type": "text", "text": f"old answer {index}"}]})
+        messages.append({"role": "user", "content": f"old follow-up {index}"})
+    messages.append({"role": "user", "content": "Latest raw request: explain the GitHub PR blocker."})
+
+    def broken_compactor(_omitted, _context):
+        raise RuntimeError("summary model unavailable")
+
+    compacted, report = compact_session_messages_with_checkpoint(
+        messages,
+        token_limit=10,
+        target_tokens=10,
+        session_id="latest-intent-session",
+        phase="test",
+        max_messages=10,
+        min_messages=4,
+        force=True,
+        semantic_compactor=broken_compactor,
+    )
+
+    checkpoint_text = next(
+        msg["content"]
+        for msg in compacted
+        if isinstance(msg.get("content"), str) and "Context compaction checkpoint" in msg["content"]
+    )
+    payload = json.loads(checkpoint_text[checkpoint_text.find("{"):checkpoint_text.rfind("}") + 1])
+
+    assert report.strategy == "structured_checkpoint_fallback"
+    assert payload["active_objective"] == "Latest raw request: explain the GitHub PR blocker."
+    assert payload["recent_user_intent"] == "Latest raw request: explain the GitHub PR blocker."
+
+
+def test_structured_checkpoint_fallback_ignores_tool_results_as_latest_intent():
+    from brain.systems.context.semantic_compaction import deterministic_checkpoint_from_messages
+
+    checkpoint = deterministic_checkpoint_from_messages(
+        [
+            {"role": "user", "content": "Latest human request: finish the GitHub diagnosis."},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-1", "name": "read_file", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "large file output"}]},
+        ],
+        recent_messages=[
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-2", "content": "newer tool output"}]},
+        ],
+        session_id="tool-result-intent-session",
+    )
+
+    assert checkpoint.active_objective == "Latest human request: finish the GitHub diagnosis."
+    assert checkpoint.recent_user_intent == "Latest human request: finish the GitHub diagnosis."
+
+
 def test_thread_handoff_builds_startup_context_with_recent_raw_messages():
     from brain.systems.context.thread_handoff import (
         build_thread_handoff,
@@ -289,6 +346,28 @@ def test_thread_handoff_builds_startup_context_with_recent_raw_messages():
     assert len(startup) < len(messages)
     assert startup[-1]["content"] == "Latest exact request should stay raw."
     assert "read_thread_messages" in startup[0]["content"]
+
+
+def test_thread_handoff_fallback_uses_latest_user_intent_as_objective():
+    from brain.systems.context.thread_handoff import build_thread_handoff
+
+    messages = [{"role": "user", "content": "First stale question: what context is connected?"}]
+    for index in range(10):
+        messages.append({"role": "assistant", "content": [{"type": "text", "text": f"context answer {index}"}]})
+        messages.append({"role": "user", "content": f"follow-up {index}"})
+    messages.append({"role": "user", "content": "Latest raw request: what exact GitHub setup do you need?"})
+
+    handoff, error = build_thread_handoff(
+        previous_handoff=None,
+        messages_since=messages,
+        total_message_count=len(messages),
+        session_id="handoff-latest-intent-session",
+    )
+    payload = handoff.to_payload()
+
+    assert error is None
+    assert payload["checkpoint"]["active_objective"] == "Latest raw request: what exact GitHub setup do you need?"
+    assert payload["checkpoint"]["recent_user_intent"] == "Latest raw request: what exact GitHub setup do you need?"
 
 
 def test_thread_handoff_incrementally_carries_previous_summary():

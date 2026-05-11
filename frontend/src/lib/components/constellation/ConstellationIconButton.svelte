@@ -12,6 +12,8 @@
     title,
     disabled = false,
     pressed,
+    expanded,
+    popup,
     type = 'button',
     onclick,
     children,
@@ -23,6 +25,8 @@
     title?: string;
     disabled?: boolean;
     pressed?: boolean;
+    expanded?: boolean;
+    popup?: 'menu' | 'listbox' | 'tree' | 'grid' | 'dialog' | true;
     type?: 'button' | 'submit' | 'reset';
     onclick?: (event: MouseEvent) => void;
     children?: Snippet;
@@ -43,6 +47,8 @@
   aria-label={label}
   title={resolvedTitle}
   aria-pressed={pressed}
+  aria-expanded={expanded}
+  aria-haspopup={popup}
   {disabled}
   {onclick}
 >

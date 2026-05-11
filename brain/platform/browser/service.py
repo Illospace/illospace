@@ -24,6 +24,7 @@ from brain.kernel.common.time import utcnow as _shared_utcnow
 
 from brain.systems.cortex.events import publish_safe
 from brain.systems.cortex.resources.telemetry import build_browser_resource_summary
+from brain.systems.cortex.upload_preview import public_static_upload_url, static_upload_url_for
 from brain.platform.db.models.browser import BrowserSession
 from brain.platform.db.models.idea import Idea, VisualBlock
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -141,6 +142,7 @@ class BrowserDownload:
     at: str
     filename: str
     url: str
+    download_url: str | None = None
     size: int | None = None
 
 
@@ -150,6 +152,7 @@ class BrowserArtifact:
     kind: str
     filename: str
     url: str
+    download_url: str | None = None
     size: int | None = None
 
 
@@ -289,9 +292,14 @@ result = page_info()
                 shutil.copy2(source, target)
             except FileNotFoundError:
                 continue
-            public_url = f"/static/uploads/browser-downloads/{self.session_id}/{target.name}"
+            public_url = static_upload_url_for("browser-downloads", self.session_id, target.name)
             self._record_action("download", target.name)
-            self._record_download(filename=target.name, url=public_url, size=target.stat().st_size)
+            self._record_download(
+                filename=target.name,
+                url=public_url,
+                download_url=public_static_upload_url(public_url),
+                size=target.stat().st_size,
+            )
             self._emit_state("download")
         self._known_download_paths = current
 
@@ -786,7 +794,7 @@ result = {{"ok": True}}
             artifact = self._record_artifact(
                 kind="screenshot",
                 filename=target.name,
-                url=f"/static/uploads/browser-artifacts/{self.session_id}/{target.name}",
+                url=static_upload_url_for("browser-artifacts", self.session_id, target.name),
                 size=target.stat().st_size if target.exists() else None,
             )
             self._emit_state("artifact")
@@ -807,7 +815,7 @@ result = {{"ok": True}}
             artifact = self._record_artifact(
                 kind="pdf",
                 filename=target.name,
-                url=f"/static/uploads/browser-artifacts/{self.session_id}/{target.name}",
+                url=static_upload_url_for("browser-artifacts", self.session_id, target.name),
                 size=target.stat().st_size if target.exists() else None,
             )
             self._emit_state("artifact")
@@ -1283,13 +1291,39 @@ print({json.dumps(marker)} + json.dumps(result))
         if len(self._actions) > 30:
             self._actions = self._actions[-30:]
 
-    def _record_download(self, filename: str, url: str, size: int | None = None) -> None:
-        self._downloads.append(BrowserDownload(at=_utcnow().isoformat(), filename=filename, url=url, size=size))
+    def _record_download(
+        self,
+        filename: str,
+        url: str,
+        download_url: str | None = None,
+        size: int | None = None,
+    ) -> None:
+        self._downloads.append(BrowserDownload(
+            at=_utcnow().isoformat(),
+            filename=filename,
+            url=url,
+            download_url=download_url or public_static_upload_url(url),
+            size=size,
+        ))
         if len(self._downloads) > 20:
             self._downloads = self._downloads[-20:]
 
-    def _record_artifact(self, kind: str, filename: str, url: str, size: int | None = None) -> BrowserArtifact:
-        artifact = BrowserArtifact(at=_utcnow().isoformat(), kind=kind, filename=filename, url=url, size=size)
+    def _record_artifact(
+        self,
+        kind: str,
+        filename: str,
+        url: str,
+        download_url: str | None = None,
+        size: int | None = None,
+    ) -> BrowserArtifact:
+        artifact = BrowserArtifact(
+            at=_utcnow().isoformat(),
+            kind=kind,
+            filename=filename,
+            url=url,
+            download_url=download_url or public_static_upload_url(url),
+            size=size,
+        )
         self._artifacts.append(artifact)
         if len(self._artifacts) > 20:
             self._artifacts = self._artifacts[-20:]

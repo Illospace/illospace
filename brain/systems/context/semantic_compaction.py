@@ -94,21 +94,27 @@ def _content_text(content: Any, *, limit: int = 1_000) -> str:
     return " ".join(" ".join(parts).split())[:limit]
 
 
+def _is_tool_result_content(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, Mapping) and block.get("type") == "tool_result" for block in content)
+
+
+def _is_synthetic_user_text(text: str) -> bool:
+    stripped = text.lstrip()
+    return stripped.startswith("[System:") or stripped.startswith("[Previous durable thread handoff]")
+
+
 def _latest_user_text(messages: list[dict]) -> str:
     for msg in reversed(messages):
         if msg.get("role") != "user":
             continue
-        text = _content_text(msg.get("content"))
-        if text:
-            return text
-    return ""
-
-
-def _first_user_text(messages: list[dict]) -> str:
-    for msg in messages:
-        if msg.get("role") != "user":
+        content = msg.get("content")
+        if _is_tool_result_content(content):
             continue
-        text = _content_text(msg.get("content"))
+        text = _content_text(content)
+        if _is_synthetic_user_text(text):
+            continue
         if text:
             return text
     return ""
@@ -230,13 +236,15 @@ def deterministic_checkpoint_from_messages(
     """Build a structured checkpoint without a model call."""
     summary = _summarize_trimmed_messages(omitted_messages)
     recent = list(recent_messages or [])
+    latest_recent_intent = _latest_user_text(recent)
+    latest_intent = latest_recent_intent or _latest_user_text(omitted_messages)
     constraints = _extract_constraint_candidates(omitted_messages)
     paths = _extract_paths(omitted_messages)
     risks = ["Semantic compactor unavailable; checkpoint was built from deterministic transcript excerpts."]
     if fallback_error:
         risks.append(f"Semantic compactor failed: {fallback_error[:240]}")
     return CompactionCheckpoint(
-        active_objective=_first_user_text(omitted_messages)[:500],
+        active_objective=latest_intent[:500],
         user_constraints=constraints,
         completed_work=(summary,),
         current_plan=(),
@@ -246,13 +254,14 @@ def deterministic_checkpoint_from_messages(
         important_tool_results=(),
         open_questions=(),
         verification_status="unknown",
-        recent_user_intent=_latest_user_text(recent)[:500],
+        recent_user_intent=(latest_recent_intent or latest_intent)[:500],
         risks_or_unknowns=tuple(risks),
         source="deterministic_fallback",
         metadata={
             "session_id": session_id,
             "phase": phase,
             "omitted_message_count": len(omitted_messages),
+            "latest_user_intent_source": "recent_messages" if latest_recent_intent else "omitted_messages",
         },
     )
 
@@ -326,7 +335,9 @@ def checkpoint_message(checkpoint: CompactionCheckpoint, *, omitted_count: int) 
         "content": (
             "[System: Context compaction checkpoint. "
             f"{omitted_count} older messages were summarized to preserve the current task state. "
-            "Continue from this checkpoint plus the raw recent turns. Do not claim certainty about omitted details.\n"
+            "Continue from this checkpoint plus the raw recent turns. The final raw user message after this "
+            "checkpoint is the current request and supersedes any older objective in the checkpoint. "
+            "Do not claim certainty about omitted details.\n"
             f"{body}]"
         ),
     }
@@ -461,4 +472,3 @@ def compact_session_messages_with_checkpoint(
             "final_estimated_tokens": best_tokens,
         },
     )
-

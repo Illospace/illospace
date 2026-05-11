@@ -3,6 +3,9 @@
 Illo Brain is a self-hostable AI workspace with a FastAPI backend, a SvelteKit
 frontend, PostgreSQL/pgvector storage, and an agent runtime for tool-using work.
 
+For a visual map of boundaries, data flow, deployment services, and operating
+constraints, see [Architecture Diagram](architecture-diagram.md).
+
 ## Repository Map
 
 ```text

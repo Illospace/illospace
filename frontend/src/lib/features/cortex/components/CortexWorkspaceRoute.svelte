@@ -17,6 +17,7 @@
     createWorkspaceThreadStageController,
     handleWorkspaceKeydown,
     handleWorkspaceKeyup,
+    resolveThreadOriginAccent,
     type WorkspaceFieldLayoutOptions,
   } from '$lib/features/cortex/controllers';
   import type { Idea } from '$lib/types/cortex';
@@ -522,7 +523,20 @@
 
   const threadWorkspaceStyle = $derived.by(() => threadStage.workspaceStyle);
 
-  const threadAmbientTone = $derived(buildThreadAmbientTone(cortex.selectedIdea?.status ?? 'idle'));
+  const threadOriginAccent = $derived.by(() =>
+    resolveThreadOriginAccent({
+      selectedIdea: cortex.selectedIdea,
+      currentUserId: auth.user?.id,
+      currentUserColor: auth.user?.color,
+      teamMembers: cortex.teamMembers,
+    }),
+  );
+  const threadAmbientTone = $derived.by(() =>
+    buildThreadAmbientTone({
+      status: cortex.selectedIdea?.status ?? 'idle',
+      originAccent: threadOriginAccent,
+    }),
+  );
   const cortexVisualReady = $derived(Boolean(auth.user?.id) || cortex.teamMembersLoaded);
   const cortexSurfaceReady = $derived(
     cortexVisualReady && (!cortex.loading || cortex.ideas.length > 0 || cortex.connections.length > 0),

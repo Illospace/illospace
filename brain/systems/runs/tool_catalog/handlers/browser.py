@@ -46,6 +46,7 @@ def _record_browser_saved_artifact(result: dict, *, source_tool: str) -> None:
     if _browser_state_is_error(state):
         return
     artifact_type = "browser_screenshot" if kind == "screenshot" else "browser_preview"
+    download_url = saved.get("download_url") or saved.get("downloadUrl")
     artifact = {
         "type": artifact_type,
         "source_tool": source_tool,
@@ -57,6 +58,8 @@ def _record_browser_saved_artifact(result: dict, *, source_tool: str) -> None:
         "page_url": state.get("current_url"),
         "page_title": state.get("page_title"),
     }
+    if download_url:
+        artifact["download_url"] = download_url
     _persist_execution_artifacts([artifact])
 
 

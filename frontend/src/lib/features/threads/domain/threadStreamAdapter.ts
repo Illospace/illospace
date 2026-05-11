@@ -1,5 +1,6 @@
 import {
   attachmentDetail,
+  attachmentDownloadUrl,
   attachmentLabel,
   attachmentPreviewKind,
   attachmentUrl,
@@ -279,6 +280,7 @@ export function resolveUserAccent(
 export function mapThreadAttachment(att: any): CortexThreadStageAttachmentItem | null {
   const url = attachmentUrl(att);
   if (!url) return null;
+  const downloadUrl = attachmentDownloadUrl(att);
 
   const kind = att.content_type || att.type || '';
   if (['diff', 'chart', 'preview', 'diagram', 'html', 'code', 'markdown', 'screenshot'].includes(kind)) {
@@ -298,6 +300,7 @@ export function mapThreadAttachment(att: any): CortexThreadStageAttachmentItem |
     return {
       kind: 'image',
       url,
+      downloadUrl,
       alt: attachmentLabel(att),
     };
   }
@@ -305,6 +308,7 @@ export function mapThreadAttachment(att: any): CortexThreadStageAttachmentItem |
   return {
     kind: 'file',
     url,
+    downloadUrl,
     label: attachmentLabel(att),
     detail: attachmentDetail(att),
     previewKind,

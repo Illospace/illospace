@@ -273,6 +273,7 @@ class CortexStore {
         this.browserExtraction = null;
         if (browserSession?.id) {
           wsClient.send('browser_subscribe', { session_id: browserSession.id });
+          this._requestBrowserSnapshot(browserSession.id, browserSession as BrowserSessionState);
         }
       }).catch(() => {});
 
@@ -300,6 +301,24 @@ class CortexStore {
         wsClient.send('browser_subscribe', { session_id: state.id });
       }
     }
+  }
+
+  private _requestBrowserSnapshot(sessionId: string, fallbackSession?: BrowserSessionState | null) {
+    api.snapshotBrowserSession(sessionId)
+      .then((snapshot) => {
+        if (this.browserSession?.id !== sessionId) return;
+        const next = applyBrowserSnapshotToState({
+          session: this.browserSession,
+          frame: this.browserFrame,
+          discovery: this.browserDiscovery,
+          extraction: this.browserExtraction,
+        }, snapshot?.state ?? fallbackSession ?? this.browserSession, snapshot?.frame ?? null);
+        this.browserSession = next.session;
+        this.browserFrame = next.frame;
+        this.browserDiscovery = next.discovery;
+        this.browserExtraction = next.extraction;
+      })
+      .catch(() => {});
   }
 
   private _focusThreadForBrowserEvent(
@@ -352,6 +371,9 @@ class CortexStore {
       this.browserExtraction = result.state.extraction;
       if (result.shouldSubscribeSessionId) {
         wsClient.send('browser_subscribe', { session_id: result.shouldSubscribeSessionId });
+      }
+      if (event.type === 'state' && result.state.session?.id && !result.state.frame) {
+        this._requestBrowserSnapshot(result.state.session.id, result.state.session);
       }
     }
   }
@@ -433,6 +455,7 @@ class CortexStore {
           return;
         }
         this._applyBrowserEventPayload(browserSession as BrowserSessionState);
+        this._requestBrowserSnapshot(browserSession.id, browserSession as BrowserSessionState);
       }).catch(() => {});
     }, delayMs);
   }
@@ -1184,6 +1207,7 @@ class CortexStore {
       this.browserDiscovery = empty.discovery;
       this.browserExtraction = empty.extraction;
       wsClient.send('browser_subscribe', { session_id: session.id });
+      this._requestBrowserSnapshot(session.id, session);
       return session;
     } catch (err: any) {
       ui.toast(err.detail || 'Failed to start browser session', 'error');

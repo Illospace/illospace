@@ -5,6 +5,18 @@ import { clamp } from '$lib/utils/math';
 export type ThreadStageOrigin = { x: number | string; y: number | string };
 type ThreadEdgeSide = ThreadPeripherySignal['side'];
 type ThreadSignalKind = ThreadPeripherySignal['kind'];
+type ThreadAmbientToneOptions = {
+  status?: string | null;
+  originAccent?: string | null;
+};
+type ThreadOriginAccentIdea = Pick<Idea, 'user_id' | 'author_color'> & {
+  user_color?: string | null;
+};
+type ThreadOriginAccentMember = {
+  id?: string | number | null;
+  color?: string | null;
+  cortex_color?: string | null;
+};
 
 const THREAD_TONE_BY_STATUS: Record<string, string> = {
   idle: '#57CFA0',
@@ -18,8 +30,18 @@ const THREAD_SIGNAL_PROFILE: Record<string, { color: string; kind: ThreadSignalK
   idle: { color: '#57CFA0', kind: 'progress', weight: 0.46, pulseMs: 5600 },
 };
 
+function normalizeHexColor(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(trimmed)) return null;
+  if (trimmed.length === 4) {
+    return `#${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}${trimmed[3]}${trimmed[3]}`;
+  }
+  return trimmed;
+}
+
 export function hexToRgb(hex: string) {
-  const clean = hex.replace('#', '');
+  const clean = (normalizeHexColor(hex) ?? '#57CFA0').replace('#', '');
   const normalized = clean.length === 3
     ? clean.split('').map((char) => char + char).join('')
     : clean;
@@ -27,8 +49,45 @@ export function hexToRgb(hex: string) {
   return `${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}`;
 }
 
-export function buildThreadAmbientTone(status = 'idle') {
-  const color = THREAD_TONE_BY_STATUS[status] ?? '#57CFA0';
+export function resolveThreadOriginAccent({
+  selectedIdea,
+  currentUserId,
+  currentUserColor,
+  teamMembers = [],
+}: {
+  selectedIdea?: ThreadOriginAccentIdea | null;
+  currentUserId?: string | number | null;
+  currentUserColor?: string | null;
+  teamMembers?: readonly ThreadOriginAccentMember[];
+}) {
+  if (!selectedIdea) return null;
+
+  const explicitAuthorColor = normalizeHexColor(selectedIdea.author_color);
+  if (explicitAuthorColor) return explicitAuthorColor;
+
+  const explicitUserColor = normalizeHexColor(selectedIdea.user_color);
+  if (explicitUserColor) return explicitUserColor;
+
+  if (selectedIdea.user_id && currentUserId && String(selectedIdea.user_id) === String(currentUserId)) {
+    const ownColor = normalizeHexColor(currentUserColor);
+    if (ownColor) return ownColor;
+  }
+
+  const owner = selectedIdea.user_id
+    ? teamMembers.find((member) => member.id != null && String(member.id) === String(selectedIdea.user_id))
+    : null;
+
+  return normalizeHexColor(owner?.color) ?? normalizeHexColor(owner?.cortex_color);
+}
+
+export function buildThreadAmbientTone(statusOrOptions: string | ThreadAmbientToneOptions = 'idle') {
+  const status = typeof statusOrOptions === 'string'
+    ? statusOrOptions
+    : (statusOrOptions.status ?? 'idle');
+  const originAccent = typeof statusOrOptions === 'string'
+    ? null
+    : normalizeHexColor(statusOrOptions.originAccent);
+  const color = originAccent ?? THREAD_TONE_BY_STATUS[status] ?? '#57CFA0';
   return {
     color,
     rgb: hexToRgb(color),

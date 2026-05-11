@@ -59,6 +59,7 @@
     onTranscriptScroll,
     onTranscriptReady,
     onScrollToBottom,
+    onPreviewAttachment,
   }: ThreadTranscriptProps = $props();
 
   let transcriptContainerEl: HTMLDivElement | undefined = $state();
@@ -346,6 +347,10 @@
   }
 
   function openAttachmentPreview(attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment) {
+    if (onPreviewAttachment) {
+      onPreviewAttachment(attachment);
+      return;
+    }
     previewAttachment = attachment;
   }
 
@@ -360,8 +365,9 @@
   }
 
   function openPreviewAttachmentExternal() {
-    if (!previewAttachmentUrl || typeof window === 'undefined') return;
-    window.open(previewAttachmentUrl, '_blank', 'noopener,noreferrer');
+    const target = previewAttachment?.downloadUrl || previewAttachmentUrl;
+    if (!target || typeof window === 'undefined') return;
+    window.open(target, '_blank', 'noopener,noreferrer');
   }
 
   $effect(() => {
@@ -1406,23 +1412,7 @@
   }
 
   .thread-header-title-row :global(.thread-header-action-button) {
-    --constellation-icon-button-border: transparent;
-    --constellation-icon-button-quiet-background: transparent;
-    --constellation-icon-button-quiet-background-hover: color-mix(in srgb, var(--thread-accent, #57cfa0) 10%, transparent);
-    --constellation-icon-button-quiet-border-hover: transparent;
-    --constellation-icon-button-quiet-shadow: none;
-
     flex: 0 0 auto;
-    width: 24px;
-    height: 24px;
-    background: transparent;
-    box-shadow: none;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-  }
-
-  .thread-header-title-row :global(.thread-header-action-button:hover:not(:disabled)) {
-    color: var(--constellation-thread-header-title);
   }
 
   .thread-header-title-row :global(.thread-title-action-button.is-loading svg) {
@@ -1430,26 +1420,12 @@
   }
 
   .thread-header-panel-toggle-group {
-    --constellation-icon-button-border: transparent;
-    --constellation-icon-button-pressed-border: transparent;
-    --constellation-icon-button-pressed-background: transparent;
-    --constellation-icon-button-quiet-background: transparent;
-    --constellation-icon-button-quiet-background-hover: transparent;
-    --constellation-icon-button-quiet-border-hover: transparent;
-    --constellation-icon-button-quiet-shadow: none;
-
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     margin-left: auto;
     margin-right: -2px;
     padding: 2px;
-  }
-
-  .thread-header-panel-toggle-group :global(.thread-header-action-button:hover:not(:disabled)),
-  .thread-header-panel-toggle-group :global(.thread-header-action-button[aria-pressed='true']) {
-    background: transparent;
-    box-shadow: none;
   }
 
   @keyframes thread-title-action-spin {

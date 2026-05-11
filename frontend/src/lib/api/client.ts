@@ -758,6 +758,8 @@ export const api = {
       return r.json();
     });
   },
+  previewUpload: (url: string) =>
+    fetchJson<any>(withQuery('/api/cortex/uploads/preview', { url })),
   generateTitle: (text: string) =>
     fetchJson<any>('/api/cortex/generate-title', { method: 'POST', body: JSON.stringify({ text }) }),
   notifyCortex: (data: { event: string; idea_id?: string; [key: string]: any }) =>
