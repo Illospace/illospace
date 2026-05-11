@@ -26,6 +26,11 @@ import time
 import numpy as np
 
 from brain.kernel import config as brain_config
+from brain.systems.runs.project_execution_env import (
+    annotate_project_execution_result,
+    prepare_project_execution_env,
+    redact_sensitive_output,
+)
 
 logger = logging.getLogger("agent.tools")
 
@@ -533,13 +538,19 @@ def handle_test_runner(target: str, pattern: str | None = None, verbose: bool = 
     if verbose:
         cmd.append("-v")
 
+    project_execution = prepare_project_execution_env()
+
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True,
             timeout=120, cwd=workspace_root or WORKSPACE_ROOT,
+            env=project_execution.env,
         )
 
-        output = proc.stdout + proc.stderr
+        output = redact_sensitive_output(
+            (proc.stdout or "") + (proc.stderr or ""),
+            project_execution.sensitive_values,
+        )
         result = {
             "exit_code": proc.returncode,
             "success": proc.returncode == 0,
@@ -571,12 +582,18 @@ def handle_test_runner(target: str, pattern: str | None = None, verbose: bool = 
 
             result["failures"] = failures[:5]  # Cap at 5
 
+        annotate_project_execution_result(result, project_execution)
         return result
 
     except subprocess.TimeoutExpired:
-        return {"exit_code": -1, "success": False, "error": "Tests timed out after 120s"}
+        result = {"exit_code": -1, "success": False, "error": "Tests timed out after 120s"}
+        annotate_project_execution_result(result, project_execution)
+        return result
     except Exception as e:
-        return {"exit_code": -1, "success": False, "error": str(e)}
+        error = redact_sensitive_output(str(e), project_execution.sensitive_values)
+        result = {"exit_code": -1, "success": False, "error": error}
+        annotate_project_execution_result(result, project_execution)
+        return result
 
 
 def handle_project_context(path: str | None = None, workspace_root: str | None = None) -> dict:
