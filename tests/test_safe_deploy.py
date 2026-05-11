@@ -190,6 +190,7 @@ def test_illo_exposes_native_default_dev_mode_and_compose_deploy():
     assert "deploy" in content
     assert 'deploy_command "${@:2}"' in content
     assert 'update_command "${@:2}"' in content
+    assert "deploy_compose build api web updater" in content
     assert "--no-next" in content
     assert "worker-status" not in content
     assert "worker-drain" not in content
@@ -214,8 +215,14 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     services_section = compose.split("services:", 1)[1].rsplit("\nvolumes:", 1)[0]
     service_names = re.findall(r"^  ([a-z][a-z0-9_-]+):$", services_section, flags=re.MULTILINE)
 
-    assert service_names == ["postgres", "migrate", "api", "worker", "scheduler", "web"]
+    assert service_names == ["postgres", "migrate", "api", "worker", "scheduler", "updater", "web"]
     assert "127.0.0.1:${ILLO_WEB_PORT:-8080}:8080" in compose
+    assert "ILLO_SELF_UPDATE_REQUEST_FILE" in compose
+    assert "ILLO_SELF_UPDATE_HEARTBEAT_FILE" in compose
+    assert "deploy/docker/updater.Dockerfile" in compose
+    assert "illo-self-update-healthcheck" in compose
+    assert "/var/run/docker.sock:/var/run/docker.sock" in compose
+    assert "../..:/repo" in compose
     assert "deploy " + "publish" not in launcher
 
 
@@ -224,7 +231,9 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
 
     assert "active_agent_run_count" in upgrade
     assert "status IN" in upgrade
-    assert "compose up -d --no-deps api scheduler web" in upgrade
+    assert "non_worker_services" in upgrade
+    assert "api scheduler web updater" in upgrade
+    assert "ILLO_COMPOSE_SKIP_UPDATER_RESTART" in upgrade
     assert "start_worker_handoff" in upgrade
     assert "ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1" in upgrade
     assert "started handoff worker" in upgrade

@@ -88,10 +88,12 @@ users will not use `http://localhost:8080`.
 Expected result:
 
 - `./illo deploy status` shows `postgres`, `api`, `worker`, `scheduler`, and
-  `web` running
+  `updater`, and `web` running
 - `./illo deploy doctor` exits successfully
 - `http://localhost:8080` opens the dashboard through the SSH tunnel
 - an owner/admin can sign in and add provider credentials in System/Access
+- an owner/admin can start a code update from System/Update Illospace; the
+  Compose updater sidecar runs it from the host checkout
 
 ## Health Checks
 

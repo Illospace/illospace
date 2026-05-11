@@ -542,6 +542,7 @@ def test_start_runtime_update_launches_detached_safe_deploy(monkeypatch, tmp_pat
     monkeypatch.setenv("ILLO_SELF_UPDATE_ROOT", str(root))
     monkeypatch.setenv("ILLO_SELF_UPDATE_STATE_DIR", str(state_dir))
     monkeypatch.delenv("ILLO_SELF_UPDATE_COMMAND", raising=False)
+    monkeypatch.delenv("ILLO_SELF_UPDATE_REQUEST_FILE", raising=False)
     monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 2)
     monkeypatch.setattr(self_update, "_pid_running", lambda _pid: False)
     monkeypatch.setattr(self_update.subprocess, "Popen", fake_popen)
@@ -579,6 +580,7 @@ def test_start_runtime_update_reuses_running_update(monkeypatch, tmp_path):
     monkeypatch.setenv("ILLO_SELF_UPDATE_ROOT", str(root))
     monkeypatch.setenv("ILLO_SELF_UPDATE_STATE_DIR", str(state_dir))
     monkeypatch.delenv("ILLO_SELF_UPDATE_COMMAND", raising=False)
+    monkeypatch.delenv("ILLO_SELF_UPDATE_REQUEST_FILE", raising=False)
     monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 1)
     monkeypatch.setattr(self_update, "_pid_running", lambda pid: pid == 5150)
     monkeypatch.setattr(
@@ -605,9 +607,77 @@ def test_start_runtime_update_rejects_non_checkout_without_override(monkeypatch,
     monkeypatch.setenv("ILLO_SELF_UPDATE_ROOT", str(root))
     monkeypatch.setenv("ILLO_SELF_UPDATE_STATE_DIR", str(state_dir))
     monkeypatch.delenv("ILLO_SELF_UPDATE_COMMAND", raising=False)
+    monkeypatch.delenv("ILLO_SELF_UPDATE_REQUEST_FILE", raising=False)
 
     with pytest.raises(Exception) as exc:
         self_update.start_runtime_update(requested_by="owner-1")
 
     assert getattr(exc.value, "status_code", None) == 409
     assert "not running from a git checkout" in exc.value.detail
+
+
+def test_start_runtime_update_queues_compose_sidecar_request(monkeypatch, tmp_path):
+    import json
+
+    import brain.systems.runtime_settings.self_update as self_update
+
+    request_file = tmp_path / "self-update" / "request.json"
+    status_file = tmp_path / "self-update" / "status.json"
+    log_path = tmp_path / "logs" / "illo-self-update.log"
+
+    monkeypatch.setenv("ILLO_SELF_UPDATE_REQUEST_FILE", str(request_file))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_STATUS_FILE", str(status_file))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_LOG_PATH", str(log_path))
+    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 3)
+
+    status = self_update.start_runtime_update(requested_by="owner-1")
+
+    assert status.status == "running"
+    assert status.available is True
+    assert status.pid is None
+    assert status.active_agent_runs == 3
+    assert status.log_path == str(log_path)
+    assert "queued" in (status.detail or "")
+    request_payload = json.loads(request_file.read_text(encoding="utf-8"))
+    status_payload = json.loads(status_file.read_text(encoding="utf-8"))
+    assert request_payload["requested_by"] == "owner-1"
+    assert status_payload["status"] == "queued"
+
+
+def test_runtime_update_status_reports_compose_sidecar_available(monkeypatch, tmp_path):
+    import brain.systems.runtime_settings.self_update as self_update
+
+    request_file = tmp_path / "self-update" / "request.json"
+    status_file = tmp_path / "self-update" / "status.json"
+    status_file.parent.mkdir()
+    status_file.write_text(
+        '{"status": "idle", "detail": "Compose updater sidecar is ready."}',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("ILLO_SELF_UPDATE_REQUEST_FILE", str(request_file))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_STATUS_FILE", str(status_file))
+    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 0)
+
+    status = self_update.get_runtime_update_status()
+
+    assert status.status == "idle"
+    assert status.available is True
+    assert status.detail == "Compose updater sidecar is ready."
+
+
+def test_runtime_update_status_waits_for_compose_sidecar_heartbeat(monkeypatch, tmp_path):
+    import brain.systems.runtime_settings.self_update as self_update
+
+    request_file = tmp_path / "self-update" / "request.json"
+    heartbeat_file = tmp_path / "self-update" / "heartbeat.json"
+
+    monkeypatch.setenv("ILLO_SELF_UPDATE_REQUEST_FILE", str(request_file))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_HEARTBEAT_FILE", str(heartbeat_file))
+    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 0)
+
+    status = self_update.get_runtime_update_status()
+
+    assert status.status == "idle"
+    assert status.available is False
+    assert "waiting for the Compose updater sidecar" in (status.detail or "")

@@ -10,6 +10,7 @@ public ingress, TLS automation, or cloud-specific infrastructure.
 - `api`: FastAPI backend
 - `worker`: standalone AgentRun worker
 - `scheduler`: recurring job daemon
+- `updater`: owner-triggered self-update sidecar with access to the host repo and Docker socket
 - `migrate`: one-shot Alembic migration job
 - `postgres`: Postgres 16 with pgvector
 
@@ -128,6 +129,11 @@ Build during upgrade when release images are unavailable:
 ```bash
 ./illo deploy upgrade --build --no-pull
 ```
+
+Owners/admins can also start the same update flow from System/Update Illospace.
+In Compose, the API queues the request in the private data volume and the
+`updater` sidecar runs `./illo update --mode compose` from the host checkout.
+The sidecar mounts the Docker socket, so keep this stack on trusted hosts only.
 
 ## Advanced Paths
 
