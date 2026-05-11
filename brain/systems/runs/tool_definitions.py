@@ -893,11 +893,16 @@ WORKSPACE_APP_TOOLS = [
         "name": "manage_workspace_app",
         "description": (
             "Create, list, update, archive, and persist state for generated workspace apps. "
-            "This is the action tool to create or change a small UI surface or dashboard that should remain available "
-            "inside Cortex. Prefer renderer_key='generated-ui-app' and source_kind='json' with "
-            "a structured generated UI spec. Use renderer_key='sandboxed-html-app' only as a "
-            "custom HTML escape-hatch runtime. Recordful apps must use manage_domain first; app-local "
-            "state is only for UI preferences, filters, drafts, and ephemeral interface state. "
+            "This is the action tool to create or change a persistent programmable UI surface inside Cortex. "
+            "Do not assume a workflow needs a template, special renderer, or built-in view type; compose it from "
+            "generic app code, workspace data, and host actions. Use renderer_key='generated-ui-app' and "
+            "source_kind='json' for simple host-rendered structured UIs that fit the built-in views and App Kit "
+            "tokens. Use renderer_key='sandboxed-html-app' and source_kind='html' as the first-class full-code "
+            "runtime for custom layouts, richer interactions, and arbitrary app logic; it must still follow App "
+            "Kit classes/tokens and contract rules. Recordful apps must use manage_domain first and bind Domains "
+            "in manifest.data_plan; app code can call the authenticated host bridge with "
+            "window.illo.domain(alias).list/query/get/create/update/archive. App-local state is only for UI "
+            "preferences, filters, drafts, and ephemeral interface state. "
             "For awareness questions about what apps exist or current app state, prefer read_workspace_apps first. "
             "New generated apps must pass the workspace app contract before they are persisted. Use action='help' "
             "or action='schema' with operation to inspect arguments before mutating."
@@ -933,23 +938,25 @@ WORKSPACE_APP_TOOLS = [
                     "type": "string",
                     "default": "generated-ui-app",
                     "description": (
-                        "Renderer runtime key. Use generated-ui-app for host-rendered structured UI. "
-                        "Use sandboxed-html-app only for custom HTML escape hatches."
+                        "Renderer runtime key. Use generated-ui-app for host-rendered structured UI when the "
+                        "built-in JSON views are enough. Use sandboxed-html-app for full-code HTML/CSS/JS apps "
+                        "with custom layout or interaction; it is a normal app runtime, not a use-case template."
                     ),
                 },
                 "source_kind": {
                     "type": "string",
                     "default": "json",
-                    "description": "Generated source format. Use json for generated-ui-app; html for sandboxed HTML apps.",
+                    "description": "Generated source format. Use json for generated-ui-app; html for sandboxed-html-app.",
                 },
                 "source_code": {
                     "type": "string",
                     "description": (
                         "Generated app source. For generated-ui-app, provide a JSON string with "
                         "schema_version=1, title, optional description, and views. For sandboxed html, "
-                        "provide a responsive HTML/CSS/JS body or document. Canonical calls pass "
-                        "manifest, visual_spec, and metadata as separate tool args; the app compiler "
-                        "also normalizes wrapped generated-app envelopes when needed."
+                        "provide a responsive HTML/CSS/JS body or document that uses App Kit classes/tokens and "
+                        "the window.illo bridge for app state and bound Domain records. Canonical calls pass "
+                        "manifest, visual_spec, and metadata as separate tool args; the app compiler also "
+                        "normalizes wrapped generated-app envelopes when needed."
                     ),
                 },
                 "manifest": {

@@ -408,8 +408,8 @@ artifact/evidence criteria instead of marking the work failed.
         name="build-workspace-app",
         description=(
             "Create or update persistent generated Cortex workspace apps with "
-            "Domain-backed records, structured generated UI, App Kit styling, "
-            "and contract validation."
+            "Domain-backed records, full-code or structured UI, App Kit styling, "
+            "host bridge access, and contract validation."
         ),
         procedure="""
 ## Role
@@ -447,16 +447,22 @@ Constellation design contract.
      view/control surface over that data.
    - Use app-local state through `manage_workspace_app` only for UI
      preferences, filters, draft input, view settings, and ephemeral state.
-3. Prefer a host-rendered structured UI spec for simple apps:
+3. Choose the renderer by capability fit, not by use-case template:
+   - Use a host-rendered structured UI spec for simple apps:
    `renderer_key="generated-ui-app"`, `source_kind="json"`, and
    `source_code` as JSON with `schema_version: 1`, `title`, optional
    `description`, `primary_binding`, and `views`.
    Use view types `table`, `list`, `cards`, `chart`, `metrics`, `detail`, or
    `form`. Use editable `status`/`select`/`boolean` columns only when the
    Domain binding allows `update`.
-4. Use sandboxed HTML only as a legacy/escape-hatch renderer when the UI cannot
-   be represented by the structured spec.
-5. For legacy HTML, use the host bridge:
+   - Use `renderer_key="sandboxed-html-app"` and `source_kind="html"` as the
+     first-class full-code app runtime for custom layouts, richer interactions,
+     and arbitrary app logic. This is not a kanban/CRM/dashboard template path;
+     it is how the LLM builds a bespoke app surface while still following App
+     Kit classes/tokens and the app contract.
+   - Do not ask for or invent use-case-specific templates or renderer
+     primitives when generic app code plus Domains can express the workflow.
+4. For full-code HTML apps, use the host bridge:
    - `await window.illo.domains.query/create/update/archive/schema(...)` for
      bound Domain records.
    - `await window.illo.getState/setState/updateState(...)` only for UI state.
@@ -469,18 +475,18 @@ Constellation design contract.
    - Bind DOM event listeners once, outside render/state handlers, or replace
      nodes before rebinding. Never add submit/click listeners every time
      `illo:state` fires.
-6. When using Domains, save a manifest with `data_plan.mode="domain"` and
+5. When using Domains, save a manifest with `data_plan.mode="domain"` and
    one binding per SDK alias. Each binding must include `domain_id` and
    `object_key`; include `domain_slug`, `fields`, and `operations` when known.
-7. Save with `manage_workspace_app(action="create" | "update")`.
-8. Verify contract validation, rendered behavior, persistence, dark/light theme
+6. Save with `manage_workspace_app(action="create" | "update")`.
+7. Verify contract validation, rendered behavior, persistence, dark/light theme
    fit, and thumbnail facade before telling the user the app is done.
-9. Tell the user what app was created and what data it stores.
+8. Tell the user what app was created and what data it stores.
 
 ## App Contract
 
 - The app must work in both the right workspace overlay and the right thread panel.
-- Prefer structured generated UI. Minimal example:
+- Use structured generated UI when it fits. Minimal example:
 
 ```json
 {
@@ -505,7 +511,7 @@ Constellation design contract.
   generated UI spec and pass `manifest`, `visual_spec`, and `metadata` as
   separate tool arguments. The app compiler tolerates wrapped envelopes and
   fills safe defaults, but it will not invent durable data models.
-- Legacy generated HTML must use fluid layout and container-aware sizing.
+- Full-code generated HTML must use fluid layout and container-aware sizing.
 - The persisted manifest must end with `contract_version: 1`, `data_plan`, and
   `design_contract`. The compiler supplies simple app-local UI-state defaults;
   provide explicit Domain bindings for recordful apps.

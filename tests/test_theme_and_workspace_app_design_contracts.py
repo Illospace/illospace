@@ -72,6 +72,26 @@ def test_workspace_app_defaults_prefer_structured_generated_ui():
     assert schema["properties"]["source_kind"]["default"] == STRUCTURED_UI_SOURCE_KIND
 
 
+def test_workspace_app_agent_instructions_are_primitive_first():
+    from brain.systems.runs.tool_definitions import WORKSPACE_APP_TOOLS
+
+    tool = next(item for item in WORKSPACE_APP_TOOLS if item["name"] == "manage_workspace_app")
+    tool_text = json.dumps(tool).lower()
+    skill_text = (
+        REPO_ROOT / "brain/systems/skills/builtin_skill_bundles/build-workspace-app/SKILL.md"
+    ).read_text().lower()
+    bridge_text = (
+        REPO_ROOT / "brain/systems/skills/builtin_skill_bundles/build-workspace-app/references/host-bridge.md"
+    ).read_text().lower()
+
+    combined = "\n".join([tool_text, skill_text, bridge_text])
+    assert "full-code" in combined
+    assert "window.illo.domain" in combined
+    assert "use-case-specific templates" in combined
+    assert "escape-hatch" not in combined
+    assert "legacy/escape" not in combined
+
+
 def test_workspace_app_db_defaults_are_in_canonical_model():
     from brain.platform.db.models.workspace_app import WorkspaceAppVersion
 
