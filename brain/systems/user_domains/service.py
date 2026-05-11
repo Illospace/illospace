@@ -566,7 +566,7 @@ class DomainService:
         run_id: int | None = None,
         idea_id: str | None = None,
     ) -> dict[str, Any]:
-        self.get_domain(org_id, domain_id)
+        domain = self.get_domain(org_id, domain_id)
         stmt = select(DomainRelation).where(
             DomainRelation.id == relation_id,
             DomainRelation.org_id == org_id,
@@ -578,6 +578,7 @@ class DomainService:
         before = self.serialize_relation(relation)
         if mode == "archive":
             relation.archived_at = datetime.now(timezone.utc)
+            domain.updated_by_user_id = actor_id
             self._add_event(
                 org_id=org_id,
                 domain_id=domain_id,
@@ -592,6 +593,7 @@ class DomainService:
             )
             return {"id": relation_id, "mode": "archive", "archived": True}
         if mode == "delete":
+            domain.updated_by_user_id = actor_id
             self._add_event(
                 org_id=org_id,
                 domain_id=domain_id,
