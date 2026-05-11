@@ -107,13 +107,84 @@ def _run_browser_async(coro):
         "Browser tools are not supported from an already-running event loop in this sync handler context"
     )
 
+_TOOL_RESULT_CONTENT_KEY = "_tool_result_content"
+
+
+def _clean_browser_payload(value):
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            if key == _TOOL_RESULT_CONTENT_KEY:
+                continue
+            if key == "image_url" and isinstance(item, str) and item.startswith("data:image/"):
+                cleaned["image_attached"] = True
+                continue
+            cleaned[key] = _clean_browser_payload(item)
+        return cleaned
+    if isinstance(value, list):
+        return [_clean_browser_payload(item) for item in value]
+    return value
+
+
+def _browser_image_block(result: dict) -> dict | None:
+    frame = result.get("frame") if isinstance(result, dict) else None
+    if not isinstance(frame, dict):
+        return None
+    image_url = frame.get("image_url")
+    if not isinstance(image_url, str) or not image_url.startswith("data:image/") or "," not in image_url:
+        return None
+    header, data = image_url.split(",", 1)
+    media_type = header.removeprefix("data:").split(";", 1)[0] or "image/png"
+    if not data.strip():
+        return None
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": data,
+        },
+    }
+
+
+def _browser_result_for_model(result: dict, *, source_tool: str) -> dict:
+    cleaned = _clean_browser_payload(result)
+    if not isinstance(cleaned, dict):
+        cleaned = {"result": cleaned}
+    image_block = _browser_image_block(result)
+    if image_block:
+        cleaned["observation"] = (
+            "Screenshot attached. Use it to choose viewport coordinates and verify visible state; "
+            "use discover/extract only when DOM/text detail is needed."
+        )
+    cleaned["source_tool"] = source_tool
+    blocks = [{"type": "text", "text": json.dumps(cleaned, default=str, sort_keys=True)}]
+    if image_block:
+        blocks.append(image_block)
+    cleaned[_TOOL_RESULT_CONTENT_KEY] = blocks
+    return cleaned
+
+
+def _observe_browser_session(session_id: str, action_result: dict, *, source_tool: str) -> dict:
+    from brain.platform.browser import browser_sessions
+
+    try:
+        observed = _run_browser_async(browser_sessions.command(session_id, "observe", {}))
+    except Exception as exc:
+        fallback = dict(action_result) if isinstance(action_result, dict) else {"result": action_result}
+        fallback["observation_error"] = str(exc)
+        return fallback
+    observed["action_result"] = _clean_browser_payload(action_result)
+    return _browser_result_for_model(observed, source_tool=source_tool)
+
+
 _BROWSER_DISCOVER_DEFAULT_SELECTOR = "a,button,input,textarea,select,[role='button']"
 
 _BROWSER_ACTION_HELP: dict[str, dict[str, object]] = {
     "open": {
         "required": [],
         "optional": ["url", "viewport_width", "viewport_height", "storage_mode", "allow_downloads", "allow_file_uploads"],
-        "effect": "create or reuse the browser session for this thought",
+        "effect": "create or reuse the browser session for this thought; set allow_downloads=true before tasks that may download files",
         "aliases": ["session_open"],
     },
     "navigate": {"required": ["url"], "optional": [], "effect": "navigate the active browser tab"},
@@ -127,6 +198,7 @@ _BROWSER_ACTION_HELP: dict[str, dict[str, object]] = {
     "close_tab": {"required": [], "optional": ["index"], "effect": "close a tab, defaulting to the current tab"},
     "list_tabs": {"required": [], "optional": [], "effect": "read open tabs"},
     "wait": {"required": [], "optional": ["selector", "wait_until", "timeout_ms"], "effect": "wait for page state or selector"},
+    "observe": {"required": [], "optional": [], "effect": "capture the current viewport as a model-visible screenshot"},
     "extract": {"required": [], "optional": ["selector", "mode", "max_chars"], "effect": "read text, HTML, or markdown"},
     "discover": {"required": [], "optional": ["selector", "max_results"], "effect": "find likely interactive elements"},
     "upload_attachment": {
@@ -134,7 +206,7 @@ _BROWSER_ACTION_HELP: dict[str, dict[str, object]] = {
         "optional": [],
         "effect": "upload a Cortex attachment into a file input",
     },
-    "snapshot": {"required": [], "optional": ["persist", "title"], "effect": "capture the current viewport"},
+    "snapshot": {"required": [], "optional": ["persist", "title"], "effect": "capture the current viewport and optionally persist it into the thought"},
     "save_screenshot": {"required": [], "optional": ["full_page"], "effect": "save a PNG screenshot artifact"},
     "print_pdf": {"required": [], "optional": ["landscape"], "effect": "save the current page as a PDF artifact"},
     "close": {"required": [], "optional": [], "effect": "close the active browser session"},
@@ -241,6 +313,8 @@ def _handle_browser(
         return _handle_browser_list_tabs()
     if normalized == "wait":
         return _handle_browser_wait(selector=selector, wait_until=wait_until, timeout_ms=timeout_ms)
+    if normalized == "observe":
+        return _handle_browser_observe()
     if normalized == "extract":
         return _handle_browser_extract(selector=selector, mode=mode, max_chars=max_chars)
     if normalized == "discover":
@@ -305,7 +379,13 @@ def _handle_browser_session_open(
             pass
     state.setdefault("resource_summary", resource_summary)
     _record_browser_preview_artifact(state, source_tool="browser_session_open")
-    return state
+    try:
+        observed = _run_browser_async(runtime.observe())
+        observed["action_result"] = _clean_browser_payload(state)
+        return _browser_result_for_model(observed, source_tool="browser_session_open")
+    except Exception as exc:
+        state["observation_error"] = str(exc)
+        return state
 
 
 def _get_active_browser_session_id(idea_id: str) -> str:
@@ -321,88 +401,102 @@ def _handle_browser_navigate(url: str) -> dict:
     from brain.platform.browser import browser_sessions
 
     idea_id, _, _ = _browser_session_context()
-    result = _run_browser_async(browser_sessions.command(_get_active_browser_session_id(idea_id), "navigate", {"url": url}))
+    session_id = _get_active_browser_session_id(idea_id)
+    result = _run_browser_async(browser_sessions.command(session_id, "navigate", {"url": url}))
     _record_browser_preview_artifact(result, source_tool="browser_navigate")
-    return result
+    return _observe_browser_session(session_id, result, source_tool="browser_navigate")
 
 
 def _handle_browser_click(selector: str | None = None, x: float | None = None, y: float | None = None) -> dict:
     from brain.platform.browser import browser_sessions
 
     idea_id, _, _ = _browser_session_context()
-    return _run_browser_async(browser_sessions.command(
-        _get_active_browser_session_id(idea_id),
+    session_id = _get_active_browser_session_id(idea_id)
+    result = _run_browser_async(browser_sessions.command(
+        session_id,
         "click",
         {"selector": selector, "x": x, "y": y},
     ))
+    return _observe_browser_session(session_id, result, source_tool="browser_click")
 
 
 def _handle_browser_type(text: str, selector: str | None = None, press_enter: bool = False) -> dict:
     from brain.platform.browser import browser_sessions
 
     idea_id, _, _ = _browser_session_context()
-    return _run_browser_async(browser_sessions.command(
-        _get_active_browser_session_id(idea_id),
+    session_id = _get_active_browser_session_id(idea_id)
+    result = _run_browser_async(browser_sessions.command(
+        session_id,
         "type",
         {"text": text, "selector": selector, "press_enter": press_enter},
     ))
+    return _observe_browser_session(session_id, result, source_tool="browser_type")
 
 
 def _handle_browser_key(key: str) -> dict:
     from brain.platform.browser import browser_sessions
 
     idea_id, _, _ = _browser_session_context()
-    return _run_browser_async(browser_sessions.command(
-        _get_active_browser_session_id(idea_id),
+    session_id = _get_active_browser_session_id(idea_id)
+    result = _run_browser_async(browser_sessions.command(
+        session_id,
         "key",
         {"key": key},
     ))
+    return _observe_browser_session(session_id, result, source_tool="browser_key")
 
 
 def _handle_browser_back() -> dict:
     from brain.platform.browser import browser_sessions
 
     idea_id, _, _ = _browser_session_context()
-    return _run_browser_async(browser_sessions.command(
-        _get_active_browser_session_id(idea_id),
+    session_id = _get_active_browser_session_id(idea_id)
+    result = _run_browser_async(browser_sessions.command(
+        session_id,
         "back",
         {},
     ))
+    return _observe_browser_session(session_id, result, source_tool="browser_back")
 
 
 def _handle_browser_forward() -> dict:
     from brain.platform.browser import browser_sessions
 
     idea_id, _, _ = _browser_session_context()
-    return _run_browser_async(browser_sessions.command(
-        _get_active_browser_session_id(idea_id),
+    session_id = _get_active_browser_session_id(idea_id)
+    result = _run_browser_async(browser_sessions.command(
+        session_id,
         "forward",
         {},
     ))
+    return _observe_browser_session(session_id, result, source_tool="browser_forward")
 
 
 def _handle_browser_new_tab(url: str | None = None) -> dict:
     from brain.platform.browser import browser_sessions
 
     idea_id, _, _ = _browser_session_context()
+    session_id = _get_active_browser_session_id(idea_id)
     result = _run_browser_async(browser_sessions.command(
-        _get_active_browser_session_id(idea_id),
+        session_id,
         "new_tab",
         {"url": url},
     ))
     _record_browser_preview_artifact(result, source_tool="browser_new_tab")
-    return result
+    return _observe_browser_session(session_id, result, source_tool="browser_new_tab")
 
 
 def _handle_browser_switch_tab(index: int) -> dict:
     from brain.platform.browser import browser_sessions
 
     idea_id, _, _ = _browser_session_context()
-    return _run_browser_async(browser_sessions.command(
-        _get_active_browser_session_id(idea_id),
+    session_id = _get_active_browser_session_id(idea_id)
+    result = _run_browser_async(browser_sessions.command(
+        session_id,
         "switch_tab",
         {"index": index},
     ))
+    return _observe_browser_session(session_id, result, source_tool="browser_switch_tab")
 
 
 def _handle_browser_close_tab(index: int | None = None) -> dict:
@@ -410,11 +504,13 @@ def _handle_browser_close_tab(index: int | None = None) -> dict:
 
     idea_id, _, _ = _browser_session_context()
     payload = {} if index is None else {"index": index}
-    return _run_browser_async(browser_sessions.command(
-        _get_active_browser_session_id(idea_id),
+    session_id = _get_active_browser_session_id(idea_id)
+    result = _run_browser_async(browser_sessions.command(
+        session_id,
         "close_tab",
         payload,
     ))
+    return _observe_browser_session(session_id, result, source_tool="browser_close_tab")
 
 
 def _handle_browser_list_tabs() -> dict:
@@ -432,11 +528,22 @@ def _handle_browser_wait(selector: str | None = None, wait_until: str = "load", 
     from brain.platform.browser import browser_sessions
 
     idea_id, _, _ = _browser_session_context()
-    return _run_browser_async(browser_sessions.command(
-        _get_active_browser_session_id(idea_id),
+    session_id = _get_active_browser_session_id(idea_id)
+    result = _run_browser_async(browser_sessions.command(
+        session_id,
         "wait",
         {"selector": selector, "wait_until": wait_until, "timeout_ms": timeout_ms},
     ))
+    return _observe_browser_session(session_id, result, source_tool="browser_wait")
+
+
+def _handle_browser_observe() -> dict:
+    from brain.platform.browser import browser_sessions
+
+    idea_id, _, _ = _browser_session_context()
+    session_id = _get_active_browser_session_id(idea_id)
+    result = _run_browser_async(browser_sessions.command(session_id, "observe", {}))
+    return _browser_result_for_model(result, source_tool="browser_observe")
 
 
 def _handle_browser_extract(selector: str | None = None, mode: str = "text", max_chars: int = 6000) -> dict:
@@ -468,24 +575,27 @@ def _handle_browser_upload_attachment(selector: str, attachment_url: str) -> dic
     from brain.platform.browser import browser_sessions
 
     idea_id, _, _ = _browser_session_context()
-    return _run_browser_async(browser_sessions.command(
-        _get_active_browser_session_id(idea_id),
+    session_id = _get_active_browser_session_id(idea_id)
+    result = _run_browser_async(browser_sessions.command(
+        session_id,
         "upload_attachment",
         {"selector": selector, "attachment_url": attachment_url},
     ))
+    return _observe_browser_session(session_id, result, source_tool="browser_upload_attachment")
 
 
 def _handle_browser_snapshot(persist: bool = False, title: str | None = None) -> dict:
     from brain.platform.browser import browser_sessions
 
     idea_id, _, _ = _browser_session_context()
+    session_id = _get_active_browser_session_id(idea_id)
     result = _run_browser_async(browser_sessions.command(
-        _get_active_browser_session_id(idea_id),
+        session_id,
         "snapshot",
         {"persist": persist, "title": title},
     ))
     _record_browser_snapshot_artifact(result, source_tool="browser_snapshot")
-    return result
+    return _browser_result_for_model(result, source_tool="browser_snapshot")
 
 
 def _handle_browser_save_screenshot(full_page: bool = True) -> dict:

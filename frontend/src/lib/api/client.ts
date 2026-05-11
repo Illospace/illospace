@@ -347,6 +347,38 @@ export interface DomainRecordRead {
   updated_at: string;
 }
 
+export interface DomainRelationRead {
+  id: number;
+  org_id: string;
+  domain_id: number;
+  relation_type_id: number;
+  relation_key: string | null;
+  source_record_id: number;
+  target_record_id: number;
+  properties: Record<string, any>;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DomainEventRead {
+  id: number;
+  org_id: string;
+  domain_id: number;
+  record_id: number | null;
+  relation_id: number | null;
+  event_type: string;
+  actor_kind: string;
+  actor_id: string | null;
+  run_id: number | null;
+  idea_id: string | null;
+  before: Record<string, any>;
+  after: Record<string, any>;
+  patch: Record<string, any>;
+  reason: string | null;
+  created_at: string;
+}
+
 export interface DomainFieldCreateInput {
   key: string;
   name?: string | null;
@@ -865,6 +897,49 @@ export const api = {
     fetchJson<any>(withQuery(`/api/domains/${domainId}/records/${recordId}`, { mode }), {
       method: 'DELETE',
     }),
+  listDomainRelations: (
+    domainId: number,
+    options: {
+      relationKey?: string | null;
+      sourceRecordId?: number | null;
+      targetRecordId?: number | null;
+      includeArchived?: boolean;
+      limit?: number;
+    } = {},
+  ) =>
+    fetchJson<DomainRelationRead[]>(
+      withQuery(`/api/domains/${domainId}/relations`, {
+        relation_key: options.relationKey,
+        source_record_id: options.sourceRecordId,
+        target_record_id: options.targetRecordId,
+        include_archived: options.includeArchived,
+        limit: options.limit ?? 100,
+      }),
+    ),
+  createDomainRelation: (
+    domainId: number,
+    data: {
+      relation_key: string;
+      source_record_id: number;
+      target_record_id: number;
+      properties?: Record<string, any>;
+    },
+  ) =>
+    fetchJson<DomainRelationRead>(`/api/domains/${domainId}/relations`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  removeDomainRelation: (domainId: number, relationId: number, mode: 'archive' | 'delete' = 'archive') =>
+    fetchJson<any>(withQuery(`/api/domains/${domainId}/relations/${relationId}`, { mode }), {
+      method: 'DELETE',
+    }),
+  listDomainEvents: (domainId: number, options: { recordId?: number | null; limit?: number } = {}) =>
+    fetchJson<DomainEventRead[]>(
+      withQuery(`/api/domains/${domainId}/events`, {
+        record_id: options.recordId,
+        limit: options.limit ?? 50,
+      }),
+    ),
 
   // Generated workspace apps
   listWorkspaceApps: () => fetchJson<WorkspaceAppRead[]>('/api/workspace-apps/'),

@@ -524,6 +524,90 @@ class DomainService:
         )
         return relation
 
+    def list_relations(
+        self,
+        org_id: str,
+        domain_id: int,
+        *,
+        relation_key: str | None = None,
+        source_record_id: int | None = None,
+        target_record_id: int | None = None,
+        include_archived: bool = False,
+        limit: int = 100,
+    ) -> Sequence[DomainRelation]:
+        domain = self.get_domain(org_id, domain_id)
+        stmt = select(DomainRelation).where(
+            DomainRelation.org_id == org_id,
+            DomainRelation.domain_id == domain.id,
+        )
+        if relation_key:
+            relation_type = self.get_relation_type(domain.id, relation_key)
+            stmt = stmt.where(DomainRelation.relation_type_id == relation_type.id)
+        if source_record_id is not None:
+            stmt = stmt.where(DomainRelation.source_record_id == source_record_id)
+        if target_record_id is not None:
+            stmt = stmt.where(DomainRelation.target_record_id == target_record_id)
+        if not include_archived:
+            stmt = stmt.where(DomainRelation.archived_at.is_(None))
+        stmt = stmt.order_by(DomainRelation.updated_at.desc(), DomainRelation.id.desc()).limit(
+            max(1, min(int(limit), 500))
+        )
+        return self.session.scalars(stmt).all()
+
+    def remove_relation(
+        self,
+        org_id: str,
+        domain_id: int,
+        relation_id: int,
+        *,
+        mode: str = "archive",
+        actor_id: str | None = None,
+        actor_kind: str = "human",
+        run_id: int | None = None,
+        idea_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.get_domain(org_id, domain_id)
+        stmt = select(DomainRelation).where(
+            DomainRelation.id == relation_id,
+            DomainRelation.org_id == org_id,
+            DomainRelation.domain_id == domain_id,
+        )
+        relation = self.session.scalars(stmt).first()
+        if relation is None:
+            raise DomainNotFound(f"Relation {relation_id} not found")
+        before = self.serialize_relation(relation)
+        if mode == "archive":
+            relation.archived_at = datetime.now(timezone.utc)
+            self._add_event(
+                org_id=org_id,
+                domain_id=domain_id,
+                relation_id=relation.id,
+                event_type="relation.archived",
+                actor_id=actor_id,
+                actor_kind=actor_kind,
+                run_id=run_id,
+                idea_id=idea_id,
+                before=before,
+                after=self.serialize_relation(relation),
+            )
+            return {"id": relation_id, "mode": "archive", "archived": True}
+        if mode == "delete":
+            self._add_event(
+                org_id=org_id,
+                domain_id=domain_id,
+                relation_id=relation.id,
+                event_type="relation.deleted",
+                actor_id=actor_id,
+                actor_kind=actor_kind,
+                run_id=run_id,
+                idea_id=idea_id,
+                before=before,
+            )
+            self.session.delete(relation)
+            self.session.flush()
+            return {"id": relation_id, "mode": "delete", "deleted": True}
+        raise DomainError("mode must be 'archive' or 'delete'")
+
     def list_events(
         self,
         org_id: str,

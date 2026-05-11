@@ -788,6 +788,14 @@ result = page_info()
             "state": self.state_payload(),
         }
 
+    async def observe(self) -> dict[str, Any]:
+        frame = await self._capture_frame(force=True)
+        return {
+            "session_id": self.session_id,
+            "frame": frame.__dict__,
+            "state": self.state_payload(),
+        }
+
     async def save_screenshot(self, *, full_page: bool = True) -> dict[str, Any]:
         async with self._action_lock:
             await self.start()
@@ -1002,19 +1010,43 @@ result = {"image": base64.b64encode(data).decode("ascii"), "info": page_info()}
         args.append("about:blank")
         return args
 
-    def _ensure_chrome_sidecar_permissions(self, chrome: str) -> None:
+    def _chrome_sidecar_executables(self, chrome: str) -> list[Path]:
         executable = Path(chrome)
-        for path in (
+        candidates: list[Path] = [
             executable,
             executable.with_name("chrome_crashpad_handler"),
             executable.with_name("chrome_sandbox"),
-        ):
+        ]
+        contents_root = next((parent for parent in executable.parents if parent.name == "Contents"), None)
+        if contents_root is not None:
+            frameworks_root = contents_root / "Frameworks"
+            if frameworks_root.exists():
+                candidates.extend(path for path in frameworks_root.glob("**/Helpers/*") if path.is_file())
+                candidates.extend(path for path in frameworks_root.glob("**/*.app/Contents/MacOS/*") if path.is_file())
+        deduped: list[Path] = []
+        seen: set[Path] = set()
+        for path in candidates:
+            if path in seen:
+                continue
+            deduped.append(path)
+            seen.add(path)
+        return deduped
+
+    def _ensure_chrome_sidecar_permissions(self, chrome: str) -> None:
+        for path in self._chrome_sidecar_executables(chrome):
             if not path.exists() or not path.is_file():
                 continue
             try:
                 path.chmod(path.stat().st_mode | 0o100)
             except OSError:
                 logger.debug("Failed to chmod Chrome sidecar executable: %s", path, exc_info=True)
+
+    def _harness_log_tail(self, limit: int = 2000) -> str:
+        try:
+            text = (self._harness_ipc_dir / "bu.log").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        return text[-limit:].strip()
 
     def _chrome_launch_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -1182,16 +1214,23 @@ print({json.dumps(marker)} + json.dumps(result))
         try:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
-                timeout=timeout or max(10.0, self.service.nav_timeout_ms / 1000 + 5),
+                timeout=timeout or max(40.0, self.service.nav_timeout_ms / 1000 + 5),
             )
         except asyncio.TimeoutError as exc:
             process.kill()
-            await process.communicate()
-            raise BrowserCapabilityError("Browser Harness command timed out") from exc
+            stdout, stderr = await process.communicate()
+            out = stdout.decode("utf-8", "replace")
+            err = stderr.decode("utf-8", "replace")
+            detail = (err or out or self._harness_log_tail() or "").strip()
+            message = "Browser Harness command timed out"
+            if detail:
+                message = f"{message}: {detail[-2000:]}"
+            raise BrowserCapabilityError(message) from exc
         out = stdout.decode("utf-8", "replace")
         err = stderr.decode("utf-8", "replace")
         if process.returncode:
-            raise BrowserCapabilityError((err or out or "Browser Harness command failed").strip())
+            detail = (err or out or self._harness_log_tail() or "Browser Harness command failed").strip()
+            raise BrowserCapabilityError(detail)
         for line in reversed(out.splitlines()):
             if line.startswith(marker):
                 return json.loads(line[len(marker):])
@@ -1629,7 +1668,11 @@ class BrowserSessionService:
         try:
             await runtime.start()
             if url:
-                await runtime.navigate(url)
+                current_url = str(runtime.current_url or "").strip()
+                if created_session or not current_url or current_url == "about:blank" or current_url.startswith("chrome://"):
+                    await runtime.new_tab(url)
+                else:
+                    await runtime.navigate(url)
             await runtime.capture_visible_frame(reason="created" if created_session else "opened")
         except Exception as exc:
             _record_browser_harness_tool_call(
@@ -1753,6 +1796,8 @@ class BrowserSessionService:
                     persist=bool(payload.get("persist")),
                     title=payload.get("title"),
                 )
+            if action == "observe":
+                return await runtime.observe()
             if action == "close":
                 await runtime.close(reason=payload.get("reason", "closed"))
                 async with self._runtime_lock:

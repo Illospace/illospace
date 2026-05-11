@@ -3,10 +3,14 @@
   import { onMount } from 'svelte';
 
   import {
+    createDomainRelation,
     createDomainRecord,
     getDomain,
     getDomainRecord,
+    listDomainEvents,
     listDomainRecords,
+    listDomainRelations,
+    removeDomainRelation,
     removeDomainRecord,
     updateDomainRecord,
     type WorkspaceAppRead,
@@ -25,6 +29,8 @@
     patch?: Record<string, any>;
     domain?: Record<string, any>;
     alias?: string;
+    actionKey?: string;
+    payload?: Record<string, any>;
     message?: string;
   };
 
@@ -146,11 +152,12 @@
         function domain(alias) {
           const normalizedAlias = String(alias || '').trim();
           if (!normalizedAlias) throw new Error('window.illo.domain(alias) requires an alias');
-          return {
+          const api = {
             schema: () => request('illo:domain:schema', { alias: normalizedAlias, domain: { alias: normalizedAlias } }),
             list: (options) => request('illo:domain:list', { alias: normalizedAlias, domain: { alias: normalizedAlias, ...(options || {}) } }),
             query: (options) => request('illo:domain:query', { alias: normalizedAlias, domain: { alias: normalizedAlias, ...(options || {}) } }),
             get: (recordId) => request('illo:domain:get', { alias: normalizedAlias, domain: { alias: normalizedAlias, recordId } }),
+            aggregate: (options) => request('illo:domain:aggregate', { alias: normalizedAlias, domain: { alias: normalizedAlias, ...(options || {}) } }),
             create: (data, options) => request('illo:domain:create', {
               alias: normalizedAlias,
               domain: { alias: normalizedAlias, data: data || {}, ...(options || {}) }
@@ -159,8 +166,53 @@
               alias: normalizedAlias,
               domain: { alias: normalizedAlias, recordId, dataPatch: dataPatch || {}, ...(options || {}) }
             }),
-            archive: (recordId) => request('illo:domain:archive', { alias: normalizedAlias, domain: { alias: normalizedAlias, recordId } })
+            bulkUpdate: (updates, options) => request('illo:domain:bulkUpdate', {
+              alias: normalizedAlias,
+              domain: Array.isArray(updates)
+                ? { alias: normalizedAlias, updates, ...(options || {}) }
+                : { alias: normalizedAlias, ...(updates || {}) }
+            }),
+            archive: (recordId) => request('illo:domain:archive', { alias: normalizedAlias, domain: { alias: normalizedAlias, recordId } }),
+            history: (recordIdOrOptions, options) => {
+              const payload = recordIdOrOptions && typeof recordIdOrOptions === 'object'
+                ? recordIdOrOptions
+                : { recordId: recordIdOrOptions, ...(options || {}) };
+              return request('illo:domain:history', { alias: normalizedAlias, domain: { alias: normalizedAlias, ...(payload || {}) } });
+            },
+            subscribe: (handler, options) => {
+              if (typeof handler !== 'function') throw new Error('domain.subscribe(handler) requires a function');
+              const config = options || {};
+              const intervalMs = Math.max(1000, Math.min(Number(config.intervalMs || config.interval_ms || 5000), 60000));
+              let active = true;
+              let timer = null;
+              async function tick() {
+                if (!active) return;
+                try {
+                  const records = await api.list(config);
+                  if (active) handler(records);
+                } catch (error) {
+                  if (active && typeof config.onError === 'function') config.onError(error);
+                } finally {
+                  if (active) timer = setTimeout(tick, intervalMs);
+                }
+              }
+              tick();
+              return function unsubscribe() {
+                active = false;
+                if (timer) clearTimeout(timer);
+              };
+            },
+            relations: {
+              list: (options) => request('illo:domain:listRelations', { alias: normalizedAlias, domain: { alias: normalizedAlias, ...(options || {}) } }),
+              link: (relationKey, sourceRecordId, targetRecordId, properties) => request('illo:domain:createRelation', {
+                alias: normalizedAlias,
+                domain: { alias: normalizedAlias, relationKey, sourceRecordId, targetRecordId, properties: properties || {} }
+              }),
+              create: (payload) => request('illo:domain:createRelation', { alias: normalizedAlias, domain: { alias: normalizedAlias, ...(payload || {}) } }),
+              archive: (relationId) => request('illo:domain:archiveRelation', { alias: normalizedAlias, domain: { alias: normalizedAlias, relationId } })
+            }
           };
+          return api;
         }
 
         function compatibilityRequest(type, payload) {
@@ -180,9 +232,18 @@
             list: (payload) => compatibilityRequest('illo:domain:list', payload),
             query: (payload) => compatibilityRequest('illo:domain:query', payload),
             get: (payload) => compatibilityRequest('illo:domain:get', payload),
+            aggregate: (payload) => compatibilityRequest('illo:domain:aggregate', payload),
             create: (payload) => compatibilityRequest('illo:domain:create', payload),
             update: (payload) => compatibilityRequest('illo:domain:update', payload),
-            archive: (payload) => compatibilityRequest('illo:domain:archive', payload)
+            bulkUpdate: (payload) => compatibilityRequest('illo:domain:bulkUpdate', payload),
+            archive: (payload) => compatibilityRequest('illo:domain:archive', payload),
+            history: (payload) => compatibilityRequest('illo:domain:history', payload),
+            listRelations: (payload) => compatibilityRequest('illo:domain:listRelations', payload),
+            createRelation: (payload) => compatibilityRequest('illo:domain:createRelation', payload),
+            archiveRelation: (payload) => compatibilityRequest('illo:domain:archiveRelation', payload)
+          },
+          actions: {
+            run: (actionKey, payload) => request('illo:action:run', { actionKey: String(actionKey || ''), payload: payload || {} })
           },
           toast: (message) => parent.postMessage({ source: 'illo-app', type: 'illo:toast', message: String(message || '') }, '*')
         };
@@ -641,6 +702,76 @@
     }
   }
 
+  function recordFieldValue(record: any, key: string | null | undefined) {
+    if (!key) return 'all';
+    if (key === 'id' || key === 'title' || key === 'object_key' || key === 'created_at' || key === 'updated_at') {
+      return record[key];
+    }
+    return record?.data?.[key];
+  }
+
+  function normalizeGroupValues(value: unknown): unknown[] {
+    if (Array.isArray(value)) return value.length ? value : ['(empty)'];
+    if (value === undefined || value === null || value === '') return ['(empty)'];
+    return [value];
+  }
+
+  function numericValue(value: unknown) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function aggregateDomainRecords(records: any[], request: DomainRequest) {
+    const metrics = request.metrics?.length ? request.metrics : [{ type: 'count', as: 'count' }];
+    const groups = new Map<string, { key: unknown; label: string; records: any[]; values: Record<string, any> }>();
+
+    for (const record of records) {
+      for (const groupValue of normalizeGroupValues(recordFieldValue(record, request.groupBy))) {
+        const key = JSON.stringify(groupValue);
+        const label = String(groupValue);
+        const group = groups.get(key) ?? { key: groupValue, label, records: [], values: {} };
+        group.records.push(record);
+        groups.set(key, group);
+      }
+    }
+
+    for (const group of groups.values()) {
+      for (const metric of metrics) {
+        const metricType = String(metric.type || 'count').toLowerCase();
+        const metricKey = metric.as || (metric.field ? `${metricType}_${metric.field}` : metricType);
+        if (metricType === 'count') {
+          group.values[metricKey] = group.records.length;
+          continue;
+        }
+        const values = group.records
+          .map((record) => numericValue(recordFieldValue(record, metric.field)))
+          .filter((value): value is number => value !== null);
+        if (metricType === 'sum') {
+          group.values[metricKey] = values.reduce((total, value) => total + value, 0);
+        } else if (metricType === 'avg' || metricType === 'average') {
+          group.values[metricKey] = values.length ? values.reduce((total, value) => total + value, 0) / values.length : null;
+        } else if (metricType === 'min') {
+          group.values[metricKey] = values.length ? Math.min(...values) : null;
+        } else if (metricType === 'max') {
+          group.values[metricKey] = values.length ? Math.max(...values) : null;
+        } else {
+          group.values[metricKey] = null;
+        }
+      }
+    }
+
+    return {
+      total: records.length,
+      groupBy: request.groupBy ?? null,
+      metrics,
+      groups: Array.from(groups.values()).map((group) => ({
+        key: group.key,
+        label: group.label,
+        ...group.values,
+      })),
+    };
+  }
+
   async function executeDomainRequest(request: DomainRequest): Promise<unknown> {
     switch (request.operation) {
       case 'schema':
@@ -655,6 +786,17 @@
             limit: request.limit,
           }),
         );
+      case 'aggregate': {
+        const records = withDomainRecordAliases(
+          await listDomainRecords(request.domainId, {
+            objectKey: request.objectKey,
+            search: request.search,
+            includeArchived: request.includeArchived,
+            limit: request.limit,
+          }),
+        ) as any[];
+        return aggregateDomainRecords(records, request);
+      }
       case 'get':
         return withDomainRecordAliases(await getDomainRecord(request.domainId, request.recordId!));
       case 'create':
@@ -672,8 +814,40 @@
             expected_version: request.expectedVersion,
           }),
         );
+      case 'bulkUpdate':
+        return Promise.all(
+          (request.updates || []).map((update) =>
+            updateDomainRecord(request.domainId, update.recordId, {
+              data_patch: update.dataPatch || {},
+              title: update.title,
+              expected_version: update.expectedVersion,
+            }).then(withDomainRecordAliases),
+          ),
+        );
       case 'archive':
         return removeDomainRecord(request.domainId, request.recordId!, 'archive');
+      case 'history':
+        return listDomainEvents(request.domainId, {
+          recordId: request.recordId,
+          limit: request.limit,
+        });
+      case 'listRelations':
+        return listDomainRelations(request.domainId, {
+          relationKey: request.relationKey,
+          sourceRecordId: request.sourceRecordId,
+          targetRecordId: request.targetRecordId,
+          includeArchived: request.includeArchived,
+          limit: request.limit,
+        });
+      case 'createRelation':
+        return createDomainRelation(request.domainId, {
+          relation_key: request.relationKey!,
+          source_record_id: request.sourceRecordId!,
+          target_record_id: request.targetRecordId!,
+          properties: request.properties || {},
+        });
+      case 'archiveRelation':
+        return removeDomainRelation(request.domainId, request.relationId!, 'archive');
       default:
         throw new Error(`Unsupported Domain operation '${request.operation}'`);
     }
@@ -728,6 +902,26 @@
     }
   }
 
+  async function handleActionRequest(message: RuntimeMessage) {
+    const actionKey = String(message.actionKey || '').trim();
+    try {
+      if (!actionKey) throw new Error('actions.run(actionKey) requires an action key');
+      const actions =
+        (manifest.actions && typeof manifest.actions === 'object' ? manifest.actions : null) ??
+        (manifest.action_plan?.actions && typeof manifest.action_plan.actions === 'object' ? manifest.action_plan.actions : null) ??
+        {};
+      const action = actions[actionKey];
+      if (!action) {
+        throw new Error(`Workspace action '${actionKey}' is not declared in this app manifest`);
+      }
+      throw new Error(
+        `Workspace action '${actionKey}' is declared, but no server-side action executor is registered yet. Use Domain APIs in-app, or add a product-level action executor for external systems.`,
+      );
+    } catch (err: any) {
+      respond(message.requestId, null, err?.detail || err?.message || 'Workspace action failed');
+    }
+  }
+
   function handleMessage(event: MessageEvent<RuntimeMessage>) {
     if (!browser || event.source !== frameWindow()) return;
     const message = event.data || {};
@@ -756,6 +950,11 @@
 
     if (message.type?.startsWith('illo:domain:')) {
       void handleDomainRequest(message);
+      return;
+    }
+
+    if (message.type === 'illo:action:run') {
+      void handleActionRequest(message);
       return;
     }
 

@@ -188,6 +188,42 @@ def test_valid_domain_backed_manifest_saves(session):
     assert version.manifest["data_plan"]["bindings"]["todos"]["object_key"] == "todo_item"
 
 
+def test_domain_binding_accepts_generic_app_primitives(session):
+    domain = _todo_domain(session)
+    operations = [
+        "schema",
+        "list",
+        "query",
+        "get",
+        "create",
+        "update",
+        "archive",
+        "aggregate",
+        "bulkUpdate",
+        "history",
+        "listRelations",
+        "createRelation",
+        "archiveRelation",
+    ]
+
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="todo-workbench",
+        name="Todo Workbench",
+        renderer_key="sandboxed-html-app",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=_manifest(domain.id, operations=operations),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    version = active_version(session, app.id)
+    assert version is not None
+    assert version.manifest["data_plan"]["bindings"]["todos"]["operations"] == operations
+
+
 def test_valid_structured_generated_ui_app_saves(session):
     domain = _todo_domain(session)
 

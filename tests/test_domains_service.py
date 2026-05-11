@@ -245,6 +245,12 @@ def test_relations_validate_object_types(session):
         target_record_id=hook.id,
     )
     assert service.serialize_relation(relation)["relation_key"] == "trial_tests_hook"
+    assert service.list_relations(ORG_ID, domain.id, source_record_id=trial.id)[0].id == relation.id
+    assert service.list_relations(ORG_ID, domain.id, target_record_id=hook.id)[0].id == relation.id
+    assert service.remove_relation(ORG_ID, domain.id, relation.id)["archived"] is True
+    assert service.list_relations(ORG_ID, domain.id) == []
+    assert service.list_relations(ORG_ID, domain.id, include_archived=True)[0].id == relation.id
+    assert service.list_events(ORG_ID, domain.id, limit=2)[0].event_type == "relation.archived"
 
     with pytest.raises(DomainError, match="source_record_id"):
         service.create_relation(

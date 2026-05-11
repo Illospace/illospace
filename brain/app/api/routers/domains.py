@@ -354,6 +354,60 @@ def create_domain_relation(
         raise _domain_error(exc) from exc
 
 
+@router.get("/{domain_id}/relations", response_model=list[DomainRelationRead])
+def list_domain_relations(
+    domain_id: int,
+    relation_key: str | None = None,
+    source_record_id: int | None = None,
+    target_record_id: int | None = None,
+    include_archived: bool = False,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        return [
+            service.serialize_relation(relation)
+            for relation in service.list_relations(
+                org_id,
+                domain_id,
+                relation_key=relation_key,
+                source_record_id=source_record_id,
+                target_record_id=target_record_id,
+                include_archived=include_archived,
+                limit=limit,
+            )
+        ]
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
+
+
+@router.delete("/{domain_id}/relations/{relation_id}")
+def remove_domain_relation(
+    domain_id: int,
+    relation_id: int,
+    mode: str = "archive",
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    _require_domain_write(user)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        return service.remove_relation(
+            org_id,
+            domain_id,
+            relation_id,
+            mode=mode,
+            actor_id=str(user.get("id")) if user.get("id") else None,
+            actor_kind="human",
+        )
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
+
+
 @router.get("/{domain_id}/events", response_model=list[DomainEventRead])
 def list_domain_events(
     domain_id: int,

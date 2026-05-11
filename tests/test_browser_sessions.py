@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -232,6 +233,44 @@ def test_browser_tool_handlers_do_not_record_failed_preview(monkeypatch):
     )
 
     assert persisted == []
+
+
+def test_browser_result_for_model_attaches_screenshot_without_text_base64():
+    from brain.systems.runs.tool_catalog.handlers.browser import (
+        _TOOL_RESULT_CONTENT_KEY,
+        _browser_result_for_model,
+    )
+
+    result = {
+        "session_id": "sess-observe",
+        "frame": {
+            "image_url": "data:image/png;base64,abc123",
+            "width": 900,
+            "height": 457,
+            "sha1": "frame-sha",
+        },
+        "state": {
+            "id": "sess-observe",
+            "status": "ready",
+            "current_url": "https://example.com",
+            "page_title": "Example",
+        },
+    }
+
+    payload = _browser_result_for_model(result, source_tool="browser_observe")
+
+    assert payload["frame"]["image_attached"] is True
+    assert "image_url" not in payload["frame"]
+    blocks = payload[_TOOL_RESULT_CONTENT_KEY]
+    assert blocks[0]["type"] == "text"
+    assert "abc123" not in blocks[0]["text"]
+    text_payload = json.loads(blocks[0]["text"])
+    assert text_payload["frame"]["image_attached"] is True
+    assert text_payload["source_tool"] == "browser_observe"
+    assert blocks[1] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "abc123"},
+    }
 
 
 def test_get_browser_session_endpoint(monkeypatch):
@@ -717,7 +756,7 @@ async def test_browser_service_captures_visible_frame_when_agent_opens_session(m
         self.status = "ready"
         return None
 
-    async def fake_navigate(self, url):
+    async def fake_new_tab(self, url):
         self.current_url = url
         self.page_title = "YouTube"
         return self.state_payload()
@@ -729,7 +768,7 @@ async def test_browser_service_captures_visible_frame_when_agent_opens_session(m
     tool_traces = []
 
     monkeypatch.setattr(BrowserSessionRuntime, "start", fake_start)
-    monkeypatch.setattr(BrowserSessionRuntime, "navigate", fake_navigate)
+    monkeypatch.setattr(BrowserSessionRuntime, "new_tab", fake_new_tab)
     monkeypatch.setattr(BrowserSessionRuntime, "capture_visible_frame", fake_capture_visible_frame)
     monkeypatch.setattr(
         "brain.platform.browser.service._record_browser_harness_tool_call",
@@ -1378,7 +1417,32 @@ def test_browser_runtime_repairs_chrome_sidecar_permissions(tmp_path):
     crashpad = chrome.with_name("chrome_crashpad_handler")
     sandbox = chrome.with_name("chrome_sandbox")
     chrome.parent.mkdir(parents=True)
-    for path in (chrome, crashpad, sandbox):
+    mac_chrome = (
+        tmp_path
+        / "chrome-mac-arm64"
+        / "Google Chrome for Testing.app"
+        / "Contents"
+        / "MacOS"
+        / "Google Chrome for Testing"
+    )
+    mac_crashpad = (
+        mac_chrome.parents[1]
+        / "Frameworks"
+        / "Google Chrome for Testing Framework.framework"
+        / "Versions"
+        / "148.0.7778.97"
+        / "Helpers"
+        / "chrome_crashpad_handler"
+    )
+    mac_gpu_helper = (
+        mac_crashpad.parent
+        / "Google Chrome for Testing Helper (GPU).app"
+        / "Contents"
+        / "MacOS"
+        / "Google Chrome for Testing Helper (GPU)"
+    )
+    for path in (chrome, crashpad, sandbox, mac_chrome, mac_crashpad, mac_gpu_helper):
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("#!/bin/sh\n", encoding="utf-8")
         path.chmod(0o600)
 
@@ -1401,10 +1465,14 @@ def test_browser_runtime_repairs_chrome_sidecar_permissions(tmp_path):
     runtime = BrowserSessionRuntime(service, record)
 
     runtime._ensure_chrome_sidecar_permissions(str(chrome))
+    runtime._ensure_chrome_sidecar_permissions(str(mac_chrome))
 
     assert chrome.stat().st_mode & 0o100
     assert crashpad.stat().st_mode & 0o100
     assert sandbox.stat().st_mode & 0o100
+    assert mac_chrome.stat().st_mode & 0o100
+    assert mac_crashpad.stat().st_mode & 0o100
+    assert mac_gpu_helper.stat().st_mode & 0o100
 
 
 @pytest.mark.asyncio
