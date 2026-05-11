@@ -46,6 +46,16 @@ export interface RuntimeSettings {
   };
 }
 
+export interface RuntimeUpdateStatus {
+  status: 'idle' | 'running';
+  available: boolean;
+  pid?: number | null;
+  started_at?: string | null;
+  active_agent_runs: number;
+  log_path?: string | null;
+  detail?: string | null;
+}
+
 export interface MemoryCheck {
   status: 'ok' | 'error';
   detail: string;

@@ -57,6 +57,9 @@ def test_ops_deploy_drains_worker_instead_of_restarting_active_runs():
 
     assert "active_agent_run_count" in content
     assert "restart_or_drain_worker" in content
+    assert "start_worker_handoff" in content
+    assert "monitor_worker_handoff" in content
+    assert "ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1" in content
     assert "systemctl --user kill --kill-who=main --signal=TERM cortex-worker" in content
     assert "active AgentRun(s); signaling drain instead of restart" in content
 
@@ -186,9 +189,22 @@ def test_illo_exposes_native_default_dev_mode_and_compose_deploy():
     assert 'run_dev' in content
     assert "deploy" in content
     assert 'deploy_command "${@:2}"' in content
+    assert 'update_command "${@:2}"' in content
     assert "--no-next" in content
     assert "worker-status" not in content
     assert "worker-drain" not in content
+
+
+def test_illo_update_auto_selects_native_or_compose_server_mode():
+    illo_path = Path(__file__).resolve().parents[1] / "illo"
+    content = illo_path.read_text()
+
+    assert "update_detect_mode" in content
+    assert "update_native_services_active" in content
+    assert "update_compose_stack_present" in content
+    assert 'exec "$ROOT/ops/deploy.sh"' in content
+    assert "deploy_command upgrade --build --no-pull" in content
+    assert "Self-update is not enabled for local/dev runs." in content
 
 
 def test_compose_deploy_stays_private_without_builtin_public_ingress():
@@ -201,3 +217,19 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     assert service_names == ["postgres", "migrate", "api", "worker", "scheduler", "web"]
     assert "127.0.0.1:${ILLO_WEB_PORT:-8080}:8080" in compose
     assert "deploy " + "publish" not in launcher
+
+
+def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
+    upgrade = (Path(__file__).resolve().parents[1] / "deploy" / "scripts" / "upgrade.sh").read_text()
+
+    assert "active_agent_run_count" in upgrade
+    assert "status IN" in upgrade
+    assert "compose up -d --no-deps api scheduler web" in upgrade
+    assert "start_worker_handoff" in upgrade
+    assert "ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1" in upgrade
+    assert "started handoff worker" in upgrade
+    assert "docker update --restart=no" in upgrade
+    assert 'docker kill -s TERM "$worker_id"' in upgrade
+    assert "wait_for_worker_exit" in upgrade
+    assert "compose up -d --no-deps worker" in upgrade
+    assert "avoid killing active AgentRuns" in upgrade

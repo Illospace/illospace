@@ -520,3 +520,94 @@ def test_connect_gemini_api_key_requires_installation_admin(monkeypatch):
         connect_gemini_api_key(SimpleNamespace(id="user-1", org_id="org-1", role="member"), "gemini-key")
 
     assert getattr(exc.value, "status_code", None) == 403
+
+
+def test_start_runtime_update_launches_detached_safe_deploy(monkeypatch, tmp_path):
+    import brain.systems.runtime_settings.self_update as self_update
+
+    root = tmp_path / "repo"
+    state_dir = tmp_path / "state"
+    launcher = root / "illo"
+    (root / ".git").mkdir(parents=True)
+    launcher.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    popen_calls = []
+
+    class Proc:
+        pid = 4242
+
+    def fake_popen(command, **kwargs):
+        popen_calls.append((command, kwargs))
+        return Proc()
+
+    monkeypatch.setenv("ILLO_SELF_UPDATE_ROOT", str(root))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("ILLO_SELF_UPDATE_COMMAND", raising=False)
+    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 2)
+    monkeypatch.setattr(self_update, "_pid_running", lambda _pid: False)
+    monkeypatch.setattr(self_update.subprocess, "Popen", fake_popen)
+
+    status = self_update.start_runtime_update(requested_by="owner-1")
+
+    assert status.status == "running"
+    assert status.available is True
+    assert status.pid == 4242
+    assert status.active_agent_runs == 2
+    assert "active AgentRun" in (status.detail or "")
+    command, kwargs = popen_calls[0]
+    assert command == ["bash", str(launcher), "update"]
+    assert kwargs["cwd"] == str(root)
+    assert kwargs["stdin"] is self_update.subprocess.DEVNULL
+    assert kwargs["stderr"] is self_update.subprocess.STDOUT
+    assert kwargs["close_fds"] is True
+    assert kwargs["start_new_session"] is True
+    assert (state_dir / "illo-self-update.pid").read_text(encoding="utf-8").strip() == "4242"
+
+
+def test_start_runtime_update_reuses_running_update(monkeypatch, tmp_path):
+    import brain.systems.runtime_settings.self_update as self_update
+
+    root = tmp_path / "repo"
+    state_dir = tmp_path / "state"
+    (root / ".git").mkdir(parents=True)
+    (root / "illo").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    state_dir.mkdir()
+    (state_dir / "illo-self-update.json").write_text(
+        '{"pid": 5150, "started_at": "2026-05-11T12:00:00+00:00"}',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("ILLO_SELF_UPDATE_ROOT", str(root))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("ILLO_SELF_UPDATE_COMMAND", raising=False)
+    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 1)
+    monkeypatch.setattr(self_update, "_pid_running", lambda pid: pid == 5150)
+    monkeypatch.setattr(
+        self_update.subprocess,
+        "Popen",
+        MagicMock(side_effect=AssertionError("should not launch a duplicate update")),
+    )
+
+    status = self_update.start_runtime_update(requested_by="owner-1")
+
+    assert status.status == "running"
+    assert status.pid == 5150
+    assert status.detail == "Illospace update is already running."
+
+
+def test_start_runtime_update_rejects_non_checkout_without_override(monkeypatch, tmp_path):
+    import brain.systems.runtime_settings.self_update as self_update
+
+    root = tmp_path / "repo"
+    state_dir = tmp_path / "state"
+    root.mkdir()
+    (root / "illo").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    monkeypatch.setenv("ILLO_SELF_UPDATE_ROOT", str(root))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("ILLO_SELF_UPDATE_COMMAND", raising=False)
+
+    with pytest.raises(Exception) as exc:
+        self_update.start_runtime_update(requested_by="owner-1")
+
+    assert getattr(exc.value, "status_code", None) == 409
+    assert "not running from a git checkout" in exc.value.detail

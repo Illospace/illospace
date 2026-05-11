@@ -41,3 +41,11 @@ def test_shutdown_drain_timeout_accepts_numeric_override(monkeypatch):
     monkeypatch.setenv("ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS", "42.5")
 
     assert _shutdown_drain_timeout_seconds() == 42.5
+
+
+def test_cycle_scheduler_can_be_disabled_for_handoff_worker(monkeypatch):
+    from brain.systems.cortex.worker import _cycle_scheduler_enabled
+
+    monkeypatch.setenv("ILLO_WORKER_DISABLE_CYCLE_SCHEDULER", "1")
+
+    assert _cycle_scheduler_enabled() is False
