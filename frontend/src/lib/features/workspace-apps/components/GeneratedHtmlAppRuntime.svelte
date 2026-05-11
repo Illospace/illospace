@@ -12,6 +12,7 @@
     listDomainRelations,
     removeDomainRelation,
     removeDomainRecord,
+    runWorkspaceAppAction,
     updateDomainRecord,
     type WorkspaceAppRead,
   } from '$lib/features/workspace-apps/api/workspaceAppsApi';
@@ -914,9 +915,11 @@
       if (!action) {
         throw new Error(`Workspace action '${actionKey}' is not declared in this app manifest`);
       }
-      throw new Error(
-        `Workspace action '${actionKey}' is declared, but no server-side action executor is registered yet. Use Domain APIs in-app, or add a product-level action executor for external systems.`,
-      );
+      const result = await runWorkspaceAppAction(app.id, {
+        action_key: actionKey,
+        payload: message.payload || {},
+      });
+      respond(message.requestId, result);
     } catch (err: any) {
       respond(message.requestId, null, err?.detail || err?.message || 'Workspace action failed');
     }

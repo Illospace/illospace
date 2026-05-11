@@ -447,6 +447,20 @@ export interface WorkspaceAppStateRead {
   updated_at: string;
 }
 
+export interface WorkspaceAppActionRunInput {
+  action_key: string;
+  payload?: Record<string, any>;
+}
+
+export interface WorkspaceAppActionRunRead {
+  ok: boolean;
+  action_key: string;
+  status: string;
+  effects: string[];
+  connector_keys: string[];
+  result: Record<string, any>;
+}
+
 export interface WorkspacePinRead {
   id: string;
   org_id: string;
@@ -960,6 +974,11 @@ export const api = {
     fetchJson<WorkspaceAppStateRead>(`/api/workspace-apps/${appId}/state/${encodeURIComponent(stateKey)}`, {
       method: 'PUT',
       body: JSON.stringify({ data }),
+    }),
+  runWorkspaceAppAction: (appId: string, data: WorkspaceAppActionRunInput) =>
+    fetchJson<WorkspaceAppActionRunRead>(`/api/workspace-apps/${appId}/actions/run`, {
+      method: 'POST',
+      body: JSON.stringify({ action_key: data.action_key, payload: data.payload ?? {} }),
     }),
 
   // Workspace pins
