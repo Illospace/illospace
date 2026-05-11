@@ -359,7 +359,7 @@
       kind: 'pin',
       anchorId: rawId,
       name: label,
-      color: normalizeHexColor(pin.color) ?? '#d5a14d',
+      color: normalizeHexColor(pin.color) ?? '#57CFA0',
       initial: '',
       x: Number(pin.position_x),
       y: Number(pin.position_y),

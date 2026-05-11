@@ -65,6 +65,7 @@
   import ProjectContextPicker from '$lib/features/composer/components/ProjectContextPicker.svelte';
   import SkillMentionOverlay from '$lib/features/composer/components/SkillMentionOverlay.svelte';
   import SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
+  import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
   import ThreadStageShell, { type ThreadPeripherySignal } from '$lib/features/threads/components/ThreadStageShell.svelte';
   import ThreadUtilityContent from '$lib/features/threads/components/ThreadUtilityContent.svelte';
   import VaultSecretPromptPanel from '$lib/features/vault/components/VaultSecretPromptPanel.svelte';
@@ -88,7 +89,9 @@
     visibleThreadStreamItems,
   } from '$lib/features/threads/domain/threadStreamAdapter';
   import type {
+    CortexThreadStageFileAttachment,
     CortexThreadStageHeaderStatusState,
+    CortexThreadStageImageAttachment,
     CortexThreadStageTranscriptItem,
   } from '$lib/features/threads/domain/threadTranscriptAdapter';
 
@@ -135,6 +138,7 @@
   let lastAutoOpenedVaultPromptId = $state<string | null>(null);
   let lastAutoOpenedCycleSignal = $state<number | null>(null);
   let lastAutoSelectedAppId = $state<string | null>(null);
+  let dockPreviewAttachment = $state<CortexThreadStageImageAttachment | CortexThreadStageFileAttachment | null>(null);
   let teamMembers = $state<any[]>([]);
   let teamMembersLoading = false;
   let mentionDropdownVisible = $state(false);
@@ -801,6 +805,11 @@
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'cycles'));
   }
 
+  function openPreviewTab(attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment) {
+    dockPreviewAttachment = attachment;
+    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'preview'));
+  }
+
   function openAppTab(appId: string | null | undefined) {
     applySidePanelState(openAppThreadSidePanelTab(sidePanelState(), appId, workspaceApps.appById(appId ?? '')));
   }
@@ -817,9 +826,13 @@
   }
 
   function closeSidePanelTab(tabId: string) {
+    const closingTab = sidePanelTabs.find((tab) => tab.id === tabId);
     const nextState = closeThreadSidePanelTab(sidePanelTabs, activeSidePanelTabId, tabId);
     sidePanelTabs = nextState.tabs;
     activeSidePanelTabId = nextState.activeTabId;
+    if (closingTab?.kind === 'preview') {
+      dockPreviewAttachment = null;
+    }
     onBrowserOpenChange?.(true);
   }
 
@@ -838,6 +851,10 @@
     }
     if (item.kind === 'cycles') {
       openCyclesTab();
+      return;
+    }
+    if (item.kind === 'preview') {
+      if (dockPreviewAttachment) openPreviewTab(dockPreviewAttachment);
       return;
     }
     if (item.kind === 'app') {
@@ -910,6 +927,7 @@
       ideaProjectContextAttachments = [];
       ideaProjectContextLoadedForIdeaId = null;
       ideaProjectContextLoadingForIdeaId = null;
+      dockPreviewAttachment = null;
       if (currentIdeaId) void loadIdeaProjectContext(currentIdeaId);
     }
   });
@@ -1081,7 +1099,7 @@
   {/snippet}
 
   {#snippet browserPane()}
-    <BrowserThoughtPanel />
+    <BrowserThoughtPanel onPreviewAttachment={openPreviewTab} />
   {/snippet}
 
   {#snippet utilityPane()}
@@ -1090,6 +1108,10 @@
         <ThreadUtilityContent {idea} activeTab="activity" />
       </div>
     </div>
+  {/snippet}
+
+  {#snippet previewPane()}
+    <ThreadAttachmentPreviewPane attachment={dockPreviewAttachment} />
   {/snippet}
 
   {#snippet appsPane()}
@@ -1141,6 +1163,7 @@
             replyDock={replyDock}
             onTranscriptScroll={handleScrollEvent}
             onScrollToBottom={() => scrollToBottom(true)}
+            onPreviewAttachment={openPreviewTab}
             onTranscriptReady={(element) => {
               transcriptEl = element;
               requestAnimationFrame(() => syncTranscriptScrollCue());
@@ -1165,6 +1188,7 @@
               onAddMenuItem={handleSidePanelAddMenuItem}
               onClose={closeSidePanel}
               browserPane={browserPane}
+              previewPane={previewPane}
               utilityPane={utilityPane}
               appsPane={appsPane}
               vaultPane={vaultPane}
@@ -1285,8 +1309,8 @@
       ),
       radial-gradient(
         42% 66% at 72% 78%,
-        rgba(var(--thread-accent-rgb, 213, 161, 77), 0.048) 0%,
-        rgba(var(--thread-accent-rgb, 213, 161, 77), 0.016) 42%,
+        rgba(var(--thread-accent-rgb, 87, 207, 160), 0.048) 0%,
+        rgba(var(--thread-accent-rgb, 87, 207, 160), 0.016) 42%,
         transparent 80%
       );
     filter: var(--thread-stage-panel-before-filter);

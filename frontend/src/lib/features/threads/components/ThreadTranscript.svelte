@@ -59,6 +59,7 @@
     onTranscriptScroll,
     onTranscriptReady,
     onScrollToBottom,
+    onPreviewAttachment,
   }: ThreadTranscriptProps = $props();
 
   let transcriptContainerEl: HTMLDivElement | undefined = $state();
@@ -346,6 +347,10 @@
   }
 
   function openAttachmentPreview(attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment) {
+    if (onPreviewAttachment) {
+      onPreviewAttachment(attachment);
+      return;
+    }
     previewAttachment = attachment;
   }
 
@@ -360,8 +365,9 @@
   }
 
   function openPreviewAttachmentExternal() {
-    if (!previewAttachmentUrl || typeof window === 'undefined') return;
-    window.open(previewAttachmentUrl, '_blank', 'noopener,noreferrer');
+    const target = previewAttachment?.downloadUrl || previewAttachmentUrl;
+    if (!target || typeof window === 'undefined') return;
+    window.open(target, '_blank', 'noopener,noreferrer');
   }
 
   $effect(() => {
@@ -1170,10 +1176,10 @@
     --thread-color-spectral-core: var(--constellation-color-spectral-core, rgba(58, 90, 146, 0.98));
     --thread-color-spectral-owner:
       var(--constellation-color-spectral-owner, rgba(216, 231, 255, 0.96));
-    --thread-color-amber: var(--constellation-color-amber, #d5a14d);
-    --thread-color-amber-core: var(--constellation-color-amber-core, rgba(148, 108, 38, 0.98));
+    --thread-color-amber: var(--thread-accent, var(--constellation-color-spectral, #57CFA0));
+    --thread-color-amber-core: color-mix(in srgb, var(--thread-color-amber) 48%, rgba(5, 9, 16, 0.98));
     --thread-color-amber-owner:
-      var(--constellation-color-amber-owner, rgba(255, 227, 172, 0.96));
+      color-mix(in srgb, var(--thread-color-amber) 34%, rgba(240, 240, 250, 0.96));
     --thread-focus-ring: var(--constellation-control-focus-ring, rgba(240, 240, 250, 0.52));
     --thread-motion-hover-duration: var(--constellation-motion-hover-duration, 180ms);
     --thread-motion-settle-duration: var(--constellation-motion-settle-duration, 240ms);
@@ -1182,7 +1188,7 @@
     --thread-message-user-meta: rgba(240, 240, 250, 0.58);
     --thread-message-user-body: rgba(240, 240, 250, 0.92);
     --thread-run-border-queued: rgba(255, 255, 255, 0.08);
-    --thread-run-border-running: rgba(213, 161, 77, 0.2);
+    --thread-run-border-running: color-mix(in srgb, var(--thread-accent, #57CFA0) 24%, transparent);
     --thread-run-border-completed: rgba(255, 255, 255, 0.05);
     --thread-run-border-failed: rgba(225, 121, 121, 0.24);
     --thread-run-border-attention: rgba(141, 183, 255, 0.24);
@@ -1288,7 +1294,7 @@
     --thread-message-user-meta: rgba(82, 98, 111, 0.68);
     --thread-message-user-body: rgba(28, 40, 53, 0.94);
     --thread-run-border-queued: rgba(26, 39, 49, 0.14);
-    --thread-run-border-running: rgba(182, 108, 47, 0.28);
+    --thread-run-border-running: color-mix(in srgb, var(--thread-accent, #57CFA0) 28%, transparent);
     --thread-run-border-completed: rgba(20, 120, 93, 0.26);
     --thread-run-border-failed: rgba(178, 74, 97, 0.28);
     --thread-run-border-attention: rgba(49, 95, 214, 0.28);
@@ -1327,8 +1333,8 @@
     --thread-run-approval-border: rgba(49, 95, 214, 0.22);
     --thread-run-approval-background: rgba(49, 95, 214, 0.09);
     --thread-run-approval-text: #244fae;
-    --thread-run-awaiting-border: rgba(182, 108, 47, 0.22);
-    --thread-run-awaiting-background: rgba(182, 108, 47, 0.09);
+    --thread-run-awaiting-border: color-mix(in srgb, var(--thread-accent, #57CFA0) 22%, transparent);
+    --thread-run-awaiting-background: color-mix(in srgb, var(--thread-accent, #57CFA0) 9%, transparent);
     --thread-run-awaiting-text: #7c4617;
     --thread-run-error-border: rgba(178, 74, 97, 0.22);
     --thread-run-error-background: rgba(178, 74, 97, 0.09);
@@ -1409,23 +1415,7 @@
   }
 
   .thread-header-title-row :global(.thread-header-action-button) {
-    --constellation-icon-button-border: transparent;
-    --constellation-icon-button-quiet-background: transparent;
-    --constellation-icon-button-quiet-background-hover: color-mix(in srgb, var(--thread-accent, #57cfa0) 10%, transparent);
-    --constellation-icon-button-quiet-border-hover: transparent;
-    --constellation-icon-button-quiet-shadow: none;
-
     flex: 0 0 auto;
-    width: 24px;
-    height: 24px;
-    background: transparent;
-    box-shadow: none;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-  }
-
-  .thread-header-title-row :global(.thread-header-action-button:hover:not(:disabled)) {
-    color: var(--constellation-thread-header-title);
   }
 
   .thread-header-title-row :global(.thread-title-action-button.is-loading svg) {
@@ -1433,26 +1423,12 @@
   }
 
   .thread-header-panel-toggle-group {
-    --constellation-icon-button-border: transparent;
-    --constellation-icon-button-pressed-border: transparent;
-    --constellation-icon-button-pressed-background: transparent;
-    --constellation-icon-button-quiet-background: transparent;
-    --constellation-icon-button-quiet-background-hover: transparent;
-    --constellation-icon-button-quiet-border-hover: transparent;
-    --constellation-icon-button-quiet-shadow: none;
-
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     margin-left: auto;
     margin-right: -2px;
     padding: 2px;
-  }
-
-  .thread-header-panel-toggle-group :global(.thread-header-action-button:hover:not(:disabled)),
-  .thread-header-panel-toggle-group :global(.thread-header-action-button[aria-pressed='true']) {
-    background: transparent;
-    box-shadow: none;
   }
 
   @keyframes thread-title-action-spin {

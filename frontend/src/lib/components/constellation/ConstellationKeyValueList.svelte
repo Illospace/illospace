@@ -270,7 +270,7 @@
   }
 
   .constellation-key-value-tone-warning {
-    --key-value-accent: rgba(213, 161, 77, 0.14);
+    --key-value-accent: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 14%, transparent);
   }
 
   .constellation-key-value-tone-danger {

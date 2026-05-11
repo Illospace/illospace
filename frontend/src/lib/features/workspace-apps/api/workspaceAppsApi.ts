@@ -7,7 +7,9 @@ export type {
   DomainFieldRead,
   DomainObjectCreateInput,
   DomainObjectRead,
+  DomainEventRead,
   DomainRecordRead,
+  DomainRelationRead,
   DomainRelationTypeRead,
   DomainSchemaRead,
   DomainSummaryRead,
@@ -24,6 +26,8 @@ export type DomainRecordUpdateInput = Parameters<typeof api.updateDomainRecord>[
 export type RemoveDomainMode = Parameters<typeof api.removeDomain>[1];
 export type RemoveDomainRecordMode = Parameters<typeof api.removeDomainRecord>[2];
 export type ListDomainRecordsOptions = Parameters<typeof api.listDomainRecords>[1];
+export type ListDomainRelationsOptions = Parameters<typeof api.listDomainRelations>[1];
+export type ListDomainEventsOptions = Parameters<typeof api.listDomainEvents>[1];
 
 export const workspaceAppsApi = pickApiMethods([
   'listWorkspaceApps',
@@ -44,6 +48,10 @@ export const workspaceAppsApi = pickApiMethods([
   'createDomainRecord',
   'updateDomainRecord',
   'removeDomainRecord',
+  'listDomainRelations',
+  'createDomainRelation',
+  'removeDomainRelation',
+  'listDomainEvents',
 ] as const);
 
 export const {
@@ -65,4 +73,8 @@ export const {
   createDomainRecord,
   updateDomainRecord,
   removeDomainRecord,
+  listDomainRelations,
+  createDomainRelation,
+  removeDomainRelation,
+  listDomainEvents,
 } = workspaceAppsApi;

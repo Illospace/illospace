@@ -578,6 +578,9 @@ def _llm_thread_handoff_compactor(
                 "Summarize the provided transcript into compact structured JSON for the next run. "
                 "Preserve exact user constraints, active objectives, decisions, files/objects touched, "
                 "failed attempts, important tool results, open questions, verification status, and risks. "
+                "For active_objective and recent_user_intent, prefer the latest unresolved user request "
+                "from recent_messages or the tail of messages_to_summarize; do not default to the first "
+                "question in the thread. "
                 "Do not invent details. Mark uncertainty explicitly. Return JSON only."
             ),
         }]
@@ -654,7 +657,10 @@ def _llm_context_checkpoint_compactor(
                 "The older transcript span will be replaced by your compact structured JSON while "
                 "recent raw turns remain visible. Preserve exact user constraints, current objective, "
                 "decisions, files/objects touched, important tool results, failed attempts, verification "
-                "status, and risks. Do not invent details. Mark uncertainty explicitly. Return JSON only."
+                "status, and risks. For active_objective and recent_user_intent, prefer the latest "
+                "unresolved user request from recent_messages or the tail of messages_to_summarize; do "
+                "not default to the first question in the thread. Do not invent details. Mark uncertainty "
+                "explicitly. Return JSON only."
             ),
         }]
         messages = [{

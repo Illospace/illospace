@@ -41,6 +41,11 @@ from brain.systems.cortex.title_generation import (
     generate_and_store_idea_display_title,
     generate_display_title,
 )
+from brain.systems.cortex.upload_preview import (
+    build_upload_preview,
+    public_static_upload_url,
+    static_upload_url_for,
+)
 from brain.systems.services.runtime_introspection import get_provider_auth_status
 
 logger = logging.getLogger(__name__)
@@ -490,7 +495,11 @@ def auth_status(
 # ── Upload ─────────────────────────────────────────────────────
 
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...), user: dict[str, Any] = Depends(get_current_user)):
+async def upload_file(
+    request: Request,
+    file: UploadFile = File(...),
+    user: dict[str, Any] = Depends(get_current_user),
+):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Empty filename")
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
@@ -505,12 +514,32 @@ async def upload_file(file: UploadFile = File(...), user: dict[str, Any] = Depen
     (UPLOAD_DIR / filename).write_bytes(data)
     fallback_type = UPLOAD_FALLBACK_CONTENT_TYPES.get(ext, "application/octet-stream")
     content_type = file.content_type if file.content_type and file.content_type != "application/octet-stream" else fallback_type
+    url = static_upload_url_for(filename)
     return {
-        "url": f"/static/uploads/{filename}",
+        "url": url,
+        "download_url": public_static_upload_url(url, request_base_url=str(request.base_url)),
         "filename": file.filename,
         "type": content_type,
         "size": len(data),
     }
+
+
+@router.get("/uploads/preview")
+def preview_upload(
+    request: Request,
+    url: Annotated[str, Query(min_length=1)],
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    try:
+        return build_upload_preview(
+            url,
+            upload_dir=UPLOAD_DIR,
+            request_base_url=str(request.base_url),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/generate-title")

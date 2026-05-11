@@ -311,8 +311,8 @@
   }
 
   .constellation-action-row-tone-warning {
-    --action-row-accent: rgba(213, 161, 77, 0.22);
-    --action-row-accent-soft: rgba(213, 161, 77, 0.12);
+    --action-row-accent: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 22%, transparent);
+    --action-row-accent-soft: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 12%, transparent);
   }
 
   .constellation-action-row-tone-danger {

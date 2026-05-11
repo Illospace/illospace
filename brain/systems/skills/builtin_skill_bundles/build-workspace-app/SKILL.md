@@ -40,18 +40,28 @@ Constellation design contract.
    Use view types `table`, `list`, `cards`, `chart`, `metrics`, `detail`, or
    `form`. Use editable `status`/`select`/`boolean` columns only when the
    Domain binding allows `update`.
-4. Use sandboxed HTML only as a legacy/escape-hatch renderer when the UI cannot
-   be represented by the structured spec.
-5. For legacy HTML, use the host bridge:
-   - `await window.illo.domains.query/create/update/archive/schema(...)` for
-     bound Domain records.
+4. Use `renderer_key="sandboxed-html-app"` and `source_kind="html"` as the
+   first-class full-code app runtime when the user needs custom layout,
+   interaction, charts, drag/drop, canvas, or richer composition than the
+   structured renderer should carry. This is still a native Illospace app:
+   use App Kit classes, design tokens, the manifest, and the host bridge.
+5. For full-code apps, use the host bridge:
+   - `window.illo.domain(alias)` for bound Domain records and generic workspace
+     data primitives.
    - `await window.illo.getState/setState/updateState(...)` only for UI state.
    - Listen for `window` event `illo:state` when the host sends fresh state.
    - For Domain-backed apps, prefer the generated app SDK:
      `const todos = window.illo.domain("todos")`, then call
      `todos.schema()`, `todos.list()`, `todos.get(recordId)`,
      `todos.create(data, { title })`, `todos.update(recordId, dataPatch, { expectedVersion })`,
+     `todos.bulkUpdate(updates)`, `todos.aggregate({ groupBy, metrics })`,
+     `todos.history(recordId)`, `todos.relations.list/link/archive(...)`,
      and `todos.archive(recordId)`.
+   - Use `todos.subscribe(handler, { intervalMs })` instead of ad hoc polling;
+     it is polling-backed today and can become host-pushed later.
+   - Use `window.illo.actions.run(actionKey, payload)` only for
+     manifest-declared server-side actions. Do not put external credentials in
+     generated app code.
    - Bind DOM event listeners once, outside render/state handlers, or replace
      nodes before rebinding. Never add submit/click listeners every time
      `illo:state` fires.

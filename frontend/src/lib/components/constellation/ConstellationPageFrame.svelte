@@ -101,8 +101,8 @@
   .constellation-page-frame-scene-warmth {
     background: var(
       --constellation-page-frame-theme-scene-warmth,
-      radial-gradient(circle at 74% 78%, rgba(213, 161, 77, 0.12), transparent 38%),
-      radial-gradient(circle at 54% 52%, rgba(213, 161, 77, 0.04), transparent 46%)
+      radial-gradient(circle at 74% 78%, color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 12%, transparent), transparent 38%),
+      radial-gradient(circle at 54% 52%, color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 4%, transparent), transparent 46%)
     );
     filter: blur(48px);
     opacity: 0.68;

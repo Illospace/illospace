@@ -100,6 +100,30 @@ def test_domain_backed_app_kit_payload_is_accepted():
     assert any("initial_state" in error and "Domain binding" in error for error in rejected_state["errors"])
 
 
+def test_domain_binding_contract_accepts_generic_workspace_primitives():
+    manifest = json.loads(json.dumps(VALID_DOMAIN_MANIFEST))
+    manifest["data_plan"]["bindings"]["tasks"]["operations"] = [
+        "schema",
+        "list",
+        "query",
+        "get",
+        "create",
+        "update",
+        "archive",
+        "aggregate",
+        "bulkUpdate",
+        "history",
+        "listRelations",
+        "createRelation",
+        "archiveRelation",
+    ]
+
+    report = _report(manifest=manifest)
+
+    assert report["status"] == "passed"
+    assert report["errors"] == []
+
+
 def test_structured_generated_ui_payload_is_accepted():
     report = _report(
         renderer_key="generated-ui-app",

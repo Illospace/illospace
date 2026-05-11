@@ -82,11 +82,18 @@ from pathlib import Path
 target_dir = Path(sys.argv[1]).resolve()
 
 def ensure_chrome_executables(executable: Path) -> None:
-    for path in (
+    candidates = [
         executable,
         executable.with_name("chrome_crashpad_handler"),
         executable.with_name("chrome_sandbox"),
-    ):
+    ]
+    contents_root = next((parent for parent in executable.parents if parent.name == "Contents"), None)
+    if contents_root is not None:
+        frameworks_root = contents_root / "Frameworks"
+        if frameworks_root.exists():
+            candidates.extend(path for path in frameworks_root.glob("**/Helpers/*") if path.is_file())
+            candidates.extend(path for path in frameworks_root.glob("**/*.app/Contents/MacOS/*") if path.is_file())
+    for path in dict.fromkeys(candidates):
         if path.exists() and path.is_file():
             path.chmod(path.stat().st_mode | stat.S_IXUSR)
 

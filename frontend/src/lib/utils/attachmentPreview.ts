@@ -71,7 +71,12 @@ const ARCHIVE_ATTACHMENT_EXTENSIONS = new Set(['7z', 'rar', 'tar', 'zip']);
 const MESSAGE_URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
 
 export function attachmentUrl(attachment: any): string {
-  const url = attachment?.url ?? attachment?.href ?? attachment?.previewUrl;
+  const url = attachment?.url ?? attachment?.href ?? attachment?.previewUrl ?? attachment?.download_url ?? attachment?.downloadUrl;
+  return typeof url === 'string' ? url.trim() : '';
+}
+
+export function attachmentDownloadUrl(attachment: any): string {
+  const url = attachment?.download_url ?? attachment?.downloadUrl ?? attachment?.url ?? attachment?.href;
   return typeof url === 'string' ? url.trim() : '';
 }
 

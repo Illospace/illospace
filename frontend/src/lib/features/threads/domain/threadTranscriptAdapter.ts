@@ -194,12 +194,14 @@ export interface CortexThreadStageVisualAttachment {
 export interface CortexThreadStageImageAttachment {
   kind: 'image';
   url: string;
+  downloadUrl?: string;
   alt: string;
 }
 
 export interface CortexThreadStageFileAttachment {
   kind: 'file';
   url: string;
+  downloadUrl?: string;
   label: string;
   detail?: string;
   previewKind?: AttachmentPreviewKind;
@@ -245,6 +247,7 @@ export interface ThreadTranscriptProps {
   onTranscriptScroll?: (event: Event) => void;
   onTranscriptReady?: (element: HTMLDivElement | undefined) => void;
   onScrollToBottom?: () => void;
+  onPreviewAttachment?: (attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment) => void;
 }
 
 export function getCortexThreadRunStatusLabel(status: CortexThreadStageRunStatus): string {

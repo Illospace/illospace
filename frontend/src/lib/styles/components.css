@@ -1016,7 +1016,7 @@
   transition: opacity 200ms ease-out;
 }
 .msg-tag-discuss { color: var(--text-3); background: var(--bg-3); }
-.msg-tag-trigger { color: #cca860; background: rgba(204,168,96,0.15); }
+.msg-tag-trigger { color: #57CFA0; background: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 15%, transparent); }
 
 .thread-message {
   display: flex; flex-direction: column; gap: 4px;

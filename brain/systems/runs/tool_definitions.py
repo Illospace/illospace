@@ -893,10 +893,12 @@ WORKSPACE_APP_TOOLS = [
         "name": "manage_workspace_app",
         "description": (
             "Create, list, update, archive, and persist state for generated workspace apps. "
-            "This is the action tool to create or change a small UI surface or dashboard that should remain available "
-            "inside Cortex. Prefer renderer_key='generated-ui-app' and source_kind='json' with "
-            "a structured generated UI spec. Use renderer_key='sandboxed-html-app' only as a "
-            "custom HTML escape-hatch runtime. Recordful apps must use manage_domain first; app-local "
+            "This is the action tool to create or change a persistent programmable UI surface or dashboard "
+            "inside Cortex. Use renderer_key='generated-ui-app' and source_kind='json' for simple "
+            "host-rendered structured UIs. Use renderer_key='sandboxed-html-app' and source_kind='html' "
+            "as the first-class full-code runtime for custom layouts, interactions, charts, drag/drop, "
+            "canvas, or app logic that should still follow Illospace App Kit tokens/classes. Do not infer "
+            "that a workflow needs a use-case-specific template or built-in view type. Recordful apps must use manage_domain first; app-local "
             "state is only for UI preferences, filters, drafts, and ephemeral interface state. "
             "For awareness questions about what apps exist or current app state, prefer read_workspace_apps first. "
             "New generated apps must pass the workspace app contract before they are persisted. Use action='help' "
@@ -934,7 +936,8 @@ WORKSPACE_APP_TOOLS = [
                     "default": "generated-ui-app",
                     "description": (
                         "Renderer runtime key. Use generated-ui-app for host-rendered structured UI. "
-                        "Use sandboxed-html-app only for custom HTML escape hatches."
+                        "Use sandboxed-html-app for first-class full-code workspace apps that still follow "
+                        "the Illospace design contract."
                     ),
                 },
                 "source_kind": {
@@ -961,8 +964,12 @@ WORKSPACE_APP_TOOLS = [
                         "including bindings such as {\"data_plan\":{\"mode\":\"domain\","
                         "\"bindings\":{\"todos\":{\"domain_id\":1,\"domain_slug\":\"todo-notes\","
                         "\"object_key\":\"todo_item\",\"fields\":[\"title\",\"notes\",\"completed\"],"
-                        "\"operations\":[\"schema\",\"list\",\"create\",\"update\",\"archive\"]}}}} "
-                        "and access them with window.illo.domain('todos')."
+                        "\"operations\":[\"schema\",\"list\",\"query\",\"create\",\"update\",\"archive\","
+                        "\"aggregate\",\"bulkUpdate\",\"history\",\"listRelations\",\"createRelation\","
+                        "\"archiveRelation\"]}}}} and access them with window.illo.domain('todos'). "
+                        "The app runtime exposes manifest-bound Domain CRUD, aggregate, bulkUpdate, "
+                        "history, relation helpers, polling-backed subscribe, app state, and a reserved "
+                        "window.illo.actions.run(actionKey, payload) shape for approved server-side actions."
                     ),
                 },
                 "visual_spec": {
@@ -1487,7 +1494,7 @@ BROWSER_UPLOAD_ATTACHMENT_TOOL = {
 
 BROWSER_SNAPSHOT_TOOL = {
     "name": "browser_snapshot",
-    "description": "Capture the current browser viewport and optionally persist it into the thought.",
+    "description": "Capture the current browser viewport, return it as a model-visible screenshot, and optionally persist it into the thought.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -1499,7 +1506,7 @@ BROWSER_SNAPSHOT_TOOL = {
 
 BROWSER_SAVE_SCREENSHOT_TOOL = {
     "name": "browser_save_screenshot",
-    "description": "Save a PNG screenshot of the current page into the thought workspace uploads area.",
+    "description": "Save a PNG screenshot of the current page into the thought workspace uploads area. Use the returned download_url when giving the user a link.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -1510,7 +1517,7 @@ BROWSER_SAVE_SCREENSHOT_TOOL = {
 
 BROWSER_PRINT_PDF_TOOL = {
     "name": "browser_print_pdf",
-    "description": "Export the current page as a PDF into the thought workspace uploads area.",
+    "description": "Export the current page as a PDF into the thought workspace uploads area. Use the returned download_url when giving the user a link.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -1532,7 +1539,10 @@ BROWSER_TOOL = {
     "name": "browser",
     "description": (
         "Namespace tool for controlling or inspecting the live browser session attached to the current Cortex thought. "
-        "Set action='help' to see sub-actions and their required arguments. Use action='open' before navigation or interaction."
+        "Set action='help' to see sub-actions and their required arguments. Use action='open' before navigation or interaction. "
+        "Actions that change browser state return a model-visible screenshot; use action='observe' to refresh that screenshot explicitly, "
+        "and action='discover' or action='extract' when DOM/text detail is needed. "
+        "For tasks that may download a file, open the session with allow_downloads=true."
     ),
     "input_schema": {
         "type": "object",
@@ -1553,6 +1563,7 @@ BROWSER_TOOL = {
                     "close_tab",
                     "list_tabs",
                     "wait",
+                    "observe",
                     "extract",
                     "discover",
                     "upload_attachment",

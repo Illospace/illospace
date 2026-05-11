@@ -11,7 +11,21 @@ CONTRACT_VERSION = 1
 APP_KIT_NAME = "constellation-app-kit"
 STRUCTURED_UI_RENDERER_KEY = "generated-ui-app"
 STRUCTURED_UI_SOURCE_KIND = "json"
-DOMAIN_OPERATIONS = {"schema", "list", "query", "get", "create", "update", "archive"}
+DOMAIN_OPERATIONS = {
+    "schema",
+    "list",
+    "query",
+    "get",
+    "create",
+    "update",
+    "archive",
+    "aggregate",
+    "bulkUpdate",
+    "history",
+    "listRelations",
+    "createRelation",
+    "archiveRelation",
+}
 APP_LOCAL_SCOPES = {"ui_state", "preferences", "filters", "draft", "ephemeral"}
 GENERATED_UI_VIEW_TYPES = {"table", "list", "cards", "chart", "metrics", "detail", "form"}
 GENERATED_UI_CHART_TYPES = {"bar", "line", "pie", "scatter"}

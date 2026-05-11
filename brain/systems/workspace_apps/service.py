@@ -20,7 +20,21 @@ DEFAULT_SOURCE_KIND = "json"
 DEFAULT_STATE_KEY = "default"
 _VERSION_MISSING = object()
 ALLOWED_DOMAIN_BINDING_OPERATIONS = frozenset(
-    {"schema", "list", "query", "get", "create", "update", "archive"}
+    {
+        "schema",
+        "list",
+        "query",
+        "get",
+        "create",
+        "update",
+        "archive",
+        "aggregate",
+        "bulkUpdate",
+        "history",
+        "listRelations",
+        "createRelation",
+        "archiveRelation",
+    }
 )
 
 

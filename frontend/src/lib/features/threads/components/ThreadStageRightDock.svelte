@@ -44,6 +44,7 @@
     label = 'Thread side panel',
     className,
     browserPane,
+    previewPane,
     utilityPane,
     appsPane,
     vaultPane,
@@ -65,6 +66,7 @@
     label?: string;
     className?: string;
     browserPane?: Snippet;
+    previewPane?: Snippet;
     utilityPane?: Snippet;
     appsPane?: Snippet;
     vaultPane?: Snippet;
@@ -73,6 +75,7 @@
   } = $props();
 
   const hasBrowserPane = $derived(!!browserPane);
+  const hasPreviewPane = $derived(!!previewPane);
   const hasUtilityPane = $derived(!!utilityPane);
   const hasAppsPane = $derived(!!appsPane);
   const hasVaultPane = $derived(!!vaultPane);
@@ -81,15 +84,17 @@
     tabs.filter((tab) => (
       tab.kind === 'browser'
         ? hasBrowserPane
-        : tab.kind === 'activity'
-          ? hasUtilityPane
-          : tab.kind === 'app'
-            ? hasAppsPane
-            : tab.kind === 'vault'
-              ? hasVaultPane
-              : tab.kind === 'cycles'
-                ? hasCyclesPane
-              : true
+        : tab.kind === 'preview'
+          ? hasPreviewPane
+          : tab.kind === 'activity'
+            ? hasUtilityPane
+            : tab.kind === 'app'
+              ? hasAppsPane
+              : tab.kind === 'vault'
+                ? hasVaultPane
+                : tab.kind === 'cycles'
+                  ? hasCyclesPane
+                  : true
     )),
   );
   const resolvedActiveTab = $derived(
@@ -190,6 +195,7 @@
 
   function iconForMenuKind(kind: ThreadStageRightDockTabKind) {
     if (kind === 'browser') return 'preview';
+    if (kind === 'preview') return 'document';
     if (kind === 'activity') return 'activity';
     if (kind === 'vault') return 'vault';
     if (kind === 'cycles') return 'cycles';
@@ -245,15 +251,15 @@
                   class:is-active={isActive}
                   role="presentation"
                 >
-                  <button
-                    type="button"
-                    class="right-dock-tab-close"
-                    aria-label={`Close ${tab.label}`}
+                  <ConstellationIconButton
+                    className="right-dock-tab-close"
+                    size="sm"
+                    label={`Close ${tab.label}`}
                     title={`Close ${tab.label}`}
                     onclick={(event) => handleTabClose(tab.id, event)}
                   >
                     <ConstellationIcon name="close" size={10} stroke={2.2} />
-                  </button>
+                  </ConstellationIconButton>
                   <button
                     type="button"
                     class="right-dock-tab"
@@ -286,16 +292,18 @@
 
           {#if hasAddMenu}
             <div class="right-dock-add">
-              <button
-                type="button"
-                class="right-dock-add-button"
-                aria-label="Add side panel tab"
-                aria-expanded={addMenuOpen}
+              <ConstellationIconButton
+                className="right-dock-add-button"
+                label="Add side panel tab"
+                size="sm"
+                expanded={addMenuOpen}
+                popup="menu"
+                pressed={addMenuOpen}
                 title="Add side panel tab"
                 onclick={() => (addMenuOpen = !addMenuOpen)}
               >
                 <ConstellationIcon name="plus" size={16} stroke={1.8} />
-              </button>
+              </ConstellationIconButton>
               {#if addMenuOpen}
                 <div class="right-dock-add-menu" role="menu" aria-label="Add side panel tab">
                   <div class="right-dock-add-menu-label">Open in panel</div>
@@ -340,6 +348,10 @@
           <section class="right-dock-pane right-dock-browser" aria-label="Browser">
             {@render browserPane?.()}
           </section>
+        {:else if resolvedActiveTab?.kind === 'preview' && hasPreviewPane}
+          <section class="right-dock-pane right-dock-preview" aria-label="Preview">
+            {@render previewPane?.()}
+          </section>
         {:else if resolvedActiveTab?.kind === 'activity' && hasUtilityPane}
           <section class="right-dock-pane right-dock-activity" aria-label="Activity">
             {@render utilityPane?.()}
@@ -374,13 +386,6 @@
   .cortex-thread-stage-right-dock {
     --cortex-thread-stage-right-dock-width: 432px;
     --right-dock-tab-active-background: rgba(255, 255, 255, 0.065);
-    --right-dock-tab-close-background: rgba(0, 0, 0, 0.38);
-    --right-dock-tab-close-text: rgba(255, 255, 255, 0.84);
-    --right-dock-tab-close-shadow: none;
-    --right-dock-tab-close-hover-background: rgba(0, 0, 0, 0.56);
-    --right-dock-tab-close-hover-text: rgba(255, 255, 255, 0.96);
-    --right-dock-add-button-text: rgba(244, 246, 250, 0.62);
-    --right-dock-add-button-hover-text: rgba(255, 255, 255, 0.94);
     --right-dock-add-menu-border: rgba(255, 255, 255, 0.11);
     --right-dock-add-menu-background: rgba(13, 17, 26, 0.98);
     --right-dock-add-menu-shadow:
@@ -408,13 +413,6 @@
 
   :global(:root[data-color-scheme='light']) .cortex-thread-stage-right-dock {
     --right-dock-tab-active-background: rgba(49, 63, 76, 0.065);
-    --right-dock-tab-close-background: rgba(255, 253, 247, 0.82);
-    --right-dock-tab-close-text: rgba(49, 63, 76, 0.82);
-    --right-dock-tab-close-shadow: none;
-    --right-dock-tab-close-hover-background: rgba(49, 63, 76, 0.075);
-    --right-dock-tab-close-hover-text: rgba(18, 27, 36, 0.96);
-    --right-dock-add-button-text: rgba(49, 63, 76, 0.74);
-    --right-dock-add-button-hover-text: rgba(18, 27, 36, 0.96);
     --right-dock-add-menu-border: var(--constellation-surface-floating-border);
     --right-dock-add-menu-background: var(--constellation-surface-floating-background);
     --right-dock-add-menu-shadow: var(--constellation-surface-floating-shadow);
@@ -601,47 +599,35 @@
     background: var(--right-dock-tab-active-background);
   }
 
-  .right-dock-tab-close {
+  .right-dock-tab-group :global(.right-dock-tab-close.constellation-icon-button-sm) {
     position: relative;
     z-index: 1;
-    display: inline-flex;
     width: 0;
-    height: 18px;
+    min-width: 0;
+    height: 28px;
     flex: 0 0 auto;
-    align-items: center;
-    justify-content: center;
     overflow: hidden;
-    border-radius: 999px;
-    border: 0;
-    background: var(--right-dock-tab-close-background);
-    color: var(--right-dock-tab-close-text);
-    box-shadow: var(--right-dock-tab-close-shadow);
-    cursor: pointer;
     opacity: 0;
-    transform: scale(0.82);
+    pointer-events: none;
+    transform: scale(0.92);
     transition:
       width 150ms ease,
-      background-color 150ms ease,
-      color 150ms ease,
       opacity 150ms ease,
       transform 150ms ease;
   }
 
-  .right-dock-tab-group:hover .right-dock-tab-close,
-  .right-dock-tab-group:focus-within .right-dock-tab-close {
-    width: 18px;
+  .right-dock-tab-group :global(.right-dock-tab-close .constellation-icon-button-icon) {
+    width: 11px;
+    height: 11px;
+  }
+
+  .right-dock-tab-group:hover :global(.right-dock-tab-close.constellation-icon-button-sm),
+  .right-dock-tab-group:focus-within :global(.right-dock-tab-close.constellation-icon-button-sm) {
+    width: 28px;
+    margin-right: 2px;
     opacity: 1;
+    pointer-events: auto;
     transform: scale(1);
-  }
-
-  .right-dock-tab-close:hover {
-    background: var(--right-dock-tab-close-hover-background);
-    color: var(--right-dock-tab-close-hover-text);
-  }
-
-  .right-dock-tab-close:focus-visible {
-    outline: 2px solid var(--constellation-control-focus-ring);
-    outline-offset: 2px;
   }
 
   .right-dock-add {
@@ -650,31 +636,8 @@
     flex: 0 0 auto;
   }
 
-  .right-dock-add-button {
-    display: inline-flex;
-    width: 28px;
-    height: 28px;
-    align-items: center;
-    justify-content: center;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-    color: var(--right-dock-add-button-text);
-    cursor: pointer;
-    transition:
-      background-color 160ms ease,
-      color 160ms ease;
-  }
-
-  .right-dock-add-button:hover,
-  .right-dock-add-button[aria-expanded='true'] {
-    background: var(--right-dock-tab-active-background);
-    color: var(--right-dock-add-button-hover-text);
-  }
-
-  .right-dock-add-button:focus-visible {
-    outline: 2px solid var(--constellation-control-focus-ring);
-    outline-offset: 2px;
+  .right-dock-add :global(.right-dock-add-button.constellation-icon-button-sm) {
+    flex: 0 0 auto;
   }
 
   .right-dock-add-menu {

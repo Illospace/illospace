@@ -578,6 +578,55 @@ def test_tool_execution_runtime_runs_parallel_safe_handlers_in_order():
     assert '"first"' in results[0]["content"]
 
 
+def test_tool_execution_preserves_structured_model_content_without_logging_hidden_payload():
+    from brain.systems.runs.direct_loop.gates import GateState, check_gate_violations
+    from brain.systems.runs.direct_loop.tool_execution import execute_tool_calls
+
+    model_content = [
+        {"type": "text", "text": "Observed current browser viewport."},
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "abc123"},
+        },
+    ]
+    callback_results = []
+
+    def handler():
+        return {"ok": True, "_tool_result_content": model_content}
+
+    response = SimpleNamespace(
+        content=[
+            SimpleNamespace(type="tool_use", id="call_1", name="browser", input={}),
+        ]
+    )
+
+    results = execute_tool_calls(
+        response,
+        {"browser": handler},
+        [],
+        GateState(brain=True),
+        lambda _name, _tool_input, result_text: callback_results.append(result_text),
+        None,
+        None,
+        "test",
+        agent_context=SimpleNamespace(),
+        brain_tool_names=frozenset(),
+        gated_tool_names=frozenset(),
+        research_tool_names=frozenset(),
+        research_budget=6,
+        parallel_safe_tool_names=frozenset(),
+        max_parallel_tool_calls=1,
+        check_gate_violations=check_gate_violations,
+    )
+
+    assert results == [{
+        "type": "tool_result",
+        "tool_use_id": "call_1",
+        "content": model_content,
+    }]
+    assert callback_results == ['{"ok": true}']
+
+
 def test_tool_execution_limit_one_keeps_handlers_on_current_thread(monkeypatch):
     from brain.systems.runs.direct_loop.gates import GateState, check_gate_violations
     from brain.systems.runs.direct_loop.tool_execution import execute_tool_calls

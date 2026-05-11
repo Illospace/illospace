@@ -205,6 +205,7 @@ def thread_handoff_message(
         "content": (
             "[System: Durable thread handoff summary from previous runs. "
             "Use this as compact prior context, prefer the raw recent messages below for fresh details, "
+            "treat later raw user messages as authoritative when they conflict with the summary, "
             "and call read_thread_messages if an older exact detail matters.\n"
             f"{body}]"
         ),
