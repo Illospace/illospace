@@ -78,3 +78,17 @@ class WorkspaceAppStateRead(BaseModel):
 class WorkspaceAppStateUpdate(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
     data_patch: dict[str, Any] | None = None
+
+
+class WorkspaceAppActionRun(BaseModel):
+    action_key: str = Field(min_length=1, max_length=160)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceAppActionRunRead(BaseModel):
+    ok: bool
+    action_key: str
+    status: str
+    effects: list[str] = Field(default_factory=list)
+    connector_keys: list[str] = Field(default_factory=list)
+    result: dict[str, Any] = Field(default_factory=dict)

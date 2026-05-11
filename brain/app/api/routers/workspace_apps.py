@@ -10,11 +10,20 @@ from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.schemas.workspace_apps import (
+    WorkspaceAppActionRun,
+    WorkspaceAppActionRunRead,
     WorkspaceAppCreate,
     WorkspaceAppRead,
     WorkspaceAppStateRead,
     WorkspaceAppStateUpdate,
     WorkspaceAppUpdate,
+)
+from brain.systems.workspace_apps.actions import (
+    WorkspaceAppActionContractError,
+    WorkspaceAppActionError,
+    WorkspaceAppActionExecutorMissing,
+    WorkspaceAppActionNotDeclared,
+    run_workspace_app_action,
 )
 from brain.systems.workspace_apps.service import (
     WorkspaceAppConflict,
@@ -57,6 +66,16 @@ def _raise_http(exc: WorkspaceAppError) -> None:
             status_code=400,
             detail={"error": str(exc), "contract_validation": exc.report},
         ) from exc
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _raise_action_http(exc: WorkspaceAppActionError) -> None:
+    if isinstance(exc, WorkspaceAppActionNotDeclared):
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if isinstance(exc, WorkspaceAppActionExecutorMissing):
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    if isinstance(exc, WorkspaceAppActionContractError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -233,5 +252,30 @@ def update_workspace_app_state(
             user_id=_user_id(user),
         )
         return serialize_state(state)
+    except WorkspaceAppError as exc:
+        _raise_http(exc)
+
+
+@router.post("/{app_id}/actions/run", response_model=WorkspaceAppActionRunRead)
+def run_workspace_app_declared_action(
+    app_id: str,
+    body: WorkspaceAppActionRun,
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    org_id = require_org_context(user)
+    try:
+        result = run_workspace_app_action(
+            db,
+            org_id=org_id,
+            app_id=app_id,
+            action_key=body.action_key,
+            payload=body.payload,
+            user_id=_user_id(user),
+        )
+        db.commit()
+        return result
+    except WorkspaceAppActionError as exc:
+        _raise_action_http(exc)
     except WorkspaceAppError as exc:
         _raise_http(exc)

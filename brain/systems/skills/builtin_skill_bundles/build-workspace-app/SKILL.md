@@ -57,11 +57,42 @@ Constellation design contract.
      `todos.bulkUpdate(updates)`, `todos.aggregate({ groupBy, metrics })`,
      `todos.history(recordId)`, `todos.relations.list/link/archive(...)`,
      and `todos.archive(recordId)`.
+   - Use the app SDK's camelCase request shape in generated JavaScript:
+     `bulkUpdate([{ recordId, dataPatch }])`, not `record_id` /
+     `data_patch`. The bridge tolerates some aliases, but generated code
+     should use the canonical app-facing shape.
+   - For relation lists, do not pass `{ recordId }`. Use
+     `todos.relations.list({ relationKey, sourceRecordId })` to find outgoing
+     links or `todos.relations.list({ relationKey, targetRecordId })` to find
+     incoming links. Use `todos.relations.link(relationKey, sourceRecordId,
+     targetRecordId, properties)` to create links.
    - Use `todos.subscribe(handler, { intervalMs })` instead of ad hoc polling;
      it is polling-backed today and can become host-pushed later.
    - Use `window.illo.actions.run(actionKey, payload)` only for
      manifest-declared server-side actions. Do not put external credentials in
      generated app code.
+   - Treat Domains as the workspace truth bridge and actions/connectors as
+     the outside-world IO bridge. External records should flow through
+     server-side connector actions into Domains, then apps read/write those
+     Domains. App code should not become a GitHub/Jira/Slack client.
+   - Prefer workflow-level action keys over provider-locked keys:
+     `tickets.importExternal`, `tickets.createExternal`,
+     `tickets.syncExternal`. Put the provider in the action connector
+     declaration (`provider: "github"` or `"jira"`) when the user has chosen
+     one.
+   - Every manifest action must declare `kind`, `effects`, connector metadata
+     when external IO is involved, and an executor boundary. Use
+     `executor: { "type": "deferred" }` when the app contract is ready but the
+     product connector has not been registered yet. Use
+     `executor: { "type": "registered", "key": "..." }` only for approved
+     server-owned executors.
+   - Allowed action effects are `domain.read`, `domain.write`,
+     `app_state.read`, `app_state.write`, `external.read`,
+     `external.write`, `workflow.trigger`, and `agent.run`.
+   - Never include raw tokens, API keys, Authorization headers, passwords, or
+     secret values in app source, app state, payload examples, or manifests.
+     Reference Vault/project/OAuth auth by descriptor only, e.g.
+     `auth: "project_vault_binding"`.
    - Bind DOM event listeners once, outside render/state handlers, or replace
      nodes before rebinding. Never add submit/click listeners every time
      `illo:state` fires.
@@ -105,6 +136,38 @@ Constellation design contract.
 - The persisted manifest must end with `contract_version: 1`, `data_plan`, and
   `design_contract`. The compiler supplies simple app-local UI-state defaults;
   provide explicit Domain bindings for recordful apps.
+- The design contract shape is strict. Use exactly
+  `design_contract: { "kit": "constellation-app-kit", "theme_modes": ["dark", "light"] }`.
+  Do not replace `kit` with `system`, `design_system`, or
+  `uses_app_kit_classes`, and do not replace `theme_modes` with
+  `supports_color_scheme`. Extra descriptive metadata belongs in `metadata`,
+  not in `manifest.design_contract`.
+- For external systems, declare generic server-side actions in `manifest.actions`.
+  Example:
+
+```json
+{
+  "actions": {
+    "tickets.importExternal": {
+      "kind": "connector",
+      "description": "Import external ticket records into the tickets Domain.",
+      "effects": ["external.read", "domain.write"],
+      "connectors": [
+        {"key": "ticketing", "provider": "github", "auth": "project_vault_binding"}
+      ],
+      "domain_mapping": {
+        "binding": "tickets",
+        "mode": "upsert",
+        "external_id_field": "external_id"
+      },
+      "executor": {"type": "deferred"}
+    }
+  }
+}
+```
+
+  The app can call `window.illo.actions.run("tickets.importExternal", payload)`.
+  The server validates the declaration and only runs registered executors.
 - Use the Illo App Kit classes (`illo-app`, `illo-panel`, `illo-toolbar`,
   `illo-input`, `illo-button`, `illo-list`, `illo-row`, `illo-tabs`,
   `illo-badge`, `illo-empty`) instead of inventing local visual tokens.
