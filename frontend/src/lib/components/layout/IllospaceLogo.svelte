@@ -146,10 +146,6 @@
     user-select: none;
   }
 
-  .illospace-logo-icon .illospace-logo-image {
-    transform: translateX(6%);
-  }
-
   .illospace-logo-on-light {
     display: none;
   }
