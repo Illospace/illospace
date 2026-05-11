@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from starlette.testclient import TestClient
@@ -186,14 +187,27 @@ def test_chat_subscription_authorization_rejects_cross_org_conversation(monkeypa
             return SimpleNamespace(id=conversation_id, org_id="org-2")
 
     fake_session = SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr(ws_router, "SessionFactory", lambda: fake_session)
+
+    class FakeUnitOfWork:
+        def __enter__(self):
+            self.session = fake_session
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    async def run_sync_inline(fn, /, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(ws_router, "UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr(ws_router, "run_sync_with_unit_of_work", run_sync_inline)
     monkeypatch.setattr(ws_router, "ChatConversationRepository", FakeConversationRepository)
 
     assert (
-        ws_router._authorize_chat_subscription(
+        asyncio.run(ws_router._authorize_chat_subscription(
             "user-1",
             org_id="org-1",
             conversation_id="conversation-1",
-        )
+        ))
         == "CHAT_CONVERSATION_FORBIDDEN"
     )

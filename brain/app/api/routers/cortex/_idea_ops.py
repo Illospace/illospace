@@ -46,7 +46,7 @@ from brain.platform.db.models.notification import (
     NOTIFICATION_SOURCE_WORKSPACE,
 )
 from brain.platform.db.models.org import User
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -433,42 +433,55 @@ async def _publish_notification_summary_updates(
     if not org_id or not user_ids:
         return
 
-    with UnitOfWork() as uow:
-        for user_id in sorted(user_ids):
-            summary = build_notification_summary(uow.session, user_id=user_id, org_id=org_id)
-            await ws_manager.publish_notification_summary_updated(
-                user_id=user_id,
-                summary=summary.model_dump(mode="json"),
-            )
+    def _summaries():
+        with UnitOfWork() as uow:
+            return {
+                user_id: build_notification_summary(uow.session, user_id=user_id, org_id=org_id)
+                for user_id in sorted(user_ids)
+            }
+
+    summaries = await run_sync_with_unit_of_work(_summaries)
+    for user_id, summary in summaries.items():
+        await ws_manager.publish_notification_summary_updated(
+            user_id=user_id,
+            summary=summary.model_dump(mode="json"),
+        )
 
 
 # ── Idea operations ────────────────────────────────────────────
 
 @router.post("/ideas/{idea_id}/cancel-all")
-def idea_cancel_all(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
+async def idea_cancel_all(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
     from brain.systems.runs.cortex import cancel_runs_for_idea
-    with UnitOfWork() as uow:
-        _require_idea_for_user(uow.session, idea_id, user)
-    count = cancel_runs_for_idea(idea_id)
-    return {"ok": True, "canceled": count, "cancelled": count}
+
+    def _cancel():
+        with UnitOfWork() as uow:
+            _require_idea_for_user(uow.session, idea_id, user)
+        count = cancel_runs_for_idea(idea_id)
+        return {"ok": True, "canceled": count, "cancelled": count}
+
+    return await run_sync_with_unit_of_work(_cancel)
 
 
 @router.post("/ideas/{idea_id}/mark-read")
 async def mark_read(idea_id: str, request: Request, user: dict[str, Any] = Depends(get_current_user)):
     user_id = str(user.get("id"))
     org_id = str(user.get("org_id")) if user.get("org_id") else None
-    with UnitOfWork() as uow:
-        idea = _require_idea_for_user(uow.session, idea_id, user)
-        if idea.status == "unread_reply":
-            idea.status = "needs_input"
-            idea.read_at = datetime.now(timezone.utc)
-            uow.session.add(IdeaStateLog(
-                idea_id=idea_id,
-                from_state="unread_reply",
-                to_state="needs_input",
-                trigger="user_read",
-            ))
-        uow.notifications.mark_read_for_idea(user_id=user_id, idea_id=idea_id)
+    def _mark():
+        with UnitOfWork() as uow:
+            idea = _require_idea_for_user(uow.session, idea_id, user)
+            if idea.status == "unread_reply":
+                idea.status = "needs_input"
+                idea.read_at = datetime.now(timezone.utc)
+                uow.session.add(IdeaStateLog(
+                    idea_id=idea_id,
+                    from_state="unread_reply",
+                    to_state="needs_input",
+                    trigger="user_read",
+                ))
+            uow.notifications.mark_read_for_idea(user_id=user_id, idea_id=idea_id)
+
+    await run_sync_with_unit_of_work(_mark)
     try:
         await _publish_notification_summary_updates(org_id=org_id, user_ids={user_id})
     except Exception as exc:
@@ -479,11 +492,14 @@ async def mark_read(idea_id: str, request: Request, user: dict[str, Any] = Depen
 @router.patch("/ideas/{idea_id}/position")
 async def update_position(idea_id: str, request: Request, user: dict[str, Any] = Depends(get_current_user)):
     data = await request.json()
-    with UnitOfWork() as uow:
-        idea = _require_idea_for_user(uow.session, idea_id, user)
-        if idea and idea.archived_at is None:
-            idea.position_x = data.get("x")
-            idea.position_y = data.get("y")
+    def _update():
+        with UnitOfWork() as uow:
+            idea = _require_idea_for_user(uow.session, idea_id, user)
+            if idea and idea.archived_at is None:
+                idea.position_x = data.get("x")
+                idea.position_y = data.get("y")
+
+    await run_sync_with_unit_of_work(_update)
     return {"ok": True}
 
 
@@ -507,8 +523,10 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
     new_status = None
     notification_user_ids: set[str] = set()
     notification_org_id: str | None = str(org_id) if org_id else None
-    with UnitOfWork() as uow:
-        idea = _require_idea_for_user(uow.session, idea_id, user)
+    async with UnitOfWork() as uow:
+        idea = await uow.session.run_sync(
+            lambda sync_db: _require_idea_for_user(sync_db, idea_id, user)
+        )
         current_status = idea.status
         if idea.org_id:
             notification_org_id = str(idea.org_id)
@@ -542,16 +560,18 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
             message_type=msg_type,
         )
         uow.session.add(thread_msg)
-        uow.session.flush()
+        await uow.session.flush()
 
-        _append_live_guidance_from_thread_message(
-            session=uow.session,
-            idea_id=idea_id,
-            role=role,
-            content=content,
-            metadata=metadata,
-            thread_msg=thread_msg,
-            user_id=user_id,
+        await uow.session.run_sync(
+            lambda sync_db: _append_live_guidance_from_thread_message(
+                session=sync_db,
+                idea_id=idea_id,
+                role=role,
+                content=content,
+                metadata=metadata,
+                thread_msg=thread_msg,
+                user_id=user_id,
+            )
         )
 
         msg = {
@@ -582,7 +602,8 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
                     func.lower(User.name).in_(person_mentions),
                 )
             )
-            rows = uow.session.execute(stmt).all()
+            result = await uow.session.execute(stmt)
+            rows = result.all()
             resolved = {row.name: row.id for row in rows}
 
             for name in person_mentions:
@@ -590,7 +611,7 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
                     mentioned_user_id = str(resolved[name])
                     if mentioned_user_id == str(user_id):
                         continue
-                    _, created = uow.user_mentions.create_if_missing(
+                    _, created = await uow.user_mentions.create_if_missing(
                         user_id=mentioned_user_id,
                         idea_id=str(idea_id),
                         mentioned_by=str(user_id),
@@ -598,7 +619,7 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
                     )
                     if created and notification_org_id:
                         preview = compact_notification_text(content)
-                        uow.notifications.create_or_coalesce(
+                        await uow.notifications.create_or_coalesce(
                             org_id=notification_org_id,
                             user_id=mentioned_user_id,
                             source=NOTIFICATION_SOURCE_WORKSPACE,
@@ -651,7 +672,7 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
             ):
                 owner_user_id = str(idea.user_id)
                 preview = compact_notification_text(content)
-                uow.notifications.create_or_coalesce(
+                await uow.notifications.create_or_coalesce(
                     org_id=notification_org_id,
                     user_id=owner_user_id,
                     source=NOTIFICATION_SOURCE_WORKSPACE,
@@ -672,7 +693,7 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
     if role == "user":
         feedback_tags = _infer_feedback_tags(content)
         if feedback_tags:
-            _record_implicit_feedback(idea_id, content, feedback_tags)
+            await run_sync_with_unit_of_work(_record_implicit_feedback, idea_id, content, feedback_tags)
 
     await ws_manager.broadcast_product_event(
         "thread_message",
@@ -696,25 +717,30 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
 
 
 @router.post("/ideas/{idea_id}/mentions/seen")
-def mark_mentions_seen(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
+async def mark_mentions_seen(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
     user_id = user.get("id")
-    with UnitOfWork() as uow:
-        _require_idea_for_user(uow.session, idea_id, user)
-        count = uow.user_mentions.mark_seen_for_idea(
-            user_id=str(user_id),
-            idea_id=idea_id,
-        )
-    return {"cleared": count}
+    def _seen():
+        with UnitOfWork() as uow:
+            _require_idea_for_user(uow.session, idea_id, user)
+            count = uow.user_mentions.mark_seen_for_idea(
+                user_id=str(user_id),
+                idea_id=idea_id,
+            )
+        return {"cleared": count}
+
+    return await run_sync_with_unit_of_work(_seen)
 
 
 @router.get("/mentions/unread")
-def get_unread_mentions(user: dict[str, Any] = Depends(get_current_user)):
+async def get_unread_mentions(user: dict[str, Any] = Depends(get_current_user)):
     user_id = user.get("id")
-    with UnitOfWork() as uow:
-        mentions = uow.user_mentions.list_unread_for_user(
-            user_id=str(user_id),
-        )
-    return mentions
+    def _list():
+        with UnitOfWork() as uow:
+            return uow.user_mentions.list_unread_for_user(
+                user_id=str(user_id),
+            )
+
+    return await run_sync_with_unit_of_work(_list)
 
 
 # ── Presence ───────────────────────────────────────────────────
@@ -731,8 +757,11 @@ async def update_presence(request: Request, user: dict[str, Any] = Depends(get_c
     if not idea_id or action not in ("join", "leave"):
         raise HTTPException(status_code=400, detail="idea_id and action (join/leave) required")
 
-    with UnitOfWork() as uow:
-        _require_idea_for_user(uow.session, idea_id, user)
+    def _validate():
+        with UnitOfWork() as uow:
+            _require_idea_for_user(uow.session, idea_id, user)
+
+    await run_sync_with_unit_of_work(_validate)
 
     _presence_cleanup()
     if action == "join":
@@ -895,9 +924,14 @@ def unified_stream_payload(
 
 
 @router.get("/ideas/{idea_id}/unified-stream")
-def idea_unified_stream(
+async def idea_unified_stream(
     idea_id: str,
     include_debug: bool = False,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return unified_stream_payload(idea_id=idea_id, include_debug=include_debug, user=user)
+    return await run_sync_with_unit_of_work(
+        unified_stream_payload,
+        idea_id=idea_id,
+        include_debug=include_debug,
+        user=user,
+    )

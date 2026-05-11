@@ -57,23 +57,25 @@ class TestOrgValidation:
         from brain.app.api.routers.cortex import _require_idea_for_user
 
         session = MagicMock()
+        org_id = "00000000-0000-4000-8000-000000000001"
         fake_idea = MagicMock()
         fake_idea.id = "idea-1"
-        fake_idea.org_id = "org-1"
+        fake_idea.org_id = org_id
         session.scalars.return_value.first.return_value = fake_idea
 
         result = _require_idea_for_user(
             session,
             "idea-1",
-            {"id": "user-1", "org_id": "org-1", "principal_type": "human"},
+            {"id": "user-1", "org_id": org_id, "principal_type": "human"},
         )
 
         assert result is fake_idea
         stmt = session.scalars.call_args.args[0]
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-        assert "ideas.org_id = 'org-1'" in compiled
+        compiled_org_id = org_id.replace("-", "")
+        assert f"ideas.org_id = '{compiled_org_id}'" in compiled
         assert "ideas.org_id IS NULL" in compiled
-        assert "users.org_id = 'org-1'" in compiled
+        assert f"users.org_id = '{compiled_org_id}'" in compiled
 
     def test_require_idea_for_user_hides_cross_org_ideas(self):
         """Route helper raises 404 when repository-scoped lookup misses."""

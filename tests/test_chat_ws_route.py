@@ -18,7 +18,7 @@ def _ws_token(user_id: str = "user-1", org_id: str = "org-1") -> str:
 def test_ws_rejects_unauthorized_chat_conversation_subscription(monkeypatch):
     from brain.app.api.routers import ws as ws_router
 
-    def fake_authorize(
+    async def fake_authorize(
         user_id: str,
         *,
         org_id: str,

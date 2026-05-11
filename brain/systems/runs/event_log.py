@@ -6,9 +6,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import false, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.systems.runs.events import run_event
-from brain.systems.runs.store import AgentRunStore
+from brain.systems.runs.store import AgentRunStore, AsyncAgentRunStore
 from brain.systems.runs.ui_events import run_event_to_ui_message
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -40,6 +41,36 @@ def record_run_event(
         return _write(session)
     with UnitOfWork() as uow:
         return _write(uow.session)
+
+
+async def async_record_run_event(
+    run_id: int,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    producer: str = "agent_runtime",
+    session: AsyncSession | None = None,
+    **_: Any,
+) -> AgentRunEventRow:
+    """Async agent-run event persistence with no long transaction around I/O."""
+
+    async def _write(active_session: AsyncSession) -> AgentRunEventRow:
+        store = AsyncAgentRunStore(active_session)
+        run = await store._run(lambda sync_store: sync_store.require_run(int(run_id)))
+        return await store.append_event(
+            run_event(
+                int(run_id),
+                str(event_type),
+                dict(payload or {}),
+                root_run_id=run.root_run_id,
+                producer=producer,
+            )
+        )
+
+    if session is not None:
+        return await _write(session)
+    async with UnitOfWork() as uow:
+        return await _write(uow.session)
 
 
 def record_run_degraded_event(run_id: int, event_type: str, payload: dict[str, Any] | None = None, **kwargs: Any) -> AgentRunEventRow:
@@ -106,6 +137,7 @@ def list_run_events_after_for_principal(
 
 
 __all__ = [
+    "async_record_run_event",
     "list_run_events_after_for_principal",
     "record_run_degraded_event",
     "record_run_event",

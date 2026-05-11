@@ -21,7 +21,7 @@ if alembic_cfg.config_file_name is not None:
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode — emit SQL to stdout."""
     context.configure(
-        url=brain_config.DB_URL,
+        url=brain_config.DB_SYNC_URL,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -73,7 +73,7 @@ def _ensure_alembic_version_capacity(connection: Connection) -> None:
 
 def run_migrations_online() -> None:
     """Run migrations against a live database."""
-    connectable = create_engine(brain_config.DB_URL)
+    connectable = create_engine(brain_config.DB_SYNC_URL)
     try:
         with connectable.connect() as connection:
             _ensure_alembic_version_capacity(connection)

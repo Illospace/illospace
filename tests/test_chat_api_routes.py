@@ -27,6 +27,8 @@ from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.notification import NotificationEvent
 from brain.platform.db.models.org import Org, User
 
+pytestmark = pytest.mark.requires_db
+
 _TABLES = (
     Org.__table__,
     User.__table__,
@@ -105,7 +107,7 @@ def _user_context(session: Session, user_id: str) -> dict[str, str]:
 @pytest.fixture
 def chat_db_session() -> Generator[Session, None, None]:
     schema = _schema_name()
-    engine = create_engine(config.DB_URL)
+    engine = create_engine(config.DB_SYNC_URL)
     admin_conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
     admin_conn.execute(text(f'CREATE SCHEMA "{schema}"'))
     conn = engine.connect()

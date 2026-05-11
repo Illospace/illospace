@@ -3,6 +3,7 @@
 Verifies that the migrated cortex endpoints work correctly with
 SQLAlchemy ORM instead of raw SQL. Tests mock at the UnitOfWork/session level.
 """
+import asyncio
 import json
 import pytest
 from datetime import datetime, timezone
@@ -326,7 +327,11 @@ class TestTitleRoutes:
             "brain.app.api.routers.cortex._misc.generate_and_store_idea_display_title",
             return_value=StoredDisplayTitle(idea_id="idea-1", title="Generated Title", updated=True),
         ) as mock_generate_title:
-            result = backfill_titles(user={"id": "user-1", "org_id": "org-1"})
+            async def run_sync_inline(fn, /, *args, **kwargs):
+                return fn(*args, **kwargs)
+
+            with patch("brain.app.api.routers.cortex._misc.run_sync_with_unit_of_work", run_sync_inline):
+                result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": "org-1"}))
 
         assert result == {"ok": True, "generated": 1, "total": 1}
         mock_generate_title.assert_called_once_with(
@@ -345,7 +350,11 @@ class TestTitleRoutes:
         list_uow.session.scalars.return_value.all.return_value = []
         mock_uow_cls.return_value = list_uow
 
-        result = backfill_titles(user={"id": "user-1", "org_id": "org-1"})
+        async def run_sync_inline(fn, /, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        with patch("brain.app.api.routers.cortex._misc.run_sync_with_unit_of_work", run_sync_inline):
+            result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": "org-1"}))
 
         assert result == {"ok": True, "generated": 0, "total": 0}
         stmt = list_uow.session.scalars.call_args.args[0]
@@ -361,7 +370,11 @@ class TestTitleRoutes:
         list_uow.session.scalars.return_value.all.return_value = []
         mock_uow_cls.return_value = list_uow
 
-        result = backfill_titles(user={"id": "user-1", "org_id": None})
+        async def run_sync_inline(fn, /, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        with patch("brain.app.api.routers.cortex._misc.run_sync_with_unit_of_work", run_sync_inline):
+            result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": None}))
 
         assert result == {"ok": True, "generated": 0, "total": 0}
         stmt = list_uow.session.scalars.call_args.args[0]

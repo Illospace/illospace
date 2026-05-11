@@ -16,8 +16,8 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Patch DB pool before importing server (it may touch DB at import)
-with patch("brain.platform.db._get_pool"), \
+# Patch legacy DB pool before importing server (it may touch DB at import)
+with patch("brain.platform.db.legacy._get_pool"), \
      patch("brain.systems.runs.cortex.ensure_schema"), \
      patch("brain.systems.runs.cortex.start_runner"):
     import brain.app.api.main as server_module
@@ -99,7 +99,7 @@ class TestAuthenticate:
 class TestLoginRoute:
     def test_post_valid_credentials_succeeds(self, client):
         user = _make_user(password="hunter2")
-        with patch("brain.app.api.routers.auth.authenticate", return_value=user):
+        with patch("brain.app.api.routers.auth.async_authenticate", return_value=user):
             resp = client.post("/api/login",
                                json={"email": "alex@illo.ai", "password": "hunter2"})
             assert resp.status_code == 200
@@ -107,7 +107,7 @@ class TestLoginRoute:
             assert data["ok"] is True
 
     def test_post_invalid_credentials_returns_401(self, client):
-        with patch("brain.app.api.routers.auth.authenticate", return_value=None):
+        with patch("brain.app.api.routers.auth.async_authenticate", return_value=None):
             resp = client.post("/api/login",
                                json={"email": "alex@illo.ai", "password": "wrong"})
             assert resp.status_code == 401
@@ -143,13 +143,13 @@ class TestSession:
     def test_login_then_me_returns_user(self, client):
         """Login sets session; subsequent /api/me returns user info."""
         user = _make_user()
-        with patch("brain.app.api.routers.auth.authenticate", return_value=user):
+        with patch("brain.app.api.routers.auth.async_authenticate", return_value=user):
             resp = client.post("/api/login",
                                json={"email": "alex@illo.ai", "password": "hunter2"})
             assert resp.status_code == 200
 
         # Session cookie is preserved by TestClient — mock get_user_by_id for /api/me
-        with patch("brain.app.api.routers.auth.get_user_by_id", return_value=user):
+        with patch("brain.app.api.routers.auth.async_get_user_by_id", return_value=user):
             resp = client.get("/api/me")
             assert resp.status_code == 200
             data = resp.json()
@@ -159,7 +159,7 @@ class TestSession:
     def test_logout_clears_session(self, client):
         """POST /api/logout clears the session."""
         user = _make_user()
-        with patch("brain.app.api.routers.auth.authenticate", return_value=user):
+        with patch("brain.app.api.routers.auth.async_authenticate", return_value=user):
             client.post("/api/login",
                         json={"email": "alex@illo.ai", "password": "hunter2"})
 

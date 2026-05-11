@@ -13,14 +13,25 @@ from brain.app.api.main import app
 from brain.app.api.ws.auth import create_ws_token
 
 
+class _FakeSession:
+    async def run_sync(self, fn):
+        return fn(self)
+
+
 class _FakeUOW:
     def __init__(self):
-        self.session = SimpleNamespace()
+        self.session = _FakeSession()
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        return False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
         return False
 
 
@@ -82,11 +93,10 @@ def test_create_browser_session_endpoint(monkeypatch):
     monkeypatch.setattr(_browser, "UnitOfWork", _FakeUOW)
     monkeypatch.setattr(_browser, "_validate_idea_org_orm", lambda session, idea_id, org_id: True)
     monkeypatch.setattr(_browser.browser_sessions, "create_or_get_session", fake_create_or_get_session)
-    monkeypatch.setattr(
-        _browser,
-        "_get_browser_session_or_404",
-        lambda session_id: SimpleNamespace(created_at=created_at),
-    )
+    async def fake_get_browser_session_or_404(session_id: str):
+        return SimpleNamespace(created_at=created_at)
+
+    monkeypatch.setattr(_browser, "_get_browser_session_or_404", fake_get_browser_session_or_404)
     app.dependency_overrides[get_current_user] = _auth_user
 
     client = TestClient(app)
@@ -1524,6 +1534,7 @@ async def test_browser_runtime_launches_chrome_with_server_safe_env(monkeypatch,
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     runtime._wait_for_cdp = fake_wait_for_cdp  # type: ignore[method-assign]
+    runtime._allocate_port = lambda: 9222  # type: ignore[method-assign]
 
     await runtime._ensure_chrome_process()
 
@@ -1585,6 +1596,7 @@ async def test_browser_runtime_falls_back_when_preferred_chrome_cannot_launch(mo
     runtime._chrome_executable_candidates = lambda: ["/bad/chrome", "/good/chrome"]  # type: ignore[method-assign]
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     runtime._wait_for_cdp = fake_wait_for_cdp  # type: ignore[method-assign]
+    runtime._allocate_port = lambda: 9223  # type: ignore[method-assign]
 
     await runtime._ensure_chrome_process()
 

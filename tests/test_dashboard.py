@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -152,28 +152,28 @@ class TestGraphRoute:
 
     @patch("brain.app.api.routers.memory.UnitOfWork")
     def test_route_graph_delegates(self, MockUnitOfWork, client):
-        uow = MockUnitOfWork.return_value.__enter__.return_value
-        uow.memories.get_graph_data.return_value = {"nodes": [], "edges": []}
+        uow = MockUnitOfWork.return_value.__aenter__.return_value
+        uow.memories.get_graph_data = AsyncMock(return_value={"nodes": [], "edges": []})
         resp = client.get("/api/memory/graph")
         assert resp.status_code == 200
         assert resp.json()["nodes"] == []
-        uow.memories.get_graph_data.assert_called_once()
+        uow.memories.get_graph_data.assert_awaited_once()
 
 
 class TestMemoryDetailRoute:
 
     @patch("brain.app.api.routers.memory.UnitOfWork")
     def test_route_memory_detail_404(self, MockUnitOfWork, client):
-        uow = MockUnitOfWork.return_value.__enter__.return_value
-        uow.memories.get_or_raise_visible.side_effect = LookupError("not found")
+        uow = MockUnitOfWork.return_value.__aenter__.return_value
+        uow.memories.get_or_raise_visible = AsyncMock(side_effect=LookupError("not found"))
         resp = client.get("/api/memory/999")
         assert resp.status_code == 404
 
     @patch("brain.app.api.routers.memory.UnitOfWork")
     def test_route_memory_detail_200(self, MockUnitOfWork, client):
         fake = _fake_memory(id=1, content="hi")
-        uow = MockUnitOfWork.return_value.__enter__.return_value
-        uow.memories.get_or_raise_visible.return_value = fake
+        uow = MockUnitOfWork.return_value.__aenter__.return_value
+        uow.memories.get_or_raise_visible = AsyncMock(return_value=fake)
         resp = client.get("/api/memory/1")
         assert resp.status_code == 200
         data = resp.json()
@@ -184,12 +184,12 @@ class TestSearchRoute:
 
     @patch("brain.app.api.routers.memory.UnitOfWork")
     def test_route_search_delegates(self, MockUnitOfWork, client):
-        uow = MockUnitOfWork.return_value.__enter__.return_value
-        uow.memories.search_visible.return_value = [_fake_memory()]
+        uow = MockUnitOfWork.return_value.__aenter__.return_value
+        uow.memories.search_visible = AsyncMock(return_value=[_fake_memory()])
         resp = client.get("/api/memory/search?q=test+query")
         assert resp.status_code == 200
         assert len(resp.json()) == 1
-        uow.memories.search_visible.assert_called_once()
+        uow.memories.search_visible.assert_awaited_once()
 
 
 class TestHealthRoute:
@@ -271,7 +271,7 @@ class TestSkillsRoute:
         resp = client.get("/api/skills/enhanced")
 
         assert resp.status_code == 200
-        ensure_catalog.assert_called_once_with()
+        ensure_catalog.assert_called_once()
         data = resp.json()
         assert data[0]["skill"]["name"] == "develop"
         assert data[0]["package"]["package_kind"] == "legacy_db"
