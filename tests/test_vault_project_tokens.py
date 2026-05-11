@@ -1,6 +1,9 @@
 """Tests for project-bound vault token availability."""
 from __future__ import annotations
 
+import base64
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -287,6 +290,7 @@ def test_project_token_context_includes_github_repo_from_project_context_snapsho
 def test_exec_command_injects_project_bound_env_names_without_returning_values(monkeypatch, tmp_path):
     from brain.systems.runs.tool_catalog.handlers.files import _handle_exec_command
 
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
     monkeypatch.setattr(
         "brain.systems.runs.tool_catalog.handlers.files._current_project_bound_env",
         lambda: {"GITHUB_TOKEN": "ghp-secret-value"},
@@ -297,5 +301,109 @@ def test_exec_command_injects_project_bound_env_names_without_returning_values(m
         result = _handle_exec_command("gh auth status", working_dir=str(tmp_path))
 
     assert result["injected_env"] == ["GITHUB_TOKEN"]
+    assert result["git_auth_configured"] == ["github.com"]
     assert "ghp-secret-value" not in str(result)
-    assert run.call_args.kwargs["env"]["GITHUB_TOKEN"] == "ghp-secret-value"
+    run_env = run.call_args.kwargs["env"]
+    encoded = base64.b64encode(b"x-access-token:ghp-secret-value").decode("ascii")
+    assert run_env["GITHUB_TOKEN"] == "ghp-secret-value"
+    assert run_env["GIT_TERMINAL_PROMPT"] == "0"
+    assert run_env["GCM_INTERACTIVE"] == "never"
+    assert run_env["GIT_CONFIG_COUNT"] == "1"
+    assert run_env["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
+    assert run_env["GIT_CONFIG_VALUE_0"] == f"AUTHORIZATION: basic {encoded}"
+
+
+def test_exec_command_redacts_project_bound_git_auth_from_output(monkeypatch, tmp_path):
+    from brain.systems.runs.tool_catalog.handlers.files import _handle_exec_command
+
+    token = "ghp-secret-value"
+    encoded = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    auth_header = f"AUTHORIZATION: basic {encoded}"
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.files._current_project_bound_env",
+        lambda: {"GH_TOKEN": token, "STRIPE_API_KEY": "sk-live-secret"},
+    )
+    proc = SimpleNamespace(
+        returncode=0,
+        stdout=f"token={token}\nheader={auth_header}\nstripe=sk-live-secret\n",
+        stderr=f"encoded={encoded}\n",
+    )
+
+    with patch("subprocess.run", return_value=proc):
+        result = _handle_exec_command("git push origin HEAD:test", working_dir=str(tmp_path))
+
+    assert token not in result["stdout"]
+    assert encoded not in result["stdout"]
+    assert "sk-live-secret" not in result["stdout"]
+    assert encoded not in result["stderr"]
+    assert result["stdout"].count("[secret redacted]") == 3
+    assert result["stderr"].count("[secret redacted]") == 1
+
+
+def test_run_script_uses_project_bound_env_and_redacts_values(monkeypatch, tmp_path):
+    from brain.systems.runs.tool_catalog.handlers.files import _handle_run_script
+
+    monkeypatch.setattr(
+        "brain.systems.runs.tool_catalog.handlers.files._current_project_bound_env",
+        lambda: {"GH_TOKEN": "ghp-secret-value", "STRIPE_API_KEY": "sk-live-secret"},
+    )
+    proc = SimpleNamespace(
+        returncode=0,
+        stdout="github=ghp-secret-value\nstripe=sk-live-secret\n",
+        stderr="",
+    )
+
+    with patch("subprocess.run", return_value=proc) as run:
+        result = _handle_run_script("print('ok')", _workspace=str(tmp_path))
+
+    run_env = run.call_args.kwargs["env"]
+    assert run_env["GH_TOKEN"] == "ghp-secret-value"
+    assert run_env["STRIPE_API_KEY"] == "sk-live-secret"
+    assert result["injected_env"] == ["GH_TOKEN", "STRIPE_API_KEY"]
+    assert result["git_auth_configured"] == ["github.com"]
+    assert "ghp-secret-value" not in result["stdout"]
+    assert "sk-live-secret" not in result["stdout"]
+    assert result["stdout"].count("[secret redacted]") == 2
+
+
+def test_parallel_exec_commands_keep_project_bound_env_isolated(monkeypatch, tmp_path):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import files
+
+    project_a = tmp_path / "project-a"
+    project_b = tmp_path / "project-b"
+    project_a.mkdir()
+    project_b.mkdir()
+    captured_envs: dict[str, dict[str, str]] = {}
+    lock = threading.Lock()
+
+    def project_env():
+        workspace_root = str(getattr(files._agent_context, "workspace_root", ""))
+        project_name = workspace_root.rsplit("/", 1)[-1]
+        return {"GH_TOKEN": f"token-for-{project_name}"}
+
+    def fake_run(*args, **kwargs):
+        del args
+        with lock:
+            captured_envs[str(kwargs["cwd"])] = dict(kwargs["env"])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def run_for_project(project_root):
+        with bind_agent_context({
+            "workspace_root": str(project_root),
+            "user_id": USER_ID,
+            "org_id": ORG_ID,
+        }):
+            return files._handle_exec_command("git status", working_dir=str(project_root))
+
+    monkeypatch.setattr(files, "_current_project_bound_env", project_env)
+    with patch("subprocess.run", side_effect=fake_run):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(run_for_project, [project_a, project_b]))
+
+    assert captured_envs[str(project_a)]["GH_TOKEN"] == "token-for-project-a"
+    assert captured_envs[str(project_b)]["GH_TOKEN"] == "token-for-project-b"
+    assert captured_envs[str(project_a)]["GIT_CONFIG_VALUE_0"] != captured_envs[str(project_b)]["GIT_CONFIG_VALUE_0"]
+    assert all(result["injected_env"] == ["GH_TOKEN"] for result in results)
+    assert "token-for-project-a" not in str(results)
+    assert "token-for-project-b" not in str(results)
