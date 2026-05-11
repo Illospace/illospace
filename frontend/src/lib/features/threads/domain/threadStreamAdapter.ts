@@ -249,8 +249,8 @@ export function mixHex(a: string, b: string, bWeight = 0.5): string {
   });
 }
 
-export function accentTone(accent: string | null): 'spectral' | 'amber' {
-  return accent?.toLowerCase() === '#d5a14d' ? 'amber' : 'spectral';
+export function accentTone(_accent: string | null): 'spectral' | 'amber' {
+  return 'spectral';
 }
 
 export function resolveIdeaAccent(source: unknown): string | null {

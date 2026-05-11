@@ -513,15 +513,15 @@
 
   .constellation-astre-amber {
     --astre-tone-color: var(--constellation-color-amber);
-    --astre-before-border: rgba(213, 161, 77, 0.24);
-    --astre-halo-border: rgba(213, 161, 77, 0.18);
-    --astre-halo-inner-border: rgba(213, 161, 77, 0.12);
+    --astre-before-border: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 24%, transparent);
+    --astre-halo-border: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 18%, transparent);
+    --astre-halo-inner-border: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 12%, transparent);
     --astre-ring-shadow: var(--constellation-shadow-astre-amber);
     --astre-core-color: var(--constellation-color-amber-owner);
     --astre-core-border-color: rgba(255, 227, 172, 0.28);
     --astre-core-inner-stroke: rgba(255, 227, 172, 0.38);
-    --astre-core-glow-strong: rgba(213, 161, 77, 0.34);
-    --astre-core-glow-soft: rgba(213, 161, 77, 0.16);
+    --astre-core-glow-strong: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 34%, transparent);
+    --astre-core-glow-soft: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 16%, transparent);
   }
 
   .constellation-astre-hero .constellation-astre-letter {

@@ -55,7 +55,7 @@
 
   const STATUS_COLORS: Record<string, string> = {
     idle: '#57CFA0',
-    working: '#E3AA54',
+    working: 'var(--thread-accent, #57CFA0)',
     done: '#57CFA0',
   };
 
@@ -113,7 +113,7 @@
           type: 'timeline',
           icon: ev.icon || '',
           label: ev.label || '',
-          dotColor: ev.type === 'agent_started' ? '#E8A94B' : ev.type === 'agent_finished' ? '#6BC785' : undefined,
+          dotColor: ev.type === 'agent_started' ? 'var(--thread-accent, #57CFA0)' : ev.type === 'agent_finished' ? '#6BC785' : undefined,
         }));
       } catch { /* timeline API not available */ }
 
@@ -135,7 +135,7 @@
           error: dp.error,
           estimated_cost: dp.estimated_cost,
           skill_outcome: dp.skill_outcome,
-          dotColor: dp.status === 'completed' ? '#6BC785' : dp.status === 'failed' ? '#dc2626' : '#E8A94B',
+          dotColor: dp.status === 'completed' ? '#6BC785' : dp.status === 'failed' ? '#dc2626' : 'var(--thread-accent, #57CFA0)',
         }));
       } catch { /* run API not available */ }
 
@@ -297,13 +297,13 @@
 
   function evalScoreColor(score: number): string {
     if (score >= 8) return 'var(--positive, #6BC785)';
-    if (score >= 5) return '#CCA860';
+    if (score >= 5) return 'var(--thread-accent, #57CFA0)';
     return 'var(--negative, #D4808F)';
   }
 
   function evalBorderColor(avgScore: number): string {
     if (avgScore >= 6) return 'rgba(107, 199, 133, 0.5)';
-    if (avgScore >= 3) return 'rgba(204, 168, 96, 0.5)';
+    if (avgScore >= 3) return 'color-mix(in srgb, var(--thread-accent, #57CFA0) 50%, transparent)';
     return 'rgba(212, 128, 143, 0.5)';
   }
 
@@ -666,7 +666,7 @@
                         <span class="audit-phase-badge">{w.node_id}</span>
                       {/if}
                       {#if w.status && w.status !== 'completed' && w.status !== 'failed'}
-                        <span class="audit-status-badge" style="color: {w.status === 'running' ? '#CCA860' : 'var(--text-3)'};">{w.status}</span>
+                        <span class="audit-status-badge" style="color: {w.status === 'running' ? 'var(--thread-accent, #57CFA0)' : 'var(--text-3)'};">{w.status}</span>
                       {/if}
                     </div>
                     <div class="audit-worker-meta">
@@ -856,7 +856,13 @@
     position: absolute;
     inset: -2px;
     border-radius: 50%;
-    background: conic-gradient(from 0deg, #E8A94B 0%, rgba(232,169,75,0.25) 30%, transparent 30%, transparent 100%);
+    background: conic-gradient(
+      from 0deg,
+      var(--thread-accent, #57CFA0) 0%,
+      color-mix(in srgb, var(--thread-accent, #57CFA0) 25%, transparent) 30%,
+      transparent 30%,
+      transparent 100%
+    );
     animation: orb-rotate 4s linear infinite;
     mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
     -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
@@ -867,7 +873,11 @@
     position: absolute;
     inset: 1px;
     border-radius: 50%;
-    background: radial-gradient(circle at 35% 35%, rgba(232,169,75,0.15), rgba(232,169,75,0.03) 60%);
+    background: radial-gradient(
+      circle at 35% 35%,
+      color-mix(in srgb, var(--thread-accent, #57CFA0) 15%, transparent),
+      color-mix(in srgb, var(--thread-accent, #57CFA0) 3%, transparent) 60%
+    );
     animation: orb-breathe 3s ease-in-out infinite;
   }
 
@@ -1153,11 +1163,11 @@
     gap: 8px;
     margin: 0 0 12px;
     padding: 12px 14px;
-    background: rgba(232, 169, 75, 0.08);
-    border: 1px solid rgba(232, 169, 75, 0.2);
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--thread-accent, #57CFA0) 20%, transparent);
     border-radius: 14px;
     font-size: 12px;
-    color: #E8A94B;
+    color: var(--thread-accent, #57CFA0);
     letter-spacing: 0.2px;
   }
   .audit-burn-icon {
@@ -1168,8 +1178,12 @@
   /* Highlight card (Total Tokens) */
   .audit-card-highlight {
     grid-column: 1 / -1;
-    border-color: rgba(232, 169, 75, 0.18);
-    background: linear-gradient(180deg, rgba(232, 169, 75, 0.08), rgba(255, 255, 255, 0.02));
+    border-color: color-mix(in srgb, var(--thread-accent, #57CFA0) 18%, transparent);
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--thread-accent, #57CFA0) 8%, transparent),
+      rgba(255, 255, 255, 0.02)
+    );
   }
 
   /* Token breakdown pills */
@@ -1194,8 +1208,8 @@
     color: var(--text-3);
   }
   .audit-pill-output {
-    background: rgba(232, 169, 75, 0.1);
-    color: #E8A94B;
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 10%, transparent);
+    color: var(--thread-accent, #57CFA0);
   }
   .audit-pill-cache {
     background: rgba(107, 199, 133, 0.1);
@@ -1220,7 +1234,11 @@
   }
   .audit-token-bar-worker {
     height: 100%;
-    background: linear-gradient(90deg, #f59e0b, #fbbf24);
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--thread-accent, #57CFA0) 72%, #6366f1 28%),
+      var(--thread-accent, #57CFA0)
+    );
     transition: width 0.3s ease;
   }
   .audit-token-legend {
@@ -1245,7 +1263,7 @@
     background: #818cf8;
   }
   .audit-legend-dot.worker {
-    background: #fbbf24;
+    background: var(--thread-accent, #57CFA0);
   }
 
   /* Run timeline */
@@ -1308,7 +1326,7 @@
     background: rgba(245, 158, 11, 0.12);
     border: 1px solid rgba(245, 158, 11, 0.25);
     border-radius: 8px;
-    color: #fbbf24;
+    color: var(--thread-accent, #57CFA0);
     font-weight: 500;
   }
 
@@ -1713,8 +1731,8 @@
     color: var(--positive, #6BC785);
   }
   .audit-eval-rec.rec-caution {
-    background: rgba(204, 168, 96, 0.15);
-    color: #CCA860;
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 15%, transparent);
+    color: var(--thread-accent, #57CFA0);
   }
   .audit-eval-rec.rec-reject {
     background: rgba(212, 128, 143, 0.15);

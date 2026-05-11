@@ -1518,8 +1518,8 @@
     min-height: 32px;
     padding: 0 14px;
     border-radius: 999px;
-    border: 1px solid rgba(213, 161, 77, 0.24);
-    background: rgba(213, 161, 77, 0.12);
+    border: 1px solid color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 24%, transparent);
+    background: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 12%, transparent);
     color: rgba(250, 231, 188, 0.94);
     font-family: var(--constellation-font-mono);
     font-size: 10px;

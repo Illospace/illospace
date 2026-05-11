@@ -75,7 +75,7 @@
     --panel-accent: rgba(141, 183, 255, 0.22);
     --panel-accent-strong: rgba(141, 183, 255, 0.16);
     --panel-accent-soft: rgba(141, 183, 255, 0.07);
-    --panel-glow-secondary: rgba(213, 161, 77, 0.08);
+    --panel-glow-secondary: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 8%, transparent);
     --panel-separator: var(--constellation-surface-panel-separator);
     --panel-padding: 18px;
     position: relative;
@@ -171,7 +171,7 @@
     --panel-accent: rgba(141, 183, 255, 0.22);
     --panel-accent-strong: rgba(141, 183, 255, 0.15);
     --panel-accent-soft: rgba(141, 183, 255, 0.07);
-    --panel-glow-secondary: rgba(213, 161, 77, 0.08);
+    --panel-glow-secondary: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 8%, transparent);
   }
 
   .constellation-panel-tone-info {
@@ -190,9 +190,9 @@
 
   .constellation-panel-tone-warning {
     --panel-accent: rgba(250, 231, 188, 0.22);
-    --panel-accent-strong: rgba(213, 161, 77, 0.17);
-    --panel-accent-soft: rgba(213, 161, 77, 0.09);
-    --panel-glow-secondary: rgba(213, 161, 77, 0.12);
+    --panel-accent-strong: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 17%, transparent);
+    --panel-accent-soft: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 9%, transparent);
+    --panel-glow-secondary: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 12%, transparent);
   }
 
   .constellation-panel-tone-danger {

@@ -13,7 +13,7 @@
 
   let {
     mode = 'workspace',
-    tone = 'amber',
+    tone = 'spectral',
     actionStyle,
     kicker = '',
     placeholder,

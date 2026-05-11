@@ -732,6 +732,9 @@
     selectedIdea: cortex.selectedIdea,
     ideas: cortex.ideas,
     connections: cortex.connections,
+    currentUserId: auth.user?.id,
+    currentUserColor: auth.user?.color,
+    teamMembers: cortex.teamMembers,
   }));
 
   function handleKeydown(e: KeyboardEvent) {

@@ -493,7 +493,7 @@
 
   function pieSlices(data: ChartEntry[]) {
     const total = data.reduce((sum, entry) => sum + Math.max(Number(entry.value) || 0, 0), 0) || 1;
-    const colors = ['#57cfa0', '#8db7ff', '#e3aa54', '#d86f78', '#a98dff', '#64c6d9'];
+    const colors = ['#57cfa0', '#8db7ff', '#4BACB8', '#d86f78', '#a98dff', '#64c6d9'];
     let cursor = -Math.PI / 2;
     return data.map((entry, index) => {
       const value = Math.max(Number(entry.value) || 0, 0);

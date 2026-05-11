@@ -44,8 +44,8 @@ export function buildPresenceSeedStyle(color: string | null | undefined): string
   ].join('; ');
 }
 
-export function presenceToneForColor(color: string | null | undefined): 'spectral' | 'amber' {
-  return normalizeHexColor(color)?.toLowerCase() === '#d5a14d' ? 'amber' : 'spectral';
+export function presenceToneForColor(_color: string | null | undefined): 'spectral' | 'amber' {
+  return 'spectral';
 }
 
 export function buildComposerActionStyle(color: string | null | undefined): string {

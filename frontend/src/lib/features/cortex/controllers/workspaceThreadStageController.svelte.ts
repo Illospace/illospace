@@ -20,12 +20,12 @@ type ThreadOriginAccentMember = {
 
 const THREAD_TONE_BY_STATUS: Record<string, string> = {
   idle: '#57CFA0',
-  working: '#E3AA54',
+  working: '#57CFA0',
   done: '#57CFA0',
 };
 
 const THREAD_SIGNAL_PROFILE: Record<string, { color: string; kind: ThreadSignalKind; weight: number; pulseMs: number }> = {
-  working: { color: '#E3AA54', kind: 'progress', weight: 0.72, pulseMs: 4400 },
+  working: { color: '#57CFA0', kind: 'progress', weight: 0.72, pulseMs: 4400 },
   done: { color: '#5EA9FF', kind: 'attention', weight: 0.82, pulseMs: 3600 },
   idle: { color: '#57CFA0', kind: 'progress', weight: 0.46, pulseMs: 5600 },
 };
@@ -125,11 +125,17 @@ export function buildThreadPeripherySignals({
   selectedIdea,
   ideas,
   connections,
+  currentUserId,
+  currentUserColor,
+  teamMembers = [],
 }: {
   directThreadActive: boolean;
   selectedIdea: Idea | null | undefined;
   ideas: readonly Idea[];
   connections: readonly Connection[];
+  currentUserId?: string | number | null;
+  currentUserColor?: string | null;
+  teamMembers?: readonly ThreadOriginAccentMember[];
 }): ThreadPeripherySignal[] {
   if (directThreadActive) return [];
 
@@ -170,11 +176,17 @@ export function buildThreadPeripherySignals({
     const distanceBoost = clamp(1 - distance / 900, 0, 1) * 0.08;
     const related = relatedIds.has(idea.id);
     const score = profile.weight + distanceBoost + (related ? 0.16 : 0);
+    const color = resolveThreadOriginAccent({
+      selectedIdea: idea,
+      currentUserId,
+      currentUserColor,
+      teamMembers,
+    }) ?? profile.color;
     const entry = {
       score,
       offset: edgeOffsetFor(side, dx, dy),
-      color: profile.color,
-      rgb: hexToRgb(profile.color),
+      color,
+      rgb: hexToRgb(color),
       pulseMs: profile.pulseMs,
       kind: profile.kind,
       related,

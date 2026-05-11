@@ -1309,8 +1309,8 @@
       ),
       radial-gradient(
         42% 66% at 72% 78%,
-        rgba(var(--thread-accent-rgb, 213, 161, 77), 0.048) 0%,
-        rgba(var(--thread-accent-rgb, 213, 161, 77), 0.016) 42%,
+        rgba(var(--thread-accent-rgb, 87, 207, 160), 0.048) 0%,
+        rgba(var(--thread-accent-rgb, 87, 207, 160), 0.016) 42%,
         transparent 80%
       );
     filter: var(--thread-stage-panel-before-filter);

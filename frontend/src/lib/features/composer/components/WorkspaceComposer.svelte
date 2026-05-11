@@ -390,7 +390,7 @@
 
 <WorkspaceComposerAdapter
   mode="workspace"
-  tone="amber"
+  tone="spectral"
   kicker=""
   placeholder="Ask Illo anything..."
   actionState={sending ? 'working' : 'idle'}

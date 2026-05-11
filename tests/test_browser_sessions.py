@@ -833,6 +833,82 @@ async def test_browser_frame_event_includes_session_state(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_browser_stream_forces_first_frame_after_subscribe():
+    from brain.platform.browser.service import BrowserSessionRuntime, BrowserSessionService
+
+    service = BrowserSessionService()
+    record = SimpleNamespace(
+        id="sess-stream-subscribe",
+        idea_id="idea-stream-subscribe",
+        user_id="user-123",
+        run_id=None,
+        viewport_width=1280,
+        viewport_height=800,
+        status="ready",
+        current_url="about:blank",
+        page_title=None,
+        storage_mode="ephemeral",
+        allow_downloads=False,
+        allow_file_uploads=True,
+        last_error=None,
+        _idea_org_id="org-stream",
+    )
+    runtime = BrowserSessionRuntime(service, record)
+    runtime._watchers.add("user-123")
+    runtime._force_next_stream_frame = True
+    runtime._dirty.set()
+    captures = []
+
+    async def fake_capture_frame(*, force: bool = False):
+        captures.append(force)
+        runtime._closed = True
+        return None
+
+    runtime._capture_frame = fake_capture_frame  # type: ignore[method-assign]
+
+    await runtime._stream_loop()
+
+    assert captures == [True]
+    assert runtime._force_next_stream_frame is False
+
+
+@pytest.mark.asyncio
+async def test_browser_subscribe_requests_forced_stream_frame():
+    from brain.platform.browser.service import BrowserSessionService
+
+    service = BrowserSessionService()
+    calls = []
+
+    class FakeRuntime:
+        _dirty = SimpleNamespace(set=lambda: calls.append(("dirty", True)))
+
+        async def ensure_streaming(self, user_id, *, force_frame=False):
+            calls.append(("stream", user_id, force_frame))
+
+        def _emit_state(self, reason):
+            calls.append(("state", reason))
+
+        def state_payload(self):
+            return {"id": "sess-subscribe"}
+
+    async def fake_get_or_restore_runtime(session_id: str):
+        calls.append(("restore", session_id))
+        return FakeRuntime()
+
+    service.get_or_restore_runtime = fake_get_or_restore_runtime  # type: ignore[method-assign]
+
+    payload = await service.subscribe("sess-subscribe", "user-123")
+
+    assert payload == {"id": "sess-subscribe"}
+    assert calls == [
+        ("restore", "sess-subscribe"),
+        ("stream", "user-123", True),
+        ("state", "subscribed"),
+        ("dirty", True),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_browser_service_runs_export_commands():
     from brain.platform.browser.service import BrowserSessionService
 

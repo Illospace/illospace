@@ -363,10 +363,10 @@
 <style>
   .tracking-warning {
     padding: var(--sp-3) var(--sp-4);
-    background: rgba(251, 191, 36, 0.1);
-    border: 1px solid rgba(251, 191, 36, 0.3);
+    background: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 30%, transparent);
     border-radius: var(--radius-md);
-    color: #fbbf24;
+    color: #57CFA0;
     font-size: var(--text-sm);
   }
 </style>

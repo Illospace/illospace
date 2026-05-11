@@ -199,6 +199,7 @@ class BrowserSessionRuntime:
         self._dirty = asyncio.Event()
         self._closed = False
         self._last_frame_sha1: str | None = None
+        self._force_next_stream_frame = False
         self._actions: list[BrowserAction] = []
         self._downloads: list[BrowserDownload] = []
         self._artifacts: list[BrowserArtifact] = []
@@ -371,10 +372,16 @@ result = page_info()
             for idx, tab in enumerate(self._tabs)
         ]
 
-    async def ensure_streaming(self, user_id: str | None = None) -> None:
+    async def ensure_streaming(self, user_id: str | None = None, *, force_frame: bool = False) -> None:
         await self.start()
+        new_watcher = bool(user_id and str(user_id) not in self._watchers)
         if user_id:
             self._watchers.add(str(user_id))
+        if force_frame or new_watcher:
+            # A session open can capture the first frame before the websocket
+            # subscriber is attached. Force the next streamed frame so SHA
+            # dedupe cannot leave a new panel with state but no image.
+            self._force_next_stream_frame = True
         self._cancel_idle_close()
         if self._stream_task and not self._stream_task.done():
             self._dirty.set()
@@ -848,7 +855,9 @@ result = {{"ok": True}}
             try:
                 await asyncio.wait_for(self._dirty.wait(), timeout=self.service.keepalive_sec)
                 self._dirty.clear()
-                await self._capture_frame()
+                force_frame = self._force_next_stream_frame
+                self._force_next_stream_frame = False
+                await self._capture_frame(force=force_frame)
             except asyncio.TimeoutError:
                 if self._watchers:
                     await self._capture_frame()
@@ -1665,7 +1674,7 @@ class BrowserSessionService:
 
     async def subscribe(self, session_id: str, user_id: str | None) -> dict[str, Any]:
         runtime = await self.get_or_restore_runtime(session_id)
-        await runtime.ensure_streaming(user_id)
+        await runtime.ensure_streaming(user_id, force_frame=True)
         runtime._emit_state("subscribed")
         runtime._dirty.set()
         return runtime.state_payload()

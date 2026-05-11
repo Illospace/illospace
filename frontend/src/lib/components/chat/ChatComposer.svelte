@@ -7,7 +7,7 @@
   import type { ChatComposerModel } from './chatTypes';
 
   let {
-    tone = 'amber',
+    tone = 'spectral',
     value,
     defaultValue = '',
     placeholder = 'Write a message...',

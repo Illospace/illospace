@@ -600,6 +600,6 @@
   .team-profile-toggle input[type='checkbox'] {
     width: 16px;
     height: 16px;
-    accent-color: rgba(213, 161, 77, 0.92);
+    accent-color: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 92%, transparent);
   }
 </style>
