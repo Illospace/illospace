@@ -1245,6 +1245,8 @@
     --thread-reply-placeholder-title: rgba(240, 240, 250, 0.88);
     --thread-reply-placeholder-hint: rgba(240, 240, 250, 0.46);
     --thread-composer-clearance: clamp(22px, 2.4vh, 34px);
+    --thread-composer-inline-padding: 18px;
+    --thread-transient-rail-offset: var(--thread-composer-inline-padding);
 
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto;
@@ -1344,6 +1346,7 @@
   .thread-column {
     width: min(100%, var(--thread-column-max));
     margin-inline: auto;
+    box-sizing: border-box;
   }
 
   .thread-panel-header {
@@ -1974,6 +1977,8 @@
     gap: 12px;
     justify-self: start;
     margin-right: auto;
+    box-sizing: border-box;
+    padding-inline-start: var(--thread-transient-rail-offset);
   }
 
   .run-queued {
@@ -3082,7 +3087,9 @@
   .thread-thinking-state {
     display: grid;
     gap: 8px;
-    padding: 2px 0;
+    box-sizing: border-box;
+    padding-block: 2px;
+    padding-inline-start: var(--thread-transient-rail-offset);
     border-radius: 0;
     border: 0;
     background: var(--thread-thinking-background);

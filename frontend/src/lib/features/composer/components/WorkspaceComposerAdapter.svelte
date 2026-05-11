@@ -1202,7 +1202,10 @@
   .thread-mode .cortex-workspace-composer {
     min-height: 102px;
     max-height: min(220px, calc(100svh - 164px));
-    padding: 16px 18px 14px;
+    padding:
+      var(--thread-composer-padding-block-start, 16px)
+      var(--thread-composer-inline-padding, 18px)
+      var(--thread-composer-padding-block-end, 14px);
     border-color: var(--constellation-thread-composer-border);
     background: var(--constellation-thread-composer-background);
     box-shadow: var(--constellation-thread-composer-shadow);
