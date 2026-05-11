@@ -88,6 +88,7 @@ _RETRYABLE_OPENAI_STREAM_TERMS = (
     "timeout",
     "timed out",
 )
+_RETRYABLE_PROVIDER_STATUS_CODES = {408, 409, 429, 500, 502, 503, 529}
 
 
 def _openai_stream_error_message(error: Any) -> str:
@@ -105,6 +106,25 @@ def _openai_stream_error_message(error: Any) -> str:
 def _is_retryable_openai_error_message(message: str) -> bool:
     lowered = str(message or "").lower()
     return any(term in lowered for term in _RETRYABLE_OPENAI_STREAM_TERMS)
+
+
+def _provider_error_status_code(exc: Exception) -> int | None:
+    for attr in ("status_code", "status"):
+        value = getattr(exc, attr, None)
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+    response = getattr(exc, "response", None)
+    for attr in ("status_code", "status"):
+        value = getattr(response, attr, None)
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+    return None
 
 
 class _TrackedStreamContext:
@@ -272,7 +292,12 @@ class AnthropicProvider(LLMProvider):
         )
 
     def is_retryable_error(self, exc: Exception) -> bool:
-        return isinstance(exc, anthropic.InternalServerError)
+        status_code = _provider_error_status_code(exc)
+        return (
+            isinstance(exc, anthropic.InternalServerError)
+            or status_code in _RETRYABLE_PROVIDER_STATUS_CODES
+            or _is_retryable_openai_error_message(str(exc))
+        )
 
     def is_api_error(self, exc: Exception) -> bool:
         return isinstance(exc, anthropic.APIError)
@@ -502,9 +527,12 @@ class OpenAIProvider(LLMProvider):
         return StreamContext(_event_generator(), finalizer=_build_final)
 
     def is_retryable_error(self, exc: Exception) -> bool:
+        status_code = _provider_error_status_code(exc)
         return (
             exc.__class__.__module__.startswith("openai")
             and exc.__class__.__name__ == "InternalServerError"
+        ) or (
+            status_code in _RETRYABLE_PROVIDER_STATUS_CODES
         ) or isinstance(exc, OpenAICodexRetryableError) or _is_retryable_openai_error_message(str(exc))
 
     def is_api_error(self, exc: Exception) -> bool:
