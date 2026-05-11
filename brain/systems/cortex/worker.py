@@ -70,17 +70,27 @@ def _require_embedding_backend_ready() -> None:
     )
 
 
+def _cycle_scheduler_enabled() -> bool:
+    raw = os.getenv("ILLO_WORKER_DISABLE_CYCLE_SCHEDULER", "").strip().lower()
+    return raw not in {"1", "true", "yes", "on"}
+
+
 def main() -> None:
     logger.info("starting agent-run worker")
     _require_embedding_backend_ready()
-    start_cycle_scheduler()
+    cycle_scheduler_enabled = _cycle_scheduler_enabled()
+    if cycle_scheduler_enabled:
+        start_cycle_scheduler()
+    else:
+        logger.info("cycle scheduler disabled for this worker")
     start_runner()
     try:
         while _running:
             time.sleep(_poll_interval())
     finally:
         stop_runner(drain_timeout_seconds=_shutdown_drain_timeout_seconds())
-        stop_cycle_scheduler()
+        if cycle_scheduler_enabled:
+            stop_cycle_scheduler()
         logger.info("agent-run worker stopped")
 
 

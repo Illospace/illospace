@@ -1120,6 +1120,9 @@ export const api = {
   // System
   systemInfo: () => fetchJson<any>('/api/system'),
   runtimeSettings: () => fetchJson<any>('/api/runtime-settings'),
+  runtimeUpdateStatus: () => fetchJson<any>('/api/runtime-settings/update'),
+  startRuntimeUpdate: () =>
+    fetchJson<any>('/api/runtime-settings/update', { method: 'POST' }),
   connectRuntimeOpenAIKey: (data: { api_key: string }) =>
     fetchJson<any>('/api/runtime-settings/connection/openai/api-key', { method: 'POST', body: JSON.stringify(data) }),
   connectRuntimeOpenAIEmbeddingKey: (data: { api_key: string }) =>

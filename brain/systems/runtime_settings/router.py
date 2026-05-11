@@ -29,8 +29,10 @@ from .schemas import (
     RuntimeModelsRead,
     RuntimeModelsUpdate,
     RuntimeSettingsRead,
+    RuntimeUpdateRead,
 )
 from .service import can_manage_runtime_settings, get_runtime_settings
+from .self_update import get_runtime_update_status, start_runtime_update
 
 router = APIRouter(prefix="/api/runtime-settings", tags=["runtime-settings"], dependencies=[Depends(rate_limit)])
 _OPENAI_OAUTH_CALLBACK_START_MODES = {"auto", "server", "local_bridge"}
@@ -126,3 +128,15 @@ def save_runtime_memory(payload: RuntimeMemoryUpdate, user: User = Depends(_runt
 def check_memory(user: User = Depends(_runtime_user)) -> RuntimeMemoryCheckRead:
     _require_settings_admin(user)
     return check_runtime_memory(user)
+
+
+@router.get("/update", response_model=RuntimeUpdateRead)
+def read_runtime_update(user: User = Depends(_runtime_user)) -> RuntimeUpdateRead:
+    _require_settings_admin(user)
+    return get_runtime_update_status()
+
+
+@router.post("/update", response_model=RuntimeUpdateRead)
+def start_illospace_update(user: User = Depends(_runtime_user)) -> RuntimeUpdateRead:
+    _require_settings_admin(user)
+    return start_runtime_update(requested_by=str(user.id))
