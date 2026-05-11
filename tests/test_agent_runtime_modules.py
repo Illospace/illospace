@@ -660,6 +660,52 @@ def test_retry_runtime_streams_when_live_callbacks_are_present():
     assert response == "streamed-response"
     assert streamed and streamed[0][2] is False
 
+
+def test_retry_runtime_respects_retry_after_header(monkeypatch):
+    from brain.systems.runs.direct_loop import retry as retry_module
+    from brain.systems.runs.direct_loop.retry import api_call_with_retry
+
+    class RetryableProviderError(Exception):
+        response = SimpleNamespace(headers={"Retry-After": "0.25", "x-request-id": "req-1"})
+
+    attempts = 0
+    sleeps = []
+
+    def create(_request):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RetryableProviderError("rate limit")
+        return "ok"
+
+    provider = SimpleNamespace(
+        create=create,
+        is_retryable_error=lambda exc: isinstance(exc, RetryableProviderError),
+    )
+    monkeypatch.setattr(retry_module.time, "sleep", lambda delay: sleeps.append(delay))
+
+    response = api_call_with_retry(
+        provider,
+        request=SimpleNamespace(),
+        llm=SimpleNamespace(is_oauth=False, build_request_headers=lambda **_: {}),
+        cancel_event=None,
+        on_stream_activity=None,
+        on_stream_delta=None,
+        session_id="session-1",
+        turn=0,
+        tokens=SimpleNamespace(),
+        start_time=0,
+        tool_calls_made=[],
+        call_start=0,
+        retry_delays=(10,),
+        streaming_call=lambda *args, **kwargs: "unused",
+        make_cancelled_result=lambda *args, **kwargs: "cancelled",
+        degrade_betas=lambda: False,
+    )
+
+    assert response == "ok"
+    assert sleeps == [0.25]
+
 def test_streaming_runtime_surfaces_public_reflection_not_raw_reasoning(monkeypatch):
     from brain.platform.integrations.transports.base import LLMResponse, StreamContext, StreamEvent, Usage
     from brain.systems.runs.direct_loop import streaming as runtime_streaming

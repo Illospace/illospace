@@ -330,6 +330,7 @@ class WorkspaceAppsStore {
   }
 
   scheduleFollowupRefreshes(delaysMs: number[]) {
+    if (this._followupRefreshTimers.size > 0) return;
     delaysMs.forEach((delayMs) => {
       const timer = setTimeout(() => {
         this._followupRefreshTimers.delete(timer);
