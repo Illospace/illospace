@@ -47,9 +47,10 @@ class ConsolidationRun(Base):
     run_date: Mapped[date] = mapped_column(Date, nullable=False)
     phase: Mapped[str] = mapped_column(String(20), nullable=False)
     started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
         server_default=text("NOW()"), nullable=True
     )
-    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     memories_created: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
     )
@@ -158,6 +159,7 @@ class OperatingParams(Base):
     value: Mapped[float] = mapped_column(Float, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_modified: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
         nullable=False, server_default=text("NOW()")
     )
     modified_by: Mapped[str] = mapped_column(
@@ -198,7 +200,7 @@ class RetrievalLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     timestamp: Mapped[datetime] = mapped_column(
-        "timestamp", server_default=func.now()
+        "timestamp", DateTime(timezone=True), server_default=func.now()
     )
     query_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     results_returned: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

@@ -162,9 +162,11 @@ class PolicyPromotion(Base, CreatedAtMixin):
     shadow_metrics: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
     )
-    activated_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    rolled_back_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    demoted_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    rolled_back_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    demoted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     demotion_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     explicit_global_promotion: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("FALSE"), default=False
@@ -257,7 +259,9 @@ class LearningSignal(Base, CreatedAtMixin):
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
     )
     applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    rolled_back_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    rolled_back_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         Index("ix_learning_signals_org_type_created", "org_id", "signal_type", "created_at"),
@@ -340,7 +344,9 @@ class PolicyUpdateCandidate(Base, CreatedAtMixin):
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
     )
     applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    rolled_back_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    rolled_back_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         Index("ix_policy_update_candidates_org_type_status", "org_id", "candidate_type", "status"),

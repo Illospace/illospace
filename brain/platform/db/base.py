@@ -8,7 +8,7 @@ Every model inherits from Base. Mixins add common columns:
 """
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, func
+from sqlalchemy import DateTime, ForeignKey, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -27,14 +27,21 @@ class Base(DeclarativeBase):
 class CreatedAtMixin:
     """created_at only. For tables that have created_at but no updated_at."""
 
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
 
 
 class TimestampMixin(CreatedAtMixin):
     """created_at + updated_at. Only for tables that have BOTH columns."""
 
     updated_at: Mapped[datetime] = mapped_column(
-        server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
 

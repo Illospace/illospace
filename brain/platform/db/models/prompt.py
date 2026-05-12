@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    DateTime,
     Float,
     Integer,
     String,
@@ -40,9 +41,13 @@ class PromptTemplate(Base):
     use_count: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
     )
-    last_used: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    created_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
-    updated_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
+    last_used: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
 
     __table_args__ = (
         UniqueConstraint("name", "version", name="uq_prompt_templates_name_version"),
@@ -71,5 +76,7 @@ class BrainPrompt(Base, CreatedAtMixin):
     context_json: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'"), default=dict
     )
-    dismissed_until: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    resolved_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    dismissed_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -1,6 +1,8 @@
 """Base model and mixin behavior."""
-from sqlalchemy import String, inspect
+from sqlalchemy import DateTime, String, inspect
 from sqlalchemy.orm import Mapped, mapped_column
+
+import brain.platform.db.models  # noqa: F401
 from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin, OrgScopedMixin, ArchivableMixin
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaStateLog
@@ -18,14 +20,29 @@ class _FakeCreatedOnly(CreatedAtMixin, Base):
 
 
 def test_timestamp_mixin_has_both_columns():
-    cols = {c.name for c in inspect(_FakeModel).columns}
+    cols = {c.name: c for c in inspect(_FakeModel).columns}
     assert "created_at" in cols
     assert "updated_at" in cols
+    assert getattr(cols["created_at"].type, "timezone", False)
+    assert getattr(cols["updated_at"].type, "timezone", False)
 
 def test_created_at_mixin_has_only_created():
-    cols = {c.name for c in inspect(_FakeCreatedOnly).columns}
+    cols = {c.name: c for c in inspect(_FakeCreatedOnly).columns}
     assert "created_at" in cols
     assert "updated_at" not in cols
+    assert getattr(cols["created_at"].type, "timezone", False)
+
+
+def test_all_datetime_columns_are_timezone_aware():
+    naive_columns = [
+        f"{table.name}.{column.name}"
+        for table in Base.metadata.tables.values()
+        for column in table.columns
+        if isinstance(column.type, DateTime)
+        and not getattr(column.type, "timezone", False)
+    ]
+    assert naive_columns == []
+
 
 def test_archivable_mixin():
     cols = {c.name for c in inspect(_FakeModel).columns}

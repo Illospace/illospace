@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from sqlalchemy import (
+    DateTime,
     ARRAY,
     Boolean,
     Double,
@@ -84,7 +85,7 @@ class Skill(Base, TimestampMixin, ArchivableMixin):
         Integer, server_default=text("0"), default=0
     )
     avg_duration_sec: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
-    last_used: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_used: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     pitfalls: Mapped[Optional[list]] = mapped_column(
         JSONB, server_default=text("'[]'"), default=list
     )
@@ -131,7 +132,9 @@ class Skill(Base, TimestampMixin, ArchivableMixin):
     graduated_steps: Mapped[Optional[list]] = mapped_column(
         JSONB, server_default=text("'[]'::jsonb"), default=list
     )
-    last_distilled_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_distilled_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     heuristic_count: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
     )
@@ -188,6 +191,7 @@ class SkillDependency(Base):
         Double, server_default=text("1.0"), default=1.0
     )
     learned_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
         server_default=text("NOW()"), nullable=True
     )
 
@@ -209,9 +213,10 @@ class SkillExecution(Base):
     task_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     complexity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
         server_default=text("NOW()"), nullable=True
     )
-    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_sec: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
     memory_ids_used: Mapped[Optional[list]] = mapped_column(
         ARRAY(Integer), server_default=text("'{}'"), default=list
@@ -291,8 +296,12 @@ class SkillHeuristic(Base, TimestampMixin):
     violated_count: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
     )
-    last_validated: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    last_violated: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_validated: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_violated: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     active: Mapped[bool] = mapped_column(
         Boolean, server_default=text("TRUE"), default=True
     )
@@ -300,8 +309,8 @@ class SkillHeuristic(Base, TimestampMixin):
         Boolean, server_default=text("FALSE"), default=False
     )
     graduated_at: Mapped[Optional[datetime]] = mapped_column(
-        "graduated_at", nullable=True
+        "graduated_at", DateTime(timezone=True), nullable=True
     )
     demoted_at: Mapped[Optional[datetime]] = mapped_column(
-        "demoted_at", nullable=True
+        "demoted_at", DateTime(timezone=True), nullable=True
     )

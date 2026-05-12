@@ -278,14 +278,12 @@ async def resolve_event_org_id_async(
     return None
 
 
-def _write_cortex_event(
-    session: Session,
-    *,
+def _new_cortex_event(
     event_type: str,
     payload: dict[str, Any] | None = None,
 ) -> CortexEvent:
     normalized_payload = _normalize_payload(payload)
-    event = CortexEvent(
+    return CortexEvent(
         event_type=str(event_type),
         idea_id=_infer_idea_id(normalized_payload),
         target_id=_optional_text(normalized_payload.get("target_id")),
@@ -293,6 +291,15 @@ def _write_cortex_event(
         duration_ms=_optional_int(normalized_payload.get("duration_ms")),
         metadata_=normalized_payload,
     )
+
+
+def _write_cortex_event(
+    session: Session,
+    *,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+) -> CortexEvent:
+    event = _new_cortex_event(event_type, payload)
     session.add(event)
     session.flush()
     return event
@@ -304,15 +311,7 @@ async def _write_cortex_event_async(
     event_type: str,
     payload: dict[str, Any] | None = None,
 ) -> CortexEvent:
-    normalized_payload = _normalize_payload(payload)
-    event = CortexEvent(
-        event_type=str(event_type),
-        idea_id=_infer_idea_id(normalized_payload),
-        target_id=_optional_text(normalized_payload.get("target_id")),
-        session_id=_optional_text(normalized_payload.get("session_id")),
-        duration_ms=_optional_int(normalized_payload.get("duration_ms")),
-        metadata_=normalized_payload,
-    )
+    event = _new_cortex_event(event_type, payload)
     session.add(event)
     await session.flush()
     return event
@@ -402,31 +401,16 @@ def list_cortex_events_after_for_principal(
     limit: int = 100,
 ) -> list[CortexEvent]:
     """Return Cortex events visible to a replay principal after a cursor."""
-    stmt = (
-        select(CortexEvent)
-        .where(CortexEvent.id > int(last_event_id))
-        .order_by(CortexEvent.id.asc())
-        .limit(limit)
-    )
-    if not _principal_can_replay_all(principal):
-        org_id = str(principal.get("org_id") or "").strip()
-        if not org_id:
-            stmt = stmt.where(false())
-        else:
-            stmt = stmt.join(Idea, Idea.id == CortexEvent.idea_id).where(
-                Idea.org_id == org_id
-        )
+    stmt = _cortex_event_replay_stmt(principal, last_event_id=last_event_id, limit=limit)
     return list(session.scalars(stmt).all())
 
 
-async def list_cortex_events_after_for_principal_async(
-    session: AsyncSession,
+def _cortex_event_replay_stmt(
     principal: Mapping[str, Any],
     *,
-    last_event_id: int = 0,
-    limit: int = 100,
-) -> list[CortexEvent]:
-    """Return Cortex events visible to a replay principal after a cursor."""
+    last_event_id: int,
+    limit: int,
+):
     stmt = (
         select(CortexEvent)
         .where(CortexEvent.id > int(last_event_id))
@@ -441,6 +425,18 @@ async def list_cortex_events_after_for_principal_async(
             stmt = stmt.join(Idea, Idea.id == CortexEvent.idea_id).where(
                 Idea.org_id == org_id
             )
+    return stmt
+
+
+async def list_cortex_events_after_for_principal_async(
+    session: AsyncSession,
+    principal: Mapping[str, Any],
+    *,
+    last_event_id: int = 0,
+    limit: int = 100,
+) -> list[CortexEvent]:
+    """Return Cortex events visible to a replay principal after a cursor."""
+    stmt = _cortex_event_replay_stmt(principal, last_event_id=last_event_id, limit=limit)
     result = await session.scalars(stmt)
     return list(result.all())
 

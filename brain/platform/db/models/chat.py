@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    DateTime,
     Boolean,
     CheckConstraint,
     ForeignKey,
@@ -106,8 +107,10 @@ class ChatConversationMember(Base):
     role: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="member", default="member"
     )
-    joined_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
-    muted_until: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
+    muted_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     notification_preference: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="all", default="all"
     )
@@ -167,12 +170,14 @@ class ChatMessage(Base, CreatedAtMixin):
     reply_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0"), default=0
     )
-    last_reply_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_reply_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_reply_message_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
     )
-    edited_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    deleted_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    edited_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -216,8 +221,8 @@ class ChatMessageMention(Base, CreatedAtMixin):
     mentioned_by_user_id: Mapped[Optional[str]] = mapped_column(
         UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
-    delivered_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    seen_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index(
@@ -248,7 +253,7 @@ class ChatNotification(Base, CreatedAtMixin):
         UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     metadata_: Mapped[Optional[dict]] = mapped_column("metadata", JSONB, nullable=True)
-    read_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index(
@@ -278,7 +283,9 @@ class ChatConversationRead(Base):
     last_read_conversation_seq: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0"), default=0
     )
-    last_read_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
+    last_read_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
 
     __table_args__ = (
         CheckConstraint(

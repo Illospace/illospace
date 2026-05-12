@@ -10,7 +10,6 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
-    func,
     Index,
     Integer,
     String,
@@ -44,17 +43,6 @@ class AgentRunRow(Base, TimestampMixin):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
     trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     org_id: Mapped[str | None] = mapped_column(
         UUID(as_uuid=False).with_variant(String, "sqlite"),
@@ -191,7 +179,9 @@ class AgentRunEventRow(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=sql_text("'{}'::jsonb"), default=dict)
     producer: Mapped[str] = mapped_column(String(120), nullable=False, server_default=sql_text("'agent_runtime'"), default="agent_runtime")
     visibility: Mapped[str] = mapped_column(String(32), nullable=False, server_default=sql_text("'public'"), default="public")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=sql_text("NOW()"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sql_text("NOW()")
+    )
 
 
 class AgentRunArtifactRow(Base):
@@ -210,4 +200,6 @@ class AgentRunArtifactRow(Base):
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     visibility: Mapped[str] = mapped_column(String(32), nullable=False, server_default=sql_text("'public'"), default="public")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=sql_text("NOW()"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sql_text("NOW()")
+    )

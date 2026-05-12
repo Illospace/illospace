@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    DateTime,
     Boolean,
     ForeignKey,
     Index,
@@ -121,7 +122,7 @@ class SkillBundleVersion(Base, CreatedAtMixin):
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="draft", default="draft"
     )
-    published_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     bundle: Mapped["SkillBundle"] = relationship(
         "SkillBundle",

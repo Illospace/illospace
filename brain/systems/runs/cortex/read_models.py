@@ -86,13 +86,83 @@ def _visible_query(scope: RunReadScope | None):
     return stmt
 
 
+def _active_runs_stmt(scope: RunReadScope | None):
+    return (
+        _visible_query(scope)
+        .where(AgentRunRow.status.in_(sorted(ACTIVE_STATUSES)))
+        .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
+    )
+
+
+def _recent_runs_stmt(scope: RunReadScope | None, *, limit: int):
+    return (
+        _visible_query(scope)
+        .order_by(AgentRunRow.created_at.desc(), AgentRunRow.id.desc())
+        .limit(limit)
+    )
+
+
+def _run_history_stmt(idea_id: str):
+    return (
+        select(AgentRunRow)
+        .where(AgentRunRow.thread_id == idea_id)
+        .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
+    )
+
+
+def _run_debug_events_stmt(run_id: int):
+    return (
+        select(AgentRunEventRow)
+        .where(AgentRunEventRow.run_id == int(run_id))
+        .order_by(AgentRunEventRow.sequence_no.asc())
+    )
+
+
+def _run_debug_artifacts_stmt(run_id: int):
+    return (
+        select(AgentRunArtifactRow)
+        .where(AgentRunArtifactRow.run_id == int(run_id))
+        .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
+    )
+
+
+def _debug_payload(
+    run: AgentRunRow,
+    events: list[AgentRunEventRow],
+    artifacts: list[AgentRunArtifactRow],
+) -> dict[str, Any]:
+    return {
+        "run": run_stream_payload(run),
+        "events": [
+            {
+                "id": event.id,
+                "sequence_no": event.sequence_no,
+                "event_type": event.event_type,
+                "payload": event.payload or {},
+                "visibility": event.visibility,
+                "created_at": _iso(event.created_at),
+            }
+            for event in events
+        ],
+        "artifacts": [
+            {
+                "id": artifact.id,
+                "artifact_type": artifact.artifact_type,
+                "title": artifact.title,
+                "payload": artifact.payload or {},
+                "text": artifact.text,
+                "uri": artifact.uri,
+                "visibility": artifact.visibility,
+                "created_at": _iso(artifact.created_at),
+            }
+            for artifact in artifacts
+        ],
+    }
+
+
 def serialize_active_runs(scope: RunReadScope | None = None, *, uow_factory=UnitOfWork) -> list[dict[str, Any]]:
     with uow_factory() as uow:
-        rows = uow.session.scalars(
-            _visible_query(scope)
-            .where(AgentRunRow.status.in_(sorted(ACTIVE_STATUSES)))
-            .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
-        ).all()
+        rows = uow.session.scalars(_active_runs_stmt(scope)).all()
         return [run_stream_payload(row) for row in rows]
 
 
@@ -102,11 +172,7 @@ async def serialize_active_runs_async(
     uow_factory=UnitOfWork,
 ) -> list[dict[str, Any]]:
     async with uow_factory() as uow:
-        result = await uow.session.scalars(
-            _visible_query(scope)
-            .where(AgentRunRow.status.in_(sorted(ACTIVE_STATUSES)))
-            .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
-        )
+        result = await uow.session.scalars(_active_runs_stmt(scope))
         return [run_stream_payload(row) for row in result.all()]
 
 
@@ -118,11 +184,7 @@ def serialize_recent_runs(
     uow_factory=UnitOfWork,
 ) -> list[dict[str, Any]]:
     with uow_factory() as uow:
-        rows = uow.session.scalars(
-            _visible_query(scope)
-            .order_by(AgentRunRow.created_at.desc(), AgentRunRow.id.desc())
-            .limit(limit)
-        ).all()
+        rows = uow.session.scalars(_recent_runs_stmt(scope, limit=limit)).all()
         payloads = [run_stream_payload(row) for row in rows]
         if include_debug:
             for payload in payloads:
@@ -138,11 +200,7 @@ async def serialize_recent_runs_async(
     uow_factory=UnitOfWork,
 ) -> list[dict[str, Any]]:
     async with uow_factory() as uow:
-        result = await uow.session.scalars(
-            _visible_query(scope)
-            .order_by(AgentRunRow.created_at.desc(), AgentRunRow.id.desc())
-            .limit(limit)
-        )
+        result = await uow.session.scalars(_recent_runs_stmt(scope, limit=limit))
         payloads = [run_stream_payload(row) for row in result.all()]
         if include_debug:
             for payload in payloads:
@@ -161,16 +219,12 @@ def serialize_run_history(
     uow_factory=UnitOfWork,
 ) -> list[dict[str, Any]]:
     with uow_factory() as uow:
-        rows = uow.session.scalars(
-            select(AgentRunRow)
-            .where(AgentRunRow.thread_id == idea_id)
-            .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
-        ).all()
+        rows = uow.session.scalars(_run_history_stmt(idea_id)).all()
         payloads = [run_stream_payload(row) for row in rows]
     if include_debug:
         for payload in payloads:
             payload["debug"] = serialize_run_debug(int(payload["run_id"]), None, uow_factory=uow_factory)
-        return payloads
+    return payloads
 
 
 async def serialize_run_history_async(
@@ -180,11 +234,7 @@ async def serialize_run_history_async(
     uow_factory=UnitOfWork,
 ) -> list[dict[str, Any]]:
     async with uow_factory() as uow:
-        result = await uow.session.scalars(
-            select(AgentRunRow)
-            .where(AgentRunRow.thread_id == idea_id)
-            .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
-        )
+        result = await uow.session.scalars(_run_history_stmt(idea_id))
         payloads = [run_stream_payload(row) for row in result.all()]
     if include_debug:
         for payload in payloads:
@@ -207,43 +257,9 @@ def serialize_run_debug(
         run = uow.session.get(AgentRunRow, int(run_id))
         if run is None or (scope is not None and not run_belongs_to_scope(uow.session, run, scope)):
             return None
-        events = uow.session.scalars(
-            select(AgentRunEventRow)
-            .where(AgentRunEventRow.run_id == run.id)
-            .order_by(AgentRunEventRow.sequence_no.asc())
-        ).all()
-        artifacts = uow.session.scalars(
-            select(AgentRunArtifactRow)
-            .where(AgentRunArtifactRow.run_id == run.id)
-            .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
-        ).all()
-        return {
-            "run": run_stream_payload(run),
-            "events": [
-                {
-                    "id": event.id,
-                    "sequence_no": event.sequence_no,
-                    "event_type": event.event_type,
-                    "payload": event.payload or {},
-                    "visibility": event.visibility,
-                    "created_at": _iso(event.created_at),
-                }
-                for event in events
-            ],
-            "artifacts": [
-                {
-                    "id": artifact.id,
-                    "artifact_type": artifact.artifact_type,
-                    "title": artifact.title,
-                    "payload": artifact.payload or {},
-                    "text": artifact.text,
-                    "uri": artifact.uri,
-                    "visibility": artifact.visibility,
-                    "created_at": _iso(artifact.created_at),
-                }
-                for artifact in artifacts
-            ],
-        }
+        events = uow.session.scalars(_run_debug_events_stmt(run.id)).all()
+        artifacts = uow.session.scalars(_run_debug_artifacts_stmt(run.id)).all()
+        return _debug_payload(run, list(events), list(artifacts))
 
 
 async def serialize_run_debug_async(
@@ -257,45 +273,11 @@ async def serialize_run_debug_async(
         run = await uow.session.get(AgentRunRow, int(run_id))
         if run is None or (scope is not None and not run_belongs_to_scope(uow.session, run, scope)):
             return None
-        events_result = await uow.session.scalars(
-            select(AgentRunEventRow)
-            .where(AgentRunEventRow.run_id == run.id)
-            .order_by(AgentRunEventRow.sequence_no.asc())
-        )
-        artifacts_result = await uow.session.scalars(
-            select(AgentRunArtifactRow)
-            .where(AgentRunArtifactRow.run_id == run.id)
-            .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
-        )
+        events_result = await uow.session.scalars(_run_debug_events_stmt(run.id))
+        artifacts_result = await uow.session.scalars(_run_debug_artifacts_stmt(run.id))
         events = events_result.all()
         artifacts = artifacts_result.all()
-        return {
-            "run": run_stream_payload(run),
-            "events": [
-                {
-                    "id": event.id,
-                    "sequence_no": event.sequence_no,
-                    "event_type": event.event_type,
-                    "payload": event.payload or {},
-                    "visibility": event.visibility,
-                    "created_at": _iso(event.created_at),
-                }
-                for event in events
-            ],
-            "artifacts": [
-                {
-                    "id": artifact.id,
-                    "artifact_type": artifact.artifact_type,
-                    "title": artifact.title,
-                    "payload": artifact.payload or {},
-                    "text": artifact.text,
-                    "uri": artifact.uri,
-                    "visibility": artifact.visibility,
-                    "created_at": _iso(artifact.created_at),
-                }
-                for artifact in artifacts
-            ],
-        }
+        return _debug_payload(run, list(events), list(artifacts))
 
 
 def tenant_safe_queue_status(status: dict[str, Any], _scope: RunReadScope | None = None) -> dict[str, Any]:

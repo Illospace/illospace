@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    DateTime,
     Boolean,
     ForeignKey,
     Integer,
@@ -115,7 +116,7 @@ class UserApiKey(Base, CreatedAtMixin):
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("TRUE"), default=True
     )
-    last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     total_tokens_used: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
     )
@@ -143,8 +144,8 @@ class ApiKeyShare(Base, CreatedAtMixin):
     shared_by_user_id: Mapped[str] = mapped_column(
         UUID(as_uuid=False), ForeignKey("users.id"), nullable=False
     )
-    shared_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    revoked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    shared_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("api_key_id", "shared_with_user_id", name="uq_api_key_shares_key_user"),
@@ -167,7 +168,7 @@ class OrgApiKey(Base, CreatedAtMixin):
     label: Mapped[str] = mapped_column(
         String(100), server_default="main", default="main"
     )
-    last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     total_tokens_used: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
     )

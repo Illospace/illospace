@@ -207,7 +207,7 @@ class UserMention(Base, CreatedAtMixin):
     thread_message_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("idea_threads.id"), nullable=True
     )
-    seen_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         UniqueConstraint(

@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    DateTime,
     Computed,
     Double,
     Integer,
@@ -53,9 +54,10 @@ class Task(Base, CreatedAtMixin):
         ARRAY(Integer), server_default=text("'{}'"), default=list
     )
     started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
         server_default=text("NOW()"), nullable=True
     )
-    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_sec: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
     outcome: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     outcome_details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -93,9 +95,10 @@ class RunLog(Base):
         String(20), server_default="low", default="low"
     )
     runed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
         nullable=False, server_default=text("NOW()")
     )
-    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     outcome: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     outcome_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     duration_s: Mapped[Optional[int]] = mapped_column(
