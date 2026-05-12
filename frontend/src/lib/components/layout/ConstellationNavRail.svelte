@@ -67,7 +67,29 @@
       {:else}
         <span class="constellation-nav-rail-brand-logo" aria-hidden="true">
           <span class="constellation-nav-rail-brand-logo-collapsed">
-            <IllospaceLogo className="constellation-nav-rail-icon-logo" variant="icon" />
+            <svg
+              class="constellation-nav-rail-brand-icon"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="201 37 176 176"
+              fill="none"
+              focusable="false"
+            >
+              <path
+                fill="currentColor"
+                fill-rule="evenodd"
+                d="M 298.6 62.4 A 72 72 0 1 0 333.5 180.2 L 317.2 165.5 A 50 50 0 1 1 292.9 83.7 Z"
+              />
+              <circle cx="295.8" cy="73.1" r="11" fill="currentColor" />
+              <circle cx="325.3" cy="172.8" r="11" fill="currentColor" />
+              <path
+                fill="currentColor"
+                fill-rule="evenodd"
+                d="M 341.1 93.8 A 72 72 0 0 1 332.7 181.1 L 316.6 166.1 A 50 50 0 0 0 322.4 105.5 Z"
+              />
+              <circle cx="331.7" cy="99.7" r="11" fill="currentColor" />
+              <circle cx="324.6" cy="173.6" r="11" fill="currentColor" />
+              <circle cx="336" cy="64" r="17" fill="currentColor" />
+            </svg>
           </span>
           <span class="constellation-nav-rail-brand-logo-expanded">
             <IllospaceLogo className="constellation-nav-rail-animated-logo" variant="animated" />
@@ -190,7 +212,8 @@
     height: 24px;
     align-items: center;
     justify-content: center;
-    overflow: hidden;
+    overflow: visible;
+    color: var(--nav-item-active-color);
     transition: width 180ms ease;
   }
 
@@ -201,15 +224,17 @@
     height: 24px;
     align-items: center;
     justify-content: center;
-    transition:
-      opacity 160ms ease,
-      transform 180ms ease;
   }
 
   .constellation-nav-rail-brand-logo-collapsed {
     width: 24px;
-    opacity: 1;
-    transform: scale(1);
+  }
+
+  .constellation-nav-rail-brand-icon {
+    display: block;
+    width: 19px;
+    height: 19px;
+    color: currentColor;
   }
 
   .constellation-nav-rail-brand-logo-expanded {
@@ -222,10 +247,9 @@
     --illospace-logo-near-delay: 80ms;
     --illospace-logo-mid-delay: 140ms;
     --illospace-logo-i-delay: 200ms;
+    display: none;
     width: 64px;
-    opacity: 0;
     pointer-events: none;
-    transform: translateX(4px) scale(0.96);
   }
 
   .constellation-nav-rail-brand-mark-text {
@@ -350,15 +374,13 @@
   .constellation-nav-rail:hover .constellation-nav-rail-brand-logo-collapsed,
   .constellation-nav-rail:focus-within .constellation-nav-rail-brand-logo-collapsed,
   .constellation-nav-rail[data-expanded='true'] .constellation-nav-rail-brand-logo-collapsed {
-    opacity: 0;
-    transform: translateX(-4px) scale(0.9);
+    display: none;
   }
 
   .constellation-nav-rail:hover .constellation-nav-rail-brand-logo-expanded,
   .constellation-nav-rail:focus-within .constellation-nav-rail-brand-logo-expanded,
   .constellation-nav-rail[data-expanded='true'] .constellation-nav-rail-brand-logo-expanded {
-    opacity: 1;
-    transform: translateX(0) scale(1);
+    display: inline-flex;
   }
 
   .constellation-nav-rail:hover .constellation-nav-rail-item,
