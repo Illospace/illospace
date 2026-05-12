@@ -47,7 +47,7 @@ _run_event_consumer_task: asyncio.Task | None = None
 _GLOBAL_WS_EVENT_ALLOWLIST: frozenset[str] = frozenset()
 
 # Reference to the main asyncio event loop, set during lifespan startup.
-# Used by _sync_publish to schedule coroutines from background threads.
+# Used by the product event publisher to schedule coroutines from background threads.
 _main_loop: asyncio.AbstractEventLoop | None = None
 
 
@@ -81,10 +81,10 @@ async def _flush_ops_snapshot():
     await asyncio.sleep(_OPS_THROTTLE_SEC)
     _ops_pending = False
     try:
-        from brain.systems.runs.cortex.read_models import RunReadScope, serialize_active_runs
+        from brain.systems.runs.cortex.read_models import RunReadScope, serialize_active_runs_async
         from brain.app.api.routers.ws import ws_manager
         for org_id in ws_manager.connected_org_ids:
-            snapshot = serialize_active_runs(RunReadScope.for_org(org_id))
+            snapshot = await serialize_active_runs_async(RunReadScope.for_org(org_id))
             await ws_manager.broadcast_to_org(
                 org_id,
                 "ops_update",
@@ -102,65 +102,74 @@ async def _run_event_consumer_loop():
     await fanout_run_events(ws_manager, logger=logger)
 
 
-def _ensure_starting_skill_bundle() -> None:
+async def _ensure_starting_skill_bundle() -> None:
     """Materialize the bundled starter skills for fresh installations."""
     try:
         from brain.systems.skills.builtin import ensure_builtin_skills_cached
 
-        ensure_builtin_skills_cached(ttl_seconds=0)
+        await ensure_builtin_skills_cached(ttl_seconds=0)
         logger.info("starting_skill_bundle_ensured")
     except Exception as exc:
         logger.warning("starting_skill_bundle_ensure_failed", error=str(exc))
 
 
-def _sync_publish(event_type, data):
-    """Sync wrapper for async ws_manager.broadcast — used by the event bus.
+def _log_publish_failure(future):
+    try:
+        future.result()
+    except Exception as exc:
+        logger.warning("product_event_publish_failed", error=str(exc))
 
-    Works from both the main async context and background threads by using
-    the stored main loop reference set during lifespan startup.
-    """
-    global _ops_pending
-    if _main_loop is None:
-        logger.warning("_sync_publish called before main loop stored", event_type=event_type)
-        return
 
-    if not isinstance(data, Mapping):
-        logger.warning("_sync_publish dropped non-mapping payload", event_type=event_type)
-        return
-
+async def _publish_product_event(event_type, data):
+    """Resolve product scope and broadcast a live event without sync DB access."""
     from brain.app.api.routers.ws import ws_manager
-    from brain.systems.cortex.events import resolve_event_org_id
+    from brain.systems.cortex.events import resolve_event_org_id_async
 
     payload = dict(data)
     org_id = str(payload.get("org_id") or "").strip()
     if not org_id:
         try:
-            org_id = resolve_event_org_id(payload) or ""
+            org_id = await resolve_event_org_id_async(dict(payload)) or ""
         except Exception as exc:
             logger.warning(
-                "_sync_publish_org_resolve_failed",
+                "product_event_org_resolve_failed",
                 event_type=event_type,
                 error=str(exc),
             )
     if org_id:
         payload["org_id"] = org_id
-    broadcast_coro = ws_manager.broadcast_product_event(
+    await ws_manager.broadcast_product_event(
         event_type,
         payload,
         org_id=org_id or None,
         allow_global=str(event_type) in _GLOBAL_WS_EVENT_ALLOWLIST,
     )
+
+
+def _schedule_product_event_publish(event_type, data):
+    """Schedule product websocket fanout from the event bus."""
+    global _ops_pending
+    if _main_loop is None:
+        logger.warning("product_event_publish_before_loop", event_type=event_type)
+        return
+
+    if not isinstance(data, Mapping):
+        logger.warning("product_event_publish_dropped_non_mapping", event_type=event_type)
+        return
+
+    publish_coro = _publish_product_event(event_type, data)
     try:
         if _main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(broadcast_coro, _main_loop)
-            broadcast_coro = None
+            future = asyncio.run_coroutine_threadsafe(publish_coro, _main_loop)
+            future.add_done_callback(_log_publish_failure)
+            publish_coro = None
         else:
-            _main_loop.run_until_complete(broadcast_coro)
-            broadcast_coro = None
+            _main_loop.run_until_complete(publish_coro)
+            publish_coro = None
     except Exception as e:
-        if broadcast_coro is not None:
-            broadcast_coro.close()
-        logger.warning("_sync_publish failed", event_type=event_type, error=str(e))
+        if publish_coro is not None:
+            publish_coro.close()
+        logger.warning("product_event_publish_failed", event_type=event_type, error=str(e))
 
     # Throttled ops snapshot: at most one push per _OPS_THROTTLE_SEC
     if event_type in _OPS_TRIGGER_EVENTS and not _ops_pending:
@@ -173,7 +182,7 @@ def _sync_publish(event_type, data):
             if snapshot_coro is not None:
                 snapshot_coro.close()
             _ops_pending = False
-            logger.warning("_sync_publish ops snapshot failed", error=str(e))
+            logger.warning("product_event_ops_snapshot_failed", error=str(e))
 
 
 @asynccontextmanager
@@ -184,8 +193,8 @@ async def lifespan(app):
     inline_runner_started = False
 
     from brain.systems.cortex.events import set_publisher
-    set_publisher(_sync_publish)
-    _ensure_starting_skill_bundle()
+    set_publisher(_schedule_product_event_publish)
+    await _ensure_starting_skill_bundle()
     if _should_start_run_event_consumer():
         _run_event_consumer_task = asyncio.create_task(_run_event_consumer_loop())
         logger.info("run_event_consumer_started")

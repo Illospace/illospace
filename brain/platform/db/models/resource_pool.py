@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import ForeignKey, Integer, String, Text, text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -41,9 +41,13 @@ class ResourceLease(Base, CreatedAtMixin):
         server_default=text("gen_random_uuid()::text"),
         default=lambda: uuid.uuid4().hex,
     )
-    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
-    released_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    released_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     release_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
@@ -72,8 +76,12 @@ class WorkspacePoolEntry(Base, CreatedAtMixin):
         default="cold",
         index=True,
     )
-    last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
-    ttl_expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    ttl_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     health: Mapped[Optional[dict]] = mapped_column(
         JSONB,
         nullable=True,
@@ -104,8 +112,12 @@ class BrowserPoolEntry(Base, CreatedAtMixin):
         default="fresh",
         index=True,
     )
-    last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
-    ttl_expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    ttl_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     health: Mapped[Optional[dict]] = mapped_column(
         JSONB,
         nullable=True,

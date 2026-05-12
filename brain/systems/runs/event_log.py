@@ -107,13 +107,12 @@ def _principal_can_replay_all(principal: Mapping[str, Any]) -> bool:
     )
 
 
-def list_run_events_after_for_principal(
-    session,
+def _run_event_replay_stmt(
     principal: Mapping[str, Any],
     *,
-    last_event_id: int = 0,
-    limit: int = 100,
-) -> list[AgentRunEventRow]:
+    last_event_id: int,
+    limit: int,
+):
     stmt = (
         select(AgentRunEventRow, AgentRunRow.thread_id, AgentRunRow.profile, AgentRunRow.org_id)
         .join(AgentRunRow, AgentRunRow.id == AgentRunEventRow.run_id)
@@ -127,17 +126,45 @@ def list_run_events_after_for_principal(
             stmt = stmt.where(false())
         else:
             stmt = stmt.where(AgentRunRow.org_id == org_id)
-    rows = []
-    for event, thread_id, profile, row_org_id in session.execute(stmt).all():
+    return stmt
+
+
+def _project_replay_rows(rows) -> list[AgentRunEventRow]:
+    events = []
+    for event, thread_id, profile, row_org_id in rows:
         setattr(event, "_agent_run_thread_id", thread_id)
         setattr(event, "_agent_run_profile", profile)
         setattr(event, "_agent_run_org_id", row_org_id)
-        rows.append(event)
-    return rows
+        events.append(event)
+    return events
+
+
+def list_run_events_after_for_principal(
+    session,
+    principal: Mapping[str, Any],
+    *,
+    last_event_id: int = 0,
+    limit: int = 100,
+) -> list[AgentRunEventRow]:
+    stmt = _run_event_replay_stmt(principal, last_event_id=last_event_id, limit=limit)
+    return _project_replay_rows(session.execute(stmt).all())
+
+
+async def list_run_events_after_for_principal_async(
+    session: AsyncSession,
+    principal: Mapping[str, Any],
+    *,
+    last_event_id: int = 0,
+    limit: int = 100,
+) -> list[AgentRunEventRow]:
+    stmt = _run_event_replay_stmt(principal, last_event_id=last_event_id, limit=limit)
+    result = await session.execute(stmt)
+    return _project_replay_rows(result.all())
 
 
 __all__ = [
     "async_record_run_event",
+    "list_run_events_after_for_principal_async",
     "list_run_events_after_for_principal",
     "record_run_degraded_event",
     "record_run_event",

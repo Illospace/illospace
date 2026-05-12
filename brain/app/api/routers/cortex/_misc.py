@@ -308,6 +308,7 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
             parent = uow.session.get(Idea, idea_id)
             if not parent:
                 raise HTTPException(status_code=404, detail="Idea not found")
+            event_org_id = str(parent.org_id) if getattr(parent, "org_id", None) else None
 
             stmt = (
                 select(IdeaThread)
@@ -374,11 +375,16 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
             reason="Parent split into branches",
             producer="api.split",
         )
-        return created_ids
+        return created_ids, event_org_id
 
-    created_ids = await run_sync_with_unit_of_work(_split)
-    publish("thought_split", {"parent_id": idea_id, "children": created_ids})
-    publish("status_change", {"idea_id": idea_id, "new_status": "resolved"})
+    created_ids, event_org_id = await run_sync_with_unit_of_work(_split)
+    thought_split_payload = {"parent_id": idea_id, "children": created_ids}
+    status_payload = {"idea_id": idea_id, "new_status": "resolved"}
+    if event_org_id:
+        thought_split_payload["org_id"] = event_org_id
+        status_payload["org_id"] = event_org_id
+    publish("thought_split", thought_split_payload)
+    publish("status_change", status_payload)
     return {"ok": True, "children": created_ids}
 
 

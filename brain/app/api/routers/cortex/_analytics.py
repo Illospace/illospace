@@ -8,13 +8,12 @@ from typing import Any
 
 from fastapi import Depends, HTTPException
 from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.routers.cortex._router import router
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, use_sync_session
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_model_tier
 
 logger = logging.getLogger(__name__)
@@ -196,12 +195,8 @@ async def suggested_idea(user: dict[str, Any] = Depends(get_current_user)):
 async def api_slash_commands(user: dict[str, Any] = Depends(get_current_user)):
     from brain.systems.skills.builtin import ensure_builtin_skills_cached
 
+    await ensure_builtin_skills_cached()
     async with UnitOfWork() as uow:
-        def _ensure(sync_db: Session) -> None:
-            with use_sync_session(sync_db):
-                ensure_builtin_skills_cached()
-
-        await uow.session.run_sync(_ensure)
         skills = await uow.skills.list_command_summaries()
     result = []
     for s in skills:

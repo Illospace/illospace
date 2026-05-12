@@ -1,7 +1,7 @@
 """Consolidated legacy schema simplification.
 
 Revision ID: 0003_schema_simplification
-Revises: 0002_idea_timestamps_timestamptz
+Revises: 0003_agent_run_timestamps_timestamptz
 Create Date: 2026-05-12
 """
 
@@ -32,7 +32,7 @@ from pgvector.sqlalchemy import Vector
 
 
 revision = "0003_schema_simplification"
-down_revision = "0002_idea_timestamps_timestamptz"
+down_revision = "0003_agent_run_timestamps_timestamptz"
 branch_labels = None
 depends_on = None
 

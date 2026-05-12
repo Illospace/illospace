@@ -39,7 +39,9 @@ class AgentSession(Base, TimestampMixin):
     handoff_message_count: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
     )
-    handoff_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    handoff_updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     total_input_tokens: Mapped[int] = mapped_column(
         BigInteger, server_default=text("0"), default=0
     )

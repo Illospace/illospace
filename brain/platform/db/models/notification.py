@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    DateTime,
     CheckConstraint,
     ForeignKey,
     Index,
@@ -67,7 +68,7 @@ class NotificationEvent(Base, TimestampMixin):
     payload: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     coalesce_key: Mapped[str] = mapped_column(String(255), nullable=False)
     occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    read_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint(

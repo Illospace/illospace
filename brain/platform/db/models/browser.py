@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, text
+from sqlalchemy import DateTime, Boolean, ForeignKey, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -58,5 +58,7 @@ class BrowserSession(Base, CreatedAtMixin):
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("TRUE"), default=True
     )
-    last_frame_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    closed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_frame_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

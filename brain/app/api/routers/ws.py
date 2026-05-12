@@ -12,11 +12,11 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from brain.platform.browser import BrowserCapabilityError, browser_sessions
 from brain.systems.runs.event_log import (
     run_event_to_message,
-    list_run_events_after_for_principal,
+    list_run_events_after_for_principal_async,
 )
 from brain.systems.cortex.events import (
     cortex_event_to_message,
-    list_cortex_events_after_for_principal,
+    list_cortex_events_after_for_principal_async,
 )
 from brain.platform.db.repositories.chat import ChatConversationRepository, ChatMessageRepository
 from brain.app.api.schemas.chat import ChatReadUpdate
@@ -396,25 +396,22 @@ async def _load_replay_events(
     last_event_id: int,
     limit: int,
 ):
-    def _load():
-        with UnitOfWork() as uow:
-            if channel == EVENT_REPLAY_CHANNEL_RUN:
-                return list_run_events_after_for_principal(
-                    uow.session,
-                    principal,
-                    last_event_id=last_event_id,
-                    limit=limit,
-                )
-            if channel == EVENT_REPLAY_CHANNEL_CORTEX:
-                return list_cortex_events_after_for_principal(
-                    uow.session,
-                    principal,
-                    last_event_id=last_event_id,
-                    limit=limit,
-                )
-            return []
-
-    return await run_sync_with_unit_of_work(_load)
+    async with UnitOfWork() as uow:
+        if channel == EVENT_REPLAY_CHANNEL_RUN:
+            return await list_run_events_after_for_principal_async(
+                uow.session,
+                principal,
+                last_event_id=last_event_id,
+                limit=limit,
+            )
+        if channel == EVENT_REPLAY_CHANNEL_CORTEX:
+            return await list_cortex_events_after_for_principal_async(
+                uow.session,
+                principal,
+                last_event_id=last_event_id,
+                limit=limit,
+            )
+        return []
 
 
 def _replay_event_to_message(channel: str, event) -> dict[str, Any] | None:

@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    DateTime,
     Boolean,
     ForeignKey,
     Integer,
@@ -49,9 +50,15 @@ class Secret(Base):
     category: Mapped[str] = mapped_column(
         String(64), server_default="general", default="general"
     )
-    created_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
-    updated_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
-    last_accessed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
+    last_accessed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     access_count: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
     )
@@ -74,7 +81,9 @@ class VaultConfig(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
 
 
 class VaultSession(Base):
@@ -86,10 +95,12 @@ class VaultSession(Base):
     user_id: Mapped[str] = mapped_column(
         UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    created_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
-    expires_at: Mapped[datetime] = mapped_column(nullable=False)
-    revoked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    last_seen_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class VaultAgentGrant(Base):
@@ -114,10 +125,12 @@ class VaultAgentGrant(Base):
     approved_by_user_id: Mapped[Optional[str]] = mapped_column(
         UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
-    requested_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
-    decided_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     read_count: Mapped[int] = mapped_column(Integer, server_default=text("0"), default=0)
     max_reads: Mapped[int] = mapped_column(Integer, server_default=text("1"), default=1)
 
@@ -143,8 +156,12 @@ class VaultProjectBinding(Base):
     project_slug: Mapped[str] = mapped_column(String(120), nullable=False)
     env_name: Mapped[str] = mapped_column(String(128), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, server_default=text("TRUE"), default=True)
-    created_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
-    updated_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -173,7 +190,9 @@ class VaultAccessLog(Base):
     accessed_by: Mapped[str] = mapped_column(
         String(50), server_default="user", default="user"
     )
-    accessed_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
+    accessed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
 
 
 class VaultShare(Base):
@@ -192,9 +211,10 @@ class VaultShare(Base):
         UUID(as_uuid=False), ForeignKey("users.id"), nullable=False
     )
     shared_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
         server_default=text("NOW()"), nullable=True
     )
-    revoked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("secret_id", "shared_with_user_id", name="uq_vault_shares_secret_user"),
@@ -217,8 +237,12 @@ class VaultMissingRequest(Base):
     request_count: Mapped[int] = mapped_column(
         Integer, server_default=text("1"), default=1
     )
-    first_requested: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
-    last_requested: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
+    first_requested: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
+    last_requested: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
     resolved: Mapped[bool] = mapped_column(
         Boolean, server_default=text("FALSE"), default=False
     )

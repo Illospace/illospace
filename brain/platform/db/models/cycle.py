@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, text
+from sqlalchemy import DateTime, Boolean, ForeignKey, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,11 +48,15 @@ class Cycle(Base, TimestampMixin):
     reopen_archived: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("TRUE"), default=True
     )
-    next_run_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
-    last_run_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     last_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    deleted_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
 
 class CycleRun(Base, CreatedAtMixin):
@@ -64,9 +68,11 @@ class CycleRun(Base, CreatedAtMixin):
     cycle_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("cycles.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    scheduled_for: Mapped[datetime] = mapped_column(nullable=False, index=True)
-    started_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    scheduled_for: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="queued", default="queued"
     )

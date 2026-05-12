@@ -83,12 +83,12 @@ async def test_flush_ops_snapshot_broadcasts_scoped_snapshot_per_org():
     ws_manager.connected_org_ids = ["org-a", "org-b"]
     ws_manager.broadcast_to_org = AsyncMock()
 
-    def scoped_snapshot(scope):
+    async def scoped_snapshot(scope):
         return [{"org_id": scope.org_id}]
 
     with patch("brain.app.api.main.asyncio.sleep", new=AsyncMock()), \
         patch(
-            "brain.systems.runs.cortex.read_models.serialize_active_runs",
+            "brain.systems.runs.cortex.read_models.serialize_active_runs_async",
             side_effect=scoped_snapshot,
         ) as serialize, \
         patch("brain.app.api.routers.ws.ws_manager", ws_manager):
@@ -110,7 +110,7 @@ async def test_flush_ops_snapshot_broadcasts_scoped_snapshot_per_org():
     )
 
 
-def test_sync_publish_drops_unscoped_product_event(monkeypatch):
+def test_product_event_publish_drops_unscoped_product_event(monkeypatch):
     ws_manager = MagicMock()
     ws_manager.broadcast_product_event = AsyncMock(return_value=False)
     ws_manager.broadcast = AsyncMock()
@@ -119,10 +119,10 @@ def test_sync_publish_drops_unscoped_product_event(monkeypatch):
 
     try:
         with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
-            "brain.systems.cortex.events.resolve_event_org_id",
-            return_value=None,
+            "brain.systems.cortex.events.resolve_event_org_id_async",
+            AsyncMock(return_value=None),
         ):
-            api_main._sync_publish("browser_session_frame", {"session_id": "session-1"})
+            api_main._schedule_product_event_publish("browser_session_frame", {"session_id": "session-1"})
     finally:
         loop.close()
         monkeypatch.setattr(api_main, "_main_loop", None)
@@ -136,18 +136,20 @@ def test_sync_publish_drops_unscoped_product_event(monkeypatch):
     ws_manager.broadcast.assert_not_called()
 
 
-def test_sync_publish_resolves_org_scope_before_fanout(monkeypatch):
+def test_product_event_publish_resolves_org_scope_before_fanout(monkeypatch):
     ws_manager = MagicMock()
     ws_manager.broadcast_product_event = AsyncMock(return_value=True)
+    resolve_org = AsyncMock(return_value="org-1")
+
     loop = asyncio.new_event_loop()
     monkeypatch.setattr(api_main, "_main_loop", loop)
 
     try:
         with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
-            "brain.systems.cortex.events.resolve_event_org_id",
-            return_value="org-1",
+            "brain.systems.cortex.events.resolve_event_org_id_async",
+            resolve_org,
         ):
-            api_main._sync_publish("browser_session_frame", {"idea_id": "idea-1"})
+            api_main._schedule_product_event_publish("browser_session_frame", {"idea_id": "idea-1"})
     finally:
         loop.close()
         monkeypatch.setattr(api_main, "_main_loop", None)
@@ -158,6 +160,17 @@ def test_sync_publish_resolves_org_scope_before_fanout(monkeypatch):
         org_id="org-1",
         allow_global=False,
     )
+    resolve_org.assert_awaited_once_with({"idea_id": "idea-1"})
+
+
+@pytest.mark.asyncio
+async def test_ensure_starting_skill_bundle_awaits_async_catalog():
+    ensure = AsyncMock()
+
+    with patch("brain.systems.skills.builtin.ensure_builtin_skills_cached", ensure):
+        await api_main._ensure_starting_skill_bundle()
+
+    ensure.assert_awaited_once_with(ttl_seconds=0)
 
 
 @pytest.mark.asyncio
@@ -176,11 +189,11 @@ async def test_lifespan_skips_inline_runner_by_default():
 async def test_lifespan_ensures_starting_skill_bundle():
     with patch("brain.app.api.main._should_start_inline_runner", return_value=False):
         with patch("brain.systems.cortex.events.set_publisher"):
-            with patch("brain.app.api.main._ensure_starting_skill_bundle") as ensure_bundle:
+            with patch("brain.app.api.main._ensure_starting_skill_bundle", new=AsyncMock()) as ensure_bundle:
                 async with api_main.lifespan(app):
                     pass
 
-    ensure_bundle.assert_called_once_with()
+    ensure_bundle.assert_awaited_once_with()
 
 
 def test_inline_runner_honors_launcher_dispatcher_env(monkeypatch):
@@ -202,8 +215,11 @@ async def test_lifespan_can_start_inline_runner_when_enabled():
     with patch("brain.app.api.main._should_start_inline_runner", return_value=True):
         with patch("brain.systems.cortex.events.set_publisher") as mock_set_publisher:
             with patch("brain.systems.runs.cortex.start_runner") as mock_start_runner:
-                async with api_main.lifespan(app):
-                    pass
+                with patch("brain.systems.cycles.start_cycle_scheduler"), patch(
+                    "brain.systems.cycles.stop_cycle_scheduler",
+                ), patch("brain.systems.runs.cortex.stop_runner"):
+                    async with api_main.lifespan(app):
+                        pass
 
     mock_set_publisher.assert_called_once()
     mock_start_runner.assert_called_once()
