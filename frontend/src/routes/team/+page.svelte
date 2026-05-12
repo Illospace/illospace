@@ -22,7 +22,7 @@
   import { parseServerDate } from '$lib/utils/datetime';
 
   interface TeamMember {
-    id: number;
+    id: number | string;
     name: string;
     email: string;
     role: string;
@@ -32,8 +32,31 @@
     attribution_visible?: boolean;
   }
 
+  interface TeamTokenUsage {
+    user_id: string | null;
+    runs: number;
+    api_calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    cache_read: number;
+    cache_write: number;
+    estimated_cost: number;
+    last_used_at: string | null;
+  }
+
+  interface TeamTokenAnalytics {
+    window_days: number;
+    generated_at: string;
+    members: TeamTokenUsage[];
+    unattributed: TeamTokenUsage;
+    totals: TeamTokenUsage;
+  }
+
   let members = $state<TeamMember[]>([]);
   let loading = $state(true);
+  let tokenAnalytics = $state<TeamTokenAnalytics | null>(null);
+  let tokenAnalyticsLoading = $state(true);
 
   let editingProfile = $state(false);
   let profileColor = $state('#6d46d9');
@@ -57,8 +80,23 @@
     })),
   );
 
+  const tokenUsageByMember = $derived.by(() => {
+    const usageMap = new Map<string, TeamTokenUsage>();
+    for (const usage of tokenAnalytics?.members ?? []) {
+      if (usage.user_id) usageMap.set(String(usage.user_id), usage);
+    }
+    return usageMap;
+  });
+
+  const maxMemberTokens = $derived.by(() =>
+    Math.max(
+      0,
+      ...approvedMembers.map((member) => tokenUsageForMember(member).total_tokens || 0),
+    ),
+  );
+
   onMount(async () => {
-    await loadMembers();
+    await Promise.all([loadMembers(), loadTokenAnalytics()]);
   });
 
   async function loadMembers() {
@@ -73,7 +111,19 @@
   }
 
   async function refreshTeam() {
-    await loadMembers();
+    await Promise.all([loadMembers(), loadTokenAnalytics()]);
+  }
+
+  async function loadTokenAnalytics() {
+    tokenAnalyticsLoading = true;
+    try {
+      tokenAnalytics = await api.teamTokenAnalytics(30);
+    } catch (err: any) {
+      tokenAnalytics = null;
+      ui.toast(err.detail || 'Failed to load token analytics', 'error');
+    } finally {
+      tokenAnalyticsLoading = false;
+    }
   }
 
   function inviteLink() {
@@ -127,6 +177,46 @@
 
   function presenceSeedStyle(color?: string): string {
     return buildPresenceSeedStyle(color);
+  }
+
+  function emptyTokenUsage(userId: string | null = null): TeamTokenUsage {
+    return {
+      user_id: userId,
+      runs: 0,
+      api_calls: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      cache_read: 0,
+      cache_write: 0,
+      estimated_cost: 0,
+      last_used_at: null,
+    };
+  }
+
+  function tokenUsageForMember(member: TeamMember): TeamTokenUsage {
+    const userId = String(member.id);
+    return tokenUsageByMember.get(userId) ?? emptyTokenUsage(userId);
+  }
+
+  function tokenUsagePercent(usage: TeamTokenUsage): number {
+    if (!maxMemberTokens || !usage.total_tokens) return 0;
+    return Math.max(4, Math.min(100, (usage.total_tokens / maxMemberTokens) * 100));
+  }
+
+  function formatTokens(value: number | undefined): string {
+    const n = Math.max(0, Number(value || 0));
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return Math.round(n).toLocaleString();
+  }
+
+  function formatCost(value: number | undefined): string {
+    const n = Math.max(0, Number(value || 0));
+    if (n === 0) return '$0.00';
+    if (n < 0.01) return `$${n.toFixed(4)}`;
+    if (n < 1) return `$${n.toFixed(3)}`;
+    return `$${n.toFixed(2)}`;
   }
 
   function openProfileEdit(member: TeamMember | null = currentMember) {
@@ -317,10 +407,23 @@
     <ConstellationSection
       eyebrow="Roster"
       title="Members"
-      description="Approved people with their current workspace presence color and access role."
+      description="Approved people with their current presence color, access role, and run-linked token usage."
     >
+      {#snippet actions()}
+        {#if tokenAnalyticsLoading}
+          <ConstellationPill variant="muted">Loading tokens</ConstellationPill>
+        {:else if tokenAnalytics}
+          <ConstellationPill variant="info">
+            {formatTokens(tokenAnalytics.totals.total_tokens)} tokens · {formatCost(tokenAnalytics.totals.estimated_cost)} · {tokenAnalytics.window_days}d
+          </ConstellationPill>
+        {:else}
+          <ConstellationPill variant="warning">Tokens unavailable</ConstellationPill>
+        {/if}
+      {/snippet}
+
       <div class="team-row-stack">
         {#each approvedMembers as member (member.id)}
+          {@const tokenUsage = tokenUsageForMember(member)}
           <ConstellationActionRow
             title={member.name}
             description={memberSubtitle(member)}
@@ -352,10 +455,61 @@
                 </ConstellationButton>
               {/if}
             {/snippet}
+
+            {#snippet supporting()}
+              <div class="team-token-analytics">
+                {#if tokenAnalyticsLoading}
+                  <span class="team-token-muted">Loading token analytics...</span>
+                {:else if !tokenAnalytics}
+                  <span class="team-token-muted">Token analytics unavailable</span>
+                {:else}
+                  <div class="team-token-meter" aria-hidden="true">
+                    <span
+                      class="team-token-meter-fill"
+                      style={`width: ${tokenUsagePercent(tokenUsage)}%`}
+                    ></span>
+                  </div>
+                  <div class="team-token-metrics" aria-label={`Token analytics for ${member.name}`}>
+                    <span class="team-token-metric team-token-metric-primary">
+                      {formatTokens(tokenUsage.total_tokens)} tokens
+                    </span>
+                    <span class="team-token-metric">In {formatTokens(tokenUsage.input_tokens)}</span>
+                    <span class="team-token-metric">Out {formatTokens(tokenUsage.output_tokens)}</span>
+                    <span class="team-token-metric">{tokenUsage.runs.toLocaleString()} runs</span>
+                    <span class="team-token-metric">{tokenUsage.api_calls.toLocaleString()} calls</span>
+                    {#if tokenUsage.cache_read || tokenUsage.cache_write}
+                      <span class="team-token-metric">Cache {formatTokens(tokenUsage.cache_read)} read</span>
+                    {/if}
+                    <span class="team-token-metric">{formatCost(tokenUsage.estimated_cost)}</span>
+                    {#if tokenUsage.last_used_at}
+                      <span class="team-token-muted">last {timeAgo(tokenUsage.last_used_at)}</span>
+                    {:else}
+                      <span class="team-token-muted">no tracked usage</span>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {/snippet}
           </ConstellationActionRow>
         {/each}
       </div>
     </ConstellationSection>
+
+    {#if !tokenAnalyticsLoading && tokenAnalytics?.unattributed?.total_tokens}
+      <ConstellationPanel>
+        <div class="team-token-unattributed">
+          <div>
+            <p class="team-token-unattributed-eyebrow">System / unattributed</p>
+            <p class="team-token-unattributed-title">
+              {formatTokens(tokenAnalytics.unattributed.total_tokens)} tokens could not be assigned to a member.
+            </p>
+          </div>
+          <div class="team-token-unattributed-meta">
+            {tokenAnalytics.unattributed.runs.toLocaleString()} runs · {tokenAnalytics.unattributed.api_calls.toLocaleString()} calls · {formatCost(tokenAnalytics.unattributed.estimated_cost)}
+          </div>
+        </div>
+      </ConstellationPanel>
+    {/if}
 
     {#if editingProfile}
       <ConstellationPanel tone="info">
@@ -425,6 +579,104 @@
   .team-profile-editor {
     display: grid;
     gap: 22px;
+  }
+
+  .team-token-analytics {
+    display: grid;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .team-token-meter {
+    position: relative;
+    width: min(420px, 100%);
+    height: 5px;
+    overflow: hidden;
+    border-radius: var(--constellation-radius-pill);
+    background: color-mix(in srgb, var(--constellation-color-text-primary) 8%, transparent);
+  }
+
+  .team-token-meter-fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    border-radius: inherit;
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 78%, transparent),
+      color-mix(in srgb, var(--constellation-color-blue, #8DB7FF) 84%, transparent)
+    );
+    box-shadow: 0 0 14px color-mix(in srgb, var(--constellation-color-blue, #8DB7FF) 24%, transparent);
+  }
+
+  .team-token-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+
+  .team-token-metric,
+  .team-token-muted {
+    color: rgba(240, 240, 250, 0.58);
+    font-size: 11px;
+    line-height: 1.35;
+    white-space: nowrap;
+  }
+
+  .team-token-metric {
+    padding: 3px 7px;
+    border-radius: var(--constellation-radius-pill);
+    border: 1px solid rgba(240, 240, 250, 0.08);
+    background: rgba(255, 255, 255, 0.035);
+    font-family: var(--constellation-font-mono);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .team-token-metric-primary {
+    color: rgba(255, 255, 255, 0.86);
+    border-color: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 30%, transparent);
+    background: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 10%, transparent);
+  }
+
+  .team-token-unattributed {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .team-token-unattributed-eyebrow,
+  .team-token-unattributed-title {
+    margin: 0;
+  }
+
+  .team-token-unattributed-eyebrow {
+    color: rgba(240, 240, 250, 0.52);
+    font-family: var(--constellation-font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .team-token-unattributed-title {
+    margin-top: 6px;
+    color: rgba(255, 255, 255, 0.84);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .team-token-unattributed-meta {
+    flex-shrink: 0;
+    color: rgba(240, 240, 250, 0.58);
+    font-family: var(--constellation-font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    white-space: nowrap;
   }
 
   .team-profile-copy {
@@ -517,5 +769,16 @@
     width: 16px;
     height: 16px;
     accent-color: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 92%, transparent);
+  }
+
+  @media (max-width: 760px) {
+    .team-token-unattributed {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .team-token-unattributed-meta {
+      white-space: normal;
+    }
   }
 </style>

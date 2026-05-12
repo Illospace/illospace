@@ -1248,6 +1248,8 @@ export const api = {
 
   // Team
   listTeamMembers: () => fetchJson<any[]>('/api/team/members'),
+  teamTokenAnalytics: (days = 30) =>
+    fetchJson<any>(`/api/team/token-analytics?days=${days}`),
   updateProfile: (data: any) =>
     fetchJson<any>('/api/users/me', { method: 'PATCH', body: JSON.stringify(data) }),
 
