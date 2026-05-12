@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -17,6 +17,11 @@ from brain.app.api.routers.cortex._helpers import _caller_is_service_principal
 from brain.app.api.routers.cortex._router import router
 from brain.systems.runs.cortex import cancel_runs_for_idea, queue_status
 from brain.systems.runs.cortex.permissions import RunReadScope, run_belongs_to_scope
+from brain.systems.runs.cortex.recording import (
+    agent_trace_export_filename,
+    build_agent_trace_snapshot,
+    build_agent_trace_export_zip,
+)
 from brain.systems.runs.cortex.read_models import (
     serialize_active_runs,
     serialize_recent_runs,
@@ -169,6 +174,27 @@ def run_debug(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
     if result is None:
         raise HTTPException(status_code=404, detail=f"Run #{run_id} not found")
     return result
+
+
+@router.post("/run/{run_id}/trace-export.zip")
+def download_run_trace_export(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
+    with UnitOfWork() as uow:
+        run = _require_run_for_user(uow.session, run_id, user)
+        snapshot = build_agent_trace_snapshot(
+            uow.session,
+            run,
+            saved_by=str(user.get("id")) if user.get("id") else None,
+        )
+        archive = build_agent_trace_export_zip(snapshot)
+        filename = agent_trace_export_filename(snapshot)
+        return Response(
+            content=archive,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Trace-Id": str(snapshot.get("trace_id") or ""),
+            },
+        )
 
 
 @router.post("/run/{run_id}/approve")
