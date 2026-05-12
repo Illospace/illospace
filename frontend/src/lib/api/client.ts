@@ -61,6 +61,53 @@ async function fetchJson<T>(path: string, init?: ApiRequestInit): Promise<T> {
   }
 }
 
+function filenameFromContentDisposition(value: string | null): string | null {
+  if (!value) return null;
+  const encoded = value.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded.replace(/^["']|["']$/g, ''));
+    } catch {
+      return encoded.replace(/^["']|["']$/g, '');
+    }
+  }
+  return value.match(/filename="?([^";]+)"?/i)?.[1] ?? null;
+}
+
+async function fetchBlob(path: string, init?: ApiRequestInit): Promise<{ blob: Blob; filename: string | null; headers: Headers }> {
+  const {
+    headers: extraHeaders,
+    timeoutMs = DEFAULT_API_TIMEOUT_MS,
+    signal,
+    ...rest
+  } = init ?? {};
+  const controller = !signal && timeoutMs > 0 ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      ...rest,
+      signal: signal ?? controller?.signal,
+      headers: { 'Content-Type': 'application/json', ...(extraHeaders as Record<string, string>) },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw { status: res.status, detail: err.error || err.detail || res.statusText };
+    }
+    return {
+      blob: await res.blob(),
+      filename: filenameFromContentDisposition(res.headers.get('content-disposition')),
+      headers: res.headers,
+    };
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw { status: 0, detail: 'Request timed out. Check the local server and try again.' };
+    }
+    throw err;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 function withQuery(
   path: string,
   params: Record<string, string | number | boolean | null | undefined>,
@@ -772,6 +819,15 @@ export const api = {
     fetchJson<any>(`/api/cortex/ideas/${ideaId}/cancel-all`, { method: 'POST' }),
   runGraph: (id: number) => fetchJson<any>(`/api/cortex/run/${id}/graph`),
   runTools: (id: number) => fetchJson<any[]>(`/api/cortex/runs/${id}/tools`),
+  downloadRunTraceZip: async (id: number) => {
+    const result = await fetchBlob(`/api/cortex/run/${id}/trace-export.zip`, { method: 'POST' });
+    return {
+      blob: result.blob,
+      filename: result.filename || `illo-trace-run-${id}.zip`,
+      bytes: result.blob.size,
+      traceId: result.headers.get('x-trace-id'),
+    };
+  },
   skillFeedback: (id: number, data: { note: string; quality: string }) =>
     fetchJson<any>(`/api/cortex/run/${id}/skill-feedback`, { method: 'POST', body: JSON.stringify(data) }),
   markRead: (ideaId: string) =>
