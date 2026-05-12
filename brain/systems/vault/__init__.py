@@ -1756,16 +1756,16 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _utcnow_naive() -> datetime:
-    """Return UTC wall time for timestamp columns that do not store tzinfo."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+def _utcnow() -> datetime:
+    """Return a timezone-aware UTC timestamp for asyncpg timestamptz columns."""
+    return datetime.now(timezone.utc)
 
 
 def _as_db_utc(value: datetime) -> datetime:
-    """Normalize DB-loaded timestamp values to UTC-naive for comparison."""
+    """Normalize DB-loaded timestamp values to timezone-aware UTC."""
     if value.tzinfo is None:
-        return value
-    return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def get_pin_status(user_id: str) -> dict:
@@ -1883,7 +1883,7 @@ async def async_verify_pin(user_id: str, pin: str) -> bool:
 
 def generate_vault_token(user_id: str) -> tuple[str, datetime]:
     token = stdlib_secrets.token_urlsafe(32)
-    now = _utcnow_naive()
+    now = _utcnow()
     expires = now + VAULT_SESSION_TTL
     with open_unit_of_work(UnitOfWork) as uow:
         uow.session.add(VaultSession(
@@ -1897,7 +1897,7 @@ def generate_vault_token(user_id: str) -> tuple[str, datetime]:
 
 async def async_generate_vault_token(user_id: str) -> tuple[str, datetime]:
     token = stdlib_secrets.token_urlsafe(32)
-    now = _utcnow_naive()
+    now = _utcnow()
     expires = now + VAULT_SESSION_TTL
     async with UnitOfWork() as uow:
         uow.session.add(VaultSession(
@@ -1924,7 +1924,7 @@ async def async_unlock_vault(user_id: str, pin: str) -> tuple[str, datetime] | N
 def validate_vault_token(user_id: str, token: str | None) -> bool:
     if not token:
         return False
-    now = _utcnow_naive()
+    now = _utcnow()
     with open_unit_of_work(UnitOfWork) as uow:
         session = uow.session.get(VaultSession, _token_hash(token))
         if not session or str(session.user_id) != str(user_id):
@@ -1941,7 +1941,7 @@ def validate_vault_token(user_id: str, token: str | None) -> bool:
 async def async_validate_vault_token(user_id: str, token: str | None) -> bool:
     if not token:
         return False
-    now = _utcnow_naive()
+    now = _utcnow()
     async with UnitOfWork() as uow:
         session = await uow.session.get(VaultSession, _token_hash(token))
         if not session or str(session.user_id) != str(user_id):
@@ -1961,7 +1961,7 @@ def revoke_vault_token(user_id: str, token: str | None) -> None:
     with open_unit_of_work(UnitOfWork) as uow:
         session = uow.session.get(VaultSession, _token_hash(token))
         if session and str(session.user_id) == str(user_id) and session.revoked_at is None:
-            session.revoked_at = _utcnow_naive()
+            session.revoked_at = _utcnow()
 
 
 async def async_revoke_vault_token(user_id: str, token: str | None) -> None:
@@ -1970,7 +1970,7 @@ async def async_revoke_vault_token(user_id: str, token: str | None) -> None:
     async with UnitOfWork() as uow:
         session = await uow.session.get(VaultSession, _token_hash(token))
         if session and str(session.user_id) == str(user_id) and session.revoked_at is None:
-            session.revoked_at = _utcnow_naive()
+            session.revoked_at = _utcnow()
 
 
 def _get_config(key: str) -> str | None:

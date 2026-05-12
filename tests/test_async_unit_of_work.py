@@ -93,6 +93,16 @@ async def test_unit_of_work_async_cortex_idea_and_thread_repositories(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_unit_of_work_notifications_is_repository_property(monkeypatch):
+    session = _AsyncSession()
+    monkeypatch.setattr(uow_module, "SessionFactory", lambda: session)
+    monkeypatch.setattr(uow_module, "NotificationEventRepository", _Repo)
+
+    async with UnitOfWork() as uow:
+        assert await uow.notifications.record("notification") == ["notification"]
+
+
+@pytest.mark.asyncio
 async def test_unit_of_work_async_lifecycle_rolls_back_on_error(monkeypatch):
     session = _AsyncSession()
     monkeypatch.setattr(uow_module, "SessionFactory", lambda: session)

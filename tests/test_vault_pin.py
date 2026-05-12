@@ -176,9 +176,9 @@ def test_generate_vault_token(patch_uow, session_store):
     assert len(session_store) == 1
     stored = next(iter(session_store.values()))
     assert stored.user_id == USER_ID
-    assert stored.expires_at == expires.replace(tzinfo=None)
-    assert stored.created_at.tzinfo is None
-    assert stored.expires_at.tzinfo is None
+    assert stored.expires_at == expires
+    assert stored.created_at.tzinfo is not None
+    assert stored.expires_at.tzinfo is not None
 
 
 def test_validate_vault_token_valid(patch_uow, session_store):
@@ -187,7 +187,7 @@ def test_validate_vault_token_valid(patch_uow, session_store):
     assert validate_vault_token(USER_ID, token) is True
     stored = next(iter(session_store.values()))
     assert stored.last_seen_at is not None
-    assert stored.last_seen_at.tzinfo is None
+    assert stored.last_seen_at.tzinfo is not None
 
 
 def test_validate_vault_token_expired(patch_uow, session_store):
@@ -199,7 +199,7 @@ def test_validate_vault_token_expired(patch_uow, session_store):
     stored.expires_at = datetime.fromisoformat(past)
     assert validate_vault_token(USER_ID, token) is False
     assert stored.revoked_at is not None
-    assert stored.revoked_at.tzinfo is None
+    assert stored.revoked_at.tzinfo is not None
 
 
 def test_validate_vault_token_accepts_naive_utc_session_in_non_utc_db_timezone(patch_uow, session_store):
@@ -208,10 +208,9 @@ def test_validate_vault_token_accepts_naive_utc_session_in_non_utc_db_timezone(p
     token, expires = generate_vault_token(USER_ID)
     stored = next(iter(session_store.values()))
 
-    # PostgreSQL timestamp-without-timezone columns return naive datetimes. These
-    # values must be treated as UTC-normalized app timestamps, not as local server
-    # wall time, otherwise non-UTC deployments revoke fresh sessions immediately.
-    assert stored.expires_at == expires.replace(tzinfo=None)
+    # Test doubles and old rows can still surface naive UTC values. These must
+    # be treated as UTC timestamps, not as local server wall time.
+    stored.expires_at = expires.replace(tzinfo=None)
     assert validate_vault_token(USER_ID, token) is True
 
 
@@ -238,6 +237,7 @@ def test_revoke_vault_token(patch_uow, session_store):
     revoke_vault_token(USER_ID, token)
     stored = next(iter(session_store.values()))
     assert stored.revoked_at is not None
+    assert stored.revoked_at.tzinfo is not None
     assert validate_vault_token(USER_ID, token) is False
 
 

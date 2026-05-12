@@ -511,6 +511,7 @@ class UnitOfWork:
     def chat_reads(self):
         return self._repo(ChatConversationReadRepository)
 
+    @cached_property
     def notifications(self):
         return self._repo(NotificationEventRepository)
 
