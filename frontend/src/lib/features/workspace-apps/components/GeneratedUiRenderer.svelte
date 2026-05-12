@@ -4,6 +4,7 @@
   import {
     createDomainRecord,
     listDomainRecords,
+    runWorkspaceAppAction,
     updateDomainRecord,
     type DomainRecordRead,
     type WorkspaceAppRead,
@@ -24,6 +25,36 @@
     width?: string;
   };
 
+  type GeneratedUiBoardGroup = string | { label?: string; value?: any };
+  type GeneratedUiBoardCard = {
+    title?: string;
+    subtitle?: string;
+    description?: string;
+    badges?: string[];
+    meta?: string[];
+    assignee?: string;
+    href?: string;
+  };
+
+  type GeneratedUiAction = string | {
+    key?: string;
+    action_key?: string;
+    label?: string;
+    title?: string;
+    description?: string;
+    payload?: Record<string, any>;
+    disabled?: boolean;
+    hidden?: boolean;
+  };
+
+  type NormalizedGeneratedUiAction = {
+    key: string;
+    label: string;
+    description?: string;
+    payload: Record<string, any>;
+    disabled: boolean;
+  };
+
   type GeneratedUiView = {
     id?: string;
     type?: string;
@@ -34,12 +65,17 @@
     object_key?: string;
     columns?: GeneratedUiColumn[];
     fields?: GeneratedUiColumn[];
+    groups?: GeneratedUiBoardGroup[];
+    board_columns?: GeneratedUiBoardGroup[];
+    boardColumns?: GeneratedUiBoardGroup[];
+    groupBy?: string;
     rows?: Record<string, any>[];
     records?: Record<string, any>[];
     metrics?: Array<{ key?: string; label?: string; value?: any; op?: string; field?: string; equals?: any }>;
     chart_type?: string;
     chart?: string;
     group_by?: string;
+    card?: GeneratedUiBoardCard;
     allow_create?: boolean;
     create?: boolean | { fields?: GeneratedUiColumn[] };
     empty_state?: string;
@@ -51,6 +87,7 @@
     title?: string;
     description?: string;
     primary_binding?: string;
+    actions?: GeneratedUiAction[];
     views?: GeneratedUiView[];
     rows?: Record<string, any>[];
     records?: Record<string, any>[];
@@ -85,6 +122,9 @@
   let draftByView = $state<Record<string, Record<string, any>>>({});
   let busyCell = $state<Record<string, boolean>>({});
   let busyCreate = $state<Record<string, boolean>>({});
+  let busyAction = $state<Record<string, boolean>>({});
+  let actionNotice = $state<string | null>(null);
+  let actionError = $state<string | null>(null);
   let uiStateBase = $state<Record<string, any>>({});
   let uiStateLoadSignature = $state('');
   let uiStateLoaded = $state(false);
@@ -100,6 +140,8 @@
     spec?.primary_binding || Object.keys(domainBindings)[0] || null,
   );
   const views = $derived(normalizeViews(spec));
+  const hasBoardView = $derived(views.some((view) => view.type === 'board'));
+  const structuredActions = $derived(generatedActionsForSpec(spec, manifest));
   const bindingSignature = $derived(
     JSON.stringify(Object.entries(domainBindings).map(([alias, binding]) => [
       alias,
@@ -153,6 +195,56 @@
     if (!source) return [];
     if (Array.isArray(source.views) && source.views.length) return source.views;
     return [{ id: 'records', type: 'table', title: source.title || app.name }];
+  }
+
+  function manifestActionDeclarations(appManifest: Record<string, any>): Record<string, any> {
+    const direct = appManifest.actions;
+    if (isRecord(direct)) return direct;
+    const actionPlan = appManifest.action_plan;
+    if (isRecord(actionPlan) && isRecord(actionPlan.actions)) return actionPlan.actions;
+    return {};
+  }
+
+  function generatedActionsForSpec(
+    source: GeneratedUiSpec | null,
+    appManifest: Record<string, any>,
+  ): NormalizedGeneratedUiAction[] {
+    const declarations = manifestActionDeclarations(appManifest);
+    const configured = Array.isArray(source?.actions) && source.actions.length
+      ? source.actions
+      : Object.keys(declarations);
+    return configured
+      .map((raw) => normalizeGeneratedAction(raw, declarations))
+      .filter((action): action is NormalizedGeneratedUiAction => Boolean(action));
+  }
+
+  function normalizeGeneratedAction(
+    raw: GeneratedUiAction,
+    declarations: Record<string, any>,
+  ): NormalizedGeneratedUiAction | null {
+    const rawObject = isRecord(raw) ? raw : null;
+    const key = String(
+      typeof raw === 'string' ? raw : rawObject?.key || rawObject?.action_key || '',
+    ).trim();
+    if (!key) return null;
+    const declaration = declarations[key];
+    if (!isRecord(declaration)) return null;
+    const ui = isRecord(declaration.ui) ? declaration.ui : {};
+    if (rawObject?.hidden || ui.hidden === true) return null;
+    const label = String(rawObject?.label || rawObject?.title || ui.label || declaration.label || actionLabelFromKey(key)).trim();
+    return {
+      key,
+      label: label || actionLabelFromKey(key),
+      description: String(rawObject?.description || declaration.description || '').trim() || undefined,
+      payload: isRecord(rawObject?.payload) ? rawObject.payload : {},
+      disabled: rawObject?.disabled === true || ui.disabled === true,
+    };
+  }
+
+  function actionLabelFromKey(key: string): string {
+    const parts = key.split('.');
+    const tail = parts[parts.length - 1] || key;
+    return labelFromKey(tail.replace(/([a-z])([A-Z])/g, '$1 $2'));
   }
 
   function viewId(view: GeneratedUiView, index: number): string {
@@ -277,6 +369,13 @@
   function columnsForView(view: GeneratedUiView, rows: Record<string, any>[]): GeneratedUiColumn[] {
     const configured = view.columns || view.fields;
     if (Array.isArray(configured) && configured.length) return configured.filter((column) => !!column?.key);
+    const bindingFields = bindingForView(view)?.fields;
+    if (Array.isArray(bindingFields) && bindingFields.length) {
+      return bindingFields
+        .filter((key) => typeof key === 'string' && key.trim())
+        .slice(0, 8)
+        .map((key) => ({ key, label: labelFromKey(key) }));
+    }
     const first = rows[0] || {};
     return Object.keys(first)
       .filter((key) => !key.startsWith('__') && !['id', 'version', 'object_key'].includes(key))
@@ -371,6 +470,126 @@
     } finally {
       const { [cacheKey]: _removed, ...nextBusy } = busyCell;
       busyCell = nextBusy;
+    }
+  }
+
+  function boardGroupKey(view: GeneratedUiView): string {
+    return String(view.group_by || view.groupBy || 'status').trim() || 'status';
+  }
+
+  function normalizeBoardGroup(group: GeneratedUiBoardGroup): { label: string; value: any } {
+    if (typeof group === 'string') return { label: group, value: group };
+    const value = group?.value ?? group?.label ?? '';
+    return { label: group?.label || formatValue(value), value };
+  }
+
+  function boardGroups(view: GeneratedUiView, rows: Record<string, any>[]): Array<{ label: string; value: any }> {
+    const configured = view.groups || view.board_columns || view.boardColumns;
+    if (Array.isArray(configured) && configured.length) {
+      return configured.map(normalizeBoardGroup).filter((group) => String(group.value ?? '').trim());
+    }
+    const key = boardGroupKey(view);
+    const values = Array.from(new Set(rows.map((row) => row[key]).filter((value) => value !== null && value !== undefined && value !== '')));
+    if (values.length) return values.map((value) => ({ label: formatValue(value), value }));
+    return ['Backlog', 'Todo', 'In Progress', 'In Review', 'Done'].map((value) => ({ label: value, value }));
+  }
+
+  function rowsForBoardGroup(rows: Record<string, any>[], groupKey: string, groupValue: any): Record<string, any>[] {
+    return rows.filter((row) => String(row[groupKey] ?? '') === String(groupValue ?? ''));
+  }
+
+  function boardCard(view: GeneratedUiView): GeneratedUiBoardCard {
+    return view.card || {};
+  }
+
+  function boardCardTitle(view: GeneratedUiView, row: Record<string, any>, columns: GeneratedUiColumn[]): string {
+    const card = boardCard(view);
+    const key = card.title || 'title';
+    return formatValue(row[key] ?? row.title ?? row.name ?? row[columns[0]?.key]);
+  }
+
+  function boardCardSubtitle(view: GeneratedUiView, row: Record<string, any>): string {
+    const key = boardCard(view).subtitle;
+    return key ? formatValue(row[key]) : '';
+  }
+
+  function boardCardBadgeKeys(view: GeneratedUiView, columns: GeneratedUiColumn[]): string[] {
+    const configured = boardCard(view).badges;
+    if (Array.isArray(configured) && configured.length) return configured;
+    const preferred = ['priority', 'status', 'state', 'milestone', 'labels', 'label'];
+    const keys = columns.map((column) => column.key);
+    return preferred.filter((key) => keys.includes(key)).slice(0, 3);
+  }
+
+  function boardRowId(row: Record<string, any>): string {
+    return String(row.__record?.id ?? row.id ?? row.title ?? JSON.stringify(row));
+  }
+
+  function canMoveBoardCard(view: GeneratedUiView, groupKey: string, row: Record<string, any>): boolean {
+    const binding = bindingForView(view);
+    return Boolean(
+      row.__record
+      && bindingAllowsOperation(binding, 'update')
+      && bindingAllowsField(binding, groupKey)
+    );
+  }
+
+  function startBoardDrag(event: DragEvent, view: GeneratedUiView, index: number, row: Record<string, any>, groupKey: string) {
+    if (!event.dataTransfer || !canMoveBoardCard(view, groupKey, row)) return;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('application/x-illo-board-card', JSON.stringify({
+      viewId: viewId(view, index),
+      rowId: boardRowId(row),
+      groupKey,
+    }));
+  }
+
+  async function dropBoardCard(
+    event: DragEvent,
+    view: GeneratedUiView,
+    index: number,
+    rows: Record<string, any>[],
+    nextGroupValue: any,
+  ) {
+    event.preventDefault();
+    const raw = event.dataTransfer?.getData('application/x-illo-board-card');
+    if (!raw) return;
+    try {
+      const payload = JSON.parse(raw);
+      if (payload.viewId !== viewId(view, index)) return;
+      const row = rows.find((candidate) => boardRowId(candidate) === payload.rowId);
+      const groupKey = String(payload.groupKey || boardGroupKey(view));
+      if (!row || !canMoveBoardCard(view, groupKey, row)) return;
+      await updateCell(view, row, {
+        key: groupKey,
+        label: labelFromKey(groupKey),
+        type: typeof nextGroupValue === 'boolean' ? 'boolean' : 'status',
+        editable: true,
+        options: boardGroups(view, rows),
+      }, String(nextGroupValue ?? ''));
+    } catch {
+      return;
+    }
+  }
+
+  async function runGeneratedAction(action: NormalizedGeneratedUiAction) {
+    if (busyAction[action.key] || action.disabled) return;
+    busyAction = { ...busyAction, [action.key]: true };
+    actionNotice = null;
+    actionError = null;
+    try {
+      const result = await runWorkspaceAppAction(app.id, {
+        action_key: action.key,
+        payload: action.payload,
+      });
+      actionNotice = result.status === 'completed'
+        ? `${action.label} completed.`
+        : `${action.label}: ${result.status}`;
+      await loadBoundRecords();
+    } catch (err: any) {
+      actionError = err?.detail || err?.message || 'Workspace action failed.';
+    } finally {
+      busyAction = { ...busyAction, [action.key]: false };
     }
   }
 
@@ -519,7 +738,7 @@
   }
 </script>
 
-<section class="generated-ui generated-app-shell" class:is-dock={surface === 'dock'}>
+<section class="generated-ui generated-app-shell" class:is-dock={surface === 'dock'} class:has-board={hasBoardView}>
   <header class="generated-ui__header generated-app-shell__header">
     <div class="generated-ui__title-block">
       <span class="generated-ui__eyebrow">Generated UI</span>
@@ -530,6 +749,17 @@
     </div>
 
     <div class="generated-ui__actions">
+      {#each structuredActions as action (action.key)}
+        <button
+          type="button"
+          class="generated-ui__action-button"
+          title={action.description || action.label}
+          disabled={busyAction[action.key] || action.disabled}
+          onclick={() => runGeneratedAction(action)}
+        >
+          {busyAction[action.key] ? 'Running' : action.label}
+        </button>
+      {/each}
       <label class="generated-ui__search">
         <span>Search</span>
         <input
@@ -555,6 +785,11 @@
     {#if loadError}
       <div class="generated-ui__notice">{loadError}</div>
     {/if}
+    {#if actionError}
+      <div class="generated-ui__notice generated-ui__notice--error">{actionError}</div>
+    {:else if actionNotice}
+      <div class="generated-ui__notice">{actionNotice}</div>
+    {/if}
 
     <div class="generated-ui__body" aria-busy={loadingRecords}>
       {#each views as view, index (viewId(view, index))}
@@ -578,6 +813,53 @@
                   <span>{metric.label || labelFromKey(metric.key || metric.op || 'metric')}</span>
                   <strong>{metricValue(metric, rows)}</strong>
                 </div>
+              {/each}
+            </div>
+          {:else if view.type === 'board'}
+            {@const groupKey = boardGroupKey(view)}
+            {@const groups = boardGroups(view, rows)}
+            {@const badgeKeys = boardCardBadgeKeys(view, columns)}
+            <div class="generated-ui__board">
+              {#each groups as group}
+                {@const groupRows = rowsForBoardGroup(rows, groupKey, group.value)}
+                <section
+                  class="generated-ui__board-column"
+                  role="list"
+                  aria-label={`${group.label} ${labelFromKey(groupKey)}`}
+                  ondragover={(event) => event.preventDefault()}
+                  ondrop={(event) => dropBoardCard(event, view, index, rows, group.value)}
+                >
+                  <header>
+                    <strong>{group.label}</strong>
+                    <span>{groupRows.length}</span>
+                  </header>
+                  <div class="generated-ui__board-cards">
+                    {#each groupRows as row}
+                      <article
+                        class="generated-ui__board-card"
+                        role="listitem"
+                        draggable={canMoveBoardCard(view, groupKey, row)}
+                        ondragstart={(event) => startBoardDrag(event, view, index, row, groupKey)}
+                      >
+                        <strong>{boardCardTitle(view, row, columns)}</strong>
+                        {#if boardCardSubtitle(view, row)}
+                          <p>{boardCardSubtitle(view, row)}</p>
+                        {/if}
+                        {#if badgeKeys.length}
+                          <div>
+                            {#each badgeKeys as key}
+                              {#if row[key] !== undefined && row[key] !== null && row[key] !== ''}
+                                <span>{formatValue(row[key])}</span>
+                              {/if}
+                            {/each}
+                          </div>
+                        {/if}
+                      </article>
+                    {:else}
+                      <div class="generated-ui__board-empty">{view.empty_state || 'No records.'}</div>
+                    {/each}
+                  </div>
+                </section>
               {/each}
             </div>
           {:else if view.type === 'chart'}
@@ -742,6 +1024,10 @@
   border-radius: 18px;
 }
 
+.generated-ui.has-board {
+  width: min(1040px, calc(100vw - 28px));
+}
+
 .generated-ui.is-dock {
   width: 100%;
   max-height: none;
@@ -795,7 +1081,9 @@
 
 .generated-ui__actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
 }
 
@@ -837,6 +1125,7 @@
 }
 
 .generated-ui__icon-button,
+.generated-ui__action-button,
 .generated-ui__create button {
   display: inline-flex;
   min-height: 34px;
@@ -848,6 +1137,23 @@
   background: var(--constellation-control-button-secondary-background);
   color: var(--constellation-control-button-secondary-text);
   cursor: pointer;
+}
+
+.generated-ui__action-button {
+  max-width: 180px;
+  padding: 0 12px;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generated-ui__action-button:disabled,
+.generated-ui__icon-button:disabled,
+.generated-ui__create button:disabled {
+  cursor: default;
+  opacity: 0.62;
 }
 
 .generated-ui__icon-button {
@@ -936,6 +1242,117 @@
 .generated-ui__rows {
   display: grid;
   gap: 2px;
+}
+
+.generated-ui__board {
+  display: grid;
+  grid-auto-columns: minmax(210px, 1fr);
+  grid-auto-flow: column;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.generated-ui__board-column {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(92px, 1fr);
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--constellation-surface-panel-separator);
+  border-radius: 12px;
+  background: var(--constellation-surface-nested-background);
+}
+
+.generated-ui__board-column header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.generated-ui__board-column header strong {
+  overflow: hidden;
+  color: var(--constellation-section-title);
+  font-size: 12px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generated-ui__board-column header span {
+  flex: 0 0 auto;
+  color: var(--constellation-label-meta);
+  font-family: var(--constellation-font-mono, monospace);
+  font-size: 10px;
+}
+
+.generated-ui__board-cards {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 80px;
+}
+
+.generated-ui__board-card {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--constellation-surface-panel-separator);
+  border-radius: 10px;
+  background: var(--constellation-surface-panel-background);
+}
+
+.generated-ui__board-card[draggable='true'] {
+  cursor: grab;
+}
+
+.generated-ui__board-card strong,
+.generated-ui__board-card p {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.generated-ui__board-card strong {
+  color: var(--constellation-section-title);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.generated-ui__board-card p {
+  white-space: nowrap;
+}
+
+.generated-ui__board-card div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.generated-ui__board-card div span {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--constellation-control-pill-info-border);
+  border-radius: 999px;
+  color: var(--constellation-color-text-tertiary);
+  font-size: 10px;
+  padding: 3px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generated-ui__board-empty {
+  display: grid;
+  min-height: 56px;
+  place-items: center;
+  border: 1px dashed var(--constellation-surface-panel-separator);
+  border-radius: 10px;
+  color: var(--constellation-color-text-muted);
+  font-size: 11px;
 }
 
 .generated-ui__row {

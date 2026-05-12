@@ -40,6 +40,8 @@ _VIEW_TYPE_ALIASES = {
     "stats": "metrics",
     "grid": "cards",
     "card": "cards",
+    "kanban": "board",
+    "board-view": "board",
 }
 
 
@@ -174,6 +176,20 @@ def contract_repair_guidance(report: Mapping[str, Any] | None) -> dict[str, Any]
             "failure_kind": "data_model_requires_domain",
             "retryable": True,
             "suggested_repair": "Create or bind a Domain for durable records; keep app-local state to UI preferences, filters, drafts, or ephemeral state.",
+        }
+    if (
+        "illo app kit" in text
+        or "hardcode visual colors" in text
+        or "fixed body background" in text
+        or "letter spacing" in text
+        or "illo-panel" in text
+        or "illo-button" in text
+        or "illo-select" in text
+    ):
+        return {
+            "failure_kind": "html_app_contract",
+            "retryable": True,
+            "suggested_repair": "Repair the sandboxed HTML source: use App Kit classes on controls, use host/App Kit CSS variables instead of hardcoded colors, avoid fixed body backgrounds, and keep layout fluid across dock and overlay widths.",
         }
     if "generated ui" in text or "source_code" in text:
         return {
@@ -429,6 +445,16 @@ def _normalize_views(
             if columns:
                 view["columns"] = columns
                 changed = True
+        if view.get("type") == "board" and not (view.get("group_by") or view.get("groupBy")):
+            group_by = _infer_board_group_by(view=view, spec=spec, manifest=manifest)
+            if group_by:
+                view["group_by"] = group_by
+                changed = True
+        if view.get("type") == "board" and not isinstance(view.get("card"), Mapping):
+            card = _infer_board_card(view=view, spec=spec, manifest=manifest)
+            if card:
+                view["card"] = card
+                changed = True
         next_views.append(view)
     return next_views, changed
 
@@ -464,6 +490,8 @@ def _infer_view(
 
 
 def _infer_view_type(view: Mapping[str, Any]) -> str:
+    if view.get("group_by") or view.get("groupBy") or view.get("card") or view.get("groups"):
+        return "board"
     if isinstance(view.get("metrics"), list):
         return "metrics"
     if view.get("chart_type") or view.get("chart"):
@@ -506,6 +534,59 @@ def _infer_columns(
     if isinstance(fields, list):
         return [{"key": str(field), "label": _label(str(field))} for field in fields if str(field).strip()]
     return []
+
+
+def _infer_board_group_by(
+    *,
+    view: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    manifest: Mapping[str, Any] | None,
+) -> str | None:
+    candidates: list[str] = []
+    for source in (view, spec):
+        for key in ("group_by", "groupBy", "status_field", "statusField"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                candidates.append(value)
+    rows = _row_candidates(view) or _row_candidates(spec) or []
+    for row in rows[:8]:
+        if not isinstance(row, Mapping):
+            continue
+        for key in ("status", "state", "stage", "phase", "column"):
+            if key in row:
+                candidates.append(key)
+    alias = view.get("binding") or view.get("data_binding") or spec.get("primary_binding") or _primary_binding_alias(spec, manifest)
+    binding = _domain_binding(manifest, str(alias)) if alias else None
+    fields = binding.get("fields") if isinstance(binding, Mapping) else None
+    if isinstance(fields, list):
+        normalized = [str(field).strip() for field in fields if str(field).strip()]
+        for key in ("status", "state", "stage", "phase", "column"):
+            if key in normalized:
+                candidates.append(key)
+        if normalized:
+            candidates.append(normalized[0])
+    return candidates[0] if candidates else None
+
+
+def _infer_board_card(
+    *,
+    view: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    manifest: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    fields = _infer_columns(view=view, spec=spec, manifest=manifest)
+    keys = [field["key"] for field in fields if field.get("key")]
+    if not keys:
+        return None
+    title = "title" if "title" in keys else keys[0]
+    subtitle = next((key for key in ("repo", "repository", "project", "milestone") if key in keys), None)
+    badges = [key for key in ("priority", "status", "labels", "label", "milestone") if key in keys and key != title]
+    card: dict[str, Any] = {"title": title}
+    if subtitle:
+        card["subtitle"] = subtitle
+    if badges:
+        card["badges"] = badges[:3]
+    return card
 
 
 def _primary_binding_alias(spec: Mapping[str, Any], manifest: Mapping[str, Any] | None) -> str | None:

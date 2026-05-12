@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import uuid
+from collections.abc import Mapping
+from typing import Any
+
 from brain.systems.runs.tool_catalog.handlers.common import *
 from brain.systems.workspace_apps.compiler import (
     compile_workspace_app_input,
@@ -15,6 +20,56 @@ def _workspace_app_context() -> tuple[str | None, str | None]:
     org_id = getattr(_agent_context, "org_id", None) or execution_metadata.get("org_id")
     user_id = getattr(_agent_context, "user_id", None) or execution_metadata.get("user_id")
     return org_id, user_id
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_uuid(value: Any, field: str) -> tuple[str | None, dict[str, str] | None]:
+    text = _optional_text(value)
+    if text is None:
+        return None, None
+    try:
+        return str(uuid.UUID(text)), None
+    except (TypeError, ValueError, AttributeError):
+        return None, {"error": f"{field} must be a valid UUID when provided"}
+
+
+def _optional_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", ""}:
+        return False
+    return default
+
+
+def _optional_mapping(value: Any, field: str) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    if value is None:
+        return None, None
+    if isinstance(value, Mapping):
+        return dict(value), None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None, None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            return None, {"error": f"{field} must be an object or valid JSON object string: {exc.msg}"}
+        if isinstance(parsed, Mapping):
+            return dict(parsed), None
+    return None, {"error": f"{field} must be an object when provided"}
 
 
 def _handle_manage_workspace_app(
@@ -41,6 +96,38 @@ def _handle_manage_workspace_app(
     action = str(action or "").strip().lower()
     if action in {"help", "schema"}:
         return _manage_tool_guide("manage_workspace_app", operation)
+
+    app_id = _optional_text(app_id)
+    key = _optional_text(key)
+    name = _optional_text(name)
+    description = _optional_text(description)
+    renderer_key = _optional_text(renderer_key)
+    source_kind = _optional_text(source_kind)
+    state_key = _optional_text(state_key) or "default"
+    include_archived = _optional_bool(include_archived)
+    include_prototypes = _optional_bool(include_prototypes)
+    anchor_user_id, uuid_error = _optional_uuid(anchor_user_id, "anchor_user_id")
+    if uuid_error:
+        return json.dumps(uuid_error)
+
+    manifest, mapping_error = _optional_mapping(manifest, "manifest")
+    if mapping_error:
+        return json.dumps(mapping_error)
+    visual_spec, mapping_error = _optional_mapping(visual_spec, "visual_spec")
+    if mapping_error:
+        return json.dumps(mapping_error)
+    metadata, mapping_error = _optional_mapping(metadata, "metadata")
+    if mapping_error:
+        return json.dumps(mapping_error)
+    initial_state, mapping_error = _optional_mapping(initial_state, "initial_state")
+    if mapping_error:
+        return json.dumps(mapping_error)
+    data, mapping_error = _optional_mapping(data, "data")
+    if mapping_error:
+        return json.dumps(mapping_error)
+    data_patch, mapping_error = _optional_mapping(data_patch, "data_patch")
+    if mapping_error:
+        return json.dumps(mapping_error)
 
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
     from brain.systems.workspace_apps.service import (

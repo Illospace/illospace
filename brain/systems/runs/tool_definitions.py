@@ -894,11 +894,11 @@ WORKSPACE_APP_TOOLS = [
         "description": (
             "Create, list, update, archive, and persist state for generated workspace apps. "
             "This is the action tool to create or change a persistent programmable UI surface or dashboard "
-            "inside Cortex. Use renderer_key='generated-ui-app' and source_kind='json' for simple "
-            "host-rendered structured UIs. Use renderer_key='sandboxed-html-app' and source_kind='html' "
-            "as the first-class full-code runtime for custom layouts, interactions, charts, drag/drop, "
-            "canvas, or app logic that should still follow Illospace App Kit tokens/classes. Do not infer "
-            "that a workflow needs a use-case-specific template or built-in view type. Recordful apps must use manage_domain first; app-local "
+            "inside Cortex. Use renderer_key='generated-ui-app' and source_kind='json' for common "
+            "host-rendered structured UIs, including tables, lists, cards, metrics, charts, forms, details, "
+            "board/kanban views, and manifest action buttons. Use renderer_key='sandboxed-html-app' and source_kind='html' "
+            "only for bespoke interactions or custom blocks that cannot be represented by structured views. "
+            "Recordful apps must use manage_domain first; app-local "
             "state is only for UI preferences, filters, drafts, and ephemeral interface state. "
             "For awareness questions about what apps exist or current app state, prefer read_workspace_apps first. "
             "New generated apps must pass the workspace app contract before they are persisted. Use action='help' "
@@ -949,8 +949,10 @@ WORKSPACE_APP_TOOLS = [
                     "type": "string",
                     "description": (
                         "Generated app source. For generated-ui-app, provide a JSON string with "
-                        "schema_version=1, title, optional description, and views. For sandboxed html, "
-                        "provide a responsive HTML/CSS/JS body or document. Canonical calls pass "
+                        "schema_version=1, title, optional description, optional top-level actions "
+                        "referencing manifest.actions, and views. For sandboxed html, "
+                        "provide a responsive HTML/CSS/JS body or document only when structured views are insufficient. "
+                        "Canonical calls pass "
                         "manifest, visual_spec, and metadata as separate tool args; the app compiler "
                         "also normalizes wrapped generated-app envelopes when needed."
                     ),
@@ -998,10 +1000,6 @@ WORKSPACE_APP_TOOLS = [
                     ),
                 },
                 "metadata": {"type": "object", "description": "App metadata for provenance and runtime notes."},
-                "anchor_user_id": {
-                    "type": "string",
-                    "description": "Optional user id whose astre should anchor the app object.",
-                },
                 "initial_state": {"type": "object", "description": "Initial app-local state for create."},
                 "state_key": {
                     "type": "string",
