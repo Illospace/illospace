@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def record_api_call(
     session_id: str | None = None,
@@ -67,8 +71,8 @@ def record_api_call(
                         "VALUES (:sid, :did, :turn, :model, :ti, :to, :cr, :cw, :ctx, :spc, "
                         ":status, :stop, :lat, :err)"
                     ), params)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("agent_api_call_telemetry_failed: %s", exc)
 
     import threading
 

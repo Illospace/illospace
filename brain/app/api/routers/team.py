@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
@@ -18,12 +18,9 @@ from brain.app.api.schemas.team import (
     TeamTokenUsageRead,
     UserProfileUpdate,
 )
-from brain.platform.db.models.agent import AgentApiCall
-from brain.platform.db.models.agent_run import AgentRunRow
-from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.team import TeamRepository
-from brain.systems.runs.modeling import calculate_cost
+from brain.systems.runs.token_usage import summarize_member_token_usage
 
 router = APIRouter(
     prefix="/api",
@@ -32,13 +29,6 @@ router = APIRouter(
 )
 
 _PROFILE_COLOR_RE = re.compile(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
-
-
-def _team_activity_skill_name(run: AgentRunRow) -> str | None:
-    metadata = run.metadata_ if isinstance(run.metadata_, dict) else {}
-    routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
-    skill_name = routing.get("selected_skill")
-    return str(skill_name) if skill_name else None
 
 
 def _should_skip_org_lookup(user: dict[str, Any]) -> bool:
@@ -141,6 +131,23 @@ def _empty_token_usage(user_id: str | None = None) -> dict[str, Any]:
     }
 
 
+def _token_usage_from_summary(user_id: str | None, summary: dict[str, Any]) -> dict[str, Any]:
+    input_tokens = int(summary.get("tokens_input") or 0)
+    output_tokens = int(summary.get("tokens_output") or 0)
+    return {
+        "user_id": user_id,
+        "runs": int(summary.get("runs") or 0),
+        "api_calls": int(summary.get("api_calls") or 0),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "cache_read": int(summary.get("cache_read") or 0),
+        "cache_write": int(summary.get("cache_write") or 0),
+        "estimated_cost": round(float(summary.get("estimated_cost") or 0.0), 6),
+        "last_used_at": summary.get("last_used_at"),
+    }
+
+
 def _add_token_usage(target: dict[str, Any], source: dict[str, Any]) -> None:
     for key in (
         "runs",
@@ -184,69 +191,14 @@ def get_team_token_analytics(
     members = TeamRepository(db).list_by_org(org_id)
     usage_by_user = {str(member.id): _empty_token_usage(str(member.id)) for member in members}
     unattributed = _empty_token_usage(None)
-
-    usage_stmt = (
-        select(
-            AgentRunRow.user_id.label("user_id"),
-            func.count(func.distinct(AgentRunRow.id)).label("runs"),
-            func.count(AgentApiCall.id).label("api_calls"),
-            func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("input_tokens"),
-            func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("output_tokens"),
-            func.coalesce(func.sum(AgentApiCall.cache_read), 0).label("cache_read"),
-            func.coalesce(func.sum(AgentApiCall.cache_write), 0).label("cache_write"),
-            func.max(AgentApiCall.created_at).label("last_used_at"),
-        )
-        .join(AgentRunRow, AgentRunRow.id == AgentApiCall.run_id)
-        .where(
-            AgentRunRow.org_id == org_id,
-            AgentApiCall.created_at >= cutoff,
-        )
-        .group_by(AgentRunRow.user_id)
-    )
-
-    for row in db.execute(usage_stmt).mappings():
-        user_id = str(row["user_id"]) if row["user_id"] else None
-        target = usage_by_user.setdefault(user_id, _empty_token_usage(user_id)) if user_id else unattributed
-        target["runs"] = int(row["runs"] or 0)
-        target["api_calls"] = int(row["api_calls"] or 0)
-        target["input_tokens"] = int(row["input_tokens"] or 0)
-        target["output_tokens"] = int(row["output_tokens"] or 0)
-        target["total_tokens"] = target["input_tokens"] + target["output_tokens"]
-        target["cache_read"] = int(row["cache_read"] or 0)
-        target["cache_write"] = int(row["cache_write"] or 0)
-        target["last_used_at"] = row["last_used_at"]
-
-    cost_stmt = (
-        select(
-            AgentRunRow.user_id.label("user_id"),
-            AgentApiCall.model.label("model"),
-            func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("input_tokens"),
-            func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("output_tokens"),
-            func.coalesce(func.sum(AgentApiCall.cache_read), 0).label("cache_read"),
-            func.coalesce(func.sum(AgentApiCall.cache_write), 0).label("cache_write"),
-        )
-        .join(AgentRunRow, AgentRunRow.id == AgentApiCall.run_id)
-        .where(
-            AgentRunRow.org_id == org_id,
-            AgentApiCall.created_at >= cutoff,
-        )
-        .group_by(AgentRunRow.user_id, AgentApiCall.model)
-    )
-
-    for row in db.execute(cost_stmt).mappings():
-        user_id = str(row["user_id"]) if row["user_id"] else None
-        target = usage_by_user.setdefault(user_id, _empty_token_usage(user_id)) if user_id else unattributed
-        try:
-            target["estimated_cost"] += calculate_cost(
-                str(row["model"] or ""),
-                int(row["input_tokens"] or 0),
-                int(row["output_tokens"] or 0),
-                cache_read=int(row["cache_read"] or 0),
-                cache_write=int(row["cache_write"] or 0),
-            )
-        except Exception:
-            continue
-        target["estimated_cost"] = round(float(target["estimated_cost"] or 0.0), 6)
+    raw_usage = summarize_member_token_usage(db, org_id=org_id, since=cutoff)
+    for raw_user_id, summary in raw_usage.items():
+        user_id = str(raw_user_id) if raw_user_id else None
+        item = _token_usage_from_summary(user_id, summary)
+        if user_id:
+            usage_by_user[user_id] = item
+        else:
+            unattributed = item
 
     member_rows = sorted(
         usage_by_user.values(),
@@ -265,53 +217,6 @@ def get_team_token_analytics(
         "unattributed": TeamTokenUsageRead(**unattributed),
         "totals": TeamTokenUsageRead(**totals),
     }
-
-
-@router.get("/team/activity")
-def get_team_activity(
-    hours: int = 48,
-    db: Session = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
-):
-    """Recent team activity — skills used, ideas created, etc."""
-    org_id = user.get("org_id")
-    if not org_id:
-        return []
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    # Query recent runs + thread messages as team activity
-    try:
-        stmt = (
-            select(
-                AgentRunRow,
-                func.coalesce(Idea.display_title, Idea.title).label("idea_title"),
-                User.name.label("user_name"),
-            )
-            .join(Idea, cast(Idea.id, String) == AgentRunRow.thread_id)
-            .outerjoin(User, User.id == AgentRunRow.user_id)
-            .where(
-                Idea.org_id == org_id,
-                AgentRunRow.created_at >= cutoff,
-            )
-            .order_by(AgentRunRow.created_at.desc())
-            .limit(50)
-        )
-        rows = db.execute(stmt).all()
-        return [
-            {
-                "user_id": run.user_id,
-                "user_name": user_name,
-                "skill_name": _team_activity_skill_name(run),
-                "status": run.status,
-                "created_at": run.created_at.isoformat() if run.created_at else None,
-                "idea_title": idea_title,
-                "type": "run",
-            }
-            for run, idea_title, user_name in rows
-        ]
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning("team_activity_error: %s", e)
-        return []
 
 
 @router.patch("/users/me", response_model=dict)

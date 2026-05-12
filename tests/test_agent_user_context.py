@@ -11,14 +11,11 @@ After the ORM migration:
 - _add_attribution takes a SQLAlchemy session, not a cursor
 - tool_brain_encode uses UnitOfWork
 - enqueue uses UnitOfWork
-- Team activity is a FastAPI endpoint
 """
 from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -193,62 +190,3 @@ class TestRunUserPassthrough:
         assert run_obj.user_id == USER_A["id"]
         assert run_obj.thread_id == "idea-123"
         assert run_obj.target_ref["event"] == "thread_reply"
-
-
-# -- Team activity endpoint -------------------------------------------------
-
-class TestTeamActivity:
-
-    def test_team_activity_returns_list(self):
-        from brain.app.api.routers.team import get_team_activity
-        mock_db = MagicMock()
-        mock_db.execute.return_value.all.return_value = []
-        user = {"id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}
-        result = get_team_activity(db=mock_db, user=user)
-        assert isinstance(result, list)
-
-    def test_team_activity_queries_agent_run_thread_id(self):
-        from sqlalchemy.dialects import postgresql
-
-        from brain.app.api.routers.team import get_team_activity
-
-        mock_db = MagicMock()
-        mock_db.execute.return_value.all.return_value = []
-        user = {"id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}
-
-        get_team_activity(db=mock_db, user=user)
-
-        stmt = mock_db.execute.call_args.args[0]
-        compiled = str(stmt.compile(dialect=postgresql.dialect()))
-
-        assert "CAST(ideas.id AS VARCHAR) = agent_runs.thread_id" in compiled
-        assert "agent_runs.idea_id" not in compiled
-        assert "agent_runs.skill_used" not in compiled
-
-    def test_team_activity_maps_selected_skill_from_metadata(self):
-        from brain.app.api.routers.team import get_team_activity
-
-        created_at = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
-        run = SimpleNamespace(
-            user_id=USER_A["id"],
-            status="completed",
-            created_at=created_at,
-            metadata_={"routing": {"selected_skill": "debug"}},
-        )
-        mock_db = MagicMock()
-        mock_db.execute.return_value.all.return_value = [(run, "Schema cleanup", "Alice")]
-        user = {"id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}
-
-        result = get_team_activity(db=mock_db, user=user)
-
-        assert result == [
-            {
-                "user_id": USER_A["id"],
-                "user_name": "Alice",
-                "skill_name": "debug",
-                "status": "completed",
-                "created_at": "2026-05-06T12:00:00+00:00",
-                "idea_title": "Schema cleanup",
-                "type": "run",
-            }
-        ]

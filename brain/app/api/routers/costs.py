@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
 from brain.systems.runs.cortex.recording import trace_id_for_run_id
-from brain.platform.db.repositories.run import RunRepository
+from brain.systems.runs.token_usage import summarize_recent_run_usage
 
 router = APIRouter(
     prefix="/api/costs",
@@ -52,6 +52,27 @@ def _provider_model_key(raw_model: Any) -> tuple[str, str, str]:
     return "unknown", value, f"unknown/{value}"
 
 
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    return getattr(row, key, default)
+
+
+def _as_utc_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _cost_org_scope(user: dict[str, Any]) -> str | None:
+    if user.get("internal") or user.get("principal_type") == "service":
+        return None
+    org_id = user.get("org_id")
+    return str(org_id) if org_id else None
+
+
 def _fetch_agent_api_call_rows(db: Session, run_id: int) -> list[dict[str, Any]]:
     """Read optional LLM call telemetry while tolerating legacy/missing tables."""
     base_columns = (
@@ -88,25 +109,29 @@ def _fetch_agent_api_call_rows(db: Session, run_id: int) -> list[dict[str, Any]]
 
 
 def _serialize_run(d: Any) -> dict:
-    provider, model, provider_model = _provider_model_key(d.model_used)
+    run_id = _row_get(d, "id")
+    created_at = _row_get(d, "created_at")
+    model_used = _row_get(d, "model_used")
+    estimated_cost = _row_get(d, "estimated_cost")
+    provider, model, provider_model = _provider_model_key(model_used)
     return {
-        "id": d.id,
-        "trace_id": getattr(d, "trace_id", None) or trace_id_for_run_id(getattr(d, "id", None)),
-        "idea_id": d.idea_id,
-        "skill": d.skill_used,
-        "model": d.model_used,
+        "id": run_id,
+        "trace_id": _row_get(d, "trace_id") or trace_id_for_run_id(run_id),
+        "idea_id": _row_get(d, "idea_id"),
+        "skill": _row_get(d, "skill_used"),
+        "model": model_used,
         "provider": provider,
         "normalized_model": model,
         "provider_model": provider_model,
-        "input_tokens": d.tokens_input,
-        "output_tokens": d.tokens_output,
-        "tokens": d.tokens_total,
-        "cache_read": getattr(d, "cache_read", None),
-        "cache_write": getattr(d, "cache_write", None),
-        "cost": float(d.estimated_cost) if d.estimated_cost else 0,
-        "status": d.status,
-        "timestamp": d.created_at.isoformat() if d.created_at else None,
-        "event": getattr(d, "event", None),
+        "input_tokens": _row_get(d, "tokens_input", 0),
+        "output_tokens": _row_get(d, "tokens_output", 0),
+        "tokens": _row_get(d, "tokens_total", 0),
+        "cache_read": _row_get(d, "cache_read"),
+        "cache_write": _row_get(d, "cache_write"),
+        "cost": float(estimated_cost) if estimated_cost else 0,
+        "status": _row_get(d, "status"),
+        "timestamp": created_at.isoformat() if created_at else None,
+        "event": _row_get(d, "event"),
     }
 
 
@@ -230,40 +255,34 @@ def run_breakdown(
     }
 
 
-@router.get("/")
-def list_costs(
-    limit: int = Query(500, ge=1, le=500),
-    db: Session = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
-):
-    repo = RunRepository(db)
-    runs = repo.list_recent(limit=limit, summary_only=True)
-
-    total_cost = sum(float(d.estimated_cost or 0) for d in runs)
-    total_tokens = sum(d.tokens_total or 0 for d in runs)
-    total_input = sum(d.tokens_input or 0 for d in runs)
-    total_output = sum(d.tokens_output or 0 for d in runs)
-    total_cache_read = sum(getattr(d, "cache_read", 0) or 0 for d in runs)
-    total_cache_write = sum(getattr(d, "cache_write", 0) or 0 for d in runs)
-    runs_with_tokens = sum(1 for d in runs if d.tokens_total)
+def _build_cost_payload(runs: list[Any]) -> dict[str, Any]:
+    total_cost = sum(float(_row_get(d, "estimated_cost") or 0) for d in runs)
+    total_tokens = sum(int(_row_get(d, "tokens_total") or 0) for d in runs)
+    total_input = sum(int(_row_get(d, "tokens_input") or 0) for d in runs)
+    total_output = sum(int(_row_get(d, "tokens_output") or 0) for d in runs)
+    total_cache_read = sum(int(_row_get(d, "cache_read") or 0) for d in runs)
+    total_cache_write = sum(int(_row_get(d, "cache_write") or 0) for d in runs)
+    runs_with_tokens = sum(1 for d in runs if _row_get(d, "tokens_total"))
 
     # Current month filter
     now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_runs = [
-        d for d in runs if d.created_at and d.created_at >= month_start
+        d for d in runs
+        if (created_at := _as_utc_datetime(_row_get(d, "created_at"))) and created_at >= month_start
     ]
-    month_cost = sum(float(d.estimated_cost or 0) for d in month_runs)
+    month_cost = sum(float(_row_get(d, "estimated_cost") or 0) for d in month_runs)
 
     # Daily aggregation
     daily_map: dict[str, dict] = defaultdict(
         lambda: {"cost": 0.0, "runs": 0, "tokens": 0}
     )
     for d in runs:
-        day = d.created_at.strftime("%Y-%m-%d") if d.created_at else "unknown"
-        daily_map[day]["cost"] += float(d.estimated_cost or 0)
+        created_at = _row_get(d, "created_at")
+        day = created_at.strftime("%Y-%m-%d") if created_at else "unknown"
+        daily_map[day]["cost"] += float(_row_get(d, "estimated_cost") or 0)
         daily_map[day]["runs"] += 1
-        daily_map[day]["tokens"] += d.tokens_total or 0
+        daily_map[day]["tokens"] += int(_row_get(d, "tokens_total") or 0)
     daily_list = [
         {
             "date": k,
@@ -286,13 +305,13 @@ def list_costs(
         }
     )
     for d in runs:
-        provider, normalized_model, m = _provider_model_key(d.model_used)
+        provider, normalized_model, m = _provider_model_key(_row_get(d, "model_used"))
         model_map[m]["provider"] = provider
         model_map[m]["normalized_model"] = normalized_model
-        model_map[m]["cost"] += float(d.estimated_cost or 0)
+        model_map[m]["cost"] += float(_row_get(d, "estimated_cost") or 0)
         model_map[m]["runs"] += 1
-        model_map[m]["input_tokens"] += d.tokens_input or 0
-        model_map[m]["output_tokens"] += d.tokens_output or 0
+        model_map[m]["input_tokens"] += int(_row_get(d, "tokens_input") or 0)
+        model_map[m]["output_tokens"] += int(_row_get(d, "tokens_output") or 0)
     by_model = sorted(
         [
             {"model": k, **v, "cost": round(v["cost"], 6)}
@@ -308,13 +327,13 @@ def list_costs(
         lambda: {"cost": 0.0, "runs": 0, "tokens": 0, "successes": 0, "failures": 0}
     )
     for d in runs:
-        sk = d.skill_used or "unknown"
-        skill_map[sk]["cost"] += float(d.estimated_cost or 0)
+        sk = _row_get(d, "skill_used") or "unknown"
+        skill_map[sk]["cost"] += float(_row_get(d, "estimated_cost") or 0)
         skill_map[sk]["runs"] += 1
-        skill_map[sk]["tokens"] += d.tokens_total or 0
-        if d.status == "completed":
+        skill_map[sk]["tokens"] += int(_row_get(d, "tokens_total") or 0)
+        if _row_get(d, "status") == "completed":
             skill_map[sk]["successes"] += 1
-        elif d.status == "error":
+        elif _row_get(d, "status") in {"error", "failed", "canceled", "cancelled"}:
             skill_map[sk]["failures"] += 1
     by_skill = sorted(
         [
@@ -330,10 +349,10 @@ def list_costs(
         lambda: {"cost": 0.0, "runs": 0, "tokens": 0}
     )
     for d in runs:
-        idea = d.idea_id or "unknown"
-        idea_map[idea]["cost"] += float(d.estimated_cost or 0)
+        idea = _row_get(d, "idea_id") or "unknown"
+        idea_map[idea]["cost"] += float(_row_get(d, "estimated_cost") or 0)
         idea_map[idea]["runs"] += 1
-        idea_map[idea]["tokens"] += d.tokens_total or 0
+        idea_map[idea]["tokens"] += int(_row_get(d, "tokens_total") or 0)
     top_ideas = sorted(
         [
             {"idea_id": k, **v, "cost": round(v["cost"], 6)}
@@ -369,3 +388,13 @@ def list_costs(
         "runs": [_serialize_run(d) for d in runs],
         "top_ideas": top_ideas,
     }
+
+
+@router.get("/")
+def list_costs(
+    limit: int = Query(500, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    runs = summarize_recent_run_usage(db, limit=limit, org_id=_cost_org_scope(user))
+    return _build_cost_payload(runs)

@@ -1,14 +1,14 @@
 """Tests for costs endpoint and stale-idea detection.
 
 Migrated from raw SQL + dashboard.queries to FastAPI TestClient
-with mocked repository layer.
+with mocked token-usage aggregation.
 
 Run: pytest tests/test_costs.py -v --tb=short
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -71,9 +71,9 @@ def client():
 
 class TestGetCosts:
 
-    @patch("brain.app.api.routers.costs.RunRepository")
-    def test_returns_structure(self, MockRunRepo, client):
-        MockRunRepo.return_value.list_recent.return_value = []
+    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    def test_returns_structure(self, mock_usage, client):
+        mock_usage.return_value = []
         result = client.get("/api/costs/")
         assert result.status_code == 200
         data = result.json()
@@ -84,8 +84,8 @@ class TestGetCosts:
         assert "daily" in data
         assert "top_ideas" in data
 
-    @patch("brain.app.api.routers.costs.RunRepository")
-    def test_summary_counts(self, MockRunRepo, client):
+    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    def test_summary_counts(self, mock_usage, client):
         idea = "idea-001"
         runs = [
             _fake_run(id=1, idea_id=idea, estimated_cost=0.10,
@@ -93,7 +93,7 @@ class TestGetCosts:
             _fake_run(id=2, idea_id=idea, estimated_cost=0.05,
                            tokens_input=500, tokens_output=200),
         ]
-        MockRunRepo.return_value.list_recent.return_value = runs
+        mock_usage.return_value = runs
 
         result = client.get("/api/costs/")
         data = result.json()
@@ -101,13 +101,13 @@ class TestGetCosts:
         assert s["total_runs"] == 2
         assert s["total_cost"] >= 0.15
 
-    @patch("brain.app.api.routers.costs.RunRepository")
-    def test_by_model_groups(self, MockRunRepo, client):
+    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    def test_by_model_groups(self, mock_usage, client):
         runs = [
             _fake_run(id=1, model_used="anthropic/claude-opus-4-6", estimated_cost=0.10),
             _fake_run(id=2, model_used="anthropic/claude-haiku-4-5", estimated_cost=0.01),
         ]
-        MockRunRepo.return_value.list_recent.return_value = runs
+        mock_usage.return_value = runs
 
         result = client.get("/api/costs/")
         data = result.json()
@@ -115,14 +115,14 @@ class TestGetCosts:
         assert "anthropic/claude-opus-4-6" in models
         assert "anthropic/claude-haiku-4-5" in models
 
-    @patch("brain.app.api.routers.costs.RunRepository")
-    def test_by_model_normalizes_provider_prefixes(self, MockRunRepo, client):
+    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    def test_by_model_normalizes_provider_prefixes(self, mock_usage, client):
         runs = [
             _fake_run(id=1, model_used="openai:gpt-5.4", estimated_cost=0.10),
             _fake_run(id=2, model_used="openai/gpt-5.4", estimated_cost=0.02),
             _fake_run(id=3, model_used="gpt-5.4", estimated_cost=0.03),
         ]
-        MockRunRepo.return_value.list_recent.return_value = runs
+        mock_usage.return_value = runs
 
         result = client.get("/api/costs/")
         data = result.json()
@@ -132,13 +132,13 @@ class TestGetCosts:
         assert models["openai/gpt-5.4"]["normalized_model"] == "gpt-5.4"
         assert models["openai/gpt-5.4"]["runs"] == 3
 
-    @patch("brain.app.api.routers.costs.RunRepository")
-    def test_by_skill_groups(self, MockRunRepo, client):
+    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    def test_by_skill_groups(self, mock_usage, client):
         runs = [
             _fake_run(id=1, skill_used="develop", estimated_cost=0.10),
             _fake_run(id=2, skill_used="investigate", estimated_cost=0.02),
         ]
-        MockRunRepo.return_value.list_recent.return_value = runs
+        mock_usage.return_value = runs
 
         result = client.get("/api/costs/")
         data = result.json()
@@ -146,50 +146,50 @@ class TestGetCosts:
         assert "develop" in skills
         assert "investigate" in skills
 
-    @patch("brain.app.api.routers.costs.RunRepository")
-    def test_daily_list(self, MockRunRepo, client):
+    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    def test_daily_list(self, mock_usage, client):
         runs = [
             _fake_run(id=1, created_at=datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)),
             _fake_run(id=2, created_at=datetime(2026, 3, 21, 12, 0, 0, tzinfo=timezone.utc)),
         ]
-        MockRunRepo.return_value.list_recent.return_value = runs
+        mock_usage.return_value = runs
 
         result = client.get("/api/costs/")
         data = result.json()
         assert isinstance(data["daily"], list)
         assert len(data["daily"]) >= 1
 
-    @patch("brain.app.api.routers.costs.RunRepository")
-    def test_month_cost(self, MockRunRepo, client):
+    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    def test_month_cost(self, mock_usage, client):
         runs = [
             _fake_run(id=1, estimated_cost=0.25,
                            created_at=datetime.now(timezone.utc)),
         ]
-        MockRunRepo.return_value.list_recent.return_value = runs
+        mock_usage.return_value = runs
 
         result = client.get("/api/costs/")
         data = result.json()
         assert float(data["month"]["month_cost"]) >= 0.25
 
-    @patch("brain.app.api.routers.costs.RunRepository")
-    def test_empty_runs(self, MockRunRepo, client):
+    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    def test_empty_runs(self, mock_usage, client):
         """No runs should return zeroed summary."""
-        MockRunRepo.return_value.list_recent.return_value = []
+        mock_usage.return_value = []
 
         result = client.get("/api/costs/")
         data = result.json()
         assert data["summary"]["total_runs"] == 0
         assert data["summary"]["total_cost"] == 0
 
-    @patch("brain.app.api.routers.costs.RunRepository")
-    def test_top_ideas_limited(self, MockRunRepo, client):
+    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    def test_top_ideas_limited(self, mock_usage, client):
         """Top ideas list should be capped at 10."""
         # Create 15 runs with different idea_ids
         runs = [
             _fake_run(id=i, idea_id=f"idea-{i:03d}", estimated_cost=0.01)
             for i in range(15)
         ]
-        MockRunRepo.return_value.list_recent.return_value = runs
+        mock_usage.return_value = runs
 
         result = client.get("/api/costs/")
         data = result.json()

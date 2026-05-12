@@ -27,6 +27,7 @@ from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from .handoff import materialize_scheduler_handoff
 from .policy import budget_snapshot_for_candidate, evaluate_candidate, evaluate_candidate_budget
 from brain.app.scheduler.executor import execute_scheduler_run
+from brain.systems.runs.token_usage import summarize_run_usage
 
 
 @dataclass(frozen=True)
@@ -1342,28 +1343,15 @@ def mirror_learning_signal(
     }]
     if run_id is not None:
         with UnitOfWork() as uow:
-            run_row = uow.session.execute(
-                text("""
-                    SELECT id, idea_id, status, skill_used, target_status,
-                           target_validation_error, budget_reason, postmortem,
-                           tokens_total, estimated_cost, created_at
-                    FROM agent_runs
-                    WHERE id = :run_id
-                """),
-                {"run_id": run_id},
-            ).mappings().first()
+            run_row = summarize_run_usage(uow.session, run_id)
         if run_row:
             evidence_refs.append({
                 "kind": "agent_runs",
                 "source_table": "agent_runs",
                 "id": run_row.get("id"),
-                "idea_id": run_row.get("idea_id"),
+                "thread_id": run_row.get("thread_id"),
                 "status": run_row.get("status"),
                 "skill_used": run_row.get("skill_used"),
-                "target_status": run_row.get("target_status"),
-                "target_validation_error": run_row.get("target_validation_error"),
-                "budget_reason": run_row.get("budget_reason"),
-                "postmortem": run_row.get("postmortem"),
                 "tokens_total": run_row.get("tokens_total"),
                 "estimated_cost": run_row.get("estimated_cost"),
                 "created_at": run_row.get("created_at"),
