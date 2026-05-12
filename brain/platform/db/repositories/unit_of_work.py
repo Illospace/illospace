@@ -64,6 +64,15 @@ from brain.platform.db.repositories.vault import (
 RepoT = TypeVar("RepoT")
 ReturnT = TypeVar("ReturnT")
 
+
+def _method_owner(repo_cls: type[Any], name: str) -> type[Any] | None:
+    for owner in repo_cls.__mro__:
+        value = owner.__dict__.get(name)
+        if callable(value):
+            return owner
+    return None
+
+
 async def run_unit_of_work_task(fn: Callable[..., ReturnT], /, *args: Any, **kwargs: Any) -> ReturnT:
     """Run a synchronous entrypoint on the async DB compatibility boundary."""
 
@@ -241,11 +250,11 @@ class _BlockingAsyncTransaction:
 
 
 class AsyncRepositoryProxy(Generic[RepoT]):
-    """Expose sync repository methods as awaitable async operations.
+    """Expose repository methods as awaitable async operations.
 
-    Repository classes remain focused on domain queries. The proxy runs each
-    call inside ``AsyncSession.run_sync`` so the SQLAlchemy sync ORM code is
-    executed in SQLAlchemy's greenlet bridge against the asyncpg connection.
+    Repositories can migrate incrementally by defining native async
+    ``a_<method>`` implementations. Methods without a native async counterpart
+    still use SQLAlchemy's greenlet bridge against the asyncpg connection.
     """
 
     def __init__(self, session: AsyncSession, repo_cls: type[RepoT]) -> None:
@@ -253,9 +262,17 @@ class AsyncRepositoryProxy(Generic[RepoT]):
         self._repo_cls = repo_cls
 
     def __getattr__(self, name: str) -> Any:
-        attr = getattr(self._repo_cls, name, None)
-        if not callable(attr):
+        owner = _method_owner(self._repo_cls, name)
+        if owner is None:
             raise AttributeError(name)
+
+        async_owner = _method_owner(self._repo_cls, f"a_{name}")
+        if async_owner is owner:
+            async def _call(*args: Any, **kwargs: Any) -> Any:
+                repo = self._repo_cls(self._session)
+                return await getattr(repo, f"a_{name}")(*args, **kwargs)
+
+            return _call
 
         async def _call(*args: Any, **kwargs: Any) -> Any:
             def _invoke(sync_session: Session) -> Any:

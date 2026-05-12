@@ -29,11 +29,13 @@ class _SyncSession:
 class _AsyncSession:
     def __init__(self) -> None:
         self.sync_session = _SyncSession()
+        self.run_sync_calls = 0
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
 
     async def run_sync(self, fn):
+        self.run_sync_calls += 1
         return fn(self.sync_session)
 
     async def commit(self) -> None:
@@ -55,6 +57,37 @@ class _Repo:
         return list(self._session.values)
 
 
+class _NativeAsyncRepo:
+    def __init__(self, session: _AsyncSession) -> None:
+        self._session = session
+
+    def record(self, value: str) -> list[str]:
+        raise AssertionError("native async repository methods should not use run_sync")
+
+    async def a_record(self, value: str) -> list[str]:
+        self._session.sync_session.values.append(f"async:{value}")
+        return list(self._session.sync_session.values)
+
+
+class _BaseNativeAsyncRepo:
+    def __init__(self, session) -> None:
+        self._session = session
+
+    def record(self, value: str) -> list[str]:
+        self._session.values.append(f"base:{value}")
+        return list(self._session.values)
+
+    async def a_record(self, value: str) -> list[str]:
+        self._session.sync_session.values.append(f"base-async:{value}")
+        return list(self._session.sync_session.values)
+
+
+class _OverridesSyncRepo(_BaseNativeAsyncRepo):
+    def record(self, value: str) -> list[str]:
+        self._session.values.append(f"override:{value}")
+        return list(self._session.values)
+
+
 @pytest.mark.asyncio
 async def test_async_repository_proxy_runs_sync_repo_in_async_session():
     session = _AsyncSession()
@@ -62,6 +95,27 @@ async def test_async_repository_proxy_runs_sync_repo_in_async_session():
 
     assert await repo.record("alpha") == ["alpha"]
     assert session.sync_session.values == ["alpha"]
+    assert session.run_sync_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_async_repository_proxy_prefers_native_async_repo_method():
+    session = _AsyncSession()
+    repo = AsyncRepositoryProxy(session, _NativeAsyncRepo)
+
+    assert await repo.record("alpha") == ["async:alpha"]
+    assert session.sync_session.values == ["async:alpha"]
+    assert session.run_sync_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_async_repository_proxy_keeps_subclass_sync_override_on_bridge():
+    session = _AsyncSession()
+    repo = AsyncRepositoryProxy(session, _OverridesSyncRepo)
+
+    assert await repo.record("alpha") == ["override:alpha"]
+    assert session.sync_session.values == ["override:alpha"]
+    assert session.run_sync_calls == 1
 
 
 @pytest.mark.asyncio
@@ -100,6 +154,18 @@ async def test_unit_of_work_notifications_is_repository_property(monkeypatch):
 
     async with UnitOfWork() as uow:
         assert await uow.notifications.record("notification") == ["notification"]
+
+
+@pytest.mark.asyncio
+async def test_unit_of_work_notifications_prefers_native_async_repository(monkeypatch):
+    session = _AsyncSession()
+    monkeypatch.setattr(uow_module, "SessionFactory", lambda: session)
+    monkeypatch.setattr(uow_module, "NotificationEventRepository", _NativeAsyncRepo)
+
+    async with UnitOfWork() as uow:
+        assert await uow.notifications.record("notification") == ["async:notification"]
+
+    assert session.run_sync_calls == 0
 
 
 @pytest.mark.asyncio
