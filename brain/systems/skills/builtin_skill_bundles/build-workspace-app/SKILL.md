@@ -33,6 +33,10 @@ Constellation design contract.
      view/control surface over that data.
    - Use app-local state through `manage_workspace_app` only for UI
      preferences, filters, draft input, view settings, and ephemeral state.
+   - Archived apps are not candidates for new build/create requests. Only
+     restore an archived app when the user explicitly asks to restore or
+     reopen that archived app; otherwise create a fresh app or update an
+     active app.
 3. Prefer a host-rendered structured UI spec for common app patterns:
    `renderer_key="generated-ui-app"`, `source_kind="json"`, and
    `source_code` as JSON with `schema_version: 1`, `title`, optional
@@ -91,6 +95,11 @@ Constellation design contract.
      product connector has not been registered yet. Use
      `executor: { "type": "registered", "key": "..." }` only for approved
      server-owned executors.
+   - Missing external credentials are not blockers for creating the app when
+     the external action can be deferred. Do not call `vault_secret_prompt`
+     before producing the requested app. Declare the deferred action, deliver
+     the usable manual/Domain-backed surface, and mention connector setup as a
+     follow-up limitation.
    - Allowed action effects are `domain.read`, `domain.write`,
      `app_state.read`, `app_state.write`, `external.read`,
      `external.write`, `workflow.trigger`, and `agent.run`.
@@ -107,7 +116,9 @@ Constellation design contract.
 7. Save with `manage_workspace_app(action="create" | "update")`.
 8. Verify contract validation, rendered behavior, persistence, dark/light theme
    fit, and thumbnail facade before telling the user the app is done.
-9. Tell the user what app was created and what data it stores.
+9. Tell the user what app was created and what data it stores. Set a thread to
+   `needs_input` only when the main requested app cannot be produced without
+   more information; missing credentials for deferred sync do not qualify.
 
 ## App Contract
 
