@@ -5,6 +5,7 @@ import pytest
 from brain.platform.db.repositories import unit_of_work as uow_module
 from brain.platform.db.repositories.unit_of_work import AsyncRepositoryProxy, UnitOfWork, run_sync_with_unit_of_work
 from brain.systems.runs import event_log as event_log_module
+from brain.systems.runs.cortex import runner as cortex_runner
 from brain.systems.runs import store as run_store_module
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.app.scheduler import executor as scheduler_executor
@@ -124,6 +125,26 @@ async def test_sync_unit_of_work_refuses_legacy_engine_inside_async_runtime():
     with pytest.raises(RuntimeError, match="Synchronous UnitOfWork cannot open the legacy DB engine"):
         with UnitOfWork():
             pass
+
+
+def test_cortex_runner_db_bridge_uses_sync_path_outside_async_runtime(monkeypatch):
+    async def fail_async_bridge(*args, **kwargs):
+        raise AssertionError("runner should not spawn a short-lived async DB loop")
+
+    monkeypatch.setattr(
+        cortex_runner,
+        "run_sync_with_unit_of_work",
+        fail_async_bridge,
+        raising=False,
+    )
+
+    assert cortex_runner._run_db(lambda value: f"sync:{value}", "ok") == "sync:ok"
+
+
+@pytest.mark.asyncio
+async def test_cortex_runner_db_bridge_rejects_calls_inside_async_runtime():
+    with pytest.raises(RuntimeError, match="cannot be called from a running event loop"):
+        cortex_runner._run_db(lambda: None)
 
 
 @pytest.mark.asyncio

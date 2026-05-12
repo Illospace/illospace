@@ -10,6 +10,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Boolean,
+    DateTime,
     Float,
     ForeignKey,
     Index,
@@ -76,10 +77,18 @@ class Idea(Base):
     parent_id: Mapped[Optional[str]] = mapped_column(
         UUID(as_uuid=False), ForeignKey("ideas.id"), nullable=True
     )
-    created_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
-    updated_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
-    archived_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    encoded_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
+    archived_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    encoded_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     user_id: Mapped[str] = mapped_column(
         UUID(as_uuid=False), ForeignKey("users.id"), nullable=False
     )
@@ -88,7 +97,9 @@ class Idea(Base):
     )
     # Cortex UI columns
     display_title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    read_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    read_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     working_memory: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     active_agents: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
@@ -114,7 +125,9 @@ class IdeaStateLog(Base):
     )
     from_state: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     to_state: Mapped[str] = mapped_column(String(20), nullable=False)
-    changed_at: Mapped[datetime] = mapped_column(server_default=text("NOW()"))
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()")
+    )
     trigger: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
 
