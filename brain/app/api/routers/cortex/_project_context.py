@@ -171,26 +171,29 @@ async def create_project_profile(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    org_id = _profile_org_id(user)
-    _validated_snapshot_or_422(body.project_context)
-    existing_stmt = _profile_scope_stmt(org_id).where(ProjectProfile.slug == body.slug)
-    existing = db.scalar(existing_stmt)
-    if existing is not None:
-        raise HTTPException(status_code=409, detail="Project profile slug already exists")
-    profile = ProjectProfile(
-        org_id=org_id,
-        user_id=str(user.get("id")) if user.get("id") else None,
-        slug=body.slug,
-        name=body.name,
-        description=body.description,
-        project_context=body.project_context,
-        default_environment_binding_id=body.default_environment_binding_id,
-        metadata_=body.metadata,
-    )
-    db.add(profile)
-    db.commit()
-    db.refresh(profile)
-    return profile_to_read(profile)
+    def _create(sync_db: Session):
+        org_id = _profile_org_id(user)
+        _validated_snapshot_or_422(body.project_context)
+        existing_stmt = _profile_scope_stmt(org_id).where(ProjectProfile.slug == body.slug)
+        existing = sync_db.scalar(existing_stmt)
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="Project profile slug already exists")
+        profile = ProjectProfile(
+            org_id=org_id,
+            user_id=str(user.get("id")) if user.get("id") else None,
+            slug=body.slug,
+            name=body.name,
+            description=body.description,
+            project_context=body.project_context,
+            default_environment_binding_id=body.default_environment_binding_id,
+            metadata_=body.metadata,
+        )
+        sync_db.add(profile)
+        sync_db.commit()
+        sync_db.refresh(profile)
+        return profile_to_read(profile)
+
+    return await _run_db(db, _create)
 
 
 @router.get("/project-context/profiles/{profile_id}", response_model=ProjectProfileRead)
@@ -226,27 +229,28 @@ async def update_project_profile(
                     ProjectProfile.id != profile.id,
                 )
             )
-        )
-        if existing is not None:
-            raise HTTPException(status_code=409, detail="Project profile slug already exists")
-        profile.slug = body.slug
-    if "name" in fields and body.name is not None:
-        profile.name = body.name
-    if "description" in fields:
-        profile.description = body.description
-    if "project_context" in fields and body.project_context is not None:
-        _validated_snapshot_or_422(body.project_context)
-        profile.project_context = body.project_context
-    if "default_environment_binding_id" in fields:
-        profile.default_environment_binding_id = body.default_environment_binding_id
-    if "active" in fields and body.active is not None:
-        profile.active = body.active
-    if "metadata" in fields:
-        profile.metadata_ = body.metadata or {}
-    db.add(profile)
-    db.commit()
-    db.refresh(profile)
-    return profile_to_read(profile)
+            if existing is not None:
+                raise HTTPException(status_code=409, detail="Project profile slug already exists")
+            profile.slug = body.slug
+        if "name" in fields and body.name is not None:
+            profile.name = body.name
+        if "description" in fields:
+            profile.description = body.description
+        if "project_context" in fields and body.project_context is not None:
+            _validated_snapshot_or_422(body.project_context)
+            profile.project_context = body.project_context
+        if "default_environment_binding_id" in fields:
+            profile.default_environment_binding_id = body.default_environment_binding_id
+        if "active" in fields and body.active is not None:
+            profile.active = body.active
+        if "metadata" in fields:
+            profile.metadata_ = body.metadata or {}
+        sync_db.add(profile)
+        sync_db.commit()
+        sync_db.refresh(profile)
+        return profile_to_read(profile)
+
+    return await _run_db(db, _update)
 
 
 @router.delete("/project-context/profiles/{profile_id}", response_model=ProjectProfileRead)
@@ -511,31 +515,34 @@ async def attach_idea_project_context(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    idea = _require_idea_for_user(db, idea_id, user)
-    project_context = body.project_context
-    profile: ProjectProfile | None = None
-    if body.project_profile_id:
-        org_id = _profile_org_id(user)
-        profile = _get_project_profile(db, body.project_profile_id, org_id)
-        project_context = dict(profile.project_context or {})
-    if not project_context:
-        raise HTTPException(status_code=422, detail="project_profile_id or project_context is required")
-    snapshot = _validated_snapshot_or_422(project_context)
-    attachment = IdeaProjectAttachment(
-        idea_id=idea_id,
-        project_profile_id=profile.id if profile else body.project_profile_id,
-        attached_by=str(user.get("id")) if user.get("id") else None,
-        snapshot=snapshot,
-        permission_scope=snapshot.get("permission_scope") or {},
-        status=str(snapshot.get("status") or "validated"),
-        validation_errors=snapshot.get("validation_errors") or [],
-        environment_binding_id=body.environment_binding_id
-        if body.environment_binding_id is not None
-        else (profile.default_environment_binding_id if profile else None),
-        metadata_=body.metadata,
-    )
-    _set_idea_project_context(idea, snapshot)
-    db.add(attachment)
-    db.commit()
-    db.refresh(attachment)
-    return attachment_to_read(attachment)
+    def _attach(sync_db: Session):
+        idea = _require_idea_for_user(sync_db, idea_id, user)
+        project_context = body.project_context
+        profile: ProjectProfile | None = None
+        if body.project_profile_id:
+            org_id = _profile_org_id(user)
+            profile = _get_project_profile(sync_db, body.project_profile_id, org_id)
+            project_context = dict(profile.project_context or {})
+        if not project_context:
+            raise HTTPException(status_code=422, detail="project_profile_id or project_context is required")
+        snapshot = _validated_snapshot_or_422(project_context)
+        attachment = IdeaProjectAttachment(
+            idea_id=idea_id,
+            project_profile_id=profile.id if profile else body.project_profile_id,
+            attached_by=str(user.get("id")) if user.get("id") else None,
+            snapshot=snapshot,
+            permission_scope=snapshot.get("permission_scope") or {},
+            status=str(snapshot.get("status") or "validated"),
+            validation_errors=snapshot.get("validation_errors") or [],
+            environment_binding_id=body.environment_binding_id
+            if body.environment_binding_id is not None
+            else (profile.default_environment_binding_id if profile else None),
+            metadata_=body.metadata,
+        )
+        _set_idea_project_context(idea, snapshot)
+        sync_db.add(attachment)
+        sync_db.commit()
+        sync_db.refresh(attachment)
+        return attachment_to_read(attachment)
+
+    return await _run_db(db, _attach)
