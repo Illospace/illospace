@@ -19,7 +19,6 @@ from sqlalchemy import text
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.agency import mirror_guardian_signals
 
 
 def audit_day(target_date: str | None = None):
@@ -62,18 +61,11 @@ def audit_day(target_date: str | None = None):
         """), {"target": target})
         recurring = result.mappings().all()
 
-        # 4. Mirror recurring patterns into agency recommendations.
+        # 4. Report recurring patterns.
         for pattern in recurring:
             ctx = pattern["context"]
             cnt = pattern["cnt"]
             print(f"[guardian-audit] Recurring pattern ({cnt}x this week): {ctx[:80]}")
-
-        mirrored = mirror_guardian_signals(
-            target_date=target,
-            recurring_patterns=[dict(r) for r in recurring],
-            violations=[dict(v) for v in violations],
-        )
-        print(f"[guardian-audit] Mirrored {len(mirrored)} guardian candidate(s)")
 
         # 5. Check for executions with failures that had no violations logged
         failure_count = sum(1 for e in executions if e["outcome"] == "failure")
@@ -90,7 +82,6 @@ def audit_day(target_date: str | None = None):
             "violations_logged": violation_count,
             "recurring_patterns": len(recurring),
             "new_rules_created": 0,
-            "agency_candidates": len(mirrored),
         }
         print(f"[guardian-audit] Summary: {json.dumps(summary)}")
         return summary

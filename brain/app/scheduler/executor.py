@@ -162,7 +162,7 @@ def _python_one_liner(code: str) -> list[str]:
 
 
 def _is_callable_handler(job: SchedulerJob) -> bool:
-    if job.handler_kind in {"python_callable", "agency_recommendation"}:
+    if job.handler_kind == "python_callable":
         return True
     return ":" in (job.handler_ref or "")
 
@@ -257,12 +257,6 @@ def _nightly_wrapper_commands(target_date: date, *, split_steps: bool) -> list[l
             "stats = run_meta_evolution(); "
             "print(f'Insights: {stats[\"insights_total\"]}, Regressions: {stats[\"regressions\"]}, Adjustments: {len(stats[\"adjustments\"])}')"
         ),
-        ["python3", "-m", "brain.jobs.pipelines.nightly_evolve_prompts"],
-        _python_one_liner(
-            "from brain.jobs.pipelines.brain_prompts import generate_brain_prompts; "
-            "prompts = generate_brain_prompts(); "
-            "print('Generated %d brain prompts: %s' % (len(prompts), [p['type'] for p in prompts]))"
-        ),
         ["python3", "-m", "brain.jobs.pipelines.nightly_reflect", "--date", target_date.isoformat()],
         ["python3", "-m", "brain.jobs.pipelines.nightly_dream", "--date", target_date.isoformat()],
         ["python3", "-m", "brain.jobs.pipelines.consolidate", "--phase", "index"],
@@ -293,14 +287,6 @@ def _nightly_step_commands(step_key: str, target_date: date) -> list[list[str]]:
                 "from brain.systems.feedback.meta_evolution import run_meta_evolution; "
                 "stats = run_meta_evolution(); "
                 "print(f'Insights: {stats[\"insights_total\"]}, Regressions: {stats[\"regressions\"]}, Adjustments: {len(stats[\"adjustments\"])}')"
-            ),
-        ],
-        "prompt_template_evolution": [["python3", "-m", "brain.jobs.pipelines.nightly_evolve_prompts"]],
-        "brain_prompts": [
-            _python_one_liner(
-                "from brain.jobs.pipelines.brain_prompts import generate_brain_prompts; "
-                "prompts = generate_brain_prompts(); "
-                "print('Generated %d brain prompts: %s' % (len(prompts), [p['type'] for p in prompts]))"
             ),
         ],
         "reflection": [["python3", "-m", "brain.jobs.pipelines.nightly_reflect", "--date", target_date.isoformat()]],

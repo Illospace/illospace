@@ -721,7 +721,7 @@ def adjudicate_memory_pair(
 
     Provider-backed adjudication is attempted only when explicitly configured.
     Otherwise we fail closed into deterministic correction cues and
-    needs-review decisions rather than pretending valence or keywords are truth.
+    needs-review decisions rather than treating keyword heuristics as truth.
     """
     if _learning_policy_night_llm_adjudication_enabled() and (model or llm_adjudication_enabled()):
         try:

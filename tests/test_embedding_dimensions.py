@@ -21,7 +21,6 @@ def test_embedding_vector_registry_defines_required_families():
 
     assert set(registry) == {
         "memory.semantic",
-        "memory.emotional",
         "summary.semantic",
         "narrative.semantic",
         "skill.semantic",
@@ -36,8 +35,6 @@ def test_embedding_vector_registry_defines_required_families():
     assert registry["skill.semantic"].dimensions == shared
     assert registry["skill.task_centroid"].dimensions == shared
 
-    assert registry["memory.emotional"].dimensions == 32
-    assert registry["memory.emotional"].configurable is False
     assert registry["idea.embedding"].dimensions == 1536
     assert registry["idea.embedding"].provider_specific is True
 
@@ -45,9 +42,6 @@ def test_embedding_vector_registry_defines_required_families():
 def test_model_vector_dimensions_match_registry():
     assert _vector_dim(Memory, "semantic_embedding") == config.get_embedding_dimension(
         "memory.semantic"
-    )
-    assert _vector_dim(Memory, "emotional_embedding") == config.get_embedding_dimension(
-        "memory.emotional"
     )
     assert _vector_dim(MemorySummary, "semantic_embedding") == config.get_embedding_dimension(
         "summary.semantic"

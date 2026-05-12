@@ -25,7 +25,6 @@ from brain.app.api.authorization import can_manage_run, can_manage_scheduler
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.routers.costs import _fetch_agent_api_call_rows, _provider_model_key
 from brain.app.api.schemas.system import ConsolidationRunRead, DailyMetricsRead
-from brain.platform.db.repositories.emotions import EmotionRepository
 from brain.platform.db.repositories.memories import EdgeRepository, MemoryRepository
 from brain.platform.db.repositories.skills import SkillRepository
 from brain.platform.db.repositories.system import (
@@ -944,7 +943,6 @@ def overview(
 ):
     mem_repo = MemoryRepository(db)
     edge_repo = EdgeRepository(db)
-    emotion_repo = EmotionRepository(db)
     consol_repo = ConsolidationRunRepository(db)
 
     # Skills summary
@@ -953,19 +951,6 @@ def overview(
         {"name": row["name"], "maturity": row["maturity"]}
         for row in skill_summary
     ]
-
-    # Latest emotion
-    recent_emotions = emotion_repo.list_recent(limit=1)
-    latest_emotion = None
-    if recent_emotions:
-        e = recent_emotions[0]
-        latest_emotion = {
-            "label": e.label,
-            "valence": e.valence,
-            "arousal": e.arousal,
-            "trigger_summary": e.trigger_summary,
-            "timestamp": e.timestamp.isoformat() if e.timestamp else None,
-        }
 
     # Last consolidation
     recent_consols = consol_repo.list_recent(limit=1)
@@ -994,41 +979,17 @@ def overview(
     except Exception:
         logger.debug("memory_trend query failed", exc_info=True)
 
-    # Emotional trend (14 days)
-    emotional_trend = []
-    try:
-        rows = db.execute(text(
-            "SELECT d::date AS day, "
-            "ROUND(AVG(es.valence)::numeric, 3) AS av, "
-            "ROUND(AVG(es.arousal)::numeric, 3) AS aa, "
-            "COUNT(es.id) AS cnt "
-            "FROM generate_series(CURRENT_DATE - INTERVAL '13 days', CURRENT_DATE, '1 day') AS d "
-            "LEFT JOIN emotional_snapshots es ON es.session_date = d::date "
-            "GROUP BY d::date ORDER BY d::date"
-        )).mappings().all()
-        emotional_trend = [
-            {"date": r["day"].isoformat(), "valence": float(r["av"]) if r["av"] else None,
-             "arousal": float(r["aa"]) if r["aa"] else None, "count": r["cnt"]}
-            for r in rows
-        ]
-    except Exception:
-        logger.debug("emotional_trend query failed", exc_info=True)
-
     return {
         "memories": mem_repo.count_active(),
         "edges": edge_repo.count_all(),
         "skills": skill_count,
         "executions": executions,
-        "snapshots": emotion_repo.count_all(),
-        "avg_valence_7d": emotion_repo.avg_valence_7d(),
-        "latest_emotion": latest_emotion,
         "memory_types": mem_repo.count_by_type(),
         "skill_summary": skill_summary,
         "recent_activity": mem_repo.recent_activity(),
         "last_consolidation": last_consolidation,
         "retrieval_accuracy": mem_repo.retrieval_accuracy(),
         "memory_trend": memory_trend,
-        "emotional_trend": emotional_trend,
     }
 
 

@@ -4,7 +4,7 @@ Illo Memory System — Nightly Consolidation ("Sleep")
 
 Three phases:
   Phase 1: CONSOLIDATION — Import raw daily logs, compress, embed, auto-associate
-  Phase 2: REFLECTION — Emotional trajectory, retrieval quality, mistake analysis
+  Phase 2: REFLECTION — Retrieval quality and mistake analysis
   Phase 3: SYNTHESIS — Cross-cluster insights, pattern detection
 
 Run nightly via cron or manually:
@@ -27,7 +27,7 @@ import brain.kernel.config as config
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.memory.embeddings import (
     embed_document, embed_batch, embed_query,
-    make_emotional_embedding, vec_to_pg, EMOTION_MAP
+    vec_to_pg,
 )
 
 WORKSPACE = str(config.WORKSPACE_ROOT)
@@ -157,26 +157,22 @@ def import_daily_log(uow, filepath: str, log_date: date) -> int:
             continue
 
         dense = compress_text(title, body)
-        emotion, valence, arousal = detect_emotion(body)
         memory_type, salience = classify_memory(title, body)
         semantic_emb = embed_document(dense)
-        emotional_emb = make_emotional_embedding(valence, arousal, emotion)
         tags = extract_tags(title + " " + body)
         tags.append(log_date.isoformat())
 
         uow.session.execute(text("""
-            INSERT INTO memories (content, memory_type, semantic_embedding, emotional_embedding,
-                                salience, emotion_valence, emotion_arousal, emotion_label,
+            INSERT INTO memories (content, memory_type, semantic_embedding,
+                                salience,
                                 source, tags, created_at, decay_eligible)
-            VALUES (:content, :memory_type, CAST(:semantic_embedding AS vector), CAST(:emotional_embedding AS vector),
-                    :salience, :valence, :arousal, :emotion, :source, :tags, :created_at, :decay_eligible)
+            VALUES (:content, :memory_type, CAST(:semantic_embedding AS vector),
+                    :salience, :source, :tags, :created_at, :decay_eligible)
             RETURNING id
         """), {
             "content": dense, "memory_type": memory_type,
             "semantic_embedding": vec_to_pg(semantic_emb),
-            "emotional_embedding": vec_to_pg(emotional_emb),
-            "salience": salience, "valence": valence, "arousal": arousal,
-            "emotion": emotion, "source": source_tag, "tags": tags,
+            "salience": salience, "source": source_tag, "tags": tags,
             "created_at": datetime.combine(log_date, datetime.min.time()),
             "decay_eligible": memory_type not in ('lesson', 'pattern'),
         })
@@ -205,7 +201,6 @@ def import_domain_file(uow, filepath: str) -> int:
             continue
 
         dense = compress_text(title, body)
-        emotion, valence, arousal = detect_emotion(body)
         memory_type, salience = classify_memory(title, body)
 
         # Domain files get higher base salience
@@ -220,24 +215,21 @@ def import_domain_file(uow, filepath: str) -> int:
             salience = max(salience, 5.0)
 
         semantic_emb = embed_document(dense)
-        emotional_emb = make_emotional_embedding(valence, arousal, emotion)
 
         tags = extract_tags(title + " " + body)
         tags.append(filename.replace('.md', ''))
 
         uow.session.execute(text("""
-            INSERT INTO memories (content, memory_type, semantic_embedding, emotional_embedding,
-                                salience, emotion_valence, emotion_arousal, emotion_label,
+            INSERT INTO memories (content, memory_type, semantic_embedding,
+                                salience,
                                 source, tags, decay_eligible)
-            VALUES (:content, :memory_type, CAST(:semantic_embedding AS vector), CAST(:emotional_embedding AS vector),
-                    :salience, :valence, :arousal, :emotion, :source, :tags, :decay_eligible)
+            VALUES (:content, :memory_type, CAST(:semantic_embedding AS vector),
+                    :salience, :source, :tags, :decay_eligible)
             RETURNING id
         """), {
             "content": dense, "memory_type": memory_type,
             "semantic_embedding": vec_to_pg(semantic_emb),
-            "emotional_embedding": vec_to_pg(emotional_emb),
-            "salience": salience, "valence": valence, "arousal": arousal,
-            "emotion": emotion, "source": source_tag, "tags": tags,
+            "salience": salience, "source": source_tag, "tags": tags,
             "decay_eligible": memory_type not in ('lesson', 'pattern'),
         })
         created += 1
@@ -284,7 +276,7 @@ def decay_memories(uow, days: int = 30, threshold: float = 2.0) -> int:
 # ============================================================
 
 def phase_reflection(target_date: date, org_id: str | None = None):
-    """Analyze performance, emotional trajectory, and retrieval quality."""
+    """Analyze performance and retrieval quality."""
     with UnitOfWork() as uow:
         result = uow.session.execute(text("""
             INSERT INTO consolidation_runs (run_date, phase, org_id)
@@ -292,30 +284,7 @@ def phase_reflection(target_date: date, org_id: str | None = None):
         """), {"run_date": target_date, "org_id": org_id})
         run_id = result.mappings().first()["id"]
 
-        # 1. Emotional trajectory analysis
-        result = uow.session.execute(text("""
-            SELECT AVG(valence) as avg_v, AVG(arousal) as avg_a,
-                   COUNT(*) FILTER (WHERE label IN ('frustrated', 'angry', 'disappointed', 'anxious')) as neg_count,
-                   COUNT(*) FILTER (WHERE label IN ('happy', 'excited', 'proud', 'satisfied', 'impressed')) as pos_count,
-                   COUNT(*) as total
-            FROM emotional_snapshots
-            WHERE session_date = :target_date
-        """), {"target_date": target_date})
-        emotions_today = result.mappings().first()
-
-        # Compare with previous 7 days
-        result = uow.session.execute(text("""
-            SELECT AVG(valence) as avg_v, AVG(arousal) as avg_a
-            FROM emotional_snapshots
-            WHERE session_date BETWEEN :start_date AND :end_date
-        """), {"start_date": target_date - timedelta(days=7), "end_date": target_date - timedelta(days=1)})
-        emotions_prev = result.mappings().first()
-
-        valence_trend = 0.0
-        if emotions_today["avg_v"] is not None and emotions_prev["avg_v"] is not None:
-            valence_trend = float(emotions_today["avg_v"]) - float(emotions_prev["avg_v"])
-
-        # 2. Retrieval quality analysis
+        # 1. Retrieval quality analysis
         result = uow.session.execute(text("""
             SELECT COUNT(*) as total,
                    COUNT(*) FILTER (WHERE feedback = 'hit') as hits,
@@ -326,7 +295,7 @@ def phase_reflection(target_date: date, org_id: str | None = None):
         """), {"target_date": target_date})
         retrieval = result.mappings().first()
 
-        # 3. Check for known-mistake recurrence
+        # 2. Check for known-mistake recurrence
         result = uow.session.execute(text("""
             SELECT COUNT(*) as accessed_lessons
             FROM memories
@@ -334,23 +303,11 @@ def phase_reflection(target_date: date, org_id: str | None = None):
         """), {"target_date": target_date})
         lessons_accessed = result.mappings().first()["accessed_lessons"]
 
-        # 4. Compute competence scores
+        # 3. Compute competence scores
         competence = compute_competence(uow, target_date)
 
-        # 5. Generate reflection notes
+        # 4. Generate reflection notes
         notes = []
-        if emotions_today["total"] and emotions_today["total"] > 0:
-            neg_ratio = (emotions_today["neg_count"] or 0) / emotions_today["total"]
-            if neg_ratio > 0.5:
-                notes.append(f"High negativity today ({neg_ratio:.0%} of snapshots). Investigate triggers.")
-            elif neg_ratio < 0.2:
-                notes.append(f"Positive day — low frustration ({neg_ratio:.0%}).")
-
-        if valence_trend < -0.3:
-            notes.append(f"Emotional trend declining ({valence_trend:+.2f} vs 7d avg). Pattern check needed.")
-        elif valence_trend > 0.3:
-            notes.append(f"Emotional trend improving ({valence_trend:+.2f} vs 7d avg).")
-
         if retrieval["total"] and retrieval["total"] > 0:
             hit_rate = (retrieval["hits"] or 0) / retrieval["total"]
             notes.append(f"Retrieval hit rate: {hit_rate:.0%} ({retrieval['hits']}/{retrieval['total']})")
@@ -359,20 +316,15 @@ def phase_reflection(target_date: date, org_id: str | None = None):
 
         # 6. Write daily metrics
         uow.session.execute(text("""
-            INSERT INTO daily_metrics (metric_date, avg_valence, avg_arousal, valence_trend,
-                frustration_count, joy_count, retrieval_attempts, retrieval_hits, retrieval_misses,
+            INSERT INTO daily_metrics (metric_date, retrieval_attempts, retrieval_hits, retrieval_misses,
                 competence_architecture, competence_debugging, competence_frontend,
                 competence_provider_apis, competence_communication, competence_proactivity,
                 reflection_notes)
-            VALUES (:metric_date, :avg_valence, :avg_arousal, :valence_trend,
-                :frustration_count, :joy_count, :retrieval_attempts, :retrieval_hits, :retrieval_misses,
+            VALUES (:metric_date, :retrieval_attempts, :retrieval_hits, :retrieval_misses,
                 :competence_architecture, :competence_debugging, :competence_frontend,
                 :competence_provider_apis, :competence_communication, :competence_proactivity,
                 :reflection_notes)
             ON CONFLICT (metric_date) DO UPDATE SET
-                avg_valence = EXCLUDED.avg_valence, avg_arousal = EXCLUDED.avg_arousal,
-                valence_trend = EXCLUDED.valence_trend,
-                frustration_count = EXCLUDED.frustration_count, joy_count = EXCLUDED.joy_count,
                 retrieval_attempts = EXCLUDED.retrieval_attempts,
                 retrieval_hits = EXCLUDED.retrieval_hits, retrieval_misses = EXCLUDED.retrieval_misses,
                 competence_architecture = EXCLUDED.competence_architecture,
@@ -384,11 +336,6 @@ def phase_reflection(target_date: date, org_id: str | None = None):
                 reflection_notes = EXCLUDED.reflection_notes
         """), {
             "metric_date": target_date,
-            "avg_valence": float(emotions_today["avg_v"]) if emotions_today["avg_v"] else None,
-            "avg_arousal": float(emotions_today["avg_a"]) if emotions_today["avg_a"] else None,
-            "valence_trend": valence_trend,
-            "frustration_count": emotions_today["neg_count"] or 0,
-            "joy_count": emotions_today["pos_count"] or 0,
             "retrieval_attempts": retrieval["total"] or 0,
             "retrieval_hits": retrieval["hits"] or 0,
             "retrieval_misses": retrieval["misses"] or 0,
@@ -469,66 +416,7 @@ def phase_synthesis(target_date: date, org_id: str | None = None):
 
         patterns_detected = 0
 
-        # 1. Find recurring emotional patterns
-        result = uow.session.execute(text("""
-            SELECT emotion_label, COUNT(*) as cnt, AVG(salience) as avg_sal
-            FROM memories
-            WHERE NOT archived AND emotion_label IS NOT NULL
-              AND emotion_label != 'neutral'
-            GROUP BY emotion_label
-            HAVING COUNT(*) >= 3
-            ORDER BY cnt DESC
-        """))
-        emotion_clusters = result.mappings().all()
-
-        for cluster in emotion_clusters:
-            result = uow.session.execute(text("""
-                SELECT id FROM memories
-                WHERE memory_type = 'pattern' AND content LIKE :pattern AND NOT archived
-            """), {"pattern": f"%emotional pattern: {cluster['emotion_label']}%"})
-
-            if not result.mappings().first():
-                pattern_content = (
-                    f"[emotional pattern: {cluster['emotion_label']}] "
-                    f"Detected {cluster['cnt']} memories with {cluster['emotion_label']} emotion, "
-                    f"avg salience {float(cluster['avg_sal']):.1f}. "
-                    f"This emotional state recurs — investigate root causes."
-                )
-                semantic_emb = embed_document(pattern_content)
-                emotional_emb = make_emotional_embedding(label=cluster['emotion_label'])
-
-                result = uow.session.execute(text("""
-                    INSERT INTO memories (content, memory_type, semantic_embedding, emotional_embedding,
-                                        salience, emotion_label, source, tags, decay_eligible)
-                    VALUES (:content, 'pattern', CAST(:semantic_embedding AS vector), CAST(:emotional_embedding AS vector),
-                            7.0, :emotion_label, 'synthesis', :tags, FALSE)
-                    RETURNING id
-                """), {
-                    "content": pattern_content,
-                    "semantic_embedding": vec_to_pg(semantic_emb),
-                    "emotional_embedding": vec_to_pg(emotional_emb),
-                    "emotion_label": cluster['emotion_label'],
-                    "tags": [f"pattern-{cluster['emotion_label']}"],
-                })
-                pattern_id = result.mappings().first()["id"]
-
-                # Link to memories with this emotion
-                result = uow.session.execute(text("""
-                    SELECT id FROM memories
-                    WHERE emotion_label = :emotion_label AND NOT archived AND memory_type != 'pattern'
-                    ORDER BY salience DESC LIMIT 5
-                """), {"emotion_label": cluster['emotion_label']})
-
-                for mem in result.mappings().all():
-                    uow.session.execute(text("""
-                        INSERT INTO edges (source_id, target_id, relationship, weight)
-                        VALUES (:source_id, :target_id, 'emotional_echo', 1.0)
-                        ON CONFLICT DO NOTHING
-                    """), {"source_id": pattern_id, "target_id": mem["id"]})
-
-                patterns_detected += 1
-
-        # 2. Find topic clusters with high density
+        # 1. Find topic clusters with high density
         result = uow.session.execute(text("""
             SELECT unnest(tags) as tag, COUNT(*) as cnt, AVG(salience) as avg_sal
             FROM memories WHERE NOT archived
@@ -538,31 +426,17 @@ def phase_synthesis(target_date: date, org_id: str | None = None):
         """))
         hot_topics = result.mappings().all()
 
-        # 3. Detect potential contradictions (with auto-edge creation)
+        # 2. Detect potential contradictions (with auto-edge creation)
         potential_contradictions = []
         try:
             from brain.systems.cognition.graph import detect_contradictions
             potential_contradictions = detect_contradictions(uow.session, limit=10)
         except Exception as e:
             print(f"[synthesis] Graph contradiction detection failed: {e}")
-            # Fallback to inline detection
-            result = uow.session.execute(text("""
-                SELECT e.source_id, e.target_id, e.weight,
-                       m1.content as content1, m1.emotion_label as emo1,
-                       m2.content as content2, m2.emotion_label as emo2
-                FROM edges e
-                JOIN memories m1 ON m1.id = e.source_id
-                JOIN memories m2 ON m2.id = e.target_id
-                WHERE e.relationship = 'similar_to' AND e.weight > 0.8
-                  AND m1.emotion_valence * m2.emotion_valence < 0
-                  AND NOT m1.archived AND NOT m2.archived
-                LIMIT 10
-            """))
-            potential_contradictions = result.mappings().all()
 
         summary_parts = []
         if patterns_detected > 0:
-            summary_parts.append(f"{patterns_detected} new emotional patterns detected")
+            summary_parts.append(f"{patterns_detected} new patterns detected")
         if hot_topics:
             top_tags = [f"{t['tag']}({t['cnt']})" for t in hot_topics[:5]]
             summary_parts.append(f"Hot topics: {', '.join(top_tags)}")
@@ -592,40 +466,6 @@ def compress_text(title: str, body: str) -> str:
     clean = re.sub(r'[#*`_~]', '', clean)
     clean = re.sub(r'^[-•]\s*', '', clean, flags=re.MULTILINE)
     return f"[{title}] {clean[:400]}"
-
-
-def detect_emotion(text: str) -> tuple:
-    """Detect emotional tone from text content. Returns (label, valence, arousal)."""
-    text_lower = text.lower()
-
-    frustration_words = ['bug', 'broken', 'wrong', 'fail', 'error', 'issue', 'problem',
-                         'frustrat', 'annoying', 'still broken', 'not working', 'mistake']
-    positive_words = ['fixed', 'solved', 'works', 'success', 'clean', 'perfect',
-                      'great', 'exactly', 'nice', 'improvement', 'shipped']
-    urgency_words = ['urgent', 'asap', 'production', 'down', 'critical', 'hotfix',
-                     'customer waiting', 'broken in prod']
-    learning_words = ['learned', 'lesson', 'realize', 'insight', 'pattern',
-                      'next time', 'should have', 'never again']
-
-    frust_score = sum(1 for w in frustration_words if w in text_lower)
-    pos_score = sum(1 for w in positive_words if w in text_lower)
-    urg_score = sum(1 for w in urgency_words if w in text_lower)
-    learn_score = sum(1 for w in learning_words if w in text_lower)
-
-    if urg_score >= 2:
-        return ('urgent', -0.3, 0.9)
-    elif frust_score > pos_score and frust_score >= 2:
-        return ('frustrated', -0.7, 0.7)
-    elif pos_score > frust_score and pos_score >= 2:
-        return ('satisfied', 0.6, 0.4)
-    elif learn_score >= 2:
-        return ('curious', 0.2, 0.5)
-    elif frust_score > 0:
-        return ('disappointed', -0.4, 0.3)
-    elif pos_score > 0:
-        return ('satisfied', 0.4, 0.3)
-    else:
-        return ('neutral', 0.0, 0.2)
 
 
 def classify_memory(title: str, body: str) -> tuple:
@@ -682,22 +522,13 @@ def generate_index(output_path: str = None) -> str:
     with UnitOfWork() as uow:
         # High-salience memories by type
         result = uow.session.execute(text("""
-            SELECT id, content, memory_type, salience, emotion_label, tags
+            SELECT id, content, memory_type, salience, tags
             FROM memories
             WHERE NOT archived AND superseded_by IS NULL AND salience >= 5
             ORDER BY salience DESC, last_accessed DESC
             LIMIT 50
         """))
         memories = result.mappings().all()
-
-        # Recent emotional trend
-        result = uow.session.execute(text("""
-            SELECT metric_date, avg_valence, valence_trend, frustration_count,
-                   joy_count, reflection_notes
-            FROM daily_metrics
-            ORDER BY metric_date DESC LIMIT 7
-        """))
-        metrics = result.mappings().all()
 
         # Stats
         result = uow.session.execute(text("SELECT COUNT(*) as total FROM memories WHERE NOT archived"))
@@ -726,19 +557,8 @@ def generate_index(output_path: str = None) -> str:
         if t in by_type:
             lines.append(f"## {t.upper()}S")
             for m in by_type[t]:
-                emotion_tag = f" [{m['emotion_label']}]" if m['emotion_label'] != 'neutral' else ""
-                lines.append(f"- [#{m['id']} s:{m['salience']:.0f}{emotion_tag}] {m['content'][:120]}")
+                lines.append(f"- [#{m['id']} s:{m['salience']:.0f}] {m['content'][:120]}")
             lines.append("")
-
-    # Emotional trajectory
-    if metrics:
-        lines.append("## EMOTIONAL TRAJECTORY (7d)")
-        for m in metrics:
-            trend = ""
-            if m["valence_trend"]:
-                trend = f" trend:{float(m['valence_trend']):+.2f}"
-            lines.append(f"- {m['metric_date']}: valence={m['avg_valence'] or '?'}{trend}")
-        lines.append("")
 
     index_text = "\n".join(lines)
 

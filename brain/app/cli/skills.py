@@ -30,7 +30,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 import brain.kernel.config as config
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.db.models.skill import Skill, SkillDependency, SkillExecution
-from brain.platform.db.models.task import Task
 from brain.platform.db.models.memory import Memory
 from brain.systems.memory.embeddings import embed_batch, embed_document, embed_query, vec_to_pg
 
@@ -156,7 +155,6 @@ def cmd_get(args):
                 "task": e.task_description[:100] if e.task_description else None,
                 "outcome": e.outcome,
                 "duration": e.duration_sec,
-                "emotion": e.operator_emotion,
                 "date": e.started_at.isoformat() if e.started_at else None,
             } for e in executions],
             "auto_emerged": skill.auto_emerged,
@@ -228,7 +226,6 @@ def cmd_use(args):
             complexity=args.complexity,
             outcome=args.outcome or "success",
             duration_sec=args.duration,
-            operator_emotion=args.emotion,
             outcome_details=args.details,
         )
         uow.session.add(execution)
@@ -391,26 +388,72 @@ def cmd_plan(args):
     task_text = args.task
     task_emb = embed_query(task_text)
     emb_str = _vec_to_pg(task_emb)
+    words = [w for w in task_text.lower().split() if len(w) > 3][:5]
+    if words:
+        conditions = " OR ".join([f"input_message ILIKE :word_{i}" for i in range(len(words))])
+        score_terms = " + ".join([
+            f"CASE WHEN input_message ILIKE :word_{i} THEN 1 ELSE 0 END"
+            for i in range(len(words))
+        ])
+        similar_sql = f"""
+                SELECT id,
+                       input_message AS description,
+                       COALESCE(metadata->>'task_type', recipe) AS task_type,
+                       COALESCE(metadata->>'strategy_chosen', recipe) AS strategy_chosen,
+                       COALESCE(metadata->>'outcome', status) AS outcome,
+                       EXTRACT(EPOCH FROM (
+                           COALESCE(completed_at, failed_at, canceled_at, updated_at, created_at) - created_at
+                       ))::float AS duration_sec,
+                       NULL::float AS operator_satisfaction,
+                       CASE
+                           WHEN jsonb_typeof(metadata->'skills_used') = 'array'
+                           THEN metadata->'skills_used'
+                           ELSE '[]'::jsonb
+                       END AS skills_used,
+                       (({score_terms})::float / :word_count) AS similarity
+                FROM agent_runs
+                WHERE input_message IS NOT NULL
+                  AND ({conditions})
+                ORDER BY similarity DESC, created_at DESC
+                LIMIT 5
+        """
+        similar_params = {f"word_{i}": f"%{w}%" for i, w in enumerate(words)}
+        similar_params["word_count"] = len(words)
+    else:
+        similar_sql = """
+                SELECT id,
+                       input_message AS description,
+                       COALESCE(metadata->>'task_type', recipe) AS task_type,
+                       COALESCE(metadata->>'strategy_chosen', recipe) AS strategy_chosen,
+                       COALESCE(metadata->>'outcome', status) AS outcome,
+                       EXTRACT(EPOCH FROM (
+                           COALESCE(completed_at, failed_at, canceled_at, updated_at, created_at) - created_at
+                       ))::float AS duration_sec,
+                       NULL::float AS operator_satisfaction,
+                       CASE
+                           WHEN jsonb_typeof(metadata->'skills_used') = 'array'
+                           THEN metadata->'skills_used'
+                           ELSE '[]'::jsonb
+                       END AS skills_used,
+                       0.0 AS similarity
+                FROM agent_runs
+                WHERE input_message IS NOT NULL
+                ORDER BY created_at DESC
+                LIMIT 5
+        """
+        similar_params = {}
 
     with UnitOfWork() as uow:
-        # 1. Find similar past tasks (pgvector)
+        # 1. Find similar past tasks from persisted agent runs.
         similar_tasks = uow.session.execute(
-            text("""
-                SELECT id, description, task_type, strategy_chosen, outcome, duration_sec,
-                       operator_satisfaction, skills_used,
-                       1 - (embedding <=> CAST(:emb AS vector)) as similarity
-                FROM tasks
-                WHERE embedding IS NOT NULL
-                ORDER BY embedding <=> CAST(:emb AS vector)
-                LIMIT 5
-            """),
-            {"emb": emb_str},
+            text(similar_sql),
+            similar_params,
         ).mappings().all()
 
         # 2. Query memory for relevant context (pgvector)
         relevant_memories = uow.session.execute(
             text("""
-                SELECT id, content, memory_type, salience, emotion_label,
+                SELECT id, content, memory_type, salience,
                        1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity
                 FROM memories
                 WHERE NOT archived AND superseded_by IS NULL
@@ -445,7 +488,7 @@ def cmd_plan(args):
 
         if similar_tasks and similar_tasks[0]["similarity"] > 0.7:
             past = similar_tasks[0]
-            if past["outcome"] == "success" and past["strategy_chosen"]:
+            if past["outcome"] in ("success", "completed") and past["strategy_chosen"]:
                 strategy = past["strategy_chosen"]  # reuse what worked
 
         if matching_skills:
@@ -497,28 +540,58 @@ def cmd_plan(args):
                 "id": m["id"],
                 "content": m["content"][:150],
                 "type": m["memory_type"],
-                "emotion": m["emotion_label"],
                 "similarity": round(float(m["similarity"]), 3) if m["similarity"] else 0,
             } for m in relevant_memories[:5]],
         }
 
-        # 7. Store task
-        task_obj = Task(
-            description=task_text,
-            strategy_chosen=strategy,
-            similar_past_tasks=[t["id"] for t in similar_tasks if t["similarity"] and float(t["similarity"]) > 0.3],
-            memory_ids_recalled=[m["id"] for m in relevant_memories[:5]],
-            guardrails=guardrails[:5],
-        )
-        uow.session.add(task_obj)
-        uow.session.flush()
-
-        # Set embedding via raw SQL (pgvector cast)
-        uow.session.execute(
-            text("UPDATE tasks SET embedding = CAST(:emb AS vector) WHERE id = :id"),
-            {"emb": emb_str, "id": task_obj.id},
-        )
-        plan["task_id"] = task_obj.id
+        # 7. Store the planning event in agent_runs so future planning can use
+        # agent_runs.input_message as the task history.
+        row = uow.session.execute(text("""
+            INSERT INTO agent_runs (
+                thread_id, profile, recipe, status, input_message,
+                target_ref, workspace_ref, model_policy, metadata,
+                completed_at
+            ) VALUES (
+                'skills-plan', 'cli', 'skill_plan', 'completed', :task,
+                '{"kind":"skill_plan"}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                CAST(:metadata AS jsonb), NOW()
+            )
+            RETURNING id
+        """), {
+            "task": task_text,
+            "metadata": json.dumps({
+                "legacy_source": "skills.plan",
+                "task_type": "skill_plan",
+                "strategy_chosen": strategy,
+                "outcome": "planned",
+                "similar_past_run_ids": [
+                    t["id"] for t in similar_tasks
+                    if t["similarity"] and float(t["similarity"]) > 0.3
+                ],
+                "memory_ids_recalled": [m["id"] for m in relevant_memories[:5]],
+                "guardrails": guardrails[:5],
+                "skills_used": [
+                    s["id"] for s in matching_skills
+                    if s["skill_match"] and float(s["skill_match"]) > 0.3
+                ],
+            }),
+        }).mappings().first()
+        plan_run_id = int(row["id"])
+        uow.session.execute(text("""
+            UPDATE agent_runs
+            SET root_run_id = COALESCE(root_run_id, id),
+                trace_id = COALESCE(trace_id, 'skills-plan-' || id::text)
+            WHERE id = :id
+        """), {"id": plan_run_id})
+        uow.session.execute(text("""
+            INSERT INTO agent_run_artifacts (
+                run_id, root_run_id, artifact_type, title, payload, visibility
+            ) VALUES (
+                :run_id, :run_id, 'skill_plan', 'Skill planning output',
+                CAST(:payload AS jsonb), 'private'
+            )
+        """), {"run_id": plan_run_id, "payload": json.dumps(plan)})
+        plan["plan_run_id"] = plan_run_id
 
     if blocked:
         plan["blocking_message"] = "These guardrails MUST be addressed before proceeding"
@@ -547,6 +620,13 @@ def cmd_plan(args):
             plan["blocked"] = True
             plan["blocking_message"] = "Skill-authoring gate: must read skill-creator before proceeding"
 
+    with UnitOfWork() as uow:
+        uow.session.execute(text("""
+            UPDATE agent_run_artifacts
+            SET payload = CAST(:payload AS jsonb)
+            WHERE run_id = :run_id AND artifact_type = 'skill_plan'
+        """), {"run_id": plan["plan_run_id"], "payload": json.dumps(plan)})
+
     print(json.dumps(plan, indent=2, default=str))
 
 
@@ -556,11 +636,13 @@ def cmd_dashboard(args):
         # Skill overview (DB view)
         skills = uow.session.execute(text("SELECT * FROM skill_dashboard")).mappings().all()
 
-        # Recent task outcomes
+        # Recent planning/run outcomes
         task_outcomes = uow.session.execute(
             text("""
-                SELECT outcome, COUNT(*) as cnt FROM tasks
+                SELECT COALESCE(metadata->>'outcome', status) AS outcome, COUNT(*) as cnt
+                FROM agent_runs
                 WHERE created_at >= CURRENT_DATE - INTERVAL '30 days'
+                  AND input_message IS NOT NULL
                 GROUP BY outcome
             """)
         ).mappings().all()
@@ -668,14 +750,21 @@ def cmd_evolve(args):
             s.maturity = maturity
             s.confidence = confidence
 
-        # 3. Detect potential new skills from task patterns
+        # 3. Detect potential new skills from recurring agent-run task prompts.
         skill_gaps = uow.session.execute(
             text("""
-                SELECT description, task_type, COUNT(*) as cnt
-                FROM tasks
-                WHERE (skills_used IS NULL OR skills_used = '{}')
+                SELECT input_message AS description,
+                       COALESCE(metadata->>'task_type', recipe) AS task_type,
+                       COUNT(*) as cnt
+                FROM agent_runs
+                WHERE input_message IS NOT NULL
+                  AND (
+                    metadata->'skills_used' IS NULL
+                    OR jsonb_typeof(metadata->'skills_used') != 'array'
+                    OR jsonb_array_length(metadata->'skills_used') = 0
+                  )
                   AND created_at >= CURRENT_DATE - INTERVAL '7 days'
-                GROUP BY description, task_type
+                GROUP BY input_message, COALESCE(metadata->>'task_type', recipe)
                 HAVING COUNT(*) >= 2
             """)
         ).mappings().all()
@@ -734,7 +823,6 @@ def main():
     p_use.add_argument("--complexity", type=int)
     p_use.add_argument("--outcome", "-o", choices=["success", "failure", "partial", "abandoned"])
     p_use.add_argument("--duration", type=float)
-    p_use.add_argument("--emotion")
     p_use.add_argument("--details")
 
     # refine
@@ -772,7 +860,6 @@ def main():
     p_fb.add_argument("execution_id", type=int)
     p_fb.add_argument("--outcome", choices=["success", "failure", "partial"])
     p_fb.add_argument("--notes")
-    p_fb.add_argument("--emotion")
 
     # evolve
     subparsers.add_parser("evolve")

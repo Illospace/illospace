@@ -5,8 +5,8 @@ from brain.platform.db.models.memory import Memory, Edge, Tag
 def test_memory_has_all_baseline_columns():
     cols = {c.name for c in inspect(Memory).columns}
     expected = {
-        "id", "content", "memory_type", "semantic_embedding", "emotional_embedding",
-        "salience", "emotion_valence", "emotion_arousal", "emotion_label",
+        "id", "content", "memory_type", "semantic_embedding",
+        "salience",
         "source", "source_session", "tags", "created_at", "last_accessed",
         "access_count", "decay_eligible", "archived", "superseded_by",
         "memory_tier", "consolidated", "source_memory_ids", "scope",

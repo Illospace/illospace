@@ -16,8 +16,6 @@ import time
 
 import numpy as np
 
-from brain.kernel.config import MEMORY_EMOTIONAL_EMBEDDING_DIM
-
 logger = logging.getLogger("brain.systems.memory.embeddings")
 
 # ---------------------------------------------------------------------------
@@ -326,64 +324,6 @@ def embed_document(text: str) -> np.ndarray:
 def embed_query(text: str) -> np.ndarray:
     """Embed a query (with retrieval instruction)."""
     return embed_batch([text], mode="query")[0]
-
-
-# ---------------------------------------------------------------------------
-# Emotional embeddings (32-dim compact representation)
-# ---------------------------------------------------------------------------
-
-EMOTION_MAP = {
-    "frustrated":   (-0.8, 0.7, 0.3),
-    "angry":        (-0.9, 0.9, 0.6),
-    "disappointed": (-0.6, 0.3, 0.2),
-    "confused":     (-0.3, 0.5, 0.2),
-    "anxious":      (-0.5, 0.8, 0.2),
-    "neutral":      ( 0.0, 0.2, 0.5),
-    "curious":      ( 0.3, 0.6, 0.5),
-    "satisfied":    ( 0.6, 0.3, 0.6),
-    "happy":        ( 0.8, 0.6, 0.6),
-    "excited":      ( 0.7, 0.9, 0.7),
-    "proud":        ( 0.8, 0.5, 0.8),
-    "urgent":       (-0.2, 0.9, 0.4),
-    "relieved":     ( 0.5, 0.2, 0.5),
-    "impressed":    ( 0.7, 0.6, 0.4),
-    "teaching":     ( 0.4, 0.4, 0.7),
-    "directing":    ( 0.2, 0.5, 0.6),
-    "encouraging":  ( 0.6, 0.5, 0.7),
-    "delegating":   ( 0.5, 0.3, 0.6),
-}
-
-_EMOTION_CATEGORIES = {
-    "negative_high": ["frustrated", "angry", "anxious", "urgent"],
-    "negative_low":  ["disappointed", "confused"],
-    "neutral":       ["neutral", "curious", "directing"],
-    "positive_low":  ["satisfied", "relieved", "delegating"],
-    "positive_high": ["happy", "excited", "proud", "impressed", "teaching", "encouraging"],
-}
-
-
-def make_emotional_embedding(
-    valence: float = 0.0, arousal: float = 0.0, label: str = "neutral",
-) -> np.ndarray:
-    """Create a fixed-dimension emotional embedding from valence/arousal/label."""
-    vec = np.zeros(MEMORY_EMOTIONAL_EMBEDDING_DIM, dtype=np.float32)
-
-    base = EMOTION_MAP.get(label, (valence, arousal, 0.5))
-    vec[0], vec[1], vec[2] = base
-
-    for i, (_, labels) in enumerate(_EMOTION_CATEGORIES.items()):
-        if label in labels:
-            vec[3 + i] = 1.0
-
-    rng = np.random.RandomState(hash(label) % 2**31)
-    vec[8:] = rng.randn(MEMORY_EMOTIONAL_EMBEDDING_DIM - 8) * 0.3
-    vec[8:] += vec[0] * 0.2
-
-    norm = np.linalg.norm(vec)
-    if norm > 0:
-        vec /= norm
-
-    return vec
 
 
 # ---------------------------------------------------------------------------

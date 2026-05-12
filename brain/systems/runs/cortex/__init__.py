@@ -27,7 +27,6 @@ class RunAdmissionRequest:
     source: str | None = None
     producer: str | None = None
     idempotency_key: str | None = None
-    capture_emotion: bool = False
 
 
 @dataclass(frozen=True)

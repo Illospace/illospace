@@ -194,11 +194,11 @@ class TestInlineAllowlist:
 
 
 # ============================================================
-# run_log DB tests
+# agent_runs persistence tests
 # ============================================================
 
-class TestRunLog:
-    """run_log table insert/query works."""
+class TestRunPersistence:
+    """CLI run persistence writes through agent_runs."""
 
     def test_log_run_inserts(self):
         mock_session = MagicMock()
@@ -216,7 +216,7 @@ class TestRunLog:
             payload_json={"test": True},
         )
         assert run_id == 42
-        mock_session.execute.assert_called_once()
+        assert mock_session.execute.call_count == 3
 
     def test_log_run_with_context_metadata(self):
         mock_session = MagicMock()
@@ -243,13 +243,12 @@ class TestRunLog:
 # ============================================================
 
 class TestCompleteHook:
-    """complete hook updates run_log correctly."""
+    """complete hook updates agent_runs correctly."""
 
-    def test_complete_updates_run_log(self):
+    def test_complete_updates_agent_run(self):
         mock_session = MagicMock()
-        # First call: SELECT run_log row
         mock_session.execute.return_value.mappings.return_value.first.return_value = {
-            "id": 42, "skill_name": "develop", "task_summary": "impl rate limit"
+            "id": 42, "metadata": {"legacy_source": "cli.run"}
         }
 
         from brain.app.cli.run import complete_run

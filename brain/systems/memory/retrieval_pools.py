@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional
@@ -53,7 +53,6 @@ class RetrievalConfig:
     org_id: Optional[str] = None
     user_id: Optional[str] = None
     service_retrieval: bool = False
-    emotion_context: Optional[dict] = field(default=None)
 
 
 # ---------------------------------------------------------------------------

@@ -670,13 +670,11 @@ def deep_health_snapshot(*, consumer_running: bool | None = None) -> dict[str, A
 
 def compatibility_health_snapshot(*, consumer_running: bool | None = None) -> dict[str, Any]:
     try:
-        from brain.platform.db.repositories.emotions import EmotionRepository
         from brain.platform.db.repositories.memories import MemoryRepository
         from brain.platform.db.models.skill import Skill
 
         with _health_db_session() as db:
             mem_repo = MemoryRepository(db)
-            emo_repo = EmotionRepository(db)
             skill_count = db.scalar(
                 select(func.count(Skill.id)).where(
                     or_(Skill.archived == False, Skill.archived.is_(None))  # noqa: E712
@@ -692,7 +690,6 @@ def compatibility_health_snapshot(*, consumer_running: bool | None = None) -> di
                 "database": "connected",
                 "memory_count": mem_repo.count_active(),
                 "skill_count": skill_count,
-                "emotion_count": emo_repo.count_all(),
                 "run_event_backbone": event_check.details,
                 "health_tiers": {
                     "live": "/api/health/live",

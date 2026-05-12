@@ -109,7 +109,7 @@ def export_memories(scope: str, skip_llm: bool = False) -> list[dict]:
     """Fetch and scrub memories of the given scope."""
     with UnitOfWork() as uow:
         rows = [dict(r) for r in uow.session.execute(text("""
-            SELECT id, content, memory_type, salience, emotion_label,
+            SELECT id, content, memory_type, salience,
                    tags, source, created_at, scope
             FROM memories
             WHERE scope = :scope AND NOT archived
@@ -124,7 +124,6 @@ def export_memories(scope: str, skip_llm: bool = False) -> list[dict]:
             'content': scrubbed,
             'memory_type': row['memory_type'],
             'salience': row['salience'],
-            'emotion_label': row['emotion_label'],
             'tags': row['tags'] or [],
             'source': 'starter_kit',
             'original_scope': row['scope'],

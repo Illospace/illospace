@@ -19,7 +19,7 @@ from sqlalchemy import (
     func,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin
@@ -27,14 +27,11 @@ from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin
 __all__ = [
     "ConsolidationRun",
     "DailyMetrics",
-    "Reflection",
-    "OperatingParams",
     "OrgProviderModelMapping",
     "RetrievalLog",
     "RetrievalDecision",
     "RetrievalItemFeedback",
     "ErrorPipelineRun",
-    "CronJob",
 ]
 
 
@@ -81,15 +78,6 @@ class DailyMetrics(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     metric_date: Mapped[date] = mapped_column(Date, nullable=False, unique=True)
-    avg_valence: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
-    avg_arousal: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
-    valence_trend: Mapped[Optional[float]] = mapped_column(Double, nullable=True)
-    frustration_count: Mapped[int] = mapped_column(
-        Integer, server_default=text("0"), default=0
-    )
-    joy_count: Mapped[int] = mapped_column(
-        Integer, server_default=text("0"), default=0
-    )
     retrieval_attempts: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), default=0
     )
@@ -134,35 +122,6 @@ class DailyMetrics(Base):
     )
     reflection_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     behavioral_adjustments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-
-class Reflection(Base, CreatedAtMixin):
-    """A nightly reflection record."""
-
-    __tablename__ = "reflections"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    reflection_date: Mapped[date] = mapped_column(Date, nullable=False)
-    phase: Mapped[str] = mapped_column(Text, nullable=False)
-    summary: Mapped[str] = mapped_column(Text, nullable=False)
-    findings: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    actions_taken: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-
-
-class OperatingParams(Base):
-    """Key-value operating parameters (PK is key TEXT)."""
-
-    __tablename__ = "operating_params"
-
-    key: Mapped[str] = mapped_column(Text, primary_key=True)
-    value: Mapped[float] = mapped_column(Float, nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    last_modified: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=text("NOW()")
-    )
-    modified_by: Mapped[str] = mapped_column(
-        Text, server_default="init", default="init"
-    )
 
 
 class OrgProviderModelMapping(Base, CreatedAtMixin):
@@ -342,23 +301,3 @@ class ErrorPipelineRun(Base, TimestampMixin):
     )
     repo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     branch_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-
-class CronJob(Base, CreatedAtMixin):
-    """A registered cron job."""
-
-    __tablename__ = "cron_jobs"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    schedule: Mapped[str] = mapped_column(Text, nullable=False)
-    script_path: Mapped[str] = mapped_column(Text, nullable=False)
-    command: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    phases: Mapped[Optional[list]] = mapped_column(ARRAY(Text), nullable=True)
-    enabled: Mapped[bool] = mapped_column(
-        Boolean, server_default=text("TRUE"), default=True
-    )
-    created_by: Mapped[str] = mapped_column(
-        Text, server_default="user", default="user"
-    )

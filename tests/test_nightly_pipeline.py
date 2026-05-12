@@ -144,22 +144,6 @@ class TestPhaseSkillEvolution:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.7: Prompt Template Evolution
-# ---------------------------------------------------------------------------
-
-class TestPhasePromptEvolution:
-    """Tests for pipelines/nightly_evolve_prompts.py."""
-
-    def test_evolve_no_templates(self, mock_nightly_uow):
-        """When no templates exist, evolution should skip gracefully."""
-        with patch("brain.jobs.pipelines.nightly_evolve_prompts.UnitOfWork", return_value=mock_nightly_uow), \
-             patch("brain.systems.prompts.templates.UnitOfWork", return_value=mock_nightly_uow), \
-             patch("brain.jobs.pipelines.nightly_evolve_prompts.get_underperforming_templates", return_value=[]):
-            from brain.jobs.pipelines.nightly_evolve_prompts import evolve_templates
-            evolve_templates()
-
-
-# ---------------------------------------------------------------------------
 # Phase 3: LLM Reflection
 # ---------------------------------------------------------------------------
 

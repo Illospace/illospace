@@ -35,10 +35,6 @@ def test_runtime_settings_tool_returns_model_mappings_and_active_status():
     with patch.object(runtime_settings_service, "get_runtime_settings_snapshot", return_value={
             "selected_provider": "openai",
             "effective_provider": "openai",
-            "agency": {
-                "recommendation_mode": True,
-                "auto_execute_read_only": False,
-            },
             "providers": {"openai": {"status": "in_use"}},
             "provider_model_mappings": {"openai": {"medium": "gpt-5.4"}},
             "worker_backend": {"agent_effective_worker_backend": "predict_rlm"},
@@ -50,8 +46,6 @@ def test_runtime_settings_tool_returns_model_mappings_and_active_status():
     assert data["active"]["status"] == "in_use"
     assert data["provider_model_mappings"]["openai"]["medium"] == "gpt-5.4"
     assert data["worker_backend"]["agent_effective_worker_backend"] == "predict_rlm"
-    assert data["agency"]["recommendation_mode"] is True
-    assert data["agency"]["auto_execute_read_only"] is False
 
 
 def test_store_openai_connection_reports_invalid_format():

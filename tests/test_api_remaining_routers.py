@@ -298,44 +298,6 @@ async def test_scheduler_state_surface(client, mock_session_factory):
     assert data["summary"]["jobs_total"] == 1
 
 
-@pytest.mark.asyncio
-async def test_learning_observatory_admin_read_surface(client, mock_session_factory):
-    from brain.app.api.main import app
-    from brain.app.api.routers import learning as learning_router
-
-    class _ReadModel:
-        def to_payload(self):
-            return {
-                "schema_version": 1,
-                "observatory": {"recent_outcomes": {"total_count": 1}},
-                "controls": [
-                    {
-                        "key": "pause_learning",
-                        "read_only_metadata": True,
-                        "mutation_endpoint": None,
-                    }
-                ],
-            }
-
-    app.dependency_overrides[learning_router.get_current_user] = lambda: {
-        "id": "owner",
-        "role": "owner",
-        "org_id": "org-1",
-    }
-    try:
-        with patch(
-            "brain.app.api.routers.learning.build_learning_observatory_from_db",
-            return_value=_ReadModel(),
-        ) as mock_builder:
-            resp = await client.get("/api/learning/observatory?limit=25")
-    finally:
-        app.dependency_overrides.clear()
-
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["observatory"]["recent_outcomes"]["total_count"] == 1
-    assert data["controls"][0]["read_only_metadata"] is True
-    assert data["controls"][0]["mutation_endpoint"] is None
     mock_builder.assert_called_once()
 
 

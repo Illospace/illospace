@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 def preprocess_query(raw_message: str) -> str:
     """Extract the actual information need from a raw message before embedding.
 
-    Raw messages often contain emotional language, filler, or implicit references
-    that don't embed well. This extracts the semantic core.
+    Raw messages often contain filler or implicit references that don't embed
+    well. This extracts the semantic core.
 
     Examples:
         "this is still broken" → "recurring failure patterns, debugging history"
@@ -35,12 +35,12 @@ def preprocess_query(raw_message: str) -> str:
         from brain.jobs.pipelines.agent_cli import call_agent, extract_json
 
         prompt = f"""Extract the information need from this message for a memory retrieval system.
-The system stores: lessons learned, engineering decisions, emotional patterns, skill history, and work episodes.
+The system stores: lessons learned, engineering decisions, skill history, and work episodes.
 
 Message: "{raw_message[:300]}"
 
 What topics/concepts should we search for? Return ONLY a JSON object:
-{{"query": "concise search terms and concepts, comma-separated", "intent": "recall|context|emotional|skill"}}"""
+{{"query": "concise search terms and concepts, comma-separated", "intent": "recall|context|skill"}}"""
 
         result = call_agent(
             session_id="query-preprocess",

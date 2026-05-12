@@ -218,7 +218,7 @@ def build_learning_export_pack(
 
     ``eval_corpus`` may be an L05 corpus payload, one eval example, or an
     iterable of examples/sources. ``eval_cases`` accepts compact eval cases,
-    trajectories, TrajectoryEvalCase-like rows, or already-built eval examples.
+    trajectories, eval-case-like rows, or already-built eval examples.
     """
     policy = _coerce_export_policy(mode, privacy_policy)
     eval_artifacts = [
