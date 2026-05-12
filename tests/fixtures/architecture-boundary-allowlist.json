@@ -1,0 +1,506 @@
+{
+  "version": 1,
+  "description": "Temporary allowlist for existing architecture boundary violations. New violations fail tests; removed violations require deleting or lowering their entries.",
+  "entries": [
+    {
+      "source": "brain/app/api/routers/cortex_intel.py",
+      "import": "brain.jobs.pipelines.cortex_emerge",
+      "source_layer": "brain.app",
+      "target_layer": "brain.jobs",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "App code invokes job pipeline behavior directly; expose a system use case or explicit job facade."
+    },
+    {
+      "source": "brain/app/api/routers/cortex_intel.py",
+      "import": "brain.jobs.pipelines.cortex_optimize",
+      "source_layer": "brain.app",
+      "target_layer": "brain.jobs",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "App code invokes job pipeline behavior directly; expose a system use case or explicit job facade."
+    },
+    {
+      "source": "brain/jobs/pipelines/experiment_tracking.py",
+      "import": "brain.app.cli.memory",
+      "source_layer": "brain.jobs",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Job code reuses app or CLI behavior; move reusable behavior into systems."
+    },
+    {
+      "source": "brain/jobs/pipelines/nightly_assess.py",
+      "import": "brain.app.cli.memory",
+      "source_layer": "brain.jobs",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Job code reuses app or CLI behavior; move reusable behavior into systems."
+    },
+    {
+      "source": "brain/jobs/pipelines/nightly_dream.py",
+      "import": "brain.app.cli.memory",
+      "source_layer": "brain.jobs",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Job code reuses app or CLI behavior; move reusable behavior into systems."
+    },
+    {
+      "source": "brain/kernel/runtime/kernel.py",
+      "import": "brain.systems.runs.direct_agent",
+      "source_layer": "brain.kernel",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Kernel runtime delegates into a system implementation; extract a neutral invocation contract."
+    },
+    {
+      "source": "brain/platform/browser/service.py",
+      "import": "brain.app.web.research",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code depends on an app adapter; move reusable behavior to platform or a neutral contract."
+    },
+    {
+      "source": "brain/platform/browser/service.py",
+      "import": "brain.systems.cortex.events",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/browser/service.py",
+      "import": "brain.systems.cortex.resources.telemetry",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/browser/service.py",
+      "import": "brain.systems.cortex.upload_preview",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/browser/service.py",
+      "import": "brain.systems.runs.events",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/db/repositories/memories.py",
+      "import": "brain.systems.memory.embeddings",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 3,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/db/repositories/memories.py",
+      "import": "brain.systems.memory.retrieval_pools",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/db/repositories/memories.py",
+      "import": "brain.systems.memory.truth_maintenance",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/db/repositories/skill_bundles.py",
+      "import": "brain.systems.skills.bundles",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/db/repositories/unit_of_work.py",
+      "import": "brain.systems.user_domains.service",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/db/schemas/skills.py",
+      "import": "brain.systems.skills.bundles",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/db/services/skill_bundle_io.py",
+      "import": "brain.systems.skills.bundles",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/db/services/skill_io.py",
+      "import": "brain.systems.skills.gate",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/integrations/github_connector.py",
+      "import": "brain.systems.cortex.project_context.github",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/integrations/llm.py",
+      "import": "brain.systems.vault",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 2,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/telemetry/postmortem.py",
+      "import": "brain.systems.feedback.heuristics",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 2,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/platform/telemetry/postmortem.py",
+      "import": "brain.systems.learning",
+      "source_layer": "brain.platform",
+      "target_layer": "brain.systems",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
+    },
+    {
+      "source": "brain/systems/agency/core.py",
+      "import": "brain.app.scheduler.executor",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/cognition/frame.py",
+      "import": "brain.app.cli.memory",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/cognition/frame.py",
+      "import": "brain.app.mcp.server",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 2,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/cortex/encode.py",
+      "import": "brain.app.cli.memory",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/cortex/thread_attachments.py",
+      "import": "brain.app.api.routers.cortex._helpers",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/cycles/service.py",
+      "import": "brain.app.api.routers.cortex._helpers",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/feedback/predict.py",
+      "import": "brain.app.cli.memory",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/memory/encoder.py",
+      "import": "brain.app.cli.memory",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/memory/lessons.py",
+      "import": "brain.app.cli.agent_cli",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/memory/retrieval.py",
+      "import": "brain.jobs.pipelines.agent_cli",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.jobs",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code calls an offline job module; move shared behavior into systems or platform."
+    },
+    {
+      "source": "brain/systems/prompts/builder.py",
+      "import": "brain.app.cli.skills",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/quality/review.py",
+      "import": "brain.app.hooks.brain_context",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runs/direct_loop/session_effects.py",
+      "import": "brain.app.cli.memory",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runs/event_log.py",
+      "import": "brain.app.api.ws.run_events",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runs/tool_catalog/handlers/chat.py",
+      "import": "brain.app.api.routers.chat",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runs/tool_catalog/handlers/chat.py",
+      "import": "brain.app.api.services.chat",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runs/tool_catalog/handlers/composition.py",
+      "import": "brain.app.mcp.server",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runs/tool_catalog/handlers/ideas.py",
+      "import": "brain.app.api.authorization",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runs/tool_catalog/handlers/ideas.py",
+      "import": "brain.app.api.routers.cortex._helpers",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 2,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runs/tool_catalog/handlers/ideas.py",
+      "import": "brain.app.api.routers.cortex._ideas",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 3,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runs/tool_catalog/handlers/projects.py",
+      "import": "brain.app.api.routers.cortex._helpers",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runs/tool_catalog/handlers/web.py",
+      "import": "brain.app.web",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 2,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runtime_settings/auth.py",
+      "import": "brain.app.api.routers.cortex._key_utils",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runtime_settings/router.py",
+      "import": "brain.app.api.auth",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/runtime_settings/router.py",
+      "import": "brain.app.api.deps",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/sessions/harvest.py",
+      "import": "brain.app.cli.memory",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    },
+    {
+      "source": "brain/systems/tools/handlers.py",
+      "import": "brain.app.mcp.server",
+      "source_layer": "brain.systems",
+      "target_layer": "brain.app",
+      "allowed_occurrences": 1,
+      "owner": "architecture-boundaries",
+      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
+      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
+    }
+  ]
+}
