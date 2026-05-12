@@ -84,6 +84,9 @@
   );
   const activeProjectValidation = $derived(validateProjectContextResources(activeProjectResources));
   const activeProjectContextSnapshot = $derived(buildProjectContextAttachment());
+  const activeProjectStateValidation = $derived(
+    activeProjectContextSnapshot ? activeProjectValidation : { valid: true, errors: [] },
+  );
   const chipLabel = $derived(
     creatingProject
       ? (newProjectName.trim() || 'New Project')
@@ -92,6 +95,7 @@
   const canSaveProject = $derived(
     creatingProject
       && newProjectName.trim().length > 0
+      && selectedResources.length > 0
       && activeProjectValidation.valid
       && !projectSaving,
   );
@@ -292,8 +296,8 @@
   $effect(() => {
     onStateChange?.({
       snapshot: activeProjectContextSnapshot,
-      valid: activeProjectValidation.valid,
-      error: activeProjectValidation.errors[0] ?? null,
+      valid: activeProjectStateValidation.valid,
+      error: activeProjectStateValidation.errors[0] ?? null,
       resourceCount: activeProjectResources.length,
     });
   });
@@ -379,7 +383,7 @@
   <button
     class="project-context-chip"
     class:active={projectContextOpen || creatingProject}
-    class:invalid={!activeProjectValidation.valid}
+    class:invalid={!activeProjectStateValidation.valid}
     type="button"
     disabled={disabled}
     aria-expanded={projectContextOpen}

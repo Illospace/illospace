@@ -48,12 +48,16 @@ def _get_profile(session, org_id: str, profile_id: str, *, include_inactive: boo
     return profile
 
 
-def _validate_project_context(project_context: dict[str, Any]) -> dict[str, Any]:
-    from brain.systems.cortex.project_context.snapshot import snapshot_from_project_context
+def _validated_project_context(project_context: dict[str, Any]) -> dict[str, Any]:
+    from brain.systems.cortex.project_context.snapshot import (
+        ProjectContextValidationError,
+        validated_project_context_snapshot,
+    )
 
-    snapshot = snapshot_from_project_context(project_context)
-    if snapshot.get("status") == "invalid":
-        raise ValueError("Invalid project context: " + "; ".join(snapshot.get("validation_errors") or []))
+    try:
+        validated_project_context_snapshot(project_context)
+    except ProjectContextValidationError as exc:
+        raise ValueError(str(exc)) from exc
     return project_context
 
 
@@ -81,7 +85,7 @@ def _context_from_inputs(
             for index, resource in enumerate(resources)
             if isinstance(resource, dict)
         ]
-    return _validate_project_context(context)
+    return _validated_project_context(context)
 
 
 def _project_resources(profile) -> list[dict[str, Any]]:
@@ -92,7 +96,7 @@ def _project_resources(profile) -> list[dict[str, Any]]:
 def _store_resources(profile, resources: list[dict[str, Any]]) -> None:
     context = dict(profile.project_context or {})
     context["resources"] = resources
-    profile.project_context = _validate_project_context(context)
+    profile.project_context = _validated_project_context(context)
 
 
 def _unique_resource_id(resource: dict[str, Any], existing_ids: set[str], index: int) -> str:
@@ -143,9 +147,11 @@ def _handle_manage_project(
     from sqlalchemy import select
 
     from brain.app.api.routers.cortex._helpers import _require_idea_for_user
-    from brain.systems.cortex.project_context.permissions import derive_project_permission_scope
     from brain.systems.cortex.project_context.resources import normalize_project_resource
-    from brain.systems.cortex.project_context.snapshot import snapshot_from_project_context
+    from brain.systems.cortex.project_context.snapshot import (
+        ProjectContextValidationError,
+        validated_project_context_snapshot,
+    )
     from brain.platform.db.models.idea import IdeaProjectAttachment, ProjectProfile
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
@@ -310,16 +316,16 @@ def _handle_manage_project(
                     context = dict(profile.project_context or {})
                 if not context:
                     return json.dumps({"error": "attach_to_thread requires: project_id or project_context"})
-                snapshot = snapshot_from_project_context(context)
-                if snapshot.get("status") == "invalid":
-                    return json.dumps({"error": "Invalid project context", "validation_errors": snapshot.get("validation_errors") or []})
-                permission_scope = snapshot.get("permission_scope") or derive_project_permission_scope(snapshot)
+                try:
+                    snapshot = validated_project_context_snapshot(context)
+                except ProjectContextValidationError as exc:
+                    return json.dumps({"error": "Invalid project context", "validation_errors": exc.errors})
                 attachment = IdeaProjectAttachment(
                     idea_id=target_idea_id,
                     project_profile_id=profile.id if profile else selected_profile_id,
                     attached_by=user_id,
                     snapshot=snapshot,
-                    permission_scope=permission_scope,
+                    permission_scope=snapshot.get("permission_scope") or {},
                     status=str(snapshot.get("status") or "validated"),
                     validation_errors=snapshot.get("validation_errors") or [],
                     environment_binding_id=environment_binding_id

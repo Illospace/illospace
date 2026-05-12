@@ -367,6 +367,20 @@ def test_run_script_uses_project_bound_env_and_redacts_values(monkeypatch, tmp_p
     assert result["stdout"].count("[secret redacted]") == 2
 
 
+def test_run_script_keeps_temp_script_outside_workspace(tmp_path):
+    from brain.systems.runs.tool_catalog.handlers.files import _handle_run_script
+
+    proc = SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", return_value=proc) as run:
+        result = _handle_run_script("print('ok')", _workspace=str(tmp_path))
+
+    script_path = run.call_args.args[0][1]
+    assert result["exit_code"] == 0
+    assert run.call_args.kwargs["cwd"] == str(tmp_path)
+    assert not str(script_path).startswith(str(tmp_path))
+
+
 def test_parallel_exec_commands_keep_project_bound_env_isolated(monkeypatch, tmp_path):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs import project_execution_env
