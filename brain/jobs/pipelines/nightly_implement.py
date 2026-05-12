@@ -166,6 +166,29 @@ def classify_proposal(content: str) -> dict | None:
     }
 
 
+def apply_proposal(proposal: dict, dry_run: bool, log_lines: list) -> bool:
+    """Compatibility shim for the removed direct-write lane.
+
+    Nightly implementation now only reviews proposals. It never mutates files
+    directly, even when a proposal contains a safe path.
+    """
+    action = str(proposal.get("action") or "").strip().lower()
+    target_file = proposal.get("target_file")
+    if action == "log_only":
+        _log("  ⏸️ Proposal logged; direct write lane is disabled", log_lines)
+        return True
+    if target_file and not _is_safe_path(str(target_file)):
+        _log("  ❌ Unsafe proposal path rejected", log_lines)
+        return False
+    _log("  ⏸️ Direct write lane disabled; proposal reviewed only", log_lines)
+    return False
+
+
+def mirror_implement_proposal(proposal: dict, *, source: str | None = None):
+    """Compatibility no-op for the removed proposal mirroring lane."""
+    return None, None
+
+
 def run_tests(log_lines: list) -> bool:
     """Run the test suite. Returns True if all pass."""
     _log("  🧪 Running tests...", log_lines)
@@ -265,6 +288,7 @@ def main():
         content = prop.get("proposal", prop.get("change", json.dumps(prop)))
         proposal = classify_proposal(content)
         if proposal:
+            mirror_implement_proposal(proposal, source="pending_reflection")
             if dry_run:
                 _log("  🔍 [DRY RUN] Would mark pending proposal reviewed; execution lane is disabled", log_lines)
                 preview_count += 1

@@ -17,11 +17,14 @@ from .budget import (
     should_run_learning_task,
 )
 from .policy import (
-    LearningPolicy,
-    LearningPolicyOverrides,
+    LearningPolicyOverride,
+    TenantLearningPolicy,
     build_learning_policy,
     build_learning_policy_from_env,
 )
+
+LearningPolicy = TenantLearningPolicy
+LearningPolicyOverrides = LearningPolicyOverride
 
 __all__ = [
     "BudgetDecisionAction",
@@ -35,6 +38,8 @@ __all__ = [
     "should_run_learning_task",
     "LearningPolicy",
     "LearningPolicyOverrides",
+    "LearningPolicyOverride",
+    "TenantLearningPolicy",
     "build_learning_policy",
     "build_learning_policy_from_env",
 ]
