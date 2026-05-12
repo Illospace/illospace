@@ -30,7 +30,7 @@ from brain.systems.cortex.events import publish_live_safe, publish_safe
 from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaStateLog
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +54,12 @@ _PROCESS_ACTIVE_STATUS_VALUES = tuple(
 
 
 def _run_db(fn, /, *args: Any, **kwargs: Any):
-    """Run sync ORM worker code through the asyncpg-backed UnitOfWork bridge."""
+    """Run sync ORM worker code from the synchronous runner threads."""
 
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(run_sync_with_unit_of_work(fn, *args, **kwargs))
+        return fn(*args, **kwargs)
     raise RuntimeError("Cortex runner DB bridge cannot be called from a running event loop")
 
 
