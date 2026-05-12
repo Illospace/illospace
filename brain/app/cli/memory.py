@@ -134,6 +134,7 @@ def query_memories(
     use_pools: bool = False,
     user_id: str | None = None,
     org_id: str | None = None,
+    emotion_context: str | None = None,
     attention_debug: bool = False,
     expand_lazy_load: bool | None = None,
 ) -> dict:
@@ -143,6 +144,7 @@ def query_memories(
     with adaptive bandit ratios. Falls back to existing behavior on failure.
     When use_pools=False (default), existing behavior is unchanged.
     """
+    del emotion_context
     # Three-pool retrieval path
     if use_pools:
         try:

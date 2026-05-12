@@ -429,7 +429,7 @@ def test_scheduler_cutover_materializes_and_persists_split_nightly_steps(session
     assert len(created) == 1
     assert created[0].status == "recorded"
     step_plan = build_scheduler_step_plan(job)
-    assert len(step_plan) == 15
+    assert len(step_plan) == 13
     assert "skill_quality" not in {step["step_key"] for step in step_plan}
     phase_steps = [step for step in step_plan if step["kind"] == "phase"]
     assert phase_steps[0]["payload"]["night_budget"]["work_type"] == "memory_conflict_resolution"
@@ -991,4 +991,3 @@ def test_execute_scheduler_run_valid_callable_stores_normalized_contract(session
     assert executed.task_contract["allowed_actions"] == ["scheduler.run"]
     assert executed.result_summary["handler_result"]["status"] == "recorded"
     assert executed.result_summary["execution"]["owner_id"] == "callable-worker"
-

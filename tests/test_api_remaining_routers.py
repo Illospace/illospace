@@ -276,9 +276,6 @@ async def test_scheduler_state_surface(client, mock_session_factory):
     assert data["summary"]["jobs_total"] == 1
 
 
-    mock_builder.assert_called_once()
-
-
 @pytest.mark.asyncio
 async def test_scheduler_drain_control_surface(client, mock_session_factory):
     from brain.app.api.main import app

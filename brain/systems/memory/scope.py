@@ -47,7 +47,7 @@ UNIVERSAL_PATTERNS = [
 ]
 
 UNIVERSAL_TYPES = {'lesson', 'principle', 'skill', 'dream'}
-PERSONAL_TYPES = {'session', 'daily_log'}
+PERSONAL_TYPES = {'session', 'daily_log', 'emotion'}
 
 
 def classify_scope(content: str, memory_type: str = None) -> str:

@@ -64,6 +64,9 @@ class MemoryRepository(BaseRepository[Memory]):
         context: MemoryWriteContext,
         semantic_embedding: Any | None = None,
         salience: float = 5.0,
+        emotion_label: str | None = None,
+        emotion_valence: float | None = None,
+        emotion_arousal: float | None = None,
         tags: list[str] | None = None,
         related_ids: list[int] | None = None,
         rel_type: str = "related_to",
@@ -85,6 +88,7 @@ class MemoryRepository(BaseRepository[Memory]):
         scoped to memories visible to the same writer context.
         """
 
+        del emotion_label, emotion_valence, emotion_arousal
         context = require_memory_write_context(context)
         tags = list(tags or [])
         source_memory_ids = list(source_memory_ids or [])
