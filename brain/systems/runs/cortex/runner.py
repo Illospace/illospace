@@ -17,6 +17,7 @@ import uuid
 
 from sqlalchemy import func, select
 
+from brain.kernel import config as brain_config
 from brain.systems.runs.cancel import RunCancelToken
 from brain.systems.runs.engine import AgentRunEngine
 from brain.systems.runs.events import activity_event, run_event
@@ -226,8 +227,7 @@ def _run_has_project_context(run: AgentRunRow | None) -> bool:
 
 
 def _project_context_root(run_id: int, *, thread_id: str | None = None) -> str:
-    configured = os.environ.get("ILLO_PROJECT_CONTEXT_WORKSPACE_ROOT")
-    base = Path(configured).expanduser() if configured else Path(tempfile.gettempdir()) / "illo-agent-runs"
+    base = brain_config.resolve_workspace_root(default=Path(tempfile.gettempdir()) / "illo-agent-runs").expanduser()
     if thread_id:
         safe_thread_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(thread_id))[:120]
         if safe_thread_id:
@@ -490,26 +490,19 @@ def _reap_stale_runs_if_due(*, force: bool = False) -> int:
         return 0
 
 
-def _materialize_project_context(run_id: int) -> None:
-    def _prepare():
-        with UnitOfWork() as uow:
-            run = uow.session.get(AgentRunRow, int(run_id))
-            if not _run_has_project_context(run):
-                return None
-            _record_project_activity(
-                uow.session,
-                int(run_id),
-                "Preparing project context",
-            )
-            user_id = str(run.user_id) if run and run.user_id else None
-            org_id = str(run.org_id) if run and run.org_id else None
-            thread_id = str(run.thread_id) if run and run.thread_id else None
-            return user_id, org_id, thread_id
-
-    prepared = _run_db(_prepare)
-    if prepared is None:
-        return
-    user_id, org_id, thread_id = prepared
+def _materialize_project_context(run_id: int) -> tuple[bool, dict[str, Any] | None]:
+    with UnitOfWork() as uow:
+        run = uow.session.get(AgentRunRow, int(run_id))
+        if not _run_has_project_context(run):
+            return True, None
+        _record_project_activity(
+            uow.session,
+            int(run_id),
+            "Preparing project context",
+        )
+        user_id = str(run.user_id) if run and run.user_id else None
+        org_id = str(run.org_id) if run and run.org_id else None
+        thread_id = str(run.thread_id) if run and run.thread_id else None
 
     result = materialize_project_context_workspaces(
         int(run_id),
@@ -517,31 +510,51 @@ def _materialize_project_context(run_id: int) -> None:
         user_id=user_id,
         org_id=org_id,
     )
+    with UnitOfWork() as uow:
+        _record_project_activity(
+            uow.session,
+            int(run_id),
+            "Project context ready" if result.ok else "Project context unavailable",
+            workspaces=result.workspaces,
+            errors=result.errors[:3],
+        )
+    if not result.ok:
+        details = "; ".join(result.errors[:3]) or "No project workspace was materialized."
+        message = f"Project Context unavailable: {details}"
+        return False, _mark_run_failed_after_runner_error(
+            int(run_id),
+            message,
+            final_answer=(
+                "I could not start this run because the selected Project Context did not "
+                f"provide a usable workspace. {details}"
+            ),
+        )
+    return True, None
 
-    def _record_ready():
-        with UnitOfWork() as uow:
-            _record_project_activity(
-                uow.session,
-                int(run_id),
-                "Project context ready" if result.ok else "Project context unavailable",
-                workspaces=result.workspaces,
-                errors=result.errors[:3],
-            )
 
-    _run_db(_record_ready)
-
-
-def _mark_run_failed_after_runner_error(run_id: int, error: str) -> dict[str, Any] | None:
-    def _mark():
-        with UnitOfWork() as uow:
-            store = AgentRunStore(uow.session)
-            row = store.require_run(int(run_id))
-            if coerce_run_status(row.status, default=RunStatus.FAILED) not in TERMINAL_RUN_STATUSES:
-                store.append_event(run_event(int(run_id), "run.failed", {"error": error}, root_run_id=row.root_run_id))
-                store.set_status(int(run_id), RunStatus.FAILED, reason=error[:500])
-            return _settle_idea_for_terminal_root_run(uow.session, int(run_id))
-
-    return _run_db(_mark)
+def _mark_run_failed_after_runner_error(
+    run_id: int,
+    error: str,
+    *,
+    final_answer: str | None = None,
+) -> dict[str, Any] | None:
+    with UnitOfWork() as uow:
+        store = AgentRunStore(uow.session)
+        row = store.require_run(int(run_id))
+        if coerce_run_status(row.status, default=RunStatus.FAILED) not in TERMINAL_RUN_STATUSES:
+            if final_answer:
+                store.append_final_answer_once(int(run_id), final_answer, root_run_id=row.root_run_id)
+                store.append_event(
+                    run_event(
+                        int(run_id),
+                        "run.text_completed",
+                        {"text": final_answer},
+                        root_run_id=row.root_run_id,
+                    )
+                )
+            store.append_event(run_event(int(run_id), "run.failed", {"error": error}, root_run_id=row.root_run_id))
+            store.set_status(int(run_id), RunStatus.FAILED, reason=error[:500])
+        return _settle_idea_for_terminal_root_run(uow.session, int(run_id))
 
 
 def run_queued_once(*, limit: int = 1) -> int:
@@ -554,13 +567,16 @@ def run_queued_once(*, limit: int = 1) -> int:
     for run_id in ids:
         try:
             with _run_heartbeat(int(run_id)):
-                _materialize_project_context(int(run_id))
-                def _run_existing():
-                    with UnitOfWork() as uow:
-                        _engine_for_session(uow.session).run_existing(int(run_id))
-                        return _settle_idea_for_terminal_root_run(uow.session, int(run_id))
-
-                status_payload = _run_db(_run_existing)
+                context_ready, status_payload = _materialize_project_context(int(run_id))
+                if not context_ready:
+                    if status_payload:
+                        publish_safe("status_change", status_payload)
+                    processed += 1
+                    continue
+                status_payload = None
+                with UnitOfWork() as uow:
+                    _engine_for_session(uow.session).run_existing(int(run_id))
+                    status_payload = _settle_idea_for_terminal_root_run(uow.session, int(run_id))
             if status_payload:
                 publish_safe("status_change", status_payload)
             processed += 1

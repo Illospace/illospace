@@ -5,6 +5,7 @@
     activityTimeline,
     auditApply,
     auditEval,
+    downloadThreadTraceZip,
     getIdea,
     ideaAudit,
     ideaAuditAnalysisResult,
@@ -16,6 +17,14 @@
   import { formatDurationMs, formatDurationSeconds, relativeTimeAgo } from '$lib/utils/datetime';
 
   type UtilityTab = 'activity' | 'details' | 'audit';
+  type ActivityListItem = {
+    _key: string;
+    timestamp: string | null;
+    title: string;
+    meta: string[];
+    error?: string;
+    state?: string;
+  };
 
   let {
     idea,
@@ -25,7 +34,7 @@
     activeTab?: UtilityTab;
   } = $props();
 
-  let activityItems = $state<any[]>([]);
+  let activityItems = $state<ActivityListItem[]>([]);
   let activityLoading = $state(false);
   let lastActivityIdeaId = $state<string | null>(null);
   let activityRequestSeq = 0;
@@ -48,6 +57,9 @@
   let evalResults = $state<Record<number, any>>({});
   let expandedRuns = $state<Set<number>>(new Set());
   let expandedWorkers = $state<Set<string>>(new Set());
+  let threadTraceSaving = $state(false);
+  let threadTraceSaved = $state<{ bytes?: number; filename?: string } | null>(null);
+  let threadTraceError = $state('');
 
   let pollAborted = $state(false);
   let loadedForIdeaId = $state<string | null>(null);
@@ -83,11 +95,52 @@
     evalResults = {};
     expandedRuns = new Set();
     expandedWorkers = new Set();
+    threadTraceSaving = false;
+    threadTraceSaved = null;
+    threadTraceError = '';
     pollAborted = false;
   }
 
   const timeAgo = relativeTimeAgo;
   const formatDuration = formatDurationSeconds;
+  const EMOJI_PATTERN = /[\u{1F1E6}-\u{1F1FF}\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/gu;
+
+  function cleanActivityText(value: unknown, fallback = 'Activity'): string {
+    const text = String(value ?? '')
+      .replace(EMOJI_PATTERN, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return text || fallback;
+  }
+
+  function formatActivityKind(value: unknown): string {
+    return cleanActivityText(value, 'event')
+      .replace(/[._-]+/g, ' ')
+      .replace(/\brun\b/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase() || 'event';
+  }
+
+  function compactCost(value: unknown): string | null {
+    if (value === null || value === undefined || value === '') return null;
+    const amount = Number(value);
+    if (!Number.isFinite(amount)) return null;
+    return `$${amount.toFixed(4)}`;
+  }
+
+  function runDuration(item: any): string | null {
+    if (typeof item.duration_sec === 'number') return formatDuration(item.duration_sec);
+    if (!item.started_at || !item.completed_at) return null;
+    const seconds = Math.round((new Date(item.completed_at).getTime() - new Date(item.started_at).getTime()) / 1000);
+    return Number.isFinite(seconds) ? formatDuration(seconds) : null;
+  }
+
+  function activityMeta(parts: Array<unknown>): string[] {
+    return parts
+      .map((part) => cleanActivityText(part, ''))
+      .filter(Boolean);
+  }
 
   async function loadActivity() {
     const ideaId = idea?.id;
@@ -104,45 +157,59 @@
     if (showLoadingState) activityLoading = true;
 
     try {
-      let timelineEvents: any[] = [];
+      let timelineEvents: ActivityListItem[] = [];
       try {
         const events = await activityTimeline(ideaId);
         timelineEvents = events.map((ev: any, index: number) => ({
           _key: `timeline-${ev.id ?? ev.timestamp ?? index}-${ev.label ?? ev.type ?? ''}`,
           timestamp: ev.timestamp,
-          type: 'timeline',
-          icon: ev.icon || '',
-          label: ev.label || '',
-          dotColor: ev.type === 'agent_started' ? 'var(--thread-accent, #57CFA0)' : ev.type === 'agent_finished' ? '#6BC785' : undefined,
+          title: cleanActivityText(ev.label || ev.type, 'Activity'),
+          meta: activityMeta([formatActivityKind(ev.type)]),
+          state: cleanActivityText(ev.type, 'event'),
         }));
       } catch { /* timeline API not available */ }
 
-      let runEvents: any[] = [];
+      let runEvents: ActivityListItem[] = [];
       try {
         const runs = await runHistory(ideaId);
-        runEvents = runs.map((dp: any) => ({
-          _key: `run-${dp.id ?? dp.run_id ?? dp.created_at ?? dp.started_at ?? dp.event}`,
-          timestamp: dp.created_at,
-          type: 'run',
-          status: dp.status,
-          event: dp.event || 'run',
-          skill_used: dp.skill_used,
-          model_used: dp.model_used,
-          thinking_used: dp.thinking_used,
-          tokens_total: dp.tokens_total,
-          started_at: dp.started_at,
-          completed_at: dp.completed_at,
-          error: dp.error,
-          estimated_cost: dp.estimated_cost,
-          skill_outcome: dp.skill_outcome,
-          dotColor: dp.status === 'completed' ? '#6BC785' : dp.status === 'failed' ? '#dc2626' : 'var(--thread-accent, #57CFA0)',
-        }));
+        runEvents = runs.flatMap((dp: any, index: number) => {
+          const runId = dp.id ?? dp.run_id ?? index;
+          const status = cleanActivityText(dp.status, 'run').toLowerCase();
+          const duration = runDuration(dp);
+          const cost = compactCost(dp.estimated_cost);
+          const tokens = typeof dp.tokens_total === 'number' ? `${dp.tokens_total.toLocaleString()} tok` : null;
+          const summary: ActivityListItem = {
+            _key: `run-${runId}-${dp.updated_at ?? dp.completed_at ?? dp.created_at ?? dp.started_at}`,
+            timestamp: dp.completed_at ?? dp.failed_at ?? dp.canceled_at ?? dp.started_at ?? dp.created_at,
+            title: `Run ${status}`,
+            meta: activityMeta([dp.skill_used, dp.model_used, duration, tokens, cost]),
+            error: dp.error ? cleanActivityText(String(dp.error).slice(0, 200), '') : undefined,
+            state: status,
+          };
+          const trace = Array.isArray(dp.activity_trace) ? dp.activity_trace : [];
+          const traceEvents: ActivityListItem[] = trace.map((entry: any, traceIndex: number) => ({
+            _key: `run-${runId}-trace-${entry.sequence_no ?? entry.at ?? traceIndex}`,
+            timestamp: entry.at ?? dp.started_at ?? dp.created_at,
+            title: cleanActivityText(entry.activity || entry.text, 'Run activity'),
+            meta: activityMeta([formatActivityKind(entry.kind), entry.tool_name]),
+            error: entry.error ? cleanActivityText(String(entry.error).slice(0, 200), '') : undefined,
+            state: entry.status ?? status,
+          }));
+          return [summary, ...traceEvents];
+        });
       } catch { /* run API not available */ }
 
       if (requestId !== activityRequestSeq || idea?.id !== ideaId) return;
 
+      const seen = new Set<string>();
       activityItems = [...timelineEvents, ...runEvents]
-        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        .filter((item: ActivityListItem) => {
+          const key = `${item.timestamp || ''}|${item.title}|${item.meta.join('|')}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
     } catch {
       if (activityItems.length === 0) activityItems = [];
     } finally {
@@ -198,9 +265,30 @@
     cortex.selectIdea(linkedId);
   }
 
-  function statusIcon(s: string): string {
-    const icons: Record<string, string> = { completed: '✅', failed: '❌', timeout: '⏱️', running: '⚙️', queued: '📋' };
-    return icons[s] || '❔';
+  async function downloadThreadTrace() {
+    const ideaId = idea?.id;
+    if (!ideaId || threadTraceSaving) return;
+    threadTraceSaving = true;
+    threadTraceError = '';
+    try {
+      const result = await downloadThreadTraceZip(ideaId);
+      const url = URL.createObjectURL(result.blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = result.filename || `illo-thread-trace-${ideaId}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      threadTraceSaved = {
+        bytes: result.bytes,
+        filename: result.filename,
+      };
+    } catch (e: any) {
+      threadTraceError = e?.detail || 'Trace download failed';
+    } finally {
+      threadTraceSaving = false;
+    }
   }
 
   function loadUtilityTab(tab: UtilityTab) {
@@ -330,49 +418,61 @@
 </script>
 
 {#if activeTab === 'activity'}
+  <div class="activity-trace-toolbar">
+    <div class="activity-trace-copy">
+      <div class="activity-trace-title">Whole conversation trace</div>
+      {#if threadTraceSaved}
+        <div class="activity-trace-note">
+          {threadTraceSaved.filename || 'Trace zip'}
+          {#if threadTraceSaved.bytes}
+            &middot; {threadTraceSaved.bytes.toLocaleString()} bytes
+          {/if}
+        </div>
+      {:else if threadTraceError}
+        <div class="activity-trace-note activity-trace-note-error">{threadTraceError}</div>
+      {:else}
+        <div class="activity-trace-note">Messages, runs, tools, and artifacts</div>
+      {/if}
+    </div>
+    <button
+      type="button"
+      class="activity-trace-button activity-trace-button-primary"
+      disabled={!idea?.id || threadTraceSaving}
+      onclick={downloadThreadTrace}
+    >
+      {threadTraceSaving ? 'Preparing' : threadTraceSaved ? 'Download again' : 'Download conversation trace'}
+    </button>
+  </div>
+
   {#if activityLoading && activityItems.length === 0}
     <div class="tab-empty">Loading activity...</div>
   {:else if activityItems.length === 0}
     <div class="tab-empty">No activity yet.</div>
   {:else}
-    {#each activityItems as item (item._key)}
-      <div class="timeline-item">
-        <div class="timeline-dot" style="background: {item.dotColor || 'var(--text-3)'};"></div>
-        <div style="flex: 1;">
-          {#if item.type === 'run'}
-            <div class="timeline-text">
-              {statusIcon(item.status)} {item.event}
-              {#if item.skill_used}
-                <span class="dbadge" style="background: #6366f1;">{item.skill_used}</span>
-              {/if}
-              {#if item.model_used}
-                <span class="dbadge" style="background: #0891b2;">{item.model_used}</span>
-              {/if}
+    <div class="activity-list" aria-label="Thread activity">
+      {#each activityItems as item (item._key)}
+        <div class="activity-list-item" data-state={item.state}>
+          <time class="activity-time" datetime={item.timestamp || undefined}>
+            {timeAgo(item.timestamp)}
+          </time>
+          <div class="activity-body">
+            <div class="activity-title-row">
+              <div class="activity-title">{item.title}</div>
             </div>
-            <div class="timeline-time">
-              {timeAgo(item.timestamp)}
-              {#if item.started_at}
-                &middot; {formatDuration(item.started_at && item.completed_at
-                  ? Math.round((new Date(item.completed_at).getTime() - new Date(item.started_at).getTime()) / 1000)
-                  : undefined)}
-              {/if}
-              {#if item.tokens_total}
-                &middot; {item.tokens_total.toLocaleString()} tok
-              {/if}
-              {#if item.estimated_cost}
-                &middot; ${Number(item.estimated_cost).toFixed(4)}
-              {/if}
-            </div>
-            {#if item.error}
-              <div class="timeline-error">Error: {item.error.substring(0, 200)}</div>
+            {#if item.meta.length}
+              <div class="activity-meta">
+                {#each item.meta as meta}
+                  <span class="activity-meta-part">{meta}</span>
+                {/each}
+              </div>
             {/if}
-          {:else}
-            <div class="timeline-text">{item.icon} {item.label}</div>
-            <div class="timeline-time">{timeAgo(item.timestamp)}</div>
-          {/if}
+            {#if item.error}
+              <div class="activity-error">Error: {item.error}</div>
+            {/if}
+          </div>
         </div>
-      </div>
-    {/each}
+      {/each}
+    </div>
   {/if}
 {:else if activeTab === 'details'}
   {#if detailsLoading}
@@ -888,51 +988,176 @@
   }
 
 
-  /* ── Timeline (Activity tab) ─────────────────────────── */
-  .timeline-item {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 12px;
-    padding: 14px 14px 15px;
-    border-radius: 18px;
-    border: 1px solid rgba(255, 255, 255, 0.04);
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015));
-    font-size: 12px;
-    margin-bottom: 10px;
-  }
-
-  .timeline-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-3);
-    margin-top: 7px;
-    flex-shrink: 0;
-    box-shadow: none;
-  }
-
-  .timeline-text {
-    color: rgba(239, 244, 251, 0.88);
+  /* Activity tab */
+  .activity-trace-toolbar {
     display: flex;
     align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-    line-height: 1.5;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    width: 100%;
+    margin-bottom: 10px;
+    padding: 10px 2px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   }
 
-  .timeline-time {
-    color: rgba(231, 238, 247, 0.44);
+  .activity-trace-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .activity-trace-title {
+    color: rgba(239, 244, 251, 0.92);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  .activity-list {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .activity-list-item {
+    display: grid;
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: 10px;
+    width: 100%;
+    min-width: 0;
+    padding: 8px 2px 9px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 12px;
+  }
+
+  .activity-list-item:last-child {
+    border-bottom-color: transparent;
+  }
+
+  .activity-time {
+    min-width: 0;
+    color: rgba(231, 238, 247, 0.48);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 9px;
+    line-height: 1.35;
+    letter-spacing: 0.02em;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .activity-body {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .activity-title-row {
+    min-width: 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .activity-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: rgba(239, 244, 251, 0.9);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.35;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .activity-trace-button {
+    flex: 0 0 auto;
+    min-height: 20px;
+    padding: 2px 7px;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.055);
+    color: rgba(231, 238, 247, 0.66);
+    font: inherit;
     font-size: 10px;
-    margin-top: 6px;
-    font-family: var(--font-mono);
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
+    line-height: 1.4;
+    cursor: pointer;
+    transition:
+      background 150ms ease,
+      color 150ms ease,
+      transform 150ms ease;
   }
 
-  .timeline-error {
+  .activity-trace-button-primary {
+    min-height: 28px;
+    padding: 5px 10px;
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 16%, rgba(255, 255, 255, 0.055));
+    color: rgba(239, 244, 251, 0.92);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .activity-trace-button:hover:not(:disabled),
+  .activity-trace-button:focus-visible {
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 14%, transparent);
+    color: rgba(239, 244, 251, 0.9);
+  }
+
+  .activity-trace-button:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--thread-accent, #57CFA0) 35%, transparent);
+    outline-offset: 2px;
+  }
+
+  .activity-trace-button:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  .activity-trace-button:disabled {
+    cursor: default;
+    opacity: 0.62;
+  }
+
+  .activity-meta {
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 8px;
+    color: rgba(231, 238, 247, 0.52);
+    font-size: 10px;
+    line-height: 1.35;
+  }
+
+  .activity-meta-part {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .activity-trace-note {
+    min-width: 0;
+    color: rgba(231, 238, 247, 0.48);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 9px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .activity-trace-note-error {
+    color: var(--negative, #D4808F);
+  }
+
+  .activity-error {
+    min-width: 0;
     color: var(--negative, #D4808F);
     font-size: 11px;
-    margin-top: 8px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   /* ── Details tab ─────────────────────────────────────── */
@@ -1740,7 +1965,9 @@
   }
 
   .tab-empty,
-  .timeline-time,
+  .activity-time,
+  .activity-meta,
+  .activity-trace-note,
   .details-empty,
   .details-meta,
   .link-meta,
@@ -1760,7 +1987,7 @@
     color: var(--panel-utility-muted-text);
   }
 
-  .timeline-text,
+  .activity-title,
   .details-desc,
   .details-meta strong,
   .link-item,
@@ -1782,7 +2009,6 @@
     color: var(--panel-utility-primary-hover-text);
   }
 
-  .timeline-item,
   .details-section,
   .audit-card,
   .audit-efficiency,
@@ -1797,6 +2023,7 @@
   }
 
   .link-item,
+  .activity-list-item,
   .metrics-section,
   .metrics-row,
   .audit-eval-row + .audit-eval-row,

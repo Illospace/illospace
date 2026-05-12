@@ -71,6 +71,9 @@ import type {
   VaultSecretPrompt,
 } from '$lib/types/cortex';
 
+const ACTIVE_IDEA_SNAPSHOT_RECONCILE_MS = 8_000;
+const SELECTED_THREAD_RECONCILE_MS = 5_000;
+
 export type {
   AgentRunOptions,
   BrowserDiscoveryResult,
@@ -470,7 +473,7 @@ class CortexStore {
         return;
       }
       this._refreshIdeasSnapshot();
-    }, 1500);
+    }, ACTIVE_IDEA_SNAPSHOT_RECONCILE_MS);
   }
 
   private _stopIdeasSnapshotReconcile() {
@@ -1598,7 +1601,7 @@ class CortexStore {
         return;
       }
       this._refreshSelectedStream();
-    }, 1200);
+    }, SELECTED_THREAD_RECONCILE_MS);
   }
 
   private _stopSelectedIdeaReconcile() {

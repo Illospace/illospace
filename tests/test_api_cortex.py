@@ -1312,8 +1312,28 @@ def test_project_context_validation_rejects_missing_local_path_when_enforced(tmp
     assert any("does not exist" in error for error in snapshot["validation_errors"])
 
 
+def test_project_context_snapshot_attachment_revalidates_existing_status():
+    from brain.systems.cortex.project_context.snapshot import attach_project_context_snapshot
+
+    payload = attach_project_context_snapshot(
+        {},
+        {
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [],
+            },
+        },
+    )
+
+    snapshot = payload["project_context_snapshot"]
+    assert snapshot["status"] == "invalid"
+    assert snapshot["validation_errors"] == [
+        "project_context_snapshot.resources must contain at least one resource."
+    ]
+
+
 @pytest.mark.asyncio
-async def test_create_empty_project_profile(client, mock_session_factory):
+async def test_create_project_profile_rejects_empty_project_context(client, mock_session_factory):
     from brain.app.api.routers.cortex import _project_context as pc_mod
 
     with (
@@ -1334,10 +1354,10 @@ async def test_create_empty_project_profile(client, mock_session_factory):
             json={"slug": "empty-project", "name": "Empty Project", "project_context": {"name": "Empty Project", "resources": []}},
         )
 
-    assert response.status_code == 201
-    payload = response.json()
-    assert payload["name"] == "Empty Project"
-    assert payload["project_context"]["resources"] == []
+    assert response.status_code == 422
+    assert response.json()["detail"]["validation_errors"] == [
+        "project_context_snapshot.resources must contain at least one resource."
+    ]
 
 
 async def test_create_project_profile_validates_project_context(client, mock_session_factory):

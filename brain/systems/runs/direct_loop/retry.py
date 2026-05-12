@@ -4,16 +4,40 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Callable
 
 from brain.platform.integrations.providers import LLMRequest
 
 logger = logging.getLogger("agent")
+_MAX_RETRY_AFTER_SECONDS = 60.0
 
 
 class _NeverCancelled:
     def is_set(self) -> bool:
         return False
+
+
+def _retry_after_seconds(headers: dict[str, str]) -> float | None:
+    value = None
+    for key, candidate in headers.items():
+        if str(key).lower() == "retry-after":
+            value = str(candidate).strip()
+            break
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        except Exception:
+            return None
+    return max(0.0, min(seconds, _MAX_RETRY_AFTER_SECONDS))
 
 
 def api_call_with_retry(
@@ -67,8 +91,9 @@ def api_call_with_retry(
                 raise
             resp = getattr(exc, "response", None)
             headers = dict(getattr(resp, "headers", {}) or {}) if resp else {}
+            retry_after = _retry_after_seconds(headers)
             logger.warning(
-                "Agent %s turn %d: API 500 (attempt %d/%d), req=%s",
+                "Agent %s turn %d: provider retryable error (attempt %d/%d), req=%s",
                 session_id,
                 turn,
                 api_attempt + 1,
@@ -94,7 +119,7 @@ def api_call_with_retry(
                     call_start = time.time()
                     continue
                 raise
-            delay = retry_delays[api_attempt]
+            delay = retry_after if retry_after is not None else retry_delays[api_attempt]
             api_attempt += 1
             if on_stream_activity:
                 on_stream_activity(f"API hiccup — retrying in {delay}s…")

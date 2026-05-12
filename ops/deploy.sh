@@ -228,6 +228,48 @@ restart_user_service_if_present() {
   return 1
 }
 
+worker_service_main_pid() {
+  systemctl --user show cortex-worker --property=MainPID --value 2>/dev/null || true
+}
+
+start_worker_handoff() {
+  mkdir -p "$ROOT/logs"
+  (
+    cd "$ROOT"
+    env \
+      PYTHONPATH="$ROOT" \
+      ILLO_ENV="${ILLO_ENV:-production}" \
+      ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1 \
+      ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS="${ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS:-infinity}" \
+      "$PYTHON_BIN" -m brain.systems.cortex.worker
+  ) >> "$ROOT/logs/cortex-worker-handoff.log" 2>&1 &
+  echo "$!"
+}
+
+monitor_worker_handoff() {
+  local old_pid="$1"
+  local handoff_pid="$2"
+  (
+    local timeout_seconds="${ILLO_WORKER_HANDOFF_TIMEOUT_SECONDS:-86400}"
+    local deadline=$((SECONDS + timeout_seconds))
+    local current_pid active
+    echo "Handoff: temporary worker $handoff_pid is serving new AgentRuns while cortex-worker drains."
+    while kill -0 "$handoff_pid" >/dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do
+      active="$(systemctl --user is-active cortex-worker 2>/dev/null || true)"
+      current_pid="$(worker_service_main_pid)"
+      if [ "$active" = "active" ] && [ -n "$current_pid" ] && [ "$current_pid" != "0" ] && [ "$current_pid" != "$old_pid" ]; then
+        echo "Handoff: cortex-worker restarted as $current_pid; draining temporary worker $handoff_pid."
+        kill -TERM "$handoff_pid" >/dev/null 2>&1 || true
+        exit 0
+      fi
+      sleep 5
+    done
+    if kill -0 "$handoff_pid" >/dev/null 2>&1; then
+      echo "Handoff: timeout waiting for cortex-worker restart; temporary worker remains active."
+    fi
+  ) >> "$ROOT/logs/cortex-worker-handoff.log" 2>&1 &
+}
+
 disable_user_service_if_present() {
   local service_name="$1"
   if have_user_service "$service_name"; then
@@ -307,7 +349,12 @@ restart_or_drain_worker() {
 
   echo "Worker:    $active_runs active AgentRun(s); signaling drain instead of restart"
   echo "           It will stop claiming new runs and restart on the new version after active runs finish."
+  local old_pid handoff_pid
+  old_pid="$(worker_service_main_pid)"
+  handoff_pid="$(start_worker_handoff)"
+  echo "Worker:    started temporary handoff worker $handoff_pid for new AgentRuns"
   systemctl --user kill --kill-who=main --signal=TERM cortex-worker || true
+  monitor_worker_handoff "$old_pid" "$handoff_pid"
 }
 
 should_run_local_embedder() {
@@ -380,8 +427,9 @@ PY
 }
 
 echo "=== Pulling latest code ==="
+git fetch origin main
 git checkout main
-git pull origin main
+git pull --ff-only origin main
 
 if [ ! -x "$PYTHON_BIN" ]; then
   echo "=== Creating virtual environment ==="

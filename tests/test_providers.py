@@ -309,6 +309,24 @@ class TestAnthropicProvider:
         p.stream(LLMRequest(model="claude-sonnet-4-6", messages=[], max_output_tokens=100))
         client.messages.stream.assert_called_once()
 
+    def test_rate_limit_status_is_retryable(self):
+        client = MagicMock()
+        p = AnthropicProvider(client)
+
+        class ProviderStatusError(Exception):
+            status_code = 429
+
+        assert p.is_retryable_error(ProviderStatusError("rate limit exceeded"))
+
+    def test_client_error_status_is_not_retryable(self):
+        client = MagicMock()
+        p = AnthropicProvider(client)
+
+        class ProviderStatusError(Exception):
+            status_code = 400
+
+        assert not p.is_retryable_error(ProviderStatusError("bad request"))
+
 
 # ── OpenAIProvider ────────────────────────────────────────────────
 

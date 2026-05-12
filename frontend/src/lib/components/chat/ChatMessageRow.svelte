@@ -76,6 +76,11 @@
     })),
   );
 
+  function unreadChipStyle(color: string | null | undefined) {
+    const accent = normalizeHexColor(color);
+    return accent ? `--chat-unread-chip-accent:${accent};` : undefined;
+  }
+
   function openThread() {
     if (!item.thread) return;
     item.thread.onOpen?.(item.thread.id);
@@ -175,7 +180,11 @@
           </ConstellationPill>
 
           {#if item.thread.unreadCount}
-            <ChatUnreadChip count={item.thread.unreadCount} compact />
+            <ChatUnreadChip
+              count={item.thread.unreadCount}
+              compact
+              style={unreadChipStyle(item.thread.accentColor ?? item.accentColor)}
+            />
           {/if}
         </div>
 

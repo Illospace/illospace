@@ -81,7 +81,7 @@
           {:else if profile.resources.length}
             <small>{profile.resources.length} resource{profile.resources.length === 1 ? '' : 's'}</small>
           {:else if profile.id !== 'none'}
-            <small>Empty project — add resources when you create or attach context</small>
+            <small>No resources attached</small>
           {/if}
         </span>
         {#if isSelected}

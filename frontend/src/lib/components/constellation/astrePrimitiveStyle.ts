@@ -124,19 +124,11 @@ function resolveLightAstreAccent(accent: string | null, seed: number) {
   if (!accent) return LIGHT_ASTRE_USER_PALETTE[seed % LIGHT_ASTRE_USER_PALETTE.length];
 
   const { h, s, l } = rgbToHsl(hexToRgb(accent));
-  const isWaterRange = h >= 164 && h <= 240;
-  const isEarthRange = h >= 10 && h <= 48;
-  const isVerySoft = s < 0.42 || l > 0.62;
-
-  if (isEarthRange || isWaterRange || isVerySoft) {
-    return LIGHT_ASTRE_USER_PALETTE[(seed + 2) % LIGHT_ASTRE_USER_PALETTE.length];
-  }
-
   return rgbToHex(
     hslToRgb({
       h,
-      s: clamp(Math.max(s * 1.22, 0.62), 0.58, 0.84),
-      l: clamp(l, 0.38, 0.5),
+      s: clamp(Math.max(s * 1.18, 0.46), 0.42, 0.9),
+      l: clamp(l, 0.34, 0.52),
     }),
   );
 }
@@ -198,7 +190,7 @@ export function buildAstrePrimitiveStyle({
     `inset 0 18px 30px color-mix(in srgb, white 46%, ${normalizedAccent} 4%)`,
     `inset 0 -24px 34px color-mix(in srgb, ${normalizedAccent} 10%, rgba(156, 109, 36, 0.1))`,
     `0 12px 30px color-mix(in srgb, ${normalizedAccent} 14%, transparent)`,
-    `0 0 54px color-mix(in srgb, var(--constellation-color-amber-core) 12%, transparent)`,
+    `0 0 54px color-mix(in srgb, ${normalizedAccent} 12%, transparent)`,
   ].join(', ');
   const lightUseBrightHover = isLightMode && emphasis;
   const lightUseCalmRest = isLightMode && !emphasis;
@@ -311,10 +303,10 @@ export function buildAstrePrimitiveStyle({
         ].join(', '),
     '--astre-rim-hot': isLightMode
       ? `color-mix(in srgb, ${normalizedAccent} 50%, rgba(255, 253, 247, 0.5))`
-      : `color-mix(in srgb, ${normalizedAccent} 52%, var(--constellation-color-amber-owner) 48%)`,
+      : `color-mix(in srgb, ${normalizedAccent} 52%, var(--constellation-color-text-primary) 48%)`,
     '--astre-rim-soft': isLightMode
       ? `color-mix(in srgb, ${normalizedAccent} 28%, rgba(255, 253, 247, 0.5))`
-      : `color-mix(in srgb, ${normalizedAccent} 34%, var(--constellation-color-amber-owner))`,
+      : `color-mix(in srgb, ${normalizedAccent} 34%, var(--constellation-color-text-primary))`,
     '--astre-rim-dim': colorAlpha(normalizedAccent, isLightMode ? 0.12 : 0.18),
     '--astre-rim-opacity': isLightMode ? (lightUseBrightHover ? 0.74 : 0.5) : 1,
   });

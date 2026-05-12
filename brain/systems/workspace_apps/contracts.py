@@ -26,6 +26,18 @@ DOMAIN_OPERATIONS = {
     "createRelation",
     "archiveRelation",
 }
+ACTION_KINDS = {"connector", "domain", "workflow", "agent", "server"}
+ACTION_EFFECTS = {
+    "domain.read",
+    "domain.write",
+    "app_state.read",
+    "app_state.write",
+    "external.read",
+    "external.write",
+    "workflow.trigger",
+    "agent.run",
+}
+ACTION_EXECUTOR_TYPES = {"registered", "deferred"}
 APP_LOCAL_SCOPES = {"ui_state", "preferences", "filters", "draft", "ephemeral"}
 GENERATED_UI_VIEW_TYPES = {"table", "list", "cards", "chart", "metrics", "detail", "form"}
 GENERATED_UI_CHART_TYPES = {"bar", "line", "pie", "scatter"}
@@ -56,6 +68,11 @@ _EXTERNAL_STYLESHEET_RE = re.compile(
 )
 _CSS_IMPORT_RE = re.compile(r"@import\s+", re.IGNORECASE)
 _REMOTE_FONT_RE = re.compile(r"fonts\.(?:googleapis|gstatic)\.com", re.IGNORECASE)
+_SECRET_KEY_RE = re.compile(
+    r"(?:^|[_-])(?:token|secret|password|api[_-]?key|authorization|bearer|client[_-]?secret|private[_-]?key)(?:$|[_-])",
+    re.IGNORECASE,
+)
+_SECRET_VALUE_RE = re.compile(r"\b(?:ghp_|github_pat_|sk-|xox[baprs]-)[A-Za-z0-9_=-]{8,}")
 
 
 def contract_validation_passed() -> dict[str, Any]:
@@ -113,6 +130,7 @@ def build_contract_validation_report(
             }
 
     _validate_data_plan(manifest_dict.get("data_plan"), errors, initial_state=initial_state)
+    _validate_actions(manifest_dict, errors)
     _validate_design_contract(manifest_dict.get("design_contract"), errors)
     _validate_thumbnail(visual_spec_dict.get("thumbnail"), errors)
 
@@ -186,6 +204,47 @@ def _validate_domain_binding(alias: str, value: Any, errors: list[str]) -> None:
         errors.append(f"{prefix}.operations contains unsupported operation(s): {', '.join(invalid)}")
 
 
+def _validate_actions(manifest: Mapping[str, Any], errors: list[str]) -> None:
+    actions = manifest.get("actions")
+    if actions is None:
+        actions = _as_mapping(manifest.get("action_plan")).get("actions")
+    if actions is None:
+        return
+    if not isinstance(actions, Mapping):
+        errors.append("manifest.actions must be an object when provided")
+        return
+    for key, raw_action in actions.items():
+        action_key = str(key or "").strip()
+        prefix = f"manifest.actions.{action_key or '<empty>'}"
+        if not action_key or not re.match(r"^[a-zA-Z][\w.-]*$", action_key):
+            errors.append("manifest.actions keys must be stable identifiers")
+        if not isinstance(raw_action, Mapping):
+            errors.append(f"{prefix} must be an object")
+            continue
+        kind = str(raw_action.get("kind") or "connector").strip()
+        if kind not in ACTION_KINDS:
+            errors.append(f"{prefix}.kind must be one of: {', '.join(sorted(ACTION_KINDS))}")
+        effects = raw_action.get("effects")
+        if not isinstance(effects, list) or not effects:
+            errors.append(f"{prefix}.effects must list allowed effects")
+        else:
+            invalid_effects = sorted({str(effect) for effect in effects} - ACTION_EFFECTS)
+            if invalid_effects:
+                errors.append(f"{prefix}.effects contains unsupported effect(s): {', '.join(invalid_effects)}")
+        executor = raw_action.get("executor")
+        if executor is not None:
+            executor_obj = _as_mapping(executor)
+            executor_type = str(executor_obj.get("type") or "").strip()
+            if executor_type not in ACTION_EXECUTOR_TYPES:
+                errors.append(
+                    f"{prefix}.executor.type must be one of: {', '.join(sorted(ACTION_EXECUTOR_TYPES))}"
+                )
+            if executor_type == "registered" and not str(executor_obj.get("key") or "").strip():
+                errors.append(f"{prefix}.executor.key is required for registered executors")
+        if _forbidden_secret_paths(raw_action):
+            errors.append(f"{prefix} must not contain raw credentials or secret values")
+
+
 def _validate_design_contract(value: Any, errors: list[str]) -> None:
     contract = _as_mapping(value)
     if not contract:
@@ -245,6 +304,23 @@ def _validate_html_source(source: str, errors: list[str]) -> None:
     if _BODY_BACKGROUND_RE.search(source):
         errors.append("source_code must not set a fixed body background")
     _validate_app_kit_html(source, errors)
+
+
+def _forbidden_secret_paths(value: Any, prefix: str = "") -> list[str]:
+    paths: list[str] = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            key_text = str(key)
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if _SECRET_KEY_RE.search(key_text):
+                paths.append(path)
+            paths.extend(_forbidden_secret_paths(item, path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            paths.extend(_forbidden_secret_paths(item, f"{prefix}[{index}]"))
+    elif isinstance(value, str) and _SECRET_VALUE_RE.search(value):
+        paths.append(prefix or "<value>")
+    return paths
 
 
 def _is_structured_ui_renderer(renderer_key: str, source_kind: str) -> bool:

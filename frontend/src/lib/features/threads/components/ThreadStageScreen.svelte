@@ -68,9 +68,9 @@
   import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
   import ThreadStageShell, { type ThreadPeripherySignal } from '$lib/features/threads/components/ThreadStageShell.svelte';
   import ThreadUtilityContent from '$lib/features/threads/components/ThreadUtilityContent.svelte';
-  import VaultSecretPromptPanel from '$lib/features/vault/components/VaultSecretPromptPanel.svelte';
   import WorkspaceComposerAdapter from '$lib/features/composer/components/WorkspaceComposerAdapter.svelte';
   import ThreadAppsPane from '$lib/features/workspace-apps/components/ThreadAppsPane.svelte';
+  import VaultPage from '../../../../routes/vault/+page.svelte';
   import ThreadTranscript from './ThreadTranscript.svelte';
   import ThreadStageRightDock from './ThreadStageRightDock.svelte';
   import {
@@ -153,6 +153,7 @@
   let userScrolledUp = $state(false);
   let programmaticScroll = false;
   let showTranscriptScrollCue = $state(false);
+  let transcriptScrollFrame: number | null = null;
   let projectContextError = $state('');
   let ideaProjectContextAttachments = $state<any[]>([]);
   let ideaProjectContextLoadedForIdeaId: string | null = null;
@@ -215,6 +216,9 @@
   );
   const sidePanelAddMenuItems = $derived.by(() =>
     buildThreadSidePanelAddMenuItems(sidePanelTabs, workspaceApps.visibleApps),
+  );
+  const activeVaultSecretPrompt = $derived(
+    cortex.vaultSecretPrompt?.idea_id === idea?.id ? cortex.vaultSecretPrompt : null,
   );
 
   function ideaDisplayTitle(source: { display_title?: string | null; title?: string | null }): string {
@@ -462,9 +466,26 @@
     programmaticScroll = true;
     scrollConversationToBottom(transcriptEl);
     requestAnimationFrame(() => {
+      scrollConversationToBottom(transcriptEl);
       programmaticScroll = false;
       userScrolledUp = false;
       syncTranscriptScrollCue();
+    });
+  }
+
+  function keepTranscriptPinnedToBottom() {
+    if (!transcriptEl || userScrolledUp) {
+      syncTranscriptScrollCue();
+      return;
+    }
+
+    if (transcriptScrollFrame !== null) {
+      cancelAnimationFrame(transcriptScrollFrame);
+    }
+
+    transcriptScrollFrame = requestAnimationFrame(() => {
+      transcriptScrollFrame = null;
+      scrollToBottom(true);
     });
   }
 
@@ -960,6 +981,22 @@
   });
 
   $effect(() => {
+    const element = transcriptEl;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+
+    const observer = new ResizeObserver(keepTranscriptPinnedToBottom);
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+      if (transcriptScrollFrame !== null) {
+        cancelAnimationFrame(transcriptScrollFrame);
+        transcriptScrollFrame = null;
+      }
+    };
+  });
+
+  $effect(() => {
     const element = threadStagePanelEl;
     if (!element || typeof window === 'undefined') return;
 
@@ -983,6 +1020,10 @@
 
   onDestroy(() => {
     document.removeEventListener('click', handleDocClick);
+    if (transcriptScrollFrame !== null) {
+      cancelAnimationFrame(transcriptScrollFrame);
+      transcriptScrollFrame = null;
+    }
   });
 </script>
 
@@ -1123,11 +1164,22 @@
   {/snippet}
 
   {#snippet vaultPane()}
-    <VaultSecretPromptPanel
-      prompt={cortex.vaultSecretPrompt?.idea_id === idea?.id ? cortex.vaultSecretPrompt : null}
-      onSaved={(promptId) => cortex.clearVaultSecretPrompt(promptId)}
-      onDismiss={(promptId) => cortex.clearVaultSecretPrompt(promptId)}
-    />
+    <div class="thread-vault-surface">
+      <VaultPage
+        embedded
+        initialCreatePrefill={activeVaultSecretPrompt
+          ? {
+              id: activeVaultSecretPrompt.id,
+              keyName: activeVaultSecretPrompt.key_name,
+              description: activeVaultSecretPrompt.description,
+              category: activeVaultSecretPrompt.category,
+            }
+          : null}
+        onInitialCreateSaved={(promptId) => {
+          if (promptId) cortex.clearVaultSecretPrompt(promptId);
+        }}
+      />
+    </div>
   {/snippet}
 
   {#snippet cyclesPane()}
@@ -1213,6 +1265,7 @@
     --thread-stage-panel-radius: 24px;
     --thread-stage-panel-padding-block: clamp(14px, 1.7vw, 22px);
     --thread-stage-panel-padding-inline: clamp(16px, 2vw, 24px);
+    --thread-stage-docked-header-height: 46px;
     --thread-bridge-mention-dropdown-border: rgba(124, 138, 158, 0.14);
     --thread-bridge-mention-dropdown-background:
       linear-gradient(180deg, rgba(10, 14, 22, 0.98), rgba(8, 11, 18, 1));
@@ -1285,6 +1338,71 @@
   .thread-utility-surface-body > :global(*) {
     flex: 1 1 auto;
     min-height: 0;
+  }
+
+  .thread-vault-surface {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded) {
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-scene-glow),
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-scene-warmth) {
+    display: none;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-shell) {
+    width: 100%;
+    gap: 12px;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-header) {
+    padding: 2px 2px 12px;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-header-head) {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-header-actions) {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 8px;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-header-actions > *) {
+    flex: 1 1 auto;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded) {
+    gap: 12px;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded .inventory-tools) {
+    padding: 12px;
+    gap: 10px;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded .vault-list) {
+    padding: 0 10px 10px;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded .vault-row) {
+    grid-template-columns: 1fr;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded .vault-row-side) {
+    justify-items: start;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded .metadata-list) {
+    grid-template-columns: 1fr;
   }
 
   .thread-stage-panel::before,
@@ -1528,6 +1646,15 @@
       box-sizing: border-box;
       justify-self: stretch;
       align-self: stretch;
+    }
+
+    .thread-stage-layout.with-dock .thread-stage-thread :global(.thread-panel-header) {
+      min-height: var(--thread-stage-docked-header-height);
+      padding: 0 2px 0 0;
+    }
+
+    .thread-stage-layout.with-dock .thread-stage-thread :global(.thread-header-title-row) {
+      min-height: var(--thread-stage-docked-header-height);
     }
   }
 
