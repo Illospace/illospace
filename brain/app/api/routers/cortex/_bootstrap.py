@@ -9,11 +9,13 @@ from typing import Any
 
 from fastapi import Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
 from brain.app.api.deps import get_db
+from brain.app.api.db_utils import run_db
 from brain.app.api.routers.cortex._helpers import _require_idea_for_user
 from brain.app.api.routers.cortex._ideas import _idea_read_with_author, list_ideas_payload
 from brain.app.api.routers.cortex._idea_ops import unified_stream_payload
@@ -58,54 +60,59 @@ def _dump_payload(value: Any) -> Any:
 
 
 @router.get("/bootstrap")
-def cortex_bootstrap(
+async def cortex_bootstrap(
     include: str | None = "core",
     idea_id: str | None = None,
     include_debug: bool = False,
     provider: str | None = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     include_set = _parse_include(include)
-    payload: dict[str, Any] = {
-        "ideas": None,
-        "connections": None,
-        "team_members": None,
-        "workspace_apps": None,
-        "workspace_pins": None,
-        "selected_idea": None,
-        "auth_status": None,
-        "meta": {
-            "org_id": user.get("org_id"),
-            "include": sorted(include_set),
-        },
-    }
 
-    if "ideas" in include_set:
-        payload["ideas"] = _dump_payload(list_ideas_payload(db=db, user=user))
-    if "connections" in include_set:
-        payload["connections"] = list_connections_payload(db=db, user=user)
-    if "team_members" in include_set:
-        payload["team_members"] = _dump_payload([
-            TeamMemberRead.model_validate(member)
-            for member in list_members_payload(db=db, user=user)
-        ])
-    if "workspace_apps" in include_set:
-        org_id = require_org_context(user)
-        payload["workspace_apps"] = _dump_payload(serialize_apps(db, list_apps(db, org_id)))
-    if "workspace_pins" in include_set:
-        org_id = require_org_context(user)
-        pins = db.scalars(
-            select(WorkspacePin)
-            .where(WorkspacePin.org_id == org_id, WorkspacePin.archived_at.is_(None))
-            .order_by(WorkspacePin.created_at.asc(), WorkspacePin.id.asc())
-        ).all()
-        payload["workspace_pins"] = _dump_payload([_serialize_pin(pin) for pin in pins])
-    if "selected_idea" in include_set:
-        if not idea_id:
-            raise HTTPException(status_code=400, detail="idea_id is required when include contains selected_idea")
-        idea = _require_idea_for_user(db, idea_id, user)
-        payload["selected_idea"] = _dump_payload(_idea_read_with_author(idea, db))
+    def _build_payload(sync_db: Session) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ideas": None,
+            "connections": None,
+            "team_members": None,
+            "workspace_apps": None,
+            "workspace_pins": None,
+            "selected_idea": None,
+            "auth_status": None,
+            "meta": {
+                "org_id": user.get("org_id"),
+                "include": sorted(include_set),
+            },
+        }
+
+        if "ideas" in include_set:
+            payload["ideas"] = _dump_payload(list_ideas_payload(db=sync_db, user=user))
+        if "connections" in include_set:
+            payload["connections"] = list_connections_payload(db=sync_db, user=user)
+        if "team_members" in include_set:
+            payload["team_members"] = _dump_payload([
+                TeamMemberRead.model_validate(member)
+                for member in list_members_payload(db=sync_db, user=user)
+            ])
+        if "workspace_apps" in include_set:
+            org_id = require_org_context(user)
+            payload["workspace_apps"] = _dump_payload(serialize_apps(sync_db, list_apps(sync_db, org_id)))
+        if "workspace_pins" in include_set:
+            org_id = require_org_context(user)
+            pins = sync_db.scalars(
+                select(WorkspacePin)
+                .where(WorkspacePin.org_id == org_id, WorkspacePin.archived_at.is_(None))
+                .order_by(WorkspacePin.created_at.asc(), WorkspacePin.id.asc())
+            ).all()
+            payload["workspace_pins"] = _dump_payload([_serialize_pin(pin) for pin in pins])
+        if "selected_idea" in include_set:
+            if not idea_id:
+                raise HTTPException(status_code=400, detail="idea_id is required when include contains selected_idea")
+            idea = _require_idea_for_user(sync_db, idea_id, user)
+            payload["selected_idea"] = _dump_payload(_idea_read_with_author(idea, sync_db))
+        return payload
+
+    payload = await run_db(db, _build_payload)
     if "direct_thread" in include_set:
         if not idea_id:
             raise HTTPException(status_code=400, detail="idea_id is required when include contains direct_thread")

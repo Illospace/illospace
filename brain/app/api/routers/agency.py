@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.systems.agency.core import (
@@ -17,6 +18,7 @@ from brain.systems.agency.core import (
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import can_manage_scheduler
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.db_utils import run_db
 from brain.platform.db.models.agency import (
     CANDIDATE_STATES,
     AgencyApproval,
@@ -182,150 +184,168 @@ def _serialize_budget_event(event: AgencyBudgetEvent) -> dict[str, Any]:
 
 
 @router.get("/candidates")
-def list_candidates(
+async def list_candidates(
     status: str | None = None,
     limit: int = 50,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    if status is not None and status not in CANDIDATE_STATES:
-        raise HTTPException(status_code=400, detail="Unknown agency candidate status")
-    stmt = select(AgencyCandidate)
-    predicate = _visible_candidate_predicate(user)
-    if predicate is not None:
-        stmt = stmt.where(predicate)
-    if status is not None:
-        stmt = stmt.where(AgencyCandidate.status == status)
-    stmt = stmt.order_by(AgencyCandidate.created_at.desc()).limit(max(1, min(limit, 200)))
-    return [_serialize_candidate(candidate) for candidate in db.scalars(stmt).all()]
+    def _list(sync_db: Session):
+        if status is not None and status not in CANDIDATE_STATES:
+            raise HTTPException(status_code=400, detail="Unknown agency candidate status")
+        stmt = select(AgencyCandidate)
+        predicate = _visible_candidate_predicate(user)
+        if predicate is not None:
+            stmt = stmt.where(predicate)
+        if status is not None:
+            stmt = stmt.where(AgencyCandidate.status == status)
+        stmt = stmt.order_by(AgencyCandidate.created_at.desc()).limit(max(1, min(limit, 200)))
+        return [_serialize_candidate(candidate) for candidate in sync_db.scalars(stmt).all()]
+
+    return await run_db(db, _list)
 
 
 @router.get("/candidates/{candidate_id}")
-def get_candidate(
+async def get_candidate(
     candidate_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    candidate = _get_candidate_or_404(db, candidate_id, user)
-    decisions = db.scalars(
-        select(AgencyDecision)
-        .where(AgencyDecision.candidate_id == candidate.id)
-        .order_by(AgencyDecision.created_at.desc())
-    ).all()
-    approvals = db.scalars(
-        select(AgencyApproval)
-        .where(AgencyApproval.candidate_id == candidate.id)
-        .order_by(AgencyApproval.created_at.desc())
-    ).all()
-    setattr(candidate, "_agency_decisions", decisions)
-    setattr(candidate, "_agency_approvals", approvals)
-    return _serialize_candidate(candidate, include_review=True)
+    def _get(sync_db: Session):
+        candidate = _get_candidate_or_404(sync_db, candidate_id, user)
+        decisions = sync_db.scalars(
+            select(AgencyDecision)
+            .where(AgencyDecision.candidate_id == candidate.id)
+            .order_by(AgencyDecision.created_at.desc())
+        ).all()
+        approvals = sync_db.scalars(
+            select(AgencyApproval)
+            .where(AgencyApproval.candidate_id == candidate.id)
+            .order_by(AgencyApproval.created_at.desc())
+        ).all()
+        setattr(candidate, "_agency_decisions", decisions)
+        setattr(candidate, "_agency_approvals", approvals)
+        return _serialize_candidate(candidate, include_review=True)
+
+    return await run_db(db, _get)
 
 
 @router.post("/candidates/{candidate_id}/approve")
-def approve_candidate(
+async def approve_candidate(
     candidate_id: int,
     body: AgencyApprovalRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_agency_reviewer(user)
-    _get_candidate_or_404(db, candidate_id, user)
-    try:
-        candidate, decision, approval = approve_candidate_review(
-            db,
-            candidate_id,
-            actor_id=str(user["id"]),
-            actor_role=str(user.get("role") or "unknown"),
-            actor_type=str(user.get("principal_type") or "human"),
-            reason=body.reason,
-            expires_at=body.expires_at,
-        )
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {
-        "candidate": _serialize_candidate(candidate),
-        "decision": _serialize_decision(decision),
-        "approval": _serialize_approval(approval),
-    }
+    def _approve(sync_db: Session):
+        _require_agency_reviewer(user)
+        _get_candidate_or_404(sync_db, candidate_id, user)
+        try:
+            candidate, decision, approval = approve_candidate_review(
+                sync_db,
+                candidate_id,
+                actor_id=str(user["id"]),
+                actor_role=str(user.get("role") or "unknown"),
+                actor_type=str(user.get("principal_type") or "human"),
+                reason=body.reason,
+                expires_at=body.expires_at,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "candidate": _serialize_candidate(candidate),
+            "decision": _serialize_decision(decision),
+            "approval": _serialize_approval(approval),
+        }
+
+    return await run_db(db, _approve)
 
 
 @router.post("/candidates/{candidate_id}/reject")
-def reject_candidate(
+async def reject_candidate(
     candidate_id: int,
     body: AgencyRejectRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_agency_reviewer(user)
-    _get_candidate_or_404(db, candidate_id, user)
-    try:
-        candidate, decision = reject_candidate_review(
-            db,
-            candidate_id,
-            actor_id=str(user["id"]),
-            actor_role=str(user.get("role") or "unknown"),
-            actor_type=str(user.get("principal_type") or "human"),
-            reason=body.reason,
-        )
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
-        "candidate": _serialize_candidate(candidate),
-        "decision": _serialize_decision(decision),
-    }
+    def _reject(sync_db: Session):
+        _require_agency_reviewer(user)
+        _get_candidate_or_404(sync_db, candidate_id, user)
+        try:
+            candidate, decision = reject_candidate_review(
+                sync_db,
+                candidate_id,
+                actor_id=str(user["id"]),
+                actor_role=str(user.get("role") or "unknown"),
+                actor_type=str(user.get("principal_type") or "human"),
+                reason=body.reason,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "candidate": _serialize_candidate(candidate),
+            "decision": _serialize_decision(decision),
+        }
+
+    return await run_db(db, _reject)
 
 
 @router.post("/candidates/{candidate_id}/suppress")
-def suppress_candidate(
+async def suppress_candidate(
     candidate_id: int,
     body: AgencySuppressRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_agency_reviewer(user)
-    _get_candidate_or_404(db, candidate_id, user)
-    try:
-        candidate, decision = suppress_candidate_review(
-            db,
-            candidate_id,
-            actor_id=str(user["id"]),
-            actor_role=str(user.get("role") or "unknown"),
-            actor_type=str(user.get("principal_type") or "human"),
-            reason=body.reason,
-            suppress_until=body.suppress_until,
-        )
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
-        "candidate": _serialize_candidate(candidate),
-        "decision": _serialize_decision(decision),
-    }
+    def _suppress(sync_db: Session):
+        _require_agency_reviewer(user)
+        _get_candidate_or_404(sync_db, candidate_id, user)
+        try:
+            candidate, decision = suppress_candidate_review(
+                sync_db,
+                candidate_id,
+                actor_id=str(user["id"]),
+                actor_role=str(user.get("role") or "unknown"),
+                actor_type=str(user.get("principal_type") or "human"),
+                reason=body.reason,
+                suppress_until=body.suppress_until,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "candidate": _serialize_candidate(candidate),
+            "decision": _serialize_decision(decision),
+        }
+
+    return await run_db(db, _suppress)
 
 
 @router.get("/budget-events")
-def list_budget_events(
+async def list_budget_events(
     candidate_id: int | None = None,
     limit: int = 100,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_agency_reviewer(user)
-    stmt = select(AgencyBudgetEvent)
-    if candidate_id is not None:
-        _get_candidate_or_404(db, candidate_id, user)
-        stmt = stmt.where(AgencyBudgetEvent.candidate_id == candidate_id)
-    elif not (_is_agency_reviewer(user) and user.get("principal_type") == "service"):
-        org_id = user.get("org_id")
-        if org_id:
-            stmt = stmt.where(AgencyBudgetEvent.scope_id == str(org_id))
-        else:
-            stmt = stmt.where(AgencyBudgetEvent.actor_id == str(user.get("id")))
-    stmt = stmt.order_by(AgencyBudgetEvent.created_at.desc()).limit(max(1, min(limit, 500)))
-    return [_serialize_budget_event(event) for event in db.scalars(stmt).all()]
+    def _list(sync_db: Session):
+        _require_agency_reviewer(user)
+        stmt = select(AgencyBudgetEvent)
+        if candidate_id is not None:
+            _get_candidate_or_404(sync_db, candidate_id, user)
+            stmt = stmt.where(AgencyBudgetEvent.candidate_id == candidate_id)
+        elif not (_is_agency_reviewer(user) and user.get("principal_type") == "service"):
+            org_id = user.get("org_id")
+            if org_id:
+                stmt = stmt.where(AgencyBudgetEvent.scope_id == str(org_id))
+            else:
+                stmt = stmt.where(AgencyBudgetEvent.actor_id == str(user.get("id")))
+        stmt = stmt.order_by(AgencyBudgetEvent.created_at.desc()).limit(max(1, min(limit, 500)))
+        return [_serialize_budget_event(event) for event in sync_db.scalars(stmt).all()]
+
+    return await run_db(db, _list)

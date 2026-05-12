@@ -7,6 +7,7 @@ import threading
 from typing import Any
 
 from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.systems.runs.domain import (
@@ -630,7 +631,48 @@ class AgentRunStore:
         return str(getattr(getattr(bind, "dialect", None), "name", "") or "")
 
 
-__all__ = ["AgentRunStore"]
+class AsyncAgentRunStore:
+    """Async facade for the agent-run store.
+
+    Each method runs the existing synchronous domain operation inside
+    ``AsyncSession.run_sync``. Callers should open a short-lived async session,
+    perform the persistence operation, then commit before any long-running
+    model, tool, browser, or connector I/O.
+    """
+
+    def __init__(self, session: AsyncSession, *, auto_commit: bool = False):
+        self.session = session
+        self.auto_commit = bool(auto_commit)
+
+    async def _run(self, fn):
+        def _invoke(sync_session: Session):
+            return fn(AgentRunStore(sync_session, auto_commit=self.auto_commit))
+
+        return await self.session.run_sync(_invoke)
+
+    async def create_run(self, request: AgentRunRequest) -> AgentRun:
+        return await self._run(lambda store: store.create_run(request))
+
+    async def create_child_run(self, parent: AgentRun | AgentRunRow, **kwargs: Any) -> AgentRun:
+        return await self._run(lambda store: store.create_child_run(parent, **kwargs))
+
+    async def claim_next(self) -> AgentRun | None:
+        return await self._run(lambda store: store.claim_next())
+
+    async def claim_run(self, run_id: int) -> AgentRun | None:
+        return await self._run(lambda store: store.claim_run(run_id))
+
+    async def set_status(self, run_id: int, status: RunStatus | str, *, reason: str | None = None) -> AgentRun:
+        return await self._run(lambda store: store.set_status(run_id, status, reason=reason))
+
+    async def append_event(self, event: AgentRunEvent) -> AgentRunEventRow:
+        return await self._run(lambda store: store.append_event(event))
+
+    async def append_artifact(self, artifact: AgentRunArtifact) -> AgentRunArtifactRow:
+        return await self._run(lambda store: store.append_artifact(artifact))
+
+
+__all__ = ["AgentRunStore", "AsyncAgentRunStore"]
 
 
 def _jsonable(value: Any) -> Any:

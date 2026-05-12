@@ -9,6 +9,9 @@ from brain.app.scheduler.catalog import (
 )
 from brain.app.scheduler.daemon import scheduler_daemon_tick, scheduler_health_snapshot
 from brain.app.scheduler.executor import (
+    async_claim_scheduler_run,
+    async_drain_scheduler,
+    async_execute_scheduler_run,
     claim_scheduler_run,
     drain_scheduler,
     execute_scheduler_run,
@@ -20,6 +23,11 @@ from brain.app.scheduler.executor import (
 )
 from brain.app.scheduler.planner import materialize_due_runs, next_run_after
 from brain.app.scheduler.runtime import (
+    async_claim_next_due_run,
+    async_claim_run,
+    async_finish_run,
+    async_heartbeat_lease,
+    async_update_run_step,
     claim_next_due_run,
     claim_run,
     ensure_run_steps,
@@ -33,6 +41,14 @@ from brain.app.scheduler.runtime import (
 )
 
 __all__ = [
+    "async_claim_next_due_run",
+    "async_claim_run",
+    "async_claim_scheduler_run",
+    "async_drain_scheduler",
+    "async_execute_scheduler_run",
+    "async_finish_run",
+    "async_heartbeat_lease",
+    "async_update_run_step",
     "claim_scheduler_run",
     "claim_next_due_run",
     "claim_run",

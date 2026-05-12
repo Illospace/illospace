@@ -5,26 +5,26 @@ import hashlib
 import ipaddress
 import time
 from collections import defaultdict
-from typing import Generator
+from collections.abc import AsyncGenerator
 
 from fastapi import Depends, HTTPException, Request
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db import SessionFactory
 from brain.app.api.config import RATE_LIMIT, RATE_LIMIT_GLOBAL, RATE_WINDOW
 
 
-def get_db() -> Generator[Session, None, None]:
-    """Yield a SQLAlchemy session, auto-close after request."""
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """Yield an async SQLAlchemy session, auto-close after request."""
     session = SessionFactory()
     try:
         yield session
-        session.commit()
+        await session.commit()
     except Exception:
-        session.rollback()
+        await session.rollback()
         raise
     finally:
-        session.close()
+        await session.close()
 
 
 _rate_store: dict[str, list[float]] = defaultdict(list)

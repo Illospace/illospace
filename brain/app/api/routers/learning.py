@@ -11,11 +11,13 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import can_manage_system
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.db_utils import run_db
 from brain.platform.db.models.learning import (
     LearningSignal,
     PolicyPromotion,
@@ -35,21 +37,24 @@ router = APIRouter(
 
 
 @router.get("/observatory")
-def learning_observatory(
+async def learning_observatory(
     limit: int = Query(100, ge=1, le=500),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     if not can_manage_system(user):
         raise HTTPException(status_code=403, detail="Permission denied")
 
     org_id = str(user["org_id"]) if user.get("org_id") else None
-    return build_learning_observatory_from_db(
+    return await run_db(
         db,
-        org_id=org_id,
-        include_all_orgs=bool(user.get("internal") and org_id is None),
-        limit=limit,
-    ).to_payload()
+        lambda sync_db: build_learning_observatory_from_db(
+            sync_db,
+            org_id=org_id,
+            include_all_orgs=bool(user.get("internal") and org_id is None),
+            limit=limit,
+        ).to_payload()
+    )
 
 
 def build_learning_observatory_from_db(

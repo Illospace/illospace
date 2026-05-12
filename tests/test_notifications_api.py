@@ -171,7 +171,7 @@ def test_openapi_registers_notification_routes():
 
 def test_notification_preferences_are_persisted():
     schema = _schema_name()
-    engine = create_engine(config.DB_URL)
+    engine = create_engine(config.DB_SYNC_URL)
     admin_conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
     admin_conn.execute(text(f'CREATE SCHEMA "{schema}"'))
     conn = engine.connect()
@@ -223,7 +223,7 @@ def test_notification_preferences_are_persisted():
 
 def test_workspace_notification_read_marks_user_mentions_seen():
     schema = _schema_name()
-    engine = create_engine(config.DB_URL)
+    engine = create_engine(config.DB_SYNC_URL)
     admin_conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
     admin_conn.execute(text(f'CREATE SCHEMA "{schema}"'))
     conn = engine.connect()

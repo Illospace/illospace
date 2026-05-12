@@ -18,11 +18,16 @@ from __future__ import annotations
 import json
 import os
 import sys
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+
+def _run(awaitable):
+    return asyncio.run(awaitable)
 
 
 # -- Fixtures ---------------------------------------------------------------
@@ -63,7 +68,7 @@ def mock_session_factory():
     def _factory():
         return session
 
-    with patch("brain.app.api.deps.SessionFactory", _factory):
+    with patch("brain.platform.db.legacy.legacy_session_factory", _factory):
         yield session
 
 
@@ -169,15 +174,16 @@ class TestPatchMemoryVisibility:
         mock_mem.visibility = "private"
 
         with patch("brain.app.api.routers.memory.UnitOfWork") as MockUnitOfWork:
-            uow = MockUnitOfWork.return_value.__enter__.return_value
-            uow.memories.get_or_raise_visible.return_value = mock_mem
+            uow = MockUnitOfWork.return_value.__aenter__.return_value
+            uow.memories.get_or_raise_visible = AsyncMock(return_value=mock_mem)
+            uow.session.flush = AsyncMock()
             body = MemoryUpdate(visibility="team")
-            result = update_memory(1, body, user={
-                "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"})
+            result = _run(update_memory(1, body, user={
+                "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}))
 
         assert mock_mem.visibility == "team"
         assert result == mock_mem
-        uow.session.flush.assert_called_once()
+        uow.session.flush.assert_awaited_once()
 
     def test_update_memory_not_found_raises_404(self, mock_session_factory):
         from brain.app.api.routers.memory import update_memory
@@ -185,12 +191,12 @@ class TestPatchMemoryVisibility:
         from fastapi import HTTPException
 
         with patch("brain.app.api.routers.memory.UnitOfWork") as MockUnitOfWork:
-            uow = MockUnitOfWork.return_value.__enter__.return_value
-            uow.memories.get_or_raise_visible.side_effect = LookupError
+            uow = MockUnitOfWork.return_value.__aenter__.return_value
+            uow.memories.get_or_raise_visible = AsyncMock(side_effect=LookupError)
             body = MemoryUpdate(visibility="team")
             with pytest.raises(HTTPException) as exc_info:
-                update_memory(999, body, user={
-                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"})
+                _run(update_memory(999, body, user={
+                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}))
             assert exc_info.value.status_code == 404
 
 
@@ -207,15 +213,16 @@ class TestPromoteMemory:
         mock_mem.visibility = "private"
 
         with patch("brain.app.api.routers.memory.UnitOfWork") as MockUnitOfWork:
-            uow = MockUnitOfWork.return_value.__enter__.return_value
-            uow.memories.get_or_raise_visible.return_value = mock_mem
+            uow = MockUnitOfWork.return_value.__aenter__.return_value
+            uow.memories.get_or_raise_visible = AsyncMock(return_value=mock_mem)
+            uow.session.flush = AsyncMock()
             body = MemoryPromote(visibility="org")
-            result = promote_memory(1, body, user={
-                "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"})
+            result = _run(promote_memory(1, body, user={
+                "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}))
 
         assert mock_mem.visibility == "org"
         assert result == mock_mem
-        uow.session.flush.assert_called_once()
+        uow.session.flush.assert_awaited_once()
 
     def test_promote_invalid_target_raises_400(self, mock_session_factory):
         from brain.app.api.routers.memory import promote_memory
@@ -226,12 +233,12 @@ class TestPromoteMemory:
         mock_mem.id = 1
 
         with patch("brain.app.api.routers.memory.UnitOfWork") as MockUnitOfWork:
-            uow = MockUnitOfWork.return_value.__enter__.return_value
-            uow.memories.get_or_raise_visible.return_value = mock_mem
+            uow = MockUnitOfWork.return_value.__aenter__.return_value
+            uow.memories.get_or_raise_visible = AsyncMock(return_value=mock_mem)
             body = MemoryPromote(visibility="public")
             with pytest.raises(HTTPException) as exc_info:
-                promote_memory(1, body, user={
-                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"})
+                _run(promote_memory(1, body, user={
+                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}))
             assert exc_info.value.status_code == 400
 
     def test_promote_not_found_raises_404(self, mock_session_factory):
@@ -240,12 +247,12 @@ class TestPromoteMemory:
         from fastapi import HTTPException
 
         with patch("brain.app.api.routers.memory.UnitOfWork") as MockUnitOfWork:
-            uow = MockUnitOfWork.return_value.__enter__.return_value
-            uow.memories.get_or_raise_visible.side_effect = LookupError
+            uow = MockUnitOfWork.return_value.__aenter__.return_value
+            uow.memories.get_or_raise_visible = AsyncMock(side_effect=LookupError)
             body = MemoryPromote(visibility="org")
             with pytest.raises(HTTPException) as exc_info:
-                promote_memory(1, body, user={
-                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"})
+                _run(promote_memory(1, body, user={
+                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}))
             assert exc_info.value.status_code == 404
 
 
@@ -259,21 +266,21 @@ class TestOrgMemoriesEndpoint:
         mock_mem.id = 2
         mock_mem.visibility = "org"
         with patch("brain.app.api.routers.memory.UnitOfWork") as MockUnitOfWork:
-            uow = MockUnitOfWork.return_value.__enter__.return_value
-            uow.memories.list_org_memories.return_value = [mock_mem]
-            result = list_org_memories(
+            uow = MockUnitOfWork.return_value.__aenter__.return_value
+            uow.memories.list_org_memories = AsyncMock(return_value=[mock_mem])
+            result = _run(list_org_memories(
                 limit=50, offset=0,
                 user={"id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"},
-            )
+            ))
         assert len(result) == 1
-        uow.memories.list_org_memories.assert_called_once()
+        uow.memories.list_org_memories.assert_awaited_once()
 
     def test_returns_empty_without_org_id(self, mock_session_factory):
         from brain.app.api.routers.memory import list_org_memories
         with patch("brain.app.api.routers.memory.UnitOfWork") as MockUnitOfWork:
-            result = list_org_memories(
+            result = _run(list_org_memories(
                 limit=50, offset=0,
                 user={"id": USER_A["id"], "role": "owner"},
-            )
+            ))
         assert result == []
         MockUnitOfWork.assert_not_called()

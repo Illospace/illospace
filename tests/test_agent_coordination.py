@@ -22,6 +22,24 @@ from brain.app.cli import agent_coordination as ac
 @pytest.fixture(autouse=True)
 def clean_coordination_table(db_session, unit_of_work_for_session):
     """Run UnitOfWork-backed coordination code inside the rollback session."""
+    db_session.execute(text("""
+        CREATE TABLE IF NOT EXISTS agent_coordination (
+            id SERIAL PRIMARY KEY,
+            session_key TEXT NOT NULL,
+            task_description TEXT NOT NULL,
+            files_touched TEXT[] NOT NULL DEFAULT '{}',
+            git_branch TEXT,
+            resources_locked TEXT[] NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'running',
+            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            completed_at TIMESTAMPTZ
+        )
+    """))
+    db_session.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_coordination_running_session
+        ON agent_coordination (session_key)
+        WHERE status = 'running'
+    """))
     db_session.execute(text("DELETE FROM agent_coordination WHERE session_key LIKE 'test_%'"))
     with patch("brain.app.cli.agent_coordination.UnitOfWork", unit_of_work_for_session):
         yield

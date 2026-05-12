@@ -1,15 +1,33 @@
 """Tests for cortex router — ideas CRUD, threads."""
+import asyncio
 import json
 import inspect
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+
+
+class _AsyncSession:
+    def __init__(self, sync_session):
+        self.sync_session = sync_session
+
+    async def run_sync(self, fn):
+        return fn(self.sync_session)
+
+    async def commit(self):
+        return None
+
+    async def rollback(self):
+        return None
+
+    async def close(self):
+        return None
 
 
 @pytest.fixture(autouse=True)
@@ -17,10 +35,14 @@ def mock_session_factory():
     """Mock the DB SessionFactory so no real database is needed."""
     session = MagicMock()
 
-    def _factory():
+    def _async_factory():
+        return _AsyncSession(session)
+
+    def _legacy_factory():
         return session
 
-    with patch("brain.app.api.deps.SessionFactory", _factory):
+    with patch("brain.app.api.deps.SessionFactory", _async_factory), \
+         patch("brain.platform.db.legacy.legacy_session_factory", _legacy_factory):
         yield session
 
 
@@ -230,25 +252,30 @@ def test_project_profile_resource_endpoints_mutate_context(tmp_path):
         metadata_={},
         created_at=None,
     )
-    db = MagicMock()
-    db.scalar.return_value = profile
+    session = MagicMock()
+    session.scalar.return_value = profile
+    db = _AsyncSession(session)
     user = {"id": "user-1", "org_id": "test-org", "role": "owner"}
 
-    _project_context.add_project_resources(
-        "project-1",
-        ProjectResourcesCreate(resources=[{"kind": "file", "path": str(second), "name": "brief"}]),
-        db=db,
-        user=user,
+    asyncio.run(
+        _project_context.add_project_resources(
+            "project-1",
+            ProjectResourcesCreate(resources=[{"kind": "file", "path": str(second), "name": "brief"}]),
+            db=db,
+            user=user,
+        )
     )
 
     assert [resource["path"] for resource in profile.project_context["resources"]] == [str(first), str(second)]
     added_id = profile.project_context["resources"][1]["id"]
 
-    _project_context.reorder_project_resources(
-        "project-1",
-        ProjectResourcesReorder(resource_ids=[added_id, "r1"]),
-        db=db,
-        user=user,
+    asyncio.run(
+        _project_context.reorder_project_resources(
+            "project-1",
+            ProjectResourcesReorder(resource_ids=[added_id, "r1"]),
+            db=db,
+            user=user,
+        )
     )
 
     assert [resource["id"] for resource in profile.project_context["resources"]] == [added_id, "r1"]
@@ -282,15 +309,18 @@ def test_project_profile_resource_reorder_rejects_duplicates(tmp_path):
         metadata_={},
         created_at=None,
     )
-    db = MagicMock()
-    db.scalar.return_value = profile
+    session = MagicMock()
+    session.scalar.return_value = profile
+    db = _AsyncSession(session)
 
     with pytest.raises(HTTPException) as exc_info:
-        _project_context.reorder_project_resources(
-            "project-1",
-            ProjectResourcesReorder(resource_ids=["r1", "r1"]),
-            db=db,
-            user={"id": "user-1", "org_id": "test-org", "role": "owner"},
+        asyncio.run(
+            _project_context.reorder_project_resources(
+                "project-1",
+                ProjectResourcesReorder(resource_ids=["r1", "r1"]),
+                db=db,
+                user={"id": "user-1", "org_id": "test-org", "role": "owner"},
+            )
         )
 
     assert exc_info.value.status_code == 422
@@ -712,15 +742,22 @@ def test_slash_commands_materializes_builtin_skills():
         success_count=0,
     )
     mock_uow = MagicMock()
-    mock_uow.__enter__.return_value = mock_uow
-    mock_uow.__exit__.return_value = False
-    mock_uow.skills.list_command_summaries.return_value = [skill]
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    mock_uow.session = MagicMock()
+    mock_uow.skills = MagicMock()
+    mock_uow.skills.list_command_summaries = AsyncMock(return_value=[skill])
+
+    async def run_sync(fn):
+        return fn(MagicMock())
+
+    mock_uow.session.run_sync = AsyncMock(side_effect=run_sync)
 
     with (
         patch("brain.systems.skills.builtin.ensure_builtin_skills_cached") as ensure_builtin,
         patch.object(analytics_mod, "UnitOfWork", return_value=mock_uow),
     ):
-        result = analytics_mod.api_slash_commands(user={"id": "user-1"})
+        result = asyncio.run(analytics_mod.api_slash_commands(user={"id": "user-1"}))
 
     ensure_builtin.assert_called_once_with()
     assert result[0]["name"] == "develop"

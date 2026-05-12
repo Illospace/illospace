@@ -255,7 +255,6 @@ def test_get_llm_info_uses_low_tier_for_background_models(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    monkeypatch.setattr("brain.app.api.routers.system.UnitOfWork", FakeUoW)
     monkeypatch.setattr(
         "brain.platform.providers.model_policy.get_provider_model_maps",
         lambda **kwargs: {"openai": {"low": "gpt-5-mini", "medium": "gpt-5.4"}},
@@ -268,7 +267,7 @@ def test_get_llm_info_uses_low_tier_for_background_models(monkeypatch):
         raising=False,
     )
 
-    info = _get_llm_info({"id": "user-1", "org_id": "org-1"})
+    info = _get_llm_info({"id": "user-1", "org_id": "org-1"}, db=FakeSession())
 
     assert info is not None
     assert info["harvest_model"] == "gpt-5-mini"
@@ -310,7 +309,6 @@ def test_get_llm_info_exposes_provider_health(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    monkeypatch.setattr("brain.app.api.routers.system.UnitOfWork", FakeUoW)
     monkeypatch.setattr("brain.platform.providers.model_policy.get_provider_model_maps", lambda **kwargs: {"openai": {"medium": "gpt-5.4"}})
     monkeypatch.setattr("brain.platform.providers.model_policy.resolve_default_provider", lambda **kwargs: "openai")
     monkeypatch.setattr("brain.platform.providers.model_policy.get_model_for_tier", lambda *args, **kwargs: "gpt-5-mini")
@@ -320,7 +318,7 @@ def test_get_llm_info_exposes_provider_health(monkeypatch):
         raising=False,
     )
 
-    info = _get_llm_info({"id": "user-1", "org_id": "org-1"})
+    info = _get_llm_info({"id": "user-1", "org_id": "org-1"}, db=FakeSession())
 
     assert info is not None
     assert info["provider_health"]["operations"]["verifier"][0]["status"] == "unavailable"

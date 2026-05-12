@@ -5,10 +5,12 @@ from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.db_utils import run_db
 from brain.app.api.schemas.memories import (
     EdgeRead,
     GraphResponse,
@@ -42,23 +44,23 @@ router = APIRouter(
 
 
 @router.get("/graph", response_model=GraphResponse)
-def get_graph(
+async def get_graph(
     limit: Annotated[int | None, Query(ge=25, le=500)] = None,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         if limit is None:
-            return uow.memories.get_graph_data(
+            return await uow.memories.get_graph_data(
                 context=MemoryVisibilityContext.from_user(user),
             )
-        return uow.memories.get_graph_data(
+        return await uow.memories.get_graph_data(
             limit=limit,
             context=MemoryVisibilityContext.from_user(user),
         )
 
 
 @router.get("/graph-similarity", response_model=SimilarityGraphResponse)
-def get_graph_with_similarity(
+async def get_graph_with_similarity(
     limit: Annotated[int | None, Query(ge=25, le=500)] = None,
     top_k: Annotated[int, Query(ge=1, le=10)] = 5,
     threshold: Annotated[float, Query(ge=0.0, le=1.0)] = 0.40,
@@ -66,20 +68,20 @@ def get_graph_with_similarity(
 ):
     """Return memory graph with pgvector cosine-similarity edges for proximity layout."""
     context = MemoryVisibilityContext.from_user(user)
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         if limit is None:
-            data = uow.memories.get_graph_data(context=context)
+            data = await uow.memories.get_graph_data(context=context)
         else:
-            data = uow.memories.get_graph_data(limit=limit, context=context)
+            data = await uow.memories.get_graph_data(limit=limit, context=context)
         try:
             if limit is None:
-                similarity_edges = uow.memories.get_similarity_edges(
+                similarity_edges = await uow.memories.get_similarity_edges(
                     top_k=top_k,
                     threshold=threshold,
                     context=context,
                 )
             else:
-                similarity_edges = uow.memories.get_similarity_edges(
+                similarity_edges = await uow.memories.get_similarity_edges(
                     limit=limit,
                     top_k=top_k,
                     threshold=threshold,
@@ -92,24 +94,24 @@ def get_graph_with_similarity(
 
 
 @router.get("/search", response_model=list[MemoryRead])
-def search_memories(
+async def search_memories(
     q: str,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    with UnitOfWork() as uow:
-        return uow.memories.search_visible(q, MemoryVisibilityContext.from_user(user))
+    async with UnitOfWork() as uow:
+        return await uow.memories.search_visible(q, MemoryVisibilityContext.from_user(user))
 
 
 @router.get("/stale", response_model=list[MemoryRead])
-def list_stale(
+async def list_stale(
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    with UnitOfWork() as uow:
-        return uow.memories.list_stale_visible(MemoryVisibilityContext.from_user(user))
+    async with UnitOfWork() as uow:
+        return await uow.memories.list_stale_visible(MemoryVisibilityContext.from_user(user))
 
 
 @router.get("/org-memories", response_model=list[MemoryRead])
-def list_org_memories(
+async def list_org_memories(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     user: dict[str, Any] = Depends(get_current_user),
@@ -119,8 +121,8 @@ def list_org_memories(
     if not org_id:
         return []
     context = MemoryVisibilityContext.from_user(user)
-    with UnitOfWork() as uow:
-        return uow.memories.list_org_memories(context, limit=limit, offset=offset)
+    async with UnitOfWork() as uow:
+        return await uow.memories.list_org_memories(context, limit=limit, offset=offset)
 
 
 @router.get("/duplicate-candidates")
@@ -138,27 +140,27 @@ def list_duplicate_candidates(
 
 
 @router.get("/{memory_id}", response_model=MemoryRead)
-def get_memory(
+async def get_memory(
     memory_id: int,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         try:
-            return uow.memories.get_or_raise_visible(memory_id, MemoryVisibilityContext.from_user(user))
+            return await uow.memories.get_or_raise_visible(memory_id, MemoryVisibilityContext.from_user(user))
         except LookupError:
             raise HTTPException(status_code=404, detail="Memory not found")
 
 
 @router.get("/{memory_id}/truth", response_model=MemoryTruthSnapshot)
-def get_memory_truth(
+async def get_memory_truth(
     memory_id: int,
     include_records: bool = Query(False),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return a read-only truth-maintenance snapshot for a memory."""
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         try:
-            return uow.memories.get_truth_snapshot(
+            return await uow.memories.get_truth_snapshot(
                 memory_id,
                 include_records=include_records,
                 context=MemoryVisibilityContext.from_user(user),
@@ -168,56 +170,59 @@ def get_memory_truth(
 
 
 @router.post("/{memory_id}/truth/review", response_model=MemoryTruthSnapshot)
-def review_memory_truth(
+async def review_memory_truth(
     memory_id: int,
     body: MemoryTruthReviewRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Apply a human truth-maintenance review with required evidence/confidence."""
-    repo = MemoryRepository(db)
-    context = MemoryVisibilityContext.from_user(user)
-    try:
-        mem = repo.get_or_raise_visible(memory_id, context)
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Memory not found")
+    def _review(sync_db: Session):
+        repo = MemoryRepository(sync_db)
+        context = MemoryVisibilityContext.from_user(user)
+        try:
+            mem = repo.get_or_raise_visible(memory_id, context)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Memory not found")
 
-    contradictions = repo.list_contradictions(memory_id)
-    open_contradiction_count = sum(
-        1
-        for contradiction in contradictions
-        if str(getattr(contradiction, "status", "open")).lower()
-        not in {"resolved", "closed", "dismissed", "accepted"}
-    )
-    try:
-        _apply_truth_review_action(
-            db,
-            mem,
-            body,
-            reviewer_id=user.get("id"),
-            open_contradiction_count=open_contradiction_count,
+        contradictions = repo.list_contradictions(memory_id)
+        open_contradiction_count = sum(
+            1
+            for contradiction in contradictions
+            if str(getattr(contradiction, "status", "open")).lower()
+            not in {"resolved", "closed", "dismissed", "accepted"}
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        try:
+            _apply_truth_review_action(
+                sync_db,
+                mem,
+                body,
+                reviewer_id=user.get("id"),
+                open_contradiction_count=open_contradiction_count,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
-    db.flush()
-    return repo.get_truth_snapshot(memory_id, include_records=True, context=context)
+        sync_db.flush()
+        return repo.get_truth_snapshot(memory_id, include_records=True, context=context)
+
+    return await run_db(db, _review)
 
 
 @router.get("/{memory_id}/neighborhood", response_model=list[EdgeRead])
-def get_neighborhood(
+async def get_neighborhood(
     memory_id: int,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         try:
-            return uow.edges.neighborhood(memory_id, context=MemoryVisibilityContext.from_user(user))
+            return await uow.edges.neighborhood(memory_id, context=MemoryVisibilityContext.from_user(user))
         except LookupError:
             raise HTTPException(status_code=404, detail="Memory not found")
 
 
 @router.post("/", response_model=MemoryRead, status_code=201)
-def create_memory(
+async def create_memory(
     body: MemoryCreate,
     user: dict[str, Any] = Depends(get_current_user),
 ):
@@ -229,27 +234,27 @@ def create_memory(
         confidence=0.5,
         evidence={"route": "POST /api/memory"},
     )
-    with UnitOfWork() as uow:
-        result = uow.memories.insert_memory(
+    async with UnitOfWork() as uow:
+        result = await uow.memories.insert_memory(
             content=body.content,
             memory_type=body.memory_type,
             tags=body.tags or [],
             context=context,
             auto_edge=False,
         )
-        uow.session.flush()
-        return uow.memories.get(result["id"])
+        await uow.session.flush()
+        return await uow.memories.get(result["id"])
 
 
 @router.patch("/{memory_id}", response_model=MemoryRead)
-def update_memory(
+async def update_memory(
     memory_id: int,
     body: MemoryUpdate,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         try:
-            mem = uow.memories.get_or_raise_visible(memory_id, MemoryVisibilityContext.from_user(user))
+            mem = await uow.memories.get_or_raise_visible(memory_id, MemoryVisibilityContext.from_user(user))
         except LookupError:
             raise HTTPException(status_code=404, detail="Memory not found")
         updates = body.model_dump(exclude_unset=True)
@@ -257,7 +262,7 @@ def update_memory(
             updates["visibility"] = _validate_visibility_update(updates["visibility"], user)
         for key, value in updates.items():
             setattr(mem, key, value)
-        uow.session.flush()
+        await uow.session.flush()
         return mem
 
 
@@ -265,14 +270,14 @@ def update_memory(
 
 
 @router.post("/{memory_id}/confirm", response_model=MemoryRead)
-def confirm_memory(
+async def confirm_memory(
     memory_id: int,
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Increment salience by 1 and add 'confirmed' tag."""
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         try:
-            mem = uow.memories.get_or_raise_visible(memory_id, MemoryVisibilityContext.from_user(user))
+            mem = await uow.memories.get_or_raise_visible(memory_id, MemoryVisibilityContext.from_user(user))
         except LookupError:
             raise HTTPException(status_code=404, detail="Memory not found")
         mem.salience = min((mem.salience or 0) + 1, 10)
@@ -280,43 +285,43 @@ def confirm_memory(
         if "confirmed" not in tags:
             tags.append("confirmed")
         mem.tags = tags
-        uow.session.flush()
+        await uow.session.flush()
         return mem
 
 
 @router.post("/{memory_id}/flag", response_model=MemoryRead)
-def flag_memory(
+async def flag_memory(
     memory_id: int,
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Add 'needs_review' tag to the memory."""
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         try:
-            mem = uow.memories.get_or_raise_visible(memory_id, MemoryVisibilityContext.from_user(user))
+            mem = await uow.memories.get_or_raise_visible(memory_id, MemoryVisibilityContext.from_user(user))
         except LookupError:
             raise HTTPException(status_code=404, detail="Memory not found")
         tags = list(mem.tags or [])
         if "needs_review" not in tags:
             tags.append("needs_review")
         mem.tags = tags
-        uow.session.flush()
+        await uow.session.flush()
         return mem
 
 
 @router.post("/{memory_id}/promote", response_model=MemoryRead)
-def promote_memory(
+async def promote_memory(
     memory_id: int,
     body: MemoryPromote,
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Change visibility of a memory (e.g. private -> team -> org)."""
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         try:
-            mem = uow.memories.get_or_raise_visible(memory_id, MemoryVisibilityContext.from_user(user))
+            mem = await uow.memories.get_or_raise_visible(memory_id, MemoryVisibilityContext.from_user(user))
         except LookupError:
             raise HTTPException(status_code=404, detail="Memory not found")
         mem.visibility = _validate_visibility_update(body.visibility, user)
-        uow.session.flush()
+        await uow.session.flush()
         return mem
 
 

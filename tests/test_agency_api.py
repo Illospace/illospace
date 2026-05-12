@@ -23,10 +23,15 @@ from brain.platform.db.models.agency import (
 )
 from brain.platform.db.models.scheduler import SchedulerJob, SchedulerLease, SchedulerRun, SchedulerRunStep
 
+ORG_1_ID = "00000000-0000-0000-0000-000000000001"
+OWNER_ID = "10000000-0000-0000-0000-000000000001"
+MEMBER_ID = "10000000-0000-0000-0000-000000000002"
+
 
 def _patch_sqlite_for_pg_types():
     if not hasattr(SQLiteTypeCompiler, "visit_JSONB"):
         SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "TEXT"
 
     original = SQLiteDDLCompiler.get_column_default_string
 
@@ -72,9 +77,13 @@ def _build_session() -> Session:
 
 
 def _override_db(session: Session):
-    def _db() -> Generator[Session, None, None]:
+    class _AsyncSession:
+        async def run_sync(self, fn):
+            return fn(session)
+
+    async def _db() -> Generator[_AsyncSession, None, None]:
         try:
-            yield session
+            yield _AsyncSession()
             session.commit()
         except Exception:
             session.rollback()
@@ -85,8 +94,8 @@ def _override_db(session: Session):
 
 def _owner_user() -> dict[str, object]:
     return {
-        "id": "owner-1",
-        "org_id": "org-1",
+        "id": OWNER_ID,
+        "org_id": ORG_1_ID,
         "role": "owner",
         "principal_type": "human",
         "permissions": ["scheduler:manage"],
@@ -95,8 +104,8 @@ def _owner_user() -> dict[str, object]:
 
 def _member_user() -> dict[str, object]:
     return {
-        "id": "member-1",
-        "org_id": "org-1",
+        "id": MEMBER_ID,
+        "org_id": ORG_1_ID,
         "role": "member",
         "principal_type": "human",
         "permissions": [],
@@ -107,7 +116,7 @@ def _seed_candidate(session: Session) -> AgencyCandidate:
     now = datetime.now(timezone.utc)
     budget = AgencyBudget(
         scope_type="org",
-        scope_id="org-1",
+        scope_id=ORG_1_ID,
         drive_type="curiosity",
         window_start=now - timedelta(days=1),
         window_end=now + timedelta(days=1),
@@ -129,7 +138,7 @@ def _seed_candidate(session: Session) -> AgencyCandidate:
         drive_type="curiosity",
         source_type="curiosity_reading",
         source_refs=[{"kind": "reading_source", "url": "https://example.com"}],
-        org_id="org-1",
+        org_id=ORG_1_ID,
         proposal_kind="curiosity_followup",
         proposed_run_payload={"title": "Review this"},
         risk_class="low",

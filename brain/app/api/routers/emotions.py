@@ -5,10 +5,12 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.db_utils import run_db
 from brain.platform.db.repositories.emotions import EmotionRepository
 
 router = APIRouter(
@@ -30,10 +32,9 @@ def _serialize_snapshot(s: Any) -> dict:
     }
 
 
-@router.get("/")
 def list_emotions(
-    db: Session = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
+    db: Session,
+    user: dict[str, Any] | None = None,
 ):
     repo = EmotionRepository(db)
     snapshots = repo.list_recent(limit=500)
@@ -73,3 +74,13 @@ def list_emotions(
         "daily": daily_list,
         "distribution": distribution,
     }
+
+
+@router.get("/")
+async def list_emotions_route(
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    return await run_db(db, lambda sync_db: list_emotions(sync_db, user=user))
+
+    return await run_db(db, _list)

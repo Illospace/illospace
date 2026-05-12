@@ -328,6 +328,8 @@ exit 0
 set -euo pipefail
 cd "$1"
 source "$2"
+mkdir -p "$LOCAL_POSTGRES_RUNTIME_DIR"
+printf '55432\n' > "$LOCAL_POSTGRES_PORT_FILE"
 ensure_managed_postgres_db illo illo illo_memory
 test "$DB_HOST" = "127.0.0.1"
 test -n "$DB_PORT"

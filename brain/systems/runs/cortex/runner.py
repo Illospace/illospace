@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,7 +30,7 @@ from brain.systems.cortex.events import publish_live_safe, publish_safe
 from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaStateLog
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,16 @@ _last_stale_reconcile_monotonic = 0.0
 _PROCESS_ACTIVE_STATUS_VALUES = tuple(
     status.value for status in (RunStatus.STARTING, RunStatus.RUNNING, RunStatus.VERIFYING)
 )
+
+
+def _run_db(fn, /, *args: Any, **kwargs: Any):
+    """Run sync ORM worker code through the asyncpg-backed UnitOfWork bridge."""
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(run_sync_with_unit_of_work(fn, *args, **kwargs))
+    raise RuntimeError("Cortex runner DB bridge cannot be called from a running event loop")
 
 
 def _coerce_concurrency(value: Any, *, default: int | None = None) -> int | None:
@@ -146,8 +157,11 @@ def _live_stream_sink(session):
 
 
 def _drain_steering_in_isolated_uow(run_id: int):
-    with UnitOfWork() as uow:
-        return AgentRunStore(uow.session).drain_steering(int(run_id))
+    def _drain():
+        with UnitOfWork() as uow:
+            return AgentRunStore(uow.session).drain_steering(int(run_id))
+
+    return _run_db(_drain)
 
 
 def _engine_for_session(session) -> AgentRunEngine:
@@ -246,13 +260,16 @@ def _record_project_activity(session, run_id: int, label: str, **payload: Any) -
 
 def _heartbeat_run_once(run_id: int, *, token: str, reason: str) -> bool:
     try:
-        with UnitOfWork() as uow:
-            return AgentRunStore(uow.session).heartbeat_run(
-                int(run_id),
-                token=token,
-                reason=reason,
-                min_interval_seconds=0,
-            )
+        def _heartbeat():
+            with UnitOfWork() as uow:
+                return AgentRunStore(uow.session).heartbeat_run(
+                    int(run_id),
+                    token=token,
+                    reason=reason,
+                    min_interval_seconds=0,
+                )
+
+        return _run_db(_heartbeat)
     except Exception:
         logger.debug("agent_run_heartbeat_failed", extra={"run_id": run_id}, exc_info=True)
         return False
@@ -398,54 +415,60 @@ def reap_stale_active_runs(
     status_payloads: list[dict[str, Any]] = []
     reaped = 0
 
-    with UnitOfWork() as uow:
-        rows = list(
-            uow.session.scalars(
-                select(AgentRunRow)
-                .where(
-                    AgentRunRow.status.in_(_PROCESS_ACTIVE_STATUS_VALUES),
-                    func.coalesce(AgentRunRow.updated_at, AgentRunRow.started_at, AgentRunRow.created_at) <= cutoff,
-                )
-                .order_by(func.coalesce(AgentRunRow.updated_at, AgentRunRow.started_at, AgentRunRow.created_at).asc())
-                .limit(max(1, int(limit)))
-            ).all()
-        )
-        store = AgentRunStore(uow.session)
-        latest_event_by_run, latest_event_by_root = _latest_event_times_for_rows(uow.session, rows)
-        active_root_run_ids = _active_root_run_ids_for_children(uow.session, rows)
-        for row in rows:
-            if str(row.status or "") not in _PROCESS_ACTIVE_STATUS_VALUES:
-                continue
-            root_run_id = int(row.root_run_id or row.id)
-            if row.parent_run_id is not None and root_run_id in active_root_run_ids:
-                continue
-            last_liveness_at = _run_liveness_at(
-                row,
-                latest_event_by_run=latest_event_by_run,
-                latest_event_by_root=latest_event_by_root,
+    def _reap():
+        local_status_payloads: list[dict[str, Any]] = []
+        local_reaped = 0
+        with UnitOfWork() as uow:
+            rows = list(
+                uow.session.scalars(
+                    select(AgentRunRow)
+                    .where(
+                        AgentRunRow.status.in_(_PROCESS_ACTIVE_STATUS_VALUES),
+                        func.coalesce(AgentRunRow.updated_at, AgentRunRow.started_at, AgentRunRow.created_at) <= cutoff,
+                    )
+                    .order_by(func.coalesce(AgentRunRow.updated_at, AgentRunRow.started_at, AgentRunRow.created_at).asc())
+                    .limit(max(1, int(limit)))
+                ).all()
             )
-            if last_liveness_at is not None and last_liveness_at > cutoff:
-                continue
-            metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
-            heartbeat = metadata.get("runner_heartbeat")
-            heartbeat = dict(heartbeat) if isinstance(heartbeat, dict) else {}
-            payload = {
-                "error": "runner heartbeat stale",
-                "reason": "runner_heartbeat_stale",
-                "stale_after_seconds": int(stale_after_seconds),
-                "last_heartbeat_at": heartbeat.get("at"),
-                "last_heartbeat_reason": heartbeat.get("reason"),
-                "last_liveness_at": last_liveness_at.isoformat() if last_liveness_at else None,
-                "last_run_update_at": row.updated_at.isoformat() if row.updated_at else None,
-            }
-            event = run_event(int(row.id), "run.failed", payload, root_run_id=row.root_run_id)
-            event_row = store.append_event(event)
-            store.set_status(int(row.id), RunStatus.FAILED, reason="runner_heartbeat_stale")
-            _project_live_event(uow.session, event.event_type, _event_stream_payload(event, event_row, row))
-            status_payload = _settle_idea_for_terminal_root_run(uow.session, int(row.id))
-            if status_payload:
-                status_payloads.append(status_payload)
-            reaped += 1
+            store = AgentRunStore(uow.session)
+            latest_event_by_run, latest_event_by_root = _latest_event_times_for_rows(uow.session, rows)
+            active_root_run_ids = _active_root_run_ids_for_children(uow.session, rows)
+            for row in rows:
+                if str(row.status or "") not in _PROCESS_ACTIVE_STATUS_VALUES:
+                    continue
+                root_run_id = int(row.root_run_id or row.id)
+                if row.parent_run_id is not None and root_run_id in active_root_run_ids:
+                    continue
+                last_liveness_at = _run_liveness_at(
+                    row,
+                    latest_event_by_run=latest_event_by_run,
+                    latest_event_by_root=latest_event_by_root,
+                )
+                if last_liveness_at is not None and last_liveness_at > cutoff:
+                    continue
+                metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
+                heartbeat = metadata.get("runner_heartbeat")
+                heartbeat = dict(heartbeat) if isinstance(heartbeat, dict) else {}
+                payload = {
+                    "error": "runner heartbeat stale",
+                    "reason": "runner_heartbeat_stale",
+                    "stale_after_seconds": int(stale_after_seconds),
+                    "last_heartbeat_at": heartbeat.get("at"),
+                    "last_heartbeat_reason": heartbeat.get("reason"),
+                    "last_liveness_at": last_liveness_at.isoformat() if last_liveness_at else None,
+                    "last_run_update_at": row.updated_at.isoformat() if row.updated_at else None,
+                }
+                event = run_event(int(row.id), "run.failed", payload, root_run_id=row.root_run_id)
+                event_row = store.append_event(event)
+                store.set_status(int(row.id), RunStatus.FAILED, reason="runner_heartbeat_stale")
+                _project_live_event(uow.session, event.event_type, _event_stream_payload(event, event_row, row))
+                status_payload = _settle_idea_for_terminal_root_run(uow.session, int(row.id))
+                if status_payload:
+                    local_status_payloads.append(status_payload)
+                local_reaped += 1
+        return local_status_payloads, local_reaped
+
+    status_payloads, reaped = _run_db(_reap)
 
     for payload in status_payloads:
         publish_safe("status_change", payload)
@@ -535,8 +558,11 @@ def _mark_run_failed_after_runner_error(
 
 
 def run_queued_once(*, limit: int = 1) -> int:
-    with UnitOfWork() as uow:
-        ids = AgentRunStore(uow.session).claim_next_run_ids(limit=limit)
+    def _claim():
+        with UnitOfWork() as uow:
+            return AgentRunStore(uow.session).claim_next_run_ids(limit=limit)
+
+    ids = _run_db(_claim)
     processed = 0
     for run_id in ids:
         try:
@@ -679,11 +705,14 @@ def stop_runner(*, drain_timeout_seconds: float | None = 2.0) -> None:
 
 
 def queue_status(*, consumer_running: bool | None = None, org_id: str | None = None) -> dict[str, Any]:
-    with UnitOfWork() as uow:
-        stmt = select(AgentRunRow.status, func.count()).group_by(AgentRunRow.status)
-        if org_id:
-            stmt = stmt.where(AgentRunRow.org_id == org_id)
-        counts = {str(status): int(count) for status, count in uow.session.execute(stmt).all()}
+    def _counts():
+        with UnitOfWork() as uow:
+            stmt = select(AgentRunRow.status, func.count()).group_by(AgentRunRow.status)
+            if org_id:
+                stmt = stmt.where(AgentRunRow.org_id == org_id)
+            return {str(status): int(count) for status, count in uow.session.execute(stmt).all()}
+
+    counts = _run_db(_counts)
     active_threads = _active_runner_threads()
     return {
         "runner_running": bool(active_threads),

@@ -5,15 +5,17 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
-from brain.app.api.deps import rate_limit
+from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.db_utils import run_db
 from brain.app.triggers.adapters.internal import build_cortex_notify_trigger
 from brain.app.triggers.router import route_trigger
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.idea import Idea
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
 from brain.systems.services.runtime_introspection import get_provider_auth_status
 from brain.systems.runs.status import RunStatus
@@ -132,7 +134,10 @@ def _queue_intro_display_title(
 
 
 @router.post("/runtime-ready-intro-draft")
-def runtime_ready_intro_draft(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
+async def runtime_ready_intro_draft(
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     """Return the visible composer draft for the runtime-ready intro flow."""
     user_id = str(user.get("id") or "")
     if not user_id:
@@ -140,8 +145,8 @@ def runtime_ready_intro_draft(user: dict[str, Any] = Depends(get_current_user)) 
     org_id = require_org_context(user)
     _require_personal_openai_connection(user_id=user_id, org_id=org_id)
 
-    with UnitOfWork() as uow:
-        existing = _find_existing_intro(uow.session, org_id=org_id, user_id=user_id)
+    def _draft(sync_db: Session) -> dict[str, Any]:
+        existing = _find_existing_intro(sync_db, org_id=org_id, user_id=user_id)
         return {
             "ok": True,
             "idea_id": str(existing.id) if existing is not None else None,
@@ -152,9 +157,12 @@ def runtime_ready_intro_draft(user: dict[str, Any] = Depends(get_current_user)) 
             "run_metadata": _intro_metadata("visible_composer"),
         }
 
+    return await run_db(db, _draft)
+
 
 @router.post("/runtime-ready-intro")
-def start_runtime_ready_intro(
+async def start_runtime_ready_intro(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
     background_tasks: BackgroundTasks = None,
 ) -> dict[str, Any]:
@@ -165,12 +173,12 @@ def start_runtime_ready_intro(
     org_id = require_org_context(user)
     _require_personal_openai_connection(user_id=user_id, org_id=org_id)
 
-    with UnitOfWork() as uow:
-        existing = _find_existing_intro(uow.session, org_id=org_id, user_id=user_id)
+    def _start(sync_db: Session) -> dict[str, Any]:
+        existing = _find_existing_intro(sync_db, org_id=org_id, user_id=user_id)
         if existing is not None:
-            latest_status = _latest_intro_run_status(uow.session, idea_id=str(existing.id))
+            latest_status = _latest_intro_run_status(sync_db, idea_id=str(existing.id))
             if latest_status not in INTRO_RUN_SETTLED_STATUSES:
-                result = _route_intro_run(uow.session, idea=existing, user=user)
+                result = _route_intro_run(sync_db, idea=existing, user=user)
                 return {
                     "ok": True,
                     "idea_id": str(existing.id),
@@ -203,10 +211,10 @@ def start_runtime_ready_intro(
                 },
             },
         )
-        uow.session.add(idea)
-        uow.session.flush()
+        sync_db.add(idea)
+        sync_db.flush()
 
-        result = _route_intro_run(uow.session, idea=idea, user=user)
+        result = _route_intro_run(sync_db, idea=idea, user=user)
         if background_tasks is not None:
             _queue_intro_display_title(
                 background_tasks,
@@ -224,3 +232,5 @@ def start_runtime_ready_intro(
             "route": result.route,
             "skipped_reason": result.skipped_reason,
         }
+
+    return await run_db(db, _start)

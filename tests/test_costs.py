@@ -8,6 +8,7 @@ Run: pytest tests/test_costs.py -v --tb=short
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -215,7 +216,7 @@ def test_run_breakdown_wraps_legacy_agent_api_calls_table():
     db = MagicMock()
     db.execute.side_effect = SQLAlchemyError("legacy table")
 
-    result = run_breakdown(42, db=db, user={"id": "system"})
+    result = asyncio.run(run_breakdown(42, db=db, user={"id": "system"}))
 
     assert result == {
         "run_id": 42,

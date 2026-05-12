@@ -15,7 +15,7 @@ def mock_session_factory():
     def _factory():
         return session
 
-    with patch("brain.app.api.deps.SessionFactory", _factory):
+    with patch("brain.platform.db.legacy.legacy_session_factory", _factory):
         yield session
 
 
@@ -108,7 +108,7 @@ async def test_list_skills(client, mock_session_factory):
 @pytest.mark.asyncio
 async def test_vault_pin_status(client, mock_session_factory):
     with _vault_user(), \
-         patch("brain.systems.vault.get_pin_status", return_value={
+         patch("brain.systems.vault.async_get_pin_status", return_value={
              "has_pin": False,
              "failed_attempts": 0,
              "locked_until": None,
@@ -122,7 +122,7 @@ async def test_vault_pin_status(client, mock_session_factory):
 async def test_vault_unlock(client, mock_session_factory):
     expires = datetime.now(timezone.utc)
     with _vault_user(), \
-         patch("brain.systems.vault.unlock_vault", return_value=("vault-token", expires)):
+         patch("brain.systems.vault.async_unlock_vault", return_value=("vault-token", expires)):
         resp = await client.post("/api/vault/unlock", json={"pin": "1234"})
     assert resp.status_code == 200
     data = resp.json()
@@ -146,8 +146,8 @@ async def test_vault_list_secrets(client, mock_session_factory):
         "shared_by_name": None,
     }
     with _vault_user(), \
-         patch("brain.systems.vault.has_pin", return_value=False), \
-         patch("brain.systems.vault.list_secrets", return_value=[secret]) as list_secrets:
+         patch("brain.systems.vault.async_has_pin", return_value=False), \
+         patch("brain.systems.vault.async_list_secrets", return_value=[secret]) as list_secrets:
         resp = await client.get("/api/vault/")
     assert resp.status_code == 200
     assert len(resp.json()) == 1

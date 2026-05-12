@@ -58,6 +58,9 @@ def build_scheduler_handoff(
         "payload": {
             "candidate_id": candidate.id,
             "candidate_key": candidate.candidate_key,
+            "user_id": str(candidate.user_id) if candidate.user_id else None,
+            "org_id": str(candidate.org_id) if candidate.org_id else None,
+            "memory_visibility": "org" if candidate.org_id else "private",
             "proposal_kind": candidate.proposal_kind,
             "source_type": candidate.source_type,
             "source_refs": candidate.source_refs,

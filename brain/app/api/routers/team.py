@@ -7,10 +7,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import String, cast, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.db_utils import run_db
 from brain.app.api.schemas.team import CortexColorRead, TeamMemberRead, UserProfileUpdate
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.idea import Idea
@@ -69,8 +71,8 @@ def _profile_value_taken(
 
 
 def list_members_payload(
-    db: Session = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
+    db: Session,
+    user: dict[str, Any],
 ) -> list[TeamMemberRead]:
     org_id = user.get("org_id") or None
     if not org_id and _should_skip_org_lookup(user):
@@ -87,46 +89,50 @@ def list_members_payload(
 
 
 @router.get("/team/members", response_model=list[TeamMemberRead])
-def list_members(
-    db: Session = Depends(get_db),
+async def list_members(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return list_members_payload(db=db, user=user)
+    return await run_db(db, lambda sync_db: list_members_payload(db=sync_db, user=user))
 
 
 @router.get("/team/colors", response_model=list[CortexColorRead])
-def list_cortex_colors(
-    db: Session = Depends(get_db),
+async def list_cortex_colors(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Lightweight endpoint returning team members with their cortex colors.
 
     Used by the frontend to position and color user suns in the solar system view.
     """
-    org_id = user.get("org_id") or None
-    if not org_id and _should_skip_org_lookup(user):
-        return []
-    if not org_id and user.get("id") != "system":
-        from brain.systems.auth.users import get_user_by_id
-        db_user = get_user_by_id(user["id"])
-        org_id = db_user.get("org_id") if db_user else None
-    if not org_id:
-        return []
-    repo = TeamRepository(db)
-    members = repo.list_by_org(org_id)
-    return [
-        CortexColorRead(id=str(m.id), name=m.name, cortex_color=m.color)
-        for m in members
-    ]
+    def _list(sync_db: Session):
+        org_id = user.get("org_id") or None
+        if not org_id and _should_skip_org_lookup(user):
+            return []
+        if not org_id and user.get("id") != "system":
+            from brain.systems.auth.users import get_user_by_id
+            db_user = get_user_by_id(user["id"])
+            org_id = db_user.get("org_id") if db_user else None
+        if not org_id:
+            return []
+        repo = TeamRepository(sync_db)
+        members = repo.list_by_org(org_id)
+        return [
+            CortexColorRead(id=str(m.id), name=m.name, cortex_color=m.color)
+            for m in members
+        ]
+
+    return await run_db(db, _list)
 
 
-@router.get("/team/activity")
 def get_team_activity(
     hours: int = 48,
-    db: Session = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
+    db: Session | None = None,
+    user: dict[str, Any] | None = None,
 ):
     """Recent team activity — skills used, ideas created, etc."""
+    assert db is not None, "get_team_activity requires a sync session"
+    user = user or {}
     org_id = user.get("org_id")
     if not org_id:
         return []
@@ -167,11 +173,28 @@ def get_team_activity(
         return []
 
 
+@router.get("/team/activity")
+async def get_team_activity_route(
+    hours: int = 48,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    return await run_db(db, lambda sync_db: get_team_activity(hours=hours, db=sync_db, user=user))
+
+
 @router.patch("/users/me", response_model=dict)
+async def update_profile_route(
+    body: UserProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    return await run_db(db, lambda sync_db: update_profile(body=body, db=sync_db, user=user))
+
+
 def update_profile(
     body: UserProfileUpdate,
-    db: Session = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
+    db: Session,
+    user: dict[str, Any],
 ):
     repo = TeamRepository(db)
     u = repo.get(user["id"])

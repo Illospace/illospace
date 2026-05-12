@@ -14,10 +14,17 @@ from sqlalchemy.orm import Session
 from brain.platform.db.models.agency import AgencyApproval, AgencyBudget, AgencyBudgetEvent, AgencyCandidate
 from brain.platform.db.models.scheduler import SchedulerJob, SchedulerLease, SchedulerRun, SchedulerRunStep
 
+ORG_1_ID = "00000000-0000-0000-0000-000000000001"
+ORG_2_ID = "00000000-0000-0000-0000-000000000002"
+ORG_3_ID = "00000000-0000-0000-0000-000000000003"
+USER_1_ID = "10000000-0000-0000-0000-000000000001"
+USER_2_ID = "10000000-0000-0000-0000-000000000002"
+
 
 def _patch_sqlite_for_pg_types():
     if not hasattr(SQLiteTypeCompiler, "visit_JSONB"):
         SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "TEXT"
 
     original = SQLiteDDLCompiler.get_column_default_string
 
@@ -132,7 +139,7 @@ def test_budget_gating_blocks_on_exhausted_budget(session, monkeypatch):
 
     budget = AgencyBudget(
         scope_type="org",
-        scope_id="org-1",
+        scope_id=ORG_1_ID,
         drive_type="competence",
         window_start=datetime(2026, 4, 21, tzinfo=timezone.utc),
         window_end=datetime(2026, 4, 22, tzinfo=timezone.utc),
@@ -159,7 +166,7 @@ def test_budget_gating_blocks_on_exhausted_budget(session, monkeypatch):
             source_refs=[{"kind": "agent_runs", "id": 42}],
             proposal_kind="system_proposal",
             proposed_run_payload={"proposal": "improve reviews"},
-            org_id="org-1",
+            org_id=ORG_1_ID,
             target_binding_id=None,
             risk_class="low",
             estimated_tokens=20,
@@ -187,7 +194,7 @@ def test_unresolved_target_and_disabled_auto_exec_block_handoff(session, monkeyp
 
     budget = AgencyBudget(
         scope_type="user",
-        scope_id="user-1",
+        scope_id=USER_1_ID,
         drive_type="integrity",
         window_start=datetime(2026, 4, 21, tzinfo=timezone.utc),
         window_end=datetime(2026, 4, 22, tzinfo=timezone.utc),
@@ -214,7 +221,7 @@ def test_unresolved_target_and_disabled_auto_exec_block_handoff(session, monkeyp
             source_refs=[{"kind": "memory", "id": 7}],
             proposal_kind="implement_proposal",
             proposed_run_payload={"action": "append", "target_file": None},
-            user_id="user-1",
+            user_id=USER_1_ID,
             risk_class="medium",
             reversibility_class="practice_safe",
             target_binding_id=None,
@@ -232,7 +239,7 @@ def test_unresolved_target_and_disabled_auto_exec_block_handoff(session, monkeyp
             source_refs=[{"kind": "memory", "id": 8}],
             proposal_kind="implement_proposal",
             proposed_run_payload={"action": "append", "target_file": "repo/notes.txt"},
-            user_id="user-1",
+            user_id=USER_1_ID,
             risk_class="medium",
             target_binding_id="repo/notes.txt",
         )
@@ -259,7 +266,7 @@ def test_budget_reserve_and_release_tracks_consumption(session, monkeypatch):
 
     budget = AgencyBudget(
         scope_type="org",
-        scope_id="org-1",
+        scope_id=ORG_1_ID,
         drive_type="curiosity",
         window_start=datetime(2026, 4, 21, tzinfo=timezone.utc),
         window_end=datetime(2026, 4, 22, tzinfo=timezone.utc),
@@ -286,7 +293,7 @@ def test_budget_reserve_and_release_tracks_consumption(session, monkeypatch):
             source_refs=[{"kind": "reading_source", "url": "https://example.com"}],
             proposal_kind="curiosity_followup",
             proposed_run_payload={"item_title": "Example", "concrete_application": "Inspect again"},
-            org_id="org-1",
+            org_id=ORG_1_ID,
             risk_class="low",
             reversibility_class="read_only",
             estimated_cost=1.5,
@@ -333,7 +340,7 @@ def test_cooldown_and_dedupe_block_repeated_evaluation(session, monkeypatch):
 
     budget = AgencyBudget(
         scope_type="user",
-        scope_id="user-1",
+        scope_id=USER_1_ID,
         drive_type="prevention",
         window_start=datetime(2026, 4, 21, tzinfo=timezone.utc),
         window_end=datetime(2026, 4, 22, tzinfo=timezone.utc),
@@ -361,7 +368,7 @@ def test_cooldown_and_dedupe_block_repeated_evaluation(session, monkeypatch):
             source_refs=[{"kind": "violation_log", "context": "repeat timeout"}],
             proposal_kind="guardian_rule",
             proposed_run_payload={"context": "repeat timeout", "count": 4},
-            user_id="user-1",
+            user_id=USER_1_ID,
             risk_class="low",
             suppression_until=suppression_until,
         )
@@ -371,7 +378,7 @@ def test_cooldown_and_dedupe_block_repeated_evaluation(session, monkeypatch):
             source_refs=[{"kind": "violation_log", "context": "repeat timeout"}],
             proposal_kind="guardian_rule",
             proposed_run_payload={"context": "repeat timeout", "count": 4},
-            user_id="user-1",
+            user_id=USER_1_ID,
             risk_class="low",
             suppression_until=suppression_until,
         )
@@ -397,7 +404,7 @@ def test_safe_candidate_materializes_scheduler_handoff(session, monkeypatch):
 
     budget = AgencyBudget(
         scope_type="org",
-        scope_id="org-2",
+        scope_id=ORG_2_ID,
         drive_type="curiosity",
         window_start=datetime(2026, 4, 21, tzinfo=timezone.utc),
         window_end=datetime(2026, 4, 22, tzinfo=timezone.utc),
@@ -429,7 +436,7 @@ def test_safe_candidate_materializes_scheduler_handoff(session, monkeypatch):
                 "concrete_application": "Review the pattern",
                 "worth_deep_dive": True,
             },
-            org_id="org-2",
+            org_id=ORG_2_ID,
             risk_class="low",
             reversibility_class="read_only",
             estimated_cost=0.2,
@@ -474,7 +481,7 @@ def test_repo_local_candidate_stays_recommendation_only_when_auto_exec_not_allow
 
     budget = AgencyBudget(
         scope_type="org",
-        scope_id="org-3",
+        scope_id=ORG_3_ID,
         drive_type="integrity",
         window_start=datetime(2026, 4, 21, tzinfo=timezone.utc),
         window_end=datetime(2026, 4, 22, tzinfo=timezone.utc),
@@ -501,7 +508,7 @@ def test_repo_local_candidate_stays_recommendation_only_when_auto_exec_not_allow
             source_refs=[{"kind": "memory", "id": 99}],
             proposal_kind="implement_proposal",
             proposed_run_payload={"action": "append", "target_file": "repo/notes.txt"},
-            org_id="org-3",
+            org_id=ORG_3_ID,
             target_binding_id="repo/notes.txt",
             risk_class="medium",
             reversibility_class="repo_local",
@@ -556,7 +563,7 @@ def test_unresolved_target_blocks_without_scheduler_handoff(session, monkeypatch
             source_refs=[{"kind": "memory", "id": 7}],
             proposal_kind="implement_proposal",
             proposed_run_payload={"action": "append", "target_file": None},
-            user_id="user-2",
+            user_id=USER_2_ID,
             risk_class="medium",
             reversibility_class="practice_safe",
             target_binding_id=None,

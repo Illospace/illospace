@@ -146,7 +146,7 @@ async def test_member_cannot_use_privileged_vault_surfaces(client, method, url, 
     c, app = client
     _act_as(app, MEMBER)
 
-    with patch("brain.systems.vault.has_pin", return_value=False):
+    with patch("brain.systems.vault.async_has_pin", return_value=False):
         response = await c.request(method, url, json=body)
 
     assert response.status_code == 403
@@ -157,8 +157,8 @@ async def test_personal_vault_crud_remains_user_owned(client):
     c, app = client
     _act_as(app, MEMBER)
 
-    with patch("brain.systems.vault.has_pin", return_value=False), \
-         patch("brain.systems.vault.list_secrets", return_value=[]) as list_secrets:
+    with patch("brain.systems.vault.async_has_pin", return_value=False), \
+         patch("brain.systems.vault.async_list_secrets", return_value=[]) as list_secrets:
         response = await c.get("/api/vault/")
 
     assert response.status_code == 200
@@ -252,8 +252,8 @@ async def test_explicit_vault_share_permission_can_share(client):
     c, app = client
     _act_as(app, {**MEMBER, "permissions": [PERMISSION_VAULT_SHARE]})
 
-    with patch("brain.systems.vault.has_pin", return_value=False), \
-         patch("brain.systems.vault.share_secret", return_value={"id": 7}) as share:
+    with patch("brain.systems.vault.async_has_pin", return_value=False), \
+         patch("brain.systems.vault.async_share_secret", return_value={"id": 7}) as share:
         response = await c.post("/api/vault/1/share", json={"shared_with_user_id": "user-2"})
 
     assert response.status_code == 200
