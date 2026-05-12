@@ -420,7 +420,7 @@
 {#if activeTab === 'activity'}
   <div class="activity-trace-toolbar">
     <div class="activity-trace-copy">
-      <div class="activity-trace-title">Conversation trace</div>
+      <div class="activity-trace-title">Whole conversation trace</div>
       {#if threadTraceSaved}
         <div class="activity-trace-note">
           {threadTraceSaved.filename || 'Trace zip'}
@@ -431,7 +431,7 @@
       {:else if threadTraceError}
         <div class="activity-trace-note activity-trace-note-error">{threadTraceError}</div>
       {:else}
-        <div class="activity-trace-note">Thread transcript, runs, tools, and artifacts</div>
+        <div class="activity-trace-note">Messages, runs, tools, and artifacts</div>
       {/if}
     </div>
     <button
@@ -440,7 +440,7 @@
       disabled={!idea?.id || threadTraceSaving}
       onclick={downloadThreadTrace}
     >
-      {threadTraceSaving ? 'Preparing' : threadTraceSaved ? 'Download again' : 'Download trace'}
+      {threadTraceSaving ? 'Preparing' : threadTraceSaved ? 'Download again' : 'Download conversation trace'}
     </button>
   </div>
 

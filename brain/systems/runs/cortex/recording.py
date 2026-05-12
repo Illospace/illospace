@@ -94,7 +94,7 @@ AGENT_TRACE_EXPORT_SCHEMA_VERSION = 1
 TRACE_MAX_MESSAGES = 40
 TRACE_MAX_EVENTS = 300
 TRACE_MAX_ARTIFACTS = 60
-THREAD_TRACE_MAX_MESSAGES = 500
+THREAD_TRACE_MAX_MESSAGES = None
 THREAD_TRACE_MAX_RUNS = 100
 THREAD_TRACE_MAX_EVENTS = 1200
 THREAD_TRACE_MAX_ARTIFACTS = 240
@@ -170,7 +170,7 @@ def build_thread_trace_snapshot(
     idea_id: str,
     *,
     saved_by: str | None = None,
-    max_messages: int = THREAD_TRACE_MAX_MESSAGES,
+    max_messages: int | None = THREAD_TRACE_MAX_MESSAGES,
     max_runs: int = THREAD_TRACE_MAX_RUNS,
     max_events: int = THREAD_TRACE_MAX_EVENTS,
     max_artifacts: int = THREAD_TRACE_MAX_ARTIFACTS,
@@ -192,6 +192,7 @@ def build_thread_trace_snapshot(
         "storage_policy": {
             "mode": "bounded_thread_snapshot",
             "max_messages": max_messages,
+            "messages": "all_thread_messages" if max_messages is None else "latest_thread_messages",
             "max_runs": max_runs,
             "max_events": max_events,
             "max_artifacts": max_artifacts,
@@ -326,15 +327,21 @@ def _trace_messages(session, run: AgentRunRow, *, max_messages: int) -> list[dic
     return _trace_thread_messages(session, str(run.thread_id), max_messages=max_messages)
 
 
-def _trace_thread_messages(session, idea_id: str, *, max_messages: int) -> list[dict[str, Any]]:
-    rows = session.scalars(
-        select(IdeaThread)
-        .where(IdeaThread.idea_id == str(idea_id))
-        .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
-        .limit(max_messages)
-    ).all()
+def _trace_thread_messages(session, idea_id: str, *, max_messages: int | None) -> list[dict[str, Any]]:
+    query = select(IdeaThread).where(IdeaThread.idea_id == str(idea_id))
+    if max_messages is None:
+        rows = session.scalars(
+            query.order_by(IdeaThread.created_at.asc(), IdeaThread.id.asc())
+        ).all()
+    else:
+        limited_rows = session.scalars(
+            query
+            .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
+            .limit(max_messages)
+        ).all()
+        rows = list(reversed(limited_rows))
     messages = []
-    for row in reversed(rows):
+    for row in rows:
         metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
         messages.append(_cap_jsonable({
             "id": row.id,

@@ -174,7 +174,7 @@ def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
     session.get.side_effect = lambda model, key: {42: run, 43: child}.get(key) if model is AgentRunRow else None
     session.scalars.side_effect = [
         _result([run, child]),
-        _result([second_message, first_message]),
+        _result([first_message, second_message]),
         _result([event]),
         _result([artifact]),
     ]
@@ -183,6 +183,8 @@ def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
 
     assert snapshot["export_scope"] == "thread"
     assert snapshot["trace_id"] == "thread:idea-1"
+    assert snapshot["storage_policy"]["messages"] == "all_thread_messages"
+    assert snapshot["thread"]["message_limit"] is None
     assert snapshot["thread"]["idea_id"] == "idea-1"
     assert [message["id"] for message in snapshot["thread"]["messages"]] == [10, 11]
     assert [run["run_id"] for run in snapshot["runs"]] == [42, 43]
