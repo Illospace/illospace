@@ -21,6 +21,7 @@ from brain.systems.runs.cortex.recording import (
     agent_trace_export_filename,
     build_agent_trace_snapshot,
     build_agent_trace_export_zip,
+    build_thread_trace_snapshot,
 )
 from brain.systems.runs.cortex.read_models import (
     serialize_active_runs,
@@ -183,6 +184,27 @@ def download_run_trace_export(run_id: int, user: dict[str, Any] = Depends(get_cu
         snapshot = build_agent_trace_snapshot(
             uow.session,
             run,
+            saved_by=str(user.get("id")) if user.get("id") else None,
+        )
+        archive = build_agent_trace_export_zip(snapshot)
+        filename = agent_trace_export_filename(snapshot)
+        return Response(
+            content=archive,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Trace-Id": str(snapshot.get("trace_id") or ""),
+            },
+        )
+
+
+@router.post("/ideas/{idea_id}/trace-export.zip")
+def download_thread_trace_export(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    with UnitOfWork() as uow:
+        _require_idea_for_run_history(uow.session, idea_id, user)
+        snapshot = build_thread_trace_snapshot(
+            uow.session,
+            idea_id,
             saved_by=str(user.get("id")) if user.get("id") else None,
         )
         archive = build_agent_trace_export_zip(snapshot)

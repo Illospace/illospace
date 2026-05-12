@@ -5,7 +5,7 @@
     activityTimeline,
     auditApply,
     auditEval,
-    downloadRunTraceZip,
+    downloadThreadTraceZip,
     getIdea,
     ideaAudit,
     ideaAuditAnalysisResult,
@@ -24,8 +24,6 @@
     meta: string[];
     error?: string;
     state?: string;
-    runId?: number;
-    canSaveTrace?: boolean;
   };
 
   let {
@@ -59,9 +57,9 @@
   let evalResults = $state<Record<number, any>>({});
   let expandedRuns = $state<Set<number>>(new Set());
   let expandedWorkers = $state<Set<string>>(new Set());
-  let traceSaving = $state<Record<number, boolean>>({});
-  let traceSaved = $state<Record<number, { bytes?: number; filename?: string }>>({});
-  let traceErrors = $state<Record<number, string>>({});
+  let threadTraceSaving = $state(false);
+  let threadTraceSaved = $state<{ bytes?: number; filename?: string } | null>(null);
+  let threadTraceError = $state('');
 
   let pollAborted = $state(false);
   let loadedForIdeaId = $state<string | null>(null);
@@ -97,9 +95,9 @@
     evalResults = {};
     expandedRuns = new Set();
     expandedWorkers = new Set();
-    traceSaving = {};
-    traceSaved = {};
-    traceErrors = {};
+    threadTraceSaving = false;
+    threadTraceSaved = null;
+    threadTraceError = '';
     pollAborted = false;
   }
 
@@ -187,8 +185,6 @@
             meta: activityMeta([dp.skill_used, dp.model_used, duration, tokens, cost]),
             error: dp.error ? cleanActivityText(String(dp.error).slice(0, 200), '') : undefined,
             state: status,
-            runId: Number.isFinite(Number(runId)) ? Number(runId) : undefined,
-            canSaveTrace: Number.isFinite(Number(runId)),
           };
           const trace = Array.isArray(dp.activity_trace) ? dp.activity_trace : [];
           const traceEvents: ActivityListItem[] = trace.map((entry: any, traceIndex: number) => ({
@@ -269,31 +265,29 @@
     cortex.selectIdea(linkedId);
   }
 
-  async function downloadTraceForRun(runId: number) {
-    if (!Number.isFinite(runId) || traceSaving[runId]) return;
-    traceSaving = { ...traceSaving, [runId]: true };
-    traceErrors = { ...traceErrors, [runId]: '' };
+  async function downloadThreadTrace() {
+    const ideaId = idea?.id;
+    if (!ideaId || threadTraceSaving) return;
+    threadTraceSaving = true;
+    threadTraceError = '';
     try {
-      const result = await downloadRunTraceZip(runId);
+      const result = await downloadThreadTraceZip(ideaId);
       const url = URL.createObjectURL(result.blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = result.filename || `illo-trace-run-${runId}.zip`;
+      link.download = result.filename || `illo-thread-trace-${ideaId}.zip`;
       document.body.appendChild(link);
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      traceSaved = {
-        ...traceSaved,
-        [runId]: {
-          bytes: result.bytes,
-          filename: result.filename,
-        },
+      threadTraceSaved = {
+        bytes: result.bytes,
+        filename: result.filename,
       };
     } catch (e: any) {
-      traceErrors = { ...traceErrors, [runId]: e?.detail || 'Trace download failed' };
+      threadTraceError = e?.detail || 'Trace download failed';
     } finally {
-      traceSaving = { ...traceSaving, [runId]: false };
+      threadTraceSaving = false;
     }
   }
 
@@ -424,6 +418,32 @@
 </script>
 
 {#if activeTab === 'activity'}
+  <div class="activity-trace-toolbar">
+    <div class="activity-trace-copy">
+      <div class="activity-trace-title">Conversation trace</div>
+      {#if threadTraceSaved}
+        <div class="activity-trace-note">
+          {threadTraceSaved.filename || 'Trace zip'}
+          {#if threadTraceSaved.bytes}
+            &middot; {threadTraceSaved.bytes.toLocaleString()} bytes
+          {/if}
+        </div>
+      {:else if threadTraceError}
+        <div class="activity-trace-note activity-trace-note-error">{threadTraceError}</div>
+      {:else}
+        <div class="activity-trace-note">Thread transcript, runs, tools, and artifacts</div>
+      {/if}
+    </div>
+    <button
+      type="button"
+      class="activity-trace-button activity-trace-button-primary"
+      disabled={!idea?.id || threadTraceSaving}
+      onclick={downloadThreadTrace}
+    >
+      {threadTraceSaving ? 'Preparing' : threadTraceSaved ? 'Download again' : 'Download trace'}
+    </button>
+  </div>
+
   {#if activityLoading && activityItems.length === 0}
     <div class="tab-empty">Loading activity...</div>
   {:else if activityItems.length === 0}
@@ -431,7 +451,6 @@
   {:else}
     <div class="activity-list" aria-label="Thread activity">
       {#each activityItems as item (item._key)}
-        {@const savedTrace = item.runId ? traceSaved[item.runId] : null}
         <div class="activity-list-item" data-state={item.state}>
           <time class="activity-time" datetime={item.timestamp || undefined}>
             {timeAgo(item.timestamp)}
@@ -439,20 +458,6 @@
           <div class="activity-body">
             <div class="activity-title-row">
               <div class="activity-title">{item.title}</div>
-              {#if item.canSaveTrace && item.runId}
-                <button
-                  type="button"
-                  class="activity-trace-button"
-                  disabled={traceSaving[item.runId]}
-                  onclick={() => item.runId && downloadTraceForRun(item.runId)}
-                >
-                  {traceSaving[item.runId]
-                    ? 'Preparing'
-                    : savedTrace
-                      ? 'Download again'
-                      : 'Download trace'}
-                </button>
-              {/if}
             </div>
             {#if item.meta.length}
               <div class="activity-meta">
@@ -460,17 +465,6 @@
                   <span class="activity-meta-part">{meta}</span>
                 {/each}
               </div>
-            {/if}
-            {#if savedTrace}
-              <div class="activity-trace-note">
-                {savedTrace.filename || 'Trace zip'}
-                {#if savedTrace.bytes}
-                  &middot; {savedTrace.bytes.toLocaleString()} bytes
-                {/if}
-              </div>
-            {/if}
-            {#if item.runId && traceErrors[item.runId]}
-              <div class="activity-error">{traceErrors[item.runId]}</div>
             {/if}
             {#if item.error}
               <div class="activity-error">Error: {item.error}</div>
@@ -995,6 +989,32 @@
 
 
   /* Activity tab */
+  .activity-trace-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    width: 100%;
+    margin-bottom: 10px;
+    padding: 10px 2px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  }
+
+  .activity-trace-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .activity-trace-title {
+    color: rgba(239, 244, 251, 0.92);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
   .activity-list {
     display: flex;
     flex-direction: column;
@@ -1072,6 +1092,15 @@
       transform 150ms ease;
   }
 
+  .activity-trace-button-primary {
+    min-height: 28px;
+    padding: 5px 10px;
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 16%, rgba(255, 255, 255, 0.055));
+    color: rgba(239, 244, 251, 0.92);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
   .activity-trace-button:hover:not(:disabled),
   .activity-trace-button:focus-visible {
     background: color-mix(in srgb, var(--thread-accent, #57CFA0) 14%, transparent);
@@ -1116,6 +1145,10 @@
     font-size: 9px;
     line-height: 1.35;
     overflow-wrap: anywhere;
+  }
+
+  .activity-trace-note-error {
+    color: var(--negative, #D4808F);
   }
 
   .activity-error {
