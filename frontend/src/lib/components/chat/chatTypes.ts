@@ -30,6 +30,7 @@ export type ChatAttachmentItem = {
 export type ChatThreadReference = {
   id: string;
   label?: string;
+  accentColor?: string;
   replyCount?: number;
   unreadCount?: number;
   lastReplyLabel?: string;
