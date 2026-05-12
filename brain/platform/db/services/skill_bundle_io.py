@@ -54,6 +54,7 @@ class SkillBundleIOService:
         review_status: str = "approved",
         trust_level: str | None = None,
         source_kind: str | None = None,
+        auto_bump_conflicting_semver: bool = False,
     ) -> dict[str, Any]:
         """Import a portable bundle and return installed row identifiers."""
         parsed = load_skill_bundle(bundle_dir)
@@ -64,16 +65,39 @@ class SkillBundleIOService:
             bundle_payload["source_kind"] = source_kind
 
         bundle = self._bundles.get_or_create_bundle(**bundle_payload)
-        version_was_existing = (
-            self._bundles.get_version(bundle.id, parsed.manifest.semver) is not None
+        version_payload = parsed.to_db_version_payload(asset_root=str(parsed.root))
+        version_was_existing = False
+        version = (
+            self._bundles.get_version_by_digest(bundle.id, parsed.content_digest)
+            if auto_bump_conflicting_semver
+            else None
         )
-        version = self._bundles.create_version(
-            bundle,
-            **parsed.to_db_version_payload(asset_root=str(parsed.root)),
-            status=review_status,
-            created_by_user_id=installed_by_user_id,
-            validate_manifest=True,
-        )
+        if version is not None:
+            version_was_existing = True
+        else:
+            requested_semver = parsed.manifest.semver
+            existing_semver = self._bundles.get_version(bundle.id, requested_semver)
+            if existing_semver is not None:
+                if existing_semver.content_digest == parsed.content_digest:
+                    version = existing_semver
+                    version_was_existing = True
+                elif auto_bump_conflicting_semver:
+                    version_payload = dict(version_payload)
+                    version_payload["semver"] = self._next_semver(bundle.id, requested_semver)
+                    version_payload["provenance"] = {
+                        **dict(version_payload.get("provenance") or {}),
+                        "declared_semver": requested_semver,
+                        "auto_bumped_from_semver": requested_semver,
+                        "auto_bumped_reason": "semver_digest_conflict",
+                    }
+            if version is None:
+                version = self._bundles.create_version(
+                    bundle,
+                    **version_payload,
+                    status=review_status,
+                    created_by_user_id=installed_by_user_id,
+                    validate_manifest=True,
+                )
         self._add_missing_assets(version.id, parsed)
 
         skill = self._materialize_skill_projection(

@@ -92,6 +92,7 @@ def _handle_manage_workspace_app(
     data_patch: dict | None = None,
     include_archived: bool = False,
     include_prototypes: bool = False,
+    confirm_restore_archived: bool = False,
 ) -> str:
     action = str(action or "").strip().lower()
     if action in {"help", "schema"}:
@@ -106,6 +107,7 @@ def _handle_manage_workspace_app(
     state_key = _optional_text(state_key) or "default"
     include_archived = _optional_bool(include_archived)
     include_prototypes = _optional_bool(include_prototypes)
+    confirm_restore_archived = _optional_bool(confirm_restore_archived)
     anchor_user_id, uuid_error = _optional_uuid(anchor_user_id, "anchor_user_id")
     if uuid_error:
         return json.dumps(uuid_error)
@@ -266,6 +268,16 @@ def _handle_manage_workspace_app(
             if action == "restore":
                 if not app_id and not key:
                     return json.dumps({"error": "restore requires: app_id or key"})
+                if not confirm_restore_archived:
+                    return json.dumps(
+                        {
+                            "error": (
+                                "restore requires confirm_restore_archived=true. "
+                                "Use restore only when the user explicitly asks to restore an archived app; "
+                                "for build/create requests, create a new app or update an active app instead."
+                            )
+                        }
+                    )
                 app = restore_app(uow.session, org_id=org_id, app_id=app_id, key=key)
                 serialized = serialize_app(uow.session, app)
                 uow.commit()

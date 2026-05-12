@@ -643,7 +643,13 @@ def test_manage_workspace_app_publishes_change_after_restore():
     ), patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
         "brain.systems.workspace_apps.events.publish_workspace_app_change"
     ) as publish:
-        result = json.loads(_handle_manage_workspace_app(action="restore", app_id="app-1"))
+        result = json.loads(
+            _handle_manage_workspace_app(
+                action="restore",
+                app_id="app-1",
+                confirm_restore_archived=True,
+            )
+        )
 
     assert result["app"] == serialized
     publish.assert_called_once_with(
@@ -651,3 +657,18 @@ def test_manage_workspace_app_publishes_change_after_restore():
         action="restore",
         app=serialized,
     )
+
+
+def test_manage_workspace_app_restore_requires_explicit_confirmation():
+    from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
+
+    with patch(
+        "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
+        return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
+    ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
+        "brain.systems.workspace_apps.service.restore_app",
+    ) as restore_app:
+        result = json.loads(_handle_manage_workspace_app(action="restore", app_id="app-1"))
+
+    assert "confirm_restore_archived=true" in result["error"]
+    restore_app.assert_not_called()

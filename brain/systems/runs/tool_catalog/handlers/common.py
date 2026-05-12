@@ -208,7 +208,11 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
             "effect": "update a generated workspace app",
         },
         "archive": {"required": ["app_id or key"], "optional": [], "effect": "archive an app"},
-        "restore": {"required": ["app_id or key"], "optional": [], "effect": "restore an archived app"},
+        "restore": {
+            "required": ["app_id or key", "confirm_restore_archived"],
+            "optional": [],
+            "effect": "restore an archived app only when the user explicitly requested restore/reopen",
+        },
         "get_state": {"required": ["app_id"], "optional": ["state_key"], "effect": "read app-local state"},
         "update_state": {"required": ["app_id"], "optional": ["state_key", "data", "data_patch"], "effect": "write app-local state"},
     },
