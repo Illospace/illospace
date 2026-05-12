@@ -137,9 +137,7 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
     project_execution = _prepare_project_execution_env()
 
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", dir=cwd, delete=False, prefix="_illo_script_"
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, prefix="_illo_script_") as f:
             f.write(script)
             script_path = f.name
 

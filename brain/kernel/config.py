@@ -31,7 +31,20 @@ except ImportError:
 # Paths
 # ---------------------------------------------------------------------------
 BRAIN_DIR = Path(__file__).resolve().parents[2]  # repository root
-WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", BRAIN_DIR.parent))
+
+
+def resolve_workspace_root(*, default: Path | None = None) -> Path:
+    """Return the configured agent workspace root.
+
+    `WORKSPACE_ROOT` is the deploy contract. `ILLO_WORKSPACE_ROOT` is accepted
+    as a compatibility fallback for older local shells.
+    """
+
+    configured = os.getenv("WORKSPACE_ROOT") or os.getenv("ILLO_WORKSPACE_ROOT")
+    return Path(configured) if configured else (default or BRAIN_DIR.parent)
+
+
+WORKSPACE_ROOT = resolve_workspace_root()
 
 # Runtime-private agent state. Keep operator prompts, generated journals, logs,
 # uploads, and local brain exports out of the public source tree by default.

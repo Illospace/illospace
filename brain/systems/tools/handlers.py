@@ -37,10 +37,7 @@ logger = logging.getLogger("agent.tools")
 
 # ── Workspace ────────────────────────────────────────────────
 
-WORKSPACE_ROOT = os.environ.get(
-    "ILLO_WORKSPACE_ROOT",
-    str(brain_config.BRAIN_DIR),
-)
+WORKSPACE_ROOT = str(brain_config.resolve_workspace_root(default=brain_config.BRAIN_DIR))
 
 
 def _resolve_path(path: str, workspace_root: str | None = None) -> str:
