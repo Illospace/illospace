@@ -127,8 +127,8 @@
     --nav-brand-mark-background: var(--constellation-system-chrome-active-background, rgba(240, 240, 250, 0.1));
     --nav-brand-mark-color: var(--constellation-system-chrome-active-text, #f0f0fa);
     --nav-rail-background: var(
-      --constellation-system-chrome-background,
-      linear-gradient(180deg, rgba(0, 0, 0, 0.82), rgba(4, 7, 13, 0.72))
+      --constellation-nav-rail-background,
+      var(--constellation-system-chrome-background, linear-gradient(180deg, #000000, #04070d))
     );
     --nav-rail-border: var(--constellation-system-chrome-border, rgba(240, 240, 250, 0.08));
     --nav-item-color: var(--constellation-system-chrome-text, rgba(240, 240, 250, 0.58));
@@ -153,8 +153,8 @@
       0 24px 80px rgba(0, 0, 0, 0.22),
       inset 0 1px 0 rgba(240, 240, 250, 0.08)
     );
-    backdrop-filter: var(--constellation-nav-rail-backdrop-filter, blur(20px));
-    -webkit-backdrop-filter: var(--constellation-nav-rail-backdrop-filter, blur(20px));
+    backdrop-filter: var(--constellation-nav-rail-backdrop-filter, none);
+    -webkit-backdrop-filter: var(--constellation-nav-rail-backdrop-filter, none);
     transition:
       width 220ms ease,
       transform 220ms ease,

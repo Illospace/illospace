@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { cortex } from '$lib/stores/cortex.svelte';
+  import { ConstellationIcon } from '$lib/components/constellation';
   import {
     activityTimeline,
     auditApply,
@@ -62,6 +63,14 @@
   let traceSaving = $state<Record<number, boolean>>({});
   let traceSaved = $state<Record<number, { bytes?: number; filename?: string }>>({});
   let traceErrors = $state<Record<number, string>>({});
+
+  const latestTraceRunId = $derived.by(() => {
+    const item = activityItems.find((candidate) => candidate.canSaveTrace && Number.isFinite(candidate.runId));
+    return item?.runId ?? null;
+  });
+  const latestTraceSaved = $derived(latestTraceRunId ? traceSaved[latestTraceRunId] : null);
+  const latestTraceError = $derived(latestTraceRunId ? traceErrors[latestTraceRunId] : '');
+  const latestTraceIsSaving = $derived(Boolean(latestTraceRunId && traceSaving[latestTraceRunId]));
 
   let pollAborted = $state(false);
   let loadedForIdeaId = $state<string | null>(null);
@@ -429,55 +438,64 @@
   {:else if activityItems.length === 0}
     <div class="tab-empty">No activity yet.</div>
   {:else}
-    <div class="activity-list" aria-label="Thread activity">
-      {#each activityItems as item (item._key)}
-        {@const savedTrace = item.runId ? traceSaved[item.runId] : null}
-        <div class="activity-list-item" data-state={item.state}>
-          <time class="activity-time" datetime={item.timestamp || undefined}>
-            {timeAgo(item.timestamp)}
-          </time>
-          <div class="activity-body">
-            <div class="activity-title-row">
-              <div class="activity-title">{item.title}</div>
-              {#if item.canSaveTrace && item.runId}
-                <button
-                  type="button"
-                  class="activity-trace-button"
-                  disabled={traceSaving[item.runId]}
-                  onclick={() => item.runId && downloadTraceForRun(item.runId)}
-                >
-                  {traceSaving[item.runId]
-                    ? 'Preparing'
-                    : savedTrace
-                      ? 'Download again'
-                      : 'Download trace'}
-                </button>
-              {/if}
-            </div>
-            {#if item.meta.length}
-              <div class="activity-meta">
-                {#each item.meta as meta}
-                  <span class="activity-meta-part">{meta}</span>
-                {/each}
-              </div>
-            {/if}
-            {#if savedTrace}
+    <div class="activity-list-shell" aria-label="Thread activity">
+      {#if latestTraceRunId}
+        <div class="activity-trace-header">
+          <div class="activity-trace-copy">
+            <div class="activity-trace-title">Whole conversation trace</div>
+            <div class="activity-trace-subtitle">Messages, tools, and artifacts</div>
+            {#if latestTraceSaved}
               <div class="activity-trace-note">
-                {savedTrace.filename || 'Trace zip'}
-                {#if savedTrace.bytes}
-                  &middot; {savedTrace.bytes.toLocaleString()} bytes
+                {latestTraceSaved.filename || 'Trace zip'}
+                {#if latestTraceSaved.bytes}
+                  &middot; {latestTraceSaved.bytes.toLocaleString()} bytes
                 {/if}
               </div>
             {/if}
-            {#if item.runId && traceErrors[item.runId]}
-              <div class="activity-error">{traceErrors[item.runId]}</div>
-            {/if}
-            {#if item.error}
-              <div class="activity-error">Error: {item.error}</div>
+            {#if latestTraceError}
+              <div class="activity-error">{latestTraceError}</div>
             {/if}
           </div>
+          <button
+            type="button"
+            class="activity-trace-download-button"
+            disabled={latestTraceIsSaving}
+            onclick={() => latestTraceRunId && downloadTraceForRun(latestTraceRunId)}
+          >
+            <ConstellationIcon name="archive" size={13} stroke={1.8} />
+            <span>
+              {latestTraceIsSaving
+                ? 'Preparing'
+                : latestTraceSaved
+                  ? 'Download again'
+                  : 'Download trace'}
+            </span>
+          </button>
         </div>
-      {/each}
+      {/if}
+
+      <div class="activity-list">
+        {#each activityItems as item (item._key)}
+          <div class="activity-list-item" data-state={item.state}>
+            <time class="activity-time" datetime={item.timestamp || undefined}>
+              {timeAgo(item.timestamp)}
+            </time>
+            <div class="activity-body">
+              <div class="activity-title">{item.title}</div>
+              {#if item.meta.length}
+                <div class="activity-meta">
+                  {#each item.meta as meta}
+                    <span class="activity-meta-part">{meta}</span>
+                  {/each}
+                </div>
+              {/if}
+              {#if item.error}
+                <div class="activity-error">Error: {item.error}</div>
+              {/if}
+            </div>
+          </div>
+        {/each}
+      </div>
     </div>
   {/if}
 {:else if activeTab === 'details'}
@@ -918,6 +936,46 @@
 {/if}
 
 <style>
+  :global(.thread-utility-surface) {
+    --panel-utility-primary-text: rgba(239, 244, 251, 0.9);
+    --panel-utility-primary-hover-text: rgba(243, 247, 255, 0.96);
+    --panel-utility-muted-text: rgba(231, 238, 247, 0.5);
+    --panel-utility-divider-border: rgba(255, 255, 255, 0.06);
+    --panel-utility-card-border: rgba(255, 255, 255, 0.04);
+    --panel-utility-card-background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015));
+    --panel-utility-link-dot-shadow: 0 0 0 4px rgba(255, 255, 255, 0.03);
+    --panel-utility-eval-button-border: rgba(255, 255, 255, 0.08);
+    --panel-utility-eval-button-background: rgba(255, 255, 255, 0.03);
+    --panel-utility-eval-button-text: rgba(231, 238, 247, 0.66);
+    --panel-utility-eval-button-hover-background: rgba(255, 255, 255, 0.06);
+    --panel-utility-eval-button-hover-text: rgba(239, 244, 251, 0.92);
+    --panel-utility-action-border: color-mix(in srgb, var(--thread-accent, #57CFA0) 24%, rgba(255, 255, 255, 0.08));
+    --panel-utility-action-background: color-mix(in srgb, var(--thread-accent, #57CFA0) 12%, rgba(255, 255, 255, 0.035));
+    --panel-utility-action-hover-background: color-mix(in srgb, var(--thread-accent, #57CFA0) 18%, rgba(255, 255, 255, 0.04));
+    --panel-utility-action-text: rgba(239, 244, 251, 0.88);
+    --panel-utility-action-hover-text: #ffffff;
+  }
+
+  :global(:root[data-color-scheme='light'] .thread-utility-surface) {
+    --panel-utility-primary-text: rgba(18, 27, 36, 0.92);
+    --panel-utility-primary-hover-text: rgba(18, 27, 36, 0.98);
+    --panel-utility-muted-text: rgba(82, 98, 111, 0.72);
+    --panel-utility-divider-border: rgba(126, 92, 52, 0.12);
+    --panel-utility-card-border: rgba(126, 92, 52, 0.1);
+    --panel-utility-card-background: rgba(248, 250, 248, 0.58);
+    --panel-utility-link-dot-shadow: 0 0 0 4px rgba(54, 70, 82, 0.06);
+    --panel-utility-eval-button-border: rgba(126, 92, 52, 0.12);
+    --panel-utility-eval-button-background: rgba(255, 253, 247, 0.76);
+    --panel-utility-eval-button-text: rgba(49, 63, 76, 0.82);
+    --panel-utility-eval-button-hover-background: rgba(255, 253, 247, 0.98);
+    --panel-utility-eval-button-hover-text: rgba(18, 27, 36, 0.96);
+    --panel-utility-action-border: color-mix(in srgb, var(--thread-accent, #57CFA0) 32%, rgba(126, 92, 52, 0.12));
+    --panel-utility-action-background: color-mix(in srgb, var(--thread-accent, #57CFA0) 14%, rgba(255, 253, 247, 0.9));
+    --panel-utility-action-hover-background: color-mix(in srgb, var(--thread-accent, #57CFA0) 20%, rgba(255, 253, 247, 0.98));
+    --panel-utility-action-text: rgba(20, 112, 82, 0.92);
+    --panel-utility-action-hover-text: rgba(11, 78, 58, 0.98);
+  }
+
   .tab-empty {
     color: rgba(231, 238, 247, 0.48);
     font-size: 13px;
@@ -995,6 +1053,99 @@
 
 
   /* Activity tab */
+  .activity-list-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .activity-trace-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    min-width: 0;
+    padding: 10px 2px 11px;
+    border-bottom: 1px solid var(--panel-utility-divider-border);
+  }
+
+  .activity-trace-copy {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .activity-trace-title {
+    min-width: 0;
+    color: var(--panel-utility-primary-text);
+    font-size: 13px;
+    font-weight: 640;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+  }
+
+  .activity-trace-subtitle {
+    min-width: 0;
+    color: var(--panel-utility-muted-text);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 10px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .activity-trace-download-button {
+    flex: 0 0 auto;
+    display: inline-flex;
+    min-width: 0;
+    min-height: 28px;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 5px 9px;
+    border: 1px solid var(--panel-utility-action-border);
+    border-radius: 999px;
+    background: var(--panel-utility-action-background);
+    color: var(--panel-utility-action-text);
+    font: inherit;
+    font-size: 11px;
+    font-weight: 620;
+    line-height: 1.2;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease,
+      transform 150ms ease;
+  }
+
+  .activity-trace-download-button:hover:not(:disabled),
+  .activity-trace-download-button:focus-visible {
+    background: var(--panel-utility-action-hover-background);
+    color: var(--panel-utility-action-hover-text);
+  }
+
+  .activity-trace-download-button:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--thread-accent, #57CFA0) 35%, transparent);
+    outline-offset: 2px;
+  }
+
+  .activity-trace-download-button:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  .activity-trace-download-button:disabled {
+    cursor: default;
+    opacity: 0.62;
+  }
+
+  .activity-trace-download-button :global(svg) {
+    flex: 0 0 auto;
+  }
+
   .activity-list {
     display: flex;
     flex-direction: column;
@@ -1035,13 +1186,6 @@
     gap: 3px;
   }
 
-  .activity-title-row {
-    min-width: 0;
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-  }
-
   .activity-title {
     flex: 1 1 auto;
     min-width: 0;
@@ -1052,44 +1196,6 @@
     white-space: normal;
     overflow-wrap: anywhere;
     word-break: break-word;
-  }
-
-  .activity-trace-button {
-    flex: 0 0 auto;
-    min-height: 20px;
-    padding: 2px 7px;
-    border: 0;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.055);
-    color: rgba(231, 238, 247, 0.66);
-    font: inherit;
-    font-size: 10px;
-    line-height: 1.4;
-    cursor: pointer;
-    transition:
-      background 150ms ease,
-      color 150ms ease,
-      transform 150ms ease;
-  }
-
-  .activity-trace-button:hover:not(:disabled),
-  .activity-trace-button:focus-visible {
-    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 14%, transparent);
-    color: rgba(239, 244, 251, 0.9);
-  }
-
-  .activity-trace-button:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--thread-accent, #57CFA0) 35%, transparent);
-    outline-offset: 2px;
-  }
-
-  .activity-trace-button:active:not(:disabled) {
-    transform: translateY(1px);
-  }
-
-  .activity-trace-button:disabled {
-    cursor: default;
-    opacity: 0.62;
   }
 
   .activity-meta {
@@ -1937,6 +2043,7 @@
   .activity-trace-note,
   .details-empty,
   .details-meta,
+  .details-section-title,
   .link-meta,
   .metrics-label,
   .metrics-row .metrics-value,

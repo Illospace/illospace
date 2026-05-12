@@ -1250,7 +1250,6 @@ export const api = {
   listTeamMembers: () => fetchJson<any[]>('/api/team/members'),
   updateProfile: (data: any) =>
     fetchJson<any>('/api/users/me', { method: 'PATCH', body: JSON.stringify(data) }),
-  teamActivity: (hours = 48) => fetchJson<any[]>(`/api/team/activity?hours=${hours}`),
 
   // Costs
   listCosts: (limit?: number) =>

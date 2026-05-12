@@ -5,7 +5,6 @@
   import { api } from '$lib/api/client';
   import {
     ConstellationActionRow,
-    ConstellationActivityFeed,
     ConstellationButton,
     ConstellationCallout,
     ConstellationEmptyState,
@@ -16,7 +15,6 @@
     ConstellationPresenceStack,
     ConstellationSection,
     ConstellationSkeletonBlock,
-    ConstellationSplitLayout,
   } from '$lib/components/constellation';
   import { auth } from '$lib/stores/auth.svelte';
   import { ui } from '$lib/stores/ui.svelte';
@@ -34,20 +32,8 @@
     attribution_visible?: boolean;
   }
 
-  interface ActivityItem {
-    user_id: string;
-    user_name: string;
-    skill_name: string | null;
-    status: string;
-    created_at: string;
-    idea_title: string | null;
-    type: string;
-  }
-
   let members = $state<TeamMember[]>([]);
-  let activity = $state<ActivityItem[]>([]);
   let loading = $state(true);
-  let activityLoading = $state(true);
 
   let editingProfile = $state(false);
   let profileColor = $state('#6d46d9');
@@ -71,22 +57,8 @@
     })),
   );
 
-  const activityFeedItems = $derived.by(() =>
-    activity.slice(0, 8).map((item) => {
-      const member = memberForActivity(item);
-      return {
-        name: item.user_name,
-        tone: 'spectral' as const,
-        text: buildActivityText(item),
-        at: timeAgo(item.created_at),
-        seedStyle: presenceSeedStyle(member?.color),
-        actorColor: member?.color || undefined,
-      };
-    }),
-  );
-
   onMount(async () => {
-    await Promise.all([loadMembers(), loadActivity()]);
+    await loadMembers();
   });
 
   async function loadMembers() {
@@ -100,19 +72,8 @@
     }
   }
 
-  async function loadActivity() {
-    activityLoading = true;
-    try {
-      activity = await api.teamActivity(48);
-    } catch {
-      activity = [];
-    } finally {
-      activityLoading = false;
-    }
-  }
-
   async function refreshTeam() {
-    await Promise.all([loadMembers(), loadActivity()]);
+    await loadMembers();
   }
 
   function inviteLink() {
@@ -164,32 +125,8 @@
     return `${months}mo ago`;
   }
 
-  function memberForActivity(item: ActivityItem) {
-    return members.find(
-      (member) => String(member.id) === item.user_id || member.name === item.user_name,
-    );
-  }
-
   function presenceSeedStyle(color?: string): string {
     return buildPresenceSeedStyle(color);
-  }
-
-  function buildActivityText(item: ActivityItem): string {
-    const status = item.status ? ` (${item.status})` : '';
-
-    if (item.skill_name && item.idea_title) {
-      return `ran ${item.skill_name} on "${item.idea_title}"${status}.`;
-    }
-
-    if (item.skill_name) {
-      return `ran ${item.skill_name}${status}.`;
-    }
-
-    if (item.idea_title) {
-      return `worked on "${item.idea_title}"${status}.`;
-    }
-
-    return `${item.type.replace(/_/g, ' ')}${status}.`;
   }
 
   function openProfileEdit(member: TeamMember | null = currentMember) {
@@ -275,7 +212,7 @@
 <ConstellationPageFrame
   eyebrow="Constellation Team"
   title="Team"
-  subtitle={loading ? 'Loading roster, approvals, and recent collaboration.' : `${approvedMembers.length} active member${approvedMembers.length === 1 ? '' : 's'}${pendingMembers.length ? ` · ${pendingMembers.length} pending approval` : ''}`}
+  subtitle={loading ? 'Loading roster and approvals.' : `${approvedMembers.length} active member${approvedMembers.length === 1 ? '' : 's'}${pendingMembers.length ? ` · ${pendingMembers.length} pending approval` : ''}`}
 >
   {#snippet actions()}
     {#if canApproveAccess()}
@@ -295,13 +232,12 @@
     <section class="team-loading-stack" aria-label="Team loading">
       <ConstellationSkeletonBlock variant="panel" height="120px" />
       <ConstellationSkeletonBlock variant="panel" height="280px" />
-      <ConstellationSkeletonBlock variant="panel" height="240px" />
     </section>
   {:else if members.length === 0}
     <ConstellationPanel>
       <ConstellationEmptyState
         title="No team members found."
-        description="Once people join the workspace, approvals, roster details, and collaboration activity will appear here."
+        description="Once people join the workspace, approvals and roster details will appear here."
       />
     </ConstellationPanel>
   {:else}
@@ -378,68 +314,48 @@
       </ConstellationSection>
     {/if}
 
-    <ConstellationSplitLayout>
-      <ConstellationSection
-        eyebrow="Roster"
-        title="Members"
-        description="Approved people with their current workspace presence color and access role."
-      >
-        <div class="team-row-stack">
-          {#each approvedMembers as member (member.id)}
-            <ConstellationActionRow
-              title={member.name}
-              description={memberSubtitle(member)}
-              tone="default"
-              meta={member.role}
-            >
-              {#snippet leading()}
-                <ConstellationPresenceSeed
-                  label={member.name}
-                  size="md"
-                  style={presenceSeedStyle(member.color)}
-                />
-              {/snippet}
+    <ConstellationSection
+      eyebrow="Roster"
+      title="Members"
+      description="Approved people with their current workspace presence color and access role."
+    >
+      <div class="team-row-stack">
+        {#each approvedMembers as member (member.id)}
+          <ConstellationActionRow
+            title={member.name}
+            description={memberSubtitle(member)}
+            tone="default"
+            meta={member.role}
+          >
+            {#snippet leading()}
+              <ConstellationPresenceSeed
+                label={member.name}
+                size="md"
+                style={presenceSeedStyle(member.color)}
+              />
+            {/snippet}
 
-              {#snippet badge()}
-                <ConstellationPill variant={member.role === 'owner' ? 'info' : 'muted'}>
-                  {isCurrentMember(member) ? 'You' : member.role}
-                </ConstellationPill>
-              {/snippet}
+            {#snippet badge()}
+              <ConstellationPill variant={member.role === 'owner' ? 'info' : 'muted'}>
+                {isCurrentMember(member) ? 'You' : member.role}
+              </ConstellationPill>
+            {/snippet}
 
-              {#snippet actions()}
-                {#if isCurrentMember(member)}
-                  <ConstellationButton
-                    variant="quiet"
-                    size="sm"
-                    onclick={() => openProfileEdit(member)}
-                  >
-                    Edit
-                  </ConstellationButton>
-                {/if}
-              {/snippet}
-            </ConstellationActionRow>
-          {/each}
-        </div>
-      </ConstellationSection>
-
-      <ConstellationSection
-        eyebrow="Presence"
-        title="Recent collaboration"
-        description="Latest shared activity across the workspace in the last 48 hours."
-      >
-        {#if activityLoading}
-          <ConstellationSkeletonBlock variant="panel" height="220px" />
-        {:else if activityFeedItems.length === 0}
-          <ConstellationEmptyState
-            size="sm"
-            title="No recent activity."
-            description="New runs, reviews, and collaboration updates will show up here as the team works."
-          />
-        {:else}
-          <ConstellationActivityFeed items={activityFeedItems} />
-        {/if}
-      </ConstellationSection>
-    </ConstellationSplitLayout>
+            {#snippet actions()}
+              {#if isCurrentMember(member)}
+                <ConstellationButton
+                  variant="quiet"
+                  size="sm"
+                  onclick={() => openProfileEdit(member)}
+                >
+                  Edit
+                </ConstellationButton>
+              {/if}
+            {/snippet}
+          </ConstellationActionRow>
+        {/each}
+      </div>
+    </ConstellationSection>
 
     {#if editingProfile}
       <ConstellationPanel tone="info">
