@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from brain.systems.runs.tool_definitions import (
     COORDINATOR_TOOLS,
     CORTEX_VISUAL_REPLY_TOOL,
@@ -122,7 +124,8 @@ def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
     ]
 
 
-def test_cortex_stream_includes_persisted_visual_block(monkeypatch):
+@pytest.mark.asyncio
+async def test_cortex_stream_includes_persisted_visual_block(monkeypatch):
     import sys
     import brain.app.api.routers.cortex._idea_ops as idea_ops
 
@@ -178,10 +181,15 @@ def test_cortex_stream_includes_persisted_visual_block(monkeypatch):
 
     monkeypatch.setattr(idea_ops, "UnitOfWork", FakeUnitOfWork)
     monkeypatch.setattr(idea_ops, "_require_idea_for_user", lambda *_args, **_kwargs: None)
+
+    async def fake_run_sync(fn, /, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(idea_ops, "run_sync_with_unit_of_work", fake_run_sync)
     fake_run = SimpleNamespace(idea_run_history=lambda _idea_id: [])
     monkeypatch.setitem(sys.modules, "brain.systems.runs.cortex", fake_run)
 
-    items = idea_ops.idea_unified_stream("idea-1", user={"id": "user-1"})
+    items = await idea_ops.idea_unified_stream("idea-1", user={"id": "user-1"})
 
     assert items == [
         {

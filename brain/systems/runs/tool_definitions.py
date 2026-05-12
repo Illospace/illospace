@@ -173,8 +173,11 @@ BRAIN_TOOLS = [
         "description": (
             "Open a guided Vault form in the current Cortex thread for a user-supplied secret. "
             "Use before asking the user to paste an API key in chat, when a task needs a missing credential "
-            "or a newly created skill/API integration needs a named key. This tool never reads or stores the "
-            "secret value itself; the user enters the value into Vault UI."
+            "or a newly created skill/API integration needs a named key. Do not use this before producing "
+            "the main requested deliverable when the credential is only needed for a deferred connector or "
+            "future sync; build the app or artifact first, declare the deferred action, and mention setup as "
+            "a follow-up. This tool never reads or stores the secret value itself; the user enters the value "
+            "into Vault UI."
         ),
         "input_schema": {
             "type": "object",
@@ -470,6 +473,8 @@ BRAIN_TOOLS = [
         "description": (
             "Read generated workspace apps/dashboards and optional app-local state. Use this for questions about "
             "what apps exist, what dashboards are available, or what UI state an app currently stores. "
+            "For build/create requests, leave include_archived=false unless the user explicitly asks to inspect "
+            "archived apps; archived apps should not be reused or restored by default. "
             "Use manage_workspace_app only when creating, updating, archiving, restoring, or changing app state."
         ),
         "input_schema": {
@@ -481,7 +486,11 @@ BRAIN_TOOLS = [
                 "start_at": {"type": "string", "description": "ISO timestamp for custom lower bound."},
                 "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
                 "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
-                "include_archived": {"type": "boolean", "default": False},
+                "include_archived": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include archived apps only when the user explicitly asks about archived/restorable apps.",
+                },
                 "include_state": {"type": "boolean", "description": "Include app-local state rows.", "default": True},
             },
         },
@@ -753,7 +762,12 @@ CORTEX_IDEA_TOOLS = [
                         "done",
                         "archived",
                     ],
-                    "description": "Next status for create, update, or set_status.",
+                    "description": (
+                        "Next status for create, update, or set_status. Use needs_input only when the "
+                        "requested deliverable cannot be produced without user input; missing credentials "
+                        "for deferred integrations are a follow-up limitation, not a reason to block an "
+                        "otherwise buildable app."
+                    ),
                 },
                 "salience_score": {"type": "number", "description": "Optional salience score."},
                 "position_x": {"type": "number", "description": "Optional Cortex canvas x position."},
@@ -892,10 +906,14 @@ WORKSPACE_APP_TOOLS = [
         "name": "manage_workspace_app",
         "description": (
             "Create, list, update, archive, and persist state for generated workspace apps. "
-            "This is the action tool to create or change a small UI surface or dashboard that should remain available "
-            "inside Cortex. Prefer renderer_key='generated-ui-app' and source_kind='json' with "
-            "a structured generated UI spec. Use renderer_key='sandboxed-html-app' only as a "
-            "custom HTML escape-hatch runtime. Recordful apps must use manage_domain first; app-local "
+            "This is the action tool to create or change a persistent programmable UI surface or dashboard "
+            "inside Cortex. Use renderer_key='generated-ui-app' and source_kind='json' for common "
+            "host-rendered structured UIs, including tables, lists, cards, metrics, charts, forms, details, "
+            "board/kanban views, and manifest action buttons. Use renderer_key='sandboxed-html-app' and source_kind='html' "
+            "only for bespoke interactions or custom blocks that cannot be represented by structured views. "
+            "Use action='restore' only when the user explicitly asks to restore an archived app; for build/create "
+            "requests, create a new app or update an active app instead of resurrecting archived drafts. "
+            "Recordful apps must use manage_domain first; app-local "
             "state is only for UI preferences, filters, drafts, and ephemeral interface state. "
             "For awareness questions about what apps exist or current app state, prefer read_workspace_apps first. "
             "New generated apps must pass the workspace app contract before they are persisted. Use action='help' "
@@ -933,7 +951,8 @@ WORKSPACE_APP_TOOLS = [
                     "default": "generated-ui-app",
                     "description": (
                         "Renderer runtime key. Use generated-ui-app for host-rendered structured UI. "
-                        "Use sandboxed-html-app only for custom HTML escape hatches."
+                        "Use sandboxed-html-app for first-class full-code workspace apps that still follow "
+                        "the Illospace design contract."
                     ),
                 },
                 "source_kind": {
@@ -945,8 +964,10 @@ WORKSPACE_APP_TOOLS = [
                     "type": "string",
                     "description": (
                         "Generated app source. For generated-ui-app, provide a JSON string with "
-                        "schema_version=1, title, optional description, and views. For sandboxed html, "
-                        "provide a responsive HTML/CSS/JS body or document. Canonical calls pass "
+                        "schema_version=1, title, optional description, optional top-level actions "
+                        "referencing manifest.actions, and views. For sandboxed html, "
+                        "provide a responsive HTML/CSS/JS body or document only when structured views are insufficient. "
+                        "Canonical calls pass "
                         "manifest, visual_spec, and metadata as separate tool args; the app compiler "
                         "also normalizes wrapped generated-app envelopes when needed."
                     ),
@@ -956,12 +977,32 @@ WORKSPACE_APP_TOOLS = [
                     "description": (
                         "Optional contract-bearing runtime manifest. The app compiler supplies safe "
                         "contract_version, app_local UI-state, and design_contract defaults for simple "
-                        "generated-ui apps. Provide an explicit data_plan for Domain-backed apps, "
-                        "including bindings such as {\"data_plan\":{\"mode\":\"domain\","
+                        "generated-ui apps. For Domain-backed apps, provide an explicit data_plan "
+                        "and include the strict design contract shape "
+                        "{\"design_contract\":{\"kit\":\"constellation-app-kit\","
+                        "\"theme_modes\":[\"dark\",\"light\"]}}. Do not use alternate keys like "
+                        "system, design_system, uses_app_kit_classes, or supports_color_scheme in "
+                        "manifest.design_contract; put descriptive labels in metadata instead. "
+                        "Use bindings such as {\"data_plan\":{\"mode\":\"domain\","
                         "\"bindings\":{\"todos\":{\"domain_id\":1,\"domain_slug\":\"todo-notes\","
                         "\"object_key\":\"todo_item\",\"fields\":[\"title\",\"notes\",\"completed\"],"
-                        "\"operations\":[\"schema\",\"list\",\"create\",\"update\",\"archive\"]}}}} "
-                        "and access them with window.illo.domain('todos')."
+                        "\"operations\":[\"schema\",\"list\",\"query\",\"create\",\"update\",\"archive\","
+                        "\"aggregate\",\"bulkUpdate\",\"history\",\"listRelations\",\"createRelation\","
+                        "\"archiveRelation\"]}}}} and access them with window.illo.domain('todos'). "
+                        "The app runtime exposes manifest-bound Domain CRUD, aggregate, bulkUpdate, "
+                        "history, relation helpers, polling-backed subscribe, app state, and "
+                        "window.illo.actions.run(actionKey, payload) for manifest-declared server-side actions. "
+                        "Treat Domains as the workspace truth bridge and actions/connectors as external IO. "
+                        "For external systems, prefer workflow-level action keys such as tickets.importExternal "
+                        "or tickets.syncExternal; declare provider/auth as connector metadata rather than "
+                        "hardcoding GitHub/Jira into the primitive. Action declarations must include kind, effects "
+                        "(such as external.read, external.write, domain.read, domain.write), connector metadata "
+                        "when external IO is involved, and executor {type:'deferred'} or an approved registered "
+                        "executor key. Never include raw tokens, API keys, Authorization headers, or passwords in "
+                        "source, state, payload examples, or manifest fields. "
+                        "In generated JavaScript, use canonical app SDK shapes such as recordId, dataPatch, "
+                        "sourceRecordId, and targetRecordId. Relation lists should pass relationKey plus "
+                        "sourceRecordId or targetRecordId, not a generic recordId."
                     ),
                 },
                 "visual_spec": {
@@ -974,10 +1015,6 @@ WORKSPACE_APP_TOOLS = [
                     ),
                 },
                 "metadata": {"type": "object", "description": "App metadata for provenance and runtime notes."},
-                "anchor_user_id": {
-                    "type": "string",
-                    "description": "Optional user id whose astre should anchor the app object.",
-                },
                 "initial_state": {"type": "object", "description": "Initial app-local state for create."},
                 "state_key": {
                     "type": "string",
@@ -988,6 +1025,14 @@ WORKSPACE_APP_TOOLS = [
                 "data_patch": {"type": "object", "description": "Shallow state patch for update_state."},
                 "include_archived": {"type": "boolean", "default": False},
                 "include_prototypes": {"type": "boolean", "default": False},
+                "confirm_restore_archived": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Required for action='restore'. Set true only when the user explicitly asked "
+                        "to restore or reopen an archived app."
+                    ),
+                },
             },
             "required": ["action"],
         },
@@ -1486,7 +1531,7 @@ BROWSER_UPLOAD_ATTACHMENT_TOOL = {
 
 BROWSER_SNAPSHOT_TOOL = {
     "name": "browser_snapshot",
-    "description": "Capture the current browser viewport and optionally persist it into the thought.",
+    "description": "Capture the current browser viewport, return it as a model-visible screenshot, and optionally persist it into the thought.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -1498,7 +1543,7 @@ BROWSER_SNAPSHOT_TOOL = {
 
 BROWSER_SAVE_SCREENSHOT_TOOL = {
     "name": "browser_save_screenshot",
-    "description": "Save a PNG screenshot of the current page into the thought workspace uploads area.",
+    "description": "Save a PNG screenshot of the current page into the thought workspace uploads area. Use the returned download_url when giving the user a link.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -1509,7 +1554,7 @@ BROWSER_SAVE_SCREENSHOT_TOOL = {
 
 BROWSER_PRINT_PDF_TOOL = {
     "name": "browser_print_pdf",
-    "description": "Export the current page as a PDF into the thought workspace uploads area.",
+    "description": "Export the current page as a PDF into the thought workspace uploads area. Use the returned download_url when giving the user a link.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -1531,7 +1576,10 @@ BROWSER_TOOL = {
     "name": "browser",
     "description": (
         "Namespace tool for controlling or inspecting the live browser session attached to the current Cortex thought. "
-        "Set action='help' to see sub-actions and their required arguments. Use action='open' before navigation or interaction."
+        "Set action='help' to see sub-actions and their required arguments. Use action='open' before navigation or interaction. "
+        "Actions that change browser state return a model-visible screenshot; use action='observe' to refresh that screenshot explicitly, "
+        "and action='discover' or action='extract' when DOM/text detail is needed. "
+        "For tasks that may download a file, open the session with allow_downloads=true."
     ),
     "input_schema": {
         "type": "object",
@@ -1552,6 +1600,7 @@ BROWSER_TOOL = {
                     "close_tab",
                     "list_tabs",
                     "wait",
+                    "observe",
                     "extract",
                     "discover",
                     "upload_attachment",

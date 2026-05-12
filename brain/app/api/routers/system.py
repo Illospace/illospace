@@ -18,11 +18,13 @@ from starlette.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, load_only
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import can_manage_run, can_manage_scheduler
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.db_utils import run_db
 from brain.app.api.routers.costs import _fetch_agent_api_call_rows, _provider_model_key
 from brain.app.api.schemas.system import ConsolidationRunRead, DailyMetricsRead
 from brain.platform.db.repositories.memories import EdgeRepository, MemoryRepository
@@ -36,7 +38,7 @@ from brain.systems.runs.cortex.recording import trace_id_for_run_id, trace_id_fo
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow as AgentRun
 from brain.platform.db.models.idea import Idea, IdeaThread
 from brain.platform.db.models.scheduler import SchedulerRun, SchedulerRunStep
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import use_sync_session
 from brain.systems.runs.predict_rlm_backend import get_agent_worker_backend_settings
 from brain.app.ops.health import (
     deep_health_snapshot,
@@ -691,10 +693,16 @@ def health_live():
 
 
 @router.get("/health/ready")
-def health_ready():
+async def health_ready(
+    db: AsyncSession = Depends(get_db),
+):
     """Readiness probe: DB, Alembic head, and event backbone are usable."""
-    snapshot = readiness_health_snapshot(
-        consumer_running=_run_event_consumer_running(),
+    snapshot = await run_db(
+        db,
+        lambda sync_db: readiness_health_snapshot(
+            consumer_running=_run_event_consumer_running(),
+            session=sync_db,
+        )
     )
     return JSONResponse(
         status_code=200 if snapshot["ready"] else 503,
@@ -703,10 +711,16 @@ def health_ready():
 
 
 @router.get("/health/deep")
-def health_deep():
+async def health_deep(
+    db: AsyncSession = Depends(get_db),
+):
     """Deep product health snapshot for operators."""
-    return deep_health_snapshot(
-        consumer_running=_run_event_consumer_running(),
+    return await run_db(
+        db,
+        lambda sync_db: deep_health_snapshot(
+            consumer_running=_run_event_consumer_running(),
+            session=sync_db,
+        )
     )
 
 
@@ -823,77 +837,83 @@ def _get_config_info() -> dict:
 
 
 @router.get("/system")
-def system_info(
-    db: Session = Depends(get_db),
+async def system_info(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _safe(fn, *args):
-        try:
-            return fn(*args)
-        except Exception as e:
-            return {"status": "error", "error": str(e)}
+    def _info(sync_db: Session):
+        def _safe(fn, *args):
+            try:
+                return fn(*args)
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
 
-    return {
-        "version": "6.0.0",
-        "python": platform.python_version(),
-        "platform": platform.system(),
-        "uptime": _safe(_get_uptime),
-        "disk": _safe(_get_disk_info),
-        "database": _safe(_get_database_info, db),
-        "gpu": _safe(_get_gpu_info),
-        "embedding": _safe(_get_embedding_info),
-        "llm": _safe(_get_llm_info, user),
-        "config": _safe(_get_config_info),
-    }
+        return {
+            "version": "6.0.0",
+            "python": platform.python_version(),
+            "platform": platform.system(),
+            "uptime": _safe(_get_uptime),
+            "disk": _safe(_get_disk_info),
+            "database": _safe(_get_database_info, sync_db),
+            "gpu": _safe(_get_gpu_info),
+            "embedding": _safe(_get_embedding_info),
+            "llm": _safe(_get_llm_info, user, sync_db),
+            "config": _safe(_get_config_info),
+        }
+
+    return await run_db(db, _info)
 
 
 @router.get("/system/traces/by-run/{run_id}")
-def trace_summary_by_run(
+async def trace_summary_by_run(
     run_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return a privacy-filtered execution skeleton for one run trace."""
-    return _build_trace_summary(db, user=user, run_id=run_id)
+    return await run_db(db, lambda sync_db: _build_trace_summary(sync_db, user=user, run_id=run_id))
 
 
 @router.get("/system/traces/by-reply/{thread_id}")
-def trace_summary_by_reply(
+async def trace_summary_by_reply(
     thread_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Resolve a user-visible Cortex reply to its run trace skeleton."""
-    thread = db.get(IdeaThread, thread_id)
-    if not thread or not _idea_visible_to_user(db, thread.idea_id, user):
-        raise HTTPException(status_code=404, detail="Reply not found")
-    metadata = thread.metadata_ if isinstance(thread.metadata_, dict) else {}
-    run_id = metadata.get("run_id")
-    if run_id is not None:
-        try:
-            return _build_trace_summary(db, user=user, run_id=int(run_id))
-        except (TypeError, ValueError):
-            pass
-    trace_id = metadata.get("trace_id")
-    if isinstance(trace_id, str) and trace_id.strip():
-        return _build_trace_summary(db, user=user, trace_id=trace_id.strip())
-    raise HTTPException(status_code=404, detail="Reply has no trace metadata")
+    def _summary(sync_db: Session):
+        thread = sync_db.get(IdeaThread, thread_id)
+        if not thread or not _idea_visible_to_user(sync_db, thread.idea_id, user):
+            raise HTTPException(status_code=404, detail="Reply not found")
+        metadata = thread.metadata_ if isinstance(thread.metadata_, dict) else {}
+        run_id = metadata.get("run_id")
+        if run_id is not None:
+            try:
+                return _build_trace_summary(sync_db, user=user, run_id=int(run_id))
+            except (TypeError, ValueError):
+                pass
+        trace_id = metadata.get("trace_id")
+        if isinstance(trace_id, str) and trace_id.strip():
+            return _build_trace_summary(sync_db, user=user, trace_id=trace_id.strip())
+        raise HTTPException(status_code=404, detail="Reply has no trace metadata")
+
+    return await run_db(db, _summary)
 
 
 @router.get("/system/traces/{trace_id}")
-def trace_summary(
+async def trace_summary(
     trace_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return a privacy-filtered execution skeleton for one trace key."""
-    return _build_trace_summary(db, user=user, trace_id=trace_id)
+    return await run_db(db, lambda sync_db: _build_trace_summary(sync_db, user=user, trace_id=trace_id))
 
 
-def _get_llm_info(user: dict) -> dict | None:
+def _get_llm_info(user: dict, db: Session | None = None) -> dict | None:
     """Return provider/model runtime config for system introspection."""
     org_id = user.get("org_id")
-    if not org_id:
+    if not org_id or db is None:
         return None
     try:
         from brain.platform.providers.model_policy import (
@@ -902,11 +922,12 @@ def _get_llm_info(user: dict) -> dict | None:
             resolve_default_provider,
         )
         from brain.platform.provider_health import provider_health_snapshot
-        with UnitOfWork() as uow:
+        def _build() -> dict | None:
             from brain.platform.db.models.org import Org
             from brain.platform.db.models.org import User
-            org = uow.session.get(Org, org_id)
-            db_user = uow.session.get(User, user.get("id")) if user.get("id") else None
+
+            org = db.get(Org, org_id)
+            db_user = db.get(User, user.get("id")) if user.get("id") else None
             if not org:
                 return None
             config = org.memory_model_config or {}
@@ -932,92 +953,92 @@ def _get_llm_info(user: dict) -> dict | None:
                 "provider_health": provider_health_snapshot(),
                 **backend_settings,
             }
+
+        with use_sync_session(db):
+            return _build()
     except Exception:
         return None
 
 
 @router.get("/overview")
-def overview(
-    db: Session = Depends(get_db),
+async def overview(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    mem_repo = MemoryRepository(db)
-    edge_repo = EdgeRepository(db)
-    consol_repo = ConsolidationRunRepository(db)
+    def _overview(sync_db: Session):
+        mem_repo = MemoryRepository(sync_db)
+        edge_repo = EdgeRepository(sync_db)
+        consol_repo = ConsolidationRunRepository(sync_db)
 
-    # Skills summary
-    skill_summary, skill_count, executions = SkillRepository(db).overview_summary(limit=10)
-    skill_summary = [
-        {"name": row["name"], "maturity": row["maturity"]}
-        for row in skill_summary
-    ]
+        skill_summary, skill_count, executions = SkillRepository(sync_db).overview_summary(limit=10)
+        skill_summary = [
+            {"name": row["name"], "maturity": row["maturity"]}
+            for row in skill_summary
+        ]
 
-    # Last consolidation
-    recent_consols = consol_repo.list_recent(limit=1)
-    last_consolidation = None
-    if recent_consols:
-        c = recent_consols[0]
-        last_consolidation = {
-            "status": c.status,
-            "run_date": c.run_date.isoformat() if c.run_date else None,
-            "completed_at": c.completed_at.isoformat() if c.completed_at else None,
-            "memories_created": c.memories_created,
-            "edges_created": c.edges_created,
-            "memories_decayed": c.memories_decayed,
+        recent_consols = consol_repo.list_recent(limit=1)
+        last_consolidation = None
+        if recent_consols:
+            c = recent_consols[0]
+            last_consolidation = {
+                "status": c.status,
+                "run_date": c.run_date.isoformat() if c.run_date else None,
+                "completed_at": c.completed_at.isoformat() if c.completed_at else None,
+                "memories_created": c.memories_created,
+                "edges_created": c.edges_created,
+                "memories_decayed": c.memories_decayed,
+            }
+
+        memory_trend = []
+        try:
+            rows = sync_db.execute(text(
+                "SELECT d::date AS day, COUNT(m.id) AS c "
+                "FROM generate_series(CURRENT_DATE - INTERVAL '13 days', CURRENT_DATE, '1 day') AS d "
+                "LEFT JOIN memories m ON m.created_at::date = d::date AND NOT m.archived "
+                "GROUP BY d::date ORDER BY d::date"
+            )).mappings().all()
+            memory_trend = [{"date": r["day"].isoformat(), "count": r["c"]} for r in rows]
+        except Exception:
+            logger.debug("memory_trend query failed", exc_info=True)
+
+        return {
+            "memories": mem_repo.count_active(),
+            "edges": edge_repo.count_all(),
+            "skills": skill_count,
+            "executions": executions,
+            "memory_types": mem_repo.count_by_type(),
+            "skill_summary": skill_summary,
+            "recent_activity": mem_repo.recent_activity(),
+            "last_consolidation": last_consolidation,
+            "retrieval_accuracy": mem_repo.retrieval_accuracy(),
+            "memory_trend": memory_trend,
         }
 
-    # Memory trend (14 days)
-    memory_trend = []
-    try:
-        rows = db.execute(text(
-            "SELECT d::date AS day, COUNT(m.id) AS c "
-            "FROM generate_series(CURRENT_DATE - INTERVAL '13 days', CURRENT_DATE, '1 day') AS d "
-            "LEFT JOIN memories m ON m.created_at::date = d::date AND NOT m.archived "
-            "GROUP BY d::date ORDER BY d::date"
-        )).mappings().all()
-        memory_trend = [{"date": r["day"].isoformat(), "count": r["c"]} for r in rows]
-    except Exception:
-        logger.debug("memory_trend query failed", exc_info=True)
-
-    return {
-        "memories": mem_repo.count_active(),
-        "edges": edge_repo.count_all(),
-        "skills": skill_count,
-        "executions": executions,
-        "memory_types": mem_repo.count_by_type(),
-        "skill_summary": skill_summary,
-        "recent_activity": mem_repo.recent_activity(),
-        "last_consolidation": last_consolidation,
-        "retrieval_accuracy": mem_repo.retrieval_accuracy(),
-        "memory_trend": memory_trend,
-    }
+    return await run_db(db, _overview)
 
 
 @router.get("/metrics", response_model=list[DailyMetricsRead])
-def list_metrics(
-    db: Session = Depends(get_db),
+async def list_metrics(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    repo = DailyMetricsRepository(db)
-    return repo.list_recent()
+    return await run_db(db, lambda sync_db: DailyMetricsRepository(sync_db).list_recent())
 
 
 @router.get("/consolidations", response_model=list[ConsolidationRunRead])
-def list_consolidations(
-    db: Session = Depends(get_db),
+async def list_consolidations(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    repo = ConsolidationRunRepository(db)
-    return repo.list_recent()
+    return await run_db(db, lambda sync_db: ConsolidationRunRepository(sync_db).list_recent())
 
 
 @router.get("/retrieval")
-def retrieval_stats(
-    db: Session = Depends(get_db),
+async def retrieval_stats(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    repo = RetrievalLogRepository(db)
-    return repo.list_recent()
+    return await run_db(db, lambda sync_db: RetrievalLogRepository(sync_db).list_recent())
 
 
 def _scheduler_snapshot(db: Session) -> dict[str, Any]:
@@ -1025,21 +1046,21 @@ def _scheduler_snapshot(db: Session) -> dict[str, Any]:
 
 
 @router.get("/system/scheduler")
-def scheduler_state(
-    db: Session = Depends(get_db),
+async def scheduler_state(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return the DB-backed scheduler state."""
-    return _scheduler_snapshot(db)
+    return await run_db(db, _scheduler_snapshot)
 
 
 @router.get("/system/scheduler/health")
-def scheduler_health(
-    db: Session = Depends(get_db),
+async def scheduler_health(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return the scheduler health snapshot."""
-    return _scheduler_snapshot(db)
+    return await run_db(db, _scheduler_snapshot)
 
 
 class SchedulerSyncRequest(BaseModel):
@@ -1048,9 +1069,9 @@ class SchedulerSyncRequest(BaseModel):
 
 
 @router.post("/system/scheduler/sync")
-def sync_scheduler_state(
+async def sync_scheduler_state(
     data: SchedulerSyncRequest | None = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Ensure built-in scheduler jobs exist without touching legacy cron tables."""
@@ -1058,10 +1079,13 @@ def sync_scheduler_state(
         raise HTTPException(status_code=403, detail="Permission denied")
     owner_mode = (data.owner_mode if data else "scheduler") or "scheduler"
     job_keys = tuple((data.job_keys if data else []) or [])
-    try:
-        return sync_scheduler_catalog(db, owner_mode=owner_mode, job_keys=job_keys)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    def _sync(sync_db: Session):
+        try:
+            return sync_scheduler_catalog(sync_db, owner_mode=owner_mode, job_keys=job_keys)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await run_db(db, _sync)
 
 
 class SchedulerMaterializeRequest(BaseModel):
@@ -1070,9 +1094,9 @@ class SchedulerMaterializeRequest(BaseModel):
 
 
 @router.post("/system/scheduler/materialize")
-def materialize_scheduler_runs(
+async def materialize_scheduler_runs(
     data: SchedulerMaterializeRequest | None = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Record due runs in the DB without executing them."""
@@ -1082,12 +1106,15 @@ def materialize_scheduler_runs(
     if owner_mode != "scheduler":
         raise HTTPException(status_code=400, detail="Legacy cron/mirror owner modes are retired")
     job_keys = tuple((data.job_keys if data else []) or [])
-    runs = materialize_due_runs(
-        db,
-        allowed_owner_modes=(owner_mode,),
-        job_keys=job_keys or None,
-    )
-    return {"recorded": len(runs), "runs": [run.id for run in runs]}
+    def _materialize(sync_db: Session):
+        runs = materialize_due_runs(
+            sync_db,
+            allowed_owner_modes=(owner_mode,),
+            job_keys=job_keys or None,
+        )
+        return {"recorded": len(runs), "runs": [run.id for run in runs]}
+
+    return await run_db(db, _materialize)
 
 
 class SchedulerDrainRequest(BaseModel):
@@ -1098,9 +1125,9 @@ class SchedulerDrainRequest(BaseModel):
 
 
 @router.post("/system/scheduler/drain")
-def drain_scheduler_runs(
+async def drain_scheduler_runs(
     data: SchedulerDrainRequest | None = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Run one scheduler tick for the requested owner mode."""
@@ -1109,12 +1136,15 @@ def drain_scheduler_runs(
     payload = data or SchedulerDrainRequest()
     if payload.owner_mode != "scheduler":
         raise HTTPException(status_code=400, detail="Legacy cron/mirror owner modes are retired")
-    return scheduler_daemon_tick(
+    return await run_db(
         db,
-        owner_mode=payload.owner_mode,
-        job_key=payload.job_key,
-        max_runs=payload.max_runs,
-        resume=payload.resume,
+        lambda sync_db: scheduler_daemon_tick(
+            sync_db,
+            owner_mode=payload.owner_mode,
+            job_key=payload.job_key,
+            max_runs=payload.max_runs,
+            resume=payload.resume,
+        )
     )
 
 
@@ -1169,34 +1199,37 @@ def _human_schedule(expr: str) -> str:
 
 
 @router.get("/system/cron-jobs")
-def list_cron_jobs(
-    db: Session = Depends(get_db),
+async def list_cron_jobs(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Compatibility view backed by scheduler jobs, not OS crontab."""
-    jobs = []
-    for job in list_scheduler_jobs(db):
-        payload = job.get("default_payload") or {}
-        jobs.append(
-            {
-                "id": job["id"],
-                "name": payload.get("name") or job["job_key"],
-                "description": payload.get("description") or "",
-                "schedule": job["cron_expr"],
-                "script_path": payload.get("script_path"),
-                "command": payload.get("command") or job["handler_ref"],
-                "phases": payload.get("phases") or [],
-                "enabled": job["enabled"],
-                "created_by": payload.get("created_by") or "scheduler",
-                "owner_mode": job["owner_mode"],
-                "schedule_human": _human_schedule(job["cron_expr"]),
-                "last_run": {
-                    "started_at": job["last_started_at"],
-                    "finished_at": job["last_finished_at"],
-                },
-            }
-        )
-    return jobs
+    def _list(sync_db: Session):
+        jobs = []
+        for job in list_scheduler_jobs(sync_db):
+            payload = job.get("default_payload") or {}
+            jobs.append(
+                {
+                    "id": job["id"],
+                    "name": payload.get("name") or job["job_key"],
+                    "description": payload.get("description") or "",
+                    "schedule": job["cron_expr"],
+                    "script_path": payload.get("script_path"),
+                    "command": payload.get("command") or job["handler_ref"],
+                    "phases": payload.get("phases") or [],
+                    "enabled": job["enabled"],
+                    "created_by": payload.get("created_by") or "scheduler",
+                    "owner_mode": job["owner_mode"],
+                    "schedule_human": _human_schedule(job["cron_expr"]),
+                    "last_run": {
+                        "started_at": job["last_started_at"],
+                        "finished_at": job["last_finished_at"],
+                    },
+                }
+            )
+        return jobs
+
+    return await run_db(db, _list)
 
 
 def _tail_text_lines(path: Path, line_count: int) -> list[str]:
@@ -1278,9 +1311,9 @@ class SchedulerJobUpsertRequest(BaseModel):
 
 
 @router.post("/system/scheduler/jobs")
-def upsert_scheduler_job_route(
+async def upsert_scheduler_job_route(
     data: SchedulerJobUpsertRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Create or update a scheduler-owned recurring job."""
@@ -1290,45 +1323,51 @@ def upsert_scheduler_job_route(
     payload.setdefault("name", data.job_key)
     if data.description:
         payload.setdefault("description", data.description)
-    try:
-        job = upsert_scheduler_job(
-            db,
-            job_key=data.job_key,
-            family=data.family,
-            program_key=data.program_key,
-            handler_kind=data.handler_kind,
-            handler_ref=data.handler_ref,
-            cron_expr=data.cron_expr,
-            timezone_name=data.timezone,
-            default_payload=payload,
-            task_contract=data.task_contract,
-            enabled=data.enabled,
-            priority=data.priority,
-            max_concurrency=data.max_concurrency,
-            timeout_seconds=data.timeout_seconds,
-            retry_policy=data.retry_policy,
-            misfire_policy=data.misfire_policy,
-            load_shed_policy=data.load_shed_policy,
-            target_binding_selector=data.target_binding_selector,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "job_key": job.job_key, "schedule_human": _human_schedule(job.cron_expr)}
+    def _upsert(sync_db: Session):
+        try:
+            job = upsert_scheduler_job(
+                sync_db,
+                job_key=data.job_key,
+                family=data.family,
+                program_key=data.program_key,
+                handler_kind=data.handler_kind,
+                handler_ref=data.handler_ref,
+                cron_expr=data.cron_expr,
+                timezone_name=data.timezone,
+                default_payload=payload,
+                task_contract=data.task_contract,
+                enabled=data.enabled,
+                priority=data.priority,
+                max_concurrency=data.max_concurrency,
+                timeout_seconds=data.timeout_seconds,
+                retry_policy=data.retry_policy,
+                misfire_policy=data.misfire_policy,
+                load_shed_policy=data.load_shed_policy,
+                target_binding_selector=data.target_binding_selector,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "job_key": job.job_key, "schedule_human": _human_schedule(job.cron_expr)}
+
+    return await run_db(db, _upsert)
 
 
 @router.delete("/system/scheduler/jobs/{job_key}")
-def retire_scheduler_job_route(
+async def retire_scheduler_job_route(
     job_key: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Retire a scheduler job without deleting historical runs."""
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    job = retire_scheduler_job(db, job_key, reason="retired via scheduler API")
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Scheduler job '{job_key}' not found")
-    return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
+    def _retire(sync_db: Session):
+        job = retire_scheduler_job(sync_db, job_key, reason="retired via scheduler API")
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Scheduler job '{job_key}' not found")
+        return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
+
+    return await run_db(db, _retire)
 
 
 class SchedulerJobPauseRequest(BaseModel):
@@ -1348,108 +1387,126 @@ class SchedulerJobLoadShedRequest(BaseModel):
 
 @router.patch("/system/scheduler/jobs/{job_key}/pause")
 @router.post("/system/scheduler/jobs/{job_key}/pause")
-def pause_scheduler_job(
+async def pause_scheduler_job(
     job_key: str,
     data: SchedulerJobPauseRequest | None = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    try:
-        job = set_scheduler_job_paused(db, job_key, paused=True, reason=(data.reason if data else None))
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
+    def _pause(sync_db: Session):
+        try:
+            job = set_scheduler_job_paused(sync_db, job_key, paused=True, reason=(data.reason if data else None))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
+
+    return await run_db(db, _pause)
 
 
 @router.patch("/system/scheduler/jobs/{job_key}/resume")
 @router.post("/system/scheduler/jobs/{job_key}/resume")
-def resume_scheduler_job(
+async def resume_scheduler_job(
     job_key: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    try:
-        job = set_scheduler_job_paused(db, job_key, paused=False, reason=None)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
+    def _resume(sync_db: Session):
+        try:
+            job = set_scheduler_job_paused(sync_db, job_key, paused=False, reason=None)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
+
+    return await run_db(db, _resume)
 
 
 @router.patch("/system/scheduler/jobs/{job_key}/owner-mode")
 @router.post("/system/scheduler/jobs/{job_key}/owner-mode")
-def set_scheduler_job_owner_mode_endpoint(
+async def set_scheduler_job_owner_mode_endpoint(
     job_key: str,
     data: SchedulerJobOwnerModeRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    try:
-        job = set_scheduler_job_owner_mode_state(db, job_key, owner_mode=data.owner_mode)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "job_key": job.job_key, "owner_mode": job.owner_mode}
+    def _set(sync_db: Session):
+        try:
+            job = set_scheduler_job_owner_mode_state(sync_db, job_key, owner_mode=data.owner_mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "job_key": job.job_key, "owner_mode": job.owner_mode}
+
+    return await run_db(db, _set)
 
 
 @router.patch("/system/scheduler/jobs/{job_key}/load-shed")
 @router.post("/system/scheduler/jobs/{job_key}/load-shed")
-def set_scheduler_job_load_shed_endpoint(
+async def set_scheduler_job_load_shed_endpoint(
     job_key: str,
     data: SchedulerJobLoadShedRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    try:
-        job = set_scheduler_job_load_shed_state(
-            db,
-            job_key,
-            load_shed_policy=data.load_shed_policy or None,
-            max_concurrency=data.max_concurrency,
-            pause_new_runs=data.pause_new_runs,
-            reason=data.reason,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
-        "ok": True,
-        "job_key": job.job_key,
-        "max_concurrency": job.max_concurrency,
-        "load_shed_policy": job.load_shed_policy or {},
-    }
+    def _set(sync_db: Session):
+        try:
+            job = set_scheduler_job_load_shed_state(
+                sync_db,
+                job_key,
+                load_shed_policy=data.load_shed_policy or None,
+                max_concurrency=data.max_concurrency,
+                pause_new_runs=data.pause_new_runs,
+                reason=data.reason,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "job_key": job.job_key,
+            "max_concurrency": job.max_concurrency,
+            "load_shed_policy": job.load_shed_policy or {},
+        }
+
+    return await run_db(db, _set)
 
 
 @router.post("/system/scheduler/runs/{run_id}/resume")
-def resume_scheduler_run_route(
+async def resume_scheduler_run_route(
     run_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    try:
-        run = resume_scheduler_run(db, run_id, owner_id=f"api:{user.get('id', 'owner')}")
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"ok": True, "run": run.id, "status": run.status}
+    def _resume(sync_db: Session):
+        try:
+            run = resume_scheduler_run(sync_db, run_id, owner_id=f"api:{user.get('id', 'owner')}")
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"ok": True, "run": run.id, "status": run.status}
+
+    return await run_db(db, _resume)
 
 
 @router.post("/system/scheduler/runs/{run_id}/retry")
-def retry_scheduler_run_route(
+async def retry_scheduler_run_route(
     run_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    try:
-        run = retry_scheduler_run(db, run_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"ok": True, "run": run.id, "status": run.status, "parent_run_id": run.parent_run_id}
+    def _retry(sync_db: Session):
+        try:
+            run = retry_scheduler_run(sync_db, run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"ok": True, "run": run.id, "status": run.status, "parent_run_id": run.parent_run_id}
+
+    return await run_db(db, _retry)

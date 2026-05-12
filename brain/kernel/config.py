@@ -31,7 +31,20 @@ except ImportError:
 # Paths
 # ---------------------------------------------------------------------------
 BRAIN_DIR = Path(__file__).resolve().parents[2]  # repository root
-WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", BRAIN_DIR.parent))
+
+
+def resolve_workspace_root(*, default: Path | None = None) -> Path:
+    """Return the configured agent workspace root.
+
+    `WORKSPACE_ROOT` is the deploy contract. `ILLO_WORKSPACE_ROOT` is accepted
+    as a compatibility fallback for older local shells.
+    """
+
+    configured = os.getenv("WORKSPACE_ROOT") or os.getenv("ILLO_WORKSPACE_ROOT")
+    return Path(configured) if configured else (default or BRAIN_DIR.parent)
+
+
+WORKSPACE_ROOT = resolve_workspace_root()
 
 # Runtime-private agent state. Keep operator prompts, generated journals, logs,
 # uploads, and local brain exports out of the public source tree by default.
@@ -67,10 +80,51 @@ DB_DSN = {
 
 from urllib.parse import quote_plus as _qp
 
-DB_URL = (
+_DEFAULT_DB_SYNC_URL = (
     f"postgresql://{_qp(DB_USER)}:{_qp(DB_PASSWORD)}"
     f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
+_DB_URL_FROM_ENV = (
+    os.getenv("DATABASE_URL")
+    or os.getenv("DB_URL")
+    or os.getenv("BRAIN_DB_URL")
+    or _DEFAULT_DB_SYNC_URL
+)
+
+
+def _to_async_pg_url(url: str) -> str:
+    """Return a SQLAlchemy asyncpg URL for runtime database access."""
+
+    if url.startswith("postgresql+asyncpg://"):
+        return url
+    if url.startswith("postgresql+psycopg2://"):
+        return url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgresql+psycopg://"):
+        return url.replace("postgresql+psycopg://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    return url
+
+
+def _to_sync_pg_url(url: str) -> str:
+    """Return a sync PostgreSQL URL for Alembic and legacy compatibility."""
+
+    if url.startswith("postgresql+asyncpg://"):
+        return url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    if url.startswith("postgresql+psycopg://"):
+        return url.replace("postgresql+psycopg://", "postgresql://", 1)
+    if url.startswith("postgresql+psycopg2://"):
+        return url.replace("postgresql+psycopg2://", "postgresql://", 1)
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql://", 1)
+    return url
+
+
+DB_SYNC_URL = _to_sync_pg_url(_DB_URL_FROM_ENV)
+DB_ASYNC_URL = _to_async_pg_url(_DB_URL_FROM_ENV)
+DB_URL = DB_ASYNC_URL
 
 VAULT_MASTER_KEY = os.getenv("VAULT_MASTER_KEY", "")
 

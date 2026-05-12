@@ -38,8 +38,8 @@
   }
 
   .constellation-address-dot.loading {
-    background: #d5a14d;
-    box-shadow: 0 0 10px rgba(213, 161, 77, 0.44);
+    background: #57CFA0;
+    box-shadow: 0 0 10px color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 44%, transparent);
   }
 
   .constellation-address-dot.error {

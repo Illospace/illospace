@@ -953,6 +953,18 @@
     return memberConversation(member)?.unread_count ?? 0;
   }
 
+  function unreadAccentStyle(color: string | null | undefined) {
+    const accent = normalizeHexColor(color);
+    return accent ? `--chat-unread-accent:${accent};` : undefined;
+  }
+
+  function roomUnreadAccentStyle() {
+    const lastMessage = roomConversation?.last_message;
+    return unreadAccentStyle(
+      resolvedParticipantColor(lastMessage?.sender_user_id, lastMessage?.sender_color),
+    );
+  }
+
   function isMemberConversationActive(member: TeamMember) {
     if (member.preview) {
       return chat.mode === 'dms' && String(selectedPreviewDmId) === String(member.id);
@@ -1041,7 +1053,9 @@
             {/each}
           </span>
           {#if roomConversation?.unread_count}
-            <span class="chat-channel-unread">{roomConversation.unread_count}</span>
+            <span class="chat-channel-unread" style={roomUnreadAccentStyle()}>
+              {roomConversation.unread_count}
+            </span>
           {/if}
           <span class="chat-channel-copy">
             <span>Team</span>
@@ -1071,7 +1085,9 @@
                 <small>{member.preview ? 'Preview' : 'Direct message'}</small>
               </span>
               {#if memberUnreadCount(member)}
-                <span class="chat-channel-unread">{memberUnreadCount(member)}</span>
+                <span class="chat-channel-unread" style={unreadAccentStyle(memberColor(member))}>
+                  {memberUnreadCount(member)}
+                </span>
               {/if}
             </button>
           {/each}
@@ -1389,7 +1405,7 @@
 
         <div class="chat-room-composer">
           <ChatComposer
-            tone="amber"
+            tone="spectral"
             variant="room"
             placeholder="Message…"
             value={roomComposerValue}
@@ -1732,7 +1748,8 @@
   --chat-empty-icon-text: rgba(234, 239, 250, 0.8);
   --chat-heading-text: rgba(244, 246, 252, 0.95);
   --chat-description-text: rgba(240, 240, 250, 0.56);
-  --chat-unread-background: rgba(213, 161, 77, 0.9);
+  --chat-unread-accent: var(--thread-accent, var(--constellation-color-user-accent, #57CFA0));
+  --chat-unread-background: color-mix(in srgb, var(--chat-unread-accent) 90%, transparent);
   --chat-unread-text: rgba(12, 10, 8, 0.92);
   --chat-unread-ring: rgba(9, 12, 19, 0.96);
   --chat-thread-border: rgba(255, 255, 255, 0.08);
@@ -1787,10 +1804,10 @@
   --chat-message-actions-background: rgba(8, 11, 18, 0.96);
   --chat-message-actions-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
   --chat-message-actions-text: rgba(236, 240, 248, 0.86);
-  --chat-drop-overlay-border: rgba(213, 161, 77, 0.42);
+  --chat-drop-overlay-border: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 42%, transparent);
   --chat-drop-overlay-background: rgba(14, 17, 24, 0.72);
   --chat-drop-overlay-text: rgba(246, 239, 224, 0.94);
-  --chat-drop-overlay-icon-background: rgba(213, 161, 77, 0.2);
+  --chat-drop-overlay-icon-background: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 20%, transparent);
   --chat-drop-overlay-shadow:
     0 18px 42px rgba(0, 0, 0, 0.26),
     inset 0 0 0 1px rgba(255, 255, 255, 0.04);
@@ -1871,7 +1888,7 @@
   --chat-empty-icon-text: rgba(45, 57, 73, 0.8);
   --chat-heading-text: rgba(17, 24, 35, 0.92);
   --chat-description-text: rgba(78, 91, 108, 0.58);
-  --chat-unread-background: rgba(213, 161, 77, 0.88);
+  --chat-unread-background: color-mix(in srgb, var(--chat-unread-accent) 88%, transparent);
   --chat-unread-text: rgba(28, 20, 12, 0.9);
   --chat-unread-ring: rgba(247, 250, 253, 0.94);
   --chat-thread-border: rgba(24, 35, 49, 0.08);
@@ -1929,7 +1946,7 @@
   --chat-drop-overlay-border: rgba(135, 100, 52, 0.28);
   --chat-drop-overlay-background: rgba(250, 250, 246, 0.78);
   --chat-drop-overlay-text: rgba(45, 57, 73, 0.92);
-  --chat-drop-overlay-icon-background: rgba(213, 161, 77, 0.18);
+  --chat-drop-overlay-icon-background: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 18%, transparent);
   --chat-drop-overlay-shadow:
     0 18px 42px rgba(24, 35, 49, 0.14),
     inset 0 0 0 1px rgba(255, 255, 255, 0.52);

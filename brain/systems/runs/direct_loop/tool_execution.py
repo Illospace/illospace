@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from brain.systems.runs.tool_catalog.registry import output_budget_chars_for_tool
 
@@ -37,6 +37,7 @@ class ResolvedToolCall:
     tool_input: dict
     result_text: str
     is_error: bool = False
+    result_content: Any | None = None
 
 
 def _env_float(name: str, default: float) -> float:
@@ -127,6 +128,16 @@ def truncate_tool_result_text(tool_name: str, result_text: str) -> str:
     return _truncate_middle_text(result_text, budget)
 
 
+def _extract_model_visible_tool_content(result: Any) -> tuple[Any, Any | None]:
+    if not isinstance(result, dict):
+        return result, None
+    if "_tool_result_content" not in result:
+        return result, None
+    cleaned = dict(result)
+    model_content = cleaned.pop("_tool_result_content", None)
+    return cleaned, model_content
+
+
 def run_tool_awaitable(result):
     """Resolve sync or async tool handler outputs in the sync agent loop."""
     if not inspect.isawaitable(result):
@@ -173,6 +184,7 @@ def _resolve_tool_call_sync(
             agent_context=agent_context,
             threadlocal_context=threadlocal_context,
         )
+        result, model_content = _extract_model_visible_tool_content(result)
         result_text = json.dumps(result, default=str)
         is_error = False
         if request.tool_name == "brain_encode" and isinstance(result, dict) and result.get("error"):
@@ -196,6 +208,7 @@ def _resolve_tool_call_sync(
             tool_input=request.tool_input,
             result_text=result_text,
             is_error=is_error,
+            result_content=model_content,
         )
     except Exception as exc:
         logger.warning("Tool %s failed: %s", request.tool_name, exc)
@@ -255,7 +268,7 @@ def emit_resolved_tool_call(
     tool_results.append({
         "type": "tool_result",
         "tool_use_id": resolved.block_id,
-        "content": resolved.result_text,
+        "content": resolved.result_content if resolved.result_content is not None else resolved.result_text,
         **({"is_error": True} if resolved.is_error else {}),
     })
     callback_result_text = resolved.result_text

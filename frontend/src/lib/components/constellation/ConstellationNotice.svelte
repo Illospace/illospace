@@ -203,8 +203,8 @@
 
   .constellation-notice-tone-warning {
     --notice-accent: rgba(250, 231, 188, 0.26);
-    --notice-accent-strong: rgba(213, 161, 77, 0.26);
-    --notice-accent-soft: rgba(213, 161, 77, 0.12);
+    --notice-accent-strong: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 26%, transparent);
+    --notice-accent-soft: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 12%, transparent);
   }
 
   .constellation-notice-tone-danger {

@@ -33,25 +33,80 @@ Constellation design contract.
      view/control surface over that data.
    - Use app-local state through `manage_workspace_app` only for UI
      preferences, filters, draft input, view settings, and ephemeral state.
-3. Prefer a host-rendered structured UI spec for simple apps:
+   - Archived apps are not candidates for new build/create requests. Only
+     restore an archived app when the user explicitly asks to restore or
+     reopen that archived app; otherwise create a fresh app or update an
+     active app.
+3. Prefer a host-rendered structured UI spec for common app patterns:
    `renderer_key="generated-ui-app"`, `source_kind="json"`, and
    `source_code` as JSON with `schema_version: 1`, `title`, optional
-   `description`, `primary_binding`, and `views`.
-   Use view types `table`, `list`, `cards`, `chart`, `metrics`, `detail`, or
-   `form`. Use editable `status`/`select`/`boolean` columns only when the
-   Domain binding allows `update`.
-4. Use sandboxed HTML only as a legacy/escape-hatch renderer when the UI cannot
-   be represented by the structured spec.
-5. For legacy HTML, use the host bridge:
-   - `await window.illo.domains.query/create/update/archive/schema(...)` for
-     bound Domain records.
+   `description`, `primary_binding`, optional `actions`, and `views`.
+   Use view types `table`, `list`, `cards`, `board`, `chart`, `metrics`,
+   `detail`, or `form`. Use `board` for kanban/status-column workflows such
+   as ticket trackers, CRM pipelines, approval queues, sourcing funnels, and
+   work progression. Use editable `status`/`select`/`boolean` columns only
+   when the Domain binding allows `update`.
+   Surface manifest-declared server actions with top-level `actions`, e.g.
+   `[{ "key": "tickets.syncExternal", "label": "Sync GitHub" }]`; do not
+   switch to HTML just to add an action button.
+4. Use `renderer_key="sandboxed-html-app"` and `source_kind="html"` as the
+   full-code app runtime only when the requested interaction cannot be
+   represented with structured views or a composed structured workflow. This
+   is still a native Illospace app: use App Kit classes, design tokens, the
+   manifest, and the host bridge.
+5. For full-code apps, use the host bridge:
+   - `window.illo.domain(alias)` for bound Domain records and generic workspace
+     data primitives.
    - `await window.illo.getState/setState/updateState(...)` only for UI state.
    - Listen for `window` event `illo:state` when the host sends fresh state.
    - For Domain-backed apps, prefer the generated app SDK:
      `const todos = window.illo.domain("todos")`, then call
      `todos.schema()`, `todos.list()`, `todos.get(recordId)`,
      `todos.create(data, { title })`, `todos.update(recordId, dataPatch, { expectedVersion })`,
+     `todos.bulkUpdate(updates)`, `todos.aggregate({ groupBy, metrics })`,
+     `todos.history(recordId)`, `todos.relations.list/link/archive(...)`,
      and `todos.archive(recordId)`.
+   - Use the app SDK's camelCase request shape in generated JavaScript:
+     `bulkUpdate([{ recordId, dataPatch }])`, not `record_id` /
+     `data_patch`. The bridge tolerates some aliases, but generated code
+     should use the canonical app-facing shape.
+   - For relation lists, do not pass `{ recordId }`. Use
+     `todos.relations.list({ relationKey, sourceRecordId })` to find outgoing
+     links or `todos.relations.list({ relationKey, targetRecordId })` to find
+     incoming links. Use `todos.relations.link(relationKey, sourceRecordId,
+     targetRecordId, properties)` to create links.
+   - Use `todos.subscribe(handler, { intervalMs })` instead of ad hoc polling;
+     it is polling-backed today and can become host-pushed later.
+   - Use `window.illo.actions.run(actionKey, payload)` only for
+     manifest-declared server-side actions. Do not put external credentials in
+     generated app code.
+   - Treat Domains as the workspace truth bridge and actions/connectors as
+     the outside-world IO bridge. External records should flow through
+     server-side connector actions into Domains, then apps read/write those
+     Domains. App code should not become a GitHub/Jira/Slack client.
+   - Prefer workflow-level action keys over provider-locked keys:
+     `tickets.importExternal`, `tickets.createExternal`,
+     `tickets.syncExternal`. Put the provider in the action connector
+     declaration (`provider: "github"` or `"jira"`) when the user has chosen
+     one.
+   - Every manifest action must declare `kind`, `effects`, connector metadata
+     when external IO is involved, and an executor boundary. Use
+     `executor: { "type": "deferred" }` when the app contract is ready but the
+     product connector has not been registered yet. Use
+     `executor: { "type": "registered", "key": "..." }` only for approved
+     server-owned executors.
+   - Missing external credentials are not blockers for creating the app when
+     the external action can be deferred. Do not call `vault_secret_prompt`
+     before producing the requested app. Declare the deferred action, deliver
+     the usable manual/Domain-backed surface, and mention connector setup as a
+     follow-up limitation.
+   - Allowed action effects are `domain.read`, `domain.write`,
+     `app_state.read`, `app_state.write`, `external.read`,
+     `external.write`, `workflow.trigger`, and `agent.run`.
+   - Never include raw tokens, API keys, Authorization headers, passwords, or
+     secret values in app source, app state, payload examples, or manifests.
+     Reference Vault/project/OAuth auth by descriptor only, e.g.
+     `auth: "project_vault_binding"`.
    - Bind DOM event listeners once, outside render/state handlers, or replace
      nodes before rebinding. Never add submit/click listeners every time
      `illo:state` fires.
@@ -61,7 +116,9 @@ Constellation design contract.
 7. Save with `manage_workspace_app(action="create" | "update")`.
 8. Verify contract validation, rendered behavior, persistence, dark/light theme
    fit, and thumbnail facade before telling the user the app is done.
-9. Tell the user what app was created and what data it stores.
+9. Tell the user what app was created and what data it stores. Set a thread to
+   `needs_input` only when the main requested app cannot be produced without
+   more information; missing credentials for deferred sync do not qualify.
 
 ## App Contract
 
@@ -91,10 +148,73 @@ Constellation design contract.
   generated UI spec and pass `manifest`, `visual_spec`, and `metadata` as
   separate tool arguments. The app compiler tolerates wrapped envelopes and
   fills safe defaults, but it will not invent durable data models.
+- Use native `board` views for kanban/status-column apps before considering
+  sandboxed HTML. Minimal example:
+
+```json
+{
+  "schema_version": 1,
+  "title": "GitHub Ticket Tracker",
+  "primary_binding": "tickets",
+  "actions": [
+    {"key": "tickets.syncExternal", "label": "Sync GitHub"}
+  ],
+  "views": [
+    {
+      "id": "ticket-board",
+      "type": "board",
+      "title": "Tickets",
+      "binding": "tickets",
+      "group_by": "status",
+      "groups": ["Backlog", "Todo", "In Progress", "In Review", "Done"],
+      "card": {
+        "title": "title",
+        "subtitle": "repo",
+        "badges": ["priority", "milestone"]
+      },
+      "allow_create": true
+    }
+  ]
+}
+```
 - Legacy generated HTML must use fluid layout and container-aware sizing.
 - The persisted manifest must end with `contract_version: 1`, `data_plan`, and
   `design_contract`. The compiler supplies simple app-local UI-state defaults;
   provide explicit Domain bindings for recordful apps.
+- The design contract shape is strict. Use exactly
+  `design_contract: { "kit": "constellation-app-kit", "theme_modes": ["dark", "light"] }`.
+  Do not replace `kit` with `system`, `design_system`, or
+  `uses_app_kit_classes`, and do not replace `theme_modes` with
+  `supports_color_scheme`. Extra descriptive metadata belongs in `metadata`,
+  not in `manifest.design_contract`.
+- For external systems, declare generic server-side actions in `manifest.actions`.
+  Example:
+
+```json
+{
+  "actions": {
+    "tickets.importExternal": {
+      "kind": "connector",
+      "description": "Import external ticket records into the tickets Domain.",
+      "effects": ["external.read", "domain.write"],
+      "connectors": [
+        {"key": "ticketing", "provider": "github", "auth": "project_vault_binding"}
+      ],
+      "domain_mapping": {
+        "binding": "tickets",
+        "mode": "upsert",
+        "external_id_field": "external_id"
+      },
+      "executor": {"type": "deferred"}
+    }
+  }
+}
+```
+
+  Generated UI apps can surface this with top-level `actions`, e.g.
+  `[{ "key": "tickets.importExternal", "label": "Import" }]`. Full-code
+  apps can call `window.illo.actions.run("tickets.importExternal", payload)`.
+  The server validates the declaration and only runs registered executors.
 - Use the Illo App Kit classes (`illo-app`, `illo-panel`, `illo-toolbar`,
   `illo-input`, `illo-button`, `illo-list`, `illo-row`, `illo-tabs`,
   `illo-badge`, `illo-empty`) instead of inventing local visual tokens.

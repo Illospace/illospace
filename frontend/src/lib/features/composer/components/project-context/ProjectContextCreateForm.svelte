@@ -50,7 +50,7 @@
 
 <div class="project-create-intro">
   <strong>Projects are saved context containers.</strong>
-  <span>Create one empty, or add resources now. A resource can be a GitHub repo or local files and folders.</span>
+  <span>Add a GitHub repo or backend-readable files before saving.</span>
 </div>
 
 <div class="project-create-fields">
@@ -101,7 +101,7 @@
     onRemove={onRemoveResource}
   />
 {:else}
-  <p class="project-context-muted project-empty-note">No resources yet. Saving now creates an empty project you can use as a named container.</p>
+  <p class="project-context-muted project-empty-note">No resources yet. Add a GitHub repo, file, or folder before saving.</p>
 {/if}
 
 {#if !validation.valid}
@@ -114,6 +114,6 @@
 <div class="project-context-actions">
   <button class="project-context-secondary" type="button" onclick={onCancel}>Cancel</button>
   <button class="project-context-primary" type="button" onclick={onSave} disabled={!canSave}>
-    {saving ? 'Saving...' : (resources.length ? 'Save project' : 'Create empty project')}
+    {saving ? 'Saving...' : 'Save project'}
   </button>
 </div>

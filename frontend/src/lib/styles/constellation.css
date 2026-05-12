@@ -27,12 +27,15 @@
   --constellation-color-spectral-core: rgba(58, 90, 146, 0.98);
   --constellation-color-spectral-owner: rgba(216, 231, 255, 0.96);
 
-  --constellation-color-amber: #d5a14d;
-  --constellation-color-amber-core: rgba(148, 108, 38, 0.98);
-  --constellation-color-amber-owner: rgba(255, 227, 172, 0.96);
+  --constellation-color-user-accent: #57cfa0;
+  --constellation-color-amber: var(--thread-accent, var(--constellation-color-user-accent));
+  --constellation-color-amber-core: color-mix(in srgb, var(--constellation-color-amber) 48%, rgba(5, 9, 16, 0.98));
+  --constellation-color-amber-owner: color-mix(in srgb, var(--constellation-color-amber) 34%, rgba(240, 240, 250, 0.96));
   --constellation-color-badge-ring: rgba(5, 9, 16, 0.92);
   --constellation-shadow-astre-spectral: 0 0 0 1px rgba(240, 240, 250, 0.06), 0 0 36px rgba(141, 183, 255, 0.28);
-  --constellation-shadow-astre-amber: 0 0 0 1px rgba(240, 240, 250, 0.06), 0 0 36px rgba(213, 161, 77, 0.24);
+  --constellation-shadow-astre-amber:
+    0 0 0 1px rgba(240, 240, 250, 0.06),
+    0 0 36px color-mix(in srgb, var(--constellation-color-amber) 24%, transparent);
 
   --constellation-control-focus-ring: rgba(240, 240, 250, 0.52);
   --constellation-control-summary: rgba(240, 240, 250, 0.56);
@@ -85,11 +88,11 @@
   --constellation-control-pill-model-background: rgba(141, 183, 255, 0.14);
   --constellation-control-pill-model-text: rgba(221, 232, 255, 0.94);
 
-  --constellation-control-pill-thinking-background: rgba(213, 161, 77, 0.14);
+  --constellation-control-pill-thinking-background: color-mix(in srgb, var(--constellation-color-amber) 14%, transparent);
   --constellation-control-pill-thinking-text: rgba(250, 231, 188, 0.96);
 
-  --constellation-control-pill-warning-background: rgba(213, 161, 77, 0.14);
-  --constellation-control-pill-warning-border: rgba(213, 161, 77, 0.24);
+  --constellation-control-pill-warning-background: color-mix(in srgb, var(--constellation-color-amber) 14%, transparent);
+  --constellation-control-pill-warning-border: color-mix(in srgb, var(--constellation-color-amber) 24%, transparent);
   --constellation-control-pill-warning-text: rgba(250, 231, 188, 0.96);
 
   --constellation-control-pill-muted-background: rgba(240, 240, 250, 0.05);
@@ -144,8 +147,8 @@
   --constellation-button-primary-shadow:
     0 12px 28px rgba(0, 0, 0, 0.18),
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  --constellation-button-pressed-background: linear-gradient(180deg, rgba(213, 161, 77, 0.18), rgba(213, 161, 77, 0.08));
-  --constellation-button-pressed-border: rgba(213, 161, 77, 0.34);
+  --constellation-button-pressed-background: linear-gradient(180deg, color-mix(in srgb, var(--constellation-color-amber) 18%, transparent), color-mix(in srgb, var(--constellation-color-amber) 8%, transparent));
+  --constellation-button-pressed-border: color-mix(in srgb, var(--constellation-color-amber) 34%, transparent);
   --constellation-button-pressed-text: rgba(255, 247, 230, 0.94);
   --constellation-button-pressed-shadow:
     0 14px 30px rgba(0, 0, 0, 0.22),
@@ -180,8 +183,8 @@
   --constellation-icon-button-border: rgba(240, 240, 250, 0.08);
   --constellation-icon-button-text: rgba(240, 240, 250, 0.72);
   --constellation-icon-button-pressed-text: rgba(255, 247, 230, 0.94);
-  --constellation-icon-button-pressed-border: rgba(213, 161, 77, 0.34);
-  --constellation-icon-button-pressed-background: rgba(213, 161, 77, 0.12);
+  --constellation-icon-button-pressed-border: color-mix(in srgb, var(--constellation-color-amber) 34%, transparent);
+  --constellation-icon-button-pressed-background: color-mix(in srgb, var(--constellation-color-amber) 12%, transparent);
   --constellation-icon-button-quiet-background: rgba(240, 240, 250, 0.03);
   --constellation-icon-button-quiet-background-hover: rgba(240, 240, 250, 0.06);
   --constellation-icon-button-quiet-border-hover: rgba(240, 240, 250, 0.16);
@@ -262,7 +265,7 @@
   --constellation-composer-shell-shadow:
     0 24px 72px rgba(0, 0, 0, 0.28),
     0 0 0 1px rgba(255, 255, 255, 0.02) inset,
-    0 0 20px rgba(213, 161, 77, 0.04);
+    0 0 20px color-mix(in srgb, var(--constellation-color-amber) 4%, transparent);
   --constellation-composer-shell-drag-border: rgba(240, 240, 250, 0.18);
   --constellation-composer-shell-drag-shadow:
     0 28px 90px rgba(0, 0, 0, 0.5),
@@ -299,7 +302,7 @@
   --constellation-utility-panel-surface-border: rgba(255, 255, 255, 0.07);
   --constellation-utility-panel-surface-background:
     radial-gradient(circle at 18% 12%, rgba(141, 183, 255, 0.1), transparent 26%),
-    radial-gradient(circle at 82% 18%, rgba(213, 161, 77, 0.08), transparent 28%),
+    radial-gradient(circle at 82% 18%, color-mix(in srgb, var(--constellation-color-amber) 8%, transparent), transparent 28%),
     linear-gradient(180deg, rgba(12, 16, 26, 0.92), rgba(9, 13, 22, 0.86));
   --constellation-utility-panel-surface-shadow:
     0 24px 58px rgba(0, 0, 0, 0.34),
@@ -325,17 +328,17 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
   --constellation-notification-title: rgba(245, 248, 255, 0.96);
   --constellation-notification-subtitle: rgba(198, 209, 224, 0.64);
-  --constellation-notification-mark-all: rgba(213, 161, 77, 0.9);
+  --constellation-notification-mark-all: color-mix(in srgb, var(--constellation-color-amber) 90%, transparent);
   --constellation-notification-empty-border: rgba(255, 255, 255, 0.08);
   --constellation-notification-empty-text: rgba(198, 209, 224, 0.64);
   --constellation-notification-row-border: rgba(255, 255, 255, 0.06);
   --constellation-notification-row-background: rgba(255, 255, 255, 0.028);
-  --constellation-notification-row-hover-border: rgba(213, 161, 77, 0.2);
+  --constellation-notification-row-hover-border: color-mix(in srgb, var(--constellation-color-amber) 20%, transparent);
   --constellation-notification-row-hover-background: rgba(255, 255, 255, 0.048);
   --constellation-notification-avatar-text: rgba(243, 247, 255, 0.96);
   --constellation-notification-meta: rgba(198, 209, 224, 0.58);
   --constellation-notification-body: rgba(214, 223, 235, 0.7);
-  --constellation-notification-occurrence: rgba(213, 161, 77, 0.82);
+  --constellation-notification-occurrence: color-mix(in srgb, var(--constellation-color-amber) 82%, transparent);
 
   --constellation-chat-shell-sidebar-border: rgba(255, 255, 255, 0.06);
   --constellation-chat-shell-footer-fade: linear-gradient(180deg, rgba(8, 11, 18, 0), rgba(8, 11, 18, 0.88) 20%);
@@ -360,7 +363,7 @@
   --constellation-chat-thread-summary-background: rgba(141, 183, 255, 0.06);
   --constellation-chat-thread-summary-meta: rgba(240, 240, 250, 0.56);
 
-  --constellation-callout-border: rgba(213, 161, 77, 0.22);
+  --constellation-callout-border: color-mix(in srgb, var(--constellation-color-amber) 22%, transparent);
   --constellation-callout-title: rgba(250, 231, 188, 0.96);
   --constellation-callout-text: rgba(240, 240, 250, 0.56);
 
@@ -395,8 +398,8 @@
     radial-gradient(circle at 34% 28%, rgba(141, 183, 255, 0.12), transparent 36%),
     radial-gradient(circle at 66% 68%, rgba(141, 183, 255, 0.08), transparent 42%);
   --constellation-screen-frame-scene-warmth:
-    radial-gradient(circle at 74% 78%, rgba(213, 161, 77, 0.12), transparent 38%),
-    radial-gradient(circle at 54% 52%, rgba(213, 161, 77, 0.04), transparent 46%);
+    radial-gradient(circle at 74% 78%, color-mix(in srgb, var(--constellation-color-amber) 12%, transparent), transparent 38%),
+    radial-gradient(circle at 54% 52%, color-mix(in srgb, var(--constellation-color-amber) 4%, transparent), transparent 46%);
   --constellation-screen-frame-hero-border: rgba(240, 240, 250, 0.08);
   --constellation-screen-frame-hero-eyebrow: rgba(240, 240, 250, 0.56);
   --constellation-screen-frame-hero-title: #ffffff;
@@ -417,7 +420,7 @@
   --constellation-data-table-row-hover: rgba(255, 255, 255, 0.035);
   --constellation-data-table-row-info: rgba(141, 183, 255, 0.05);
   --constellation-data-table-row-success: rgba(109, 245, 189, 0.05);
-  --constellation-data-table-row-warning: rgba(213, 161, 77, 0.06);
+  --constellation-data-table-row-warning: color-mix(in srgb, var(--constellation-color-amber) 6%, transparent);
   --constellation-data-table-row-danger: rgba(219, 110, 130, 0.06);
   --constellation-data-table-cell-muted: rgba(240, 240, 250, 0.56);
   --constellation-data-table-cell-info: rgba(196, 220, 255, 0.92);
@@ -533,9 +536,10 @@
   --constellation-color-spectral-core: rgba(236, 243, 249, 0.98);
   --constellation-color-spectral-owner: rgba(20, 31, 45, 0.94);
 
-  --constellation-color-amber: #b66c2f;
-  --constellation-color-amber-core: rgba(249, 239, 222, 0.98);
-  --constellation-color-amber-owner: rgba(58, 39, 24, 0.94);
+  --constellation-color-user-accent: #57cfa0;
+  --constellation-color-amber: var(--thread-accent, var(--constellation-color-user-accent));
+  --constellation-color-amber-core: color-mix(in srgb, var(--constellation-color-amber) 14%, rgba(249, 252, 248, 0.98));
+  --constellation-color-amber-owner: color-mix(in srgb, var(--constellation-color-amber) 24%, rgba(20, 31, 45, 0.94));
   --constellation-color-badge-ring: rgba(250, 247, 239, 0.96);
   --constellation-shadow-astre-spectral:
     0 0 0 1px rgba(255, 255, 255, 0.82),
@@ -543,8 +547,8 @@
     0 0 32px rgba(49, 95, 214, 0.18);
   --constellation-shadow-astre-amber:
     0 0 0 1px rgba(255, 255, 255, 0.82),
-    0 16px 34px rgba(78, 55, 32, 0.13),
-    0 0 32px rgba(182, 108, 47, 0.18);
+    0 16px 34px rgba(26, 39, 49, 0.11),
+    0 0 32px color-mix(in srgb, var(--constellation-color-amber) 18%, transparent);
 
   --constellation-control-focus-ring: rgba(49, 63, 76, 0.26);
   --constellation-control-summary: rgba(49, 63, 76, 0.7);
@@ -574,7 +578,7 @@
   --constellation-system-chrome-active-text: #18212a;
   --constellation-system-chrome-active-shadow: inset 0 0 0 1px rgba(49, 63, 76, 0.09);
   --constellation-control-slider-track: rgba(126, 92, 52, 0.16);
-  --constellation-control-slider-knob: #b66c2f;
+  --constellation-control-slider-knob: #57CFA0;
 
   --constellation-control-pill-border: rgba(126, 92, 52, 0.1);
   --constellation-control-pill-background: rgba(247, 250, 248, 0.82);
@@ -593,11 +597,11 @@
   --constellation-control-pill-model-background: rgba(49, 95, 214, 0.13);
   --constellation-control-pill-model-text: #244fae;
 
-  --constellation-control-pill-thinking-background: rgba(182, 108, 47, 0.15);
+  --constellation-control-pill-thinking-background: color-mix(in srgb, var(--constellation-color-amber) 15%, transparent);
   --constellation-control-pill-thinking-text: #7c4617;
 
-  --constellation-control-pill-warning-background: rgba(182, 108, 47, 0.15);
-  --constellation-control-pill-warning-border: rgba(182, 108, 47, 0.28);
+  --constellation-control-pill-warning-background: color-mix(in srgb, var(--constellation-color-amber) 15%, transparent);
+  --constellation-control-pill-warning-border: color-mix(in srgb, var(--constellation-color-amber) 28%, transparent);
   --constellation-control-pill-warning-text: #7c4617;
 
   --constellation-control-pill-muted-background: rgba(126, 92, 52, 0.055);
@@ -795,7 +799,7 @@
   --constellation-utility-panel-close-background: rgba(248, 250, 248, 0.78);
   --constellation-utility-panel-close-text: rgba(49, 63, 76, 0.82);
   --constellation-utility-panel-close-hover-background: rgba(255, 253, 247, 0.98);
-  --constellation-utility-panel-close-hover-border: rgba(182, 108, 47, 0.18);
+  --constellation-utility-panel-close-hover-border: color-mix(in srgb, var(--constellation-color-amber) 18%, transparent);
   --constellation-utility-panel-close-hover-text: rgba(18, 27, 36, 0.94);
   --constellation-utility-panel-scrollbar: rgba(126, 92, 52, 0.16);
 
@@ -809,7 +813,7 @@
   --constellation-notification-empty-text: rgba(82, 98, 111, 0.72);
   --constellation-notification-row-border: transparent;
   --constellation-notification-row-background: rgba(248, 250, 248, 0.78);
-  --constellation-notification-row-hover-border: rgba(182, 108, 47, 0.18);
+  --constellation-notification-row-hover-border: color-mix(in srgb, var(--constellation-color-amber) 18%, transparent);
   --constellation-notification-row-hover-background: rgba(255, 253, 247, 0.96);
   --constellation-notification-avatar-text: rgba(255, 253, 247, 0.96);
   --constellation-notification-meta: rgba(82, 98, 111, 0.68);
@@ -839,7 +843,7 @@
   --constellation-chat-thread-summary-background: rgba(49, 95, 214, 0.1);
   --constellation-chat-thread-summary-meta: rgba(82, 98, 111, 0.72);
 
-  --constellation-callout-border: rgba(182, 108, 47, 0.24);
+  --constellation-callout-border: color-mix(in srgb, var(--constellation-color-amber) 24%, transparent);
   --constellation-callout-title: #7c4617;
   --constellation-callout-text: rgba(82, 98, 111, 0.76);
 
@@ -861,7 +865,7 @@
     radial-gradient(ellipse 58% 34% at 18% 14%, rgba(56, 147, 205, 0.18), transparent 62%),
     radial-gradient(ellipse 58% 38% at 84% 18%, rgba(77, 181, 169, 0.14), transparent 64%),
     radial-gradient(ellipse 92% 62% at 50% 78%, rgba(47, 127, 158, 0.1), transparent 74%),
-    radial-gradient(ellipse 76% 54% at 30% 96%, rgba(182, 108, 47, 0.038), transparent 74%),
+    radial-gradient(ellipse 76% 54% at 30% 96%, color-mix(in srgb, var(--constellation-color-amber) 3.8%, transparent), transparent 74%),
     linear-gradient(180deg, #e5f8ff 0%, #f8fbf6 44%, #dceef1 100%);
   --constellation-workspace-theme-star-color-a: rgba(21, 30, 39, 0.055);
   --constellation-workspace-theme-star-color-b: rgba(47, 127, 158, 0.06);
@@ -873,7 +877,7 @@
     radial-gradient(ellipse 56% 42% at 66% 34%, rgba(255, 255, 255, 0.24), transparent 78%);
   --constellation-workspace-theme-scene-warmth:
     radial-gradient(ellipse 82% 56% at 74% 72%, rgba(77, 181, 169, 0.12), transparent 78%),
-    radial-gradient(ellipse 64% 48% at 42% 82%, rgba(182, 108, 47, 0.045), transparent 76%);
+    radial-gradient(ellipse 64% 48% at 42% 82%, color-mix(in srgb, var(--constellation-color-amber) 4.5%, transparent), transparent 76%);
   --constellation-workspace-theme-surface-ripples:
     radial-gradient(ellipse 70% 86% at 50% -20%, rgba(255, 255, 255, 0.72), transparent 58%),
     repeating-radial-gradient(ellipse 92% 54% at 50% -18%, rgba(255, 255, 255, 0.22) 0 1px, transparent 1px 18px),
@@ -923,7 +927,7 @@
     radial-gradient(circle at 30% 24%, rgba(49, 95, 214, 0.12), transparent 34%),
     radial-gradient(circle at 68% 66%, rgba(47, 127, 158, 0.08), transparent 42%);
   --constellation-page-frame-theme-scene-warmth:
-    radial-gradient(circle at 74% 78%, rgba(182, 108, 47, 0.1), transparent 38%),
+    radial-gradient(circle at 74% 78%, color-mix(in srgb, var(--constellation-color-amber) 10%, transparent), transparent 38%),
     radial-gradient(circle at 56% 50%, rgba(173, 93, 132, 0.05), transparent 46%);
   --constellation-page-frame-theme-header-border: rgba(126, 92, 52, 0.08);
   --constellation-page-frame-theme-eyebrow: rgba(82, 98, 111, 0.72);
@@ -933,7 +937,7 @@
     radial-gradient(circle at 34% 28%, rgba(49, 95, 214, 0.12), transparent 36%),
     radial-gradient(circle at 66% 68%, rgba(47, 127, 158, 0.08), transparent 42%);
   --constellation-screen-frame-scene-warmth:
-    radial-gradient(circle at 74% 78%, rgba(182, 108, 47, 0.1), transparent 38%),
+    radial-gradient(circle at 74% 78%, color-mix(in srgb, var(--constellation-color-amber) 10%, transparent), transparent 38%),
     radial-gradient(circle at 54% 52%, rgba(173, 93, 132, 0.05), transparent 46%);
   --constellation-screen-frame-hero-border: rgba(126, 92, 52, 0.08);
   --constellation-screen-frame-hero-eyebrow: rgba(82, 98, 111, 0.72);
@@ -951,7 +955,7 @@
   --constellation-data-table-row-hover: rgba(255, 253, 247, 0.66);
   --constellation-data-table-row-info: rgba(49, 95, 214, 0.09);
   --constellation-data-table-row-success: rgba(20, 120, 93, 0.09);
-  --constellation-data-table-row-warning: rgba(182, 108, 47, 0.1);
+  --constellation-data-table-row-warning: color-mix(in srgb, var(--constellation-color-amber) 10%, transparent);
   --constellation-data-table-row-danger: rgba(178, 74, 97, 0.09);
   --constellation-data-table-cell-muted: rgba(82, 98, 111, 0.76);
   --constellation-data-table-cell-info: #244fae;
@@ -1321,7 +1325,7 @@
   --nav-footer-muted: var(--constellation-nav-rail-footer-muted, rgba(240, 240, 250, 0.56));
   --nav-health-background: var(--constellation-nav-rail-health-background, rgba(240, 240, 250, 0.05));
   --nav-health-color: var(--constellation-nav-rail-health-color, rgba(240, 240, 250, 0.62));
-  --nav-health-dot: var(--constellation-nav-rail-health-dot, var(--constellation-color-amber, #d5a14d));
+  --nav-health-dot: var(--constellation-nav-rail-health-dot, var(--constellation-color-amber, #57CFA0));
   box-shadow: var(
     --constellation-nav-rail-shadow,
     var(--constellation-system-chrome-shadow, 0 24px 80px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(240, 240, 250, 0.08))

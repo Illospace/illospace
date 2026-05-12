@@ -102,7 +102,7 @@
     border: 1px solid var(--constellation-surface-panel-border);
     background:
       radial-gradient(circle at 50% 0%, rgba(141, 183, 255, 0.1), transparent 34%),
-      radial-gradient(circle at 74% 72%, rgba(213, 161, 77, 0.08), transparent 28%),
+      radial-gradient(circle at 74% 72%, color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 8%, transparent), transparent 28%),
       var(--constellation-surface-panel-background);
     text-align: var(--empty-text-align);
     box-shadow: var(--constellation-surface-nested-shadow);

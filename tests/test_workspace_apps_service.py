@@ -23,12 +23,20 @@ from brain.platform.db.models.workspace_app import WorkspaceApp, WorkspaceAppSta
 from brain.systems.user_domains.service import DomainService
 from brain.systems.workspace_apps.service import (
     WorkspaceAppError,
+    WorkspaceAppContractError,
     active_version,
     archive_app,
     create_app,
     list_archived_apps,
     restore_app,
     update_app,
+)
+from brain.systems.workspace_apps.actions import (
+    WorkspaceAppActionContractError,
+    WorkspaceAppActionExecutorMissing,
+    register_workspace_app_action_executor,
+    run_workspace_app_action,
+    unregister_workspace_app_action_executor,
 )
 
 ORG_ID = "11111111-1111-4111-8111-111111111111"
@@ -153,6 +161,21 @@ def _manifest(domain_id_value: int, **overrides):
     }
 
 
+def _manifest_with_action(domain_id_value: int, action: dict | None = None):
+    manifest = _manifest(domain_id_value)
+    manifest["actions"] = {
+        "tickets.syncExternal": action
+        or {
+            "kind": "connector",
+            "description": "Sync one Domain ticket with the configured external ticketing system.",
+            "effects": ["domain.read", "domain.write", "external.read", "external.write"],
+            "connectors": [{"key": "ticketing", "provider": "configured_ticketing_system", "auth": "project_vault_binding"}],
+            "executor": {"type": "deferred"},
+        }
+    }
+    return manifest
+
+
 def _app_local_manifest(**overrides):
     manifest = {
         "contract_version": 1,
@@ -188,6 +211,42 @@ def test_valid_domain_backed_manifest_saves(session):
     assert version.manifest["data_plan"]["bindings"]["todos"]["object_key"] == "todo_item"
 
 
+def test_domain_binding_accepts_generic_app_primitives(session):
+    domain = _todo_domain(session)
+    operations = [
+        "schema",
+        "list",
+        "query",
+        "get",
+        "create",
+        "update",
+        "archive",
+        "aggregate",
+        "bulkUpdate",
+        "history",
+        "listRelations",
+        "createRelation",
+        "archiveRelation",
+    ]
+
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="todo-workbench",
+        name="Todo Workbench",
+        renderer_key="sandboxed-html-app",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=_manifest(domain.id, operations=operations),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    version = active_version(session, app.id)
+    assert version is not None
+    assert version.manifest["data_plan"]["bindings"]["todos"]["operations"] == operations
+
+
 def test_valid_structured_generated_ui_app_saves(session):
     domain = _todo_domain(session)
 
@@ -209,6 +268,48 @@ def test_valid_structured_generated_ui_app_saves(session):
     assert version.renderer_key == "generated-ui-app"
     assert version.source_kind == "json"
     assert json.loads(version.source_code)["views"][0]["type"] == "table"
+
+
+def test_valid_structured_board_generated_ui_app_saves(session):
+    domain = _todo_domain(session)
+    board_spec = {
+        "schema_version": 1,
+        "title": "Todo Board",
+        "primary_binding": "todos",
+        "actions": [{"key": "tickets.syncExternal", "label": "Sync external"}],
+        "views": [
+            {
+                "id": "todo-board",
+                "type": "board",
+                "title": "Todo board",
+                "binding": "todos",
+                "group_by": "completed",
+                "groups": [
+                    {"label": "Open", "value": False},
+                    {"label": "Done", "value": True},
+                ],
+                "card": {"title": "title", "badges": ["notes"]},
+            }
+        ],
+    }
+
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="todo-board-ui",
+        name="Todo Board UI",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(board_spec),
+        manifest=_manifest_with_action(domain.id),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    version = active_version(session, app.id)
+    assert version is not None
+    assert json.loads(version.source_code)["actions"][0]["key"] == "tickets.syncExternal"
+    assert json.loads(version.source_code)["views"][0]["type"] == "board"
 
 
 @pytest.mark.parametrize(
@@ -366,3 +467,126 @@ def test_archive_and_restore_app_leave_domain_records_intact(session):
 
     restored = restore_app(session, org_id=ORG_ID, app_id=app.id)
     assert restored.archived_at is None
+
+
+def test_workspace_app_action_requires_registered_executor(session):
+    domain = _todo_domain(session)
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="ticket-actions",
+        name="Ticket Actions",
+        renderer_key="sandboxed-html-app",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=_manifest_with_action(domain.id),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    with pytest.raises(WorkspaceAppActionExecutorMissing, match="no server-side action executor"):
+        run_workspace_app_action(
+            session,
+            org_id=ORG_ID,
+            app_id=app.id,
+            action_key="tickets.syncExternal",
+            payload={"ticketId": 1},
+            user_id=USER_ID,
+        )
+
+
+def test_workspace_app_action_registered_executor_runs(session):
+    domain = _todo_domain(session)
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="ticket-action-runner",
+        name="Ticket Action Runner",
+        renderer_key="sandboxed-html-app",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=_manifest_with_action(
+            domain.id,
+            {
+                "kind": "connector",
+                "description": "Sync one Domain ticket with the configured external ticketing system.",
+                "effects": ["domain.read", "domain.write", "external.read", "external.write"],
+                "connectors": [{"key": "ticketing", "provider": "configured_ticketing_system"}],
+                "executor": {"type": "registered", "key": "ticketing.sync"},
+            },
+        ),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    def _executor(context, payload):
+        assert context.org_id == ORG_ID
+        assert context.action_key == "tickets.syncExternal"
+        return {"synced": True, "ticketId": payload["ticketId"]}
+
+    register_workspace_app_action_executor("ticketing.sync", _executor)
+    try:
+        result = run_workspace_app_action(
+            session,
+            org_id=ORG_ID,
+            app_id=app.id,
+            action_key="tickets.syncExternal",
+            payload={"ticketId": 42},
+            user_id=USER_ID,
+        )
+    finally:
+        unregister_workspace_app_action_executor("ticketing.sync")
+
+    assert result["ok"] is True
+    assert result["status"] == "completed"
+    assert result["effects"] == ["domain.read", "domain.write", "external.read", "external.write"]
+    assert result["connector_keys"] == ["ticketing"]
+    assert result["result"] == {"synced": True, "ticketId": 42}
+
+
+def test_workspace_app_action_boundaries_reject_raw_secrets(session):
+    domain = _todo_domain(session)
+
+    with pytest.raises(WorkspaceAppContractError, match="raw credentials"):
+        create_app(
+            session,
+            org_id=ORG_ID,
+            key="bad-action-secret",
+            name="Bad Action Secret",
+            renderer_key="sandboxed-html-app",
+            source_kind="html",
+            source_code=VALID_SOURCE,
+            manifest=_manifest_with_action(
+                domain.id,
+                {
+                    "kind": "connector",
+                    "description": "Bad connector declaration.",
+                    "effects": ["external.write"],
+                    "executor": {"type": "deferred"},
+                    "api_key": "github_pat_example_should_not_be_in_manifest",
+                },
+            ),
+            visual_spec=VALID_VISUAL_SPEC,
+        )
+
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="payload-secret",
+        name="Payload Secret",
+        renderer_key="sandboxed-html-app",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=_manifest_with_action(domain.id),
+        visual_spec=VALID_VISUAL_SPEC,
+    )
+
+    with pytest.raises(WorkspaceAppActionContractError, match="payload must not contain raw credentials"):
+        run_workspace_app_action(
+            session,
+            org_id=ORG_ID,
+            app_id=app.id,
+            action_key="tickets.syncExternal",
+            payload={"token": "github_pat_example_should_not_be_in_payload"},
+            user_id=USER_ID,
+        )

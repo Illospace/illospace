@@ -30,6 +30,7 @@
     PillTone,
     RuntimeOption,
     RuntimeSettings,
+    RuntimeUpdateStatus,
     StartupGuideStep,
     StartupStepKey,
   } from './types';
@@ -57,6 +58,8 @@
   let notice = $state<NoticeState | null>(null);
   let geminiApiKey = $state('');
   let savingGeminiKey = $state(false);
+  let updateStatus = $state<RuntimeUpdateStatus | null>(null);
+  let startingUpdate = $state(false);
   let startingIntro = $state(false);
   let setupEmbedderPromptSkipped = $state(false);
   let modelDraft = $state<Record<ModelTier, string>>({ low: '', medium: '', high: '' });
@@ -78,6 +81,7 @@
   const showEmbedderKeyPrompt = $derived(setupMode && canManageSettings && !hasEmbeddingApiKey && !setupEmbedderPromptSkipped);
   const startupGuideSteps = $derived(buildStartupGuideSteps());
   const showStartupGuide = $derived(shouldShowStartupGuide());
+  const updateRunning = $derived(startingUpdate || updateStatus?.status === 'running');
 
   onMount(() => {
     loadSettings();
@@ -114,11 +118,43 @@
     loading = true;
     loadError = '';
     try {
-      hydrate(await api.runtimeSettings());
+      const next = await api.runtimeSettings();
+      hydrate(next);
+      if (next.permissions?.can_manage_settings) {
+        void loadUpdateStatus();
+      }
     } catch (error) {
       loadError = error instanceof Error ? error.message : 'System setup failed to load.';
     } finally {
       loading = false;
+    }
+  }
+
+  async function loadUpdateStatus() {
+    if (!settings?.permissions?.can_manage_settings) return;
+    try {
+      updateStatus = await api.runtimeUpdateStatus();
+    } catch {
+      updateStatus = null;
+    }
+  }
+
+  async function startIllospaceUpdate() {
+    if (!canManageSettings || updateStatus?.available === false) return;
+    startingUpdate = true;
+    notice = null;
+    try {
+      const nextStatus = (await api.startRuntimeUpdate()) as RuntimeUpdateStatus;
+      updateStatus = nextStatus;
+      notice = {
+        tone: 'info',
+        title: 'Illospace update started.',
+        detail: nextStatus.detail || updateNoticeDetail(nextStatus),
+      };
+    } catch (error) {
+      notice = errorNotice('Update did not start.', error, 'Check the server update log and try again.');
+    } finally {
+      startingUpdate = false;
     }
   }
 
@@ -662,6 +698,14 @@
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
+  function updateNoticeDetail(status: RuntimeUpdateStatus | null) {
+    const activeRuns = status?.active_agent_runs ?? 0;
+    if (activeRuns > 0) {
+      return `${activeRuns} active AgentRun${activeRuns === 1 ? '' : 's'} will finish before the worker restarts on the new code.`;
+    }
+    return 'The server is fetching origin/main and applying the update.';
+  }
+
   function errorNotice(title: string, error: unknown, fallback: string): NoticeState {
     const detail =
       error instanceof Error
@@ -688,6 +732,20 @@
   contentClassName="system-page"
 >
   {#snippet actions()}
+    {#if canManageSettings}
+      <ConstellationButton
+        variant="secondary"
+        onclick={startIllospaceUpdate}
+        loading={updateRunning}
+        loadingLabel={startingUpdate ? 'Starting' : 'Updating'}
+        disabled={updateStatus?.available === false}
+      >
+        {#snippet leadingVisual()}
+          <ConstellationIcon name="git-branch" size={14} />
+        {/snippet}
+        Update Illospace
+      </ConstellationButton>
+    {/if}
     <ConstellationButton variant="quiet" onclick={loadSettings} loading={loading} loadingLabel="Loading">
       {#snippet leadingVisual()}
         <ConstellationIcon name="refresh" size={14} />

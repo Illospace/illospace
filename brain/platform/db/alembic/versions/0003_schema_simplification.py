@@ -1,7 +1,7 @@
 """Consolidated legacy schema simplification.
 
-Revision ID: 0002_schema_simplification
-Revises: 0001_public_schema_baseline
+Revision ID: 0003_schema_simplification
+Revises: 0002_idea_timestamps_timestamptz
 Create Date: 2026-05-12
 """
 
@@ -31,8 +31,8 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from pgvector.sqlalchemy import Vector
 
 
-revision = "0002_schema_simplification"
-down_revision = "0001_public_schema_baseline"
+revision = "0003_schema_simplification"
+down_revision = "0002_idea_timestamps_timestamptz"
 branch_labels = None
 depends_on = None
 
@@ -779,4 +779,3 @@ def _downgrade_0013() -> None:
             Column("topic_tags", ARRAY(Text), server_default=text("'{}'::text[]"), nullable=True),
             Column("attributed_to", String(36), nullable=True),
         )
-

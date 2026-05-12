@@ -6,12 +6,12 @@
 
   const TYPE_COLORS: Record<string, string> = {
     lesson: '#f87171',
-    pattern: '#fbbf24',
+    pattern: '#57CFA0',
     fact: '#5b8def',
     episode: '#718096',
     decision: '#34d399',
     preference: '#a78bfa',
-    insight: '#fb923c',
+    insight: '#57CFA0',
     emotion: '#f472b6',
   };
 

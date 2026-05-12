@@ -246,6 +246,58 @@ def test_openai_responses_transport_converts_typed_tool_blocks():
     ]
 
 
+def test_openai_responses_transport_preserves_tool_result_images():
+    from brain.platform.integrations.transports.base import (
+        LLMRequest,
+        ToolResultContentBlock,
+        ToolUseContentBlock,
+    )
+    from brain.platform.integrations.transports.openai_responses import OpenAIResponsesTransport
+
+    request = LLMRequest(
+        model="openai/gpt-5.4",
+        messages=[
+            {"role": "assistant", "content": [
+                ToolUseContentBlock(id="call_1", name="browser", input={"action": "observe"}),
+            ]},
+            {"role": "user", "content": [
+                ToolResultContentBlock(
+                    tool_use_id="call_1",
+                    content=[
+                        {"type": "text", "text": "Observed current browser viewport."},
+                        {
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": "image/png", "data": "abc123"},
+                        },
+                    ],
+                ),
+            ]},
+        ],
+    )
+
+    kwargs = OpenAIResponsesTransport().build_kwargs(request)
+
+    assert kwargs["input"] == [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "browser",
+            "arguments": '{"action": "observe"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "Observed current browser viewport.",
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "data:image/png;base64,abc123"},
+            ],
+        },
+    ]
+
+
 def test_openai_responses_transport_converts_user_images():
     from brain.platform.integrations.transports.base import ImageContentBlock, LLMRequest, TextContentBlock
     from brain.platform.integrations.transports.openai_responses import OpenAIResponsesTransport

@@ -8,8 +8,17 @@ from httpx import ASGITransport, AsyncClient
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import brain.app.api.main as api_main
+from brain.app.api.deps import get_db
 
 app = api_main.app
+
+
+class _AsyncSession:
+    def __init__(self, session):
+        self.session = session
+
+    async def run_sync(self, fn):
+        return fn(self.session)
 
 
 @pytest_asyncio.fixture
@@ -39,20 +48,20 @@ async def test_health_includes_run_event_backbone(client):
     mock_mem_repo.count_active.return_value = 3
     mock_skill_repo = MagicMock()
     mock_skill_repo.list_active.return_value = [1, 2]
-    mock_emo_repo = MagicMock()
-    mock_emo_repo.count_all.return_value = 4
 
-    with patch("brain.app.api.deps.get_db", fake_get_db), \
-        patch("brain.platform.db.repositories.memories.MemoryRepository", return_value=mock_mem_repo), \
+    app.dependency_overrides[get_db] = lambda: _AsyncSession(mock_db)
+    try:
+        with patch("brain.platform.db.repositories.memories.MemoryRepository", return_value=mock_mem_repo), \
         patch("brain.platform.db.repositories.skills.SkillRepository", return_value=mock_skill_repo), \
-        patch("brain.platform.db.repositories.emotions.EmotionRepository", return_value=mock_emo_repo), \
         patch("brain.systems.runs.event_log.run_event_backbone_status", return_value={
             "consumer_name": "api.websocket_fanout",
             "health": "lagging",
             "lag": 2,
             "consumer_running": True,
         }):
-        resp = await client.get("/api/health")
+            resp = await client.get("/api/health")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
 
     assert resp.status_code == 200
     data = resp.json()

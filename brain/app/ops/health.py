@@ -125,15 +125,10 @@ def sanitize_for_health(value: Any) -> Any:
 
 
 @contextmanager
-def _health_db_session() -> Iterator[Session]:
-    from brain.app.api.deps import get_db
-
-    db_gen = get_db()
-    session = next(db_gen)
-    try:
-        yield session
-    finally:
-        db_gen.close()
+def _health_db_session(session: Session | None = None) -> Iterator[Session]:
+    if session is None:
+        raise RuntimeError("health checks require an explicit database session")
+    yield session
 
 
 def _apply_statement_timeout(session: Session, timeout_ms: int) -> None:
@@ -307,16 +302,20 @@ def liveness_health_snapshot() -> dict[str, Any]:
     }
 
 
-def readiness_health_snapshot(*, consumer_running: bool | None = None) -> dict[str, Any]:
+def readiness_health_snapshot(
+    *,
+    consumer_running: bool | None = None,
+    session: Session | None = None,
+) -> dict[str, Any]:
     timeout_ms = _timeout_ms("HEALTH_READY_DB_TIMEOUT_MS", DEFAULT_DB_TIMEOUT_MS)
     checks: dict[str, HealthCheck] = {}
     try:
-        with _health_db_session() as session:
-            checks["database"] = _database_check(session, timeout_ms=timeout_ms)
+        with _health_db_session(session) as db:
+            checks["database"] = _database_check(db, timeout_ms=timeout_ms)
             if checks["database"].ok:
-                checks["migration_head"] = _migration_head_check(session, timeout_ms=timeout_ms)
+                checks["migration_head"] = _migration_head_check(db, timeout_ms=timeout_ms)
                 checks["event_backbone"] = _event_backbone_health_check(
-                    session,
+                    db,
                     consumer_running=consumer_running,
                     timeout_ms=timeout_ms,
                 )
@@ -486,13 +485,13 @@ def _provider_health_check() -> HealthCheck:
         )
 
 
-def _scheduler_health_check() -> HealthCheck:
+def _scheduler_health_check(session: Session | None = None) -> HealthCheck:
     start = time.monotonic()
     timeout_ms = _timeout_ms("HEALTH_DEEP_DB_TIMEOUT_MS", DEFAULT_DEEP_TIMEOUT_MS)
     try:
-        with _health_db_session() as session:
-            _apply_statement_timeout(session, timeout_ms)
-            snapshot = scheduler_health_snapshot(session)
+        with _health_db_session(session) as db:
+            _apply_statement_timeout(db, timeout_ms)
+            snapshot = scheduler_health_snapshot(db)
         scheduler_status = ((snapshot.get("health") or {}).get("status") or "unknown").lower()
         if scheduler_status in {"healthy", "idle"}:
             status = "ok"
@@ -549,7 +548,7 @@ def _run_row_payload(run: AgentRun, *, now: datetime | None = None) -> dict[str,
     }
 
 
-def _run_health_check() -> HealthCheck:
+def _run_health_check(session: Session | None = None) -> HealthCheck:
     start = time.monotonic()
     timeout_ms = _timeout_ms("HEALTH_DEEP_DB_TIMEOUT_MS", DEFAULT_DEEP_TIMEOUT_MS)
     stuck_after_seconds = _int_env(
@@ -567,8 +566,8 @@ def _run_health_check() -> HealthCheck:
     stuck_cutoff = now - timedelta(seconds=stuck_after_seconds)
     failure_cutoff = now - timedelta(minutes=failure_window_minutes)
     try:
-        with _health_db_session() as session:
-            _apply_statement_timeout(session, timeout_ms)
+        with _health_db_session(session) as db:
+            _apply_statement_timeout(db, timeout_ms)
             stuck_stmt = (
                 select(AgentRun)
                 .where(
@@ -578,20 +577,20 @@ def _run_health_check() -> HealthCheck:
                 .order_by(AgentRun.created_at.asc())
                 .limit(recent_limit)
             )
-            stuck_runs = list(session.scalars(stuck_stmt).all())
+            stuck_runs = list(db.scalars(stuck_stmt).all())
             recent_failure_clause = and_(
                 AgentRun.status.in_(["failed"]),
                 func.coalesce(AgentRun.completed_at, AgentRun.created_at) >= failure_cutoff,
             )
             recent_failures = list(
-                session.scalars(
+                db.scalars(
                     select(AgentRun)
                     .where(recent_failure_clause)
                     .order_by(func.coalesce(AgentRun.completed_at, AgentRun.created_at).desc())
                     .limit(recent_limit)
                 ).all()
             )
-            recent_failure_count = session.scalar(
+            recent_failure_count = db.scalar(
                 select(func.count()).select_from(AgentRun).where(recent_failure_clause)
             ) or 0
 
@@ -629,12 +628,16 @@ def _run_health_check() -> HealthCheck:
         )
 
 
-def deep_health_snapshot(*, consumer_running: bool | None = None) -> dict[str, Any]:
+def deep_health_snapshot(
+    *,
+    consumer_running: bool | None = None,
+    session: Session | None = None,
+) -> dict[str, Any]:
     checks = {
         "embedding": _embedding_health_check(),
         "providers": _provider_health_check(),
-        "scheduler": _scheduler_health_check(),
-        "run": _run_health_check(),
+        "scheduler": _scheduler_health_check(session) if session is not None else _scheduler_health_check(),
+        "run": _run_health_check(session) if session is not None else _run_health_check(),
     }
     if consumer_running is not None:
         checks["event_backbone_runtime"] = HealthCheck(
@@ -668,12 +671,16 @@ def deep_health_snapshot(*, consumer_running: bool | None = None) -> dict[str, A
     return sanitize_for_health(payload)
 
 
-def compatibility_health_snapshot(*, consumer_running: bool | None = None) -> dict[str, Any]:
+def compatibility_health_snapshot(
+    *,
+    consumer_running: bool | None = None,
+    session: Session | None = None,
+) -> dict[str, Any]:
     try:
         from brain.platform.db.repositories.memories import MemoryRepository
         from brain.platform.db.models.skill import Skill
 
-        with _health_db_session() as db:
+        with _health_db_session(session) as db:
             mem_repo = MemoryRepository(db)
             skill_count = db.scalar(
                 select(func.count(Skill.id)).where(

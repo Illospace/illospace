@@ -14,6 +14,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 # Re-export database config
 DB_URL = brain_config.DB_URL
+DB_SYNC_URL = brain_config.DB_SYNC_URL
 DB_POOL_MAX = brain_config.DB_POOL_MAX
 
 # API-specific
@@ -35,6 +36,7 @@ if not _secret_from_env:
     )
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
 RATE_LIMIT = int(os.getenv("RATE_LIMIT", "300"))
+RATE_LIMIT_GLOBAL = int(os.getenv("RATE_LIMIT_GLOBAL", str(max(RATE_LIMIT, RATE_LIMIT * 4))))
 RATE_WINDOW = int(os.getenv("RATE_WINDOW", "60"))
 
 # Localhost auth fallback exists for local CLI/dev ergonomics only.

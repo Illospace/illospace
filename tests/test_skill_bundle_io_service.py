@@ -16,10 +16,16 @@ from brain.platform.db.models.skill_bundle import (
     SkillInstallation,
     SkillOverlay,
 )
-from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
+from brain.platform.db.repositories.skill_bundles import (
+    SkillBundleRepository,
+    SkillBundleVersionConflict,
+)
 from brain.platform.db.repositories.skills import SkillRepository
 from brain.platform.db.services.skill_bundle_io import SkillBundleIOService
 from brain.systems.skills.bundles import SkillBundleError, load_skill_bundle
+
+ORG_ID = "11111111-1111-4111-8111-111111111111"
+USER_ID = "33333333-3333-4333-8333-333333333333"
 
 
 def _patch_sqlite_for_pg_types():
@@ -29,6 +35,8 @@ def _patch_sqlite_for_pg_types():
         SQLiteTypeCompiler.visit_ARRAY = lambda self, type_, **kw: "TEXT"
     if not hasattr(SQLiteTypeCompiler, "visit_VECTOR"):
         SQLiteTypeCompiler.visit_VECTOR = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_uuid = lambda self, type_, **kw: "TEXT"
 
     original = SQLiteDDLCompiler.get_column_default_string
 
@@ -110,9 +118,9 @@ def test_import_bundle_materializes_skill_installation_and_assets(service, sessi
     result = service.import_bundle(
         tmp_path,
         namespace="illo_core",
-        org_id="org-1",
-        user_id="user-1",
-        installed_by_user_id="user-1",
+        org_id=ORG_ID,
+        user_id=USER_ID,
+        installed_by_user_id=USER_ID,
         trust_level="illo_core",
     )
 
@@ -148,7 +156,7 @@ default_thinking_tier = "xhigh"
 """,
     )
 
-    result = service.import_bundle(tmp_path, namespace="illo_core", org_id="org-1")
+    result = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
     skill = session.get(Skill, result["skill"]["id"])
     assert skill.model_tier == "high"
@@ -162,7 +170,7 @@ def test_import_bundle_keeps_hosted_source_distinct_from_agent_draft(
 ):
     _write_bundle(tmp_path, source="self_hosted", visibility="private_local")
 
-    result = service.import_bundle(tmp_path, namespace="self_hosted", org_id="org-1")
+    result = service.import_bundle(tmp_path, namespace="self_hosted", org_id=ORG_ID)
 
     skill = session.get(Skill, result["skill"]["id"])
     bundle = session.get(SkillBundle, result["bundle"]["id"])
@@ -176,8 +184,8 @@ def test_import_bundle_keeps_hosted_source_distinct_from_agent_draft(
 def test_import_bundle_is_idempotent_for_same_version(service, session, tmp_path):
     _write_bundle(tmp_path)
 
-    first = service.import_bundle(tmp_path, namespace="illo_core", org_id="org-1")
-    second = service.import_bundle(tmp_path, namespace="illo_core", org_id="org-1")
+    first = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
+    second = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
     assert second["version"]["existing"] is True
     assert second["version"]["id"] == first["version"]["id"]
@@ -207,7 +215,7 @@ default_model_tier = "turbo"
     (tmp_path / "SKILL.md").write_text("# Develop\n", encoding="utf-8")
 
     with pytest.raises(SkillBundleError, match="default_model_tier"):
-        service.import_bundle(tmp_path, namespace="self_hosted", org_id="org-1")
+        service.import_bundle(tmp_path, namespace="self_hosted", org_id=ORG_ID)
 
     assert session.query(SkillBundle).count() == 0
     assert session.query(SkillBundleVersion).count() == 0
@@ -220,10 +228,10 @@ def test_import_bundle_updates_existing_install_with_rollback_pointer(
     tmp_path,
 ):
     _write_bundle(tmp_path, version="1.0.0", procedure="# Develop\nv1\n")
-    first = service.import_bundle(tmp_path, namespace="illo_core", org_id="org-1")
+    first = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
     _write_bundle(tmp_path, version="1.1.0", procedure="# Develop\nv2\n")
-    second = service.import_bundle(tmp_path, namespace="illo_core", org_id="org-1")
+    second = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
     skill = session.get(Skill, second["skill"]["id"])
     installation = session.get(SkillInstallation, second["installation"]["id"])
@@ -233,6 +241,55 @@ def test_import_bundle_updates_existing_install_with_rollback_pointer(
     assert installation.rollback_bundle_version_id == first["version"]["id"]
     assert skill.procedure == "# Develop\nv2\n"
     assert skill.version == 2
+
+
+def test_import_bundle_can_auto_bump_core_bundle_when_semver_stays_stale(
+    service,
+    session,
+    tmp_path,
+):
+    _write_bundle(tmp_path, version="1.0.0", procedure="# Develop\nv1\n")
+    first = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
+
+    _write_bundle(tmp_path, version="1.0.0", procedure="# Develop\nv2\n")
+    second = service.import_bundle(
+        tmp_path,
+        namespace="illo_core",
+        org_id=ORG_ID,
+        auto_bump_conflicting_semver=True,
+    )
+    third = service.import_bundle(
+        tmp_path,
+        namespace="illo_core",
+        org_id=ORG_ID,
+        auto_bump_conflicting_semver=True,
+    )
+
+    skill = session.get(Skill, second["skill"]["id"])
+    installation = session.get(SkillInstallation, second["installation"]["id"])
+    version = session.get(SkillBundleVersion, second["version"]["id"])
+
+    assert second["version"]["id"] != first["version"]["id"]
+    assert second["version"]["semver"] == "1.0.1"
+    assert second["version"]["existing"] is False
+    assert third["version"]["id"] == second["version"]["id"]
+    assert third["version"]["existing"] is True
+    assert version.provenance["declared_semver"] == "1.0.0"
+    assert version.provenance["auto_bumped_from_semver"] == "1.0.0"
+    assert installation.rollback_bundle_version_id == first["version"]["id"]
+    assert skill.procedure == "# Develop\nv2\n"
+    assert skill.bundle_version_id == second["version"]["id"]
+    assert skill.version == 2
+
+
+def test_import_bundle_rejects_stale_semver_without_auto_bump(service, tmp_path):
+    _write_bundle(tmp_path, version="1.0.0", procedure="# Develop\nv1\n")
+    service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
+
+    _write_bundle(tmp_path, version="1.0.0", procedure="# Develop\nv2\n")
+
+    with pytest.raises(SkillBundleVersionConflict, match="different digest"):
+        service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
 
 def test_export_skill_bundle_writes_loadable_files(service, session, tmp_path):

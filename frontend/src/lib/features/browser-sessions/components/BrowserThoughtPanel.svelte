@@ -5,6 +5,17 @@
     ConstellationIconButton,
   } from '$lib/components/constellation';
   import { cortex } from '$lib/stores/cortex.svelte';
+  import {
+    attachmentPreviewKind,
+    formatAttachmentBytes,
+  } from '$lib/utils/attachmentPreview';
+  import type { CortexThreadStageFileAttachment } from '$lib/features/threads/domain/threadTranscriptAdapter';
+
+  let {
+    onPreviewAttachment,
+  }: {
+    onPreviewAttachment?: (attachment: CortexThreadStageFileAttachment) => void;
+  } = $props();
 
   const browserUrl = $derived.by(() => cortex.browserSession?.current_url || '');
   const browserUrlLabel = $derived.by(() => {
@@ -28,6 +39,15 @@
     return 'loading';
   });
   const browserControlsDisabled = $derived.by(() => !cortex.browserSession?.id);
+  const browserFiles = $derived.by(() => {
+    const session = cortex.browserSession;
+    const downloads = (session?.downloads ?? []).map((item: any) => ({ ...item, itemKind: 'download' }));
+    const artifacts = (session?.artifacts ?? []).map((item: any) => ({ ...item, itemKind: item.kind || 'artifact' }));
+    return [...downloads, ...artifacts]
+      .filter((item) => item?.url || item?.download_url)
+      .slice(-5)
+      .reverse();
+  });
 
   let browserUrlDraft = $state('https://');
   let lastSyncedBrowserUrl = $state('');
@@ -91,6 +111,35 @@
 
   function openInBrowser(url: string | undefined) {
     const target = normalizeBrowserTarget(url || browserUrlDraft);
+    if (!target || typeof window === 'undefined') return;
+    window.open(target, '_blank', 'noopener,noreferrer');
+  }
+
+  function browserFileAttachment(file: any): CortexThreadStageFileAttachment {
+    const url = String(file?.url || file?.download_url || '');
+    const downloadUrl = String(file?.download_url || file?.url || '');
+    const label = String(file?.filename || file?.name || 'Browser file');
+    return {
+      kind: 'file',
+      url,
+      downloadUrl,
+      label,
+      detail: typeof file?.size === 'number' ? formatAttachmentBytes(file.size) : String(file?.itemKind || ''),
+      previewKind: attachmentPreviewKind({
+        url,
+        filename: label,
+        type: file?.type,
+      }),
+    };
+  }
+
+  function openBrowserFile(file: any) {
+    const attachment = browserFileAttachment(file);
+    if (onPreviewAttachment) {
+      onPreviewAttachment(attachment);
+      return;
+    }
+    const target = attachment.downloadUrl || attachment.url;
     if (!target || typeof window === 'undefined') return;
     window.open(target, '_blank', 'noopener,noreferrer');
   }
@@ -328,6 +377,26 @@
             {/if}
           </div>
         </div>
+
+        {#if browserFiles.length > 0}
+          <div class="browser-file-strip" aria-label="Browser files">
+            <span class="browser-file-strip-label">Files</span>
+            <div class="browser-file-list">
+              {#each browserFiles as file, fileIndex (`browser-file-${file.filename ?? file.url ?? fileIndex}`)}
+                {@const attachment = browserFileAttachment(file)}
+                <button
+                  type="button"
+                  class="browser-file-button"
+                  title={attachment.label}
+                  onclick={() => openBrowserFile(file)}
+                >
+                  <ConstellationIcon name={attachment.previewKind === 'pdf' ? 'pdf' : 'document'} size={14} stroke={1.8} />
+                  <span>{attachment.label}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
       </div>
     </div>
   </section>
@@ -448,6 +517,70 @@
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+
+  .browser-file-strip {
+    flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+    margin-top: 8px;
+    padding: 8px 0 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .browser-file-strip-label {
+    color: rgba(235, 242, 250, 0.44);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 9px;
+    line-height: 1;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .browser-file-list {
+    min-width: 0;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .browser-file-list::-webkit-scrollbar {
+    display: none;
+  }
+
+  .browser-file-button {
+    min-width: 0;
+    max-width: 180px;
+    min-height: 28px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 9px;
+    border-radius: 7px;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    background: rgba(255, 255, 255, 0.045);
+    color: rgba(240, 244, 252, 0.84);
+    cursor: pointer;
+    font-family: var(--constellation-font-sans, var(--font-sans));
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .browser-file-button span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .browser-file-button:hover,
+  .browser-file-button:focus-visible {
+    color: rgba(248, 251, 255, 0.96);
+    border-color: rgba(141, 183, 255, 0.28);
+    background: rgba(141, 183, 255, 0.09);
   }
 
   .browser-stage.is-empty {

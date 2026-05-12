@@ -52,7 +52,7 @@ def test_readiness_snapshot_checks_database_migration_and_event_backbone(monkeyp
     ]
 
     @contextmanager
-    def fake_db():
+    def fake_db(_session=None):
         yield session
 
     monkeypatch.setattr(health, "_health_db_session", fake_db)
@@ -86,7 +86,7 @@ def test_readiness_snapshot_fails_when_migration_is_behind(monkeypatch):
     ]
 
     @contextmanager
-    def fake_db():
+    def fake_db(_session=None):
         yield session
 
     monkeypatch.setattr(health, "_health_db_session", fake_db)
@@ -119,7 +119,7 @@ def test_readiness_snapshot_fails_when_event_backbone_has_error(monkeypatch):
     ]
 
     @contextmanager
-    def fake_db():
+    def fake_db(_session=None):
         yield session
 
     monkeypatch.setattr(health, "_health_db_session", fake_db)

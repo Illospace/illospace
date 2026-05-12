@@ -76,6 +76,62 @@ test('resolves direct domain id and object key without a manifest alias', () => 
   assert.equal(request.limit, 25);
 });
 
+test('normalizes generic workspace app Domain primitives', () => {
+  const extended = structuredClone(manifest);
+  extended.data_plan.bindings.todos.operations = [
+    'schema',
+    'list',
+    'query',
+    'get',
+    'create',
+    'update',
+    'archive',
+    'aggregate',
+    'bulkUpdate',
+    'history',
+    'listRelations',
+    'createRelation',
+    'archiveRelation',
+  ];
+
+  const aggregate = normalizeDomainRequest(extended, 'aggregate', {
+    alias: 'todos',
+    group_by: 'completed',
+    metrics: [{ type: 'count', as: 'todos' }],
+  });
+  assert.equal(aggregate.groupBy, 'completed');
+  assert.deepEqual(aggregate.metrics, [{ type: 'count', field: null, as: 'todos' }]);
+
+  const bulk = normalizeDomainRequest(extended, 'bulkUpdate', {
+    alias: 'todos',
+    record_ids: ['1', 2],
+    data_patch: { completed: true },
+  });
+  assert.deepEqual(bulk.updates, [
+    { recordId: 1, dataPatch: { completed: true }, title: null, expectedVersion: null },
+    { recordId: 2, dataPatch: { completed: true }, title: null, expectedVersion: null },
+  ]);
+
+  const relation = normalizeDomainRequest(extended, 'createRelation', {
+    alias: 'todos',
+    relation_key: 'todo_blocks_todo',
+    source_record_id: '1',
+    target_record_id: '2',
+    properties: { reason: 'dependency' },
+  });
+  assert.equal(relation.relationKey, 'todo_blocks_todo');
+  assert.equal(relation.sourceRecordId, 1);
+  assert.equal(relation.targetRecordId, 2);
+  assert.deepEqual(relation.properties, { reason: 'dependency' });
+});
+
+test('rejects operations not declared by the manifest binding', () => {
+  assert.throws(
+    () => normalizeDomainRequest(manifest, 'aggregate', { alias: 'todos' }),
+    /does not allow operation 'aggregate'/,
+  );
+});
+
 test('returns Domain records with both data and values aliases', () => {
   const records = withDomainRecordAliases([
     { id: 1, domain_id: 1, data: { title: 'One' } },

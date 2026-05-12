@@ -36,10 +36,15 @@ from brain.platform.db.models.idea import Idea, IdeaConnection, IdeaStateLog, Id
 from brain.app.api.routers.ws import ws_manager
 from brain.app.api.authorization import require_org_context
 from brain.platform.db.repositories.ideas import IdeaConnectionRepository
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
 from brain.systems.cortex.title_generation import (
     generate_and_store_idea_display_title,
     generate_display_title,
+)
+from brain.systems.cortex.upload_preview import (
+    build_upload_preview,
+    public_static_upload_url,
+    static_upload_url_for,
 )
 from brain.systems.services.runtime_introspection import get_provider_auth_status
 
@@ -54,7 +59,7 @@ async def log_events(request: Request, user: dict[str, Any] = Depends(get_curren
     events = data if isinstance(data, list) else [data]
     if not events:
         raise HTTPException(status_code=400, detail="At least one event is required")
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         for ev in events:
             et = ev.get("event_type")
             if not et:
@@ -95,9 +100,12 @@ def list_connections_payload(
 
 
 @router.get("/connections")
-def list_connections_all(idea_id: str | None = None, user: dict[str, Any] = Depends(get_current_user)):
-    with UnitOfWork() as uow:
-        return list_connections_payload(idea_id, db=uow.session, user=user)
+async def list_connections_all(idea_id: str | None = None, user: dict[str, Any] = Depends(get_current_user)):
+    def _list():
+        with UnitOfWork() as uow:
+            return list_connections_payload(idea_id, db=uow.session, user=user)
+
+    return await run_sync_with_unit_of_work(_list)
 
 
 @router.post("/connections", status_code=201)
@@ -108,32 +116,32 @@ async def create_connection(request: Request, user: dict[str, Any] = Depends(get
         raise HTTPException(status_code=400, detail="source_id and target_id are required")
     if source_id == target_id:
         raise HTTPException(status_code=400, detail="Cannot connect an idea to itself")
-    broadcast_org_id: str | None = None
-    result: dict[str, Any] | None = None
-    with UnitOfWork() as uow:
-        src = _require_idea_for_user(uow.session, source_id, user, detail="One or both ideas not found")
-        tgt = _require_idea_for_user(uow.session, target_id, user, detail="One or both ideas not found")
-        if not src or not tgt:
-            raise HTTPException(status_code=404, detail="One or both ideas not found")
-        if src.org_id:
-            broadcast_org_id = str(src.org_id)
-        elif not _caller_is_service_principal(user):
-            broadcast_org_id = require_org_context(user)
-        try:
-            conn = IdeaConnection(
-                source_id=source_id,
-                target_id=target_id,
-                type=data.get("type", "manual"),
-                weight=float(data.get("weight", 1.0)),
-                reason=data.get("reason"),
-            )
-            uow.session.add(conn)
-            uow.session.flush()
-            result = _row_to_dict(conn)
-        except Exception as e:
-            if "unique" in str(e).lower() or "duplicate" in str(e).lower():
-                raise HTTPException(status_code=400, detail="Connection already exists")
-            raise
+    def _create():
+        with UnitOfWork() as uow:
+            src = _require_idea_for_user(uow.session, source_id, user, detail="One or both ideas not found")
+            tgt = _require_idea_for_user(uow.session, target_id, user, detail="One or both ideas not found")
+            if not src or not tgt:
+                raise HTTPException(status_code=404, detail="One or both ideas not found")
+            broadcast_org_id = str(src.org_id) if src.org_id else None
+            if broadcast_org_id is None and not _caller_is_service_principal(user):
+                broadcast_org_id = require_org_context(user)
+            try:
+                conn = IdeaConnection(
+                    source_id=source_id,
+                    target_id=target_id,
+                    type=data.get("type", "manual"),
+                    weight=float(data.get("weight", 1.0)),
+                    reason=data.get("reason"),
+                )
+                uow.session.add(conn)
+                uow.session.flush()
+                return _row_to_dict(conn), broadcast_org_id
+            except Exception as e:
+                if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+                    raise HTTPException(status_code=400, detail="Connection already exists")
+                raise
+
+    result, broadcast_org_id = await run_sync_with_unit_of_work(_create)
     await ws_manager.broadcast_product_event(
         "connection_created",
         {"connection": result},
@@ -144,28 +152,32 @@ async def create_connection(request: Request, user: dict[str, Any] = Depends(get
 
 @router.delete("/connections/{conn_id}")
 async def delete_connection(conn_id: str, user: dict[str, Any] = Depends(get_current_user)):
-    broadcast_org_id: str | None = None
-    with UnitOfWork() as uow:
-        if _caller_is_service_principal(user):
-            conn = uow.session.get(IdeaConnection, conn_id)
-        else:
-            broadcast_org_id = require_org_context(user)
-            conn = IdeaConnectionRepository(uow.session).get_for_org(
-                conn_id,
-                broadcast_org_id,
-            )
-        if not conn:
-            raise HTTPException(status_code=404, detail=f"Connection {conn_id} not found")
-        if broadcast_org_id is None:
-            source = uow.session.get(Idea, conn.source_id)
-            target = uow.session.get(Idea, conn.target_id)
-            source_org_id = getattr(source, "org_id", None)
-            target_org_id = getattr(target, "org_id", None)
-            if source_org_id:
-                broadcast_org_id = str(source_org_id)
-            elif target_org_id:
-                broadcast_org_id = str(target_org_id)
-        uow.session.delete(conn)
+    def _delete():
+        broadcast_org_id: str | None = None
+        with UnitOfWork() as uow:
+            if _caller_is_service_principal(user):
+                conn = uow.session.get(IdeaConnection, conn_id)
+            else:
+                broadcast_org_id = require_org_context(user)
+                conn = IdeaConnectionRepository(uow.session).get_for_org(
+                    conn_id,
+                    broadcast_org_id,
+                )
+            if not conn:
+                raise HTTPException(status_code=404, detail=f"Connection {conn_id} not found")
+            if broadcast_org_id is None:
+                source = uow.session.get(Idea, conn.source_id)
+                target = uow.session.get(Idea, conn.target_id)
+                source_org_id = getattr(source, "org_id", None)
+                target_org_id = getattr(target, "org_id", None)
+                if source_org_id:
+                    broadcast_org_id = str(source_org_id)
+                elif target_org_id:
+                    broadcast_org_id = str(target_org_id)
+            uow.session.delete(conn)
+        return broadcast_org_id
+
+    broadcast_org_id = await run_sync_with_unit_of_work(_delete)
     await ws_manager.broadcast_product_event(
         "connection_deleted",
         {"connection_id": conn_id},
@@ -191,20 +203,23 @@ async def webhook_reply(request: Request):
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
 
-    with UnitOfWork() as uow:
-        idea = uow.session.get(Idea, idea_id)
-        if not idea:
-            raise HTTPException(status_code=404, detail=f"Idea {idea_id} not found")
-        attachments_data = data.get("attachments", [])
-        thread_msg = IdeaThread(
-            idea_id=idea_id,
-            role="illo",
-            content=content,
-            attachments=attachments_data,
-        )
-        uow.session.add(thread_msg)
-        uow.session.flush()
-        msg = _row_to_dict(thread_msg)
+    def _reply():
+        with UnitOfWork() as uow:
+            idea = uow.session.get(Idea, idea_id)
+            if not idea:
+                raise HTTPException(status_code=404, detail=f"Idea {idea_id} not found")
+            attachments_data = data.get("attachments", [])
+            thread_msg = IdeaThread(
+                idea_id=idea_id,
+                role="illo",
+                content=content,
+                attachments=attachments_data,
+            )
+            uow.session.add(thread_msg)
+            uow.session.flush()
+            return _row_to_dict(thread_msg)
+
+    msg = await run_sync_with_unit_of_work(_reply)
     return JSONResponse(content=msg, status_code=201)
 
 
@@ -237,14 +252,17 @@ def restart_gpu_worker(worker_name: str, user: dict[str, Any] = Depends(get_curr
 # ── Branch detection / splitting ───────────────────────────────
 
 @router.post("/ideas/{idea_id}/detect-branches")
-def detect_branches(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
-    with UnitOfWork() as uow:
-        stmt = (
-            select(IdeaThread.content, IdeaThread.role)
-            .where(IdeaThread.idea_id == idea_id)
-            .order_by(IdeaThread.created_at)
-        )
-        messages = uow.session.execute(stmt).all()
+async def detect_branches(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    def _messages():
+        with UnitOfWork() as uow:
+            stmt = (
+                select(IdeaThread.content, IdeaThread.role)
+                .where(IdeaThread.idea_id == idea_id)
+                .order_by(IdeaThread.created_at)
+            )
+            return uow.session.execute(stmt).all()
+
+    messages = await run_sync_with_unit_of_work(_messages)
 
     if len(messages) < 8:
         return {"branches": [], "should_split": False, "reason": "Thread too short for meaningful split"}
@@ -285,75 +303,80 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
 
     from brain.systems.cortex.events import publish
 
-    with UnitOfWork() as uow:
-        parent = uow.session.get(Idea, idea_id)
-        if not parent:
-            raise HTTPException(status_code=404, detail="Idea not found")
+    def _split():
+        with UnitOfWork() as uow:
+            parent = uow.session.get(Idea, idea_id)
+            if not parent:
+                raise HTTPException(status_code=404, detail="Idea not found")
 
-        stmt = (
-            select(IdeaThread)
-            .where(IdeaThread.idea_id == idea_id)
-            .order_by(IdeaThread.created_at)
-        )
-        all_messages = uow.session.scalars(stmt).all()
-
-        created_ids = []
-        for branch in branches:
-            child_id = str(uuid.uuid4())
-            angle = len(created_ids) * (2 * math.pi / max(len(branches), 1))
-            offset = 120
-            px = (parent.position_x or 0) + offset * math.cos(angle)
-            py = (parent.position_y or 0) + offset * math.sin(angle)
-
-            child = Idea(
-                id=child_id,
-                title=branch['topic'],
-                status='active',
-                origin='split',
-                parent_id=idea_id,
-                salience_score=parent.salience_score,
-                position_x=px,
-                position_y=py,
-                user_id=user.get("id"),
-                org_id=user.get("org_id"),
+            stmt = (
+                select(IdeaThread)
+                .where(IdeaThread.idea_id == idea_id)
+                .order_by(IdeaThread.created_at)
             )
-            uow.session.add(child)
+            all_messages = uow.session.scalars(stmt).all()
 
-            indices = set(branch.get('message_indices', []))
-            for idx, msg in enumerate(all_messages):
-                if idx in indices:
-                    uow.session.add(IdeaThread(
-                        idea_id=child_id,
-                        role=msg.role,
-                        content=msg.content,
-                        attachments=msg.attachments or [],
-                    ))
+            created_ids = []
+            for branch in branches:
+                child_id = str(uuid.uuid4())
+                angle = len(created_ids) * (2 * math.pi / max(len(branches), 1))
+                offset = 120
+                px = (parent.position_x or 0) + offset * math.cos(angle)
+                py = (parent.position_y or 0) + offset * math.sin(angle)
 
-            uow.session.add(IdeaConnection(
-                id=str(uuid.uuid4()),
-                source_id=idea_id,
-                target_id=child_id,
-                type='parent',
-                weight=1.0,
-                reason='Split from parent thought',
+                child = Idea(
+                    id=child_id,
+                    title=branch["topic"],
+                    status="active",
+                    origin="split",
+                    parent_id=idea_id,
+                    salience_score=parent.salience_score,
+                    position_x=px,
+                    position_y=py,
+                    user_id=user.get("id"),
+                    org_id=user.get("org_id"),
+                )
+                uow.session.add(child)
+
+                indices = set(branch.get("message_indices", []))
+                for idx, msg in enumerate(all_messages):
+                    if idx in indices:
+                        uow.session.add(IdeaThread(
+                            idea_id=child_id,
+                            role=msg.role,
+                            content=msg.content,
+                            attachments=msg.attachments or [],
+                        ))
+
+                uow.session.add(IdeaConnection(
+                    id=str(uuid.uuid4()),
+                    source_id=idea_id,
+                    target_id=child_id,
+                    type="parent",
+                    weight=1.0,
+                    reason="Split from parent thought",
+                ))
+
+                created_ids.append(child_id)
+
+            previous_status = parent.status
+            parent.status = "resolved"
+            parent.active_agents = 0
+            uow.session.add(IdeaStateLog(
+                idea_id=idea_id,
+                from_state=previous_status,
+                to_state="resolved",
+                trigger="thought_split",
             ))
 
-            created_ids.append(child_id)
+        supersede_runs_for_idea(
+            idea_id,
+            reason="Parent split into branches",
+            producer="api.split",
+        )
+        return created_ids
 
-        parent.status = 'resolved'
-        parent.active_agents = 0
-        uow.session.add(IdeaStateLog(
-            idea_id=idea_id,
-            from_state=parent.status,
-            to_state='resolved',
-            trigger='thought_split',
-        ))
-
-    supersede_runs_for_idea(
-        idea_id,
-        reason="Parent split into branches",
-        producer="api.split",
-    )
+    created_ids = await run_sync_with_unit_of_work(_split)
     publish("thought_split", {"parent_id": idea_id, "children": created_ids})
     publish("status_change", {"idea_id": idea_id, "new_status": "resolved"})
     return {"ok": True, "children": created_ids}
@@ -362,100 +385,103 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
 # ── Timeline data ──────────────────────────────────────────────
 
 @router.get("/timeline-data")
-def timeline_data(
+async def timeline_data(
     limit: Annotated[int | None, Query(ge=1, le=1000)] = None,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    with UnitOfWork() as uow:
-        range_result = uow.session.execute(
-            select(func.min(Idea.created_at), func.max(func.greatest(Idea.created_at, Idea.updated_at)))
-        ).fetchone()
-        if not range_result or not range_result[0]:
-            return {"range": None, "ideas": []}
-        range_start = range_result[0].isoformat() if isinstance(range_result[0], datetime) else range_result[0]
-        range_end = range_result[1].isoformat() if isinstance(range_result[1], datetime) else range_result[1]
+    def _timeline():
+        with UnitOfWork() as uow:
+            range_result = uow.session.execute(
+                select(func.min(Idea.created_at), func.max(func.greatest(Idea.created_at, Idea.updated_at)))
+            ).fetchone()
+            if not range_result or not range_result[0]:
+                return {"range": None, "ideas": []}
+            range_start = range_result[0].isoformat() if isinstance(range_result[0], datetime) else range_result[0]
+            range_end = range_result[1].isoformat() if isinstance(range_result[1], datetime) else range_result[1]
 
-        idea_ids: list[str] | None = None
-        if limit is not None:
-            idea_ids = list(
-                uow.session.scalars(
-                    select(Idea.id)
-                    .order_by(Idea.created_at.desc())
-                    .limit(limit)
-                ).all()
+            idea_ids: list[str] | None = None
+            if limit is not None:
+                idea_ids = list(
+                    uow.session.scalars(
+                        select(Idea.id)
+                        .order_by(Idea.created_at.desc())
+                        .limit(limit)
+                    ).all()
+                )
+                if not idea_ids:
+                    return {"range": {"start": range_start, "end": range_end}, "ideas": []}
+
+            stmt = (
+                select(Idea)
+                .options(load_only(
+                    Idea.id,
+                    Idea.title,
+                    Idea.display_title,
+                    Idea.status,
+                    Idea.origin,
+                    Idea.salience_score,
+                    Idea.created_at,
+                    Idea.archived_at,
+                    Idea.position_x,
+                    Idea.position_y,
+                ))
+                .order_by(Idea.created_at)
             )
-            if not idea_ids:
-                return {"range": {"start": range_start, "end": range_end}, "ideas": []}
+            if idea_ids is not None:
+                stmt = stmt.where(Idea.id.in_(idea_ids))
+            ideas_raw = uow.session.scalars(stmt).all()
 
-        stmt = (
-            select(Idea)
-            .options(load_only(
-                Idea.id,
-                Idea.title,
-                Idea.display_title,
-                Idea.status,
-                Idea.origin,
-                Idea.salience_score,
-                Idea.created_at,
-                Idea.archived_at,
-                Idea.position_x,
-                Idea.position_y,
-            ))
-            .order_by(Idea.created_at)
-        )
-        if idea_ids is not None:
-            stmt = stmt.where(Idea.id.in_(idea_ids))
-        ideas_raw = uow.session.scalars(stmt).all()
+            stmt = (
+                select(IdeaStateLog)
+                .options(load_only(
+                    IdeaStateLog.idea_id,
+                    IdeaStateLog.to_state,
+                    IdeaStateLog.changed_at,
+                    IdeaStateLog.trigger,
+                ))
+                .order_by(IdeaStateLog.changed_at)
+            )
+            if idea_ids is not None:
+                stmt = stmt.where(IdeaStateLog.idea_id.in_(idea_ids))
+            transitions_raw = uow.session.scalars(stmt).all()
 
-        stmt = (
-            select(IdeaStateLog)
-            .options(load_only(
-                IdeaStateLog.idea_id,
-                IdeaStateLog.to_state,
-                IdeaStateLog.changed_at,
-                IdeaStateLog.trigger,
-            ))
-            .order_by(IdeaStateLog.changed_at)
-        )
-        if idea_ids is not None:
-            stmt = stmt.where(IdeaStateLog.idea_id.in_(idea_ids))
-        transitions_raw = uow.session.scalars(stmt).all()
+            trans_by_idea = {}
+            for t in transitions_raw:
+                iid = str(t.idea_id)
+                if iid not in trans_by_idea:
+                    trans_by_idea[iid] = []
+                trans_by_idea[iid].append({
+                    "to_state": t.to_state,
+                    "at": t.changed_at.isoformat() if isinstance(t.changed_at, datetime) else t.changed_at,
+                    "trigger": t.trigger,
+                })
 
-        trans_by_idea = {}
-        for t in transitions_raw:
-            iid = str(t.idea_id)
-            if iid not in trans_by_idea:
-                trans_by_idea[iid] = []
-            trans_by_idea[iid].append({
-                "to_state": t.to_state,
-                "at": t.changed_at.isoformat() if isinstance(t.changed_at, datetime) else t.changed_at,
-                "trigger": t.trigger,
-            })
+            ideas = []
+            for r in ideas_raw:
+                iid = str(r.id)
+                ideas.append({
+                    "id": iid,
+                    "title": r.title,
+                    "display_title": r.display_title,
+                    "status": r.status,
+                    "origin": r.origin,
+                    "salience_score": r.salience_score,
+                    "created_at": r.created_at.isoformat() if isinstance(r.created_at, datetime) else r.created_at,
+                    "archived_at": r.archived_at.isoformat() if isinstance(r.archived_at, datetime) else None,
+                    "position_x": r.position_x,
+                    "position_y": r.position_y,
+                    "transitions": trans_by_idea.get(iid, []),
+                })
 
-        ideas = []
-        for r in ideas_raw:
-            iid = str(r.id)
-            ideas.append({
-                "id": iid,
-                "title": r.title,
-                "display_title": r.display_title,
-                "status": r.status,
-                "origin": r.origin,
-                "salience_score": r.salience_score,
-                "created_at": r.created_at.isoformat() if isinstance(r.created_at, datetime) else r.created_at,
-                "archived_at": r.archived_at.isoformat() if isinstance(r.archived_at, datetime) else None,
-                "position_x": r.position_x,
-                "position_y": r.position_y,
-                "transitions": trans_by_idea.get(iid, []),
-            })
+            return {"range": {"start": range_start, "end": range_end}, "ideas": ideas}
 
-        return {"range": {"start": range_start, "end": range_end}, "ideas": ideas}
+    return await run_sync_with_unit_of_work(_timeline)
 
 
 # ── Auth status ────────────────────────────────────────────────
 
 @router.get("/auth/status")
-def auth_status(
+async def auth_status(
     user: dict[str, Any] = Depends(get_current_user),
     provider: str | None = None,
 ):
@@ -471,13 +497,22 @@ def auth_status(
 
     user_id = user.get("id")
     org_id = user.get("org_id")
-    return get_provider_auth_status(user_id=user_id, org_id=org_id, provider=provider)
+    return await run_sync_with_unit_of_work(
+        get_provider_auth_status,
+        user_id=user_id,
+        org_id=org_id,
+        provider=provider,
+    )
 
 
 # ── Upload ─────────────────────────────────────────────────────
 
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...), user: dict[str, Any] = Depends(get_current_user)):
+async def upload_file(
+    request: Request,
+    file: UploadFile = File(...),
+    user: dict[str, Any] = Depends(get_current_user),
+):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Empty filename")
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
@@ -492,12 +527,32 @@ async def upload_file(file: UploadFile = File(...), user: dict[str, Any] = Depen
     (UPLOAD_DIR / filename).write_bytes(data)
     fallback_type = UPLOAD_FALLBACK_CONTENT_TYPES.get(ext, "application/octet-stream")
     content_type = file.content_type if file.content_type and file.content_type != "application/octet-stream" else fallback_type
+    url = static_upload_url_for(filename)
     return {
-        "url": f"/static/uploads/{filename}",
+        "url": url,
+        "download_url": public_static_upload_url(url, request_base_url=str(request.base_url)),
         "filename": file.filename,
         "type": content_type,
         "size": len(data),
     }
+
+
+@router.get("/uploads/preview")
+def preview_upload(
+    request: Request,
+    url: Annotated[str, Query(min_length=1)],
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    try:
+        return build_upload_preview(
+            url,
+            upload_dir=UPLOAD_DIR,
+            request_base_url=str(request.base_url),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/generate-title")
@@ -506,7 +561,8 @@ async def generate_title(request: Request, user: dict[str, Any] = Depends(get_cu
     text_content = data.get("text", "").strip()
     if not text_content:
         raise HTTPException(status_code=400, detail="text is required")
-    title = generate_display_title(
+    title = await run_sync_with_unit_of_work(
+        generate_display_title,
         text_content,
         user_id=user.get("id"),
         org_id=user.get("org_id"),
@@ -517,22 +573,24 @@ async def generate_title(request: Request, user: dict[str, Any] = Depends(get_cu
 
 
 @router.post("/backfill-titles")
-def backfill_titles(user: dict[str, Any] = Depends(get_current_user)):
+async def backfill_titles(user: dict[str, Any] = Depends(get_current_user)):
     org_id = user.get("org_id")
     user_id = user.get("id")
-    with UnitOfWork() as uow:
-        stmt = select(Idea).where(Idea.display_title.is_(None), Idea.archived_at.is_(None))
-        if org_id:
-            stmt = stmt.where(Idea.org_id == org_id)
-        elif user_id:
-            stmt = stmt.where(Idea.user_id == user_id)
-        rows = uow.session.scalars(stmt).all()
-        # Collect id/title before leaving the session
-        ideas_to_process = [(r.id, r.title) for r in rows]
+    def _ideas_to_process():
+        with UnitOfWork() as uow:
+            stmt = select(Idea).where(Idea.display_title.is_(None), Idea.archived_at.is_(None))
+            if org_id:
+                stmt = stmt.where(Idea.org_id == org_id)
+            elif user_id:
+                stmt = stmt.where(Idea.user_id == user_id)
+            rows = uow.session.scalars(stmt).all()
+            return [(r.id, r.title) for r in rows]
 
+    ideas_to_process = await run_sync_with_unit_of_work(_ideas_to_process)
     count = 0
     for idea_id, idea_title in ideas_to_process:
-        result = generate_and_store_idea_display_title(
+        result = await run_sync_with_unit_of_work(
+            generate_and_store_idea_display_title,
             str(idea_id),
             user_id=user_id,
             org_id=org_id,
@@ -547,14 +605,16 @@ def backfill_titles(user: dict[str, Any] = Depends(get_current_user)):
 
 
 @router.get("/ideas/{idea_id}/audit")
-def idea_audit(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
+async def idea_audit(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
     """Aggregate metrics for ALL runs on an idea — pure SQL, no LLM."""
-    with UnitOfWork() as uow:
-        try:
+    def _audit():
+        with UnitOfWork() as uow:
             return build_idea_audit_summary(uow.session, idea_id)
-        except RunAuditNotFound:
-            raise HTTPException(status_code=404, detail="No runs for this idea")
 
+    try:
+        return await run_sync_with_unit_of_work(_audit)
+    except RunAuditNotFound:
+        raise HTTPException(status_code=404, detail="No runs for this idea")
 
 @router.post("/ideas/{idea_id}/audit/analyze")
 async def idea_audit_analyze(
@@ -566,58 +626,70 @@ async def idea_audit_analyze(
     from brain.systems.runs.cortex import RunAdmissionRequest, admit_run
 
     # Build a metrics summary to include in the run message
-    with UnitOfWork() as uow:
-        runs = uow.session.scalars(
-            select(AgentRun)
-            .where(AgentRun.thread_id == idea_id)
-            .order_by(AgentRun.started_at.asc().nullslast())
-        ).all()
-        if not runs:
-            raise HTTPException(status_code=404, detail="No runs for this idea")
+    def _audit_context():
+        with UnitOfWork() as uow:
+            runs = uow.session.scalars(
+                select(AgentRun)
+                .where(AgentRun.thread_id == idea_id)
+                .order_by(AgentRun.started_at.asc().nullslast())
+            ).all()
+            if not runs:
+                raise HTTPException(status_code=404, detail="No runs for this idea")
 
-        total_cost = 0.0
-        total_tokens = 0
-        skills_used = set()
-        failed = sum(1 for d in runs if d.status == "failed")
-        all_misses = []
-        for d in runs:
-            metadata = d.metadata_ if isinstance(d.metadata_, dict) else {}
-            usage = metadata.get("usage") if isinstance(metadata.get("usage"), dict) else {}
-            routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
-            total_cost += float(usage.get("estimated_cost") or 0)
-            total_tokens += int(usage.get("tokens_total") or 0)
-            if routing.get("selected_skill"):
-                skills_used.add(routing["selected_skill"])
-            misses = metadata.get("cognitive_misses")
-            if isinstance(misses, list):
-                all_misses.extend(misses)
+            total_cost = 0.0
+            total_tokens = 0
+            skills_used = set()
+            failed = sum(1 for d in runs if d.status == "failed")
+            all_misses = []
+            for d in runs:
+                metadata = d.metadata_ if isinstance(d.metadata_, dict) else {}
+                usage = metadata.get("usage") if isinstance(metadata.get("usage"), dict) else {}
+                routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
+                total_cost += float(usage.get("estimated_cost") or 0)
+                total_tokens += int(usage.get("tokens_total") or 0)
+                if routing.get("selected_skill"):
+                    skills_used.add(routing["selected_skill"])
+                misses = metadata.get("cognitive_misses")
+                if isinstance(misses, list):
+                    all_misses.extend(misses)
 
-        # Get thread messages for context
-        thread_rows = uow.session.execute(
-            text("""
-                SELECT role, content FROM idea_threads
-                WHERE idea_id = :idea_id
-                ORDER BY created_at ASC
-                LIMIT 50
-            """),
-            {"idea_id": idea_id},
-        ).fetchall()
-        thread_text = "\n".join(
-            f"[{r.role}] {r.content[:500]}" for r in thread_rows
-        )
+            thread_rows = uow.session.execute(
+                text("""
+                    SELECT role, content FROM idea_threads
+                    WHERE idea_id = :idea_id
+                    ORDER BY created_at ASC
+                    LIMIT 50
+                """),
+                {"idea_id": idea_id},
+            ).fetchall()
+            thread_text = "\n".join(
+                f"[{r.role}] {r.content[:500]}" for r in thread_rows
+            )
 
-        worker_lines: list[str] = []
-        worker_text = "  (worker data is available in run events/artifacts)"
+            worker_lines: list[str] = []
+            worker_text = "  (worker data is available in run events/artifacts)"
+            return {
+                "run_count": len(runs),
+                "failed": failed,
+                "total_tokens": total_tokens,
+                "total_cost": total_cost,
+                "skills_used": skills_used,
+                "all_misses": all_misses,
+                "worker_lines": worker_lines,
+                "worker_text": worker_text,
+                "thread_text": thread_text,
+            }
 
+    audit_context = await run_sync_with_unit_of_work(_audit_context)
     summary = (
         f"AUDIT SUMMARY for idea {idea_id}:\n"
-        f"- {len(runs)} runs, {failed} failed\n"
-        f"- Total tokens: {total_tokens:,}, Est cost: ${total_cost:.4f}\n"
-        f"- Skills used: {', '.join(skills_used) or 'none'}\n"
-        f"- Cognitive misses: {len(all_misses)} ({', '.join(all_misses[:5])})\n"
-        f"- Workers spawned: {len(worker_lines)}\n"
-        f"{worker_text}\n\n"
-        f"CONVERSATION THREAD:\n{thread_text}\n\n"
+        f"- {audit_context['run_count']} runs, {audit_context['failed']} failed\n"
+        f"- Total tokens: {audit_context['total_tokens']:,}, Est cost: ${audit_context['total_cost']:.4f}\n"
+        f"- Skills used: {', '.join(audit_context['skills_used']) or 'none'}\n"
+        f"- Cognitive misses: {len(audit_context['all_misses'])} ({', '.join(audit_context['all_misses'][:5])})\n"
+        f"- Workers spawned: {len(audit_context['worker_lines'])}\n"
+        f"{audit_context['worker_text']}\n\n"
+        f"CONVERSATION THREAD:\n{audit_context['thread_text']}\n\n"
         f"Please analyze this conversation for:\n"
         f"1. Wasted tokens or unnecessary runs\n"
         f"2. Skill mismatches (wrong skill chosen)\n"
@@ -627,8 +699,8 @@ async def idea_audit_analyze(
     )
 
     uid = user.get("id")
-    # Force the audit skill via /audit prefix
-    admission = admit_run(
+    admission = await run_sync_with_unit_of_work(
+        admit_run,
         RunAdmissionRequest(
             idea_id=idea_id,
             event="audit_analyze",
@@ -636,7 +708,7 @@ async def idea_audit_analyze(
             priority=2,
             user_id=uid,
             metadata={"run_profile": "deep", "recipe": "deep", "source": "audit"},
-        )
+        ),
     )
 
     if not admission.ok or admission.run_id is None:
@@ -658,63 +730,64 @@ async def idea_audit_analysis_result(
     Returns the run status and, if completed, the thread message content
     associated with the audit_analyze run.
     """
-    with UnitOfWork() as uow:
-        # Find the latest audit_analyze run for this idea
-        d = uow.session.scalars(
-            select(AgentRun)
-            .where(
-                AgentRun.thread_id == idea_id,
-                AgentRun.input_message.like("/audit%"),
-            )
-            .order_by(AgentRun.created_at.desc())
-            .limit(1)
-        ).first()
-
-        if not d:
-            return {"found": False}
-
-        result: dict[str, Any] = {
-            "found": True,
-            "run_id": d.id,
-            "status": d.status,
-            "started_at": d.started_at.isoformat() if d.started_at else None,
-            "completed_at": d.completed_at.isoformat() if d.completed_at else None,
-            "error": (d.metadata_ or {}).get("error") if isinstance(d.metadata_, dict) else None,
-        }
-
-        if d.status in ("completed", "failed"):
-            # Look for the thread message posted by this run via metadata.run_id
-            msg = uow.session.scalars(
-                select(IdeaThread)
+    def _result():
+        with UnitOfWork() as uow:
+            # Find the latest audit_analyze run for this idea
+            d = uow.session.scalars(
+                select(AgentRun)
                 .where(
-                    IdeaThread.idea_id == idea_id,
-                    IdeaThread.role == "illo",
-                    text("metadata->>'run_id' = :did"),
+                    AgentRun.thread_id == idea_id,
+                    AgentRun.input_message.like("/audit%"),
                 )
-                .params(did=str(d.id))
-                .order_by(IdeaThread.created_at.desc())
+                .order_by(AgentRun.created_at.desc())
                 .limit(1)
             ).first()
 
-            if msg:
-                result["content"] = msg.content
-                result["message_id"] = msg.id
-            else:
-                # Fallback: grab the most recent illo message near run completion
-                fallback = uow.session.scalars(
+            if not d:
+                return {"found": False}
+
+            result: dict[str, Any] = {
+                "found": True,
+                "run_id": d.id,
+                "status": d.status,
+                "started_at": d.started_at.isoformat() if d.started_at else None,
+                "completed_at": d.completed_at.isoformat() if d.completed_at else None,
+                "error": (d.metadata_ or {}).get("error") if isinstance(d.metadata_, dict) else None,
+            }
+
+            if d.status in ("completed", "failed"):
+                msg = uow.session.scalars(
                     select(IdeaThread)
                     .where(
                         IdeaThread.idea_id == idea_id,
                         IdeaThread.role == "illo",
+                        text("metadata->>'run_id' = :did"),
                     )
+                    .params(did=str(d.id))
                     .order_by(IdeaThread.created_at.desc())
                     .limit(1)
                 ).first()
-                if fallback and d.completed_at and d.started_at and fallback.created_at >= d.started_at:
-                    result["content"] = fallback.content
-                    result["message_id"] = fallback.id
 
-        return result
+                if msg:
+                    result["content"] = msg.content
+                    result["message_id"] = msg.id
+                else:
+                    fallback = uow.session.scalars(
+                        select(IdeaThread)
+                        .where(
+                            IdeaThread.idea_id == idea_id,
+                            IdeaThread.role == "illo",
+                        )
+                        .order_by(IdeaThread.created_at.desc())
+                        .limit(1)
+                    ).first()
+                    if fallback and d.completed_at and d.started_at and fallback.created_at >= d.started_at:
+                        result["content"] = fallback.content
+                        result["message_id"] = fallback.id
+
+            return result
+
+    return await run_sync_with_unit_of_work(_result)
 
 
 @router.post("/audit/apply")
@@ -748,7 +821,8 @@ async def audit_apply(
             confidence=payload.get("confidence"),
             evidence={"audit_action_payload": payload},
         )
-        result = add_memory(
+        result = await run_sync_with_unit_of_work(
+            add_memory,
             content=content,
             memory_type=payload.get("memory_type", "lesson"),
             salience=payload.get("salience", 7.0),
@@ -766,12 +840,16 @@ async def audit_apply(
         if not skill_name or not text_val:
             raise HTTPException(status_code=400, detail="skill_name and text are required")
         from brain.platform.db.repositories.skills import SkillRepository
-        with UnitOfWork() as uow:
-            repo = SkillRepository(uow.session)
-            try:
-                repo.add_guardrail(skill_name, text_val, severity)
-            except LookupError:
-                raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+        def _add_guardrail():
+            with UnitOfWork() as uow:
+                repo = SkillRepository(uow.session)
+                try:
+                    repo.add_guardrail(skill_name, text_val, severity)
+                except LookupError:
+                    raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+        await run_sync_with_unit_of_work(_add_guardrail)
         return {"ok": True, "action": "add_guardrail", "skill": skill_name}
 
     elif action_type == "update_skill":
@@ -780,13 +858,17 @@ async def audit_apply(
         if not skill_name or not new_procedure:
             raise HTTPException(status_code=400, detail="skill_name and procedure are required")
         from brain.platform.db.repositories.skills import SkillRepository
-        with UnitOfWork() as uow:
-            repo = SkillRepository(uow.session)
-            try:
-                skill = repo.get_by_name_or_raise(skill_name)
-                repo.update_full(skill.id, procedure=new_procedure)
-            except LookupError:
-                raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+        def _update_skill():
+            with UnitOfWork() as uow:
+                repo = SkillRepository(uow.session)
+                try:
+                    skill = repo.get_by_name_or_raise(skill_name)
+                    repo.update_full(skill.id, procedure=new_procedure)
+                except LookupError:
+                    raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+        await run_sync_with_unit_of_work(_update_skill)
         return {"ok": True, "action": "update_skill", "skill": skill_name}
 
     elif action_type == "propose_code":
@@ -836,49 +918,52 @@ async def audit_eval(
     proposal_rec = proposal.get("recommendation", "")
     skill_name = proposal.get("skill_name") or proposal.get("payload", {}).get("skill_name")
 
-    # Fetch 3 recent completed runs with output_artifact
-    with UnitOfWork() as uow:
-        stmt = (
-            select(AgentRun, AgentRunArtifactRow)
-            .join(AgentRunArtifactRow, AgentRunArtifactRow.run_id == AgentRun.id)
-            .where(
-                AgentRun.status == "completed",
-                AgentRunArtifactRow.artifact_type == "final_answer",
-                AgentRunArtifactRow.text.isnot(None),
+    def _benchmark_data():
+        with UnitOfWork() as uow:
+            stmt = (
+                select(AgentRun, AgentRunArtifactRow)
+                .join(AgentRunArtifactRow, AgentRunArtifactRow.run_id == AgentRun.id)
+                .where(
+                    AgentRun.status == "completed",
+                    AgentRunArtifactRow.artifact_type == "final_answer",
+                    AgentRunArtifactRow.text.isnot(None),
+                )
+                .order_by(AgentRun.completed_at.desc().nullslast(), AgentRunArtifactRow.created_at.desc())
+                .limit(12)
             )
-            .order_by(AgentRun.completed_at.desc().nullslast(), AgentRunArtifactRow.created_at.desc())
-            .limit(12)
-        )
-        rows = uow.session.execute(stmt).all()
-        benchmarks = []
-        for run, artifact in rows:
-            metadata = run.metadata_ if isinstance(run.metadata_, dict) else {}
-            routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
-            if skill_name and routing.get("selected_skill") != skill_name:
-                continue
-            benchmarks.append((run, artifact))
-            if len(benchmarks) >= 3:
-                break
+            rows = uow.session.execute(stmt).all()
+            benchmarks = []
+            for run, artifact in rows:
+                metadata = run.metadata_ if isinstance(run.metadata_, dict) else {}
+                routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
+                if skill_name and routing.get("selected_skill") != skill_name:
+                    continue
+                benchmarks.append((run, artifact))
+                if len(benchmarks) >= 3:
+                    break
 
-        if not benchmarks:
-            raise HTTPException(
-                status_code=404,
-                detail="No completed runs with output artifacts found for evaluation",
-            )
+            if not benchmarks:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No completed runs with output artifacts found for evaluation",
+                )
 
-        benchmark_data = []
-        for d, artifact in benchmarks:
-            metadata = d.metadata_ if isinstance(d.metadata_, dict) else {}
-            routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
-            usage = metadata.get("usage") if isinstance(metadata.get("usage"), dict) else {}
-            benchmark_data.append({
-                "run_id": d.id,
-                "task_summary": d.input_message or routing.get("selected_skill") or "unknown",
-                "output_artifact": (artifact.text or "")[:2000],
-                "tokens_total": usage.get("tokens_total") or 0,
-                "attempts": usage.get("attempts") or 1,
-                "skill_used": routing.get("selected_skill"),
-            })
+            data = []
+            for d, artifact in benchmarks:
+                metadata = d.metadata_ if isinstance(d.metadata_, dict) else {}
+                routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
+                usage = metadata.get("usage") if isinstance(metadata.get("usage"), dict) else {}
+                data.append({
+                    "run_id": d.id,
+                    "task_summary": d.input_message or routing.get("selected_skill") or "unknown",
+                    "output_artifact": (artifact.text or "")[:2000],
+                    "tokens_total": usage.get("tokens_total") or 0,
+                    "attempts": usage.get("attempts") or 1,
+                    "skill_used": routing.get("selected_skill"),
+                })
+            return data
+
+    benchmark_data = await run_sync_with_unit_of_work(_benchmark_data)
 
     # Judge each benchmark with a provider-neutral text completion.
     results = []

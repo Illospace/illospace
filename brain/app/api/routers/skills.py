@@ -7,15 +7,18 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import can_manage_skills
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.db_utils import run_db
 from brain.platform.db.models.skill import Skill
 from brain.platform.db.models.skill_bundle import SkillAsset, SkillBundle, SkillBundleVersion, SkillInstallation
 from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
 from brain.platform.db.repositories.skills import SkillRepository
+from brain.platform.db.repositories.unit_of_work import use_sync_session
 from brain.platform.db.schemas.skills import (
     SkillAssetContentRead,
     SkillAssetRead,
@@ -78,10 +81,14 @@ def _require_skills_manage(user: dict[str, Any]) -> None:
         raise HTTPException(status_code=403, detail="Permission denied")
 
 
-def _ensure_builtin_skill_catalog() -> None:
+def _ensure_builtin_skill_catalog(db: Session | None = None) -> None:
     from brain.systems.skills.builtin import ensure_builtin_skills_cached
 
-    ensure_builtin_skills_cached()
+    if db is None:
+        ensure_builtin_skills_cached()
+        return
+    with use_sync_session(db):
+        ensure_builtin_skills_cached()
 
 
 def _needs_attention(skill: Skill) -> bool:
@@ -299,510 +306,588 @@ def _enhanced_skill(db: Session, skill: Skill) -> SkillEnhancedRead:
 
 
 @router.get("/", response_model=list[SkillRead])
-def list_skills(
+async def list_skills(
     include_executions: bool = True,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _ensure_builtin_skill_catalog()
-    repo = SkillRepository(db)
-    if not include_executions:
-        return repo.list_active_for_dashboard()
-    return repo.list_active_with_executions()
+    def _list(sync_db: Session):
+        _ensure_builtin_skill_catalog(sync_db)
+        repo = SkillRepository(sync_db)
+        if not include_executions:
+            return repo.list_active_for_dashboard()
+        return repo.list_active_with_executions()
+
+    return await run_db(db, _list)
 
 
 @router.post("/new", response_model=SkillRead)
-def create_skill(
+async def create_skill(
     body: SkillCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    repo = SkillRepository(db)
-    existing = repo.get_by_name(body.name)
-    if existing:
-        raise HTTPException(status_code=409, detail=f"Skill '{body.name}' already exists")
-    skill = repo.create(
-        **body.model_dump(exclude_none=True),
-    )
-    db.flush()
-    return skill
+    def _create(sync_db: Session):
+        _require_skills_manage(user)
+        repo = SkillRepository(sync_db)
+        existing = repo.get_by_name(body.name)
+        if existing:
+            raise HTTPException(status_code=409, detail=f"Skill '{body.name}' already exists")
+        skill = repo.create(
+            **body.model_dump(exclude_none=True),
+        )
+        sync_db.flush()
+        return skill
+
+    return await run_db(db, _create)
 
 
 @router.get("/export", response_model=list[SkillExport])
-def export_skills(
-    db: Session = Depends(get_db),
+async def export_skills(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _ensure_builtin_skill_catalog()
-    repo = SkillRepository(db)
-    return repo.list_active()
+    def _export(sync_db: Session):
+        _ensure_builtin_skill_catalog(sync_db)
+        repo = SkillRepository(sync_db)
+        return repo.list_active()
+
+    return await run_db(db, _export)
 
 
 @router.post("/import", response_model=list[SkillRead])
-def import_skills(
+async def import_skills(
     body: list[SkillExport],
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    repo = SkillRepository(db)
-    imported = []
-    for item in body:
-        existing = repo.get_by_name(item.name)
-        if existing:
-            continue  # skip duplicates
-        skill = repo.create(**item.model_dump(exclude_none=True))
-        imported.append(skill)
-    db.flush()
-    return imported
+    def _import(sync_db: Session):
+        _require_skills_manage(user)
+        repo = SkillRepository(sync_db)
+        imported = []
+        for item in body:
+            existing = repo.get_by_name(item.name)
+            if existing:
+                continue
+            skill = repo.create(**item.model_dump(exclude_none=True))
+            imported.append(skill)
+        sync_db.flush()
+        return imported
+
+    return await run_db(db, _import)
 
 
 @router.get("/needing-attention", response_model=list[SkillRead])
-def needing_attention(
-    db: Session = Depends(get_db),
+async def needing_attention(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _ensure_builtin_skill_catalog()
-    repo = SkillRepository(db)
-    return repo.needing_attention()
+    def _list(sync_db: Session):
+        _ensure_builtin_skill_catalog(sync_db)
+        repo = SkillRepository(sync_db)
+        return repo.needing_attention()
+
+    return await run_db(db, _list)
 
 
 @router.get("/enhanced", response_model=list[SkillEnhancedRead])
-def list_enhanced_skills(
-    db: Session = Depends(get_db),
+async def list_enhanced_skills(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _ensure_builtin_skill_catalog()
-    repo = SkillRepository(db)
-    return [_enhanced_skill(db, skill) for skill in repo.list_active()]
+    def _list(sync_db: Session):
+        _ensure_builtin_skill_catalog(sync_db)
+        repo = SkillRepository(sync_db)
+        return [_enhanced_skill(sync_db, skill) for skill in repo.list_active()]
+
+    return await run_db(db, _list)
 
 
 # ── Path-parameter routes (AFTER fixed paths) ──
 
 
 @router.patch("/{skill_id}", response_model=SkillRead)
-def update_skill_tiers(
+async def update_skill_tiers(
     skill_id: int,
     body: SkillUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    repo = SkillRepository(db)
-    try:
-        updates = body.model_dump(exclude_unset=True)
-        if not updates:
-            raise HTTPException(status_code=422, detail="No fields to update")
-        skill = repo.update_full(skill_id, **updates)
-        return skill
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    def _update(sync_db: Session):
+        _require_skills_manage(user)
+        repo = SkillRepository(sync_db)
+        try:
+            updates = body.model_dump(exclude_unset=True)
+            if not updates:
+                raise HTTPException(status_code=422, detail="No fields to update")
+            skill = repo.update_full(skill_id, **updates)
+            return skill
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    return await run_db(db, _update)
 
 
 @router.post("/{skill_id}/archive", response_model=SkillRead)
-def archive_skill(
+async def archive_skill(
     skill_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    repo = SkillRepository(db)
-    try:
-        return repo.archive(skill_id)
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
+    def _archive(sync_db: Session):
+        _require_skills_manage(user)
+        repo = SkillRepository(sync_db)
+        try:
+            return repo.archive(skill_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+    return await run_db(db, _archive)
 
 
 @router.delete("/{skill_id}", response_model=SkillRead)
-def delete_skill(
+async def delete_skill(
     skill_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    repo = SkillRepository(db)
-    try:
-        return repo.archive(skill_id)
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
+    def _delete(sync_db: Session):
+        _require_skills_manage(user)
+        repo = SkillRepository(sync_db)
+        try:
+            return repo.archive(skill_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+    return await run_db(db, _delete)
 
 
 @router.put("/{skill_id}/edit", response_model=SkillRead)
-def edit_skill(
+async def edit_skill(
     skill_id: int,
     body: SkillUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    repo = SkillRepository(db)
-    try:
-        updates = body.model_dump(exclude_unset=True)
-        if not updates:
-            raise HTTPException(status_code=422, detail="No fields to update")
-        skill = repo.update_full(skill_id, **updates)
-        return skill
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    def _edit(sync_db: Session):
+        _require_skills_manage(user)
+        repo = SkillRepository(sync_db)
+        try:
+            updates = body.model_dump(exclude_unset=True)
+            if not updates:
+                raise HTTPException(status_code=422, detail="No fields to update")
+            skill = repo.update_full(skill_id, **updates)
+            return skill
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    return await run_db(db, _edit)
 
 
 @router.get("/{skill_id}/package", response_model=SkillPackageRead)
-def get_skill_package(
+async def get_skill_package(
     skill_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    repo = SkillRepository(db)
-    try:
-        skill = repo.get_or_raise(skill_id)
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    return _package_for_skill(db, skill, include_manifest=True)
+    def _get(sync_db: Session):
+        repo = SkillRepository(sync_db)
+        try:
+            skill = repo.get_or_raise(skill_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        return _package_for_skill(sync_db, skill, include_manifest=True)
+
+    return await run_db(db, _get)
 
 
 @router.get("/{skill_id}/assets", response_model=list[SkillAssetRead])
-def list_skill_assets(
+async def list_skill_assets(
     skill_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    repo = SkillRepository(db)
-    try:
-        skill = repo.get_or_raise(skill_id)
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    _, version, _, assets = _load_package_rows(db, skill)
-    if version is None:
-        return []
-    return [_asset_read(asset) for asset in assets]
+    def _list(sync_db: Session):
+        repo = SkillRepository(sync_db)
+        try:
+            skill = repo.get_or_raise(skill_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        _, version, _, assets = _load_package_rows(sync_db, skill)
+        if version is None:
+            return []
+        return [_asset_read(asset) for asset in assets]
+
+    return await run_db(db, _list)
 
 
 @router.post("/{skill_id}/assets", response_model=SkillAssetContentRead)
-def upsert_skill_asset(
+async def upsert_skill_asset(
     skill_id: int,
     body: SkillAssetWriteBody,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    if not body.path:
-        raise HTTPException(status_code=422, detail="Asset path is required")
-    service = SkillBundleIOService(SkillRepository(db), SkillBundleRepository(db))
-    try:
-        asset = service.upsert_skill_asset(
-            skill_id,
-            path=body.path,
-            content=body.content,
-            asset_kind=body.asset_kind,
-            mime_type=body.mime_type,
-            loading_budget_tokens=body.loading_budget_tokens,
-            org_id=user.get("org_id"),
-            user_id=user.get("id"),
-            installed_by_user_id=user.get("id"),
+    def _upsert(sync_db: Session):
+        _require_skills_manage(user)
+        if not body.path:
+            raise HTTPException(status_code=422, detail="Asset path is required")
+        service = SkillBundleIOService(SkillRepository(sync_db), SkillBundleRepository(sync_db))
+        try:
+            asset = service.upsert_skill_asset(
+                skill_id,
+                path=body.path,
+                content=body.content,
+                asset_kind=body.asset_kind,
+                mime_type=body.mime_type,
+                loading_budget_tokens=body.loading_budget_tokens,
+                org_id=user.get("org_id"),
+                user_id=user.get("id"),
+                installed_by_user_id=user.get("id"),
+            )
+            sync_db.flush()
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc) or "Skill not found")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return SkillAssetContentRead(
+            **_asset_read(asset).model_dump(),
+            content=asset.content_text,
+            truncated=False,
         )
-        db.flush()
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc) or "Skill not found")
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    return SkillAssetContentRead(
-        **_asset_read(asset).model_dump(),
-        content=asset.content_text,
-        truncated=False,
-    )
+
+    return await run_db(db, _upsert)
 
 
 @router.put("/{skill_id}/assets/{asset_path:path}", response_model=SkillAssetContentRead)
-def replace_skill_asset(
+async def replace_skill_asset(
     skill_id: int,
     asset_path: str,
     body: SkillAssetWriteBody,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    service = SkillBundleIOService(SkillRepository(db), SkillBundleRepository(db))
-    try:
-        asset = service.upsert_skill_asset(
-            skill_id,
-            path=asset_path,
-            content=body.content,
-            asset_kind=body.asset_kind,
-            mime_type=body.mime_type,
-            loading_budget_tokens=body.loading_budget_tokens,
-            org_id=user.get("org_id"),
-            user_id=user.get("id"),
-            installed_by_user_id=user.get("id"),
+    def _replace(sync_db: Session):
+        _require_skills_manage(user)
+        service = SkillBundleIOService(SkillRepository(sync_db), SkillBundleRepository(sync_db))
+        try:
+            asset = service.upsert_skill_asset(
+                skill_id,
+                path=asset_path,
+                content=body.content,
+                asset_kind=body.asset_kind,
+                mime_type=body.mime_type,
+                loading_budget_tokens=body.loading_budget_tokens,
+                org_id=user.get("org_id"),
+                user_id=user.get("id"),
+                installed_by_user_id=user.get("id"),
+            )
+            sync_db.flush()
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc) or "Skill not found")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return SkillAssetContentRead(
+            **_asset_read(asset).model_dump(),
+            content=asset.content_text,
+            truncated=False,
         )
-        db.flush()
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc) or "Skill not found")
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    return SkillAssetContentRead(
-        **_asset_read(asset).model_dump(),
-        content=asset.content_text,
-        truncated=False,
-    )
+
+    return await run_db(db, _replace)
 
 
 @router.get("/{skill_id}/assets/{asset_path:path}", response_model=SkillAssetContentRead)
-def get_skill_asset(
+async def get_skill_asset(
     skill_id: int,
     asset_path: str,
     max_chars: int = 12000,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    repo = SkillRepository(db)
-    safe_path = _safe_asset_path(asset_path)
-    try:
-        skill = repo.get_or_raise(skill_id)
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    _, version, _, assets = _load_package_rows(db, skill)
-    if version is None:
-        raise HTTPException(status_code=404, detail="Skill is not backed by a bundle")
-    asset = next((item for item in assets if item.path == safe_path), None)
-    if asset is None:
-        raise HTTPException(status_code=404, detail="Skill asset not found")
-    content, truncated = _truncate(asset.content_text, max_chars)
-    return SkillAssetContentRead(
-        **_asset_read(asset).model_dump(),
-        content=content,
-        truncated=truncated,
-    )
+    def _get(sync_db: Session):
+        repo = SkillRepository(sync_db)
+        safe_path = _safe_asset_path(asset_path)
+        try:
+            skill = repo.get_or_raise(skill_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        _, version, _, assets = _load_package_rows(sync_db, skill)
+        if version is None:
+            raise HTTPException(status_code=404, detail="Skill is not backed by a bundle")
+        asset = next((item for item in assets if item.path == safe_path), None)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="Skill asset not found")
+        content, truncated = _truncate(asset.content_text, max_chars)
+        return SkillAssetContentRead(
+            **_asset_read(asset).model_dump(),
+            content=content,
+            truncated=truncated,
+        )
+
+    return await run_db(db, _get)
 
 
 @router.delete("/{skill_id}/assets/{asset_path:path}", response_model=SkillPackageRead)
-def delete_skill_asset(
+async def delete_skill_asset(
     skill_id: int,
     asset_path: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    service = SkillBundleIOService(SkillRepository(db), SkillBundleRepository(db))
-    try:
-        skill = service.delete_skill_asset(
-            skill_id,
-            path=asset_path,
-            org_id=user.get("org_id"),
-            user_id=user.get("id"),
-            installed_by_user_id=user.get("id"),
-        )
-        db.flush()
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc) or "Skill asset not found")
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    return _package_for_skill(db, skill, include_manifest=True)
+    def _delete(sync_db: Session):
+        _require_skills_manage(user)
+        service = SkillBundleIOService(SkillRepository(sync_db), SkillBundleRepository(sync_db))
+        try:
+            skill = service.delete_skill_asset(
+                skill_id,
+                path=asset_path,
+                org_id=user.get("org_id"),
+                user_id=user.get("id"),
+                installed_by_user_id=user.get("id"),
+            )
+            sync_db.flush()
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc) or "Skill asset not found")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return _package_for_skill(sync_db, skill, include_manifest=True)
+
+    return await run_db(db, _delete)
 
 
 @router.post("/{skill_id}/convert-to-bundle", response_model=SkillRead)
-def convert_skill_to_bundle(
+async def convert_skill_to_bundle(
     skill_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    skill_repo = SkillRepository(db)
-    service = SkillBundleIOService(skill_repo, SkillBundleRepository(db))
-    try:
-        skill = service.ensure_skill_bundle(
-            skill_id,
-            org_id=user.get("org_id"),
-            user_id=user.get("id"),
-            installed_by_user_id=user.get("id"),
-        )
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    db.flush()
-    return skill
+    def _convert(sync_db: Session):
+        _require_skills_manage(user)
+        skill_repo = SkillRepository(sync_db)
+        service = SkillBundleIOService(skill_repo, SkillBundleRepository(sync_db))
+        try:
+            skill = service.ensure_skill_bundle(
+                skill_id,
+                org_id=user.get("org_id"),
+                user_id=user.get("id"),
+                installed_by_user_id=user.get("id"),
+            )
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        sync_db.flush()
+        return skill
+
+    return await run_db(db, _convert)
 
 
 @router.get("/{skill_name}/versions")
-def get_versions(
+async def get_versions(
     skill_name: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    repo = SkillRepository(db)
-    try:
-        versions = repo.get_versions(skill_name)
-        return [
-            {
-                "id": v.id,
-                "version": v.version,
-                "procedure": v.procedure,
-                "changed_by": v.changed_by,
-                "created_at": v.created_at.isoformat() if v.created_at else None,
-            }
-            for v in versions
-        ]
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
+    def _get(sync_db: Session):
+        repo = SkillRepository(sync_db)
+        try:
+            versions = repo.get_versions(skill_name)
+            return [
+                {
+                    "id": v.id,
+                    "version": v.version,
+                    "procedure": v.procedure,
+                    "changed_by": v.changed_by,
+                    "created_at": v.created_at.isoformat() if v.created_at else None,
+                }
+                for v in versions
+            ]
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+    return await run_db(db, _get)
 
 
 @router.post("/{skill_name}/versions/{version}/restore", response_model=SkillRead)
-def restore_version(
+async def restore_version(
     skill_name: str,
     version: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    repo = SkillRepository(db)
-    try:
-        skill = repo.get_by_name_or_raise(skill_name)
-        versions = repo.get_versions(skill_name)
-        target = next((v for v in versions if v.version == version), None)
-        if not target:
-            raise HTTPException(status_code=404, detail=f"Version {version} not found")
-        skill = repo.update_full(skill.id, procedure=target.procedure)
-        return skill
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
+    def _restore(sync_db: Session):
+        _require_skills_manage(user)
+        repo = SkillRepository(sync_db)
+        try:
+            skill = repo.get_by_name_or_raise(skill_name)
+            versions = repo.get_versions(skill_name)
+            target = next((v for v in versions if v.version == version), None)
+            if not target:
+                raise HTTPException(status_code=404, detail=f"Version {version} not found")
+            skill = repo.update_full(skill.id, procedure=target.procedure)
+            return skill
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+    return await run_db(db, _restore)
 
 
 @router.get("/{skill_name}/executions")
-def get_executions(
+async def get_executions(
     skill_name: str,
     limit: int = 20,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    repo = SkillRepository(db)
-    try:
-        execs = repo.get_sparkline(skill_name, limit=limit)
-        return [
-            {
-                "id": e.id,
-                "task_description": e.task_description,
-                "outcome": e.outcome,
-                "duration_sec": e.duration_sec,
-                "started_at": e.started_at.isoformat() if e.started_at else None,
-                "rework_rounds": e.rework_rounds,
-                "flagged": e.flagged,
-            }
-            for e in execs
-        ]
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
+    def _get(sync_db: Session):
+        repo = SkillRepository(sync_db)
+        try:
+            execs = repo.get_sparkline(skill_name, limit=limit)
+            return [
+                {
+                    "id": e.id,
+                    "task_description": e.task_description,
+                    "outcome": e.outcome,
+                    "duration_sec": e.duration_sec,
+                    "started_at": e.started_at.isoformat() if e.started_at else None,
+                    "rework_rounds": e.rework_rounds,
+                    "flagged": e.flagged,
+                }
+                for e in execs
+            ]
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+    return await run_db(db, _get)
 
 
 @router.get("/{skill_name}/sparkline")
-def get_sparkline(
+async def get_sparkline(
     skill_name: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    repo = SkillRepository(db)
-    try:
-        execs = repo.get_sparkline(skill_name, limit=30)
-        return [
-            {"outcome": e.outcome, "started_at": e.started_at.isoformat() if e.started_at else None}
-            for e in reversed(execs)  # oldest first for sparkline display
-        ]
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
+    def _get(sync_db: Session):
+        repo = SkillRepository(sync_db)
+        try:
+            execs = repo.get_sparkline(skill_name, limit=30)
+            return [
+                {"outcome": e.outcome, "started_at": e.started_at.isoformat() if e.started_at else None}
+                for e in reversed(execs)
+            ]
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+    return await run_db(db, _get)
 
 
 @router.post("/{skill_name}/guardrail", response_model=SkillRead)
-def add_guardrail(
+async def add_guardrail(
     skill_name: str,
     body: GuardrailBody,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    repo = SkillRepository(db)
-    try:
-        return repo.add_guardrail(skill_name, body.text, body.severity)
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
+    def _add(sync_db: Session):
+        _require_skills_manage(user)
+        repo = SkillRepository(sync_db)
+        try:
+            return repo.add_guardrail(skill_name, body.text, body.severity)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+    return await run_db(db, _add)
 
 
 @router.post("/{skill_name}/procedure-step", response_model=SkillRead)
-def add_procedure_step(
+async def add_procedure_step(
     skill_name: str,
     body: ProcedureStepBody,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    repo = SkillRepository(db)
-    try:
-        skill = repo.get_by_name_or_raise(skill_name)
-        proc = skill.procedure or ""
-        step_line = f"\n- {body.text}" if proc else f"- {body.text}"
-        if body.position == "start":
-            new_proc = step_line.lstrip("\n") + ("\n" + proc if proc else "")
-        else:
-            new_proc = proc + step_line
-        skill = repo.update_full(skill.id, procedure=new_proc)
-        return skill
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
+    def _add(sync_db: Session):
+        _require_skills_manage(user)
+        repo = SkillRepository(sync_db)
+        try:
+            skill = repo.get_by_name_or_raise(skill_name)
+            proc = skill.procedure or ""
+            step_line = f"\n- {body.text}" if proc else f"- {body.text}"
+            if body.position == "start":
+                new_proc = step_line.lstrip("\n") + ("\n" + proc if proc else "")
+            else:
+                new_proc = proc + step_line
+            skill = repo.update_full(skill.id, procedure=new_proc)
+            return skill
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+    return await run_db(db, _add)
 
 
 @router.post("/{skill_name}/flag-execution")
-def flag_execution(
+async def flag_execution(
     skill_name: str,
     body: FlagExecutionBody,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    from brain.platform.db.models.skill import SkillExecution
+    def _flag(sync_db: Session):
+        from brain.platform.db.models.skill import SkillExecution
 
-    repo = SkillRepository(db)
-    try:
-        repo.get_by_name_or_raise(skill_name)  # verify skill exists
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
+        repo = SkillRepository(sync_db)
+        try:
+            repo.get_by_name_or_raise(skill_name)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
 
-    execution = db.get(SkillExecution, body.execution_id)
-    if not execution:
-        raise HTTPException(status_code=404, detail="Execution not found")
-    execution.flagged = True
-    if body.correction:
-        execution.operator_feedback = body.correction
-    db.flush()
-    return {"ok": True, "execution_id": execution.id}
+        execution = sync_db.get(SkillExecution, body.execution_id)
+        if not execution:
+            raise HTTPException(status_code=404, detail="Execution not found")
+        execution.flagged = True
+        if body.correction:
+            execution.operator_feedback = body.correction
+        sync_db.flush()
+        return {"ok": True, "execution_id": execution.id}
+
+    return await run_db(db, _flag)
 
 
 @router.post("/{skill_name}/trigger", response_model=SkillRead)
-def add_trigger(
+async def add_trigger(
     skill_name: str,
     body: TriggerBody,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    repo = SkillRepository(db)
-    try:
-        return repo.add_trigger(skill_name, body.direction, body.pattern)
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
+    def _add(sync_db: Session):
+        _require_skills_manage(user)
+        repo = SkillRepository(sync_db)
+        try:
+            return repo.add_trigger(skill_name, body.direction, body.pattern)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+    return await run_db(db, _add)
 
 
 @router.delete("/{skill_name}/trigger/{index}", response_model=SkillRead)
-def remove_trigger(
+async def remove_trigger(
     skill_name: str,
     index: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_skills_manage(user)
-    repo = SkillRepository(db)
-    try:
-        return repo.remove_trigger(skill_name, index)
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    def _remove(sync_db: Session):
+        _require_skills_manage(user)
+        repo = SkillRepository(sync_db)
+        try:
+            return repo.remove_trigger(skill_name, index)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    return await run_db(db, _remove)

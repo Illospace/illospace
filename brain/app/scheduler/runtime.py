@@ -11,6 +11,7 @@ from typing import Any
 from brain.kernel.common.time import ensure_utc
 
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.platform.db.models.scheduler import (
@@ -582,3 +583,100 @@ def set_scheduler_job_load_shed(
     job.load_shed_policy = load_shed_policy or {}
     session.flush()
     return job
+
+
+async def _run_scheduler_sync(session: AsyncSession, fn):
+    return await session.run_sync(fn)
+
+
+async def async_claim_run(
+    session: AsyncSession,
+    run_id: int,
+    *,
+    owner_id: str | None = None,
+    lease_ttl_seconds: int = LEASE_TTL_SECONDS,
+    now: datetime | None = None,
+) -> tuple[SchedulerRun, SchedulerLease]:
+    return await _run_scheduler_sync(
+        session,
+        lambda sync_session: claim_run(
+            sync_session,
+            run_id,
+            owner_id=owner_id,
+            lease_ttl_seconds=lease_ttl_seconds,
+            now=now,
+        ),
+    )
+
+
+async def async_claim_next_due_run(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    allowed_owner_modes: tuple[str, ...] = (OWNER_MODE_SCHEDULER,),
+    job_keys: tuple[str, ...] | None = None,
+    owner_id: str | None = None,
+    lease_ttl_seconds: int = LEASE_TTL_SECONDS,
+) -> tuple[SchedulerRun, SchedulerLease] | None:
+    return await _run_scheduler_sync(
+        session,
+        lambda sync_session: claim_next_due_run(
+            sync_session,
+            now=now,
+            allowed_owner_modes=allowed_owner_modes,
+            job_keys=job_keys,
+            owner_id=owner_id,
+            lease_ttl_seconds=lease_ttl_seconds,
+        ),
+    )
+
+
+async def async_heartbeat_lease(
+    session: AsyncSession,
+    lease_id: int,
+    *,
+    lease_ttl_seconds: int = LEASE_TTL_SECONDS,
+    now: datetime | None = None,
+) -> SchedulerLease | None:
+    return await _run_scheduler_sync(
+        session,
+        lambda sync_session: heartbeat_lease(
+            sync_session,
+            lease_id,
+            lease_ttl_seconds=lease_ttl_seconds,
+            now=now,
+        ),
+    )
+
+
+async def async_update_run_step(
+    session: AsyncSession,
+    step: SchedulerRunStep,
+    **kwargs: Any,
+) -> SchedulerRunStep:
+    return await _run_scheduler_sync(
+        session,
+        lambda sync_session: update_run_step(sync_session, step, **kwargs),
+    )
+
+
+async def async_finish_run(
+    session: AsyncSession,
+    run: SchedulerRun,
+    *,
+    status: str,
+    result_summary: dict[str, Any] | None = None,
+    error_text: str | None = None,
+    now: datetime | None = None,
+) -> SchedulerRun:
+    return await _run_scheduler_sync(
+        session,
+        lambda sync_session: finish_run(
+            sync_session,
+            run,
+            status=status,
+            result_summary=result_summary,
+            error_text=error_text,
+            now=now,
+        ),
+    )

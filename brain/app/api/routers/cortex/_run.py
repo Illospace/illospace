@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -17,6 +17,12 @@ from brain.app.api.routers.cortex._helpers import _caller_is_service_principal
 from brain.app.api.routers.cortex._router import router
 from brain.systems.runs.cortex import cancel_runs_for_idea, queue_status
 from brain.systems.runs.cortex.permissions import RunReadScope, run_belongs_to_scope
+from brain.systems.runs.cortex.recording import (
+    agent_trace_export_filename,
+    build_agent_trace_snapshot,
+    build_agent_trace_export_zip,
+    build_thread_trace_snapshot,
+)
 from brain.systems.runs.cortex.read_models import (
     serialize_active_runs,
     serialize_recent_runs,
@@ -26,7 +32,7 @@ from brain.systems.runs.cortex.read_models import (
 )
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
 
 
 class RunSteerRequest(BaseModel):
@@ -95,17 +101,18 @@ def _serialize_active_runs(user: dict[str, Any] | None = None) -> list[dict[str,
 
 
 @router.get("/ops/active")
-def ops_active_runs(user: dict[str, Any] = Depends(get_current_user)):
-    return _serialize_active_runs(user)
+async def ops_active_runs(user: dict[str, Any] = Depends(get_current_user)):
+    return await run_sync_with_unit_of_work(_serialize_active_runs, user)
 
 
 @router.get("/ops/recent")
-def ops_recent_runs(
+async def ops_recent_runs(
     limit: int = 30,
     include_debug: bool = False,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return serialize_recent_runs(
+    return await run_sync_with_unit_of_work(
+        serialize_recent_runs,
         _run_read_scope(user),
         limit=limit,
         include_debug=include_debug,
@@ -114,17 +121,18 @@ def ops_recent_runs(
 
 
 @router.get("/runs/{run_id}/tools")
-def run_tools(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
-    with UnitOfWork() as uow:
-        _require_run_for_user(uow.session, run_id, user)
-        rows = uow.session.scalars(
+async def run_tools(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
+    async with UnitOfWork() as uow:
+        await uow.session.run_sync(lambda sync_db: _require_run_for_user(sync_db, run_id, user))
+        result = await uow.session.scalars(
             select(AgentRunEventRow)
             .where(
                 AgentRunEventRow.run_id == int(run_id),
                 AgentRunEventRow.event_type.in_(["run.tool_started", "run.tool_completed", "run.tool_failed"]),
             )
             .order_by(AgentRunEventRow.sequence_no.asc())
-        ).all()
+        )
+        rows = result.all()
         tools = [{"event_type": row.event_type, "payload": row.payload or {}, "created_at": row.created_at.isoformat()} for row in rows]
         return {"tools": tools, "count": len(tools)}
 
@@ -140,63 +148,125 @@ def run_status(user: dict[str, Any] = Depends(get_current_user)):
 
 
 @router.get("/run/events/status")
-def run_events_status(user: dict[str, Any] = Depends(get_current_user)):
+async def run_events_status(user: dict[str, Any] = Depends(get_current_user)):
     from brain.systems.runs.event_log import run_event_backbone_status
     from brain.app.api.ws.run_events import DEFAULT_CONSUMER_NAME
 
-    with UnitOfWork() as uow:
-        return run_event_backbone_status(
-            uow.session,
-            DEFAULT_CONSUMER_NAME,
-            consumer_running=_run_event_consumer_running(),
-        )
+    def _status():
+        with UnitOfWork() as uow:
+            return run_event_backbone_status(
+                uow.session,
+                DEFAULT_CONSUMER_NAME,
+                consumer_running=_run_event_consumer_running(),
+            )
+
+    return await run_sync_with_unit_of_work(_status)
 
 
 @router.get("/run/history/{idea_id}")
-def run_history(
+async def run_history(
     idea_id: str,
     include_debug: bool = False,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    with UnitOfWork() as uow:
-        _require_idea_for_run_history(uow.session, idea_id, user)
-    return serialize_run_history(idea_id, include_debug=include_debug, uow_factory=UnitOfWork)
+    def _history():
+        with UnitOfWork() as uow:
+            _require_idea_for_run_history(uow.session, idea_id, user)
+        return serialize_run_history(idea_id, include_debug=include_debug, uow_factory=UnitOfWork)
+
+    return await run_sync_with_unit_of_work(_history)
 
 
 @router.get("/run/{run_id}/debug")
-def run_debug(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
-    result = serialize_run_debug(run_id, _run_read_scope(user), uow_factory=UnitOfWork)
+async def run_debug(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
+    result = await run_sync_with_unit_of_work(
+        serialize_run_debug,
+        run_id,
+        _run_read_scope(user),
+        uow_factory=UnitOfWork,
+    )
     if result is None:
         raise HTTPException(status_code=404, detail=f"Run #{run_id} not found")
     return result
 
 
-@router.post("/run/{run_id}/approve")
-def approve_run(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
+@router.post("/run/{run_id}/trace-export.zip")
+def download_run_trace_export(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
     with UnitOfWork() as uow:
-        _require_run_for_user(uow.session, run_id, user)
-        AgentRunStore(uow.session).set_status(int(run_id), RunStatus.RUNNING, reason="approved")
-        return {"ok": True, "run_id": run_id}
+        run = _require_run_for_user(uow.session, run_id, user)
+        snapshot = build_agent_trace_snapshot(
+            uow.session,
+            run,
+            saved_by=str(user.get("id")) if user.get("id") else None,
+        )
+        archive = build_agent_trace_export_zip(snapshot)
+        filename = agent_trace_export_filename(snapshot)
+        return Response(
+            content=archive,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Trace-Id": str(snapshot.get("trace_id") or ""),
+            },
+        )
+
+
+@router.post("/ideas/{idea_id}/trace-export.zip")
+def download_thread_trace_export(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    with UnitOfWork() as uow:
+        _require_idea_for_run_history(uow.session, idea_id, user)
+        snapshot = build_thread_trace_snapshot(
+            uow.session,
+            idea_id,
+            saved_by=str(user.get("id")) if user.get("id") else None,
+        )
+        archive = build_agent_trace_export_zip(snapshot)
+        filename = agent_trace_export_filename(snapshot)
+        return Response(
+            content=archive,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Trace-Id": str(snapshot.get("trace_id") or ""),
+            },
+        )
+
+
+@router.post("/run/{run_id}/approve")
+async def approve_run(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
+    def _approve():
+        with UnitOfWork() as uow:
+            _require_run_for_user(uow.session, run_id, user)
+            AgentRunStore(uow.session).set_status(int(run_id), RunStatus.RUNNING, reason="approved")
+            return {"ok": True, "run_id": run_id}
+
+    return await run_sync_with_unit_of_work(_approve)
 
 
 @router.post("/run/{run_id}/deny")
-def deny_run(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
-    with UnitOfWork() as uow:
-        _require_run_for_user(uow.session, run_id, user)
-        _cancel_run_with_event(AgentRunStore(uow.session), int(run_id), reason="approval_denied")
-        return {"ok": True, "run_id": run_id}
+async def deny_run(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
+    def _deny():
+        with UnitOfWork() as uow:
+            _require_run_for_user(uow.session, run_id, user)
+            _cancel_run_with_event(AgentRunStore(uow.session), int(run_id), reason="approval_denied")
+            return {"ok": True, "run_id": run_id}
+
+    return await run_sync_with_unit_of_work(_deny)
 
 
 @router.post("/run/{run_id}/cancel")
-def cancel_run(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
-    with UnitOfWork() as uow:
-        _require_run_for_user(uow.session, run_id, user)
-        _cancel_run_with_event(AgentRunStore(uow.session), int(run_id), reason="user_canceled")
-        return {"ok": True, "run_id": run_id}
+async def cancel_run(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
+    def _cancel():
+        with UnitOfWork() as uow:
+            _require_run_for_user(uow.session, run_id, user)
+            _cancel_run_with_event(AgentRunStore(uow.session), int(run_id), reason="user_canceled")
+            return {"ok": True, "run_id": run_id}
+
+    return await run_sync_with_unit_of_work(_cancel)
 
 
 @router.post("/run/{run_id}/steer")
-def steer_run(
+async def steer_run(
     run_id: int,
     payload: RunSteerRequest,
     user: dict[str, Any] = Depends(get_current_user),
@@ -204,38 +274,44 @@ def steer_run(
     content = " ".join(str(payload.content or "").split())
     if not content:
         raise HTTPException(status_code=400, detail="Steering content is required")
-    with UnitOfWork() as uow:
-        run = _require_run_for_user(uow.session, run_id, user)
-        if coerce_run_status(run.status) in TERMINAL_RUN_STATUSES:
-            raise HTTPException(status_code=409, detail="Run is no longer active")
-        event = AgentRunStore(uow.session).append_steering(
-            int(run_id),
-            content,
-            user_id=str(user.get("id")) if user.get("id") and user.get("id") != "system" else None,
-        )
-        return {"ok": True, "run_id": run_id, "event_id": event.id}
+    def _steer():
+        with UnitOfWork() as uow:
+            run = _require_run_for_user(uow.session, run_id, user)
+            if coerce_run_status(run.status) in TERMINAL_RUN_STATUSES:
+                raise HTTPException(status_code=409, detail="Run is no longer active")
+            event = AgentRunStore(uow.session).append_steering(
+                int(run_id),
+                content,
+                user_id=str(user.get("id")) if user.get("id") and user.get("id") != "system" else None,
+            )
+            return {"ok": True, "run_id": run_id, "event_id": event.id}
+
+    return await run_sync_with_unit_of_work(_steer)
 
 
 @router.get("/run/{run_id}/graph")
-def run_graph(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
-    debug = run_debug(run_id, user)
+async def run_graph(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
+    debug = await run_debug(run_id, user)
     return {"run_id": run_id, "steps": [], "events": debug.get("events", [])}
 
 
 @router.post("/run/{run_id}/skill-feedback")
-def run_skill_feedback(
+async def run_skill_feedback(
     run_id: int,
     payload: SkillFeedbackRequest,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    with UnitOfWork() as uow:
-        _require_run_for_user(uow.session, run_id, user)
-        store = AgentRunStore(uow.session)
-        store.append_event(
-            run_event(
-                int(run_id),
-                "run.feedback_received",
-                {"feedback": payload.feedback, "note": payload.note, "user_id": user.get("id")},
+    def _feedback():
+        with UnitOfWork() as uow:
+            _require_run_for_user(uow.session, run_id, user)
+            store = AgentRunStore(uow.session)
+            store.append_event(
+                run_event(
+                    int(run_id),
+                    "run.feedback_received",
+                    {"feedback": payload.feedback, "note": payload.note, "user_id": user.get("id")},
+                )
             )
-        )
-    return {"ok": True}
+        return {"ok": True}
+
+    return await run_sync_with_unit_of_work(_feedback)

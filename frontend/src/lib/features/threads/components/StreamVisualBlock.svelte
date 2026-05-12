@@ -60,7 +60,7 @@
 
   function pieSlices(data: { label: string; value: number }[]) {
     const total = data.reduce((s, d) => s + d.value, 0) || 1;
-    const colors = ['#E8A94B', '#4BACB8', '#B85C4B', '#7B4BE8', '#4BE87B', '#E84B8A', '#8AE84B', '#4B7BE8'];
+    const colors = ['var(--thread-accent, #57CFA0)', '#4BACB8', '#B85C4B', '#7B4BE8', '#4BE87B', '#E84B8A', '#8AE84B', '#4B7BE8'];
     let cumAngle = -Math.PI / 2;
     return data.map((d, i) => {
       const angle = (d.value / total) * Math.PI * 2;
@@ -246,7 +246,7 @@
     if (!mermaidContainer) return;
     try {
       const { default: mermaid } = await import('mermaid');
-      mermaid.initialize({ startOnLoad: false, theme: 'dark', themeVariables: { primaryColor: '#E8A94B', primaryTextColor: '#e0dcd4', lineColor: '#555' } });
+      mermaid.initialize({ startOnLoad: false, theme: 'dark', themeVariables: { primaryColor: '#57CFA0', primaryTextColor: '#e0dcd4', lineColor: '#555' } });
       const { svg } = await mermaid.render('mermaid-' + Math.random().toString(36).slice(2), block.content);
       if (mermaidContainer) mermaidContainer.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true } });
     } catch (e) {
@@ -320,7 +320,7 @@
                   <!-- X axis -->
                   <line x1="48" y1="195" x2="390" y2="195" stroke="var(--text-3)" stroke-width="1" opacity="0.3"/>
                   {#each barChartPath(chart.data, 400, 220) as bar, i}
-                    <rect x={bar.x} y={bar.y} width={bar.w} height={bar.h} fill="#E8A94B" rx="2" opacity="0.85">
+                    <rect x={bar.x} y={bar.y} width={bar.w} height={bar.h} fill="var(--thread-accent, #57CFA0)" rx="2" opacity="0.85">
                       <title>{bar.label}: {bar.value}</title>
                     </rect>
                     <text x={bar.x + bar.w / 2} y="210" text-anchor="middle" fill="var(--text-3)" font-size="9">{bar.label}</text>
@@ -337,12 +337,12 @@
                 <svg class="chart-svg" viewBox="0 0 400 220" preserveAspectRatio="xMidYMid meet">
                   <line x1="48" y1="10" x2="48" y2="195" stroke="var(--text-3)" stroke-width="1" opacity="0.3"/>
                   <line x1="48" y1="195" x2="390" y2="195" stroke="var(--text-3)" stroke-width="1" opacity="0.3"/>
-                  <polyline points={lineChartPoints(chart.data, 400, 220)} fill="none" stroke="#E8A94B" stroke-width="2" stroke-linejoin="round"/>
+                  <polyline points={lineChartPoints(chart.data, 400, 220)} fill="none" stroke="var(--thread-accent, #57CFA0)" stroke-width="2" stroke-linejoin="round"/>
                   {#each chart.data as d, i}
                     {@const max = chartMax(chart.data)}
                     {@const x = 50 + (chart.data.length > 1 ? i * (330 / (chart.data.length - 1)) : 0)}
                     {@const y = 195 - (d.value / max) * 175}
-                    <circle cx={x} cy={y} r="3" fill="#E8A94B">
+                    <circle cx={x} cy={y} r="3" fill="var(--thread-accent, #57CFA0)">
                       <title>{d.label}: {d.value}</title>
                     </circle>
                     <text x={x} y="210" text-anchor="middle" fill="var(--text-3)" font-size="9">{d.label}</text>
@@ -377,7 +377,7 @@
                     {@const max = chartMax(chart.data)}
                     {@const x = 50 + (chart.data.length > 1 ? i * (330 / (chart.data.length - 1)) : 0)}
                     {@const y = 195 - (d.value / max) * 175}
-                    <circle cx={x} cy={y} r="4" fill="#E8A94B" opacity="0.8">
+                    <circle cx={x} cy={y} r="4" fill="var(--thread-accent, #57CFA0)" opacity="0.8">
                       <title>{d.label}: {d.value}</title>
                     </circle>
                   {/each}
@@ -609,7 +609,7 @@
   }
   .diff-add { background: rgba(99, 208, 142, 0.08); }
   .diff-del { background: rgba(225, 121, 121, 0.08); }
-  .diff-hunk { background: rgba(213, 161, 77, 0.08); }
+  .diff-hunk { background: color-mix(in srgb, var(--thread-accent, #57CFA0) 8%, transparent); }
   .diff-meta { background: rgba(141, 183, 255, 0.08); }
 
   /* ── Charts ── */
@@ -676,17 +676,17 @@
   .markdown-view :global(h4) { font-size: 1em; font-weight: 500; margin: 10px 0 4px; color: rgba(240, 240, 250, 0.82); }
   .markdown-view :global(strong) { font-weight: 600; color: rgba(255, 255, 255, 0.94); }
   .markdown-view :global(em) { font-style: italic; }
-  .markdown-view :global(a) { color: #E8A94B; text-decoration: none; }
+  .markdown-view :global(a) { color: var(--thread-accent, #57CFA0); text-decoration: none; }
   .markdown-view :global(a:hover) { text-decoration: underline; }
   .markdown-view :global(hr) { border: none; border-top: 1px solid rgba(255, 255, 255, 0.05); margin: 12px 0; }
   .markdown-view :global(ul) { padding-left: 20px; margin: 6px 0; }
   .markdown-view :global(li) { margin: 2px 0; }
   .markdown-view :global(blockquote) {
-    border-left: 3px solid #E8A94B;
+    border-left: 3px solid var(--thread-accent, #57CFA0);
     padding: 4px 12px;
     margin: 8px 0;
     color: rgba(240, 240, 250, 0.72);
-    background: rgba(232, 169, 75, 0.05);
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 5%, transparent);
     border-radius: 0 4px 4px 0;
   }
   .markdown-view :global(.md-code-block) {

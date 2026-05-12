@@ -43,6 +43,46 @@
         "type": "string"
       }
     },
+    "external_actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "action_key",
+          "effects",
+          "executor"
+        ],
+        "properties": {
+          "action_key": {
+            "type": "string"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "executor": {
+            "enum": [
+              "deferred",
+              "registered"
+            ]
+          },
+          "domain_binding": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
     "verification": {
       "type": "array",
       "items": {

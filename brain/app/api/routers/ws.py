@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Mapping
 from typing import Any
@@ -17,7 +18,6 @@ from brain.systems.cortex.events import (
     cortex_event_to_message,
     list_cortex_events_after_for_principal,
 )
-from brain.platform.db import SessionFactory
 from brain.platform.db.repositories.chat import ChatConversationRepository, ChatMessageRepository
 from brain.app.api.schemas.chat import ChatReadUpdate
 from brain.app.api.services.chat import ChatReadPublishState, ChatService
@@ -25,6 +25,7 @@ from brain.app.api.services.notifications import build_notification_summary
 from brain.app.api.ws.manager import ConnectionManager
 from brain.app.api.ws.events import ServerEvent, ClientEvent
 from brain.app.api.ws.auth import WsTokenError, validate_auth_frame_claims, verify_ws_token
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -111,7 +112,7 @@ async def websocket_endpoint(ws: WebSocket):
                 if conversation_id is None:
                     await _send_chat_error(ws, "CHAT_CONVERSATION_REQUIRED")
                     continue
-                error_code = _authorize_chat_subscription(
+                error_code = await _authorize_chat_subscription(
                     user_id,
                     org_id=org_id,
                     conversation_id=conversation_id,
@@ -136,7 +137,7 @@ async def websocket_endpoint(ws: WebSocket):
                 if conversation_id is None or thread_root_message_id is None:
                     await _send_chat_error(ws, "CHAT_THREAD_SUBSCRIPTION_INVALID")
                     continue
-                error_code = _authorize_chat_subscription(
+                error_code = await _authorize_chat_subscription(
                     user_id,
                     org_id=org_id,
                     conversation_id=conversation_id,
@@ -321,12 +322,13 @@ async def _replay_durable_events(
             continue
         cursor = int(cursors[channel])
         try:
-            events = _load_replay_events(
+            loaded_events = _load_replay_events(
                 channel,
                 principal,
                 last_event_id=cursor,
                 limit=replay_limit + 1,
             )
+            events = await loaded_events if inspect.isawaitable(loaded_events) else loaded_events
         except Exception as exc:
             logger.warning(
                 "event_replay_failed user=%s org=%s channel=%s cursor=%s error=%s",
@@ -387,32 +389,32 @@ async def _replay_durable_events(
         )
 
 
-def _load_replay_events(
+async def _load_replay_events(
     channel: str,
     principal: Mapping[str, Any],
     *,
     last_event_id: int,
     limit: int,
 ):
-    session = SessionFactory()
-    try:
-        if channel == EVENT_REPLAY_CHANNEL_RUN:
-            return list_run_events_after_for_principal(
-                session,
-                principal,
-                last_event_id=last_event_id,
-                limit=limit,
-            )
-        if channel == EVENT_REPLAY_CHANNEL_CORTEX:
-            return list_cortex_events_after_for_principal(
-                session,
-                principal,
-                last_event_id=last_event_id,
-                limit=limit,
-            )
-        return []
-    finally:
-        session.close()
+    def _load():
+        with UnitOfWork() as uow:
+            if channel == EVENT_REPLAY_CHANNEL_RUN:
+                return list_run_events_after_for_principal(
+                    uow.session,
+                    principal,
+                    last_event_id=last_event_id,
+                    limit=limit,
+                )
+            if channel == EVENT_REPLAY_CHANNEL_CORTEX:
+                return list_cortex_events_after_for_principal(
+                    uow.session,
+                    principal,
+                    last_event_id=last_event_id,
+                    limit=limit,
+                )
+            return []
+
+    return await run_sync_with_unit_of_work(_load)
 
 
 def _replay_event_to_message(channel: str, event) -> dict[str, Any] | None:
@@ -442,7 +444,7 @@ async def _authorize_browser_session_for_ws(user_id: str, org_id: str | None, se
         })
         return False
     try:
-        record = browser_sessions.get_session_record_for_org(session_id, org_id=org_id)
+        record = await browser_sessions.get_session_record_for_org_async(session_id, org_id=org_id)
     except Exception as exc:
         logger.warning("browser ws authorization failed user=%s session=%s: %s", user_id, session_id, exc)
         await ws_manager.send_to(user_id, ServerEvent.BROWSER_SESSION_ERROR, {
@@ -519,7 +521,7 @@ async def _handle_chat_typing(user_id: str, org_id: str, data: dict, ws: WebSock
         "thread_root_message_id",
         alias="message_id",
     )
-    error_code = _authorize_chat_subscription(
+    error_code = await _authorize_chat_subscription(
         user_id,
         org_id=org_id,
         conversation_id=conversation_id,
@@ -564,27 +566,27 @@ async def _handle_chat_mark_read(user_id: str, org_id: str, data: dict, ws: WebS
         await _send_chat_error(ws, "CHAT_READ_CURSOR_INVALID")
         return
 
-    session = SessionFactory()
     try:
-        _, publish = ChatService(
-            session,
-            {"id": user_id, "org_id": org_id},
-        ).mark_conversation_read(
-            conversation_id,
-            ChatReadUpdate(
-                last_read_conversation_seq=last_read_conversation_seq,
-                last_read_message_id=last_read_message_id,
-            ),
-        )
-        session.commit()
+        def _mark_read():
+            with UnitOfWork() as uow:
+                _, publish = ChatService(
+                    uow.session,
+                    {"id": user_id, "org_id": org_id},
+                ).mark_conversation_read(
+                    conversation_id,
+                    ChatReadUpdate(
+                        last_read_conversation_seq=last_read_conversation_seq,
+                        last_read_message_id=last_read_message_id,
+                    ),
+                )
+                summary = build_notification_summary(uow.session, user_id=user_id, org_id=org_id)
+                return publish, summary.model_dump(mode="json")
+
+        publish, summary_payload = await run_sync_with_unit_of_work(_mark_read)
     except HTTPException as exc:
-        session.rollback()
-        session.close()
         await _send_chat_error(ws, _chat_error_code_from_http_exception(exc))
         return
     except Exception as exc:
-        session.rollback()
-        session.close()
         logger.warning(
             "chat_mark_read_failed user=%s conversation=%s: %s",
             user_id,
@@ -595,10 +597,9 @@ async def _handle_chat_mark_read(user_id: str, org_id: str, data: dict, ws: WebS
         return
     try:
         await _publish_chat_read_state(publish)
-        summary = build_notification_summary(session, user_id=user_id, org_id=org_id)
         await ws_manager.publish_notification_summary_updated(
             user_id=user_id,
-            summary=summary.model_dump(mode="json"),
+            summary=summary_payload,
         )
     except Exception as exc:
         logger.warning(
@@ -607,8 +608,6 @@ async def _handle_chat_mark_read(user_id: str, org_id: str, data: dict, ws: WebS
             conversation_id,
             exc,
         )
-    finally:
-        session.close()
 
 
 async def _publish_chat_read_state(publish: ChatReadPublishState) -> None:
@@ -679,35 +678,35 @@ def _chat_error_code_from_http_exception(exc: HTTPException) -> str:
     return "CHAT_MARK_READ_INVALID"
 
 
-def _authorize_chat_subscription(
+async def _authorize_chat_subscription(
     user_id: str,
     *,
     org_id: str,
     conversation_id: str,
     thread_root_message_id: int | None = None,
 ) -> str | None:
-    session = SessionFactory()
-    try:
-        conversation = ChatConversationRepository(session).get_for_user(
-            conversation_id,
-            user_id,
-        )
-        if conversation is None:
-            return "CHAT_CONVERSATION_FORBIDDEN"
-        if str(conversation.org_id) != str(org_id):
-            return "CHAT_CONVERSATION_FORBIDDEN"
+    def _authorize():
+        with UnitOfWork() as uow:
+            conversation = ChatConversationRepository(uow.session).get_for_user(
+                conversation_id,
+                user_id,
+            )
+            if conversation is None:
+                return "CHAT_CONVERSATION_FORBIDDEN"
+            if str(conversation.org_id) != str(org_id):
+                return "CHAT_CONVERSATION_FORBIDDEN"
 
-        if thread_root_message_id is None:
+            if thread_root_message_id is None:
+                return None
+
+            root_message = ChatMessageRepository(uow.session).get(thread_root_message_id)
+            if (
+                root_message is None
+                or root_message.deleted_at is not None
+                or root_message.conversation_id != conversation.id
+                or root_message.thread_root_message_id is not None
+            ):
+                return "CHAT_THREAD_SUBSCRIPTION_INVALID"
             return None
 
-        root_message = ChatMessageRepository(session).get(thread_root_message_id)
-        if (
-            root_message is None
-            or root_message.deleted_at is not None
-            or root_message.conversation_id != conversation.id
-            or root_message.thread_root_message_id is not None
-        ):
-            return "CHAT_THREAD_SUBSCRIPTION_INVALID"
-        return None
-    finally:
-        session.close()
+    return await run_sync_with_unit_of_work(_authorize)

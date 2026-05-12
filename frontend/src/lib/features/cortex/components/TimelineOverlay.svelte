@@ -9,6 +9,7 @@
     idea_id: string;
     title: string;
     created_at: string;
+    accent: string;
     events: { timestamp: string; status: string }[];
   }
 
@@ -28,11 +29,15 @@
   let maxTime = $derived(Date.now());
   let scrubTime = $derived(minTime + (maxTime - minTime) * scrubPosition);
 
-  const STATUS_COLORS: Record<string, string> = {
-    idle: '#57CFA0',
-    working: '#E3AA54',
-    done: '#57CFA0',
-  };
+  function normalizeHexColor(value: string | null | undefined): string | null {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(trimmed)) return null;
+    if (trimmed.length === 4) {
+      return `#${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}${trimmed[3]}${trimmed[3]}`;
+    }
+    return trimmed;
+  }
 
   onMount(async () => {
     if (!visible) return;
@@ -62,6 +67,7 @@
         idea_id: String(idea.idea_id ?? idea.id ?? ''),
         title: String(idea.title ?? idea.display_title ?? 'Untitled'),
         created_at: String(idea.created_at ?? ''),
+        accent: normalizeHexColor(idea.author_color) ?? normalizeHexColor(idea.user_color) ?? '#57CFA0',
         events: (Array.isArray(idea.events) ? idea.events : (idea.transitions ?? []))
           .map((event: any) => ({
             timestamp: String(event.timestamp ?? event.at ?? event.changed_at ?? ''),
@@ -127,23 +133,21 @@
     const segs: { left: number; width: number; color: string }[] = [];
     const born = new Date(entry.created_at).getTime();
     let prevTime = born;
-    let prevStatus = 'idle';
 
     for (const ev of entry.events) {
       const evTime = new Date(ev.timestamp).getTime();
       segs.push({
         left: (prevTime - minTime) / range,
         width: (evTime - prevTime) / range,
-        color: STATUS_COLORS[prevStatus] ?? '#888',
+        color: entry.accent,
       });
       prevTime = evTime;
-      prevStatus = ev.status;
     }
     // Final segment to now
     segs.push({
       left: (prevTime - minTime) / range,
       width: (maxTime - prevTime) / range,
-      color: STATUS_COLORS[prevStatus] ?? '#888',
+      color: entry.accent,
     });
     return segs;
   }

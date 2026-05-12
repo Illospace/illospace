@@ -2445,7 +2445,7 @@ deploy_up() {
     fi
   fi
   if [ "$build" = "1" ]; then
-    deploy_compose build api web || return 1
+    deploy_compose build api web updater || return 1
   fi
   deploy_compose up -d || return 1
   if [ "$doctor" = "1" ]; then
@@ -2511,6 +2511,114 @@ deploy_command() {
   esac
 }
 
+# ── Self-update CLI ────────────────────────────────────────
+
+update_usage() {
+  echo ""
+  echo -e "${BOLD}Usage:${NC} ./illo update [--mode auto|native|compose]"
+  echo ""
+  echo "Fetch origin/main and update the running server without interrupting active AgentRuns."
+  echo ""
+  echo "Modes:"
+  echo -e "  ${GREEN}auto${NC}      Prefer native/systemd when active, otherwise Compose when a stack is present"
+  echo -e "  ${GREEN}native${NC}    Run ops/deploy.sh, which drains cortex-worker while AgentRuns are active"
+  echo -e "  ${GREEN}compose${NC}   Fast-forward to origin/main, rebuild images, migrate, and restart Compose"
+  echo ""
+}
+
+update_git_sync_main() {
+  echo "=== Syncing checkout to origin/main ==="
+  git fetch origin main
+  git checkout main
+  git pull --ff-only origin main
+}
+
+update_native_services_active() {
+  systemd_user_ready || return 1
+  run_logged_timeout 5 systemctl --user is-active --quiet illo-api.service >/dev/null 2>&1 && return 0
+  run_logged_timeout 5 systemctl --user is-active --quiet cortex-worker.service >/dev/null 2>&1 && return 0
+  return 1
+}
+
+update_compose_stack_present() {
+  [ -f "$(deploy_compose_env_file)" ] || return 1
+  command -v docker >/dev/null 2>&1 || return 1
+  docker compose version >/dev/null 2>&1 || return 1
+  deploy_compose ps -q api >/dev/null 2>&1 || return 1
+  [ -n "$(deploy_compose ps -q api 2>/dev/null || true)" ]
+}
+
+update_detect_mode() {
+  if update_native_services_active; then
+    echo "native"
+    return 0
+  fi
+  if update_compose_stack_present; then
+    echo "compose"
+    return 0
+  fi
+  echo "local"
+}
+
+update_command() {
+  local mode="${ILLO_UPDATE_MODE:-${ILLO_SELF_UPDATE_MODE:-auto}}"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --mode)
+        mode="${2:?--mode requires a value}"
+        shift 2
+        ;;
+      -h|--help)
+        update_usage
+        return 0
+        ;;
+      *)
+        err "Unknown update option: $1"
+        update_usage
+        return 2
+        ;;
+    esac
+  done
+
+  case "$mode" in
+    auto)
+      mode="$(update_detect_mode)"
+      ;;
+    native|systemd)
+      mode="native"
+      ;;
+    compose|docker)
+      mode="compose"
+      ;;
+    local|dev)
+      mode="local"
+      ;;
+    *)
+      err "Unknown update mode: $mode"
+      update_usage
+      return 2
+      ;;
+  esac
+
+  case "$mode" in
+    native)
+      dim "Update mode: native/systemd"
+      exec "$ROOT/ops/deploy.sh"
+      ;;
+    compose)
+      dim "Update mode: Docker Compose"
+      update_git_sync_main || return 1
+      deploy_command upgrade --build --no-pull
+      ;;
+    local)
+      err "Self-update is not enabled for local/dev runs."
+      dim "Run git pull manually for local development, or set ILLO_UPDATE_MODE=native|compose when this checkout owns a server."
+      return 1
+      ;;
+  esac
+}
+
 # ── CLI ────────────────────────────────────────────────────
 
 usage() {
@@ -2521,6 +2629,7 @@ usage() {
   echo -e "  ${GREEN}dev${NC}          Start development mode with frontend hot reload"
   echo -e "  ${GREEN}setup${NC}        Run setup only"
   echo -e "  ${GREEN}deploy${NC}       Manage the recommended Compose team-server deploy"
+  echo -e "  ${GREEN}update${NC}       Update a running server from origin/main"
   echo -e "  ${GREEN}doctor${NC}       Validate local configuration"
   echo -e "  ${GREEN}uninstall${NC}    Remove local runtime, config, and Illo Docker DB"
   echo -e "  ${GREEN}test${NC}         Run tests"
@@ -2541,6 +2650,9 @@ case "${1:-}" in
     ;;
   deploy)
     deploy_command "${@:2}"
+    ;;
+  update)
+    update_command "${@:2}"
     ;;
   doctor)
     check_prereqs

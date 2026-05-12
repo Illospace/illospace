@@ -87,8 +87,8 @@
     if (!lastTime) return { pct: 50, label: 'unknown', color: '#888' };
     const staleSec = (now - lastTime) / 1000;
     if (staleSec < 30) return { pct: 100, label: 'active', color: '#34d399' };
-    if (staleSec < 120) return { pct: 75, label: 'working', color: '#E8A94B' };
-    if (staleSec < 300) return { pct: 40, label: 'slow', color: '#fb923c' };
+    if (staleSec < 120) return { pct: 75, label: 'working', color: '#57CFA0' };
+    if (staleSec < 300) return { pct: 40, label: 'slow', color: '#57CFA0' };
     return { pct: 15, label: 'stalled', color: '#f87171' };
   }
 
@@ -741,6 +741,8 @@
   }
 
   .ops-console {
+    --ops-working-accent: var(--thread-accent, #57CFA0);
+
     position: fixed;
     bottom: 0;
     left: 0;
@@ -832,8 +834,8 @@
   }
 
   .ops-stat-tile.stat-active {
-    border-color: rgba(232, 169, 75, 0.2);
-    background: rgba(232, 169, 75, 0.04);
+    border-color: color-mix(in srgb, var(--ops-working-accent) 20%, transparent);
+    background: color-mix(in srgb, var(--ops-working-accent) 4%, transparent);
   }
 
   .ops-stat-tile.stat-queued {
@@ -849,7 +851,7 @@
     line-height: 1.1;
   }
 
-  .stat-active .ops-stat-value { color: #E8A94B; }
+  .stat-active .ops-stat-value { color: var(--ops-working-accent); }
 
   .ops-stat-label {
     display: block;
@@ -863,7 +865,11 @@
   .ops-stat-glow {
     position: absolute;
     inset: 0;
-    background: radial-gradient(circle at center, rgba(232, 169, 75, 0.08), transparent 70%);
+    background: radial-gradient(
+      circle at center,
+      color-mix(in srgb, var(--ops-working-accent) 8%, transparent),
+      transparent 70%
+    );
     animation: stat-glow-pulse 3s ease-in-out infinite;
     pointer-events: none;
   }
@@ -909,8 +915,8 @@
     width: 5px;
     height: 5px;
     border-radius: 50%;
-    background: #E8A94B;
-    box-shadow: 0 0 6px rgba(232, 169, 75, 0.5);
+    background: var(--ops-working-accent);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--ops-working-accent) 50%, transparent);
     animation: stat-glow-pulse 2s ease-in-out infinite;
   }
 
@@ -1029,8 +1035,8 @@
   }
 
   .ops-lane.lane-running {
-    border-color: rgba(232, 169, 75, 0.12);
-    background: rgba(232, 169, 75, 0.015);
+    border-color: color-mix(in srgb, var(--ops-working-accent) 12%, transparent);
+    background: color-mix(in srgb, var(--ops-working-accent) 1.5%, transparent);
   }
 
   .ops-lane.lane-queued {
@@ -1078,7 +1084,7 @@
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    border: 1.5px solid rgba(232, 169, 75, 0.25);
+    border: 1.5px solid color-mix(in srgb, var(--ops-working-accent) 25%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1089,14 +1095,14 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: #E8A94B;
-    box-shadow: 0 0 8px rgba(232, 169, 75, 0.5);
+    background: var(--ops-working-accent);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--ops-working-accent) 50%, transparent);
     animation: pulse-core 2.5s ease-in-out infinite;
   }
 
   @keyframes pulse-ring {
-    0%, 100% { border-color: rgba(232, 169, 75, 0.15); transform: scale(0.95); }
-    50% { border-color: rgba(232, 169, 75, 0.35); transform: scale(1.1); }
+    0%, 100% { border-color: color-mix(in srgb, var(--ops-working-accent) 15%, transparent); transform: scale(0.95); }
+    50% { border-color: color-mix(in srgb, var(--ops-working-accent) 35%, transparent); transform: scale(1.1); }
   }
   @keyframes pulse-core {
     0%, 100% { opacity: 0.7; }
@@ -1142,7 +1148,7 @@
     border-radius: 3px;
     text-transform: uppercase;
   }
-  .lane-flag-miss { background: rgba(251, 191, 36, 0.12); color: rgba(251, 191, 36, 0.7); }
+  .lane-flag-miss { background: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 12%, transparent); color: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 70%, transparent); }
   .lane-flag-good { background: rgba(52, 211, 153, 0.1); color: rgba(52, 211, 153, 0.7); }
   .lane-flag-bad { background: rgba(248, 113, 113, 0.1); color: rgba(248, 113, 113, 0.7); }
   .lane-flag-postmortem { background: rgba(167, 139, 250, 0.1); color: rgba(167, 139, 250, 0.7); }
@@ -1278,7 +1284,7 @@
   }
 
   .live-caret {
-    color: rgba(232, 169, 75, 0.5);
+    color: color-mix(in srgb, var(--ops-working-accent) 50%, transparent);
     margin-right: 4px;
     animation: caret-blink 1s step-end infinite;
   }
@@ -1305,15 +1311,15 @@
 
   .run-step-seg.seg-completed { background: rgba(52, 211, 153, 0.55); }
   .run-step-seg.seg-running {
-    background: rgba(232, 169, 75, 0.4);
+    background: color-mix(in srgb, var(--ops-working-accent) 40%, transparent);
     animation: seg-pulse 1.5s ease-in-out infinite;
   }
   .run-step-seg.seg-failed { background: rgba(248, 113, 113, 0.5); }
   .run-step-seg.seg-skipped { background: rgba(255, 255, 255, 0.03); }
 
   @keyframes seg-pulse {
-    0%, 100% { background: rgba(232, 169, 75, 0.25); }
-    50% { background: rgba(232, 169, 75, 0.55); }
+    0%, 100% { background: color-mix(in srgb, var(--ops-working-accent) 25%, transparent); }
+    50% { background: color-mix(in srgb, var(--ops-working-accent) 55%, transparent); }
   }
 
   /* ── Error line (collapsed) ── */
@@ -1362,7 +1368,7 @@
     gap: 6px;
   }
 
-  .detail-label.label-warning { color: rgba(251, 191, 36, 0.5); }
+  .detail-label.label-warning { color: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 50%, transparent); }
   .detail-label.label-error { color: rgba(248, 113, 113, 0.5); }
 
   .detail-count {
@@ -1387,7 +1393,7 @@
   .run-step-row:hover { background: rgba(255, 255, 255, 0.02); }
 
   .run-step-row.row-completed { background: rgba(52, 211, 153, 0.03); }
-  .run-step-row.row-running { background: rgba(232, 169, 75, 0.04); }
+  .run-step-row.row-running { background: color-mix(in srgb, var(--ops-working-accent) 4%, transparent); }
   .run-step-row.row-failed { background: rgba(248, 113, 113, 0.03); }
 
   .run-step-icon { width: 14px; text-align: center; flex-shrink: 0; }
@@ -1400,8 +1406,8 @@
     display: inline-block;
     width: 8px;
     height: 8px;
-    border: 1.5px solid rgba(232, 169, 75, 0.4);
-    border-top-color: #E8A94B;
+    border: 1.5px solid color-mix(in srgb, var(--ops-working-accent) 40%, transparent);
+    border-top-color: var(--ops-working-accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
@@ -1447,8 +1453,8 @@
   }
   .trace-line:hover { background: rgba(200, 175, 100, 0.03); }
   .trace-line.trace-latest {
-    background: rgba(232, 169, 75, 0.04);
-    border-left: 2px solid rgba(232, 169, 75, 0.3);
+    background: color-mix(in srgb, var(--ops-working-accent) 4%, transparent);
+    border-left: 2px solid color-mix(in srgb, var(--ops-working-accent) 30%, transparent);
   }
 
   .trace-time {
@@ -1540,10 +1546,10 @@
   .miss-item {
     font-size: 10px;
     padding: 3px 8px;
-    background: rgba(251, 191, 36, 0.04);
-    border-left: 2px solid rgba(251, 191, 36, 0.2);
+    background: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 4%, transparent);
+    border-left: 2px solid color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 20%, transparent);
     border-radius: 0 3px 3px 0;
-    color: rgba(251, 191, 36, 0.55);
+    color: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 55%, transparent);
   }
 
   /* ── Adaptations ── */
@@ -1637,8 +1643,8 @@
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 3px;
-    background: rgba(251, 191, 36, 0.08);
-    color: rgba(251, 191, 36, 0.6);
+    background: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 8%, transparent);
+    color: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 60%, transparent);
     letter-spacing: 0.04em;
   }
   .class-retry { background: rgba(52, 211, 153, 0.08); color: rgba(52, 211, 153, 0.6); }

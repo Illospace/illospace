@@ -255,7 +255,7 @@
 
   .constellation-metric-tile-tone-warning {
     --metric-accent: rgba(250, 231, 188, 0.28);
-    --metric-accent-soft: rgba(213, 161, 77, 0.12);
+    --metric-accent-soft: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 12%, transparent);
   }
 
   .constellation-metric-tile-tone-danger {

@@ -29,6 +29,13 @@ from brain.systems.runs.execution_context import (
     _agent_context,
     bind_agent_context,
 )
+from brain.systems.runs.project_execution_env import (
+    _canonical_project_token_slug,
+    _current_project_token_context,
+    _current_run_target_context,
+    _current_workspace_root_hint,
+    _project_context_token_slugs,
+)
 from brain.systems.runs.tool_catalog.registry import (
     action_manifest_tool_names,
     parallel_safe_tool_names,
@@ -41,10 +48,7 @@ _MODEL_TIER_ALIASES: dict[str, str] = {}
 _REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh"}
 
 # Workspace root — configurable, defaults to project root
-WORKSPACE_ROOT = os.environ.get(
-    "ILLO_WORKSPACE_ROOT",
-    str(brain_config.BRAIN_DIR),
-)
+WORKSPACE_ROOT = str(brain_config.resolve_workspace_root(default=brain_config.BRAIN_DIR))
 
 # Max output size for tool results (from budget config)
 _MAX_RESULT_CHARS = int(os.environ.get("BUDGET_MAX_TOOL_RESULT_CHARS", "10000"))
@@ -204,7 +208,11 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
             "effect": "update a generated workspace app",
         },
         "archive": {"required": ["app_id or key"], "optional": [], "effect": "archive an app"},
-        "restore": {"required": ["app_id or key"], "optional": [], "effect": "restore an archived app"},
+        "restore": {
+            "required": ["app_id or key", "confirm_restore_archived"],
+            "optional": [],
+            "effect": "restore an archived app only when the user explicitly requested restore/reopen",
+        },
         "get_state": {"required": ["app_id"], "optional": ["state_key"], "effect": "read app-local state"},
         "update_state": {"required": ["app_id"], "optional": ["state_key", "data", "data_patch"], "effect": "write app-local state"},
     },
@@ -427,122 +435,6 @@ def _select_workspace(
 
     options = ", ".join(sorted(item["name"] for item in registry)) or "(none)"
     raise ValueError(f"Workspace '{workspace}' is not accessible in this run. Available: {options}")
-
-
-def _current_run_target_context() -> dict | None:
-    """Load the current run target context, if the tool call is running inside one."""
-    run = getattr(_agent_context, "run", None)
-    run_id = getattr(run, "run_id", None)
-    if not run_id:
-        return None
-
-    try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        from brain.systems.environment import load_run_target_context
-
-        with UnitOfWork() as uow:
-            return load_run_target_context(uow.session, run_id)
-    except Exception:
-        return None
-
-
-def _current_workspace_root_hint() -> str | None:
-    """Return the safest current workspace root hint available to helper wrappers."""
-    workspace_root = getattr(_agent_context, "workspace_root", None)
-    if isinstance(workspace_root, str) and workspace_root.strip():
-        return workspace_root
-
-    context = _current_run_target_context()
-    if not context:
-        return None
-
-    defaults = context.get("execution_defaults") or {}
-    workspace_hint = defaults.get("workspace_root") or defaults.get("workspace_hint")
-    if isinstance(workspace_hint, str) and workspace_hint.strip():
-        return workspace_hint
-    return None
-
-
-def _canonical_project_token_slug(value: object, *, require_repo_like: bool = False) -> str | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        from brain.systems.cortex.project_context.github import parse_github_repo_slug
-
-        github_slug = parse_github_repo_slug(raw)
-    except Exception:
-        github_slug = None
-    if github_slug:
-        return github_slug.lower()
-    if require_repo_like:
-        return None
-    return raw.lower()
-
-
-def _project_context_token_slugs(raw_target: dict) -> list[str]:
-    snapshot = raw_target.get("project_context_snapshot")
-    if not isinstance(snapshot, dict):
-        return []
-    resources = snapshot.get("resources")
-    if not isinstance(resources, list):
-        return []
-
-    slugs: list[str] = []
-
-    def add(value: object, *, require_repo_like: bool = False) -> None:
-        slug = _canonical_project_token_slug(value, require_repo_like=require_repo_like)
-        if slug and slug not in slugs:
-            slugs.append(slug)
-
-    for resource in resources:
-        if not isinstance(resource, dict):
-            continue
-        git = resource.get("git") if isinstance(resource.get("git"), dict) else {}
-        add(resource.get("repo"))
-        add(resource.get("name"), require_repo_like=not ("/" in str(resource.get("name") or "")))
-        for key in ("uri", "url", "html_url", "remote", "remote_url"):
-            add(resource.get(key), require_repo_like=True)
-        for key in ("repo", "remote", "remote_url", "url"):
-            add(git.get(key), require_repo_like=True)
-    return slugs
-
-
-def _current_project_token_context() -> dict:
-    """Return the project identity used for project-bound vault tokens."""
-    context = _current_run_target_context() or {}
-    binding = context.get("binding") or {}
-    registry = context.get("registry") or binding.get("target_registry") or {}
-    raw_target = binding.get("raw_target_metadata") or {}
-
-    target_registry_id = registry.get("id") or binding.get("target_registry_id")
-    project_slugs: list[str] = []
-
-    def add_slug(value: object, *, require_repo_like: bool = False) -> None:
-        slug = _canonical_project_token_slug(value, require_repo_like=require_repo_like)
-        if slug and slug not in project_slugs:
-            project_slugs.append(slug)
-
-    add_slug(registry.get("slug"))
-    for key in ("project_slug", "slug", "repo", "name"):
-        add_slug(raw_target.get(key))
-    for slug in _project_context_token_slugs(raw_target):
-        add_slug(slug)
-
-    workspace_root = getattr(_agent_context, "workspace_root", None) or _current_workspace_root_hint()
-    if isinstance(workspace_root, str) and workspace_root.strip():
-        add_slug(os.path.basename(os.path.realpath(workspace_root)))
-
-    try:
-        target_registry_id = int(target_registry_id) if target_registry_id is not None else None
-    except (TypeError, ValueError):
-        target_registry_id = None
-
-    return {
-        "project_slug": project_slugs[0] if project_slugs else None,
-        "project_slugs": project_slugs,
-        "target_registry_id": target_registry_id,
-    }
 
 
 def _get_current_run_id() -> str | None:

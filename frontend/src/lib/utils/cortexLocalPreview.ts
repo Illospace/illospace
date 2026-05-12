@@ -52,7 +52,7 @@ export const LOCAL_PREVIEW_MEMBER_SEEDS = [
 export const LOCAL_PREVIEW_APP_SEEDS = [
   { name: 'Orbit CRM', key: 'orbit-crm', accent: '#57cfa0', metric: '12', label: 'leads' },
   { name: 'Launch Board', key: 'launch-board', accent: '#8db7ff', metric: '04', label: 'tasks' },
-  { name: 'Fit Notes', key: 'fit-notes', accent: '#d5a14d', metric: '27', label: 'notes' },
+  { name: 'Fit Notes', key: 'fit-notes', accent: '#57CFA0', metric: '27', label: 'notes' },
 ] as const;
 
 interface LocalPreviewIdea {

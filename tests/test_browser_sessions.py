@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,14 +13,25 @@ from brain.app.api.main import app
 from brain.app.api.ws.auth import create_ws_token
 
 
+class _FakeSession:
+    async def run_sync(self, fn):
+        return fn(self)
+
+
 class _FakeUOW:
     def __init__(self):
-        self.session = SimpleNamespace()
+        self.session = _FakeSession()
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        return False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
         return False
 
 
@@ -81,11 +93,10 @@ def test_create_browser_session_endpoint(monkeypatch):
     monkeypatch.setattr(_browser, "UnitOfWork", _FakeUOW)
     monkeypatch.setattr(_browser, "_validate_idea_org_orm", lambda session, idea_id, org_id: True)
     monkeypatch.setattr(_browser.browser_sessions, "create_or_get_session", fake_create_or_get_session)
-    monkeypatch.setattr(
-        _browser,
-        "_get_browser_session_or_404",
-        lambda session_id: SimpleNamespace(created_at=created_at),
-    )
+    async def fake_get_browser_session_or_404(session_id: str):
+        return SimpleNamespace(created_at=created_at)
+
+    monkeypatch.setattr(_browser, "_get_browser_session_or_404", fake_get_browser_session_or_404)
     app.dependency_overrides[get_current_user] = _auth_user
 
     client = TestClient(app)
@@ -232,6 +243,44 @@ def test_browser_tool_handlers_do_not_record_failed_preview(monkeypatch):
     )
 
     assert persisted == []
+
+
+def test_browser_result_for_model_attaches_screenshot_without_text_base64():
+    from brain.systems.runs.tool_catalog.handlers.browser import (
+        _TOOL_RESULT_CONTENT_KEY,
+        _browser_result_for_model,
+    )
+
+    result = {
+        "session_id": "sess-observe",
+        "frame": {
+            "image_url": "data:image/png;base64,abc123",
+            "width": 900,
+            "height": 457,
+            "sha1": "frame-sha",
+        },
+        "state": {
+            "id": "sess-observe",
+            "status": "ready",
+            "current_url": "https://example.com",
+            "page_title": "Example",
+        },
+    }
+
+    payload = _browser_result_for_model(result, source_tool="browser_observe")
+
+    assert payload["frame"]["image_attached"] is True
+    assert "image_url" not in payload["frame"]
+    blocks = payload[_TOOL_RESULT_CONTENT_KEY]
+    assert blocks[0]["type"] == "text"
+    assert "abc123" not in blocks[0]["text"]
+    text_payload = json.loads(blocks[0]["text"])
+    assert text_payload["frame"]["image_attached"] is True
+    assert text_payload["source_tool"] == "browser_observe"
+    assert blocks[1] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "abc123"},
+    }
 
 
 def test_get_browser_session_endpoint(monkeypatch):
@@ -717,7 +766,7 @@ async def test_browser_service_captures_visible_frame_when_agent_opens_session(m
         self.status = "ready"
         return None
 
-    async def fake_navigate(self, url):
+    async def fake_new_tab(self, url):
         self.current_url = url
         self.page_title = "YouTube"
         return self.state_payload()
@@ -729,7 +778,7 @@ async def test_browser_service_captures_visible_frame_when_agent_opens_session(m
     tool_traces = []
 
     monkeypatch.setattr(BrowserSessionRuntime, "start", fake_start)
-    monkeypatch.setattr(BrowserSessionRuntime, "navigate", fake_navigate)
+    monkeypatch.setattr(BrowserSessionRuntime, "new_tab", fake_new_tab)
     monkeypatch.setattr(BrowserSessionRuntime, "capture_visible_frame", fake_capture_visible_frame)
     monkeypatch.setattr(
         "brain.platform.browser.service._record_browser_harness_tool_call",
@@ -830,6 +879,82 @@ async def test_browser_frame_event_includes_session_state(monkeypatch):
     assert frame_events[-1]["state"]["current_url"] == "https://example.com"
     assert frame_events[-1]["state"]["org_id"] == "org-frame"
     assert frame_events[-1]["state"]["page_title"] == "Example"
+
+
+@pytest.mark.asyncio
+async def test_browser_stream_forces_first_frame_after_subscribe():
+    from brain.platform.browser.service import BrowserSessionRuntime, BrowserSessionService
+
+    service = BrowserSessionService()
+    record = SimpleNamespace(
+        id="sess-stream-subscribe",
+        idea_id="idea-stream-subscribe",
+        user_id="user-123",
+        run_id=None,
+        viewport_width=1280,
+        viewport_height=800,
+        status="ready",
+        current_url="about:blank",
+        page_title=None,
+        storage_mode="ephemeral",
+        allow_downloads=False,
+        allow_file_uploads=True,
+        last_error=None,
+        _idea_org_id="org-stream",
+    )
+    runtime = BrowserSessionRuntime(service, record)
+    runtime._watchers.add("user-123")
+    runtime._force_next_stream_frame = True
+    runtime._dirty.set()
+    captures = []
+
+    async def fake_capture_frame(*, force: bool = False):
+        captures.append(force)
+        runtime._closed = True
+        return None
+
+    runtime._capture_frame = fake_capture_frame  # type: ignore[method-assign]
+
+    await runtime._stream_loop()
+
+    assert captures == [True]
+    assert runtime._force_next_stream_frame is False
+
+
+@pytest.mark.asyncio
+async def test_browser_subscribe_requests_forced_stream_frame():
+    from brain.platform.browser.service import BrowserSessionService
+
+    service = BrowserSessionService()
+    calls = []
+
+    class FakeRuntime:
+        _dirty = SimpleNamespace(set=lambda: calls.append(("dirty", True)))
+
+        async def ensure_streaming(self, user_id, *, force_frame=False):
+            calls.append(("stream", user_id, force_frame))
+
+        def _emit_state(self, reason):
+            calls.append(("state", reason))
+
+        def state_payload(self):
+            return {"id": "sess-subscribe"}
+
+    async def fake_get_or_restore_runtime(session_id: str):
+        calls.append(("restore", session_id))
+        return FakeRuntime()
+
+    service.get_or_restore_runtime = fake_get_or_restore_runtime  # type: ignore[method-assign]
+
+    payload = await service.subscribe("sess-subscribe", "user-123")
+
+    assert payload == {"id": "sess-subscribe"}
+    assert calls == [
+        ("restore", "sess-subscribe"),
+        ("stream", "user-123", True),
+        ("state", "subscribed"),
+        ("dirty", True),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1302,7 +1427,32 @@ def test_browser_runtime_repairs_chrome_sidecar_permissions(tmp_path):
     crashpad = chrome.with_name("chrome_crashpad_handler")
     sandbox = chrome.with_name("chrome_sandbox")
     chrome.parent.mkdir(parents=True)
-    for path in (chrome, crashpad, sandbox):
+    mac_chrome = (
+        tmp_path
+        / "chrome-mac-arm64"
+        / "Google Chrome for Testing.app"
+        / "Contents"
+        / "MacOS"
+        / "Google Chrome for Testing"
+    )
+    mac_crashpad = (
+        mac_chrome.parents[1]
+        / "Frameworks"
+        / "Google Chrome for Testing Framework.framework"
+        / "Versions"
+        / "148.0.7778.97"
+        / "Helpers"
+        / "chrome_crashpad_handler"
+    )
+    mac_gpu_helper = (
+        mac_crashpad.parent
+        / "Google Chrome for Testing Helper (GPU).app"
+        / "Contents"
+        / "MacOS"
+        / "Google Chrome for Testing Helper (GPU)"
+    )
+    for path in (chrome, crashpad, sandbox, mac_chrome, mac_crashpad, mac_gpu_helper):
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("#!/bin/sh\n", encoding="utf-8")
         path.chmod(0o600)
 
@@ -1325,10 +1475,14 @@ def test_browser_runtime_repairs_chrome_sidecar_permissions(tmp_path):
     runtime = BrowserSessionRuntime(service, record)
 
     runtime._ensure_chrome_sidecar_permissions(str(chrome))
+    runtime._ensure_chrome_sidecar_permissions(str(mac_chrome))
 
     assert chrome.stat().st_mode & 0o100
     assert crashpad.stat().st_mode & 0o100
     assert sandbox.stat().st_mode & 0o100
+    assert mac_chrome.stat().st_mode & 0o100
+    assert mac_crashpad.stat().st_mode & 0o100
+    assert mac_gpu_helper.stat().st_mode & 0o100
 
 
 @pytest.mark.asyncio
@@ -1380,6 +1534,7 @@ async def test_browser_runtime_launches_chrome_with_server_safe_env(monkeypatch,
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     runtime._wait_for_cdp = fake_wait_for_cdp  # type: ignore[method-assign]
+    runtime._allocate_port = lambda: 9222  # type: ignore[method-assign]
 
     await runtime._ensure_chrome_process()
 
@@ -1441,6 +1596,7 @@ async def test_browser_runtime_falls_back_when_preferred_chrome_cannot_launch(mo
     runtime._chrome_executable_candidates = lambda: ["/bad/chrome", "/good/chrome"]  # type: ignore[method-assign]
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     runtime._wait_for_cdp = fake_wait_for_cdp  # type: ignore[method-assign]
+    runtime._allocate_port = lambda: 9223  # type: ignore[method-assign]
 
     await runtime._ensure_chrome_process()
 

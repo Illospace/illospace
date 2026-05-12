@@ -85,6 +85,31 @@ def _openai_image_part(block: ContentBlock) -> dict[str, Any] | None:
     return None
 
 
+def _openai_tool_result_content_parts(content: Any) -> tuple[str, list[dict[str, Any]]]:
+    if not isinstance(content, list):
+        return _coerce_text(content), []
+
+    text_parts: list[str] = []
+    image_parts: list[dict[str, Any]] = []
+    for item in content:
+        try:
+            block = ContentBlock.from_legacy(item, strict=False)
+        except Exception:
+            text_parts.append(_coerce_text(item))
+            continue
+        if block.type == ContentBlockType.TEXT:
+            if block.text:
+                text_parts.append(block.text)
+            continue
+        if block.type == ContentBlockType.IMAGE:
+            part = _openai_image_part(block)
+            if part:
+                image_parts.append(part)
+            continue
+        text_parts.append(_coerce_text(block.model_dump(exclude_none=True)))
+    return "\n".join(part for part in text_parts if part).strip(), image_parts
+
+
 def _append_user_content_message(
     items: list[dict],
     text_parts: list[str],
@@ -146,11 +171,14 @@ def _anthropic_messages_to_openai_input(messages: list[dict]) -> list[dict]:
 
             if role == MessageRole.USER and block_type == ContentBlockType.TOOL_RESULT:
                 _append_user_content_message(items, text_parts, image_parts)
+                output, result_image_parts = _openai_tool_result_content_parts(block.content)
                 items.append({
                     "type": "function_call_output",
                     "call_id": block.tool_use_id or "",
-                    "output": _coerce_text(block.content),
+                    "output": output,
                 })
+                if result_image_parts:
+                    _append_user_content_message(items, [], result_image_parts)
                 continue
 
         if role == MessageRole.USER:

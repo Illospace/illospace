@@ -29,6 +29,8 @@ def _patch_sqlite_for_pg_types():
         SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
     if not hasattr(SQLiteTypeCompiler, "visit_ARRAY"):
         SQLiteTypeCompiler.visit_ARRAY = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_uuid = lambda self, type_, **kw: "TEXT"
 
     original = SQLiteDDLCompiler.get_column_default_string
 
@@ -108,6 +110,13 @@ def test_create_version_rejects_conflicting_semver_digest(repo):
             semver="1.0.0",
             content_digest="sha256:bbb",
         )
+
+
+def test_get_version_by_digest_returns_existing_version(repo):
+    bundle, version = _create_bundle_version(repo, digest="sha256:aaa")
+
+    assert repo.get_version_by_digest(bundle, "sha256:aaa").id == version.id
+    assert repo.get_version_by_digest(bundle.id, "sha256:missing") is None
 
 
 def test_add_and_list_assets(repo):

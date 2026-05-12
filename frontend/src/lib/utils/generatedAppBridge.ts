@@ -6,6 +6,12 @@ export const DOMAIN_BINDING_OPERATIONS = [
   'create',
   'update',
   'archive',
+  'aggregate',
+  'bulkUpdate',
+  'history',
+  'listRelations',
+  'createRelation',
+  'archiveRelation',
 ] as const;
 
 export type DomainBindingOperation = (typeof DOMAIN_BINDING_OPERATIONS)[number];
@@ -25,12 +31,29 @@ export type NormalizedDomainRequest = NormalizedDomainBinding & {
   warnings: string[];
   data?: LooseRecord;
   dataPatch?: LooseRecord;
+  updates?: Array<{
+    recordId: number;
+    dataPatch: LooseRecord;
+    title?: string | null;
+    expectedVersion?: number | null;
+  }>;
   recordId?: number;
+  relationId?: number;
+  relationKey?: string | null;
+  sourceRecordId?: number | null;
+  targetRecordId?: number | null;
+  properties?: LooseRecord;
   expectedVersion?: number | null;
   title?: string | null;
   search?: string | null;
   limit?: number;
   includeArchived?: boolean;
+  groupBy?: string | null;
+  metrics?: Array<{
+    type: string;
+    field?: string | null;
+    as?: string | null;
+  }>;
 };
 
 function isRecord(value: unknown): value is LooseRecord {
@@ -187,12 +210,33 @@ export function normalizeDomainRequest(
     warnings,
   };
 
+  const declaredOperations = Array.isArray(binding.binding?.operations)
+    ? binding.binding.operations.map((item) => String(item).trim()).filter(Boolean)
+    : [];
+  if (declaredOperations.length && !declaredOperations.includes(normalizedOperation)) {
+    throw new Error(
+      `Domain binding '${binding.alias ?? binding.domainId}' does not allow operation '${normalizedOperation}'`,
+    );
+  }
+
   if (normalizedOperation === 'list' || normalizedOperation === 'query') {
     normalized.search = optionalString(requestPayload.search);
     normalized.limit = optionalNumber(requestPayload.limit, 'limit') ?? undefined;
     normalized.includeArchived = optionalBoolean(
       firstDefined(requestPayload, ['includeArchived', 'include_archived'], warnings, 'includeArchived'),
     );
+  }
+
+  if (normalizedOperation === 'aggregate') {
+    normalized.search = optionalString(requestPayload.search);
+    normalized.limit = optionalNumber(requestPayload.limit, 'limit') ?? undefined;
+    normalized.includeArchived = optionalBoolean(
+      firstDefined(requestPayload, ['includeArchived', 'include_archived'], warnings, 'includeArchived'),
+    );
+    normalized.groupBy =
+      optionalString(firstDefined(requestPayload, ['groupBy', 'group_by'], warnings, 'groupBy')) ??
+      null;
+    normalized.metrics = normalizeMetrics(requestPayload.metrics);
   }
 
   if (normalizedOperation === 'get' || normalizedOperation === 'update' || normalizedOperation === 'archive') {
@@ -219,7 +263,133 @@ export function normalizeDomainRequest(
     );
   }
 
+  if (normalizedOperation === 'bulkUpdate') {
+    const updatesValue = firstDefined(requestPayload, ['updates', 'records'], warnings, 'updates');
+    const idsValue = firstDefined(requestPayload, ['recordIds', 'record_ids', 'ids'], warnings, 'recordIds');
+    const sharedPatch = firstObject(
+      requestPayload,
+      ['dataPatch', 'data_patch', 'values', 'fields', 'data'],
+      warnings,
+      'dataPatch',
+    );
+    const sharedTitle = optionalString(requestPayload.title);
+    const sharedExpectedVersion = optionalNumber(
+      firstDefined(requestPayload, ['expectedVersion', 'expected_version'], warnings, 'expectedVersion'),
+      'expectedVersion',
+    );
+    normalized.updates = normalizeBulkUpdates(
+      updatesValue,
+      idsValue,
+      sharedPatch,
+      sharedTitle,
+      sharedExpectedVersion,
+      warnings,
+    );
+  }
+
+  if (normalizedOperation === 'history') {
+    const recordIdValue = firstDefined(requestPayload, ['recordId', 'record_id', 'id'], warnings, 'recordId');
+    normalized.recordId = optionalNumber(recordIdValue, 'recordId') ?? undefined;
+    normalized.limit = optionalNumber(requestPayload.limit, 'limit') ?? undefined;
+  }
+
+  if (normalizedOperation === 'listRelations') {
+    normalized.relationKey =
+      optionalString(firstDefined(requestPayload, ['relationKey', 'relation_key'], warnings, 'relationKey')) ??
+      null;
+    normalized.sourceRecordId = optionalNumber(
+      firstDefined(requestPayload, ['sourceRecordId', 'source_record_id'], warnings, 'sourceRecordId'),
+      'sourceRecordId',
+    );
+    normalized.targetRecordId = optionalNumber(
+      firstDefined(requestPayload, ['targetRecordId', 'target_record_id'], warnings, 'targetRecordId'),
+      'targetRecordId',
+    );
+    normalized.includeArchived = optionalBoolean(
+      firstDefined(requestPayload, ['includeArchived', 'include_archived'], warnings, 'includeArchived'),
+    );
+    normalized.limit = optionalNumber(requestPayload.limit, 'limit') ?? undefined;
+  }
+
+  if (normalizedOperation === 'createRelation') {
+    normalized.relationKey =
+      optionalString(firstDefined(requestPayload, ['relationKey', 'relation_key'], warnings, 'relationKey')) ??
+      null;
+    if (!normalized.relationKey) throw new Error('Domain relation request requires relationKey');
+    normalized.sourceRecordId = coerceNumber(
+      firstDefined(requestPayload, ['sourceRecordId', 'source_record_id'], warnings, 'sourceRecordId'),
+      'sourceRecordId',
+    );
+    normalized.targetRecordId = coerceNumber(
+      firstDefined(requestPayload, ['targetRecordId', 'target_record_id'], warnings, 'targetRecordId'),
+      'targetRecordId',
+    );
+    normalized.properties = firstObject(requestPayload, ['properties', 'data'], warnings, 'properties');
+  }
+
+  if (normalizedOperation === 'archiveRelation') {
+    normalized.relationId = coerceNumber(
+      firstDefined(requestPayload, ['relationId', 'relation_id', 'id'], warnings, 'relationId'),
+      'relationId',
+    );
+  }
+
   return normalized;
+}
+
+function normalizeMetrics(value: unknown): Array<{ type: string; field?: string | null; as?: string | null }> {
+  if (!Array.isArray(value) || !value.length) {
+    return [{ type: 'count', as: 'count' }];
+  }
+  return value
+    .filter(isRecord)
+    .map((metric) => ({
+      type: String(metric.type || metric.op || 'count').trim() || 'count',
+      field: optionalString(metric.field ?? metric.key),
+      as: optionalString(metric.as ?? metric.label),
+    }));
+}
+
+function normalizeBulkUpdates(
+  updatesValue: unknown,
+  idsValue: unknown,
+  sharedPatch: LooseRecord,
+  sharedTitle: string | null,
+  sharedExpectedVersion: number | null,
+  warnings: string[],
+): Array<{ recordId: number; dataPatch: LooseRecord; title?: string | null; expectedVersion?: number | null }> {
+  if (Array.isArray(updatesValue) && updatesValue.length) {
+    return updatesValue.map((item, index) => {
+      if (!isRecord(item)) throw new Error(`bulkUpdate updates[${index}] must be an object`);
+      const recordId = coerceNumber(
+        firstDefined(item, ['recordId', 'record_id', 'id'], warnings, 'recordId'),
+        `updates[${index}].recordId`,
+      );
+      const dataPatch = firstObject(
+        item,
+        ['dataPatch', 'data_patch', 'values', 'fields', 'data'],
+        warnings,
+        'dataPatch',
+      );
+      const title = optionalString(item.title);
+      const expectedVersion = optionalNumber(
+        firstDefined(item, ['expectedVersion', 'expected_version'], warnings, 'expectedVersion'),
+        `updates[${index}].expectedVersion`,
+      );
+      return { recordId, dataPatch, title, expectedVersion };
+    });
+  }
+
+  if (Array.isArray(idsValue) && idsValue.length) {
+    return idsValue.map((recordIdValue, index) => ({
+      recordId: coerceNumber(recordIdValue, `recordIds[${index}]`),
+      dataPatch: sharedPatch,
+      title: sharedTitle,
+      expectedVersion: sharedExpectedVersion,
+    }));
+  }
+
+  throw new Error('bulkUpdate requires updates or recordIds');
 }
 
 export function withDomainRecordAliases(value: unknown): unknown {

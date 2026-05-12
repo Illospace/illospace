@@ -7,12 +7,15 @@ export type ThreadMessage = Awaited<ReturnType<typeof api.addThreadMessage>>;
 export type ThreadRunHistoryItem = Awaited<ReturnType<typeof api.runHistory>>[number];
 export type RunDecisionResponse = Awaited<ReturnType<typeof api.approveRun>>;
 export type RunTool = Awaited<ReturnType<typeof api.runTools>>[number];
+export type ThreadTraceZipDownload = Awaited<ReturnType<typeof api.downloadThreadTraceZip>>;
 export type RunGraph = Awaited<ReturnType<typeof api.runGraph>>;
+export type RunTraceZipDownload = Awaited<ReturnType<typeof api.downloadRunTraceZip>>;
 export type RunStatus = Awaited<ReturnType<typeof api.runStatus>>;
 export type ActiveOpsRun = Awaited<ReturnType<typeof api.opsActive>>[number];
 export type RecentOpsRun = Awaited<ReturnType<typeof api.opsRecent>>[number];
 export type SkillFeedbackInput = Parameters<typeof api.skillFeedback>[1];
 export type UploadedThreadFile = Awaited<ReturnType<typeof api.uploadFile>>;
+export type UploadPreview = Awaited<ReturnType<typeof api.previewUpload>>;
 export type ThreadProjectContextAttachment = Awaited<ReturnType<typeof api.listIdeaProjectContext>>[number];
 export type AttachThreadProjectContextInput = Parameters<typeof api.attachIdeaProjectContext>[1];
 export type ThreadActivityTimelineItem = Awaited<ReturnType<typeof api.activityTimeline>>[number];
@@ -32,6 +35,8 @@ type ThreadApiMethods = {
   runStatus: () => Promise<RunStatus>;
   runGraph: (id: number) => Promise<RunGraph>;
   runTools: (id: number) => Promise<RunTool[]>;
+  downloadThreadTraceZip: typeof api.downloadThreadTraceZip;
+  downloadRunTraceZip: typeof api.downloadRunTraceZip;
   skillFeedback: typeof api.skillFeedback;
   opsActive: () => Promise<ActiveOpsRun[]>;
   opsRecent: (limit?: number, includeDebug?: boolean) => Promise<RecentOpsRun[]>;
@@ -40,6 +45,7 @@ type ThreadApiMethods = {
   activityTimeline: typeof api.activityTimeline;
   generateTitle: typeof api.generateTitle;
   uploadFile: (file: File) => Promise<UploadedThreadFile>;
+  previewUpload: typeof api.previewUpload;
   listIdeaProjectContext: typeof api.listIdeaProjectContext;
   attachIdeaProjectContext: typeof api.attachIdeaProjectContext;
   ideaAudit: typeof api.ideaAudit;
@@ -61,6 +67,8 @@ export const threadApi = pickTypedApiMethods<ThreadApiMethods>([
   'runStatus',
   'runGraph',
   'runTools',
+  'downloadThreadTraceZip',
+  'downloadRunTraceZip',
   'skillFeedback',
   'opsActive',
   'opsRecent',
@@ -68,6 +76,7 @@ export const threadApi = pickTypedApiMethods<ThreadApiMethods>([
   'ideaConnections',
   'activityTimeline',
   'uploadFile',
+  'previewUpload',
   'listIdeaProjectContext',
   'attachIdeaProjectContext',
   'ideaAudit',
@@ -89,6 +98,8 @@ export const {
   runStatus,
   runGraph,
   runTools,
+  downloadThreadTraceZip,
+  downloadRunTraceZip,
   skillFeedback,
   opsActive,
   opsRecent,
@@ -97,6 +108,7 @@ export const {
   activityTimeline,
   generateTitle,
   uploadFile,
+  previewUpload,
   listIdeaProjectContext,
   attachIdeaProjectContext,
   ideaAudit,

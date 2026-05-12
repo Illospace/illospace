@@ -1,4 +1,4 @@
-export type ThreadStageRightDockTabKind = 'browser' | 'activity' | 'app' | 'vault' | 'cycles';
+export type ThreadStageRightDockTabKind = 'browser' | 'activity' | 'app' | 'vault' | 'cycles' | 'preview';
 
 export type ThreadStageRightDockTab = {
   id: string;
@@ -150,12 +150,18 @@ export function openBrowserThreadSidePanelTab(
 
 export function openSingletonThreadSidePanelTab(
   state: ThreadSidePanelTabState,
-  kind: 'activity' | 'vault' | 'cycles',
+  kind: 'activity' | 'vault' | 'cycles' | 'preview',
 ): ThreadSidePanelTabState {
   const existing = state.tabs.find((tab) => tab.kind === kind);
   if (existing) return { ...state, activeTabId: existing.id };
 
-  const label = kind === 'vault' ? 'Vault' : kind === 'cycles' ? 'Cycles' : 'Activity';
+  const label = kind === 'vault'
+    ? 'Vault'
+    : kind === 'cycles'
+      ? 'Cycles'
+      : kind === 'preview'
+        ? 'Preview'
+        : 'Activity';
   return {
     ...state,
     tabs: [

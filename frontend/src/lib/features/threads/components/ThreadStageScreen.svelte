@@ -65,11 +65,12 @@
   import ProjectContextPicker from '$lib/features/composer/components/ProjectContextPicker.svelte';
   import SkillMentionOverlay from '$lib/features/composer/components/SkillMentionOverlay.svelte';
   import SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
+  import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
   import ThreadStageShell, { type ThreadPeripherySignal } from '$lib/features/threads/components/ThreadStageShell.svelte';
   import ThreadUtilityContent from '$lib/features/threads/components/ThreadUtilityContent.svelte';
-  import VaultSecretPromptPanel from '$lib/features/vault/components/VaultSecretPromptPanel.svelte';
   import WorkspaceComposerAdapter from '$lib/features/composer/components/WorkspaceComposerAdapter.svelte';
   import ThreadAppsPane from '$lib/features/workspace-apps/components/ThreadAppsPane.svelte';
+  import VaultPage from '../../../../routes/vault/+page.svelte';
   import ThreadTranscript from './ThreadTranscript.svelte';
   import ThreadStageRightDock from './ThreadStageRightDock.svelte';
   import {
@@ -88,7 +89,9 @@
     visibleThreadStreamItems,
   } from '$lib/features/threads/domain/threadStreamAdapter';
   import type {
+    CortexThreadStageFileAttachment,
     CortexThreadStageHeaderStatusState,
+    CortexThreadStageImageAttachment,
     CortexThreadStageTranscriptItem,
   } from '$lib/features/threads/domain/threadTranscriptAdapter';
 
@@ -135,6 +138,7 @@
   let lastAutoOpenedVaultPromptId = $state<string | null>(null);
   let lastAutoOpenedCycleSignal = $state<number | null>(null);
   let lastAutoSelectedAppId = $state<string | null>(null);
+  let dockPreviewAttachment = $state<CortexThreadStageImageAttachment | CortexThreadStageFileAttachment | null>(null);
   let teamMembers = $state<any[]>([]);
   let teamMembersLoading = false;
   let mentionDropdownVisible = $state(false);
@@ -149,6 +153,7 @@
   let userScrolledUp = $state(false);
   let programmaticScroll = false;
   let showTranscriptScrollCue = $state(false);
+  let transcriptScrollFrame: number | null = null;
   let projectContextError = $state('');
   let ideaProjectContextAttachments = $state<any[]>([]);
   let ideaProjectContextLoadedForIdeaId: string | null = null;
@@ -211,6 +216,9 @@
   );
   const sidePanelAddMenuItems = $derived.by(() =>
     buildThreadSidePanelAddMenuItems(sidePanelTabs, workspaceApps.visibleApps),
+  );
+  const activeVaultSecretPrompt = $derived(
+    cortex.vaultSecretPrompt?.idea_id === idea?.id ? cortex.vaultSecretPrompt : null,
   );
 
   function ideaDisplayTitle(source: { display_title?: string | null; title?: string | null }): string {
@@ -458,9 +466,26 @@
     programmaticScroll = true;
     scrollConversationToBottom(transcriptEl);
     requestAnimationFrame(() => {
+      scrollConversationToBottom(transcriptEl);
       programmaticScroll = false;
       userScrolledUp = false;
       syncTranscriptScrollCue();
+    });
+  }
+
+  function keepTranscriptPinnedToBottom() {
+    if (!transcriptEl || userScrolledUp) {
+      syncTranscriptScrollCue();
+      return;
+    }
+
+    if (transcriptScrollFrame !== null) {
+      cancelAnimationFrame(transcriptScrollFrame);
+    }
+
+    transcriptScrollFrame = requestAnimationFrame(() => {
+      transcriptScrollFrame = null;
+      scrollToBottom(true);
     });
   }
 
@@ -801,6 +826,11 @@
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'cycles'));
   }
 
+  function openPreviewTab(attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment) {
+    dockPreviewAttachment = attachment;
+    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'preview'));
+  }
+
   function openAppTab(appId: string | null | undefined) {
     applySidePanelState(openAppThreadSidePanelTab(sidePanelState(), appId, workspaceApps.appById(appId ?? '')));
   }
@@ -817,9 +847,13 @@
   }
 
   function closeSidePanelTab(tabId: string) {
+    const closingTab = sidePanelTabs.find((tab) => tab.id === tabId);
     const nextState = closeThreadSidePanelTab(sidePanelTabs, activeSidePanelTabId, tabId);
     sidePanelTabs = nextState.tabs;
     activeSidePanelTabId = nextState.activeTabId;
+    if (closingTab?.kind === 'preview') {
+      dockPreviewAttachment = null;
+    }
     onBrowserOpenChange?.(true);
   }
 
@@ -838,6 +872,10 @@
     }
     if (item.kind === 'cycles') {
       openCyclesTab();
+      return;
+    }
+    if (item.kind === 'preview') {
+      if (dockPreviewAttachment) openPreviewTab(dockPreviewAttachment);
       return;
     }
     if (item.kind === 'app') {
@@ -910,6 +948,7 @@
       ideaProjectContextAttachments = [];
       ideaProjectContextLoadedForIdeaId = null;
       ideaProjectContextLoadingForIdeaId = null;
+      dockPreviewAttachment = null;
       if (currentIdeaId) void loadIdeaProjectContext(currentIdeaId);
     }
   });
@@ -942,6 +981,22 @@
   });
 
   $effect(() => {
+    const element = transcriptEl;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+
+    const observer = new ResizeObserver(keepTranscriptPinnedToBottom);
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+      if (transcriptScrollFrame !== null) {
+        cancelAnimationFrame(transcriptScrollFrame);
+        transcriptScrollFrame = null;
+      }
+    };
+  });
+
+  $effect(() => {
     const element = threadStagePanelEl;
     if (!element || typeof window === 'undefined') return;
 
@@ -965,6 +1020,10 @@
 
   onDestroy(() => {
     document.removeEventListener('click', handleDocClick);
+    if (transcriptScrollFrame !== null) {
+      cancelAnimationFrame(transcriptScrollFrame);
+      transcriptScrollFrame = null;
+    }
   });
 </script>
 
@@ -1081,7 +1140,7 @@
   {/snippet}
 
   {#snippet browserPane()}
-    <BrowserThoughtPanel />
+    <BrowserThoughtPanel onPreviewAttachment={openPreviewTab} />
   {/snippet}
 
   {#snippet utilityPane()}
@@ -1090,6 +1149,10 @@
         <ThreadUtilityContent {idea} activeTab="activity" />
       </div>
     </div>
+  {/snippet}
+
+  {#snippet previewPane()}
+    <ThreadAttachmentPreviewPane attachment={dockPreviewAttachment} />
   {/snippet}
 
   {#snippet appsPane()}
@@ -1101,11 +1164,22 @@
   {/snippet}
 
   {#snippet vaultPane()}
-    <VaultSecretPromptPanel
-      prompt={cortex.vaultSecretPrompt?.idea_id === idea?.id ? cortex.vaultSecretPrompt : null}
-      onSaved={(promptId) => cortex.clearVaultSecretPrompt(promptId)}
-      onDismiss={(promptId) => cortex.clearVaultSecretPrompt(promptId)}
-    />
+    <div class="thread-vault-surface">
+      <VaultPage
+        embedded
+        initialCreatePrefill={activeVaultSecretPrompt
+          ? {
+              id: activeVaultSecretPrompt.id,
+              keyName: activeVaultSecretPrompt.key_name,
+              description: activeVaultSecretPrompt.description,
+              category: activeVaultSecretPrompt.category,
+            }
+          : null}
+        onInitialCreateSaved={(promptId) => {
+          if (promptId) cortex.clearVaultSecretPrompt(promptId);
+        }}
+      />
+    </div>
   {/snippet}
 
   {#snippet cyclesPane()}
@@ -1141,6 +1215,7 @@
             replyDock={replyDock}
             onTranscriptScroll={handleScrollEvent}
             onScrollToBottom={() => scrollToBottom(true)}
+            onPreviewAttachment={openPreviewTab}
             onTranscriptReady={(element) => {
               transcriptEl = element;
               requestAnimationFrame(() => syncTranscriptScrollCue());
@@ -1165,6 +1240,7 @@
               onAddMenuItem={handleSidePanelAddMenuItem}
               onClose={closeSidePanel}
               browserPane={browserPane}
+              previewPane={previewPane}
               utilityPane={utilityPane}
               appsPane={appsPane}
               vaultPane={vaultPane}
@@ -1189,6 +1265,7 @@
     --thread-stage-panel-radius: 24px;
     --thread-stage-panel-padding-block: clamp(14px, 1.7vw, 22px);
     --thread-stage-panel-padding-inline: clamp(16px, 2vw, 24px);
+    --thread-stage-docked-header-height: 46px;
     --thread-bridge-mention-dropdown-border: rgba(124, 138, 158, 0.14);
     --thread-bridge-mention-dropdown-background:
       linear-gradient(180deg, rgba(10, 14, 22, 0.98), rgba(8, 11, 18, 1));
@@ -1263,6 +1340,71 @@
     min-height: 0;
   }
 
+  .thread-vault-surface {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded) {
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-scene-glow),
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-scene-warmth) {
+    display: none;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-shell) {
+    width: 100%;
+    gap: 12px;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-header) {
+    padding: 2px 2px 12px;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-header-head) {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-header-actions) {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 8px;
+  }
+
+  .thread-vault-surface :global(.vault-constellation-frame.is-embedded .constellation-page-frame-header-actions > *) {
+    flex: 1 1 auto;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded) {
+    gap: 12px;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded .inventory-tools) {
+    padding: 12px;
+    gap: 10px;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded .vault-list) {
+    padding: 0 10px 10px;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded .vault-row) {
+    grid-template-columns: 1fr;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded .vault-row-side) {
+    justify-items: start;
+  }
+
+  .thread-vault-surface :global(.vault-page.is-embedded .metadata-list) {
+    grid-template-columns: 1fr;
+  }
+
   .thread-stage-panel::before,
   .thread-stage-panel::after {
     content: none;
@@ -1285,8 +1427,8 @@
       ),
       radial-gradient(
         42% 66% at 72% 78%,
-        rgba(var(--thread-accent-rgb, 213, 161, 77), 0.048) 0%,
-        rgba(var(--thread-accent-rgb, 213, 161, 77), 0.016) 42%,
+        rgba(var(--thread-accent-rgb, 87, 207, 160), 0.048) 0%,
+        rgba(var(--thread-accent-rgb, 87, 207, 160), 0.016) 42%,
         transparent 80%
       );
     filter: var(--thread-stage-panel-before-filter);
@@ -1504,6 +1646,15 @@
       box-sizing: border-box;
       justify-self: stretch;
       align-self: stretch;
+    }
+
+    .thread-stage-layout.with-dock .thread-stage-thread :global(.thread-panel-header) {
+      min-height: var(--thread-stage-docked-header-height);
+      padding: 0 2px 0 0;
+    }
+
+    .thread-stage-layout.with-dock .thread-stage-thread :global(.thread-header-title-row) {
+      min-height: var(--thread-stage-docked-header-height);
     }
   }
 

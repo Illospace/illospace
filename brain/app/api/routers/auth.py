@@ -9,15 +9,15 @@ from starlette.responses import JSONResponse
 from brain.app.api.auth import get_current_user
 from brain.app.api.ws.auth import WS_TOKEN_TTL_SECONDS, create_ws_token, ensure_ws_session_id
 from brain.systems.auth.users import (
-    authenticate,
-    create_first_user,
-    create_workspace_owner,
-    create_user,
-    get_default_org_summary,
-    get_org_summary_by_slug,
-    get_user_by_id,
-    has_any_users,
-    get_user_by_email,
+    async_authenticate,
+    async_create_first_user,
+    async_create_workspace_owner,
+    async_create_user,
+    async_get_default_org_summary,
+    async_get_org_summary_by_slug,
+    async_get_user_by_id,
+    async_has_any_users,
+    async_get_user_by_email,
     safe_user_context,
 )
 
@@ -61,7 +61,7 @@ async def login(request: Request):
     body = await request.json()
     email = body.get("email", "")
     password = body.get("password", "")
-    user = authenticate(email, password)
+    user = await async_authenticate(email, password)
     if user is None:
         return JSONResponse(status_code=401, content={"error": "Invalid credentials"})
     ctx = safe_user_context(user)
@@ -79,7 +79,7 @@ async def logout(request: Request):
 async def me(request: Request):
     session_user_id = request.session.get("user_id")
     if session_user_id:
-        user = get_user_by_id(session_user_id)
+        user = await async_get_user_by_id(session_user_id)
         if not user:
             request.session.clear()
             return JSONResponse(status_code=200, content=None)
@@ -89,7 +89,7 @@ async def me(request: Request):
         return JSONResponse(status_code=200, content=None)
 
     try:
-        current_user = get_current_user(request)
+        current_user = await get_current_user(request)
     except HTTPException:
         return JSONResponse(status_code=200, content=None)
     if current_user and current_user.get("principal_type") == "human":
@@ -100,10 +100,10 @@ async def me(request: Request):
 @router.get("/auth/setup-check")
 async def setup_check(workspace: str | None = None):
     """Return whether the instance needs first-time setup (no users exist)."""
-    requested_org = get_org_summary_by_slug(workspace) if workspace else None
+    requested_org = await async_get_org_summary_by_slug(workspace) if workspace else None
     return {
-        "setup_required": not has_any_users(),
-        "default_org": get_default_org_summary(),
+        "setup_required": not await async_has_any_users(),
+        "default_org": await async_get_default_org_summary(),
         "requested_org": requested_org,
     }
 
@@ -162,18 +162,18 @@ async def register(request: Request):
         return JSONResponse(status_code=400, content={"error": "Password must be at least 8 characters"})
 
     # Check duplicate email
-    existing = get_user_by_email(email)
+    existing = await async_get_user_by_email(email)
     if existing:
         return JSONResponse(status_code=400, content={"error": "Email already in use"})
 
-    users_exist = has_any_users()
+    users_exist = await async_has_any_users()
 
     # First user setup: create org + owner
     if not users_exist:
         if not org_name:
             return JSONResponse(status_code=400, content={"error": "Workspace name is required for setup"})
         try:
-            user = create_first_user(name, email, password, org_name)
+            user = await async_create_first_user(name, email, password, org_name)
         except Exception:
             logger.exception("Failed to create first user")
             return JSONResponse(status_code=400, content={"error": "Failed to create workspace"})
@@ -185,7 +185,7 @@ async def register(request: Request):
         if not org_name:
             return JSONResponse(status_code=400, content={"error": "Workspace name is required"})
         try:
-            user = create_workspace_owner(name, email, password, org_name)
+            user = await async_create_workspace_owner(name, email, password, org_name)
         except Exception:
             logger.exception("Failed to create workspace")
             return JSONResponse(status_code=400, content={"error": "Failed to create workspace"})
@@ -197,11 +197,11 @@ async def register(request: Request):
     # attach public signups to the first org.
     if not workspace_slug:
         return JSONResponse(status_code=400, content={"error": "Invite link required to join a workspace"})
-    target_org = get_org_summary_by_slug(workspace_slug) if workspace_slug else None
+    target_org = await async_get_org_summary_by_slug(workspace_slug) if workspace_slug else None
     if not target_org:
         return JSONResponse(status_code=404, content={"error": "Workspace invite not found"})
     try:
-        user = create_user(name, email, password, target_org["id"])
+        user = await async_create_user(name, email, password, target_org["id"])
     except Exception:
         logger.exception("Failed to create user")
         return JSONResponse(status_code=400, content={"error": "Email already in use"})

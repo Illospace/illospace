@@ -142,7 +142,7 @@ test('handoffTargetWithinRadius can select a recipient even when the owner is al
 test('orbitAnchorTargetWithinRadius resolves generic user and pin orbit targets', () => {
   const attractors = [
     { id: 'owner', kind: 'user', anchorId: 'owner', name: 'Owner', color: '#ff0000', initial: 'O', x: 100, y: 100 },
-    { id: 'pin:marketing', kind: 'pin', anchorId: 'marketing', name: 'Marketing', color: '#d5a14d', initial: '', x: 180, y: 100 },
+    { id: 'pin:marketing', kind: 'pin', anchorId: 'marketing', name: 'Marketing', color: '#57CFA0', initial: '', x: 180, y: 100 },
   ];
 
   assert.deepEqual(orbitAnchorRefForAttractor(attractors[1]), {
@@ -158,7 +158,7 @@ test('orbitAnchorTargetWithinRadius resolves generic user and pin orbit targets'
 test('getAttractionTarget prefers an explicit pin orbit anchor over blob ownership', () => {
   const attractors = [
     { id: 'owner', kind: 'user', anchorId: 'owner', name: 'Owner', color: '#ff0000', initial: 'O', x: 100, y: 100 },
-    { id: 'pin:marketing', kind: 'pin', anchorId: 'marketing', name: 'Marketing', color: '#d5a14d', initial: '', x: 420, y: 260 },
+    { id: 'pin:marketing', kind: 'pin', anchorId: 'marketing', name: 'Marketing', color: '#57CFA0', initial: '', x: 420, y: 260 },
   ];
   const lookup = buildLookup(attractors);
 

@@ -60,14 +60,15 @@ async def fanout_run_events_once(
     **_: Any,
 ) -> tuple[int, bool]:
     global _last_event_id
-    with UnitOfWork() as uow:
-        rows = uow.session.execute(
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(
             select(AgentRunEventRow, AgentRunRow)
             .join(AgentRunRow, AgentRunRow.id == AgentRunEventRow.run_id)
             .where(AgentRunEventRow.id > int(_last_event_id or 0))
             .order_by(AgentRunEventRow.id.asc())
             .limit(batch_size)
-        ).all()
+        )
+        rows = result.all()
     if not rows:
         return 0, False
 

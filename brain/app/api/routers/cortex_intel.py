@@ -42,9 +42,9 @@ def api_optimize(user: dict[str, Any] = Depends(get_current_user)):
 
 
 @router.get("/intelligence/status")
-def api_intel_status(user: dict[str, Any] = Depends(get_current_user)):
-    with UnitOfWork() as uow:
-        idea_counts = uow.session.execute(
+async def api_intel_status(user: dict[str, Any] = Depends(get_current_user)):
+    async with UnitOfWork() as uow:
+        idea_counts_result = await uow.session.execute(
             text(
                 """
                 SELECT
@@ -54,10 +54,12 @@ def api_intel_status(user: dict[str, Any] = Depends(get_current_user)):
                 FROM ideas
                 """
             )
-        ).mappings().first()
-        auto_connections = uow.session.execute(
+        )
+        idea_counts = idea_counts_result.mappings().first()
+        auto_connections_result = await uow.session.execute(
             text("SELECT count(*) as c FROM idea_connections WHERE type = 'similarity'")
-        ).mappings().first()['c']
+        )
+        auto_connections = auto_connections_result.mappings().first()['c']
     return {
         'embedded_ideas': int((idea_counts or {}).get('embedded') or 0),
         'emerged_ideas': int((idea_counts or {}).get('emerged') or 0),

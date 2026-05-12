@@ -16,7 +16,7 @@ from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
 from brain.platform.db.models.org import User
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
 
 logger = logging.getLogger("cycles")
 
@@ -434,6 +434,10 @@ def run_cycle_now(cycle_id: int) -> dict:
     with UnitOfWork() as uow:
         run = uow.session.get(CycleRun, run_id)
         return serialize_cycle_run(run)
+
+
+async def async_run_cycle_now(cycle_id: int) -> dict:
+    return await run_sync_with_unit_of_work(run_cycle_now, cycle_id)
 
 
 def schedule_due_cycles_once(*, limit: int = 10) -> list[int]:

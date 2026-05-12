@@ -304,8 +304,8 @@ export function archiveDotPosition(
   };
 }
 
-export function primitiveTone(accent: string): ConstellationTone {
-  return accent.toLowerCase() === '#d5a14d' ? 'amber' : 'spectral';
+export function primitiveTone(_accent: string): ConstellationTone {
+  return 'spectral';
 }
 
 export function primitiveBlobShape(id: string): ConstellationShape {

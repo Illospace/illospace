@@ -99,8 +99,8 @@ export interface BrowserSessionState {
   tabs?: { index: number; url?: string | null; title?: string | null; active: boolean }[];
   current_tab_index?: number;
   actions?: { at: string; action: string; detail?: string | null }[];
-  downloads?: { at: string; filename: string; url: string; size?: number | null }[];
-  artifacts?: { at: string; kind: string; filename: string; url: string; size?: number | null }[];
+  downloads?: { at: string; filename: string; url: string; download_url?: string | null; size?: number | null }[];
+  artifacts?: { at: string; kind: string; filename: string; url: string; download_url?: string | null; size?: number | null }[];
   console_messages?: { at: string; level: string; text: string; location?: string | null }[];
   request_failures?: {
     at: string;

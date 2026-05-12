@@ -15,8 +15,9 @@ import sys
 import tempfile
 from pathlib import Path
 from dataclasses import dataclass
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeVar
 from urllib import request as urlrequest
 from urllib.parse import unquote, urlparse
 
@@ -24,12 +25,14 @@ from brain.kernel.common.time import utcnow as _shared_utcnow
 
 from brain.systems.cortex.events import publish_safe
 from brain.systems.cortex.resources.telemetry import build_browser_resource_summary
+from brain.systems.cortex.upload_preview import public_static_upload_url, static_upload_url_for
 from brain.platform.db.models.browser import BrowserSession
 from brain.platform.db.models.idea import Idea, VisualBlock
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, use_sync_session
 from brain.app.web.research import _assert_safe_url
 
 logger = logging.getLogger(__name__)
+ReturnT = TypeVar("ReturnT")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BRAIN_ROOT = PROJECT_ROOT / "brain"
@@ -43,6 +46,21 @@ HARNESS_RESULT_MARKER = "__ILLO_BROWSER_HARNESS_RESULT__"
 
 def _utcnow() -> datetime:
     return _shared_utcnow()
+
+
+async def _run_browser_db(fn: Callable[[], ReturnT]) -> ReturnT:
+    """Run browser service sync DB helpers through the async UnitOfWork bridge."""
+
+    uow = UnitOfWork()
+    if not hasattr(uow, "__aenter__"):
+        return fn()
+
+    async with uow:
+        def _invoke(sync_session):
+            with use_sync_session(sync_session):
+                return fn()
+
+        return await uow.session.run_sync(_invoke)
 
 
 def _normalize_url(url: str) -> str:
@@ -141,6 +159,7 @@ class BrowserDownload:
     at: str
     filename: str
     url: str
+    download_url: str | None = None
     size: int | None = None
 
 
@@ -150,6 +169,7 @@ class BrowserArtifact:
     kind: str
     filename: str
     url: str
+    download_url: str | None = None
     size: int | None = None
 
 
@@ -196,6 +216,7 @@ class BrowserSessionRuntime:
         self._dirty = asyncio.Event()
         self._closed = False
         self._last_frame_sha1: str | None = None
+        self._force_next_stream_frame = False
         self._actions: list[BrowserAction] = []
         self._downloads: list[BrowserDownload] = []
         self._artifacts: list[BrowserArtifact] = []
@@ -289,9 +310,14 @@ result = page_info()
                 shutil.copy2(source, target)
             except FileNotFoundError:
                 continue
-            public_url = f"/static/uploads/browser-downloads/{self.session_id}/{target.name}"
+            public_url = static_upload_url_for("browser-downloads", self.session_id, target.name)
             self._record_action("download", target.name)
-            self._record_download(filename=target.name, url=public_url, size=target.stat().st_size)
+            self._record_download(
+                filename=target.name,
+                url=public_url,
+                download_url=public_static_upload_url(public_url),
+                size=target.stat().st_size,
+            )
             self._emit_state("download")
         self._known_download_paths = current
 
@@ -363,10 +389,16 @@ result = page_info()
             for idx, tab in enumerate(self._tabs)
         ]
 
-    async def ensure_streaming(self, user_id: str | None = None) -> None:
+    async def ensure_streaming(self, user_id: str | None = None, *, force_frame: bool = False) -> None:
         await self.start()
+        new_watcher = bool(user_id and str(user_id) not in self._watchers)
         if user_id:
             self._watchers.add(str(user_id))
+        if force_frame or new_watcher:
+            # A session open can capture the first frame before the websocket
+            # subscriber is attached. Force the next streamed frame so SHA
+            # dedupe cannot leave a new panel with state but no image.
+            self._force_next_stream_frame = True
         self._cancel_idle_close()
         if self._stream_task and not self._stream_task.done():
             self._dirty.set()
@@ -741,18 +773,21 @@ result = page_info()
                 f"alt=\"{title or self.page_title or self.current_url or 'Browser snapshot'}\""
                 " />"
             )
-            with UnitOfWork() as uow:
-                block = VisualBlock(
-                    idea_id=self.idea_id,
-                    content_type="preview",
-                    title=title or self.page_title or "Browser snapshot",
-                    content=html,
-                    display_mode="canvas",
-                    run_id=self.run_id,
-                )
-                uow.session.add(block)
-                uow.session.flush()
-                block_id = block.id
+            def _persist_block() -> int:
+                with UnitOfWork() as uow:
+                    block = VisualBlock(
+                        idea_id=self.idea_id,
+                        content_type="preview",
+                        title=title or self.page_title or "Browser snapshot",
+                        content=html,
+                        display_mode="canvas",
+                        run_id=self.run_id,
+                    )
+                    uow.session.add(block)
+                    uow.session.flush()
+                    return block.id
+
+            block_id = await _run_browser_db(_persist_block)
             publish_safe("visual_reply", {
                 "idea_id": self.idea_id,
                 "block": {
@@ -773,6 +808,14 @@ result = page_info()
             "state": self.state_payload(),
         }
 
+    async def observe(self) -> dict[str, Any]:
+        frame = await self._capture_frame(force=True)
+        return {
+            "session_id": self.session_id,
+            "frame": frame.__dict__,
+            "state": self.state_payload(),
+        }
+
     async def save_screenshot(self, *, full_page: bool = True) -> dict[str, Any]:
         async with self._action_lock:
             await self.start()
@@ -786,7 +829,7 @@ result = {{"ok": True}}
             artifact = self._record_artifact(
                 kind="screenshot",
                 filename=target.name,
-                url=f"/static/uploads/browser-artifacts/{self.session_id}/{target.name}",
+                url=static_upload_url_for("browser-artifacts", self.session_id, target.name),
                 size=target.stat().st_size if target.exists() else None,
             )
             self._emit_state("artifact")
@@ -807,7 +850,7 @@ result = {{"ok": True}}
             artifact = self._record_artifact(
                 kind="pdf",
                 filename=target.name,
-                url=f"/static/uploads/browser-artifacts/{self.session_id}/{target.name}",
+                url=static_upload_url_for("browser-artifacts", self.session_id, target.name),
                 size=target.stat().st_size if target.exists() else None,
             )
             self._emit_state("artifact")
@@ -840,7 +883,9 @@ result = {{"ok": True}}
             try:
                 await asyncio.wait_for(self._dirty.wait(), timeout=self.service.keepalive_sec)
                 self._dirty.clear()
-                await self._capture_frame()
+                force_frame = self._force_next_stream_frame
+                self._force_next_stream_frame = False
+                await self._capture_frame(force=force_frame)
             except asyncio.TimeoutError:
                 if self._watchers:
                     await self._capture_frame()
@@ -985,19 +1030,43 @@ result = {"image": base64.b64encode(data).decode("ascii"), "info": page_info()}
         args.append("about:blank")
         return args
 
-    def _ensure_chrome_sidecar_permissions(self, chrome: str) -> None:
+    def _chrome_sidecar_executables(self, chrome: str) -> list[Path]:
         executable = Path(chrome)
-        for path in (
+        candidates: list[Path] = [
             executable,
             executable.with_name("chrome_crashpad_handler"),
             executable.with_name("chrome_sandbox"),
-        ):
+        ]
+        contents_root = next((parent for parent in executable.parents if parent.name == "Contents"), None)
+        if contents_root is not None:
+            frameworks_root = contents_root / "Frameworks"
+            if frameworks_root.exists():
+                candidates.extend(path for path in frameworks_root.glob("**/Helpers/*") if path.is_file())
+                candidates.extend(path for path in frameworks_root.glob("**/*.app/Contents/MacOS/*") if path.is_file())
+        deduped: list[Path] = []
+        seen: set[Path] = set()
+        for path in candidates:
+            if path in seen:
+                continue
+            deduped.append(path)
+            seen.add(path)
+        return deduped
+
+    def _ensure_chrome_sidecar_permissions(self, chrome: str) -> None:
+        for path in self._chrome_sidecar_executables(chrome):
             if not path.exists() or not path.is_file():
                 continue
             try:
                 path.chmod(path.stat().st_mode | 0o100)
             except OSError:
                 logger.debug("Failed to chmod Chrome sidecar executable: %s", path, exc_info=True)
+
+    def _harness_log_tail(self, limit: int = 2000) -> str:
+        try:
+            text = (self._harness_ipc_dir / "bu.log").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        return text[-limit:].strip()
 
     def _chrome_launch_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -1165,16 +1234,23 @@ print({json.dumps(marker)} + json.dumps(result))
         try:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
-                timeout=timeout or max(10.0, self.service.nav_timeout_ms / 1000 + 5),
+                timeout=timeout or max(40.0, self.service.nav_timeout_ms / 1000 + 5),
             )
         except asyncio.TimeoutError as exc:
             process.kill()
-            await process.communicate()
-            raise BrowserCapabilityError("Browser Harness command timed out") from exc
+            stdout, stderr = await process.communicate()
+            out = stdout.decode("utf-8", "replace")
+            err = stderr.decode("utf-8", "replace")
+            detail = (err or out or self._harness_log_tail() or "").strip()
+            message = "Browser Harness command timed out"
+            if detail:
+                message = f"{message}: {detail[-2000:]}"
+            raise BrowserCapabilityError(message) from exc
         out = stdout.decode("utf-8", "replace")
         err = stderr.decode("utf-8", "replace")
         if process.returncode:
-            raise BrowserCapabilityError((err or out or "Browser Harness command failed").strip())
+            detail = (err or out or self._harness_log_tail() or "Browser Harness command failed").strip()
+            raise BrowserCapabilityError(detail)
         for line in reversed(out.splitlines()):
             if line.startswith(marker):
                 return json.loads(line[len(marker):])
@@ -1215,16 +1291,19 @@ print({json.dumps(marker)} + json.dumps(result))
         self._chrome_process = None
 
     async def _persist_state(self, **updates: Any) -> None:
-        with UnitOfWork() as uow:
-            record = uow.session.get(BrowserSession, self.session_id)
-            if not record:
-                return
-            for key, value in updates.items():
-                setattr(record, key, value)
-            # Keep runtime copy in sync for fields we expose frequently.
-            for key, value in updates.items():
-                if hasattr(self, key):
-                    setattr(self, key, value)
+        def _persist() -> None:
+            with UnitOfWork() as uow:
+                record = uow.session.get(BrowserSession, self.session_id)
+                if not record:
+                    return
+                for key, value in updates.items():
+                    setattr(record, key, value)
+                # Keep runtime copy in sync for fields we expose frequently.
+                for key, value in updates.items():
+                    if hasattr(self, key):
+                        setattr(self, key, value)
+
+        await _run_browser_db(_persist)
 
     async def _handle_runtime_error(self, message: str) -> None:
         self.last_error = message
@@ -1283,13 +1362,39 @@ print({json.dumps(marker)} + json.dumps(result))
         if len(self._actions) > 30:
             self._actions = self._actions[-30:]
 
-    def _record_download(self, filename: str, url: str, size: int | None = None) -> None:
-        self._downloads.append(BrowserDownload(at=_utcnow().isoformat(), filename=filename, url=url, size=size))
+    def _record_download(
+        self,
+        filename: str,
+        url: str,
+        download_url: str | None = None,
+        size: int | None = None,
+    ) -> None:
+        self._downloads.append(BrowserDownload(
+            at=_utcnow().isoformat(),
+            filename=filename,
+            url=url,
+            download_url=download_url or public_static_upload_url(url),
+            size=size,
+        ))
         if len(self._downloads) > 20:
             self._downloads = self._downloads[-20:]
 
-    def _record_artifact(self, kind: str, filename: str, url: str, size: int | None = None) -> BrowserArtifact:
-        artifact = BrowserArtifact(at=_utcnow().isoformat(), kind=kind, filename=filename, url=url, size=size)
+    def _record_artifact(
+        self,
+        kind: str,
+        filename: str,
+        url: str,
+        download_url: str | None = None,
+        size: int | None = None,
+    ) -> BrowserArtifact:
+        artifact = BrowserArtifact(
+            at=_utcnow().isoformat(),
+            kind=kind,
+            filename=filename,
+            url=url,
+            download_url=download_url or public_static_upload_url(url),
+            size=size,
+        )
         self._artifacts.append(artifact)
         if len(self._artifacts) > 20:
             self._artifacts = self._artifacts[-20:]
@@ -1443,13 +1548,16 @@ class BrowserSessionService:
                 return
             except Exception as exc:
                 logger.debug("Failed to close recycled browser session %s: %s", session_id, exc)
-        with UnitOfWork() as uow:
-            record = uow.session.get(BrowserSession, session_id)
-            if record:
-                record.status = "closed"
-                record.active = False
-                record.closed_at = _utcnow()
-                record.last_error = reason
+        def _retire() -> None:
+            with UnitOfWork() as uow:
+                record = uow.session.get(BrowserSession, session_id)
+                if record:
+                    record.status = "closed"
+                    record.active = False
+                    record.closed_at = _utcnow()
+                    record.last_error = reason
+
+        await _run_browser_db(_retire)
 
     def get_idea_org_id(self, idea_id: str) -> str | None:
         try:
@@ -1463,6 +1571,9 @@ class BrowserSessionService:
             logger.debug("Failed to resolve browser session idea org idea=%s: %s", idea_id, exc)
             return None
         return str(org_id) if org_id else None
+
+    async def get_idea_org_id_async(self, idea_id: str) -> str | None:
+        return await _run_browser_db(lambda: self.get_idea_org_id(idea_id))
 
     def get_session_record_for_org(
         self,
@@ -1496,6 +1607,16 @@ class BrowserSessionService:
             setattr(record, "_idea_org_id", str(idea_org_id) if idea_org_id else None)
             return record
 
+    async def get_session_record_for_org_async(
+        self,
+        session_id: str,
+        *,
+        org_id: str | None,
+    ) -> BrowserSession | None:
+        return await _run_browser_db(
+            lambda: self.get_session_record_for_org(session_id, org_id=org_id)
+        )
+
     async def create_or_get_session(
         self,
         *,
@@ -1510,8 +1631,8 @@ class BrowserSessionService:
         allow_file_uploads: bool = True,
     ) -> BrowserSessionRuntime:
         async with self._runtime_lock:
-            record = self._load_active_session(idea_id)
-            org_id = self.get_idea_org_id(idea_id)
+            record = await self.get_active_session_record_async(idea_id)
+            org_id = await self.get_idea_org_id_async(idea_id)
             if record is not None:
                 setattr(record, "_idea_org_id", org_id)
             created_session = False
@@ -1538,23 +1659,27 @@ class BrowserSessionService:
             )
             if record is None:
                 created_session = True
-                with UnitOfWork() as uow:
-                    record = BrowserSession(
-                        idea_id=idea_id,
-                        user_id=user_id,
-                        run_id=run_id,
-                        current_url=url,
-                        viewport_width=viewport_width,
-                        viewport_height=viewport_height,
-                        storage_mode=storage_mode,
-                        allow_downloads=allow_downloads,
-                        allow_file_uploads=allow_file_uploads,
-                        status="starting",
-                    )
-                    uow.session.add(record)
-                    uow.session.flush()
-                    uow.session.refresh(record)
-                    setattr(record, "_idea_org_id", org_id)
+                def _create_record() -> BrowserSession:
+                    with UnitOfWork() as uow:
+                        record = BrowserSession(
+                            idea_id=idea_id,
+                            user_id=user_id,
+                            run_id=run_id,
+                            current_url=url,
+                            viewport_width=viewport_width,
+                            viewport_height=viewport_height,
+                            storage_mode=storage_mode,
+                            allow_downloads=allow_downloads,
+                            allow_file_uploads=allow_file_uploads,
+                            status="starting",
+                        )
+                        uow.session.add(record)
+                        uow.session.flush()
+                        uow.session.refresh(record)
+                        setattr(record, "_idea_org_id", org_id)
+                        return record
+
+                record = await _run_browser_db(_create_record)
                 publish_safe("browser_session_state", {
                     "session_id": str(record.id),
                     "idea_id": idea_id,
@@ -1586,7 +1711,11 @@ class BrowserSessionService:
         try:
             await runtime.start()
             if url:
-                await runtime.navigate(url)
+                current_url = str(runtime.current_url or "").strip()
+                if created_session or not current_url or current_url == "about:blank" or current_url.startswith("chrome://"):
+                    await runtime.new_tab(url)
+                else:
+                    await runtime.navigate(url)
             await runtime.capture_visible_frame(reason="created" if created_session else "opened")
         except Exception as exc:
             _record_browser_harness_tool_call(
@@ -1617,11 +1746,17 @@ class BrowserSessionService:
             runtime = None
         if runtime is not None:
             return runtime
-        with UnitOfWork() as uow:
-            record = uow.session.get(BrowserSession, session_id)
+        def _load_record() -> BrowserSession | None:
+            with UnitOfWork() as uow:
+                record = uow.session.get(BrowserSession, session_id)
+                if record is not None:
+                    org_id = self.get_idea_org_id(str(record.idea_id))
+                    setattr(record, "_idea_org_id", org_id)
+                return record
+
+        record = await _run_browser_db(_load_record)
         if not record or not record.active:
             raise KeyError(f"Unknown or inactive browser session: {session_id}")
-        setattr(record, "_idea_org_id", self.get_idea_org_id(str(record.idea_id)))
         runtime = BrowserSessionRuntime(self, record)
         self._runtimes[session_id] = runtime
         return runtime
@@ -1629,9 +1764,12 @@ class BrowserSessionService:
     def get_active_session_record(self, idea_id: str) -> BrowserSession | None:
         return self._load_active_session(idea_id)
 
+    async def get_active_session_record_async(self, idea_id: str) -> BrowserSession | None:
+        return await _run_browser_db(lambda: self.get_active_session_record(idea_id))
+
     async def subscribe(self, session_id: str, user_id: str | None) -> dict[str, Any]:
         runtime = await self.get_or_restore_runtime(session_id)
-        await runtime.ensure_streaming(user_id)
+        await runtime.ensure_streaming(user_id, force_frame=True)
         runtime._emit_state("subscribed")
         runtime._dirty.set()
         return runtime.state_payload()
@@ -1710,6 +1848,8 @@ class BrowserSessionService:
                     persist=bool(payload.get("persist")),
                     title=payload.get("title"),
                 )
+            if action == "observe":
+                return await runtime.observe()
             if action == "close":
                 await runtime.close(reason=payload.get("reason", "closed"))
                 async with self._runtime_lock:

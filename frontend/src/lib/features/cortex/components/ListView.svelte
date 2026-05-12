@@ -9,12 +9,6 @@
   } from '$lib/utils/constellationPresence';
   import { parseServerDate } from '$lib/utils/datetime';
 
-  const STATUS_COLORS: Record<string, string> = {
-    idle: '#57CFA0',
-    working: '#E3AA54',
-    done: '#57CFA0',
-  };
-
   const STATUS_LABELS: Record<string, string> = {
     idle: 'idle',
     working: 'working',
@@ -72,11 +66,10 @@
     {#each sorted as idea, idx (idea.id)}
       {@const ownerColor = ideaOwnerColor(idea)}
       {@const ownerName = ideaOwnerName(idea)}
-      {@const statusColor = STATUS_COLORS[idea.status] ?? '#8090A8'}
       <button
         class="list-item"
         class:selected={cortex.selectedIdeaId === idea.id}
-        style="--row-color: {ownerColor}; --status-color: {statusColor}; animation-delay: {idx * 30}ms"
+        style="--row-color: {ownerColor}; --status-color: {ownerColor}; animation-delay: {idx * 30}ms"
         onclick={() => cortex.selectIdea(idea.id)}
       >
         <ConstellationPresenceSeed

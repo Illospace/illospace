@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -9,6 +10,7 @@ ModelTier = Literal["low", "medium", "high"]
 ConnectionStatus = Literal["connected", "missing", "error"]
 EmbedderKey = Literal["local_gpu", "local_cpu", "openai", "gemini"]
 RerankerKey = Literal["weighted"]
+RuntimeUpdateStatus = Literal["idle", "running"]
 
 
 class RuntimeOption(BaseModel):
@@ -59,6 +61,16 @@ class RuntimeMemoryCheckRead(BaseModel):
 
 class RuntimePermissionsRead(BaseModel):
     can_manage_settings: bool
+
+
+class RuntimeUpdateRead(BaseModel):
+    status: RuntimeUpdateStatus
+    available: bool
+    pid: int | None = None
+    started_at: datetime | None = None
+    active_agent_runs: int = 0
+    log_path: str | None = None
+    detail: str | None = None
 
 
 class RuntimeSettingsRead(BaseModel):

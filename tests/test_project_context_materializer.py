@@ -418,10 +418,149 @@ def test_materialize_refuses_to_overwrite_non_matching_thread_checkout(tmp_path,
     assert run.target_status == "invalid"
 
 
+def test_materialize_empty_project_context_is_not_ready(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    run = SimpleNamespace(
+        id=48,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={},
+        target_ref={
+            "kind": "cortex_idea",
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [],
+            },
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+
+    result = materialize_project_context_workspaces(48, workspace_root=str(tmp_path), user_id="user-1")
+
+    assert not result.ok
+    assert result.workspaces == []
+    assert result.errors == ["Project Context has no resources to materialize."]
+    assert "workspace_root" not in run.workspace_ref
+
+
+def test_materialize_missing_project_context_snapshot_reports_error(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    run = SimpleNamespace(
+        id=50,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={},
+        target_ref={"kind": "cortex_idea"},
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+
+    result = materialize_project_context_workspaces(50, workspace_root=str(tmp_path), user_id="user-1")
+
+    assert not result.ok
+    assert result.errors == ["Project Context snapshot is missing."]
+
+
 def test_project_context_root_is_scoped_by_thread(monkeypatch, tmp_path):
     from brain.systems.runs.cortex.runner import _project_context_root
 
-    monkeypatch.setenv("ILLO_PROJECT_CONTEXT_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
 
     assert _project_context_root(101, thread_id="idea/with spaces") == str(tmp_path / "ideas" / "idea-with-spaces")
     assert _project_context_root(101, thread_id=None) == str(tmp_path / "run-101")
+
+
+def test_project_context_root_uses_workspace_root_in_deploy(monkeypatch, tmp_path):
+    from brain.systems.runs.cortex.runner import _project_context_root
+
+    monkeypatch.delenv("ILLO_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+
+    assert _project_context_root(102, thread_id="idea-2") == str(tmp_path / "ideas" / "idea-2")
+
+
+def test_runner_fails_fast_when_project_context_has_no_workspace(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    run = SimpleNamespace(
+        id=49,
+        user_id="user-1",
+        org_id="org-1",
+        thread_id="idea-3",
+        target_ref={"project_context_snapshot": {"resources": []}},
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    captured = {}
+
+    monkeypatch.setattr(runner, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(runner, "_record_project_activity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "materialize_project_context_workspaces",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=False,
+            workspaces=[],
+            errors=["Project Context has no resources to materialize."],
+        ),
+    )
+
+    def fake_mark_failed(run_id, error, *, final_answer=None):
+        captured.update({"run_id": run_id, "error": error, "final_answer": final_answer})
+        return {"idea_id": "idea-3", "new_status": "failed"}
+
+    monkeypatch.setattr(runner, "_mark_run_failed_after_runner_error", fake_mark_failed)
+
+    context_ready, status_payload = runner._materialize_project_context(49)
+
+    assert context_ready is False
+    assert status_payload == {"idea_id": "idea-3", "new_status": "failed"}
+    assert captured["run_id"] == 49
+    assert "Project Context unavailable" in captured["error"]
+    assert "did not provide a usable workspace" in captured["final_answer"]

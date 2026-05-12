@@ -190,9 +190,12 @@ def test_alembic_revision_headers_match_identifiers():
 
 
 def test_public_tree_has_single_schema_baseline():
-    """Fresh public releases start from one current-state schema baseline."""
+    """Fresh public releases keep one current-state schema baseline."""
     migration_files = _material_schema_migration_files()
-    assert [path.name for path in migration_files] == [PUBLIC_BASELINE]
+    assert migration_files[0].name == PUBLIC_BASELINE
+    assert [path.name for path in migration_files if "baseline" in path.name] == [
+        PUBLIC_BASELINE
+    ]
 
     content = (VERSIONS_DIR / PUBLIC_BASELINE).read_text()
     assert "CREATE EXTENSION IF NOT EXISTS vector" in content

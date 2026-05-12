@@ -3,10 +3,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import Depends, HTTPException, Request
-from sqlalchemy.orm import Session
+from fastapi import HTTPException, Request
 
-from brain.app.api.deps import get_db, _is_internal
+from brain.app.api.deps import _is_internal
 from brain.app.api.authorization import human_identity, service_principal_context
 from brain.app.api.config import (
     AUTH_DEV_FALLBACK_ENABLED,
@@ -18,7 +17,7 @@ from brain.app.api.config import (
 _LOCALHOST_NAMES = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
 
-def _get_localhost_user() -> dict[str, Any] | None:
+async def _get_localhost_user() -> dict[str, Any] | None:
     """Find the first approved user (owner preferred) for explicit dev fallback.
 
     Returns a full user context dict with real UUID, or None if no users exist.
@@ -28,16 +27,17 @@ def _get_localhost_user() -> dict[str, Any] | None:
         from brain.systems.auth.users import safe_user_context
         from sqlalchemy import text as sa_text
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        with UnitOfWork() as uow:
-            row = uow.session.execute(sa_text(
+        async with UnitOfWork() as uow:
+            result = await uow.session.execute(sa_text(
                 "SELECT id FROM users WHERE approved = TRUE "
                 "ORDER BY CASE WHEN role = 'owner' THEN 0 ELSE 1 END, created_at "
                 "LIMIT 1"
-            )).mappings().first()
+            ))
+            row = result.mappings().first()
             if not row:
                 return None
-            from brain.systems.auth.users import get_user_by_id
-            db_user = get_user_by_id(str(row["id"]))
+            from brain.systems.auth.users import async_get_user_by_id
+            db_user = await async_get_user_by_id(str(row["id"]))
             if not db_user:
                 return None
             ctx = safe_user_context(db_user)
@@ -71,10 +71,7 @@ def _is_local_dev_request(request: Request) -> bool:
     return host in _LOCALHOST_NAMES
 
 
-def get_current_user(
-    request: Request,
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
+async def get_current_user(request: Request) -> dict[str, Any]:
     """Extract and validate current user from session or bearer token.
 
     Always reads fresh user data from DB so code changes never require re-login.
@@ -90,7 +87,7 @@ def get_current_user(
     # Localhost user fallback is dev/test-only and must be explicitly enabled.
     if not user_id:
         if AUTH_DEV_FALLBACK_ENABLED and _is_local_dev_request(request):
-            fallback = _get_localhost_user()
+            fallback = await _get_localhost_user()
             if fallback:
                 return fallback
             return service_principal_context("dev-localhost", token_source="localhost")
@@ -98,8 +95,8 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Authentication required")
 
     # Always read fresh from DB — no stale session fields
-    from brain.systems.auth.users import get_user_by_id, safe_user_context
-    db_user = get_user_by_id(user_id)
+    from brain.systems.auth.users import async_get_user_by_id, safe_user_context
+    db_user = await async_get_user_by_id(user_id)
     if not db_user:
         request.session.clear()
         raise HTTPException(status_code=401, detail="User not found")
@@ -117,11 +114,8 @@ def get_current_user(
     }
 
 
-def get_optional_user(
-    request: Request,
-    db: Session = Depends(get_db),
-) -> dict[str, Any] | None:
+async def get_optional_user(request: Request) -> dict[str, Any] | None:
     try:
-        return get_current_user(request, db)
+        return await get_current_user(request)
     except HTTPException:
         return None

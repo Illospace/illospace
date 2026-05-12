@@ -23,13 +23,13 @@ def mock_cursor():
 
 @pytest.fixture
 def mock_db(mock_cursor):
-    """Patch db.get_cursor to yield mock_cursor."""
+    """Patch legacy db.get_cursor to yield mock_cursor."""
     @contextmanager
     def _get_cursor(commit=True):
         yield mock_cursor
 
-    with patch("brain.platform.db.get_cursor", _get_cursor), \
-         patch("brain.platform.db._get_pool"):
+    with patch("brain.platform.db.legacy.get_cursor", _get_cursor), \
+         patch("brain.platform.db.legacy._get_pool"):
         yield mock_cursor
 
 
@@ -83,7 +83,7 @@ def rollback_cursor():
     The entire transaction is rolled back after the test, leaving zero residue.
     """
     import psycopg2.extras as _extras
-    import brain.platform.db as db
+    import brain.platform.db.legacy as db
     conn = db._get_pool().getconn()
     conn.autocommit = False
     cur = conn.cursor(cursor_factory=_extras.RealDictCursor)
@@ -96,16 +96,16 @@ def rollback_cursor():
 
 @pytest.fixture
 def rollback_db():
-    """Patches db.get_cursor globally so ALL code paths use a rollback transaction.
+    """Patches legacy db.get_cursor globally so ALL code paths use a rollback transaction.
 
     Unlike rollback_cursor (which passes a cursor directly), this fixture
-    monkey-patches core.db.get_cursor so that production code calling
+    monkey-patches legacy.get_cursor so that compatibility code calling
     get_cursor() internally still goes through the same rolled-back transaction.
 
     Use for integration tests where the code under test calls get_cursor() itself.
     """
     import psycopg2.extras as _extras
-    import brain.platform.db as db
+    import brain.platform.db.legacy as db
 
     conn = db._get_pool().getconn()
     conn.autocommit = False

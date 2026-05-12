@@ -4,7 +4,7 @@
   let {
     pinId,
     label,
-    accent = '#d5a14d',
+    accent = '#57CFA0',
     active = false,
     moving = false,
     canEdit = false,
@@ -130,7 +130,7 @@
 
 <style>
   .cortex-workspace-pin {
-    --workspace-pin-accent: #d5a14d;
+    --workspace-pin-accent: #57CFA0;
     --workspace-pin-body-background: color-mix(
       in srgb,
       var(--workspace-pin-accent) 12%,

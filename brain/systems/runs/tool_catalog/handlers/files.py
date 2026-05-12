@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from brain.systems.runs.tool_catalog.handlers.common import *
+from brain.systems.runs.project_execution_env import (
+    annotate_project_execution_result as _annotate_project_execution_result,
+    prepare_project_execution_env as _prepare_project_execution_env,
+    redact_sensitive_output as _redact_sensitive_output,
+)
+
 
 def _resolve_path(path: str, working_dir: str | None = None) -> str:
     """Resolve a path relative to workspace root. Enforces containment.
@@ -36,29 +42,6 @@ _BLOCKED_PATTERNS = [
 ]
 
 
-def _current_project_bound_env() -> dict[str, str]:
-    """Resolve project-bound vault tokens for command env injection."""
-    user_id = getattr(_agent_context, "user_id", None)
-    if not user_id:
-        return {}
-    project_context = _current_project_token_context()
-    if not project_context.get("project_slug") and project_context.get("target_registry_id") is None:
-        return {}
-    try:
-        from brain.systems.vault import resolve_project_bound_env_tokens
-
-        return resolve_project_bound_env_tokens(
-            user_id=user_id,
-            org_id=getattr(_agent_context, "org_id", None),
-            project_slug=project_context.get("project_slug"),
-            project_slugs=project_context.get("project_slugs"),
-            target_registry_id=project_context.get("target_registry_id"),
-        )
-    except Exception:
-        logger.debug("project_bound_vault_env_resolution_failed", exc_info=True)
-        return {}
-
-
 def _handle_exec_command(
     command: str,
     working_dir: str | None = None,
@@ -89,11 +72,7 @@ def _handle_exec_command(
     # Otherwise split into a list for safer execution.
     _SHELL_CHARS = {'|', '>', '<', '&&', '||', ';', '`', '$(' }
     needs_shell = any(ch in command for ch in _SHELL_CHARS)
-    project_env = _current_project_bound_env()
-    run_env = None
-    if project_env:
-        run_env = os.environ.copy()
-        run_env.update(project_env)
+    project_execution = _prepare_project_execution_env()
 
     try:
         if needs_shell:
@@ -104,7 +83,7 @@ def _handle_exec_command(
                 text=True,
                 timeout=timeout,
                 cwd=cwd,
-                env=run_env,
+                env=project_execution.env,
             )
         else:
             proc = subprocess.run(
@@ -113,14 +92,16 @@ def _handle_exec_command(
                 text=True,
                 timeout=timeout,
                 cwd=cwd,
-                env=run_env,
+                env=project_execution.env,
             )
-        stdout = proc.stdout[:_MAX_RESULT_CHARS] if proc.stdout else ""
-        stderr = proc.stderr[:_MAX_RESULT_CHARS] if proc.stderr else ""
+        stdout_raw = _redact_sensitive_output(proc.stdout or "", project_execution.sensitive_values)
+        stderr_raw = _redact_sensitive_output(proc.stderr or "", project_execution.sensitive_values)
+        stdout = stdout_raw[:_MAX_RESULT_CHARS] if stdout_raw else ""
+        stderr = stderr_raw[:_MAX_RESULT_CHARS] if stderr_raw else ""
 
-        if len(proc.stdout or "") > _MAX_RESULT_CHARS:
+        if len(stdout_raw) > _MAX_RESULT_CHARS:
             stdout += f"\n... (truncated, {len(proc.stdout):,} chars total)"
-        if len(proc.stderr or "") > _MAX_RESULT_CHARS:
+        if len(stderr_raw) > _MAX_RESULT_CHARS:
             stderr += f"\n... (truncated, {len(proc.stderr):,} chars total)"
 
         result = {
@@ -128,8 +109,7 @@ def _handle_exec_command(
             "stdout": stdout,
             "stderr": stderr,
         }
-        if project_env:
-            result["injected_env"] = sorted(project_env)
+        _annotate_project_execution_result(result, project_execution)
         # Only semantic execution outcomes belong in execution_artifacts. Generic
         # command transcripts are too noisy for provenance tools such as my_activity.
         _patched_private(
@@ -139,9 +119,11 @@ def _handle_exec_command(
         return result
     except subprocess.TimeoutExpired:
         result = {"exit_code": -1, "stdout": "", "stderr": f"Command timed out after {timeout}s", "error": "timeout"}
+        _annotate_project_execution_result(result, project_execution)
         return result
     except Exception as e:
-        result = {"exit_code": -1, "stdout": "", "stderr": str(e), "error": str(e)}
+        error = _redact_sensitive_output(str(e), project_execution.sensitive_values)
+        result = {"exit_code": -1, "stdout": "", "stderr": error, "error": error}
         return result
 
 
@@ -152,11 +134,10 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
 
     timeout = min(timeout, 300)
     cwd = _workspace or _patched_workspace_root()
+    project_execution = _prepare_project_execution_env()
 
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", dir=cwd, delete=False, prefix="_illo_script_"
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, prefix="_illo_script_") as f:
             f.write(script)
             script_path = f.name
 
@@ -167,18 +148,24 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
                 text=True,
                 timeout=timeout,
                 cwd=cwd,
+                env=project_execution.env,
             )
-            stdout = proc.stdout[:_MAX_RESULT_CHARS] if proc.stdout else ""
-            stderr = proc.stderr[:_MAX_RESULT_CHARS] if proc.stderr else ""
+            stdout_raw = _redact_sensitive_output(proc.stdout or "", project_execution.sensitive_values)
+            stderr_raw = _redact_sensitive_output(proc.stderr or "", project_execution.sensitive_values)
+            stdout = stdout_raw[:_MAX_RESULT_CHARS] if stdout_raw else ""
+            stderr = stderr_raw[:_MAX_RESULT_CHARS] if stderr_raw else ""
 
-            if len(proc.stdout or "") > _MAX_RESULT_CHARS:
+            if len(stdout_raw) > _MAX_RESULT_CHARS:
                 stdout += f"\n... (truncated, {len(proc.stdout):,} chars total)"
+            if len(stderr_raw) > _MAX_RESULT_CHARS:
+                stderr += f"\n... (truncated, {len(proc.stderr):,} chars total)"
 
             result = {
                 "exit_code": proc.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
             }
+            _annotate_project_execution_result(result, project_execution)
             _record_tool_evidence(
                 "run_script",
                 {"script": script, "description": description, "timeout": timeout, "workspace": _workspace},
@@ -196,6 +183,7 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
                 pass
     except subprocess.TimeoutExpired:
         result = {"exit_code": -1, "stdout": "", "stderr": f"Script timed out after {timeout}s", "error": "timeout"}
+        _annotate_project_execution_result(result, project_execution)
         _record_tool_evidence(
             "run_script",
             {"script": script, "description": description, "timeout": timeout, "workspace": _workspace},
@@ -203,7 +191,9 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
         )
         return result
     except Exception as e:
-        result = {"exit_code": -1, "stdout": "", "stderr": str(e), "error": str(e)}
+        error = _redact_sensitive_output(str(e), project_execution.sensitive_values)
+        result = {"exit_code": -1, "stdout": "", "stderr": error, "error": error}
+        _annotate_project_execution_result(result, project_execution)
         _record_tool_evidence(
             "run_script",
             {"script": script, "description": description, "timeout": timeout, "workspace": _workspace},
