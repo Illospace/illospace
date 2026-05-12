@@ -37,6 +37,10 @@ from brain.systems.cortex.thread_attachments import (
     build_thread_attachment_context,
     project_context_from_text_attachments,
 )
+from brain.systems.cortex.project_context.snapshot import (
+    ProjectContextValidationError,
+    validated_project_context_snapshot,
+)
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import IdeaStateLog, IdeaThread
@@ -412,6 +416,16 @@ def _extract_project_context_from_message(
     return _merge_project_context_payloads(explicit, readable_attachments)
 
 
+def _validate_thread_project_context(project_context: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not project_context:
+        return project_context
+    try:
+        validated_project_context_snapshot(project_context, validate_local_paths=False)
+    except ProjectContextValidationError as exc:
+        raise HTTPException(status_code=422, detail={"validation_errors": exc.errors}) from exc
+    return project_context
+
+
 def _merge_project_context_into_idea(idea: Any, project_context: dict[str, Any] | None) -> None:
     if not project_context:
         return
@@ -522,6 +536,7 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
             attachments_data,
             metadata if isinstance(metadata, dict) else None,
         )
+        project_context = _validate_thread_project_context(project_context)
         if project_context or thread_attachment_context:
             next_metadata = dict(metadata or {}) if isinstance(metadata, dict) else {}
             if project_context:

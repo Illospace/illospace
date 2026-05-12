@@ -88,6 +88,20 @@ def test_project_context_extraction_from_thread_payload():
     assert _extract_project_context_from_message([], {"project_context": snapshot}) == snapshot
 
 
+def test_thread_project_context_validation_rejects_empty_context():
+    from fastapi import HTTPException
+
+    from brain.app.api.routers.cortex._idea_ops import _validate_thread_project_context
+
+    with pytest.raises(HTTPException) as excinfo:
+        _validate_thread_project_context({"name": "Legacy empty project", "resources": []})
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["validation_errors"] == [
+        "project_context_snapshot.resources must contain at least one resource."
+    ]
+
+
 def test_project_context_extraction_promotes_readable_thread_upload(tmp_path, monkeypatch):
     from brain.app.api.routers.cortex import _idea_ops
     from brain.systems.cortex import thread_attachments

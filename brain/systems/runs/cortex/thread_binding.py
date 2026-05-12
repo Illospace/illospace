@@ -7,9 +7,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from brain.systems.cortex.project_context.snapshot import (
+    ProjectContextValidationError,
+    validated_project_context_snapshot,
+)
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
-from brain.systems.cortex.project_context.snapshot import snapshot_from_project_context
 from brain.systems.cortex.thread_context import build_agent_visible_thread_context
 from brain.platform.db.models.idea import Idea, IdeaProjectAttachment
 
@@ -80,13 +83,15 @@ def _recipe_for_profile(profile: RunProfile, metadata: dict[str, Any] | None) ->
     return RunRecipe.DEEP if profile is RunProfile.DEEP else RunRecipe.FAST
 
 
-def _snapshot_for_project_context(project_context: dict[str, Any]) -> dict[str, Any] | None:
+def _snapshot_for_project_context(project_context: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     if not project_context:
-        return None
+        return None, []
     try:
-        return snapshot_from_project_context(project_context, validate_local_paths=False)
+        return validated_project_context_snapshot(project_context, validate_local_paths=False), []
+    except ProjectContextValidationError as exc:
+        return None, exc.errors
     except Exception:
-        return dict(project_context)
+        return None, ["Project Context could not be validated."]
 
 
 def _project_context_from_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -139,6 +144,35 @@ def _latest_attached_project_context(session: Session, idea_id: str) -> dict[str
     return dict(snapshot) if isinstance(snapshot, dict) else {}
 
 
+def _select_project_context(
+    session: Session,
+    *,
+    idea: Idea,
+    idea_id: str,
+    metadata: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
+    validation_errors: list[dict[str, Any]] = []
+    for source, candidate in (
+        ("metadata", _project_context_from_metadata(metadata)),
+        ("idea", _project_context_from_idea(idea)),
+    ):
+        if not candidate:
+            continue
+        snapshot, errors = _snapshot_for_project_context(candidate)
+        if snapshot:
+            return candidate, snapshot, validation_errors
+        validation_errors.append({"source": source, "errors": errors})
+
+    candidate = _latest_attached_project_context(session, idea_id)
+    if candidate:
+        snapshot, errors = _snapshot_for_project_context(candidate)
+        if snapshot:
+            return candidate, snapshot, validation_errors
+        validation_errors.append({"source": "latest_attachment", "errors": errors})
+
+    return {}, None, validation_errors
+
+
 def build_run_request(
     session: Session,
     *,
@@ -158,24 +192,29 @@ def build_run_request(
     metadata = annotate_metadata_with_slash_skill_commands(metadata, message)
     profile = _profile_from_metadata(metadata)
     recipe = _recipe_for_profile(profile, metadata)
-    project_context = (
-        _project_context_from_metadata(metadata)
-        or _project_context_from_idea(idea)
-        or _latest_attached_project_context(session, idea_id)
+    project_context, project_context_snapshot, project_context_validation_errors = _select_project_context(
+        session,
+        idea=idea,
+        idea_id=idea_id,
+        metadata=metadata,
     )
-    project_context_snapshot = _snapshot_for_project_context(project_context)
     target_ref = {
         "kind": "cortex_idea",
         "idea_id": idea_id,
         "event": event,
         "title": getattr(idea, "title", None),
     }
-    workspace_ref = dict(project_context or {})
-    if project_context and not isinstance(metadata.get("project_context"), dict):
-        metadata["project_context"] = project_context
+    workspace_ref = dict(project_context) if project_context_snapshot else {}
+    if project_context_validation_errors:
+        metadata["project_context_validation_errors"] = project_context_validation_errors
     if project_context_snapshot:
+        metadata["project_context"] = project_context
+        metadata.pop("project_context_snapshot", None)
         target_ref["project_context_snapshot"] = project_context_snapshot
         workspace_ref["project_context_snapshot"] = project_context_snapshot
+    else:
+        metadata.pop("project_context", None)
+        metadata.pop("project_context_snapshot", None)
     if not isinstance(metadata.get("thread_context"), dict):
         thread_context = build_agent_visible_thread_context(
             session,
