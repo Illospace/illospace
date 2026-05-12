@@ -5,6 +5,7 @@
     ConstellationIcon,
     ConstellationIconButton,
   } from '$lib/components/constellation';
+  import ThreadStageRightDockTabButton from './ThreadStageRightDockTabButton.svelte';
   import type {
     ThreadStageRightDockAddMenuItem,
     ThreadStageRightDockTab,
@@ -181,8 +182,7 @@
     onTabChange?.(nextTabId);
   }
 
-  function handleTabClose(tabId: string, event: MouseEvent) {
-    event.stopPropagation();
+  function handleTabClose(tabId: string) {
     addMenuOpen = false;
     onTabClose?.(tabId);
   }
@@ -245,48 +245,14 @@
           <div class="right-dock-tabs" role="tablist" aria-label="Thread side panel tabs">
             {#each availableTabs as tab (tab.id)}
               {@const isActive = tab.id === resolvedActiveTab?.id}
-              {#if tab.closeable}
-                <span
-                  class="right-dock-tab-group"
-                  class:is-active={isActive}
-                  role="presentation"
-                >
-                  <ConstellationIconButton
-                    className="right-dock-tab-close"
-                    size="sm"
-                    label={`Close ${tab.label}`}
-                    title={`Close ${tab.label}`}
-                    onclick={(event) => handleTabClose(tab.id, event)}
-                  >
-                    <ConstellationIcon name="close" size={10} stroke={2.2} />
-                  </ConstellationIconButton>
-                  <button
-                    type="button"
-                    class="right-dock-tab"
-                    class:is-app-tab={tab.kind === 'app'}
-                    class:is-active={isActive}
-                    role="tab"
-                    aria-selected={isActive}
-                    title={tab.label}
-                    onclick={() => handleTabChange(tab.id)}
-                  >
-                    <span class="right-dock-tab-label">{tab.label}</span>
-                  </button>
-                </span>
-              {:else}
-                <button
-                  type="button"
-                  class="right-dock-tab is-standalone"
-                  class:is-app-tab={tab.kind === 'app'}
-                  class:is-active={isActive}
-                  role="tab"
-                  aria-selected={isActive}
-                  title={tab.label}
-                  onclick={() => handleTabChange(tab.id)}
-                >
-                  <span class="right-dock-tab-label">{tab.label}</span>
-                </button>
-              {/if}
+              <ThreadStageRightDockTabButton
+                label={tab.label}
+                active={isActive}
+                appTab={tab.kind === 'app'}
+                closeable={Boolean(tab.closeable)}
+                onselect={() => handleTabChange(tab.id)}
+                onclose={() => handleTabClose(tab.id)}
+              />
             {/each}
           </div>
 
@@ -513,121 +479,6 @@
 
   .right-dock-tabs::-webkit-scrollbar {
     display: none;
-  }
-
-  .right-dock-tab {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    min-width: 0;
-    min-height: 28px;
-    padding: 0 8px;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-    color: var(--constellation-utility-panel-tab-text);
-    font-family: var(--constellation-font-sans, var(--font-sans, system-ui, sans-serif));
-    font-size: 13px;
-    font-weight: 600;
-    line-height: 1;
-    letter-spacing: 0;
-    text-transform: none;
-    cursor: pointer;
-    transition:
-      background-color 160ms ease,
-      color 180ms ease,
-      opacity 180ms ease;
-  }
-
-  .right-dock-tab.is-app-tab {
-    min-width: 0;
-    justify-content: flex-start;
-  }
-
-  .right-dock-tab-group {
-    --right-dock-close-space: 0px;
-    display: inline-flex;
-    min-width: 0;
-    max-width: min(190px, 30vw);
-    height: 28px;
-    align-items: center;
-    gap: 0;
-    padding: 0 6px;
-    border-radius: 999px;
-    background: transparent;
-    color: var(--constellation-utility-panel-tab-text);
-    transition:
-      background-color 160ms ease,
-      color 160ms ease;
-  }
-
-  .right-dock-tab-group:hover,
-  .right-dock-tab-group:focus-within,
-  .right-dock-tab-group.is-active {
-    background: var(--right-dock-tab-active-background);
-  }
-
-  .right-dock-tab-group:hover,
-  .right-dock-tab-group:focus-within {
-    color: var(--constellation-utility-panel-tab-hover-text);
-  }
-
-  .right-dock-tab-group.is-active {
-    color: var(--constellation-utility-panel-tab-active-text);
-  }
-
-  .right-dock-tab-label {
-    display: inline-block;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .right-dock-tab-group .right-dock-tab {
-    min-width: 0;
-    flex: 1 1 auto;
-    justify-content: flex-start;
-    min-height: 28px;
-    padding: 0 4px;
-    color: inherit;
-    background: transparent;
-  }
-
-  .right-dock-tab.is-standalone:hover,
-  .right-dock-tab.is-standalone.is-active {
-    background: var(--right-dock-tab-active-background);
-  }
-
-  .right-dock-tab-group :global(.right-dock-tab-close.constellation-icon-button-sm) {
-    position: relative;
-    z-index: 1;
-    width: 0;
-    min-width: 0;
-    height: 28px;
-    flex: 0 0 auto;
-    overflow: hidden;
-    opacity: 0;
-    pointer-events: none;
-    transform: scale(0.92);
-    transition:
-      width 150ms ease,
-      opacity 150ms ease,
-      transform 150ms ease;
-  }
-
-  .right-dock-tab-group :global(.right-dock-tab-close .constellation-icon-button-icon) {
-    width: 11px;
-    height: 11px;
-  }
-
-  .right-dock-tab-group:hover :global(.right-dock-tab-close.constellation-icon-button-sm),
-  .right-dock-tab-group:focus-within :global(.right-dock-tab-close.constellation-icon-button-sm) {
-    width: 28px;
-    margin-right: 2px;
-    opacity: 1;
-    pointer-events: auto;
-    transform: scale(1);
   }
 
   .right-dock-add {
@@ -884,15 +735,16 @@
     min-height: 0;
   }
 
-  .right-dock-activity :global(.timeline-item) {
+  .right-dock-activity :global(.activity-list) {
+    width: 100%;
+  }
+
+  .right-dock-activity :global(.activity-list-item) {
     margin: 0;
-    padding: 11px 2px 12px;
-    border-width: 0 0 1px;
-    border-radius: 0;
     background: transparent;
   }
 
-  .right-dock-activity :global(.timeline-item:last-child) {
+  .right-dock-activity :global(.activity-list-item:last-child) {
     border-bottom-color: transparent;
   }
 

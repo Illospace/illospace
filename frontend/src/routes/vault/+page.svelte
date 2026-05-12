@@ -79,6 +79,12 @@
 
   type FilterMode = 'all' | 'attention' | 'grants';
   type PillTone = 'muted' | 'warning' | 'success' | 'danger' | 'info';
+  type VaultInitialCreatePrefill = {
+    id?: string | null;
+    keyName?: string | null;
+    description?: string | null;
+    category?: string | null;
+  };
   type VaultRow =
     | { id: string; kind: 'secret'; secret: Secret }
     | { id: string; kind: 'grant'; grant: AgentGrant }
@@ -98,6 +104,16 @@
     { key: 'available', label: 'Agent Available' },
     { key: 'manual', label: 'Manual Only' },
   ];
+
+  let {
+    embedded = false,
+    initialCreatePrefill = null,
+    onInitialCreateSaved,
+  }: {
+    embedded?: boolean;
+    initialCreatePrefill?: VaultInitialCreatePrefill | null;
+    onInitialCreateSaved?: (prefillId?: string | null) => void;
+  } = $props();
 
   let secrets = $state<Secret[]>([]);
   let missing = $state<MissingSecret[]>([]);
@@ -130,6 +146,7 @@
   let formSaving = $state(false);
   let showPassword = $state(false);
   let initialCreatePrefillApplied = $state(false);
+  let appliedInitialCreatePrefillSignature = $state<string | null>(null);
 
   // Edit form
   let showEditModal = $state(false);
@@ -165,6 +182,12 @@
   let copiedKey = $state('');
 
   const isVaultPreview = $derived(dev && $page.url.searchParams.get('preview') === '1');
+  const frameClassName = $derived(
+    ['vault-constellation-frame', embedded ? 'is-embedded' : ''].filter(Boolean).join(' '),
+  );
+  const frameContentClassName = $derived(
+    ['vault-page', embedded ? 'is-embedded' : ''].filter(Boolean).join(' '),
+  );
   const vaultSessionStorageKey = $derived(
     auth.user?.id ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.id)}` : '',
   );
@@ -235,6 +258,11 @@
 
   onDestroy(() => {
     Object.values(revealTimers).forEach(clearTimeout);
+  });
+
+  $effect(() => {
+    if (!initialCreatePrefill?.keyName || loading || vaultLocked) return;
+    maybeApplyInitialCreatePrefill();
   });
 
   function previewIso(daysAgo: number, hoursAgo = 0): string {
@@ -740,7 +768,24 @@
   }
 
   function maybeApplyInitialCreatePrefill() {
-    if (initialCreatePrefillApplied || vaultLocked) return;
+    if (vaultLocked) return;
+    const propKeyName = (initialCreatePrefill?.keyName || '').trim();
+    if (propKeyName) {
+      const signature = JSON.stringify([
+        propKeyName,
+        initialCreatePrefill?.description ?? '',
+        initialCreatePrefill?.category ?? '',
+      ]);
+      if (appliedInitialCreatePrefillSignature === signature) return;
+      appliedInitialCreatePrefillSignature = signature;
+      openCreate(propKeyName, {
+        description: initialCreatePrefill?.description,
+        category: initialCreatePrefill?.category,
+      });
+      return;
+    }
+
+    if (initialCreatePrefillApplied) return;
     const params = $page.url.searchParams;
     const keyName = (params.get('add_secret') || params.get('key_name') || '').trim();
     if (!keyName) return;
@@ -749,6 +794,12 @@
       description: params.get('description'),
       category: params.get('category'),
     });
+  }
+
+  function notifyInitialCreateSaved(keyName: string) {
+    const prefillKeyName = (initialCreatePrefill?.keyName || '').trim();
+    if (!prefillKeyName || prefillKeyName !== keyName.trim()) return;
+    onInitialCreateSaved?.(initialCreatePrefill?.id ?? null);
   }
 
   async function submitCreate() {
@@ -776,6 +827,7 @@
       missing = missing.filter((item) => item.key_name !== keyName);
       selectedRowId = `secret:${keyName}`;
       showCreateModal = false;
+      notifyInitialCreateSaved(keyName);
       ui.toast('Preview secret added', 'success');
       return;
     }
@@ -790,6 +842,7 @@
       }, vaultToken);
       ui.toast('Secret created', 'success');
       showCreateModal = false;
+      notifyInitialCreateSaved(formKeyName.trim());
       await loadData();
     } catch (err: any) {
       handleVaultError(err, 'Create failed');
@@ -1047,6 +1100,7 @@
     eyebrow="Constellation Vault"
     title="Vault"
     subtitle="Protected secrets, missing runtime keys, and shared access."
+    className={frameClassName}
   >
     <div class="vault-constellation-lock-panel">
       <ConstellationPanel tone="warning">
@@ -1083,7 +1137,8 @@
     eyebrow="Constellation Vault"
     title="Vault"
     subtitle={loading ? 'Loading protected secrets, missing keys, and lock state.' : `${secrets.length} secrets · ${categoryCount} categories tracked.`}
-    contentClassName="vault-page"
+    className={frameClassName}
+    contentClassName={frameContentClassName}
   >
     {#snippet actions()}
       {#if hasPin}

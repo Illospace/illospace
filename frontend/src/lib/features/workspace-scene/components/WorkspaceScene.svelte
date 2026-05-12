@@ -169,13 +169,14 @@
   // ── Constants (from cortex-core.js) ────────────────────────
   const ILLO_AGENT_ROLES = ['illo', 'agent', 'assistant'];
 
-  // Ownership accent color stays subtle; position remains the primary ownership cue.
+  // Ownership accents follow the orbit anchor: the astre/pin a thread belongs to.
   function ownerColor(d: any): string {
-    const explicitAuthorColor = normalizeHexColor(d.author_color);
-    if (explicitAuthorColor) return explicitAuthorColor;
-
-    const explicitUserColor = normalizeHexColor(d.user_color);
-    if (explicitUserColor) return explicitUserColor;
+    const anchorKey = itemOrbitAnchorKey(d);
+    const anchor = orbitAnchorLookup?.byId?.get(anchorKey)
+      ?? orbitAnchorLookup?.byAnchorKey?.get(anchorKey)
+      ?? attractorLookup?.byId?.get(anchorKey);
+    const anchorColor = normalizeHexColor(anchor?.color);
+    if (anchorColor) return anchorColor;
 
     const currentUserColor = d.user_id === auth.user?.id
       ? normalizeHexColor(auth.user?.color)
@@ -186,6 +187,9 @@
       const attractorColor = normalizeHexColor(attractorLookup.byId.get(d.user_id)!.color);
       if (attractorColor) return attractorColor;
     }
+
+    const explicitUserColor = normalizeHexColor(d.user_color);
+    if (explicitUserColor) return explicitUserColor;
 
     return '#f0f0fa';
   }
