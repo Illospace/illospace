@@ -154,16 +154,14 @@ class TestExtractSemantic:
 
     @patch("brain.systems.cognition.consolidate._synthesize_with_gpu_server")
     @patch("brain.systems.memory.embeddings.vec_to_pg")
-    @patch("brain.systems.memory.embeddings.make_emotional_embedding")
     @patch("brain.systems.memory.embeddings.embed_document")
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_creates_semantic_memory(self, mock_uow_cls, mock_emb, mock_emo, mock_vec, mock_gpu):
+    def test_creates_semantic_memory(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
         """Should create a semantic memory from episode cluster."""
         from brain.systems.cognition.consolidate import extract_semantic
 
         mock_gpu.return_value = "[semantic] Redis TTLs require explicit expiry for session data"
         mock_emb.return_value = np.zeros(2000)
-        mock_emo.return_value = np.zeros(32)
         mock_vec.return_value = "[0,0,0]"
 
         uow, session = _make_mock_uow()
@@ -197,16 +195,14 @@ class TestExtractSemantic:
 
     @patch("brain.systems.cognition.consolidate._synthesize_with_gpu_server")
     @patch("brain.systems.memory.embeddings.vec_to_pg")
-    @patch("brain.systems.memory.embeddings.make_emotional_embedding")
     @patch("brain.systems.memory.embeddings.embed_document")
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_fallback_when_ollama_fails(self, mock_uow_cls, mock_emb, mock_emo, mock_vec, mock_gpu):
+    def test_fallback_when_ollama_fails(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
         """Should use heuristic fallback when GPU server unavailable."""
         from brain.systems.cognition.consolidate import extract_semantic
 
         mock_gpu.return_value = None  # Ollama fails
         mock_emb.return_value = np.zeros(2000)
-        mock_emo.return_value = np.zeros(32)
         mock_vec.return_value = "[0,0,0]"
 
         uow, session = _make_mock_uow()
@@ -271,16 +267,14 @@ class TestCrystallizeProcedural:
 
     @patch("brain.systems.cognition.consolidate._crystallize_with_gpu_server")
     @patch("brain.systems.memory.embeddings.vec_to_pg")
-    @patch("brain.systems.memory.embeddings.make_emotional_embedding")
     @patch("brain.systems.memory.embeddings.embed_document")
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_creates_procedural_from_semantics(self, mock_uow_cls, mock_emb, mock_emo, mock_vec, mock_gpu):
+    def test_creates_procedural_from_semantics(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
         """Should crystallize semantic memories into a procedure."""
         from brain.systems.cognition.consolidate import crystallize_procedural
 
         mock_gpu.return_value = "1. Check TTL\n2. Set expiry\n3. Monitor"
         mock_emb.return_value = np.zeros(2000)
-        mock_emo.return_value = np.zeros(32)
         mock_vec.return_value = "[0,0,0]"
 
         uow, session = _make_mock_uow()

@@ -30,17 +30,6 @@ def _fake_skill(name="test-skill", maturity="developing", use_count=5):
     return s
 
 
-def _fake_emotion(label="curious", valence=0.7, arousal=0.5,
-                  trigger_summary="learning", timestamp=None):
-    e = MagicMock()
-    e.label = label
-    e.valence = valence
-    e.arousal = arousal
-    e.trigger_summary = trigger_summary
-    e.timestamp = timestamp or datetime(2026, 3, 18, 12, 0, 0)
-    return e
-
-
 def _fake_consolidation():
     c = MagicMock()
     c.status = "completed"
@@ -99,13 +88,12 @@ def client():
 class TestOverviewRoute:
 
     @patch("brain.app.api.routers.system.ConsolidationRunRepository")
-    @patch("brain.app.api.routers.system.EmotionRepository")
     @patch("brain.app.api.routers.system.SkillRepository")
     @patch("brain.app.api.routers.system.EdgeRepository")
     @patch("brain.app.api.routers.system.MemoryRepository")
     def test_route_overview_delegates(
         self, MockMemRepo, MockEdgeRepo, MockSkillRepo,
-        MockEmotionRepo, MockConsolRepo, client,
+        MockConsolRepo, client,
     ):
         mem = MockMemRepo.return_value
         mem.count_active.return_value = 42
@@ -120,11 +108,6 @@ class TestOverviewRoute:
             5,
         )
 
-        emotion = MockEmotionRepo.return_value
-        emotion.count_all.return_value = 5
-        emotion.avg_valence_7d.return_value = 0.6
-        emotion.list_recent.return_value = [_fake_emotion()]
-
         MockConsolRepo.return_value.list_recent.return_value = [_fake_consolidation()]
 
         resp = client.get("/api/overview")
@@ -134,13 +117,12 @@ class TestOverviewRoute:
         assert data["edges"] == 18
 
     @patch("brain.app.api.routers.system.ConsolidationRunRepository")
-    @patch("brain.app.api.routers.system.EmotionRepository")
     @patch("brain.app.api.routers.system.SkillRepository")
     @patch("brain.app.api.routers.system.EdgeRepository")
     @patch("brain.app.api.routers.system.MemoryRepository")
     def test_route_500_on_exception(
         self, MockMemRepo, MockEdgeRepo, MockSkillRepo,
-        MockEmotionRepo, MockConsolRepo, client,
+        MockConsolRepo, client,
     ):
         """When a repository raises, the global exception handler returns 500."""
         MockMemRepo.return_value.count_active.side_effect = RuntimeError("db down")
@@ -194,31 +176,16 @@ class TestSearchRoute:
 
 class TestHealthRoute:
 
-    @patch("brain.platform.db.repositories.emotions.EmotionRepository")
     @patch("brain.platform.db.repositories.skills.SkillRepository")
     @patch("brain.platform.db.repositories.memories.MemoryRepository")
-    def test_route_health_delegates(self, MockMemRepo, MockSkillRepo, MockEmoRepo, client):
+    def test_route_health_delegates(self, MockMemRepo, MockSkillRepo, client):
         """Health endpoint returns status."""
         MockMemRepo.return_value.count_active.return_value = 10
         MockSkillRepo.return_value.list_active.return_value = []
-        MockEmoRepo.return_value.count_all.return_value = 5
         resp = client.get("/api/health")
         assert resp.status_code == 200
         data = resp.json()
         assert "status" in data
-
-
-class TestEmotionsRoute:
-
-    @patch("brain.app.api.routers.emotions.EmotionRepository")
-    def test_route_emotions_delegates(self, MockEmoRepo, client):
-        MockEmoRepo.return_value.list_recent.return_value = []
-        resp = client.get("/api/emotions/")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "snapshots" in data
-        assert "daily" in data
-        assert "distribution" in data
 
 
 class TestSkillsRoute:

@@ -171,9 +171,6 @@ NARRATIVE_SEMANTIC_EMBEDDING_DIM = EMBEDDING_DIM
 SKILL_SEMANTIC_EMBEDDING_DIM = EMBEDDING_DIM
 SKILL_TASK_CENTROID_EMBEDDING_DIM = EMBEDDING_DIM
 
-# Emotional embeddings are local heuristic feature vectors, not provider output.
-MEMORY_EMOTIONAL_EMBEDDING_DIM = 32
-
 # Cortex idea embeddings are a legacy OpenAI-specific vector field. Keep the
 # typmod explicit until a dedicated idea re-embedding migration replaces it.
 IDEA_EMBEDDING_DIM = 1536
@@ -211,9 +208,9 @@ class EmbeddingDimensionError(RuntimeError):
 def embedding_vector_registry() -> dict[str, EmbeddingVectorSpec]:
     """Return the central embedding dimension registry.
 
-    Semantic families share EMBEDDING_DIM. The emotional and idea families are
-    fixed by their generation policy and documented here rather than being
-    scattered as raw Vector(N) literals.
+Semantic families share EMBEDDING_DIM. The idea family is fixed by its
+generation policy and documented here rather than being scattered as raw
+Vector(N) literals.
     """
 
     semantic_dim = int(EMBEDDING_DIM)
@@ -226,15 +223,6 @@ def embedding_vector_registry() -> dict[str, EmbeddingVectorSpec]:
             configurable=True,
             provider_specific=False,
             notes="Shared semantic memory embedding dimension from EMBEDDING_DIM.",
-        ),
-        "memory.emotional": EmbeddingVectorSpec(
-            family="memory.emotional",
-            dimensions=MEMORY_EMOTIONAL_EMBEDDING_DIM,
-            table="memories",
-            column="emotional_embedding",
-            configurable=False,
-            provider_specific=False,
-            notes="Fixed 32-dim local emotion feature vector.",
         ),
         "summary.semantic": EmbeddingVectorSpec(
             family="summary.semantic",
@@ -421,45 +409,3 @@ AUTO_EDGE_MIN_SIM = float(os.getenv("AUTO_EDGE_MIN_SIM", "0.75"))
 # ---------------------------------------------------------------------------
 DECAY_RATE = float(os.getenv("DECAY_RATE", "0.05"))
 DECAY_THRESHOLD = float(os.getenv("DECAY_THRESHOLD", "2.0"))
-
-# ---------------------------------------------------------------------------
-# Emotion signals (heuristic layer — supplemented by embeddings)
-# ---------------------------------------------------------------------------
-EMOTION_SIGNALS = {
-    "frustration": {
-        "keywords": ["still broken", "again", "i told you", "wrong", "not working", "wtf", "seriously", "come on"],
-        "valence": -0.7,
-    },
-    "joy": {
-        "keywords": ["perfect", "exactly", "love it", "amazing", "great job", "nice", "brilliant"],
-        "valence": 0.9,
-    },
-    "urgency": {
-        "keywords": ["production", "down", "customer waiting", "asap", "urgent", "broken", "now"],
-        "valence": -0.3,
-    },
-    "satisfaction": {
-        "keywords": ["works", "that's it", "good", "solid", "clean", "well done"],
-        "valence": 0.6,
-    },
-    "curiosity": {
-        "keywords": ["what if", "how about", "interesting", "let's try", "explore", "think about"],
-        "valence": 0.4,
-    },
-    "disappointment": {
-        "keywords": ["expected more", "not what i wanted", "missed", "should have", "thought you would"],
-        "valence": -0.5,
-    },
-    "excitement": {
-        "keywords": ["let's go", "can't wait", "this is huge", "game changer", "wow"],
-        "valence": 0.8,
-    },
-    "confusion": {
-        "keywords": ["don't understand", "what do you mean", "confused", "unclear", "huh"],
-        "valence": -0.2,
-    },
-    "trust": {
-        "keywords": ["i trust you", "go ahead", "your call", "you decide", "handle it"],
-        "valence": 0.7,
-    },
-}

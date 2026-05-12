@@ -14,8 +14,6 @@ NIGHTLY_SLEEP_STEP_KEYS: tuple[str, ...] = (
     "meta_learning",
     "heuristic_review",
     "meta_evolution",
-    "prompt_template_evolution",
-    "brain_prompts",
     "reflection",
     "dream",
     "wake_up_index",
@@ -48,14 +46,6 @@ NIGHTLY_SLEEP_STEP_BUDGET_HINTS: dict[str, dict[str, object]] = {
     "meta_evolution": {
         "work_type": "context_policy_eval",
         "estimated_tokens": 8_000,
-    },
-    "prompt_template_evolution": {
-        "work_type": "context_policy_eval",
-        "estimated_tokens": 7_500,
-    },
-    "brain_prompts": {
-        "work_type": "context_policy_eval",
-        "estimated_tokens": 3_000,
     },
     "reflection": {
         "work_type": "reflection_dream",
@@ -253,17 +243,7 @@ def _nightly_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
             ),
             "Meta-evolution",
         ),
-        StepSpec("prompt_template_evolution", ["python3", "-m", "brain.jobs.pipelines.nightly_evolve_prompts"], "Prompt template evolution"),
         StepSpec("context_policy_eval", ["python3", "-m", "brain.jobs.pipelines.nightly_context_eval", "--date", target_date], "Context policy shadow evaluation"),
-        StepSpec(
-            "self_reflection_prompts",
-            _python_one_liner(
-                "from brain.jobs.pipelines.brain_prompts import generate_brain_prompts; "
-                "prompts = generate_brain_prompts(); "
-                "print('Generated %d brain prompts: %s' % (len(prompts), [p['type'] for p in prompts]))"
-            ),
-            "Self-reflection prompts",
-        ),
         StepSpec("nightly_reflect", ["python3", "-m", "brain.jobs.pipelines.nightly_reflect", "--date", target_date], "LLM reflection"),
         StepSpec("nightly_dream", ["python3", "-m", "brain.jobs.pipelines.nightly_dream", "--date", target_date], "Dream synthesis"),
         StepSpec("wake_up_index", ["python3", "-m", "brain.jobs.pipelines.consolidate", "--phase", "index"], "Wake-up index"),

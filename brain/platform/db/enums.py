@@ -42,7 +42,6 @@ class MemoryType(StrEnum):
     PROCEDURE = "procedure"
     EPISODE = "episode"
     INSIGHT = "insight"
-    EMOTION = "emotion"
 
 
 class Visibility(StrEnum):

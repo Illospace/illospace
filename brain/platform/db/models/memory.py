@@ -27,10 +27,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship as sa_relationshi
 
 from pgvector.sqlalchemy import Vector
 
-from brain.kernel.config import (
-    MEMORY_EMOTIONAL_EMBEDDING_DIM,
-    MEMORY_SEMANTIC_EMBEDDING_DIM,
-)
+from brain.kernel.config import MEMORY_SEMANTIC_EMBEDDING_DIM
 from brain.platform.db.base import ArchivableMixin, Base, CreatedAtMixin
 
 
@@ -47,21 +44,11 @@ class Memory(Base, CreatedAtMixin, ArchivableMixin):
     semantic_embedding: Mapped[Optional[list]] = mapped_column(
         Vector(MEMORY_SEMANTIC_EMBEDDING_DIM), nullable=True
     )
-    emotional_embedding: Mapped[Optional[list]] = mapped_column(
-        Vector(MEMORY_EMOTIONAL_EMBEDDING_DIM), nullable=True
-    )
 
-    # Salience & emotion
+    # Retrieval salience
     salience: Mapped[float] = mapped_column(
         Double, server_default="5.0", default=5.0
     )
-    emotion_valence: Mapped[float] = mapped_column(
-        Double, server_default="0.0", default=0.0
-    )
-    emotion_arousal: Mapped[float] = mapped_column(
-        Double, server_default="0.0", default=0.0
-    )
-    emotion_label: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
 
     # Provenance
     source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)

@@ -151,17 +151,6 @@ class TestSkills:
         MockRepo.return_value.list_active_with_executions.assert_called_once()
 
 
-# ── Emotions ─────────────────────────────────────────────────────────────
-
-class TestEmotions:
-    def test_list_emotions_calls_repository(self, mock_session_factory):
-        from brain.app.api.routers.emotions import list_emotions
-        with patch("brain.app.api.routers.emotions.EmotionRepository") as MockRepo:
-            MockRepo.return_value.list_recent.return_value = []
-            result = list_emotions(db=mock_session_factory, user=_mock_user())
-        MockRepo.return_value.list_recent.assert_called_once_with(limit=500)
-
-
 # ── Global Search ────────────────────────────────────────────────────────
 
 class TestGlobalSearch:

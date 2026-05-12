@@ -197,7 +197,6 @@ def test_learning_doctor_reports_clear_self_hosted_status_objects():
     assert report.ok
     assert report.findings == ()
     assert statuses["learning-scheduler"].status == "ok"
-    assert statuses["learning-schema"].details["expected_tables"] == list(config_doctor._LEARNING_TABLES)
     assert statuses["learning-budget"].status == "ok"
     assert statuses["learning-privacy"].status == "ok"
     assert statuses["learning-model-tier"].status == "ok"
@@ -241,55 +240,6 @@ def test_learning_doctor_rejects_invalid_budget_values():
     assert "LEARNING_BUDGET_AFTER_RUN_SAMPLE_RATE" in status.details["invalid_rate_settings"]
 
 
-def test_learning_doctor_flags_missing_learning_migration_names(tmp_path):
-    for relative in (
-        "brain/systems/learning/__init__.py",
-        "brain/app/scheduler/daemon.py",
-        "brain/app/cli/scheduler.py",
-        "brain/app/scheduler/programs.py",
-    ):
-        path = tmp_path / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("", encoding="utf-8")
-    (tmp_path / "brain/app/scheduler/catalog.py").write_text(
-        "nightly_sleep scheduler_split_steps brain.systems.learning.night_budget",
-        encoding="utf-8",
-    )
-    (tmp_path / "ops").mkdir()
-    (tmp_path / "ops/illo-scheduler.service").write_text(
-        "Environment=ILLO_ENV=production\nExecStart=python -m brain.app.cli.scheduler daemon\n",
-        encoding="utf-8",
-    )
-    model_path = tmp_path / "brain/platform/db/models/learning.py"
-    model_path.parent.mkdir(parents=True)
-    model_path.write_text(
-        "\n".join(f'__tablename__ = "{table}"' for table in config_doctor._LEARNING_TABLES),
-        encoding="utf-8",
-    )
-    migration_dir = tmp_path / "brain/platform/db/alembic/versions"
-    migration_dir.mkdir(parents=True)
-    migration_dir.joinpath("001_learning.py").write_text(
-        "\n".join(
-            f'op.create_table("{table}")'
-            for table in config_doctor._LEARNING_TABLES
-            if table != "policy_update_candidates"
-        ),
-        encoding="utf-8",
-    )
-
-    report = config_doctor.run_checks(
-        root=tmp_path,
-        env=_safe_self_hosted_learning_env(),
-        production=True,
-        scan_tracked_secrets=False,
-        include_learning_checks=True,
-    )
-
-    assert not report.ok
-    status = _statuses(report)["learning-schema-missing"]
-    assert "policy_update_candidates" in status.details["missing_migration_tables"]
-
-
 def test_config_doctor_json_output_includes_learning_status_objects(capsys):
     with patch("brain.app.cli.config_doctor.os.environ", _safe_self_hosted_learning_env()), patch(
         "brain.app.cli.config_doctor._tracked_files",
@@ -308,7 +258,6 @@ def test_config_doctor_json_output_includes_learning_status_objects(capsys):
     assert payload["ok"] is True
     assert {status["code"] for status in payload["statuses"]} >= {
         "learning-scheduler",
-        "learning-schema",
         "learning-budget",
         "learning-privacy",
         "learning-model-tier",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Illo Brain — deterministic task run log helper.
+"""Illo Brain — deterministic task run helper.
 
 Classifies tasks, selects templates, injects context from the brain,
 and returns ready-to-run JSON payloads.
@@ -18,7 +18,6 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))  # repo root
 
@@ -221,21 +220,26 @@ def find_similar_runs(task: str, limit: int = 3) -> list:
         words = [w for w in task.lower().split() if len(w) > 3][:5]
         if not words:
             return []
-        conditions = " OR ".join([f"task_summary ILIKE :word_{i}" for i in range(len(words))])
+        conditions = " OR ".join([f"input_message ILIKE :word_{i}" for i in range(len(words))])
         params = {f"word_{i}": f"%{w}%" for i, w in enumerate(words)}
         params["limit"] = limit
         rows = uow.session.execute(sa_text(f"""
-            SELECT id, task_summary, task_type, outcome, outcome_notes
-            FROM run_log
+            SELECT id,
+                   input_message AS task_summary,
+                   metadata->>'task_type' AS task_type,
+                   COALESCE(metadata->>'outcome', status) AS outcome,
+                   metadata->>'outcome_notes' AS outcome_notes
+            FROM agent_runs
             WHERE {conditions}
-            ORDER BY runed_at DESC
+              AND metadata->>'legacy_source' = 'cli.run'
+            ORDER BY created_at DESC
             LIMIT :limit
         """), params).mappings().all()
         return [dict(r) for r in rows]
 
 
 # ============================================================
-# Run Log
+# Run Persistence
 # ============================================================
 
 def log_run(
@@ -253,30 +257,56 @@ def log_run(
     similar_past_ids: list = None,
     session_key: str = None,
 ) -> int:
-    """Insert a run_log row. Returns run_id."""
-    row = session.execute(sa_text("""
-        INSERT INTO run_log (
-            task_summary, task_type, template_used, model, thinking_level,
-            prompt_hash, payload_json, skill_name,
-            memories_injected, guardrails_injected, similar_past_ids,
-            session_key
-        ) VALUES (:task_summary, :task_type, :template_used, :model, :thinking_level,
-                  :prompt_hash, :payload_json, :skill_name,
-                  :memories_injected, :guardrails_injected, :similar_past_ids,
-                  :session_key)
-        RETURNING id
-    """), {
-        "task_summary": task_summary, "task_type": task_type,
-        "template_used": template_used, "model": model,
-        "thinking_level": thinking_level, "prompt_hash": prompt_hash,
-        "payload_json": json.dumps(payload_json) if payload_json else None,
+    """Persist a CLI run in agent_runs and store its replay payload as an artifact."""
+    metadata = {
+        "legacy_source": "cli.run",
+        "task_type": task_type,
+        "template_used": template_used,
         "skill_name": skill_name,
+        "thinking_level": thinking_level,
+        "prompt_hash": prompt_hash,
         "memories_injected": memories_injected or [],
         "guardrails_injected": guardrails_injected or [],
         "similar_past_ids": similar_past_ids or [],
         "session_key": session_key,
+    }
+    row = session.execute(sa_text("""
+        INSERT INTO agent_runs (
+            thread_id, profile, recipe, status, input_message,
+            target_ref, workspace_ref, model_policy, metadata
+        ) VALUES (
+            :thread_id, 'cli', 'run_helper', 'queued', :task_summary,
+            CAST(:target_ref AS jsonb), '{}'::jsonb,
+            CAST(:model_policy AS jsonb), CAST(:metadata AS jsonb)
+        )
+        RETURNING id
+    """), {
+        "thread_id": session_key or "cli-run",
+        "task_summary": task_summary,
+        "target_ref": json.dumps({"kind": "cli_task", "task_type": task_type}),
+        "model_policy": json.dumps({"model": model, "thinking": thinking_level}),
+        "metadata": json.dumps(metadata),
     }).mappings().first()
-    return row["id"]
+    run_id = int(row["id"])
+    session.execute(sa_text("""
+        UPDATE agent_runs
+        SET root_run_id = COALESCE(root_run_id, id),
+            trace_id = COALESCE(trace_id, 'cli-' || id::text)
+        WHERE id = :id
+    """), {"id": run_id})
+    session.execute(sa_text("""
+        INSERT INTO agent_run_artifacts (
+            run_id, root_run_id, artifact_type, title, payload, text, visibility
+        ) VALUES (
+            :run_id, :run_id, 'run_payload', 'CLI run payload',
+            CAST(:payload AS jsonb), :text, 'private'
+        )
+    """), {
+        "run_id": run_id,
+        "payload": json.dumps(payload_json or {}),
+        "text": json.dumps(payload_json or {}, indent=2),
+    })
+    return run_id
 
 
 # ============================================================
@@ -284,18 +314,34 @@ def log_run(
 # ============================================================
 
 def complete_run(session, run_id: int, outcome: str, notes: str = None) -> dict:
-    """Mark a run-log row as complete."""
+    """Mark a CLI agent_run row as complete."""
     row = session.execute(sa_text("""
-        SELECT id, skill_name, task_summary
-        FROM run_log WHERE id = :id
+        SELECT id, metadata
+        FROM agent_runs
+        WHERE id = :id AND metadata->>'legacy_source' = 'cli.run'
     """), {"id": run_id}).mappings().first()
     if not row:
         return {"error": f"Run {run_id} not found"}
 
+    status = {
+        "success": "completed",
+        "partial": "completed",
+        "failure": "failed",
+        "cancelled": "canceled",
+    }.get(outcome, "completed")
     session.execute(sa_text("""
-        UPDATE run_log SET completed_at = NOW(), outcome = :outcome, outcome_notes = :notes
+        UPDATE agent_runs
+        SET status = :status,
+            completed_at = CASE WHEN :status = 'completed' THEN NOW() ELSE completed_at END,
+            failed_at = CASE WHEN :status = 'failed' THEN NOW() ELSE failed_at END,
+            canceled_at = CASE WHEN :status = 'canceled' THEN NOW() ELSE canceled_at END,
+            metadata = metadata || CAST(:metadata_patch AS jsonb)
         WHERE id = :id
-    """), {"outcome": outcome, "notes": notes, "id": run_id})
+    """), {
+        "status": status,
+        "metadata_patch": json.dumps({"outcome": outcome, "outcome_notes": notes}),
+        "id": run_id,
+    })
 
     return {"run_id": run_id, "outcome": outcome}
 
@@ -394,10 +440,21 @@ def cmd_complete(args):
 
 def cmd_history(args):
     with UnitOfWork() as uow:
-        sql = "SELECT id, task_summary, task_type, outcome, model, runed_at, completed_at, duration_s FROM run_log"
+        sql = """
+            SELECT id,
+                   input_message AS task_summary,
+                   metadata->>'task_type' AS task_type,
+                   COALESCE(metadata->>'outcome', status) AS outcome,
+                   model_policy->>'model' AS model,
+                   created_at AS runed_at,
+                   completed_at,
+                   EXTRACT(EPOCH FROM (completed_at - created_at))::INTEGER AS duration_s
+            FROM agent_runs
+            WHERE metadata->>'legacy_source' = 'cli.run'
+        """
         params = {}
         if args.type:
-            sql += " WHERE task_type = :task_type"
+            sql += " AND metadata->>'task_type' = :task_type"
             params["task_type"] = args.type
         sql += " ORDER BY runed_at DESC LIMIT :limit"
         params["limit"] = args.limit
@@ -410,20 +467,23 @@ def cmd_stats(args):
         overview = dict(uow.session.execute(sa_text("""
             SELECT
                 COUNT(*) as total,
-                COUNT(*) FILTER (WHERE outcome = 'success') as successes,
-                COUNT(*) FILTER (WHERE outcome = 'failure') as failures,
-                COUNT(*) FILTER (WHERE outcome = 'partial') as partials,
-                COUNT(*) FILTER (WHERE outcome IS NULL) as pending,
-                ROUND(AVG(duration_s)::numeric, 0) as avg_duration_s
-            FROM run_log
-            WHERE runed_at >= NOW() - INTERVAL '1 day' * :days
+                COUNT(*) FILTER (WHERE metadata->>'outcome' = 'success') as successes,
+                COUNT(*) FILTER (WHERE metadata->>'outcome' = 'failure') as failures,
+                COUNT(*) FILTER (WHERE metadata->>'outcome' = 'partial') as partials,
+                COUNT(*) FILTER (WHERE metadata->>'outcome' IS NULL) as pending,
+                ROUND(AVG(EXTRACT(EPOCH FROM (completed_at - created_at)))::numeric, 0) as avg_duration_s
+            FROM agent_runs
+            WHERE metadata->>'legacy_source' = 'cli.run'
+              AND created_at >= NOW() - INTERVAL '1 day' * :days
         """), {"days": args.days}).mappings().first())
 
         by_type_rows = uow.session.execute(sa_text("""
-            SELECT task_type, COUNT(*) as cnt,
-                   COUNT(*) FILTER (WHERE outcome = 'success') as ok
-            FROM run_log
-            WHERE runed_at >= NOW() - INTERVAL '1 day' * :days
+            SELECT metadata->>'task_type' AS task_type,
+                   COUNT(*) as cnt,
+                   COUNT(*) FILTER (WHERE metadata->>'outcome' = 'success') as ok
+            FROM agent_runs
+            WHERE metadata->>'legacy_source' = 'cli.run'
+              AND created_at >= NOW() - INTERVAL '1 day' * :days
             GROUP BY task_type ORDER BY cnt DESC
         """), {"days": args.days}).mappings().all()
         by_type = [dict(r) for r in by_type_rows]
@@ -434,12 +494,18 @@ def cmd_stats(args):
 def cmd_replay(args):
     with UnitOfWork() as uow:
         row = uow.session.execute(sa_text(
-            "SELECT payload_json FROM run_log WHERE id = :id"
+            """
+            SELECT payload
+            FROM agent_run_artifacts
+            WHERE run_id = :id AND artifact_type = 'run_payload'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """
         ), {"id": args.run_id}).mappings().first()
-    if not row or not row["payload_json"]:
+    if not row or not row["payload"]:
         print(json.dumps({"error": f"Run {args.run_id} not found or has no payload"}))
         return
-    print(json.dumps(row["payload_json"], indent=2))
+    print(json.dumps(row["payload"], indent=2))
 
 
 # ============================================================

@@ -23,34 +23,6 @@ def test_vec_to_pg():
     assert "2.5" in result
 
 
-def test_emotion_map_has_standard_emotions():
-    """EMOTION_MAP should contain standard emotion labels."""
-    from brain.systems.memory.embeddings import EMOTION_MAP
-
-    required = ["neutral", "frustrated", "satisfied", "curious"]
-    for emotion in required:
-        assert emotion in EMOTION_MAP, f"Missing emotion: {emotion}"
-
-
-def test_make_emotional_embedding_returns_vector():
-    """make_emotional_embedding should return a numpy array."""
-    import numpy as np
-    from brain.systems.memory.embeddings import make_emotional_embedding
-
-    result = make_emotional_embedding(0.5, 0.3, "satisfied")
-    assert isinstance(result, np.ndarray)
-    assert len(result) > 0
-
-
-def test_make_emotional_embedding_with_label_only():
-    """make_emotional_embedding should work with just a label."""
-    import numpy as np
-    from brain.systems.memory.embeddings import make_emotional_embedding
-
-    result = make_emotional_embedding(label="frustrated")
-    assert isinstance(result, np.ndarray)
-
-
 class TestEmbeddingsClient:
     def test_embed_document_calls_gpu_client(self):
         from brain.systems.memory.embeddings import embed_document

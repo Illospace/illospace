@@ -290,7 +290,7 @@ def candidate_to_policy_update_values(
     org_id: str | None = None,
     visibility: str = "private",
 ) -> dict[str, Any]:
-    """Return kwargs suitable for PolicyUpdateCandidateRepository.upsert_candidate."""
+    """Return a portable policy-candidate payload."""
     candidate = _mapping(evaluation_payload.get("candidate"))
     candidate_digest = _text(evaluation_payload.get("candidate_digest")) or _stable_digest(evaluation_payload)
     return {
@@ -555,7 +555,7 @@ def _source_payload(source: Mapping[str, Any] | Any) -> dict[str, Any]:
         if isinstance(quality, Mapping):
             payload.setdefault("quality", _jsonable(dict(quality)))
     if not payload:
-        raise TypeError("source must be a mapping or TrajectoryEvalCase-like row")
+        raise TypeError("source must be a mapping or eval-case-like row")
     return payload
 
 

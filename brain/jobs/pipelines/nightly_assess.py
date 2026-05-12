@@ -92,8 +92,6 @@ def gather_data(data_source: str) -> dict:
     """
     if data_source == "skill_success_rates":
         return _gather_skill_stats()
-    elif data_source == "delegation_quality":
-        return _gather_delegation_stats()
     elif data_source == "nightly_logs":
         return _gather_nightly_log_stats()
     elif data_source == "test_results":
@@ -129,28 +127,6 @@ def _gather_skill_stats() -> dict:
         }
     except Exception as e:
         return {"available": False, "metrics": {}, "summary": f"Error querying skills: {e}"}
-
-
-def _gather_delegation_stats() -> dict:
-    """Query delegation_quality table for average scores."""
-    try:
-        with UnitOfWork() as uow:
-            result = uow.session.execute(text("""
-                SELECT COUNT(*) as total,
-                       AVG(score)::numeric(4,2) as avg_score
-                FROM delegation_quality
-                WHERE created_at >= NOW() - INTERVAL '7 days'
-            """))
-            row = result.mappings().first()
-        if not row or not row["total"]:
-            return {"available": False, "metrics": {}, "summary": "No delegation data in last 7 days"}
-        return {
-            "available": True,
-            "metrics": {"avg_score": float(row["avg_score"]) if row["avg_score"] else 0, "total": row["total"]},
-            "summary": f"Delegation avg score: {row['avg_score']} over {row['total']} delegations",
-        }
-    except Exception as e:
-        return {"available": False, "metrics": {}, "summary": f"Error querying delegation_quality: {e}"}
 
 
 def _gather_nightly_log_stats() -> dict:
@@ -288,14 +264,6 @@ def _heuristic_assess(data_source: str, metrics: dict) -> str:
         if pct >= 70:
             return "passed"
         elif pct < 50:
-            return "failed"
-        return "inconclusive"
-
-    elif data_source == "delegation_quality":
-        score = metrics.get("avg_score", 0)
-        if score >= 7:
-            return "passed"
-        elif score < 4:
             return "failed"
         return "inconclusive"
 

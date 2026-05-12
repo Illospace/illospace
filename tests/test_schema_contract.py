@@ -37,13 +37,12 @@ def test_memories_table_has_hierarchical_columns(rollback_db):
 
 def test_brain_recall_recovers_after_graph_sql_failure(db_session):
     """Vector fallback must still work if graph recall poisons the transaction."""
-    from brain.kernel.config import MEMORY_EMOTIONAL_EMBEDDING_DIM, MEMORY_SEMANTIC_EMBEDDING_DIM
+    from brain.kernel.config import MEMORY_SEMANTIC_EMBEDDING_DIM
     import brain.app.mcp.server as mcp_server
 
     vector = np.zeros(MEMORY_SEMANTIC_EMBEDDING_DIM, dtype=np.float32)
     vector[0] = 1.0
     emb_str = "[" + ",".join(f"{x:.8f}" for x in vector) + "]"
-    emotional_emb_str = "[" + ",".join("0.0" for _ in range(MEMORY_EMOTIONAL_EMBEDDING_DIM)) + "]"
     org_id = "11111111-1111-4111-8111-111111111111"
     user_id = "22222222-2222-4222-8222-222222222222"
 
@@ -72,20 +71,18 @@ def test_brain_recall_recovers_after_graph_sql_failure(db_session):
 
     db_session.execute(text("""
         INSERT INTO memories (
-            content, memory_type, semantic_embedding, emotional_embedding,
-            salience, emotion_label, source, archived, user_id, org_id, visibility
+            content, memory_type, semantic_embedding,
+            salience, source, archived, user_id, org_id, visibility
         )
         VALUES (
-            :content, :memory_type, CAST(:semantic_embedding AS vector), CAST(:emotional_embedding AS vector),
-            :salience, :emotion_label, :source, false, :user_id, :org_id, 'private'
+            :content, :memory_type, CAST(:semantic_embedding AS vector),
+            :salience, :source, false, :user_id, :org_id, 'private'
         )
     """), {
         "content": "Fallback recall should still find this lesson",
         "memory_type": "lesson",
         "semantic_embedding": emb_str,
-        "emotional_embedding": emotional_emb_str,
         "salience": 8.0,
-        "emotion_label": "neutral",
         "source": "test",
         "user_id": user_id,
         "org_id": org_id,

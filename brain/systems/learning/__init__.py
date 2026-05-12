@@ -1,4 +1,9 @@
-"""Learning primitives for scoped run genomes, policy promotion, and practice."""
+"""Learning policy and budget primitives.
+
+The legacy DB-backed learning persistence layer was removed from runtime. Keep
+this package lightweight so imports such as ``brain.systems.learning.budget`` do
+not load database-backed models.
+"""
 
 from .budget import (
     BudgetDecisionAction,
@@ -11,34 +16,15 @@ from .budget import (
     ProviderLocation,
     should_run_learning_task,
 )
-from .genomes import derive_run_genome, evaluate_run_learning_gate, persist_run_genome
-from .policies import (
-    activate_policy_promotion,
-    demote_policy_promotion,
-    policy_activation_report,
-    record_run_learning_artifacts,
-    record_learning_example,
-    recommend_policy_promotions,
-    record_policy_promotion,
-    rollback_policy_promotion,
+from .policy import (
+    LearningPolicyOverride,
+    TenantLearningPolicy,
+    build_learning_policy,
+    build_learning_policy_from_env,
 )
-from .practice import (
-    execute_practice_run,
-    record_practice_run,
-    score_practice_outcome,
-    validate_practice_guardrails,
-)
-from .queue import (
-    AfterRunLearningJob,
-    AfterRunLearningJobStatus,
-    AfterRunLearningJobType,
-    AfterRunLearningQueueResult,
-    AfterRunLearningQueueService,
-    AfterRunLearningSource,
-    AfterRunSkillReference,
-    build_eval_case_from_trajectory,
-    queue_after_run_learning_for_run,
-)
+
+LearningPolicy = TenantLearningPolicy
+LearningPolicyOverrides = LearningPolicyOverride
 
 __all__ = [
     "BudgetDecisionAction",
@@ -50,28 +36,10 @@ __all__ = [
     "LearningCostEstimate",
     "ProviderLocation",
     "should_run_learning_task",
-    "derive_run_genome",
-    "evaluate_run_learning_gate",
-    "persist_run_genome",
-    "activate_policy_promotion",
-    "demote_policy_promotion",
-    "policy_activation_report",
-    "record_run_learning_artifacts",
-    "record_learning_example",
-    "recommend_policy_promotions",
-    "record_policy_promotion",
-    "rollback_policy_promotion",
-    "execute_practice_run",
-    "record_practice_run",
-    "score_practice_outcome",
-    "validate_practice_guardrails",
-    "AfterRunLearningJob",
-    "AfterRunLearningJobStatus",
-    "AfterRunLearningJobType",
-    "AfterRunLearningQueueResult",
-    "AfterRunLearningQueueService",
-    "AfterRunLearningSource",
-    "AfterRunSkillReference",
-    "build_eval_case_from_trajectory",
-    "queue_after_run_learning_for_run",
+    "LearningPolicy",
+    "LearningPolicyOverrides",
+    "LearningPolicyOverride",
+    "TenantLearningPolicy",
+    "build_learning_policy",
+    "build_learning_policy_from_env",
 ]

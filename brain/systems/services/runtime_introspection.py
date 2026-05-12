@@ -197,22 +197,6 @@ def get_provider_auth_status(
     }
 
 
-def get_agency_runtime_settings() -> dict[str, Any]:
-    """Return bounded-agency feature flags and defaults."""
-    return {
-        "candidates_enabled": _env_bool("AGENCY_CANDIDATES_ENABLED", "true"),
-        "recommendation_mode": _env_bool("AGENCY_RECOMMENDATION_MODE", "true"),
-        "source_reflection_enabled": _env_bool("AGENCY_SOURCE_REFLECTION_ENABLED", "true"),
-        "source_postmortem_enabled": _env_bool("AGENCY_SOURCE_POSTMORTEM_ENABLED", "true"),
-        "source_practice_runs_enabled": _env_bool("AGENCY_SOURCE_PRACTICE_RUNS_ENABLED", "true"),
-        "auto_execute_read_only": _env_bool("AGENCY_AUTO_EXECUTE_READ_ONLY", "false"),
-        "auto_execute_practice_runs": _env_bool("AGENCY_AUTO_EXECUTE_PRACTICE_RUNS", "false"),
-        "auto_execute_repo_local": _env_bool("AGENCY_AUTO_EXECUTE_REPO_LOCAL", "false"),
-        "default_cooldown_hours": int(os.getenv("AGENCY_DEFAULT_COOLDOWN_HOURS", "24")),
-        "default_budget_window_hours": int(os.getenv("AGENCY_DEFAULT_BUDGET_WINDOW_HOURS", "24")),
-    }
-
-
 def get_learning_budget_runtime_settings() -> dict[str, Any]:
     """Return environment-derived learning budget defaults for introspection."""
     return LearningBudgetPolicy.from_env().to_payload()
@@ -242,7 +226,6 @@ def get_runtime_settings_snapshot(
         "effective_provider": effective_provider,
         "user_id": user_id,
         "org_id": org_id,
-        "agency": get_agency_runtime_settings(),
         "learning_budget": get_learning_budget_runtime_settings(),
         "learning_policy": get_learning_policy_runtime_settings(),
         "provider_health": provider_health_snapshot(),

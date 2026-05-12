@@ -429,7 +429,7 @@ def test_scheduler_cutover_materializes_and_persists_split_nightly_steps(session
     assert len(created) == 1
     assert created[0].status == "recorded"
     step_plan = build_scheduler_step_plan(job)
-    assert len(step_plan) == 15
+    assert len(step_plan) == 13
     assert "skill_quality" not in {step["step_key"] for step in step_plan}
     phase_steps = [step for step in step_plan if step["kind"] == "phase"]
     assert phase_steps[0]["payload"]["night_budget"]["work_type"] == "memory_conflict_resolution"
@@ -991,67 +991,3 @@ def test_execute_scheduler_run_valid_callable_stores_normalized_contract(session
     assert executed.task_contract["allowed_actions"] == ["scheduler.run"]
     assert executed.result_summary["handler_result"]["status"] == "recorded"
     assert executed.result_summary["execution"]["owner_id"] == "callable-worker"
-
-
-def test_scheduler_executor_settles_bounded_agency_handoff(session):
-    job = _make_scheduler_job(
-        handler_kind="python_callable",
-        handler_ref="brain.systems.agency.handoff:run_candidate",
-        default_payload={
-            "candidate_id": 1,
-            "candidate_key": "candidate-1",
-            "proposal_kind": "curiosity_followup",
-            "source_type": "curiosity_reading",
-            "source_refs": [{"kind": "reading_source", "url": "https://example.com"}],
-            "proposed_run_payload": {
-                "item_title": "Example",
-                "item_url": "https://example.com",
-                "concrete_application": "Review the pattern",
-            },
-            "budget_snapshot": {"auto_execute_enabled": True},
-            "policy_snapshot": {"drive_type": "curiosity"},
-            "decision": "approve",
-            "execution_class": "read_only",
-        },
-    )
-    session.add(job)
-    session.flush()
-
-    run = SchedulerRun(
-        job_id=job.id,
-        scheduled_for=datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc),
-        window_start=datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc),
-        window_end=datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc),
-        status="recorded",
-        attempt=1,
-        idempotency_key="agency:handoff:1",
-        payload=job.default_payload,
-    )
-    session.add(run)
-    session.flush()
-
-    executed = execute_scheduler_run(
-        session,
-        run.id,
-        owner_id="agency",
-        now=datetime(2026, 4, 21, 12, 5, tzinfo=timezone.utc),
-    )
-    session.refresh(job)
-    session.refresh(executed)
-
-    assert executed.status == "settled_success"
-    assert executed.lease_id is not None
-    assert executed.result_summary["handler_result"]["status"] == "recorded"
-    assert executed.result_summary["execution"]["owner_id"] == "agency"
-    assert job.last_started_at is not None
-    assert job.last_finished_at is not None
-
-    lease = session.get(SchedulerLease, executed.lease_id)
-    assert lease is not None
-    assert lease.released_at is not None
-    assert lease.release_reason == "run_settled_success"
-
-    steps = session.scalars(select(SchedulerRunStep).where(SchedulerRunStep.run_id == executed.id)).all()
-    assert len(steps) == 1
-    assert steps[0].status == "completed"
-    assert steps[0].result_summary["handler_result"]["status"] == "recorded"

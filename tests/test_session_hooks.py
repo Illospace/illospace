@@ -10,24 +10,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 
 def test_consolidate_helpers():
     """Test pure helper functions from consolidate.py."""
-    from brain.jobs.pipelines.consolidate import compress_text, detect_emotion, classify_memory, extract_tags
+    from brain.jobs.pipelines.consolidate import compress_text, classify_memory, extract_tags
 
     # compress_text
     result = compress_text("Bug Fix", "Fixed a critical production bug in the API endpoint.")
     assert "[Bug Fix]" in result
     assert "critical" in result.lower()
-
-    # detect_emotion
-    label, valence, arousal = detect_emotion("This bug is broken and frustrating, errors everywhere")
-    assert label == "frustrated"
-    assert valence < 0
-
-    label, valence, arousal = detect_emotion("Fixed and solved, works perfectly now")
-    assert label == "satisfied"
-    assert valence > 0
-
-    label, valence, arousal = detect_emotion("The sky is blue today")
-    assert label == "neutral"
 
     # classify_memory
     mtype, salience = classify_memory("Lesson", "We learned that assumptions kill")
@@ -42,15 +30,6 @@ def test_consolidate_helpers():
     assert "frontend" in tags
     assert "bug" in tags
     assert "shopify" in tags
-
-
-def test_detect_emotion_urgency():
-    """Urgent signals should override frustration."""
-    from brain.jobs.pipelines.consolidate import detect_emotion
-
-    label, valence, arousal = detect_emotion("Production is down, critical hotfix needed ASAP")
-    assert label == "urgent"
-    assert arousal > 0.7
 
 
 def test_extract_tags_empty():
@@ -95,6 +74,5 @@ def test_get_cross_channel_context_preserves_rich_fields():
         "source_session": "slack:deploy",
         "source": "session",
         "created_at": None,
-        "emotion": "urgent",
         "tags": ["deploy", "ops"],
     }]

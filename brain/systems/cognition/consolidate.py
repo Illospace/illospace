@@ -406,7 +406,7 @@ def extract_semantic(
 
         # Compute embedding for the new semantic memory
         try:
-            from brain.systems.memory.embeddings import embed_document, make_emotional_embedding, vec_to_pg
+            from brain.systems.memory.embeddings import embed_document, vec_to_pg
             semantic_emb = embed_document(synthesized)
             source_ref = f"cluster:{scoped.visibility}:{len(cluster_ids)}:{cluster_ids[0]}-{cluster_ids[-1]}"
             promotion_evidence = {
@@ -434,14 +434,14 @@ def extract_semantic(
             ins_result = uow.session.execute(text("""
                 INSERT INTO memories (
                     content, memory_type, memory_tier, semantic_embedding,
-                    emotional_embedding, salience, source, tags,
+                    salience, source, tags,
                     user_id, org_id, visibility,
                     source_memory_ids, decay_eligible, truth_status,
                     review_status, confidence, freshness_score,
                     source_type, source_ref, valid_from, reviewed_at, reviewed_by
                 ) VALUES (
                     :content, 'pattern', 'semantic', CAST(:semantic_emb AS vector),
-                    CAST(:emotional_emb AS vector), :salience, 'consolidation', :tags,
+                    :salience, 'consolidation', :tags,
                     :owner_user_id, :owner_org_id, :visibility,
                     :source_ids, FALSE, :truth_status, :review_status, :confidence,
                     :freshness_score, :source_type, :source_ref, :valid_from, :reviewed_at,
@@ -450,7 +450,6 @@ def extract_semantic(
             """), {
                 "content": synthesized,
                 "semantic_emb": vec_to_pg(semantic_emb),
-                "emotional_emb": vec_to_pg(make_emotional_embedding(0, 0, "neutral")),
                 "salience": min(10.0, max_salience + 1.0),
                 "tags": list(all_tags)[:20],
                 "owner_user_id": _summary_owner_id(scoped, episodes),
@@ -567,7 +566,7 @@ def crystallize_procedural(
             )
 
         try:
-            from brain.systems.memory.embeddings import embed_document, make_emotional_embedding, vec_to_pg
+            from brain.systems.memory.embeddings import embed_document, vec_to_pg
             semantic_emb = embed_document(procedure_text)
             source_ids = [s["id"] for s in semantics]
             max_sal = max(s["salience"] or 5 for s in semantics)
@@ -635,14 +634,14 @@ def crystallize_procedural(
                 ins_result = uow.session.execute(text("""
                     INSERT INTO memories (
                         content, memory_type, memory_tier, semantic_embedding,
-                        emotional_embedding, salience, source, tags,
+                        salience, source, tags,
                         user_id, org_id, visibility,
                         source_memory_ids, decay_eligible, truth_status,
                         review_status, confidence, freshness_score,
                         source_type, source_ref, valid_from, reviewed_at, reviewed_by
                     ) VALUES (
                         :content, 'pattern', 'procedural', CAST(:semantic_emb AS vector),
-                        CAST(:emotional_emb AS vector), :salience, 'crystallization', :tags,
+                        :salience, 'crystallization', :tags,
                         :owner_user_id, :owner_org_id, :visibility,
                         :source_ids, FALSE, :truth_status, :review_status, :confidence,
                         :freshness_score, :source_type, :source_ref, :valid_from, :reviewed_at,
@@ -651,7 +650,6 @@ def crystallize_procedural(
                 """), {
                     "content": procedure_text,
                     "semantic_emb": vec_to_pg(semantic_emb),
-                    "emotional_emb": vec_to_pg(make_emotional_embedding(0, 0, "neutral")),
                     "salience": min(10.0, max_sal + 1.5),
                     "tags": [skill_name],
                     "owner_user_id": _summary_owner_id(scoped, semantics),

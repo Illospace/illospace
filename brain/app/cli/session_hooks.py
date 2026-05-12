@@ -2,7 +2,7 @@
 """Session Hooks — wire the brain into the agent's daily workflow.
 
     session_hooks.py wake                # Load index + context
-    session_hooks.py sense "message"     # Detect emotion, query context
+    session_hooks.py sense "message"     # Query context
     session_hooks.py encode "content"    # Encode a memory mid-session
     session_hooks.py sleep "summary"     # Encode session summary
     session_hooks.py status              # Quick health dashboard
@@ -28,74 +28,10 @@ from brain.platform.db.repositories.memory_visibility import (
 from brain.systems.memory.embeddings import (
     embed_document,
     embed_query,
-    make_emotional_embedding,
     server_health,
     vec_to_pg,
 )
-from brain.systems.memory.emotional import (
-    get_behavioral_hints,
-    query_with_emotion,
-    track_emotion,
-)
 from brain.app.cli.memory import add_memory
-
-# ============================================================
-# Emotion Detection
-# ============================================================
-
-EMOTION_SIGNALS = {
-    "frustrated": {
-        "words": ["still broken", "not working", "wrong again", "i told you", "frustrat",
-                  "annoying", "why does", "keeps happening", "this is broken", "wtf",
-                  "come on", "seriously", "how many times"],
-        "patterns": ["?!", "...", "!!!"],
-        "valence": -0.7, "arousal": 0.7,
-    },
-    "angry": {"words": ["unacceptable", "terrible", "awful", "hate", "worst", "furious"], "valence": -0.9, "arousal": 0.9},
-    "disappointed": {"words": ["expected better", "thought you", "should have", "missed", "not what i asked", "close but", "almost"], "valence": -0.5, "arousal": 0.3},
-    "urgent": {"words": ["production", "down", "asap", "urgent", "customers", "broken in prod", "hotfix", "immediately", "critical"], "valence": -0.3, "arousal": 0.9},
-    "curious": {"words": ["what if", "how about", "could we", "interesting", "wonder", "explore", "brainstorm", "let's try"], "valence": 0.3, "arousal": 0.5},
-    "happy": {"words": ["perfect", "exactly", "great", "love it", "amazing", "awesome", "nice", "well done", "brilliant", "nailed it"], "valence": 0.8, "arousal": 0.6},
-    "excited": {"words": ["let's go", "can't wait", "this is huge", "game changer", "incredible", "revolutionary"], "valence": 0.8, "arousal": 0.9},
-    "teaching": {"words": ["because", "the reason", "what matters is", "the point is", "understand that", "let me explain"], "valence": 0.4, "arousal": 0.4},
-    "satisfied": {"words": ["good", "works", "fine", "ok nice", "makes sense", "agreed", "solid", "ship it"], "valence": 0.5, "arousal": 0.3},
-}
-
-
-def detect_emotion_realtime(text_input: str) -> dict:
-    """Detect emotion from a message. Returns emotion details."""
-    text_lower = text_input.lower()
-    text_len = len(text_input)
-
-    scores = {}
-    for emotion, sig in EMOTION_SIGNALS.items():
-        score = 0
-        matched = []
-        for word in sig.get("words", []):
-            if word in text_lower:
-                score += 1
-                matched.append(word)
-        for pattern in sig.get("patterns", []):
-            if pattern in text_input:
-                score += 0.5
-        if text_len < 50 and score > 0:
-            score *= 1.5
-        if score > 0:
-            scores[emotion] = {"score": score, "words": matched}
-
-    if not scores:
-        return {"emotion": "neutral", "valence": 0.0, "arousal": 0.2, "confidence": 0.5, "signals": []}
-
-    best_emotion, best_data = max(scores.items(), key=lambda x: x[1]["score"])
-    sig = EMOTION_SIGNALS[best_emotion]
-    return {
-        "emotion": best_emotion,
-        "valence": sig.get("valence", 0),
-        "arousal": sig.get("arousal", 0.5),
-        "confidence": min(1.0, best_data["score"] / 3),
-        "signals": best_data["words"],
-    }
-
 
 # ============================================================
 # Cross-channel recall
@@ -124,7 +60,7 @@ def get_cross_channel_context(
             params["current_session"] = current_session
             rows = uow.session.execute(text("""
                 SELECT id, content, memory_type, salience, source_session,
-                       source, created_at, emotion_label, tags
+                       source, created_at, tags
                 FROM memories
                 WHERE created_at >= NOW() - INTERVAL :hours_interval
                   AND source_session IS NOT NULL
@@ -138,7 +74,7 @@ def get_cross_channel_context(
         else:
             rows = uow.session.execute(text("""
                 SELECT id, content, memory_type, salience, source_session,
-                       source, created_at, emotion_label, tags
+                       source, created_at, tags
                 FROM memories
                 WHERE created_at >= NOW() - INTERVAL :hours_interval
                   AND source_session IS NOT NULL
@@ -159,7 +95,6 @@ def get_cross_channel_context(
             "source_session": row["source_session"],
             "source": row["source"],
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-            "emotion": row["emotion_label"],
             "tags": row["tags"] or [],
         }
         for row in rows
@@ -218,14 +153,6 @@ def cmd_wake(args):
             index_content = f.read()
 
     with UnitOfWork() as uow:
-        trajectory = uow.session.execute(text("""
-            SELECT session_date, AVG(valence)::numeric(3,2) as avg_v,
-                   array_agg(DISTINCT label) as emotions
-            FROM emotional_snapshots
-            WHERE session_date >= CURRENT_DATE - INTERVAL '3 days'
-            GROUP BY session_date ORDER BY session_date DESC
-        """)).mappings().all()
-
         skills = uow.session.execute(text("""
             SELECT name, maturity, confidence, use_count,
                    CASE WHEN use_count > 0 THEN ROUND(success_count::numeric/use_count*100,0) ELSE 0 END as pct
@@ -263,10 +190,6 @@ def cmd_wake(args):
     print(json.dumps({
         "pending_reflection": pending_reflection,
         "index": index_content[:3000],
-        "emotional_trajectory_3d": [
-            {"date": str(t["session_date"]), "valence": float(t["avg_v"]) if t["avg_v"] else 0, "emotions": t["emotions"]}
-            for t in trajectory
-        ],
         "skills": [
             {"name": s["name"], "maturity": s["maturity"], "confidence": float(s["confidence"]) if s["confidence"] else 0,
              "uses": s["use_count"], "success_pct": float(s["pct"]) if s["pct"] else 0}
@@ -397,15 +320,6 @@ def _get_trust_info():
         return None
 
 
-def _sense_emotion(message: str) -> dict:
-    """Fast emotion detection + DB snapshot. Returns emotion dict."""
-    try:
-        from brain.systems.memory.emotions import sense_emotion
-        return sense_emotion(message)
-    except (ImportError, ConnectionError, OSError):
-        return detect_emotion_realtime(message)
-
-
 def _sense_context(message: str, timeout_s: int = 30) -> list:
     """Semantic context retrieval with graceful timeout. Returns context list."""
     import signal
@@ -428,7 +342,7 @@ def _sense_context(message: str, timeout_s: int = 30) -> list:
         emb_str = vec_to_pg(qemb)
         with UnitOfWork() as uow:
             rows = uow.session.execute(text("""
-                SELECT id, content, memory_type, salience, emotion_label,
+                SELECT id, content, memory_type, salience,
                        1 - (semantic_embedding <=> CAST(:emb AS vector)) as sim
                 FROM memories WHERE NOT archived AND superseded_by IS NULL
                 ORDER BY semantic_embedding <=> CAST(:emb AS vector) LIMIT 5
@@ -439,7 +353,7 @@ def _sense_context(message: str, timeout_s: int = 30) -> list:
                     context.append({
                         "id": row["id"], "content": row["content"][:200],
                         "type": row["memory_type"], "salience": row["salience"],
-                        "emotion": row["emotion_label"], "similarity": round(row["sim"], 3),
+                        "similarity": round(row["sim"], 3),
                     })
 
             uow.session.execute(text("""
@@ -461,66 +375,17 @@ def _sense_context(message: str, timeout_s: int = 30) -> list:
 
 
 def cmd_sense(args):
-    """Process incoming message: detect emotion, then try context retrieval.
-
-    Streams output in two phases so emotion is always available even if
-    the embed server is cold and context retrieval times out.
-    Now includes emotion-weighted retrieval, behavioral hints, and trajectory tracking.
-    """
+    """Process incoming message and retrieve semantic context."""
     message = args.message
     timeout_s = getattr(args, "timeout", 30) or 30
-
-    # Phase 1: Fast emotion detection (Ollama, ~5-15s)
-    emotion = _sense_emotion(message)
-
-    # Phase 2: Emotion-weighted context retrieval (falls back to plain if needed)
-    import signal
-
-    context = []
-    if len(message) > 20:
-        class _Timeout(Exception):
-            pass
-        def _alarm(signum, frame):
-            raise _Timeout()
-        old_handler = signal.signal(signal.SIGALRM, _alarm)
-        signal.alarm(timeout_s)
-        try:
-            context = query_with_emotion(message, emotion_context=emotion, limit=5)
-        except _Timeout:
-            print(json.dumps({"warning": "emotion-weighted retrieval timed out"}), file=sys.stderr)
-        except Exception as e:
-            # Fall back to plain context retrieval
-            print(json.dumps({"warning": f"emotion retrieval failed ({e}), falling back"}), file=sys.stderr)
-            context = _sense_context(message, timeout_s=max(1, timeout_s - 5))
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
-
-    # Phase 3: Behavioral hints
-    behavioral_hints = get_behavioral_hints(emotion.get("emotion", "neutral"))
-
-    # Phase 4: Trajectory tracking
-    trajectory = track_emotion(emotion.get("emotion", "neutral"), message)
+    context = _sense_context(message, timeout_s=timeout_s)
 
     output = {
-        "emotion": emotion,
-        "behavioral_hints": behavioral_hints,
         "relevant_context": context,
         "context_count": len(context),
-        "trajectory": trajectory,
     }
 
-    # Add escalation warning at top level if present
-    if "escalation_warning" in trajectory:
-        output["escalation_warning"] = trajectory["escalation_warning"]
-
     print(json.dumps(output, indent=2, default=str))
-
-
-def cmd_sense_emotion(args):
-    """Standalone fast emotion detection — no embeddings, no cold start risk."""
-    emotion = _sense_emotion(args.message)
-    print(json.dumps({"emotion": emotion}, indent=2, default=str))
 
 
 def cmd_sense_context(args):
@@ -536,7 +401,7 @@ def cmd_encode(args):
     related = [int(x.strip()) for x in args.related.split(",")] if args.related else None
     result = add_memory(
         content=args.content, memory_type=args.type or "episode",
-        salience=args.salience or 5.0, emotion=args.emotion or "neutral",
+        salience=args.salience or 5.0,
         tags=tags, source="session", related_ids=related,
         decay_eligible=not (args.no_decay or False),
         source_session=getattr(args, "source_session", None),
@@ -564,22 +429,16 @@ def cmd_sleep(args):
     with UnitOfWork() as uow:
         if args.summary:
             semantic_emb = embed_document(args.summary)
-            emotional_emb = make_emotional_embedding(label="neutral")
             uow.session.execute(text("""
-                INSERT INTO memories (content, memory_type, semantic_embedding, emotional_embedding,
+                INSERT INTO memories (content, memory_type, semantic_embedding,
                                     salience, source, tags)
-                VALUES (:content, 'episode', CAST(:semantic_emb AS vector), CAST(:emotional_emb AS vector), 5.0, 'session-end', :tags)
+                VALUES (:content, 'episode', CAST(:semantic_emb AS vector), 5.0, 'session-end', :tags)
             """), {
                 "content": args.summary,
                 "semantic_emb": vec_to_pg(semantic_emb),
-                "emotional_emb": vec_to_pg(emotional_emb),
                 "tags": [datetime.now().strftime("%Y-%m-%d")],
             })
 
-        snap_row = uow.session.execute(text(
-            "SELECT COUNT(*) as c FROM emotional_snapshots WHERE session_date = CURRENT_DATE"
-        )).mappings().first()
-        snap_count = snap_row["c"]
         ret = uow.session.execute(text("""
             SELECT COUNT(*) as total,
                    COUNT(*) FILTER (WHERE feedback = 'hit') as hits,
@@ -589,7 +448,6 @@ def cmd_sleep(args):
 
     print(json.dumps({
         "session_encoded": bool(args.summary),
-        "emotional_snapshots_today": snap_count,
         "retrievals_today": ret["total"], "retrieval_hits": ret["hits"], "retrieval_misses": ret["misses"],
     }))
 
@@ -603,14 +461,6 @@ def cmd_status(args):
         mem_count = mem_row["c"]
         edge_row = uow.session.execute(text("SELECT COUNT(*) as c FROM edges")).mappings().first()
         edge_count = edge_row["c"]
-
-        emo = uow.session.execute(text("""
-            SELECT ROUND(AVG(valence)::numeric, 2) as avg_v,
-                   COUNT(*) FILTER (WHERE label IN ('frustrated','angry','disappointed')) as neg,
-                   COUNT(*) FILTER (WHERE label IN ('happy','excited','satisfied','proud')) as pos,
-                   COUNT(*) as total
-            FROM emotional_snapshots WHERE session_date >= CURRENT_DATE - INTERVAL '7 days'
-        """)).mappings().first()
 
         skill_rows = uow.session.execute(text(
             "SELECT maturity, COUNT(*) as cnt FROM skills WHERE NOT archived GROUP BY maturity"
@@ -631,12 +481,6 @@ def cmd_status(args):
 
     print(json.dumps({
         "brain_health": {"memories": mem_count, "edges": edge_count, "embed_server": embed_status},
-        "emotional_state_7d": {
-            "avg_valence": float(emo["avg_v"]) if emo["avg_v"] else None,
-            "positive_snapshots": emo["pos"], "negative_snapshots": emo["neg"],
-            "total_snapshots": emo["total"],
-            "trend": "+" if (emo["avg_v"] and float(emo["avg_v"]) > 0) else "-" if (emo["avg_v"] and float(emo["avg_v"]) < 0) else "=",
-        },
         "skills": {"total": sum(skill_maturity.values()), "by_maturity": skill_maturity},
         "retrieval_quality_7d": {"attempts": ret["total"], "hit_rate_pct": round(ret["hits"] / max(ret["total"], 1) * 100)},
         "last_consolidation": {"date": str(last_consol["run_date"]) if last_consol else None, "status": last_consol["status"] if last_consol else None},
@@ -653,12 +497,11 @@ def main():
 
     p = sub.add_parser("wake"); p.add_argument("--session", default=None, help="Current session key for cross-channel filtering")
     p = sub.add_parser("sense"); p.add_argument("message"); p.add_argument("--timeout", type=int, default=30)
-    p = sub.add_parser("sense-emotion"); p.add_argument("message")
     p = sub.add_parser("sense-context"); p.add_argument("message"); p.add_argument("--timeout", type=int, default=60)
 
     p = sub.add_parser("encode"); p.add_argument("content")
     p.add_argument("--type", "-t", default="episode"); p.add_argument("--salience", "-s", type=float, default=5.0)
-    p.add_argument("--emotion", "-e"); p.add_argument("--tags"); p.add_argument("--related")
+    p.add_argument("--tags"); p.add_argument("--related")
     p.add_argument("--no-decay", action="store_true")
     p.add_argument("--source-session", dest="source_session", default=None, help="Session key for cross-channel tracking")
 
@@ -667,7 +510,7 @@ def main():
     sub.add_parser("status")
 
     args = parser.parse_args()
-    {"wake": cmd_wake, "sense": cmd_sense, "sense-emotion": cmd_sense_emotion,
+    {"wake": cmd_wake, "sense": cmd_sense,
      "sense-context": cmd_sense_context, "encode": cmd_encode,
      "log-retrieval": cmd_log_retrieval, "sleep": cmd_sleep, "status": cmd_status}[args.command](args)
 

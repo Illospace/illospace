@@ -67,7 +67,6 @@ def mock_embeddings():
         patch("brain.systems.memory.embeddings.embed_document", return_value=fake_vec),
         patch("brain.systems.memory.embeddings.embed_query", return_value=fake_vec),
         patch("brain.systems.memory.embeddings.embed_batch", return_value=[fake_vec]),
-        patch("brain.systems.memory.embeddings.make_emotional_embedding", return_value=fake_vec[:8]),
     ]
     for p in patches:
         p.start()

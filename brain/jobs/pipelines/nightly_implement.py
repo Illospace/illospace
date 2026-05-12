@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Nightly self-improvement — mirrors proposals into bounded agency.
+"""Nightly self-improvement proposal review.
 
 Reads improvement memories and PENDING_REFLECTION.json, classifies proposals,
-and records them as bounded-agency candidates. The old direct write and PR
-automation lane is intentionally disabled here.
+and records processing state. Direct write and PR automation are intentionally
+disabled here.
 
 Usage:
     python3 -m brain.jobs.pipelines.nightly_implement [--date 2026-03-04] [--dry-run]
@@ -21,8 +21,6 @@ from sqlalchemy import text
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 import brain.kernel.config as config
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.quality.confidence import assess_confidence
-from brain.systems.agency import mirror_implement_proposal
 
 PROJECT_ROOT = str(config.BRAIN_DIR)
 REPO = os.environ.get("ILLO_GITHUB_REPO", "").strip()
@@ -169,56 +167,26 @@ def classify_proposal(content: str) -> dict | None:
 
 
 def apply_proposal(proposal: dict, dry_run: bool, log_lines: list) -> bool:
-    """Legacy direct-write shim.
+    """Compatibility shim for the removed direct-write lane.
 
-    The bounded-agency migration disables file mutation from this pipeline.
+    Nightly implementation now only reviews proposals. It never mutates files
+    directly, even when a proposal contains a safe path.
     """
-    action = proposal["action"]
-    target = proposal.get("target_file")
-    desc = proposal["description"]
-
+    action = str(proposal.get("action") or "").strip().lower()
+    target_file = proposal.get("target_file")
     if action == "log_only":
-        _log(f"  📝 Logged (no auto-apply): {desc[:80]}", log_lines)
+        _log("  ⏸️ Proposal logged; direct write lane is disabled", log_lines)
         return True
-
-    if not target or not _is_safe_path(target):
-        _log(f"  ❌ Unsafe path rejected: {target}", log_lines)
+    if target_file and not _is_safe_path(str(target_file)):
+        _log("  ❌ Unsafe proposal path rejected", log_lines)
         return False
-
-    _log(
-        "  ⏸️ Direct write lane disabled; proposal will only flow through bounded agency.",
-        log_lines,
-    )
+    _log("  ⏸️ Direct write lane disabled; proposal reviewed only", log_lines)
     return False
 
 
-def _proposal_evidence_refs(*, kind: str, mem: dict | None = None, pending: dict | None = None, issue: dict | None = None, target_date: date | None = None) -> list[dict]:
-    refs: list[dict] = []
-    if mem:
-        refs.append({
-            "kind": kind,
-            "memory_id": mem.get("id"),
-            "created_at": str(mem.get("created_at")),
-        })
-    if pending:
-        refs.append({
-            "kind": kind,
-            "prompt_path": pending.get("prompt_path"),
-            "output_path": pending.get("output_path"),
-            "date": pending.get("date"),
-        })
-    if issue:
-        refs.append({
-            "kind": kind,
-            "issue_number": issue.get("number"),
-            "title": issue.get("title"),
-        })
-    if target_date:
-        refs.append({
-            "kind": "nightly_implement",
-            "date": target_date.isoformat(),
-        })
-    return refs
+def mirror_implement_proposal(proposal: dict, *, source: str | None = None):
+    """Compatibility no-op for the removed proposal mirroring lane."""
+    return None, None
 
 
 def run_tests(log_lines: list) -> bool:
@@ -270,7 +238,7 @@ def main():
     _log(f"{'='*60}", log_lines)
     _log(f"NIGHTLY SELF-IMPROVEMENT — {target_date} {'[DRY RUN]' if dry_run else ''}", log_lines)
     _log(f"{'='*60}", log_lines)
-    _log("Direct writes and nightly PR automation are disabled; proposals mirror into agency only.", log_lines)
+    _log("Direct writes and nightly PR automation are disabled; proposal mirroring is removed.", log_lines)
 
     # Gather items to process
     processed_ids = _get_processed_ids()
@@ -285,10 +253,8 @@ def main():
 
     _log(f"Found {len(improvements)} improvement memories, {len(pending)} pending proposals", log_lines)
 
-    mirrored_count = 0
     preview_count = 0
-    blocked_count = 0
-    approved_count = 0
+    skipped_count = 0
     new_processed_ids = set(processed_ids)
 
     # Process improvement memories
@@ -298,26 +264,15 @@ def main():
         if proposal is None:
             _log("  ⚠️ Could not parse into actionable proposal, skipping", log_lines)
             new_processed_ids.add(mem["id"])
-            blocked_count += 1
+            skipped_count += 1
             continue
 
         if dry_run:
-            _log("  🔍 [DRY RUN] Would mirror proposal into bounded agency", log_lines)
+            _log("  🔍 [DRY RUN] Would mark proposal reviewed; execution lane is disabled", log_lines)
             preview_count += 1
         else:
-            candidate, decision = mirror_implement_proposal(
-                proposal=proposal,
-                source_refs=_proposal_evidence_refs(kind="improvement_memory", mem=mem, target_date=target_date),
-            )
-            mirrored_count += 1
-            if decision.decision == "approve":
-                approved_count += 1
-            else:
-                blocked_count += 1
-            _log(
-                f"  🤝 Agency decision: {decision.decision} ({decision.reason_code}) for candidate #{candidate.id}",
-                log_lines,
-            )
+            _log("  ⏸️ Proposal reviewed; execution lane is disabled", log_lines)
+            skipped_count += 1
         new_processed_ids.add(mem["id"])
 
     # Process pending reflection proposals
@@ -333,23 +288,13 @@ def main():
         content = prop.get("proposal", prop.get("change", json.dumps(prop)))
         proposal = classify_proposal(content)
         if proposal:
+            mirror_implement_proposal(proposal, source="pending_reflection")
             if dry_run:
-                _log("  🔍 [DRY RUN] Would mirror proposal into bounded agency", log_lines)
+                _log("  🔍 [DRY RUN] Would mark pending proposal reviewed; execution lane is disabled", log_lines)
                 preview_count += 1
             else:
-                candidate, decision = mirror_implement_proposal(
-                    proposal=proposal,
-                    source_refs=_proposal_evidence_refs(kind="pending_reflection", pending=prop, target_date=target_date),
-                )
-                mirrored_count += 1
-                if decision.decision == "approve":
-                    approved_count += 1
-                else:
-                    blocked_count += 1
-                _log(
-                    f"  🤝 Agency decision: {decision.decision} ({decision.reason_code}) for candidate #{candidate.id}",
-                    log_lines,
-                )
+                _log("  ⏸️ Pending proposal reviewed; execution lane is disabled", log_lines)
+                skipped_count += 1
 
     # Process GitHub issues labeled 'nightly'
     _log("\n--- GITHUB ISSUES (label: nightly) ---", log_lines)
@@ -363,26 +308,15 @@ def main():
         # Classify the issue body as a proposal
         proposal = classify_proposal(issue_body) if issue_body else None
         if not proposal:
-            _log(f"  ℹ️ Issue #{issue_num} could not be classified — mirroring skipped", log_lines)
+            _log(f"  ℹ️ Issue #{issue_num} could not be classified; skipping", log_lines)
             continue
 
         if dry_run:
-            _log("  🔍 [DRY RUN] Would mirror issue proposal into bounded agency", log_lines)
+            _log("  🔍 [DRY RUN] Would mark issue proposal reviewed; execution lane is disabled", log_lines)
             preview_count += 1
         else:
-            candidate, decision = mirror_implement_proposal(
-                proposal=proposal,
-                source_refs=_proposal_evidence_refs(kind="github_issue", issue=issue, target_date=target_date),
-            )
-            mirrored_count += 1
-            if decision.decision == "approve":
-                approved_count += 1
-            else:
-                blocked_count += 1
-            _log(
-                f"  🤝 Agency decision: {decision.decision} ({decision.reason_code}) for candidate #{candidate.id}",
-                log_lines,
-            )
+            _log("  ⏸️ Issue proposal reviewed; execution lane is disabled", log_lines)
+            skipped_count += 1
 
     # Save processed IDs
     if not dry_run:
@@ -394,8 +328,7 @@ def main():
 
     _log(f"\n{'='*60}", log_lines)
     _log(
-        f"Complete. Previewed: {preview_count}, Mirrored: {mirrored_count}, "
-        f"Approved: {approved_count}, Blocked/Skipped: {blocked_count}",
+        f"Complete. Previewed: {preview_count}, Reviewed/Skipped: {skipped_count}",
         log_lines,
     )
     _log(f"{'='*60}", log_lines)
