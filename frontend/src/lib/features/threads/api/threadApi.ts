@@ -7,6 +7,7 @@ export type ThreadMessage = Awaited<ReturnType<typeof api.addThreadMessage>>;
 export type ThreadRunHistoryItem = Awaited<ReturnType<typeof api.runHistory>>[number];
 export type RunDecisionResponse = Awaited<ReturnType<typeof api.approveRun>>;
 export type RunTool = Awaited<ReturnType<typeof api.runTools>>[number];
+export type ThreadTraceZipDownload = Awaited<ReturnType<typeof api.downloadThreadTraceZip>>;
 export type RunGraph = Awaited<ReturnType<typeof api.runGraph>>;
 export type RunTraceZipDownload = Awaited<ReturnType<typeof api.downloadRunTraceZip>>;
 export type RunStatus = Awaited<ReturnType<typeof api.runStatus>>;
@@ -34,6 +35,7 @@ type ThreadApiMethods = {
   runStatus: () => Promise<RunStatus>;
   runGraph: (id: number) => Promise<RunGraph>;
   runTools: (id: number) => Promise<RunTool[]>;
+  downloadThreadTraceZip: typeof api.downloadThreadTraceZip;
   downloadRunTraceZip: typeof api.downloadRunTraceZip;
   skillFeedback: typeof api.skillFeedback;
   opsActive: () => Promise<ActiveOpsRun[]>;
@@ -65,6 +67,7 @@ export const threadApi = pickTypedApiMethods<ThreadApiMethods>([
   'runStatus',
   'runGraph',
   'runTools',
+  'downloadThreadTraceZip',
   'downloadRunTraceZip',
   'skillFeedback',
   'opsActive',
@@ -95,6 +98,7 @@ export const {
   runStatus,
   runGraph,
   runTools,
+  downloadThreadTraceZip,
   downloadRunTraceZip,
   skillFeedback,
   opsActive,

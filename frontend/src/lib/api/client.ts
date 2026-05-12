@@ -819,6 +819,15 @@ export const api = {
     fetchJson<any>(`/api/cortex/ideas/${ideaId}/cancel-all`, { method: 'POST' }),
   runGraph: (id: number) => fetchJson<any>(`/api/cortex/run/${id}/graph`),
   runTools: (id: number) => fetchJson<any[]>(`/api/cortex/runs/${id}/tools`),
+  downloadThreadTraceZip: async (ideaId: string) => {
+    const result = await fetchBlob(`/api/cortex/ideas/${ideaId}/trace-export.zip`, { method: 'POST', timeoutMs: 60_000 });
+    return {
+      blob: result.blob,
+      filename: result.filename || `illo-thread-trace-${ideaId}.zip`,
+      bytes: result.blob.size,
+      traceId: result.headers.get('x-trace-id'),
+    };
+  },
   downloadRunTraceZip: async (id: number) => {
     const result = await fetchBlob(`/api/cortex/run/${id}/trace-export.zip`, { method: 'POST' });
     return {

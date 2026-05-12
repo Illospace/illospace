@@ -28,6 +28,14 @@
     return seed.slice(0, 1).toUpperCase();
   }
 
+  function notificationActorColor(notification: AppNotification): string {
+    return notification.actor_color || (notification.source === 'chat' ? '#5ea9ff' : '#5ecfa0');
+  }
+
+  function notificationRowStyle(notification: AppNotification): string {
+    return `--notification-actor-color:${notificationActorColor(notification)}`;
+  }
+
   function toggleMenu(event: MouseEvent) {
     event.stopPropagation();
     open = !open;
@@ -143,13 +151,11 @@
             <button
               type="button"
               class="notification-row"
+              style={notificationRowStyle(notification)}
               role="menuitem"
               onclick={() => handleSelect(notification)}
             >
-              <span
-                class="notification-avatar"
-                style:background={notification.actor_color || (notification.source === 'chat' ? 'rgba(94, 169, 255, 0.22)' : 'rgba(94, 207, 160, 0.18)')}
-              >
+              <span class="notification-avatar">
                 {actorInitial(notification)}
               </span>
 
@@ -312,6 +318,7 @@
     border-radius: 16px;
     background: var(--constellation-notification-row-background);
     color: inherit;
+    --notification-actor-color: var(--constellation-color-user-accent, #57cfa0);
     text-align: left;
     cursor: pointer;
     transition:
@@ -322,7 +329,7 @@
 
   .notification-row:hover {
     transform: translateY(-1px);
-    border-color: var(--constellation-notification-row-hover-border);
+    border-color: color-mix(in srgb, var(--notification-actor-color) 24%, transparent);
     background: var(--constellation-notification-row-hover-background);
   }
 
@@ -333,9 +340,18 @@
     align-items: center;
     justify-content: center;
     border-radius: 999px;
+    background:
+      radial-gradient(circle at 36% 28%, rgba(255, 255, 255, 0.34), transparent 34%),
+      color-mix(in srgb, var(--notification-actor-color) 88%, rgba(9, 12, 19, 0.18));
     color: var(--constellation-notification-avatar-text);
     font-size: 12px;
     font-weight: 700;
+  }
+
+  :global(:root[data-color-scheme='light']) .notification-avatar {
+    background:
+      radial-gradient(circle at 36% 28%, rgba(255, 255, 255, 0.5), transparent 34%),
+      color-mix(in srgb, var(--notification-actor-color) 84%, rgba(255, 253, 247, 0.16));
   }
 
   .notification-copy {
@@ -369,7 +385,7 @@
   }
 
   .notification-occurrence {
-    color: var(--constellation-notification-occurrence);
+    color: color-mix(in srgb, var(--notification-actor-color) 84%, transparent);
     font-size: 11px;
   }
 </style>

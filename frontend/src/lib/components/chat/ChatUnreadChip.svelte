@@ -5,12 +5,14 @@
     compact = false,
     muted = false,
     className = '',
+    style = '',
   }: {
     count?: number;
     label?: string;
     compact?: boolean;
     muted?: boolean;
     className?: string;
+    style?: string;
   } = $props();
 
   const resolvedCount = $derived(Math.max(0, count));
@@ -23,7 +25,7 @@
 </script>
 
 {#if resolvedCount > 0 || label}
-  <span class={rootClass} aria-label={`${resolvedCount} unread`}>
+  <span class={rootClass} {style} aria-label={`${resolvedCount} unread`}>
     {text}
   </span>
 {/if}
@@ -36,8 +38,14 @@
     justify-content: center;
     padding: 4px 8px;
     border-radius: 999px;
-    background: linear-gradient(180deg, rgba(141, 183, 255, 0.2), rgba(141, 183, 255, 0.12));
-    border: 1px solid rgba(141, 183, 255, 0.26);
+    --chat-unread-chip-accent: var(--thread-accent, var(--constellation-color-user-accent, #57CFA0));
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--chat-unread-chip-accent) 24%, transparent),
+        color-mix(in srgb, var(--chat-unread-chip-accent) 14%, transparent)
+      );
+    border: 1px solid color-mix(in srgb, var(--chat-unread-chip-accent) 30%, transparent);
     color: rgba(230, 238, 255, 0.96);
     font-family: var(--constellation-font-mono);
     font-size: 9px;
@@ -45,7 +53,7 @@
     letter-spacing: 0.14em;
     line-height: 1;
     text-transform: uppercase;
-    box-shadow: 0 0 14px rgba(141, 183, 255, 0.14);
+    box-shadow: 0 0 14px color-mix(in srgb, var(--chat-unread-chip-accent) 18%, transparent);
   }
 
   .chat-unread-chip.is-compact {
