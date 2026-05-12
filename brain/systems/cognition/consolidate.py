@@ -23,7 +23,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.memory.truth_maintenance import (
     build_consolidation_truth_fields,
     record_memory_review,
@@ -178,7 +178,7 @@ def _discover_consolidation_scopes(
     limit: int = 500,
 ) -> list[ConsolidationScope]:
     """Discover concrete memory scopes so consolidation never runs globally."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text("""
             SELECT DISTINCT
                    COALESCE(visibility, 'private') AS visibility,
@@ -266,7 +266,7 @@ def cluster_episodes(
     )
     scope_clause, scope_params = _scope_sql(scoped, alias="m")
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Fetch unconsolidated episodic memories
         result = uow.session.execute(text(f"""
             SELECT id, content, semantic_embedding, user_id, org_id, visibility
@@ -357,7 +357,7 @@ def extract_semantic(
     )
     scope_clause, scope_params = _scope_sql(scoped, alias="m")
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Fetch episode contents
         result = uow.session.execute(text(f"""
             SELECT id, content, memory_type, salience, tags, user_id, org_id, visibility
@@ -518,7 +518,7 @@ def crystallize_procedural(
     )
     scope_clause, scope_params = _scope_sql(scoped, alias="m")
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Find semantic memories related to this skill
         result = uow.session.execute(text(f"""
             SELECT id, content, salience, user_id, org_id, visibility
@@ -715,7 +715,7 @@ def apply_forgetting_curve(
     if scoped is not None:
         scope_clause, scope_params = _scope_sql(scoped, alias="m")
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Decay episodic memories
         result_ep = uow.session.execute(text(f"""
             UPDATE memories m SET
@@ -851,7 +851,7 @@ def _run_dag_compaction_for_scope(
     cascade_model = low_model
 
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             # ── Phase 1: Leaf compaction ──────────────────────────
             # Find episodic memories not yet in any summary (no SummaryLineage row)
             from sqlalchemy import select
@@ -1068,7 +1068,7 @@ def run_consolidation(
                 stats["semantic_created"] += 1
 
         # Step 3: Crystallize for active skills inside the same scope.
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             result = uow.session.execute(text("""
                 SELECT DISTINCT name FROM skills
                 WHERE NOT archived AND use_count >= 3

@@ -43,7 +43,7 @@ from sqlalchemy import text
 
 from brain.systems.memory.attention_controller import AttentionController, observe_retrieval
 from brain.platform.db.repositories.memories import MemoryRepository
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.db.repositories.memory_write_context import MemoryWriteContext
 from brain.platform.db.repositories.memory_visibility import MemoryVisibilityContext
 from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_model_tier
@@ -192,7 +192,7 @@ def _log_retrieval(query: str, results: list) -> None:
         from brain.platform.db.models.system import RetrievalLog
 
         top_score = max((r.get("similarity", 0) for r in results), default=0)
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             uow.retrieval_logs.create(
                 query_text=query[:500],
                 results_returned=len(results),
@@ -229,7 +229,7 @@ def tool_brain_recall(
     )
 
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             results = graph_augmented_recall(
                 uow.session,
                 query_emb,
@@ -269,7 +269,7 @@ def tool_brain_recall(
         logger.warning(f"Graph recall failed, falling back to vector: {e}")
 
     # Fallback: pure vector search with same visibility filtering
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         memories = MemoryRepository(uow.session).recall_vector(
             query_embedding=query_emb,
             limit=limit,
@@ -366,7 +366,7 @@ def tool_brain_guardrails(skill: str | None = None) -> dict:
     """Get guardrails: recent failures, high-salience warnings, and skill-specific pitfalls."""
     result = {"guardrails": [], "warnings": [], "pitfalls": []}
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Recent failures (last 7 days)
         rows = uow.session.execute(text("""
             SELECT s.name, se.outcome_details, se.error_analysis, se.started_at
@@ -554,7 +554,7 @@ def tool_brain_skills(task: str) -> dict:
 
     _SMALL_SKILLSET_THRESHOLD = 30  # below this, send ALL skills — model picks better than embeddings
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Count active skills to decide strategy
         count_row = uow.session.execute(text(
             "SELECT COUNT(*) as cnt FROM skills WHERE NOT archived"
@@ -809,7 +809,7 @@ def tool_skill_view(
             "allowed_sections": sorted(allowed),
         }
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         skill = uow.skills.get_by_name(name)
         if skill is None:
             return {"error": f"Skill '{name}' not found"}
@@ -878,7 +878,7 @@ def tool_skill_asset(
     except ValueError as exc:
         return {"error": str(exc)}
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         skill = uow.skills.get_by_name(name)
         if skill is None:
             return {"error": f"Skill '{name}' not found"}
@@ -977,7 +977,7 @@ def tool_brain_encode(
         else:
             degraded_reason = f"embedding_failed: {error_text[:200]}"
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.memories.insert_memory(
             content=content,
             memory_type=memory_type,

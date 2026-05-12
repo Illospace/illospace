@@ -43,7 +43,7 @@ def _handle_manage_cycle(
     from brain.platform.db.models.cycle import Cycle
     from brain.platform.db.models.idea import Idea
     from brain.platform.db.models.org import User
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
     from datetime import timezone as dt_timezone
 
     user_id = getattr(_agent_context, "user_id", None)
@@ -81,7 +81,7 @@ def _handle_manage_cycle(
 
     try:
         if action == "list":
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 stmt = (
                     select(Cycle)
                     .where(*_cycle_scope())
@@ -102,7 +102,7 @@ def _handle_manage_cycle(
             thinking = validate_thinking_override(thinking_override)
             normalized_name = validate_nonempty_trimmed(name, "name")
             normalized_prompt = validate_nonempty_trimmed(prompt, "prompt")
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 if target_idea_id:
                     stmt = select(Idea.id).where(*_idea_scope(target_idea_id))
                     if not uow.session.execute(stmt).first():
@@ -139,7 +139,7 @@ def _handle_manage_cycle(
         elif action == "update":
             if not id:
                 return json.dumps({"error": "update requires: id"})
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 stmt = select(Cycle).where(
                     Cycle.id == id,
                     *_cycle_scope(),
@@ -194,7 +194,7 @@ def _handle_manage_cycle(
         elif action == "delete":
             if not id:
                 return json.dumps({"error": "delete requires: id"})
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 stmt = select(Cycle).where(
                     Cycle.id == id,
                     *_cycle_scope(),
@@ -218,7 +218,7 @@ def _handle_manage_cycle(
         elif action == "run":
             if not id:
                 return json.dumps({"error": "run requires: id"})
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 stmt = select(Cycle).where(
                     Cycle.id == id,
                     *_cycle_scope(),

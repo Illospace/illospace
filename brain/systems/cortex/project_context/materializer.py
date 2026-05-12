@@ -14,7 +14,7 @@ from brain.systems.cortex.project_context.github import parse_github_repo_slug
 from brain.systems.cortex.project_context.permissions import derive_project_permission_scope
 from brain.systems.cortex.project_context.snapshot import snapshot_from_project_context
 from brain.platform.db.models.run import AgentRun
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.vault import get_secret, list_secrets
 
 
@@ -406,7 +406,7 @@ def materialize_project_context_workspaces(
         return result.fail("Project Context materialization requires a workspace root.")
 
     root = Path(workspace_root).expanduser()
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         run = uow.session.get(AgentRun, run_id)
         if not run:
             return result.fail(f"Agent run {run_id} was not found.")
@@ -450,7 +450,7 @@ def materialize_project_context_workspaces(
         snapshot["validation_errors"] = [*existing_errors, *result.errors]
         snapshot["status"] = "invalid"
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         run = uow.session.get(AgentRun, run_id)
         if not run:
             return result

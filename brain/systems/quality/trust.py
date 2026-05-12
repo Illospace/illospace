@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 TRUST_LEVELS = {0: "PROBATION", 1: "STANDARD", 2: "TRUSTED"}
 LEVEL_UP_THRESHOLD = 5
@@ -25,7 +25,7 @@ DEGRADE_WINDOW_DAYS = 7
 
 def get_trust_level() -> dict:
     """Return current trust state with level name."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         row = uow.session.execute(
             text("SELECT * FROM trust_state LIMIT 1")
         ).mappings().first()
@@ -108,7 +108,7 @@ def record_outcome(success: bool, caught_by: str = "self") -> dict:
                 level = max(0, level - 1)
 
     # Update DB
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         uow.session.execute(text("""
             UPDATE trust_state SET
                 current_level = :level,
@@ -127,7 +127,7 @@ def record_outcome(success: bool, caught_by: str = "self") -> dict:
 
 def _count_recent_failures() -> int:
     """Count failures in the last DEGRADE_WINDOW_DAYS days."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         row = uow.session.execute(text("""
             SELECT COUNT(*) as cnt FROM violation_log
             WHERE session_date >= CURRENT_DATE - INTERVAL :days

@@ -243,7 +243,7 @@ def _handle_cortex_visual_reply(content_type: str, title: str, content: str, dis
 
     try:
         from brain.systems.cortex.events import publish_safe as _ws_publish
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
         from brain.platform.db.models.idea import VisualBlock
         from sqlalchemy import text as sa_text
 
@@ -251,7 +251,7 @@ def _handle_cortex_visual_reply(content_type: str, title: str, content: str, dis
         d_id = run.run_id if run else None
 
         # Find the latest thread message for this idea to set position_after
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             last_msg = uow.session.execute(sa_text(
                 "SELECT id FROM idea_threads WHERE idea_id = :idea_id "
                 "ORDER BY created_at DESC LIMIT 1"

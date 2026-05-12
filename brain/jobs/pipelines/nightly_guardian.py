@@ -18,7 +18,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 
 def audit_day(target_date: str | None = None):
@@ -26,7 +26,7 @@ def audit_day(target_date: str | None = None):
     target = target_date or date.today().isoformat()
     print(f"[guardian-audit] Auditing {target}")
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # 1. Get all skill executions from the day
         result = uow.session.execute(text("""
             SELECT se.id, se.task_description, se.outcome, s.name as skill_name,

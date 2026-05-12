@@ -17,7 +17,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [cortex_optimize] %(message)s")
 log = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 
 def _ensure_config_table():
     """Create cortex_config table if it doesn't exist."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         uow.session.execute(text("""
             CREATE TABLE IF NOT EXISTS cortex_config (
                 key VARCHAR(100) PRIMARY KEY,
@@ -39,7 +39,7 @@ def _adjust_thresholds():
     """Adjust emergence thresholds per source based on engagement rates."""
     _ensure_config_table()
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Get engagement rates per origin
         result = uow.session.execute(text("""
             SELECT
@@ -90,7 +90,7 @@ def _adjust_thresholds():
 def _detect_stale():
     """Transition ideas with no interaction for 14+ days to 'stale'."""
     stale_count = 0
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Find non-archived, non-stale, non-resolved ideas with no recent activity
         result = uow.session.execute(text("""
             SELECT i.id, i.title, i.status, i.updated_at
@@ -126,7 +126,7 @@ def _surface_insights():
     """Detect high-engagement clusters and surface meta-insights."""
     insights = []
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             # Find ideas with high engagement in last 7 days
             result = uow.session.execute(text("""
                 SELECT i.id, i.title, count(e.id) as events

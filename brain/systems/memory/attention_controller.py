@@ -23,7 +23,7 @@ from brain.platform.db.models.memory import Memory
 from brain.platform.db.models.memory_dag import MemorySummary
 from brain.platform.db.repositories.memory_visibility import MemoryVisibilityContext, memory_is_visible
 from brain.platform.db.models.system import RetrievalDecision, RetrievalItemFeedback
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -799,7 +799,7 @@ class AttentionController:
         *,
         run_id: int | None = None,
     ) -> AttentionDecision:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             decision_row = RetrievalDecision(
                 run_id=run_id,
                 stage=decision.stage,
@@ -868,7 +868,7 @@ class AttentionController:
             service_retrieval=service_retrieval,
         )
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = select(RetrievalItemFeedback).where(
                 RetrievalItemFeedback.retrieval_decision_id == retrieval_decision_id,
             )
@@ -922,7 +922,7 @@ class AttentionController:
             service_retrieval=service_retrieval,
         )
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = select(RetrievalItemFeedback).where(
                 RetrievalItemFeedback.retrieval_decision_id == retrieval_decision_id,
             )
@@ -961,7 +961,7 @@ class AttentionController:
             service_retrieval=service_retrieval,
         )
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = select(RetrievalItemFeedback).where(
                 RetrievalItemFeedback.retrieval_decision_id == retrieval_decision_id,
                 RetrievalItemFeedback.lazy_load_eligible.is_(True),

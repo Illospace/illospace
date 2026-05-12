@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.db.repositories.memory_write_context import (
     MemoryWriteContext,
     dangerously_build_dev_test_memory_write_context,
@@ -88,7 +88,7 @@ def add_memory(
 
     semantic_emb = embed_document(content)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         context = write_context
         if context is None:
             context = dangerously_build_dev_test_memory_write_context(
@@ -165,7 +165,7 @@ def query_memories(
 
     query_emb = embed_query(query)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         visibility_context = MemoryVisibilityContext(
             user_id=user_id,
             org_id=org_id,
@@ -251,7 +251,7 @@ def _query_with_pools(
     """
     query_emb = embed_query(query)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Get adaptive ratios (falls back to defaults if no data)
         ratios = uow.pool_stats.get_pool_ratios(org_id=org_id)
         results = uow.memories.retrieve_with_pools(
@@ -298,7 +298,7 @@ def _query_with_pools(
 
 def get_memory(memory_id: int) -> dict | None:
     """Get a single memory with its edges."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         detail = uow.memories.get_detail(memory_id)
         if not detail:
             return None
@@ -328,7 +328,7 @@ def get_memory(memory_id: int) -> dict | None:
 
 def get_context(memory_id: int, depth: int = 2) -> dict:
     """Get memory with full graph neighborhood (spreading activation)."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return uow.memories.get_graph_context(memory_id, depth=depth)
 
 
@@ -337,7 +337,7 @@ def list_memories(
     min_salience: float | None = None, tags: list[str] | None = None,
 ) -> list[dict]:
     """List memories with optional filters."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         memories = uow.memories.list_filtered(
             memory_type=memory_type,
             limit=limit,
@@ -359,13 +359,13 @@ def list_memories(
 
 def get_stats() -> dict:
     """Database statistics."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return uow.memories.stats()
 
 
 def connect_memories(source: int, target: int, rel: str, weight: float = 1.0) -> int:
     """Create an edge between two memories."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return uow.edges.upsert_edge(
             source,
             target,
@@ -437,7 +437,7 @@ def cmd_stats(args):
 
 
 def cmd_decay(args):
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         candidates = uow.memories.list_decay_candidates(
             days=args.days,
             threshold=args.threshold,
@@ -455,7 +455,7 @@ def cmd_decay(args):
 
 
 def cmd_index(args):
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         memories = uow.memories.list_index_memories(limit=args.limit)
 
     by_type: dict = {}

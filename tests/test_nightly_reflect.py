@@ -87,11 +87,11 @@ class TestGatherContextRegressions:
     """Regression tests for known bugs in gather_context."""
 
     def test_connection_uses_context_manager(self):
-        """Regression: must use 'with UnitOfWork()' context manager pattern."""
+        """Regression: must use a UnitOfWork/db connection context manager."""
         import inspect
         from brain.jobs.pipelines.nightly_reflect import gather_context
         source = inspect.getsource(gather_context)
-        assert "with UnitOfWork()" in source or "with db.get_conn()" in source, \
+        assert "open_unit_of_work" in source or "with db.get_conn()" in source, \
             "gather_context must use a context manager"
 
 
@@ -239,7 +239,7 @@ class TestApplyReflectionRegressions:
         import inspect
         from brain.jobs.pipelines.nightly_reflect import apply_reflection
         source = inspect.getsource(apply_reflection)
-        assert "with" in source and ("UnitOfWork" in source or "db.get_conn()" in source), \
+        assert "with" in source and ("open_unit_of_work" in source or "db.get_conn()" in source), \
             "apply_reflection must use a context manager"
 
 

@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
-from contextvars import ContextVar
 from functools import cached_property
-from collections.abc import Callable, Iterator
+import threading
+from collections.abc import Callable
 from typing import Any, Generic, TypeVar
 
 from sqlalchemy.orm import Session
@@ -65,40 +64,180 @@ from brain.platform.db.repositories.vault import (
 RepoT = TypeVar("RepoT")
 ReturnT = TypeVar("ReturnT")
 
-_sync_session_override: ContextVar[Session | None] = ContextVar(
-    "unit_of_work_sync_session_override",
-    default=None,
-)
+async def run_unit_of_work_task(fn: Callable[..., ReturnT], /, *args: Any, **kwargs: Any) -> ReturnT:
+    """Run a synchronous entrypoint on the async DB compatibility boundary."""
+
+    return await asyncio.to_thread(fn, *args, **kwargs)
 
 
-def _running_async_loop() -> bool:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return False
-    return True
+class _AsyncLoopWorker:
+    """Owns one event loop for a blocking compatibility transaction."""
+
+    def __init__(self) -> None:
+        self._ready = threading.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread = threading.Thread(target=self._run, name="blocking-async-uow", daemon=True)
+        self._thread.start()
+        self._ready.wait()
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        self._ready.set()
+        loop.run_forever()
+        loop.close()
+
+    def run(self, awaitable):
+        assert self._loop is not None
+        return asyncio.run_coroutine_threadsafe(awaitable, self._loop).result()
+
+    def call(self, fn: Callable[[], ReturnT]) -> ReturnT:
+        async def _invoke() -> ReturnT:
+            return fn()
+
+        return self.run(_invoke())
+
+    def close(self) -> None:
+        if self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=5)
 
 
-@contextmanager
-def use_sync_session(session: Session) -> Iterator[None]:
-    """Bind nested sync UnitOfWork blocks to an AsyncSession.run_sync session."""
+class BlockingAsyncQuery:
+    """Small compatibility wrapper for legacy ``session.query`` call sites."""
 
-    token = _sync_session_override.set(session)
-    try:
-        yield
-    finally:
-        _sync_session_override.reset(token)
+    def __init__(self, session: BlockingAsyncSession, *entities: Any) -> None:
+        from sqlalchemy import select
+
+        self._session = session
+        self._entities = entities
+        self._stmt = select(*entities)
+
+    def filter(self, *criteria: Any):
+        self._stmt = self._stmt.where(*criteria)
+        return self
+
+    def where(self, *criteria: Any):
+        return self.filter(*criteria)
+
+    def join(self, *args: Any, **kwargs: Any):
+        self._stmt = self._stmt.join(*args, **kwargs)
+        return self
+
+    def order_by(self, *clauses: Any):
+        self._stmt = self._stmt.order_by(*clauses)
+        return self
+
+    def limit(self, value: int):
+        self._stmt = self._stmt.limit(value)
+        return self
+
+    def with_for_update(self, **kwargs: Any):
+        self._stmt = self._stmt.with_for_update(**kwargs)
+        return self
+
+    def _single_model_entity(self) -> bool:
+        return len(self._entities) == 1 and hasattr(self._entities[0], "__mapper__")
+
+    def all(self):
+        result = self._session.execute(self._stmt)
+        return result.scalars().all() if self._single_model_entity() else result.all()
+
+    def first(self):
+        result = self._session.execute(self._stmt.limit(1))
+        return result.scalars().first() if self._single_model_entity() else result.first()
+
+    def scalar(self):
+        return self._session.scalar(self._stmt.limit(1))
+
+    def one_or_none(self):
+        result = self._session.execute(self._stmt.limit(2))
+        return result.scalars().one_or_none() if self._single_model_entity() else result.one_or_none()
 
 
-async def run_sync_with_unit_of_work(fn: Callable[..., ReturnT], /, *args: Any, **kwargs: Any) -> ReturnT:
-    """Run a legacy-shaped service function inside an async UnitOfWork."""
+class BlockingAsyncSession:
+    """Synchronous-looking adapter backed by an ``AsyncSession``.
 
-    async with UnitOfWork() as uow:
-        def _invoke(sync_session: Session) -> ReturnT:
-            with use_sync_session(sync_session):
-                return fn(*args, **kwargs)
+    This is only for sync entrypoints such as CLIs and worker bootstrap code.
+    Async request/runtime code should continue to use ``async with UnitOfWork()``.
+    """
 
-        return await uow.session.run_sync(_invoke)
+    def __init__(self, worker: _AsyncLoopWorker, session: AsyncSession) -> None:
+        self._worker = worker
+        self._session = session
+
+    def scalars(self, *args: Any, **kwargs: Any):
+        return self._worker.run(self._session.scalars(*args, **kwargs))
+
+    def execute(self, *args: Any, **kwargs: Any):
+        return self._worker.run(self._session.execute(*args, **kwargs))
+
+    def scalar(self, *args: Any, **kwargs: Any):
+        return self._worker.run(self._session.scalar(*args, **kwargs))
+
+    def get(self, *args: Any, **kwargs: Any):
+        return self._worker.run(self._session.get(*args, **kwargs))
+
+    def add(self, obj: Any) -> None:
+        self._worker.call(lambda: self._session.add(obj))
+
+    def add_all(self, objects: list[Any]) -> None:
+        self._worker.call(lambda: self._session.add_all(objects))
+
+    def begin_nested(self):
+        return _BlockingAsyncTransaction(self._worker, self._session.begin_nested())
+
+    def commit(self) -> None:
+        self._worker.run(self._session.commit())
+
+    def delete(self, obj: Any) -> None:
+        self._worker.run(self._session.delete(obj))
+
+    def flush(self) -> None:
+        self._worker.run(self._session.flush())
+
+    def refresh(self, obj: Any) -> None:
+        self._worker.run(self._session.refresh(obj))
+
+    def expunge(self, obj: Any) -> None:
+        self._worker.call(lambda: self._session.expunge(obj))
+
+    def get_bind(self, *args: Any, **kwargs: Any):
+        return self._worker.call(lambda: self._session.get_bind(*args, **kwargs))
+
+    def rollback(self) -> None:
+        self._worker.run(self._session.rollback())
+
+    def close(self) -> None:
+        self._worker.run(self._session.close())
+
+    def query(self, *entities: Any) -> BlockingAsyncQuery:
+        return BlockingAsyncQuery(self, *entities)
+
+    def table_exists(self, table_name: str) -> bool:
+        from sqlalchemy import inspect
+
+        async def _exists() -> bool:
+            connection = await self._session.connection()
+            return await connection.run_sync(
+                lambda sync_connection: inspect(sync_connection).has_table(table_name)
+            )
+
+        return bool(self._worker.run(_exists()))
+
+
+class _BlockingAsyncTransaction:
+    def __init__(self, worker: _AsyncLoopWorker, transaction) -> None:
+        self._worker = worker
+        self._transaction = transaction
+
+    def __enter__(self):
+        return self._worker.run(self._transaction.__aenter__())
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._worker.run(self._transaction.__aexit__(exc_type, exc_val, exc_tb))
 
 
 class AsyncRepositoryProxy(Generic[RepoT]):
@@ -123,7 +262,7 @@ class AsyncRepositoryProxy(Generic[RepoT]):
                 repo = self._repo_cls(sync_session)
                 return getattr(repo, name)(*args, **kwargs)
 
-            return await self._session.run_sync(_invoke)
+            return await getattr(self._session, "run_sync")(_invoke)
 
         return _call
 
@@ -135,10 +274,17 @@ class UnitOfWork:
     manager support remains for older CLI/test paths while they are migrated.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, _blocking: bool = False) -> None:
         self._session: Session | None = None
         self._async_session: AsyncSession | None = None
+        self._blocking_session: BlockingAsyncSession | None = None
         self._external_session = False
+        self._blocking = _blocking
+        self._worker: _AsyncLoopWorker | None = None
+
+    @classmethod
+    def blocking(cls) -> UnitOfWork:
+        return cls(_blocking=True)
 
     async def __aenter__(self) -> UnitOfWork:
         self._async_session = SessionFactory()
@@ -155,38 +301,33 @@ class UnitOfWork:
         self._clear_cached_repositories()
 
     def __enter__(self) -> UnitOfWork:
-        override = _sync_session_override.get()
-        if override is not None:
-            self._session = override
-            self._external_session = True
-            return self
+        if not self._blocking:
+            raise RuntimeError("Use `async with UnitOfWork()` or `open_unit_of_work()`.")
+        self._worker = _AsyncLoopWorker()
 
-        if _running_async_loop():
-            raise RuntimeError(
-                "Synchronous UnitOfWork cannot open the legacy DB engine inside async runtime. "
-                "Use `async with UnitOfWork()` or wrap sync code with `run_sync_with_unit_of_work()`."
-            )
+        async def _open() -> AsyncSession:
+            return SessionFactory()
 
-        from brain.platform.db.legacy import legacy_session_factory
-
-        self._session = legacy_session_factory()
-        self._external_session = False
+        self._async_session = self._worker.run(_open())
+        self._blocking_session = BlockingAsyncSession(self._worker, self._async_session)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        assert self._session is not None
-        if self._external_session:
-            if exc_type is None:
-                self._session.flush()
-        elif exc_type:
-            self._session.rollback()
-        else:
-            self._session.commit()
-        if not self._external_session:
-            self._session.close()
-        self._session = None
-        self._external_session = False
-        self._clear_cached_repositories()
+        assert self._worker is not None
+        assert self._async_session is not None
+        try:
+            if exc_type:
+                self._worker.run(self._async_session.rollback())
+            else:
+                self._worker.run(self._async_session.commit())
+            self._worker.run(self._async_session.close())
+        finally:
+            self._async_session = None
+            self._blocking_session = None
+            self._external_session = False
+            self._clear_cached_repositories()
+            self._worker.close()
+            self._worker = None
 
     def _clear_cached_repositories(self) -> None:
         for attr in list(self.__dict__):
@@ -194,24 +335,30 @@ class UnitOfWork:
                 del self.__dict__[attr]
 
     @property
-    def session(self) -> Session | AsyncSession:
-        session = self._session or self._async_session
+    def session(self) -> Session | AsyncSession | BlockingAsyncSession:
+        session = self._blocking_session or self._session or self._async_session
         assert session is not None, "UnitOfWork not entered"
         return session
 
     def _repo(self, repo_cls: type[RepoT]) -> RepoT | AsyncRepositoryProxy[RepoT]:
+        if self._blocking_session is not None:
+            return repo_cls(self._blocking_session)  # type: ignore[arg-type]
         if self._async_session is not None:
             return AsyncRepositoryProxy(self._async_session, repo_cls)
         assert self._session is not None, "UnitOfWork not entered"
         return repo_cls(self._session)
 
     def commit(self):
+        if self._blocking_session is not None:
+            return self._blocking_session._worker.run(self._blocking_session._session.commit())
         if self._async_session is not None:
             return self._async_session.commit()
         assert self._session is not None, "UnitOfWork not entered"
         return self._session.commit()
 
     def rollback(self):
+        if self._blocking_session is not None:
+            return self._blocking_session.rollback()
         if self._async_session is not None:
             return self._async_session.rollback()
         assert self._session is not None, "UnitOfWork not entered"
@@ -314,6 +461,8 @@ class UnitOfWork:
 
     @cached_property
     def domains(self) -> DomainService:
+        if self._blocking_session is not None:
+            return DomainService(self.session)
         if self._async_session is not None:
             return AsyncRepositoryProxy(self._async_session, DomainService)
         assert self._session is not None, "UnitOfWork not entered"
@@ -364,3 +513,17 @@ class UnitOfWork:
 
     def notifications(self):
         return self._repo(NotificationEventRepository)
+
+
+def open_unit_of_work(factory: Callable[[], UnitOfWork] = UnitOfWork) -> UnitOfWork:
+    """Open the centralized compatibility UOW for sync entrypoints.
+
+    Production code should prefer ``async with UnitOfWork()``. This helper keeps
+    legacy CLI/job boundaries explicit while still routing I/O through the async
+    SQLAlchemy engine instead of the retired sync engine.
+    """
+
+    try:
+        return factory(_blocking=True)  # type: ignore[call-arg]
+    except TypeError:
+        return factory()

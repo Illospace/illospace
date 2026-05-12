@@ -378,7 +378,7 @@ def _handle_manage_idea(
     from brain.app.api.routers.cortex._helpers import _require_idea_for_user
     from brain.systems.cortex.events import publish_safe
     from brain.platform.db.models.idea import Idea
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
     org_id, actor_user_id, context_idea_id = _idea_tool_context()
     actor = _idea_actor(org_id=org_id, actor_user_id=actor_user_id)
@@ -386,7 +386,7 @@ def _handle_manage_idea(
     event: tuple[str, dict[str, Any]] | None = None
 
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             if normalized_action == "list":
                 ideas = _list_ideas(
                     uow.session,

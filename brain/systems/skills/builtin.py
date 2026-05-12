@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+from brain.platform.db.session_tasks import run_session_task
+
 
 logger = logging.getLogger("builtin_skills")
 
@@ -1147,7 +1149,7 @@ async def _ensure_builtin_skill_bundles() -> None:
                         auto_bump_conflicting_semver=True,
                     )
 
-                await uow.session.run_sync(_import_bundle)
+                await run_session_task(uow.session, _import_bundle)
         except Exception as exc:
             logger.warning(
                 "ensure_builtin_skill_bundle_failed skill=%s error=%s",

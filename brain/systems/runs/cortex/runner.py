@@ -30,7 +30,7 @@ from brain.systems.cortex.events import publish_live_safe, publish_safe
 from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaStateLog
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ def _live_stream_sink(session):
 
 def _drain_steering_in_isolated_uow(run_id: int):
     def _drain():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             return AgentRunStore(uow.session).drain_steering(int(run_id))
 
     return _run_db(_drain)
@@ -272,7 +272,7 @@ def _record_project_activity(session, run_id: int, label: str, **payload: Any) -
 def _heartbeat_run_once(run_id: int, *, token: str, reason: str) -> bool:
     try:
         def _heartbeat():
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 return AgentRunStore(uow.session).heartbeat_run(
                     int(run_id),
                     token=token,
@@ -429,7 +429,7 @@ def reap_stale_active_runs(
     def _reap():
         local_status_payloads: list[dict[str, Any]] = []
         local_reaped = 0
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = list(
                 uow.session.scalars(
                     select(AgentRunRow)
@@ -502,7 +502,7 @@ def _reap_stale_runs_if_due(*, force: bool = False) -> int:
 
 
 def _materialize_project_context(run_id: int) -> tuple[bool, dict[str, Any] | None]:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         run = uow.session.get(AgentRunRow, int(run_id))
         if not _run_has_project_context(run):
             return True, None
@@ -521,7 +521,7 @@ def _materialize_project_context(run_id: int) -> tuple[bool, dict[str, Any] | No
         user_id=user_id,
         org_id=org_id,
     )
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         _record_project_activity(
             uow.session,
             int(run_id),
@@ -549,7 +549,7 @@ def _mark_run_failed_after_runner_error(
     *,
     final_answer: str | None = None,
 ) -> dict[str, Any] | None:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         store = AgentRunStore(uow.session)
         row = store.require_run(int(run_id))
         if coerce_run_status(row.status, default=RunStatus.FAILED) not in TERMINAL_RUN_STATUSES:
@@ -570,7 +570,7 @@ def _mark_run_failed_after_runner_error(
 
 def run_queued_once(*, limit: int = 1) -> int:
     def _claim():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             return AgentRunStore(uow.session).claim_next_run_ids(limit=limit)
 
     ids = _run_db(_claim)
@@ -590,7 +590,7 @@ def run_queued_once(*, limit: int = 1) -> int:
                     processed += 1
                     continue
                 status_payload = None
-                with UnitOfWork() as uow:
+                with open_unit_of_work(UnitOfWork) as uow:
                     completed_run = _engine_for_session(uow.session).run_existing(int(run_id))
                     completed_status = str(getattr(completed_run.status, "value", completed_run.status) or "")
                     status_payload = _settle_idea_for_terminal_root_run(uow.session, int(run_id))
@@ -725,7 +725,7 @@ def stop_runner(*, drain_timeout_seconds: float | None = 2.0) -> None:
 
 def queue_status(*, consumer_running: bool | None = None, org_id: str | None = None) -> dict[str, Any]:
     def _counts():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = select(AgentRunRow.status, func.count()).group_by(AgentRunRow.status)
             if org_id:
                 stmt = stmt.where(AgentRunRow.org_id == org_id)

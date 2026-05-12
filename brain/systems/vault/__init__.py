@@ -28,7 +28,7 @@ from brain.platform.db.models.vault import (
     VaultSession,
     VaultShare,
 )
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_unit_of_work_task, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +152,8 @@ def _normalize_env_name(value: str | None) -> str:
 
 def _table_exists(uow: UnitOfWork, table_name: str) -> bool:
     try:
+        if hasattr(uow.session, "table_exists"):
+            return bool(uow.session.table_exists(table_name))
         return inspect(uow.session.connection()).has_table(table_name)
     except Exception:
         return True
@@ -175,7 +177,7 @@ def _log_access(user_id: str, secret_id: int | None, key_name: str,
         if uow:
             uow.session.add(entry)
         else:
-            with UnitOfWork() as _uow:
+            with open_unit_of_work(UnitOfWork) as _uow:
                 _uow.session.add(entry)
     except Exception:
         pass  # Never break vault operations for audit logging
@@ -229,7 +231,7 @@ def get_secret(
     """
     if not user_id:
         raise ValueError("user_id is required to read a vault secret")
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Try own secret first.
         secret = uow.vault.get_by_key(user_id, key_name)
         if not secret and allow_shared:
@@ -322,7 +324,7 @@ def set_secret(
         if agent_access_level is not None
         else None
     )
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         existing = uow.vault.get_by_key(user_id, key_name)
         if existing:
             existing.encrypted_value = encrypted
@@ -402,7 +404,7 @@ def delete_secret(key_name: str, user_id: str) -> bool:
     """Delete a secret. Returns True if it existed."""
     if not user_id:
         raise ValueError("user_id is required to delete a vault secret")
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         secret = uow.vault.get_by_key(user_id, key_name)
         if not secret:
             return False
@@ -420,7 +422,7 @@ def list_secrets(
     """Return metadata for user's own + shared secrets (never includes encrypted_value)."""
     if not user_id:
         raise ValueError("user_id is required to list vault secrets")
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         results = []
 
         # Own secrets
@@ -779,7 +781,7 @@ def bind_project_secret(
     """Bind a user's own secret to a project/env name."""
     if not user_id:
         raise ValueError("user_id is required to bind a vault secret")
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         secret = uow.session.get(Secret, secret_id)
         if not secret or str(secret.user_id) != str(user_id):
             return None
@@ -811,7 +813,7 @@ def bind_project_secret_by_key(
     clean_key_name = (key_name or "").strip()
     if not clean_key_name:
         raise ValueError("key_name is required")
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         secret = _find_owned_secret_for_policy(uow, key_name=clean_key_name, user_id=user_id)
         if secret is None:
             return None
@@ -837,7 +839,7 @@ def list_project_bindings(
     """List project token bindings owned by the current user."""
     if not user_id:
         raise ValueError("user_id is required to list project vault bindings")
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return [
             _binding_to_dict(binding, secret)
             for binding, secret in _project_binding_rows(
@@ -856,7 +858,7 @@ def delete_project_binding(
     org_id: str | None = None,
 ) -> bool:
     """Deactivate a project binding owned by the current user."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         binding = uow.session.get(VaultProjectBinding, binding_id)
         if not binding or str(binding.user_id) != str(user_id):
             return False
@@ -884,7 +886,7 @@ def resolve_project_bound_env_tokens(
     """
     if not user_id or (not project_slug and not project_slugs and target_registry_id is None):
         return {}
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         env: dict[str, str] = {}
         for binding, secret in _matching_project_binding_rows(
             uow,
@@ -915,7 +917,7 @@ def share_secret(
     org_id: str | None = None,
 ) -> dict | None:
     """Share a secret with another user. Returns share record or None if secret not found."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Verify the sharer owns the secret
         secret = uow.vault.get(secret_id)
         if not secret or secret.user_id != shared_by_user_id:
@@ -966,7 +968,7 @@ def share_secret(
 
 def revoke_share(share_id: int, user_id: str) -> bool:
     """Revoke a vault share. Only the original sharer can revoke."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         stmt = select(VaultShare).where(
             VaultShare.id == share_id,
             VaultShare.shared_by_user_id == user_id,
@@ -997,7 +999,7 @@ def resolve_api_key(
 
     Returns (key, source) where source describes which level resolved.
     """
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # 1. User's chosen default key
         if user_id:
             stmt = (
@@ -1080,7 +1082,7 @@ def update_resolved_api_key(
 
     encrypted = _encrypt(api_key)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         if source == "user_default" and user_id:
             stmt = (
                 select(UserApiKey)
@@ -1144,7 +1146,7 @@ def set_api_key(
 ) -> int:
     """Store an encrypted API key for a user. Returns the key ID."""
     encrypted = _encrypt(api_key)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Check for existing key (upsert logic)
         stmt = select(UserApiKey).where(
             UserApiKey.user_id == user_id,
@@ -1175,7 +1177,7 @@ def share_api_key(
     shared_by_user_id: str,
 ) -> int:
     """Share an API key with another user. Returns the share ID."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Verify ownership
         stmt = select(UserApiKey).where(
             UserApiKey.id == api_key_id,
@@ -1221,7 +1223,7 @@ def share_api_key(
 
 def revoke_api_key_share(share_id: int, user_id: str) -> bool:
     """Revoke a shared API key. Only the original sharer can revoke."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         stmt = select(ApiKeyShare).where(
             ApiKeyShare.id == share_id,
             ApiKeyShare.shared_by_user_id == user_id,
@@ -1240,7 +1242,7 @@ def record_api_key_usage(
     cost_usd: float,
 ) -> None:
     """Record token usage for spend tracking."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         key_obj = uow.session.get(UserApiKey, api_key_id)
         if key_obj:
             key_obj.last_used_at = datetime.now(timezone.utc)
@@ -1255,7 +1257,7 @@ def get_vault_access_log(
     limit: int = 50,
 ) -> list[dict]:
     """Return access log scoped to the caller's org, or own rows without org."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         stmt = select(VaultAccessLog, User.name.label("actor_name")).join(
             User,
             User.id == VaultAccessLog.user_id,
@@ -1301,7 +1303,7 @@ def _record_missing(
     """Record that a secret was requested but not found."""
     now = datetime.now(timezone.utc)
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = select(VaultMissingRequest).where(VaultMissingRequest.key_name == key_name)
             if org_id:
                 stmt = stmt.where(VaultMissingRequest.org_id == org_id)
@@ -1347,7 +1349,7 @@ def get_missing_requests(
 ) -> list[dict]:
     if not user_id and not org_id:
         return []
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         stmt = (
             select(VaultMissingRequest)
             .where(VaultMissingRequest.resolved == False)  # noqa: E712
@@ -1378,7 +1380,7 @@ def resolve_missing(
     org_id: str | None = None,
 ) -> None:
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = select(VaultMissingRequest).where(VaultMissingRequest.key_name == key_name)
             if org_id:
                 stmt = stmt.where(VaultMissingRequest.org_id == org_id)
@@ -1422,7 +1424,7 @@ def list_agent_grants(
     limit: int = 50,
 ) -> list[dict]:
     """List vault access grants visible to the vault owner."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         stmt = select(VaultAgentGrant).where(VaultAgentGrant.user_id == user_id)
         if org_id:
             stmt = stmt.where(VaultAgentGrant.org_id == org_id)
@@ -1442,7 +1444,7 @@ def approve_agent_grant(
 ) -> dict | None:
     """Approve a pending agent grant for this user's vault."""
     now = datetime.now(timezone.utc)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         grant = uow.session.get(VaultAgentGrant, grant_id)
         if not grant or str(grant.user_id) != str(approved_by_user_id):
             return None
@@ -1471,7 +1473,7 @@ def deny_agent_grant(
 ) -> dict | None:
     """Deny/revoke an agent grant for this user's vault."""
     now = datetime.now(timezone.utc)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         grant = uow.session.get(VaultAgentGrant, grant_id)
         if not grant or str(grant.user_id) != str(denied_by_user_id):
             return None
@@ -1510,7 +1512,7 @@ def authorize_agent_secret_read(
         return {"allowed": False, "status": "denied", "reason": "authenticated user context required"}
     clean_org_id = org_id or None
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         secret = _find_owned_secret_for_policy(uow, key_name=key_name, user_id=user_id)
         if secret:
             access_level = normalize_agent_access_level(getattr(secret, "agent_access_level", None))
@@ -1551,7 +1553,7 @@ def authorize_agent_secret_read(
         return {"allowed": False, "status": "denied", "reason": "agent must provide a specific access reason"}
 
     now = datetime.now(timezone.utc)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         base = (
             VaultAgentGrant.key_name == key_name,
             VaultAgentGrant.user_id == user_id,
@@ -1614,11 +1616,11 @@ def authorize_agent_secret_read(
 
 
 async def async_delete_secret(key_name: str, user_id: str) -> bool:
-    return await run_sync_with_unit_of_work(delete_secret, key_name, user_id)
+    return await run_unit_of_work_task(delete_secret, key_name, user_id)
 
 
 async def async_revoke_share(share_id: int, user_id: str) -> bool:
-    return await run_sync_with_unit_of_work(revoke_share, share_id, user_id)
+    return await run_unit_of_work_task(revoke_share, share_id, user_id)
 
 
 async def async_get_missing_requests(
@@ -1627,7 +1629,7 @@ async def async_get_missing_requests(
     org_id: str | None = None,
     include_resolved: bool = False,
 ) -> list[dict]:
-    return await run_sync_with_unit_of_work(
+    return await run_unit_of_work_task(
         get_missing_requests,
         user_id,
         org_id=org_id,
@@ -1636,11 +1638,11 @@ async def async_get_missing_requests(
 
 
 async def async_get_vault_access_log(user_id: str, *, org_id: str | None = None, limit: int = 100) -> list[dict]:
-    return await run_sync_with_unit_of_work(get_vault_access_log, user_id, org_id=org_id, limit=limit)
+    return await run_unit_of_work_task(get_vault_access_log, user_id, org_id=org_id, limit=limit)
 
 
 async def async_get_org_users(org_id: str) -> list[dict]:
-    return await run_sync_with_unit_of_work(get_org_users, org_id)
+    return await run_unit_of_work_task(get_org_users, org_id)
 
 
 async def async_list_agent_grants(
@@ -1649,7 +1651,7 @@ async def async_list_agent_grants(
     org_id: str | None = None,
     statuses: list[str] | None = None,
 ) -> list[dict]:
-    return await run_sync_with_unit_of_work(list_agent_grants, user_id, org_id=org_id, statuses=statuses)
+    return await run_unit_of_work_task(list_agent_grants, user_id, org_id=org_id, statuses=statuses)
 
 
 async def async_approve_agent_grant(
@@ -1660,7 +1662,7 @@ async def async_approve_agent_grant(
     ttl_minutes: int = 15,
     max_reads: int = 1,
 ) -> dict | None:
-    return await run_sync_with_unit_of_work(
+    return await run_unit_of_work_task(
         approve_agent_grant,
         grant_id,
         approved_by_user_id=approved_by_user_id,
@@ -1676,7 +1678,7 @@ async def async_deny_agent_grant(
     denied_by_user_id: str,
     org_id: str | None = None,
 ) -> dict | None:
-    return await run_sync_with_unit_of_work(
+    return await run_unit_of_work_task(
         deny_agent_grant,
         grant_id,
         denied_by_user_id=denied_by_user_id,
@@ -1685,7 +1687,7 @@ async def async_deny_agent_grant(
 
 
 async def async_list_project_bindings(user_id: str, *, org_id: str | None = None) -> list[dict]:
-    return await run_sync_with_unit_of_work(list_project_bindings, user_id=user_id, org_id=org_id)
+    return await run_unit_of_work_task(list_project_bindings, user_id=user_id, org_id=org_id)
 
 
 async def async_bind_project_secret(
@@ -1697,7 +1699,7 @@ async def async_bind_project_secret(
     env_name: str,
     target_registry_id: str | None = None,
 ) -> dict | None:
-    return await run_sync_with_unit_of_work(
+    return await run_unit_of_work_task(
         bind_project_secret,
         secret_id,
         user_id=user_id,
@@ -1709,7 +1711,7 @@ async def async_bind_project_secret(
 
 
 async def async_delete_project_binding(binding_id: int, *, user_id: str, org_id: str | None = None) -> bool:
-    return await run_sync_with_unit_of_work(delete_project_binding, binding_id, user_id=user_id, org_id=org_id)
+    return await run_unit_of_work_task(delete_project_binding, binding_id, user_id=user_id, org_id=org_id)
 
 
 async def async_share_secret(
@@ -1719,7 +1721,7 @@ async def async_share_secret(
     *,
     org_id: str | None = None,
 ) -> dict | None:
-    return await run_sync_with_unit_of_work(
+    return await run_unit_of_work_task(
         share_secret,
         secret_id,
         shared_with_user_id,
@@ -1883,7 +1885,7 @@ def generate_vault_token(user_id: str) -> tuple[str, datetime]:
     token = stdlib_secrets.token_urlsafe(32)
     now = _utcnow_naive()
     expires = now + VAULT_SESSION_TTL
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         uow.session.add(VaultSession(
             token_hash=_token_hash(token),
             user_id=user_id,
@@ -1923,7 +1925,7 @@ def validate_vault_token(user_id: str, token: str | None) -> bool:
     if not token:
         return False
     now = _utcnow_naive()
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         session = uow.session.get(VaultSession, _token_hash(token))
         if not session or str(session.user_id) != str(user_id):
             return False
@@ -1956,7 +1958,7 @@ async def async_validate_vault_token(user_id: str, token: str | None) -> bool:
 def revoke_vault_token(user_id: str, token: str | None) -> None:
     if not token:
         return
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         session = uow.session.get(VaultSession, _token_hash(token))
         if session and str(session.user_id) == str(user_id) and session.revoked_at is None:
             session.revoked_at = _utcnow_naive()
@@ -1972,7 +1974,7 @@ async def async_revoke_vault_token(user_id: str, token: str | None) -> None:
 
 
 def _get_config(key: str) -> str | None:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         config = uow.session.scalars(
             select(VaultConfig).where(VaultConfig.key == key)
         ).first()
@@ -1990,7 +1992,7 @@ async def async_get_config(key: str) -> str | None:
 
 def _set_config(key: str, value: str) -> None:
     now = datetime.now(timezone.utc)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         config = uow.session.scalars(
             select(VaultConfig).where(VaultConfig.key == key)
         ).first()
@@ -2016,7 +2018,7 @@ async def async_set_config(key: str, value: str) -> None:
 
 
 def _delete_config(key: str) -> None:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         config = uow.session.scalars(
             select(VaultConfig).where(VaultConfig.key == key)
         ).first()

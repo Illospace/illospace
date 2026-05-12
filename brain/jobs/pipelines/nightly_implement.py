@@ -20,7 +20,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 PROJECT_ROOT = str(config.BRAIN_DIR)
 REPO = os.environ.get("ILLO_GITHUB_REPO", "").strip()
@@ -89,7 +89,7 @@ def _save_processed_ids(ids: set):
 
 def gather_improvement_memories(target_date: date, processed_ids: set) -> list[dict]:
     """Query unprocessed improvement memories."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text("""
             SELECT id, content, salience, tags, created_at
             FROM memories

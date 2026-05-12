@@ -167,8 +167,8 @@ def _load_session(session_id: str, user_id: str | None = None) -> tuple[list[dic
     """
     try:
         from sqlalchemy import text as sa_text
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        with UnitOfWork() as uow:
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+        with open_unit_of_work(UnitOfWork) as uow:
             if user_id:
                 row = uow.session.execute(sa_text(
                     "SELECT messages, system_prompt FROM agent_sessions "
@@ -204,13 +204,13 @@ def _save_session(
     """Save conversation messages to DB (upsert)."""
     try:
         from sqlalchemy import text as sa_text
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
         # NOTE: Do NOT strip thinking blocks before persisting.
         # The API requires thinking/redacted_thinking in all assistant turns
         # when thinking is enabled. Stripping them causes 500 on session reload.
         clean_messages = messages
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             uow.session.execute(sa_text("""
                 INSERT INTO agent_sessions (session_id, messages, system_prompt,
                     total_input_tokens, total_output_tokens,
@@ -240,8 +240,8 @@ def _load_session_handoff(session_id: str, user_id: str | None = None) -> dict[s
     """Load the durable handoff summary for a persistent agent session."""
     try:
         from sqlalchemy import text as sa_text
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        with UnitOfWork() as uow:
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+        with open_unit_of_work(UnitOfWork) as uow:
             if user_id:
                 row = uow.session.execute(sa_text(
                     "SELECT handoff_summary FROM agent_sessions "
@@ -275,8 +275,8 @@ def _save_session_handoff(
         return
     try:
         from sqlalchemy import text as sa_text
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        with UnitOfWork() as uow:
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+        with open_unit_of_work(UnitOfWork) as uow:
             if user_id:
                 uow.session.execute(sa_text("""
                     UPDATE agent_sessions

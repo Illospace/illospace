@@ -23,7 +23,7 @@ from brain.platform.db.repositories.memory_visibility import (
     MemoryVisibilityContext,
     memory_visibility_sql,
 )
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.memory.embeddings import embed_document, vec_to_pg
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ def check_duplicate(
     )
     vis_clause, vis_params = memory_visibility_sql(visibility_context, alias="")
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         row = uow.session.execute(text("""
             SELECT id, content,
                    1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity

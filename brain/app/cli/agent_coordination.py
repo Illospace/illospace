@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 # ============================================================
 # Core functions
@@ -43,7 +43,7 @@ def register_agent(
 
     Returns the agent_coordination row id.
     """
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         row = uow.session.execute(text("""
             INSERT INTO agent_coordination (
                 session_key, task_description, files_touched,
@@ -72,7 +72,7 @@ def get_active_agents(exclude_session: str | None = None) -> list[dict]:
 
     Agents older than 2 hours are auto-expired (stale detection).
     """
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Auto-expire stale agents (running > 2 hours)
         uow.session.execute(text("""
             UPDATE agent_coordination
@@ -104,7 +104,7 @@ def release_agent(session_key: str, status: str = "done") -> bool:
     """Release an agent's resource claims. Returns True if found."""
     if status not in ("done", "failed"):
         raise ValueError(f"Invalid status: {status}. Use 'done' or 'failed'.")
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         row = uow.session.execute(text("""
             UPDATE agent_coordination
             SET status = :status, completed_at = NOW()

@@ -81,7 +81,7 @@ def _handle_post_chat_message(
 ) -> str:
     """Post an Illo-authored message to the native team room."""
     from brain.app.api.services.chat import ChatService
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
     trigger = _current_chat_trigger()
     response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
@@ -100,7 +100,7 @@ def _handle_post_chat_message(
 
     publish = None
     message_payload = None
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         message, publish = ChatService(
             uow.session,
             {
@@ -120,7 +120,7 @@ def _handle_post_chat_message(
         message_payload = message.model_dump(mode="json")
         uow.session.flush()
     if publish is not None:
-        with UnitOfWork() as publish_uow:
+        with open_unit_of_work(UnitOfWork) as publish_uow:
             _publish_chat_events(publish, org_id=org_id, db=publish_uow.session)
     return json.dumps({"ok": True, "message": message_payload}, default=str)
 

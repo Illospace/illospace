@@ -17,7 +17,7 @@ from brain.app.api.routers.cortex._key_utils import (
 )
 from brain.app.api.routers.cortex._router import router
 from brain.platform.db.models.org import ApiKeyShare, OrgApiKey, User, UserApiKey
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_unit_of_work_task, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ async def list_api_keys(request: Request, user: dict[str, Any] = Depends(get_cur
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
     def _list():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = (
                 select(UserApiKey)
                 .where(UserApiKey.user_id == user_id)
@@ -109,7 +109,7 @@ async def list_api_keys(request: Request, user: dict[str, Any] = Depends(get_cur
             "org_key": org_keys[0] if org_keys else None,
         }
 
-    return await run_sync_with_unit_of_work(_list)
+    return await run_unit_of_work_task(_list)
 
 
 @router.post("/keys/auto-import")
@@ -127,7 +127,7 @@ async def auto_import_keys(request: Request, user: dict[str, Any] = Depends(get_
 
     def _import():
         imported = []
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = (
                 select(UserApiKey.id)
                 .where(
@@ -165,7 +165,7 @@ async def auto_import_keys(request: Request, user: dict[str, Any] = Depends(get_
                     imported.append("org")
         return {"imported": bool(imported), "keys": imported}
 
-    return await run_sync_with_unit_of_work(_import)
+    return await run_unit_of_work_task(_import)
 
 
 @router.post("/keys")
@@ -198,7 +198,7 @@ async def add_api_key(request: Request, user: dict[str, Any] = Depends(get_curre
             verify_error,
         )
     from brain.systems.vault import set_api_key
-    key_id = await run_sync_with_unit_of_work(set_api_key, user_id, api_key, provider=provider, label=label)
+    key_id = await run_unit_of_work_task(set_api_key, user_id, api_key, provider=provider, label=label)
     return {
         "id": key_id,
         "status": "stored",
@@ -216,7 +216,7 @@ async def set_default_key(request: Request, user: dict[str, Any] = Depends(get_c
     data = await request.json()
     api_key_id = data.get("api_key_id")
     def _set_default():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             if api_key_id is not None:
                 stmt = (
                     select(UserApiKey.id)
@@ -242,7 +242,7 @@ async def set_default_key(request: Request, user: dict[str, Any] = Depends(get_c
                 u.default_api_key_id = api_key_id
         return {"status": "default_updated", "api_key_id": api_key_id}
 
-    return await run_sync_with_unit_of_work(_set_default)
+    return await run_unit_of_work_task(_set_default)
 
 
 @router.post("/keys/org")
@@ -276,7 +276,7 @@ async def set_org_main_key(request: Request, user: dict[str, Any] = Depends(get_
         )
     from brain.systems.vault import _encrypt
     encrypted = _encrypt(api_key)
-    await run_sync_with_unit_of_work(store_org_api_key, org_id, provider, encrypted, uow_factory=UnitOfWork)
+    await run_unit_of_work_task(store_org_api_key, org_id, provider, encrypted, uow_factory=UnitOfWork)
     return {
         "status": "org_key_stored",
         "verified": verify_error is None,
@@ -296,7 +296,7 @@ async def share_key(key_id: int, request: Request, user: dict[str, Any] = Depend
         raise HTTPException(status_code=400, detail="shared_with_user_id is required")
     from brain.systems.vault import share_api_key
     try:
-        share_id = await run_sync_with_unit_of_work(share_api_key, key_id, target_user_id, user_id)
+        share_id = await run_unit_of_work_task(share_api_key, key_id, target_user_id, user_id)
         return {"share_id": share_id, "status": "shared"}
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
@@ -308,7 +308,7 @@ async def deactivate_key(key_id: int, user: dict[str, Any] = Depends(get_current
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
     def _deactivate():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = (
                 select(UserApiKey)
                 .where(UserApiKey.id == key_id, UserApiKey.user_id == user_id)
@@ -319,4 +319,4 @@ async def deactivate_key(key_id: int, user: dict[str, Any] = Depends(get_current
             key.is_active = False
         return {"status": "deactivated"}
 
-    return await run_sync_with_unit_of_work(_deactivate)
+    return await run_unit_of_work_task(_deactivate)

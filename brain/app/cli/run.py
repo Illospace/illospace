@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 
 from sqlalchemy import text as sa_text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 # ============================================================
 # Inline Allowlist
 # ============================================================
@@ -179,7 +179,7 @@ def build_context_block(task: str, skill_name: str = None) -> tuple:
         from brain.systems.memory.embeddings import embed_query, vec_to_pg
         task_emb = embed_query(task)
         emb_str = vec_to_pg(task_emb)
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             # Get guardrails from relevant memories (lessons/patterns)
             guardrail_rows = uow.session.execute(sa_text("""
                 SELECT content, memory_type,
@@ -215,7 +215,7 @@ def build_context_block(task: str, skill_name: str = None) -> tuple:
 
 def find_similar_runs(task: str, limit: int = 3) -> list:
     """Find similar past runs by text similarity (simple ILIKE for now)."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Use first few significant words for matching
         words = [w for w in task.lower().split() if len(w) > 3][:5]
         if not words:
@@ -393,7 +393,7 @@ def build_payload(
     }
 
     # Log to DB
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         run_id = log_run(
             session=uow.session,
             task_summary=task,
@@ -433,13 +433,13 @@ def cmd_run(args):
 
 
 def cmd_complete(args):
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = complete_run(uow.session, args.run_id, args.outcome, args.notes)
     print(json.dumps(result, indent=2, default=str))
 
 
 def cmd_history(args):
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         sql = """
             SELECT id,
                    input_message AS task_summary,
@@ -463,7 +463,7 @@ def cmd_history(args):
 
 
 def cmd_stats(args):
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         overview = dict(uow.session.execute(sa_text("""
             SELECT
                 COUNT(*) as total,
@@ -492,7 +492,7 @@ def cmd_stats(args):
 
 
 def cmd_replay(args):
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         row = uow.session.execute(sa_text(
             """
             SELECT payload

@@ -21,7 +21,7 @@ import logging
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ def apply_retrieval_feedback(log_id: int, feedback: str, *, cur=None) -> dict:
         return {"log_id": log_id, "feedback": feedback, "memory_id": memory_id,
                 "old_salience": old_salience, "new_salience": new_salience}
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return _do(uow)
 
 
@@ -108,7 +108,7 @@ def analyze_missed_memories(*, cur=None, min_misses: int = 3, days: int = 30) ->
 
     Returns list of {memory_id, content, miss_count, hit_count, salience}.
     """
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text("""
             SELECT rl.top_result_id as memory_id,
                    m.content,
@@ -146,7 +146,7 @@ def apply_auto_feedback(
     """
     delta = BOOST_SUCCESS if success else -PENALTY_FAILURE
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         for mid in memory_ids:
             _adjust_salience_uow(uow, mid, delta)
         for pool_name in pool_tags:
@@ -164,7 +164,7 @@ def apply_explicit_feedback(
     """
     delta = BOOST_EXPLICIT if positive else -PENALTY_EXPLICIT
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         for mid in memory_ids:
             _adjust_salience_uow(uow, mid, delta)
 
@@ -229,7 +229,7 @@ def record_attention_lazy_load(
 
 def _adjust_salience(memory_id: int, delta: float) -> None:
     """Adjust a single memory's salience using UnitOfWork (standalone)."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         _adjust_salience_uow(uow, memory_id, delta)
 
 
@@ -250,7 +250,7 @@ def _record_pool_outcome(
     pool_name: str, *, hit: bool, org_id: str | None = None
 ) -> None:
     """Record a pool outcome via RetrievalPoolStatsRepository (standalone)."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         _record_pool_outcome_uow(uow, pool_name, hit=hit, org_id=org_id)
 
 

@@ -24,7 +24,7 @@ from brain.systems.cortex.resources.telemetry import (
     build_workspace_resource_summary,
 )
 from brain.platform.db.models.resource_pool import BrowserPoolEntry, WorkspacePoolEntry
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +197,7 @@ class ResourcePoolManager:
             reason = "warm workspace reuse not enabled in this slice"
             return self._workspace_cold_plan(repo_root, base_commit, runtime_fingerprint, pool_key, reason)
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             entry = (
                 uow.session.query(WorkspacePoolEntry)
                 .filter(
@@ -342,7 +342,7 @@ class ResourcePoolManager:
             reason = "warm browser reuse not enabled in this slice"
             return self._browser_cold_plan(profile_key, browser_version, selected_mode, pool_key, reason)
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             entry = (
                 uow.session.query(BrowserPoolEntry)
                 .filter(
@@ -610,7 +610,7 @@ class ResourcePoolManager:
         except Exception:
             pass
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 row = uow.session.get(WorkspacePoolEntry, entry.id)
                 if row:
                     row.status = "destroyed"
@@ -621,7 +621,7 @@ class ResourcePoolManager:
 
     def _destroy_browser_entry(self, entry: BrowserPoolEntry, reason: str) -> None:
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 row = uow.session.get(BrowserPoolEntry, entry.id)
                 if row:
                     row.status = "destroyed"
@@ -632,7 +632,7 @@ class ResourcePoolManager:
 
     def _mark_workspace_entry_leased(self, entry_id: int, lease_token: str, workspace_path: Path, mode: str) -> None:
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 row = uow.session.get(WorkspacePoolEntry, entry_id)
                 if row:
                     row.status = "leased"
@@ -649,7 +649,7 @@ class ResourcePoolManager:
 
     def _mark_browser_entry_leased(self, entry_id: int, lease_token: str, mode: str) -> None:
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 row = uow.session.get(BrowserPoolEntry, entry_id)
                 if row:
                     row.status = "leased"
@@ -667,7 +667,7 @@ class ResourcePoolManager:
         if pool_entry_id is None:
             return
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 row = uow.session.get(WorkspacePoolEntry, pool_entry_id)
                 if row:
                     row.last_used_at = _utcnow()
@@ -684,7 +684,7 @@ class ResourcePoolManager:
         if pool_entry_id is None:
             return
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 row = uow.session.get(BrowserPoolEntry, pool_entry_id)
                 if row:
                     row.last_used_at = _utcnow()
@@ -700,7 +700,7 @@ class ResourcePoolManager:
     def _reconcile_expired_workspace_entries(self) -> None:
         try:
             now = _utcnow()
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 rows = (
                     uow.session.query(WorkspacePoolEntry)
                     .filter(
@@ -719,7 +719,7 @@ class ResourcePoolManager:
     def _reconcile_expired_browser_entries(self) -> None:
         try:
             now = _utcnow()
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 rows = (
                     uow.session.query(BrowserPoolEntry)
                     .filter(

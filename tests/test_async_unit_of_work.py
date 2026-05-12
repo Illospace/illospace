@@ -3,7 +3,12 @@ from __future__ import annotations
 import pytest
 
 from brain.platform.db.repositories import unit_of_work as uow_module
-from brain.platform.db.repositories.unit_of_work import AsyncRepositoryProxy, UnitOfWork, run_sync_with_unit_of_work
+from brain.platform.db.repositories.unit_of_work import (
+    AsyncRepositoryProxy,
+    UnitOfWork,
+    open_unit_of_work,
+    run_unit_of_work_task,
+)
 from brain.systems.runs import event_log as event_log_module
 from brain.systems.runs.cortex import runner as cortex_runner
 from brain.systems.runs import store as run_store_module
@@ -102,27 +107,26 @@ async def test_unit_of_work_async_lifecycle_rolls_back_on_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_sync_with_unit_of_work_reuses_async_sync_session(monkeypatch):
+async def test_run_unit_of_work_task_runs_blocking_task_off_loop():
+    result = await run_unit_of_work_task(lambda value: f"blocking:{value}", "gamma")
+
+    assert result == "blocking:gamma"
+
+
+@pytest.mark.asyncio
+async def test_sync_unit_of_work_uses_blocking_async_session_inside_async_runtime(monkeypatch):
     session = _AsyncSession()
     monkeypatch.setattr(uow_module, "SessionFactory", lambda: session)
 
-    def legacy_shaped_service(value: str) -> list[str]:
-        with UnitOfWork() as uow:
-            assert uow.session is session.sync_session
-            uow.session.values.append(value)
-            return list(uow.session.values)
+    with open_unit_of_work() as uow:
+        assert uow.session is not session
 
-    result = await run_sync_with_unit_of_work(legacy_shaped_service, "gamma")
-
-    assert result == ["gamma"]
-    assert session.sync_session.flushes == 1
     assert session.commits == 1
     assert session.closed is True
 
 
-@pytest.mark.asyncio
-async def test_sync_unit_of_work_refuses_legacy_engine_inside_async_runtime():
-    with pytest.raises(RuntimeError, match="Synchronous UnitOfWork cannot open the legacy DB engine"):
+def test_direct_sync_unit_of_work_is_not_supported():
+    with pytest.raises(RuntimeError, match="open_unit_of_work"):
         with UnitOfWork():
             pass
 
@@ -133,7 +137,7 @@ def test_cortex_runner_db_bridge_uses_sync_path_outside_async_runtime(monkeypatc
 
     monkeypatch.setattr(
         cortex_runner,
-        "run_sync_with_unit_of_work",
+        "run_unit_of_work_task",
         fail_async_bridge,
         raising=False,
     )

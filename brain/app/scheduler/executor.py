@@ -29,6 +29,7 @@ from brain.platform.db.models.scheduler import (
     SchedulerRun,
     SchedulerRunStep,
 )
+from brain.platform.db.session_tasks import run_session_task
 from brain.app.scheduler.catalog import normalize_owner_mode
 from brain.app.scheduler.contracts import validate_scheduler_run_contract
 from brain.app.scheduler.planner import materialize_due_runs
@@ -987,7 +988,8 @@ async def async_claim_scheduler_run(
     lease_seconds: int = 60,
     now: datetime | None = None,
 ) -> SchedulerLease | None:
-    return await session.run_sync(
+    return await run_session_task(
+        session,
         lambda sync_session: claim_scheduler_run(
             sync_session,
             run_id,
@@ -1010,7 +1012,8 @@ async def async_execute_scheduler_run(
     lease_seconds: int = 60,
     now: datetime | None = None,
 ) -> SchedulerRun | None:
-    return await session.run_sync(
+    return await run_session_task(
+        session,
         lambda sync_session: execute_scheduler_run(
             sync_session,
             run_id,
@@ -1035,7 +1038,8 @@ async def async_drain_scheduler(
     now: datetime | None = None,
     allowed_owner_modes: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    return await session.run_sync(
+    return await run_session_task(
+        session,
         lambda sync_session: drain_scheduler(
             sync_session,
             owner_mode=owner_mode,

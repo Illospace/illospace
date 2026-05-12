@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from brain.platform.db.models.run import CortexEvent
 from brain.platform.db.models.idea import Idea
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ def _lookup_idea_org_id(idea_id: str, *, session: Session | None = None) -> str 
             idea = session.get(Idea, cache_key)
             org_id = _optional_text(getattr(idea, "org_id", None)) if idea is not None else None
         else:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 idea = uow.session.get(Idea, cache_key)
                 org_id = _optional_text(getattr(idea, "org_id", None)) if idea is not None else None
     except Exception as exc:
@@ -192,7 +192,7 @@ def _lookup_run_org_id(run_id: int, *, session: Session | None = None) -> str | 
             run = session.get(AgentRunRow, cache_key)
             org_id = _optional_text(getattr(run, "org_id", None)) if run is not None else None
         else:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 run = uow.session.get(AgentRunRow, cache_key)
                 org_id = _optional_text(getattr(run, "org_id", None)) if run is not None else None
     except Exception as exc:
@@ -328,7 +328,7 @@ def record_cortex_event(
     if session is not None:
         return _write_cortex_event(session, event_type=event_type, payload=payload)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return _write_cortex_event(uow.session, event_type=event_type, payload=payload)
 
 

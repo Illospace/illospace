@@ -12,6 +12,7 @@ from brain.app.api.schemas.ideas import BrowserSessionCreate, BrowserSessionRead
 from brain.platform.browser import BrowserCapabilityError, browser_sessions
 from brain.platform.db.models.browser import BrowserSession
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.session_tasks import run_session_task
 
 
 async def _get_browser_session_or_404(session_id: str) -> BrowserSession:
@@ -40,7 +41,8 @@ async def create_browser_session(
 ):
     if user.get("org_id"):
         async with UnitOfWork() as uow:
-            valid = await uow.session.run_sync(
+            valid = await run_session_task(
+                uow.session,
                 lambda sync_db: _validate_idea_org_orm(sync_db, idea_id, user.get("org_id"))
             )
             if not valid:
@@ -85,7 +87,8 @@ async def create_browser_session(
 async def get_browser_session(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
     if user.get("org_id"):
         async with UnitOfWork() as uow:
-            valid = await uow.session.run_sync(
+            valid = await run_session_task(
+                uow.session,
                 lambda sync_db: _validate_idea_org_orm(sync_db, idea_id, user.get("org_id"))
             )
             if not valid:

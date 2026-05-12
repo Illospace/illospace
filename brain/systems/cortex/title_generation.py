@@ -203,9 +203,9 @@ def _idea_title_source(
     raw_title: str | None,
 ) -> tuple[str | None, str | None]:
     from brain.platform.db.models.idea import Idea
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         idea = uow.session.get(Idea, str(idea_id))
         if idea is None:
             return None, "missing"
@@ -237,9 +237,9 @@ def _store_generated_display_title(
     from sqlalchemy import func, or_, update
 
     from brain.platform.db.models.idea import Idea
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         stmt = (
             update(Idea)
             .where(

@@ -18,7 +18,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.app.cli.memory import add_memory
 
 PROJECT_ROOT = str(config.BRAIN_DIR)
@@ -63,7 +63,7 @@ def _update_experiment_content(content: str, meta: dict) -> str:
 def gather_due_experiments(target_date: date) -> list[dict]:
     """Query active experiment memories due for assessment."""
     date_str = target_date.isoformat()
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text("""
             SELECT id, content, salience, tags, created_at
             FROM memories
@@ -103,7 +103,7 @@ def gather_data(data_source: str) -> dict:
 def _gather_skill_stats() -> dict:
     """Query skills table for recent success rates."""
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             result = uow.session.execute(text("""
                 SELECT name,
                        use_count,
@@ -230,7 +230,7 @@ def assess_single_experiment(experiment: dict, target_date: date, dry_run: bool 
 
     if not dry_run:
         new_content = _update_experiment_content(experiment["content"], meta)
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             uow.session.execute(text(
                 "UPDATE memories SET content = :content WHERE id = :id"
             ), {"content": new_content, "id": mem_id})

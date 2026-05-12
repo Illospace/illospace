@@ -38,7 +38,6 @@ from brain.systems.runs.cortex.recording import trace_id_for_run_id, trace_id_fo
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow as AgentRun
 from brain.platform.db.models.idea import Idea, IdeaThread
 from brain.platform.db.models.scheduler import SchedulerRun, SchedulerRunStep
-from brain.platform.db.repositories.unit_of_work import use_sync_session
 from brain.systems.runs.predict_rlm_backend import get_agent_worker_backend_settings
 from brain.app.ops.health import (
     deep_health_snapshot,
@@ -954,8 +953,7 @@ def _get_llm_info(user: dict, db: Session | None = None) -> dict | None:
                 **backend_settings,
             }
 
-        with use_sync_session(db):
-            return _build()
+        return _build()
     except Exception:
         return None
 

@@ -138,14 +138,14 @@ def run_all_checks(*, org_id: str | None = None) -> list[IntegrityResult]:
     Actual data gathering is deferred to integration wiring — this stub
     logs the intent and persists each result to MemoryHealthRepository.
     """
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
     logger.info("Running memory integrity checks (org_id=%s)", org_id)
 
     # Stub: no data gathered yet — individual checks run at integration time.
     results: list[IntegrityResult] = []
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         for result in results:
             uow.memory_health.log_check(
                 check_type=result.check_type,

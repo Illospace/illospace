@@ -24,7 +24,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))  # repo root
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.memory.embeddings import (
     embed_document, embed_batch, embed_query,
     vec_to_pg,
@@ -54,7 +54,7 @@ def _mapping_count(result, key: str = "cnt") -> int:
 
 def phase_consolidation(target_date: date, org_id: str | None = None):
     """Import and compress raw daily logs into the memory graph."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text("""
             INSERT INTO consolidation_runs (run_date, phase, org_id)
             VALUES (:run_date, 'consolidation', :org_id) RETURNING id
@@ -277,7 +277,7 @@ def decay_memories(uow, days: int = 30, threshold: float = 2.0) -> int:
 
 def phase_reflection(target_date: date, org_id: str | None = None):
     """Analyze performance and retrieval quality."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text("""
             INSERT INTO consolidation_runs (run_date, phase, org_id)
             VALUES (:run_date, 'reflection', :org_id) RETURNING id
@@ -407,7 +407,7 @@ def compute_competence(uow, target_date: date) -> dict:
 
 def phase_synthesis(target_date: date, org_id: str | None = None):
     """Look for cross-cluster patterns and generate insights."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text("""
             INSERT INTO consolidation_runs (run_date, phase, org_id)
             VALUES (:run_date, 'synthesis', :org_id) RETURNING id
@@ -519,7 +519,7 @@ def extract_tags(text: str) -> list:
 
 def generate_index(output_path: str = None) -> str:
     """Generate a lightweight wake-up index file."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # High-salience memories by type
         result = uow.session.execute(text("""
             SELECT id, content, memory_type, salience, tags

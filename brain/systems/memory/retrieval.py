@@ -16,7 +16,7 @@ import sys
 from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 logger = logging.getLogger(__name__)
 
 
@@ -71,7 +71,7 @@ def mark_relevant(retrieval_log_id: int, relevant: bool) -> bool:
     """
     feedback = "hit" if relevant else "miss"
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             result = uow.session.execute(text(
                 "UPDATE retrieval_log SET was_relevant = :relevant, feedback = :feedback "
                 "WHERE id = :id RETURNING id"
@@ -97,7 +97,7 @@ def get_retrieval_stats(days: int = 7) -> dict:
             avg_results_returned: float,
         }
     """
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text("""
             SELECT
                 COUNT(*) as total,

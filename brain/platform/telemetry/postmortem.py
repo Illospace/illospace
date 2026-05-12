@@ -27,7 +27,7 @@ def run_postmortem(run_id: int, error: str, skill_name: str | None = None):
 def _postmortem_worker(run_id: int, error: str, skill_name: str | None):
     """Gather data, analyze, store results, route corrections."""
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
         from brain.platform.telemetry.classify import classify_error
 
         classification = classify_error(error)
@@ -35,7 +35,7 @@ def _postmortem_worker(run_id: int, error: str, skill_name: str | None):
         # Look up skill_name from run if not provided
         if not skill_name:
             try:
-                with UnitOfWork() as uow:
+                with open_unit_of_work(UnitOfWork) as uow:
                     result = uow.session.execute(text(
                         "SELECT skill_used FROM agent_runs WHERE id = :id"
                     ), {"id": run_id})
@@ -49,7 +49,7 @@ def _postmortem_worker(run_id: int, error: str, skill_name: str | None):
         context_growth = []
         tool_trace = []
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 from brain.platform.db.models.agent_run import AgentRunEventRow
 
                 result = uow.session.execute(text(
@@ -94,7 +94,7 @@ def _postmortem_worker(run_id: int, error: str, skill_name: str | None):
         }
 
         # Store on run row
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             uow.session.execute(text(
                 "UPDATE agent_runs SET postmortem = :postmortem WHERE id = :id"
             ), {"postmortem": json.dumps(result, default=str), "id": run_id})

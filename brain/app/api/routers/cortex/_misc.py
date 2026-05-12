@@ -36,7 +36,7 @@ from brain.platform.db.models.idea import Idea, IdeaConnection, IdeaStateLog, Id
 from brain.app.api.routers.ws import ws_manager
 from brain.app.api.authorization import require_org_context
 from brain.platform.db.repositories.ideas import IdeaConnectionRepository
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_unit_of_work_task, open_unit_of_work
 from brain.systems.cortex.title_generation import (
     generate_and_store_idea_display_title,
     generate_display_title,
@@ -102,10 +102,10 @@ def list_connections_payload(
 @router.get("/connections")
 async def list_connections_all(idea_id: str | None = None, user: dict[str, Any] = Depends(get_current_user)):
     def _list():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             return list_connections_payload(idea_id, db=uow.session, user=user)
 
-    return await run_sync_with_unit_of_work(_list)
+    return await run_unit_of_work_task(_list)
 
 
 @router.post("/connections", status_code=201)
@@ -117,7 +117,7 @@ async def create_connection(request: Request, user: dict[str, Any] = Depends(get
     if source_id == target_id:
         raise HTTPException(status_code=400, detail="Cannot connect an idea to itself")
     def _create():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             src = _require_idea_for_user(uow.session, source_id, user, detail="One or both ideas not found")
             tgt = _require_idea_for_user(uow.session, target_id, user, detail="One or both ideas not found")
             if not src or not tgt:
@@ -141,7 +141,7 @@ async def create_connection(request: Request, user: dict[str, Any] = Depends(get
                     raise HTTPException(status_code=400, detail="Connection already exists")
                 raise
 
-    result, broadcast_org_id = await run_sync_with_unit_of_work(_create)
+    result, broadcast_org_id = await run_unit_of_work_task(_create)
     await ws_manager.broadcast_product_event(
         "connection_created",
         {"connection": result},
@@ -154,7 +154,7 @@ async def create_connection(request: Request, user: dict[str, Any] = Depends(get
 async def delete_connection(conn_id: str, user: dict[str, Any] = Depends(get_current_user)):
     def _delete():
         broadcast_org_id: str | None = None
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             if _caller_is_service_principal(user):
                 conn = uow.session.get(IdeaConnection, conn_id)
             else:
@@ -177,7 +177,7 @@ async def delete_connection(conn_id: str, user: dict[str, Any] = Depends(get_cur
             uow.session.delete(conn)
         return broadcast_org_id
 
-    broadcast_org_id = await run_sync_with_unit_of_work(_delete)
+    broadcast_org_id = await run_unit_of_work_task(_delete)
     await ws_manager.broadcast_product_event(
         "connection_deleted",
         {"connection_id": conn_id},
@@ -204,7 +204,7 @@ async def webhook_reply(request: Request):
         raise HTTPException(status_code=400, detail="content is required")
 
     def _reply():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             idea = uow.session.get(Idea, idea_id)
             if not idea:
                 raise HTTPException(status_code=404, detail=f"Idea {idea_id} not found")
@@ -219,7 +219,7 @@ async def webhook_reply(request: Request):
             uow.session.flush()
             return _row_to_dict(thread_msg)
 
-    msg = await run_sync_with_unit_of_work(_reply)
+    msg = await run_unit_of_work_task(_reply)
     return JSONResponse(content=msg, status_code=201)
 
 
@@ -254,7 +254,7 @@ def restart_gpu_worker(worker_name: str, user: dict[str, Any] = Depends(get_curr
 @router.post("/ideas/{idea_id}/detect-branches")
 async def detect_branches(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
     def _messages():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = (
                 select(IdeaThread.content, IdeaThread.role)
                 .where(IdeaThread.idea_id == idea_id)
@@ -262,7 +262,7 @@ async def detect_branches(idea_id: str, user: dict[str, Any] = Depends(get_curre
             )
             return uow.session.execute(stmt).all()
 
-    messages = await run_sync_with_unit_of_work(_messages)
+    messages = await run_unit_of_work_task(_messages)
 
     if len(messages) < 8:
         return {"branches": [], "should_split": False, "reason": "Thread too short for meaningful split"}
@@ -304,7 +304,7 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
     from brain.systems.cortex.events import publish
 
     def _split():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             parent = uow.session.get(Idea, idea_id)
             if not parent:
                 raise HTTPException(status_code=404, detail="Idea not found")
@@ -377,7 +377,7 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
         )
         return created_ids, event_org_id
 
-    created_ids, event_org_id = await run_sync_with_unit_of_work(_split)
+    created_ids, event_org_id = await run_unit_of_work_task(_split)
     thought_split_payload = {"parent_id": idea_id, "children": created_ids}
     status_payload = {"idea_id": idea_id, "new_status": "resolved"}
     if event_org_id:
@@ -396,7 +396,7 @@ async def timeline_data(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     def _timeline():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             range_result = uow.session.execute(
                 select(func.min(Idea.created_at), func.max(func.greatest(Idea.created_at, Idea.updated_at)))
             ).fetchone()
@@ -481,7 +481,7 @@ async def timeline_data(
 
             return {"range": {"start": range_start, "end": range_end}, "ideas": ideas}
 
-    return await run_sync_with_unit_of_work(_timeline)
+    return await run_unit_of_work_task(_timeline)
 
 
 # ── Auth status ────────────────────────────────────────────────
@@ -503,7 +503,7 @@ async def auth_status(
 
     user_id = user.get("id")
     org_id = user.get("org_id")
-    return await run_sync_with_unit_of_work(
+    return await run_unit_of_work_task(
         get_provider_auth_status,
         user_id=user_id,
         org_id=org_id,
@@ -567,7 +567,7 @@ async def generate_title(request: Request, user: dict[str, Any] = Depends(get_cu
     text_content = data.get("text", "").strip()
     if not text_content:
         raise HTTPException(status_code=400, detail="text is required")
-    title = await run_sync_with_unit_of_work(
+    title = await run_unit_of_work_task(
         generate_display_title,
         text_content,
         user_id=user.get("id"),
@@ -583,7 +583,7 @@ async def backfill_titles(user: dict[str, Any] = Depends(get_current_user)):
     org_id = user.get("org_id")
     user_id = user.get("id")
     def _ideas_to_process():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = select(Idea).where(Idea.display_title.is_(None), Idea.archived_at.is_(None))
             if org_id:
                 stmt = stmt.where(Idea.org_id == org_id)
@@ -592,10 +592,10 @@ async def backfill_titles(user: dict[str, Any] = Depends(get_current_user)):
             rows = uow.session.scalars(stmt).all()
             return [(r.id, r.title) for r in rows]
 
-    ideas_to_process = await run_sync_with_unit_of_work(_ideas_to_process)
+    ideas_to_process = await run_unit_of_work_task(_ideas_to_process)
     count = 0
     for idea_id, idea_title in ideas_to_process:
-        result = await run_sync_with_unit_of_work(
+        result = await run_unit_of_work_task(
             generate_and_store_idea_display_title,
             str(idea_id),
             user_id=user_id,
@@ -614,11 +614,11 @@ async def backfill_titles(user: dict[str, Any] = Depends(get_current_user)):
 async def idea_audit(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
     """Aggregate metrics for ALL runs on an idea — pure SQL, no LLM."""
     def _audit():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             return build_idea_audit_summary(uow.session, idea_id)
 
     try:
-        return await run_sync_with_unit_of_work(_audit)
+        return await run_unit_of_work_task(_audit)
     except RunAuditNotFound:
         raise HTTPException(status_code=404, detail="No runs for this idea")
 
@@ -633,7 +633,7 @@ async def idea_audit_analyze(
 
     # Build a metrics summary to include in the run message
     def _audit_context():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             runs = uow.session.scalars(
                 select(AgentRun)
                 .where(AgentRun.thread_id == idea_id)
@@ -686,7 +686,7 @@ async def idea_audit_analyze(
                 "thread_text": thread_text,
             }
 
-    audit_context = await run_sync_with_unit_of_work(_audit_context)
+    audit_context = await run_unit_of_work_task(_audit_context)
     summary = (
         f"AUDIT SUMMARY for idea {idea_id}:\n"
         f"- {audit_context['run_count']} runs, {audit_context['failed']} failed\n"
@@ -705,7 +705,7 @@ async def idea_audit_analyze(
     )
 
     uid = user.get("id")
-    admission = await run_sync_with_unit_of_work(
+    admission = await run_unit_of_work_task(
         admit_run,
         RunAdmissionRequest(
             idea_id=idea_id,
@@ -737,7 +737,7 @@ async def idea_audit_analysis_result(
     associated with the audit_analyze run.
     """
     def _result():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             # Find the latest audit_analyze run for this idea
             d = uow.session.scalars(
                 select(AgentRun)
@@ -793,7 +793,7 @@ async def idea_audit_analysis_result(
 
             return result
 
-    return await run_sync_with_unit_of_work(_result)
+    return await run_unit_of_work_task(_result)
 
 
 @router.post("/audit/apply")
@@ -827,7 +827,7 @@ async def audit_apply(
             confidence=payload.get("confidence"),
             evidence={"audit_action_payload": payload},
         )
-        result = await run_sync_with_unit_of_work(
+        result = await run_unit_of_work_task(
             add_memory,
             content=content,
             memory_type=payload.get("memory_type", "lesson"),
@@ -848,14 +848,14 @@ async def audit_apply(
         from brain.platform.db.repositories.skills import SkillRepository
 
         def _add_guardrail():
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 repo = SkillRepository(uow.session)
                 try:
                     repo.add_guardrail(skill_name, text_val, severity)
                 except LookupError:
                     raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
 
-        await run_sync_with_unit_of_work(_add_guardrail)
+        await run_unit_of_work_task(_add_guardrail)
         return {"ok": True, "action": "add_guardrail", "skill": skill_name}
 
     elif action_type == "update_skill":
@@ -866,7 +866,7 @@ async def audit_apply(
         from brain.platform.db.repositories.skills import SkillRepository
 
         def _update_skill():
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 repo = SkillRepository(uow.session)
                 try:
                     skill = repo.get_by_name_or_raise(skill_name)
@@ -874,7 +874,7 @@ async def audit_apply(
                 except LookupError:
                     raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
 
-        await run_sync_with_unit_of_work(_update_skill)
+        await run_unit_of_work_task(_update_skill)
         return {"ok": True, "action": "update_skill", "skill": skill_name}
 
     elif action_type == "propose_code":
@@ -925,7 +925,7 @@ async def audit_eval(
     skill_name = proposal.get("skill_name") or proposal.get("payload", {}).get("skill_name")
 
     def _benchmark_data():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = (
                 select(AgentRun, AgentRunArtifactRow)
                 .join(AgentRunArtifactRow, AgentRunArtifactRow.run_id == AgentRun.id)
@@ -969,7 +969,7 @@ async def audit_eval(
                 })
             return data
 
-    benchmark_data = await run_sync_with_unit_of_work(_benchmark_data)
+    benchmark_data = await run_unit_of_work_task(_benchmark_data)
 
     # Judge each benchmark with a provider-neutral text completion.
     results = []

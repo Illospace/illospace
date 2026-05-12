@@ -330,7 +330,7 @@ class TestTitleRoutes:
             async def run_sync_inline(fn, /, *args, **kwargs):
                 return fn(*args, **kwargs)
 
-            with patch("brain.app.api.routers.cortex._misc.run_sync_with_unit_of_work", run_sync_inline):
+            with patch("brain.app.api.routers.cortex._misc.run_unit_of_work_task", run_sync_inline):
                 result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": "org-1"}))
 
         assert result == {"ok": True, "generated": 1, "total": 1}
@@ -353,7 +353,7 @@ class TestTitleRoutes:
         async def run_sync_inline(fn, /, *args, **kwargs):
             return fn(*args, **kwargs)
 
-        with patch("brain.app.api.routers.cortex._misc.run_sync_with_unit_of_work", run_sync_inline):
+        with patch("brain.app.api.routers.cortex._misc.run_unit_of_work_task", run_sync_inline):
             result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": "org-1"}))
 
         assert result == {"ok": True, "generated": 0, "total": 0}
@@ -373,7 +373,7 @@ class TestTitleRoutes:
         async def run_sync_inline(fn, /, *args, **kwargs):
             return fn(*args, **kwargs)
 
-        with patch("brain.app.api.routers.cortex._misc.run_sync_with_unit_of_work", run_sync_inline):
+        with patch("brain.app.api.routers.cortex._misc.run_unit_of_work_task", run_sync_inline):
             result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": None}))
 
         assert result == {"ok": True, "generated": 0, "total": 0}

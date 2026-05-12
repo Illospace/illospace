@@ -10,7 +10,7 @@ from brain.kernel.common.time import utcnow as _shared_utcnow
 
 from brain.systems.cortex.events import publish_safe
 from brain.platform.db.models.run import AgentRun
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ def record_run_resource_telemetry(
         return normalized
 
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             run = uow.session.get(AgentRun, run_id)
             if not run:
                 return normalized

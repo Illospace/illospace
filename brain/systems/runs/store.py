@@ -29,6 +29,7 @@ from brain.platform.db.models.agent_run import (
     AgentRunEventRow,
     AgentRunRow,
 )
+from brain.platform.db.session_tasks import run_session_task
 
 _STEERING_SUBMITTED_EVENT = "run.steering_submitted"
 _STEERING_CURSOR_METADATA_KEY = "steering_cursor_sequence_no"
@@ -648,7 +649,7 @@ class AsyncAgentRunStore:
         def _invoke(sync_session: Session):
             return fn(AgentRunStore(sync_session, auto_commit=self.auto_commit))
 
-        return await self.session.run_sync(_invoke)
+        return await run_session_task(self.session, _invoke)
 
     async def create_run(self, request: AgentRunRequest) -> AgentRun:
         return await self._run(lambda store: store.create_run(request))

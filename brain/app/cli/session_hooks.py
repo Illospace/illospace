@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 import brain.kernel.config as config
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.db.repositories.memory_visibility import (
     MemoryVisibilityContext,
     memory_visibility_sql,
@@ -55,7 +55,7 @@ def get_cross_channel_context(
     vis_clause, vis_params = memory_visibility_sql(visibility_context, alias="")
     params = {"hours_interval": f"{hours} hours", "limit": limit, **vis_params}
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         if current_session:
             params["current_session"] = current_session
             rows = uow.session.execute(text("""
@@ -152,7 +152,7 @@ def cmd_wake(args):
         with open(index_path) as f:
             index_content = f.read()
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         skills = uow.session.execute(text("""
             SELECT name, maturity, confidence, use_count,
                    CASE WHEN use_count > 0 THEN ROUND(success_count::numeric/use_count*100,0) ELSE 0 END as pct
@@ -214,7 +214,7 @@ def _get_experiment_info() -> dict:
     from datetime import date as _date
     result = {"active_count": 0, "assessed_last_night": [], "due_soon": []}
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = uow.session.execute(text("""
                 SELECT id, content FROM memories
                 WHERE memory_type = 'experiment' AND NOT archived
@@ -276,7 +276,7 @@ def _get_nightly_changes() -> list[str]:
 def _get_dream_memories() -> list[dict]:
     """Get dream memories from the last nightly cycle."""
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = uow.session.execute(text("""
                 SELECT id, content, created_at
                 FROM memories
@@ -340,7 +340,7 @@ def _sense_context(message: str, timeout_s: int = 30) -> list:
     try:
         qemb = embed_query(message)
         emb_str = vec_to_pg(qemb)
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = uow.session.execute(text("""
                 SELECT id, content, memory_type, salience,
                        1 - (semantic_embedding <=> CAST(:emb AS vector)) as sim
@@ -412,7 +412,7 @@ def cmd_encode(args):
 def cmd_log_retrieval(args):
     """Log retrieval feedback and adjust memory salience."""
     from retrieval_feedback import apply_retrieval_feedback
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Find the most recent retrieval log entry
         row = uow.session.execute(text(
             "SELECT id FROM retrieval_log ORDER BY timestamp DESC LIMIT 1"
@@ -426,7 +426,7 @@ def cmd_log_retrieval(args):
 
 def cmd_sleep(args):
     """Session end: encode session summary."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         if args.summary:
             semantic_emb = embed_document(args.summary)
             uow.session.execute(text("""
@@ -454,7 +454,7 @@ def cmd_sleep(args):
 
 def cmd_status(args):
     """Quick health dashboard."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         mem_row = uow.session.execute(text(
             "SELECT COUNT(*) as c FROM memories WHERE NOT archived"
         )).mappings().first()

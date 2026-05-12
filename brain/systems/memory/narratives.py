@@ -119,11 +119,11 @@ def link_session_to_narratives(
 
     Returns list of narrative IDs that were created or updated.
     """
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
     narrative_ids: list[int] = []
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         for tag in topic_tags:
             slug = slugify_topic(tag)
             narrative = uow.narratives.get_by_slug(

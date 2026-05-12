@@ -27,7 +27,7 @@ from datetime import timezone
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger("feedback.heuristics")
 
@@ -184,7 +184,7 @@ def store_heuristics(skill_name: str, candidates: list[dict]):
         return
 
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             # Load existing heuristics for dedup
             existing = uow.session.execute(text(
                 "SELECT id, condition, action FROM skill_heuristics "
@@ -239,7 +239,7 @@ def validate_heuristics(skill_name: str, success: bool):
     and useless ones get pruned.
     """
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             if success:
                 uow.session.execute(text("""
                     UPDATE skill_heuristics
@@ -276,7 +276,7 @@ def validate_heuristics(skill_name: str, success: bool):
 def get_active_heuristics(skill_name: str, min_confidence: float = INJECT_THRESHOLD) -> list[dict]:
     """Get high-confidence heuristics for injection into cognitive frames."""
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = uow.session.execute(text("""
                 SELECT condition, action, confidence, validated_count, source_count
                 FROM skill_heuristics
@@ -296,7 +296,7 @@ def update_skill_fitness(skill_name: str):
     Fitness = weighted combination of success rate, efficiency, heuristic quality.
     """
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             skill = uow.session.execute(text("""
                 SELECT use_count, success_count, failure_count, confidence,
                        heuristic_count
@@ -363,7 +363,7 @@ def graduate_heuristics(skill_name: str) -> list[dict]:
 
     graduated = []
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             candidates = uow.session.execute(text("""
                 SELECT id, condition, action, confidence, validated_count, source_count, demoted_at
                 FROM skill_heuristics
@@ -427,7 +427,7 @@ def demote_heuristics(skill_name: str) -> list[dict]:
     """
     demoted = []
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             candidates = uow.session.execute(text("""
                 SELECT id, condition, action, confidence
                 FROM skill_heuristics
@@ -480,7 +480,7 @@ def nightly_heuristic_review():
 
     try:
         # Prune stale low-confidence heuristics (not validated in 30 days)
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             pruned = uow.session.execute(text("""
                 UPDATE skill_heuristics
                 SET active = FALSE, updated_at = NOW()
@@ -494,7 +494,7 @@ def nightly_heuristic_review():
                 logger.info(f"Nightly: pruned {len(pruned)} stale heuristics")
 
         # Recompute fitness for all active skills
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = uow.session.execute(
                 text("SELECT name FROM skills WHERE NOT archived")
             ).mappings().all()
@@ -529,7 +529,7 @@ def summarize_skill_heuristics(skill_name: str) -> dict:
     changing the existing heuristic lifecycle.
     """
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = uow.session.execute(text("""
                 SELECT
                     COUNT(*) FILTER (WHERE active) AS active_count,

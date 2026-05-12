@@ -15,7 +15,7 @@ import bcrypt
 from sqlalchemy import select
 
 from brain.platform.db.models.org import Org, User
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ async def _async_user_with_org(uow: UnitOfWork, user: User) -> dict:
 
 def get_user_by_email(email: str) -> Optional[dict]:
     """Return user row by email, or None if not found."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         user = uow.team.get_by_email(email.lower().strip())
         if not user:
             return None
@@ -109,7 +109,7 @@ async def async_get_user_by_email(email: str) -> Optional[dict]:
 
 def get_user_by_id(user_id: str) -> Optional[dict]:
     """Return user row by UUID, or None if not found."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         user = uow.team.get_by_id(str(user_id))
         if not user:
             return None
@@ -172,7 +172,7 @@ async def async_authenticate(email: str, password: str) -> Optional[dict]:
 
 def has_any_users() -> bool:
     """Return True if at least one user exists."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return uow.team.has_any()
 
 
@@ -197,7 +197,7 @@ async def async_create_first_user(name: str, email: str, password: str, org_name
 def create_workspace_owner(name: str, email: str, password: str, org_name: str) -> dict:
     """Create a new workspace and make the registering user its approved owner."""
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         slug = _unique_org_slug(uow, org_name)
         org = Org(name=org_name.strip(), slug=slug)
         uow.session.add(org)
@@ -250,7 +250,7 @@ async def async_create_workspace_owner(name: str, email: str, password: str, org
 def create_user(name: str, email: str, password: str, org_id: str, role: str = "member") -> dict:
     """Create a new user in an existing org. Returns user dict."""
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         user = User(
             name=name.strip(),
             email=email.lower().strip(),
@@ -306,7 +306,7 @@ def _org_summary(org: Org | None) -> dict | None:
 
 def get_default_org_summary() -> dict | None:
     """Return the first org summary shown on the public signup screen."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         org = uow.orgs.get_first()
         return _org_summary(org)
 
@@ -324,7 +324,7 @@ def get_org_summary_by_slug(slug: str) -> dict | None:
     cleaned = (slug or "").strip().lower()
     if not cleaned:
         return None
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         stmt = select(Org).where(Org.slug == cleaned).limit(1)
         return _org_summary(uow.session.scalars(stmt).first())
 
@@ -343,21 +343,21 @@ async def async_get_org_summary_by_slug(slug: str) -> dict | None:
 
 def get_org_users(org_id: str) -> list[dict]:
     """Return all users in the given org (for sharing pickers, etc.)."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         users = uow.team.list_by_org(org_id)
         return [{"id": str(u.id), "name": u.name, "email": u.email, "color": u.color} for u in users]
 
 
 def get_all_users() -> list[dict]:
     """Return all users (for nightly per-user processing)."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         users = uow.team.list_all()
         return [{"id": str(u.id), "name": u.name} for u in users]
 
 
 def get_all_orgs() -> list[dict]:
     """Return all orgs."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         from sqlalchemy import select
         orgs = uow.session.scalars(select(Org).order_by(Org.name)).all()
         return [{"id": str(o.id), "name": o.name, "slug": o.slug} for o in orgs]
@@ -385,7 +385,7 @@ def safe_user_context(user: dict) -> dict:
 
 def get_pending_users(org_id: str) -> list[dict]:
     """Return unapproved users in the org."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         users = uow.team.list_pending(org_id)
         return [
             {"id": str(u.id), "name": u.name, "email": u.email, "color": u.color, "created_at": u.created_at}
@@ -395,7 +395,7 @@ def get_pending_users(org_id: str) -> list[dict]:
 
 def approve_user(user_id: str, approver_id: str) -> bool:
     """Approve a pending user in the approver's org."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         approver = uow.team.get_by_id(approver_id)
         if not approver or not approver.approved:
             return False
@@ -408,7 +408,7 @@ def approve_user(user_id: str, approver_id: str) -> bool:
 
 def reject_user(user_id: str, approver_id: str) -> bool:
     """Reject (delete) a pending user. Only owners can reject."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         approver = uow.team.get_by_id(approver_id)
         if not approver or approver.role != "owner":
             return False

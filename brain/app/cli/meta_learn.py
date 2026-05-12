@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from sqlalchemy import text
 
 from brain.kernel import config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.memory.embeddings import embed_document, embed_query, vec_to_pg
 
 _vec_to_pg = vec_to_pg
@@ -144,7 +144,7 @@ def _check_skill_overlap(name, description, max_similarity):
     """Check if a skill with similar name/description already exists."""
     try:
         emb = embed_query(f"{name}: {description or ''}")
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = uow.session.execute(text("""
                 SELECT name, 1 - (embedding <=> CAST(:emb AS vector)) AS similarity
                 FROM skills WHERE NOT archived
@@ -168,7 +168,7 @@ def _create_skill_via_db(name, description, procedure):
 
     emb_text = f"{name}: {description or ''} {procedure[:500]}"
     embedding = embed_document(emb_text)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         row = uow.session.execute(text("""
             INSERT INTO skills (name, description, procedure, level, embedding)
             VALUES (:name, :description, :procedure, 'cognitive', CAST(:embedding AS vector))
@@ -186,7 +186,7 @@ def _create_skill_via_db(name, description, procedure):
 
 def assess_skill(skill_name):
     """Assess skill health: usage stats, pitfalls, dormancy, suggestions."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         skill = uow.session.execute(text(
             "SELECT * FROM skills WHERE name = :name AND NOT archived"
         ), {"name": skill_name}).mappings().first()
@@ -298,7 +298,7 @@ def assess_skill(skill_name):
 
 def cross_pollinate():
     """Analyze skills for shared pitfalls and complementary patterns."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         rows = uow.session.execute(text("""
             SELECT id, name, description, procedure, pitfalls, refinements,
                    use_count, success_count, failure_count, maturity, confidence
@@ -398,7 +398,7 @@ def evolve_meta():
     approved = [d for d in state["author_decisions"] if d["approved"] and d.get("skill_id")]
     if len(approved) >= 3:
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 skill_ids = [d["skill_id"] for d in approved[-20:]]
                 rows = uow.session.execute(text("""
                     SELECT id, use_count, success_count, failure_count

@@ -86,7 +86,7 @@ def _chat_thread_id(chat_trigger: dict[str, Any], target: dict[str, Any]) -> str
 
 
 def _route_chat_trigger(trigger: IlloTrigger, *, session: Any | None = None) -> TriggerRouteResult:
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
     def _admit(active_session: Any) -> TriggerRouteResult:
         target = dict(trigger.target or {})
@@ -138,7 +138,7 @@ def _route_chat_trigger(trigger: IlloTrigger, *, session: Any | None = None) -> 
 
     if session is not None:
         return _admit(session)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return _admit(uow.session)
 
 

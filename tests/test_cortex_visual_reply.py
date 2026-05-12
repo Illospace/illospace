@@ -75,7 +75,7 @@ def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
     monkeypatch.setattr(cortex_reply._agent_context, "run", run, raising=False)
 
     fake_events = SimpleNamespace(publish_safe=lambda event, payload: published.append((event, payload)))
-    fake_uow_mod = SimpleNamespace(UnitOfWork=FakeUnitOfWork)
+    fake_uow_mod = SimpleNamespace(UnitOfWork=FakeUnitOfWork, open_unit_of_work=lambda factory: factory())
     fake_idea_mod = SimpleNamespace(VisualBlock=FakeVisualBlock)
     monkeypatch.setitem(sys.modules, "brain.systems.cortex.events", fake_events)
     monkeypatch.setitem(sys.modules, "brain.platform.db.repositories.unit_of_work", fake_uow_mod)
@@ -185,7 +185,7 @@ async def test_cortex_stream_includes_persisted_visual_block(monkeypatch):
     async def fake_run_sync(fn, /, *args, **kwargs):
         return fn(*args, **kwargs)
 
-    monkeypatch.setattr(idea_ops, "run_sync_with_unit_of_work", fake_run_sync)
+    monkeypatch.setattr(idea_ops, "run_unit_of_work_task", fake_run_sync)
     fake_run = SimpleNamespace(idea_run_history=lambda _idea_id: [])
     monkeypatch.setitem(sys.modules, "brain.systems.runs.cortex", fake_run)
 

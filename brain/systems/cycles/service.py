@@ -16,7 +16,7 @@ from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
 from brain.platform.db.models.org import User
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_unit_of_work_task, open_unit_of_work
 
 logger = logging.getLogger("cycles")
 
@@ -480,7 +480,7 @@ def _finalize_cycle_run(
 
 
 def create_cycle_run_record(cycle_id: int, *, scheduled_for: datetime, prompt_snapshot: str) -> int:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         run = CycleRun(
             cycle_id=cycle_id,
             scheduled_for=scheduled_for,
@@ -493,7 +493,7 @@ def create_cycle_run_record(cycle_id: int, *, scheduled_for: datetime, prompt_sn
 
 
 def _load_cycle_prompt(cycle_id: int) -> str:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         cycle = uow.session.get(Cycle, cycle_id)
         if not cycle or cycle.deleted_at is not None:
             raise ValueError("Cycle not found")
@@ -507,20 +507,20 @@ def run_cycle_now(cycle_id: int) -> dict:
         prompt_snapshot=_load_cycle_prompt(cycle_id),
     )
     execute_cycle_run(run_id)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         run = uow.session.get(CycleRun, run_id)
         return serialize_cycle_run(run)
 
 
 async def async_run_cycle_now(cycle_id: int) -> dict:
-    return await run_sync_with_unit_of_work(run_cycle_now, cycle_id)
+    return await run_unit_of_work_task(run_cycle_now, cycle_id)
 
 
 def schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
     claimed_run_ids: list[int] = []
     now = datetime.now(timezone.utc)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         stmt = (
             select(Cycle)
             .where(
@@ -572,7 +572,7 @@ def execute_cycle_run(run_id: int) -> None:
     cycle_user_id = None
     agent_run_id = None
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         run = uow.session.scalars(
             select(CycleRun).where(CycleRun.id == run_id).with_for_update()
         ).first()
@@ -706,7 +706,7 @@ def finalize_cycle_run_from_run(
 ) -> None:
     if status not in {"completed", "failed"}:
         return
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         run = uow.session.get(AgentRun, run_id)
         metadata = run.metadata_ if run else None
         if not isinstance(metadata, dict) or metadata.get("source") != "cycle":

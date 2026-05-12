@@ -520,10 +520,10 @@ def record_action_manifest(manifest: ActionManifestCreate | Mapping[str, Any] | 
         return None
     try:
         from brain.platform.db.models.run import ActionManifest
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
         create = _coerce_manifest_create(manifest)
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = ActionManifest.from_create(create)
             uow.session.add(row)
             uow.session.flush()
@@ -544,9 +544,9 @@ def complete_action_manifest(
         return
     try:
         from brain.platform.db.models.run import ActionManifest
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = uow.session.get(ActionManifest, manifest_id)
             if not row:
                 return

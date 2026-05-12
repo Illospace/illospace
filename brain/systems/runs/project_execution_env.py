@@ -69,10 +69,10 @@ def _current_run_target_context() -> dict | None:
 
     try:
         from brain.platform.db.models.run import AgentRun
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
         from brain.systems.environment import load_run_target_context
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             context = load_run_target_context(uow.session, int(run_id))
             if context:
                 return context

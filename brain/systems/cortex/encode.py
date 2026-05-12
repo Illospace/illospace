@@ -10,7 +10,7 @@ import re
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ def encode_thought_to_brain(idea_id: str, force: bool = False):
     Skips if already encoded unless force=True.
     """
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             idea = uow.session.execute(text(
                 "SELECT id, title, display_title, agent_details, encoded_at, user_id, org_id FROM ideas WHERE id = :id"
             ), {"id": idea_id}).mappings().first()
@@ -81,7 +81,7 @@ Thought:
             logger.info(f"Cortex encode SKIP for idea {idea_id[:8]}")
             # Mark as encoded even on SKIP to avoid re-processing
             try:
-                with UnitOfWork() as uow2:
+                with open_unit_of_work(UnitOfWork) as uow2:
                     uow2.session.execute(text(
                         "UPDATE ideas SET encoded_at = NOW() WHERE id = :id"
                     ), {"id": idea_id})
@@ -146,7 +146,7 @@ Thought:
 
         # Mark as encoded to prevent double-encoding
         try:
-            with UnitOfWork() as uow2:
+            with open_unit_of_work(UnitOfWork) as uow2:
                 uow2.session.execute(text(
                     "UPDATE ideas SET encoded_at = NOW() WHERE id = :id"
                 ), {"id": idea_id})

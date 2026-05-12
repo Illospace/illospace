@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from sqlalchemy import text
 
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 WORKSPACE = str(config.WORKSPACE_ROOT)
 
@@ -107,7 +107,7 @@ def scrub_content(text: str, skip_llm: bool = False) -> str:
 
 def export_memories(scope: str, skip_llm: bool = False) -> list[dict]:
     """Fetch and scrub memories of the given scope."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         rows = [dict(r) for r in uow.session.execute(text("""
             SELECT id, content, memory_type, salience,
                    tags, source, created_at, scope
@@ -133,7 +133,7 @@ def export_memories(scope: str, skip_llm: bool = False) -> list[dict]:
 
 def export_skills() -> list[dict]:
     """Export all non-archived skills."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         rows = uow.session.execute(text("""
             SELECT name, description, procedure, version, level, maturity,
                    confidence, use_count, success_count, failure_count,

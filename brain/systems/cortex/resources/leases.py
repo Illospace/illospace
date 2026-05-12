@@ -11,7 +11,7 @@ from brain.kernel.common.time import utcnow as _shared_utcnow
 
 from brain.systems.cortex.events import publish_safe
 from brain.platform.db.models.resource_pool import ResourceLease
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class ResourceLeaseManager:
         token = lease_token or uuid.uuid4().hex
 
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 active_lease = (
                     uow.session.query(ResourceLease)
                     .filter(
@@ -186,7 +186,7 @@ class ResourceLeaseManager:
             return False
 
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 lease = (
                     uow.session.query(ResourceLease)
                     .filter(
@@ -224,7 +224,7 @@ class ResourceLeaseManager:
             return False
 
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 lease = (
                     uow.session.query(ResourceLease)
                     .filter(
@@ -251,7 +251,7 @@ class ResourceLeaseManager:
         reclaimed = 0
 
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 query = uow.session.query(ResourceLease).filter(
                     ResourceLease.released_at.is_(None),
                     ResourceLease.expires_at.isnot(None),

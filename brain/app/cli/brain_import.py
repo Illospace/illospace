@@ -22,14 +22,14 @@ from brain.kernel import config
 def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
     """Import from an exported starter kit directory."""
     from sqlalchemy import text
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
     stats = {'memories': 0, 'skills': 0, 'templates': 0, 'schema': False}
 
     # 1. Apply schema if tables don't exist
     schema_path = os.path.join(export_dir, 'schema.sql')
     if os.path.exists(schema_path):
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = uow.session.execute(text("""
                 SELECT EXISTS (
                     SELECT FROM information_schema.tables
@@ -59,7 +59,7 @@ def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
     migration_path = str(Path(config.BRAIN_DIR) / 'migrations' / '012_scope_column.sql')
     if not dry_run:
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 uow.session.execute(text(
                     "ALTER TABLE memories ADD COLUMN IF NOT EXISTS scope VARCHAR(20) DEFAULT 'personal'"
                 ))
@@ -100,7 +100,7 @@ def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
 
         if not dry_run:
             from brain.systems.skills.gate import validate_skill_structure
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 for s in skills:
                     # Validate via centralized skill-creator gate (issue #187)
                     violations = validate_skill_structure(

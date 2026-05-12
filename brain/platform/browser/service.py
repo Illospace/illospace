@@ -28,7 +28,7 @@ from brain.systems.cortex.resources.telemetry import build_browser_resource_summ
 from brain.systems.cortex.upload_preview import public_static_upload_url, static_upload_url_for
 from brain.platform.db.models.browser import BrowserSession
 from brain.platform.db.models.idea import Idea, VisualBlock
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, use_sync_session
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_unit_of_work_task, open_unit_of_work
 from brain.app.web.research import _assert_safe_url
 
 logger = logging.getLogger(__name__)
@@ -49,18 +49,9 @@ def _utcnow() -> datetime:
 
 
 async def _run_browser_db(fn: Callable[[], ReturnT]) -> ReturnT:
-    """Run browser service sync DB helpers through the async UnitOfWork bridge."""
+    """Run browser service blocking DB helpers off the event loop."""
 
-    uow = UnitOfWork()
-    if not hasattr(uow, "__aenter__"):
-        return fn()
-
-    async with uow:
-        def _invoke(sync_session):
-            with use_sync_session(sync_session):
-                return fn()
-
-        return await uow.session.run_sync(_invoke)
+    return await run_unit_of_work_task(fn)
 
 
 def _normalize_url(url: str) -> str:
@@ -774,7 +765,7 @@ result = page_info()
                 " />"
             )
             def _persist_block() -> int:
-                with UnitOfWork() as uow:
+                with open_unit_of_work(UnitOfWork) as uow:
                     block = VisualBlock(
                         idea_id=self.idea_id,
                         content_type="preview",
@@ -1292,7 +1283,7 @@ print({json.dumps(marker)} + json.dumps(result))
 
     async def _persist_state(self, **updates: Any) -> None:
         def _persist() -> None:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 record = uow.session.get(BrowserSession, self.session_id)
                 if not record:
                     return
@@ -1549,7 +1540,7 @@ class BrowserSessionService:
             except Exception as exc:
                 logger.debug("Failed to close recycled browser session %s: %s", session_id, exc)
         def _retire() -> None:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 record = uow.session.get(BrowserSession, session_id)
                 if record:
                     record.status = "closed"
@@ -1561,7 +1552,7 @@ class BrowserSessionService:
 
     def get_idea_org_id(self, idea_id: str) -> str | None:
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 org_id = (
                     uow.session.query(Idea.org_id)
                     .filter(Idea.id == str(idea_id))
@@ -1585,7 +1576,7 @@ class BrowserSessionService:
         if not normalized_session_id:
             return None
         normalized_org_id = str(org_id).strip() if org_id else None
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             query = uow.session.query(BrowserSession).filter(BrowserSession.id == normalized_session_id)
             if normalized_org_id:
                 query = (
@@ -1660,7 +1651,7 @@ class BrowserSessionService:
             if record is None:
                 created_session = True
                 def _create_record() -> BrowserSession:
-                    with UnitOfWork() as uow:
+                    with open_unit_of_work(UnitOfWork) as uow:
                         record = BrowserSession(
                             idea_id=idea_id,
                             user_id=user_id,
@@ -1747,7 +1738,7 @@ class BrowserSessionService:
         if runtime is not None:
             return runtime
         def _load_record() -> BrowserSession | None:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 record = uow.session.get(BrowserSession, session_id)
                 if record is not None:
                     org_id = self.get_idea_org_id(str(record.idea_id))
@@ -1862,7 +1853,7 @@ class BrowserSessionService:
             raise
 
     def _load_active_session(self, idea_id: str) -> BrowserSession | None:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             return (
                 uow.session.query(BrowserSession)
                 .filter(

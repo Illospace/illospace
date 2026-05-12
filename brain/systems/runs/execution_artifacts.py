@@ -35,9 +35,9 @@ def load_execution_artifacts(*, execution_id: str | None = None, execution_ids: 
     if not requested_execution_ids:
         return []
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             records = uow.session.scalars(
                 select(AgentRunArtifactRow)
                 .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
@@ -66,9 +66,9 @@ def append_run_execution_artifacts(*, run_id: int | None, artifacts: list[Any]) 
     if not run_id or not artifacts:
         return
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             store = AgentRunStore(uow.session)
             run = store.get_run(int(run_id))
             if not run:
@@ -106,9 +106,9 @@ def append_execution_artifacts(*, execution_id: str, provenance: dict, artifacts
     if not run_id:
         return
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             store = AgentRunStore(uow.session)
             run = store.get_run(int(run_id))
             if not run:
@@ -164,9 +164,9 @@ def update_execution_summary(
     if not run_id:
         return
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             store = AgentRunStore(uow.session)
             run = store.get_run(int(run_id))
             if not run:

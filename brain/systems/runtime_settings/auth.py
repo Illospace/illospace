@@ -21,7 +21,7 @@ from brain.platform.integrations.openai_codex_auth import (
     parse_codex_oauth_callback,
 )
 from brain.platform.db.models.org import User
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.services.runtime_introspection import get_provider_auth_status
 from brain.systems.vault import set_api_key
 
@@ -128,7 +128,7 @@ def store_openai_connection(user: User, token: str, *, label: str | None = None)
     except RuntimeError as exc:
         _raise_if_vault_not_configured(exc)
         raise
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         refreshed = uow.session.get(User, user.id)
         if not refreshed:
             raise HTTPException(status_code=404, detail="User not found")
@@ -341,7 +341,7 @@ def connect_gemini_api_key(user: User, api_key: str) -> RuntimeMemoryRead:
 
 
 def refresh_user(user_id: str) -> User:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         user = uow.session.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")

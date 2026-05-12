@@ -18,7 +18,7 @@ from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.ideas import IdeaRepository
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ def _record_implicit_feedback(idea_id: str, content: str, tags: list[str]) -> No
     if not tags:
         return
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = (
                 select(AgentRun)
                 .where(AgentRun.thread_id == idea_id)
@@ -196,7 +196,7 @@ def _record_implicit_feedback(idea_id: str, content: str, tags: list[str]) -> No
 
 def _create_feedback_triggers(skill_used: str, task_summary: str, note: str):
     from datetime import datetime as dt
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         skill = uow.skills.get_by_name(skill_used)
         if skill:
             triggers = list(skill.triggers or [])

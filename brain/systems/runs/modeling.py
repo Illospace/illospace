@@ -6,7 +6,7 @@ import sys
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.providers.model_policy import (
     calculate_model_cost,
     get_default_model,
@@ -44,7 +44,7 @@ def resolve_model(
 def get_skill_tiers() -> list[dict]:
     """Return all non-archived skills with their tier settings."""
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = uow.session.execute(text(
                 "SELECT name, model_tier, thinking_tier, maturity, confidence, "
                 "use_count, success_count, version "

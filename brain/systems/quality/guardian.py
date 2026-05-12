@@ -8,12 +8,12 @@ from datetime import datetime
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 
 def load_rules(active_only: bool = True) -> list[dict]:
     """Load guardian rules from DB."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         clause = "WHERE active = true" if active_only else ""
         rows = uow.session.execute(text(f"""
             SELECT id, name, description, trigger_type, trigger_pattern,
@@ -73,7 +73,7 @@ def check_completion(action_log: list[str], task_context: dict) -> tuple[bool, l
                 missing.append(evidence)
 
         # Update enforcement counter
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             uow.session.execute(text("""
                 UPDATE guardian_rules SET times_enforced = times_enforced + 1,
                        updated_at = NOW() WHERE id = :id
@@ -84,13 +84,13 @@ def check_completion(action_log: list[str], task_context: dict) -> tuple[bool, l
                 f"[{rule['name']}] {rule['check_description']} "
                 f"(missing: {', '.join(missing)})"
             )
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 uow.session.execute(text("""
                     UPDATE guardian_rules SET times_bounced = times_bounced + 1
                     WHERE id = :id
                 """), {"id": rule["id"]})
         else:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 uow.session.execute(text("""
                     UPDATE guardian_rules SET times_passed = times_passed + 1
                     WHERE id = :id
@@ -104,7 +104,7 @@ def record_completion(passed: bool, violations: list[str], caught_by: str):
 
     caught_by: 'guardian', 'self', 'user'
     """
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         if caught_by == "user":
             # Worst case: user caught something we missed
             uow.session.execute(text("""
@@ -156,7 +156,7 @@ def record_completion(passed: bool, violations: list[str], caught_by: str):
 
 def get_trust_level() -> dict:
     """Return current trust state."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         row = uow.session.execute(
             text("SELECT * FROM trust_state LIMIT 1")
         ).mappings().first()
@@ -172,7 +172,7 @@ def get_trust_level() -> dict:
 
 def demote(reason: str):
     """Demote trust level. Called when user catches a miss."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         uow.session.execute(text("""
             UPDATE trust_state SET
                 current_level = GREATEST(0, current_level - 1),
@@ -185,7 +185,7 @@ def demote(reason: str):
 
 def get_scout_checklist() -> str:
     """Generate the pre-flight checklist as markdown for private operator context."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         rows = uow.session.execute(text("""
             SELECT category, check_text, priority
             FROM checklist_items WHERE active = true

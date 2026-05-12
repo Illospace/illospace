@@ -28,7 +28,7 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))  # repo root
 
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.db.models.skill import Skill, SkillDependency, SkillExecution
 from brain.platform.db.models.memory import Memory
 from brain.systems.memory.embeddings import embed_batch, embed_document, embed_query, vec_to_pg
@@ -68,7 +68,7 @@ def compute_maturity(use_count: int, success_rate: float) -> tuple:
 
 def cmd_list(args):
     """List all skills with metrics."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # skill_dashboard is a DB view — use raw SQL for it
         rows = uow.session.execute(text("SELECT * FROM skill_dashboard")).mappings().all()
 
@@ -90,7 +90,7 @@ def cmd_list(args):
 
 def cmd_get(args):
     """Get full skill details."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         skill = uow.skills.get_by_name(args.name)
 
         if not skill:
@@ -190,7 +190,7 @@ def cmd_create(args):
     emb_text = f"{args.name}: {args.desc or ''} {args.procedure[:500]}"
     embedding = embed_document(emb_text)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         skill = Skill(
             name=args.name,
             description=args.desc,
@@ -212,7 +212,7 @@ def cmd_create(args):
 
 def cmd_use(args):
     """Record a skill execution."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         skill = uow.skills.get_by_name(args.name)
         if not skill:
             print(json.dumps({"error": f"Skill '{args.name}' not found"}))
@@ -294,7 +294,7 @@ def cmd_refine(args):
     if not _check_skill_creator_gate(args, "refine"):
         return
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         skill = uow.skills.get_by_name(args.name)
         if not skill:
             print(json.dumps({"error": f"Skill '{args.name}' not found"}))
@@ -333,7 +333,7 @@ def cmd_refine(args):
 
 def cmd_pitfall(args):
     """Add a pitfall to a skill."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         skill = uow.skills.get_by_name(args.name)
         if not skill:
             print(json.dumps({"error": f"Skill '{args.name}' not found"}))
@@ -354,7 +354,7 @@ def cmd_pitfall(args):
 
 def cmd_depend(args):
     """Create a dependency between skills."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         parent = uow.skills.get_by_name(args.parent)
         child = uow.skills.get_by_name(args.child)
 
@@ -443,7 +443,7 @@ def cmd_plan(args):
         """
         similar_params = {}
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # 1. Find similar past tasks from persisted agent runs.
         similar_tasks = uow.session.execute(
             text(similar_sql),
@@ -620,7 +620,7 @@ def cmd_plan(args):
             plan["blocked"] = True
             plan["blocking_message"] = "Skill-authoring gate: must read skill-creator before proceeding"
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         uow.session.execute(text("""
             UPDATE agent_run_artifacts
             SET payload = CAST(:payload AS jsonb)
@@ -632,7 +632,7 @@ def cmd_plan(args):
 
 def cmd_dashboard(args):
     """Full performance dashboard."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Skill overview (DB view)
         skills = uow.session.execute(text("SELECT * FROM skill_dashboard")).mappings().all()
 
@@ -686,7 +686,7 @@ def cmd_evolve(args):
     print("SKILL EVOLUTION — Nightly Analysis")
     print("=" * 60)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # 1. Analyze recent executions (last 24h)
         recent_execs = uow.session.execute(
             text("""

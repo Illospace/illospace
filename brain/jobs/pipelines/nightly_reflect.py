@@ -25,7 +25,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))  # repo root
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 WORKSPACE = str(config.WORKSPACE_ROOT)
 PRIVATE_HOME = str(config.PRIVATE_HOME)
@@ -36,7 +36,7 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
     _mem_org_filter = "AND org_id = :org_id" if org_id else ""
     _mem_org_params = {"org_id": org_id} if org_id else {}
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         context = {}
 
         # 1. Today's skill executions
@@ -302,7 +302,7 @@ def apply_reflection(reflection: dict, target_date: date, context: dict | None =
     """Apply the LLM's reflection outputs to the system."""
     context = context or {}
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         applied = []
 
         # 1. Apply skill refinements

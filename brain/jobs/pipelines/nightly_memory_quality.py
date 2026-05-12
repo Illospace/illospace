@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy import or_, select
 
 from brain.platform.db.models.memory import Memory, MemoryContradiction
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.learning.budget import LearningBudgetLedger, LearningBudgetPolicy
 from brain.systems.memory.conflict_resolver import resolve_memory_conflicts
 
@@ -32,7 +32,7 @@ def gather_memory_quality_inputs(
     """Load conflict rows and stale freshness signals for a nightly run."""
     clock = now or datetime.now(timezone.utc)
     limit = max(1, int(limit or 100))
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         contradictions = _fetch_contradictions(uow.session, limit=limit)
         memory_ids = {
             int(row[key])

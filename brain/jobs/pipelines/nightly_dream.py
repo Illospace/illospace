@@ -18,7 +18,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 PROJECT_ROOT = str(config.BRAIN_DIR)
 WORKSPACE = str(config.WORKSPACE_ROOT)
@@ -29,7 +29,7 @@ def gather_today_memories(target_date: date, limit: int = 10, org_id: str | None
     """Get today's highest-salience memories."""
     _org_filter = "AND org_id = :org_id" if org_id else ""
     _org_params = {"org_id": org_id} if org_id else {}
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text(f"""
             SELECT id, content, memory_type, salience, tags
             FROM memories
@@ -44,7 +44,7 @@ def gather_random_old_memories(target_date: date, limit: int = 10, org_id: str |
     """Get random old memories from diverse types."""
     _org_filter = "AND org_id = :org_id" if org_id else ""
     _org_params = {"org_id": org_id} if org_id else {}
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text(f"""
             SELECT id, content, memory_type, salience, tags,
                    created_at::date as created_date

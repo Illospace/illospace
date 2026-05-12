@@ -19,7 +19,7 @@ import os
 import re
 from datetime import datetime, timezone, timedelta
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.runs.token_usage import summarize_token_totals
 
 logger = logging.getLogger("cortex.budget")
@@ -94,7 +94,7 @@ def check_budget(idea_id: str, estimated_input_tokens: int,
     now = datetime.now(timezone.utc)
 
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             # 1. Per-idea hourly usage
             hour_ago = now - timedelta(hours=1)
             idea_hour = summarize_token_totals(
@@ -218,7 +218,7 @@ def get_budget_status() -> dict:
     """Return current budget utilization for the dashboard."""
     now = datetime.now(timezone.utc)
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             # Daily usage
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             daily = summarize_token_totals(

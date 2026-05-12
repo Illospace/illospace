@@ -352,6 +352,7 @@ def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeypatch):
 
     monkeypatch.setattr(service, "_admit_cycle_run", fake_admit)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_capture_cycle_emotion", lambda *args, **kwargs: None, raising=False)
 
     service.execute_cycle_run(run.id)
 

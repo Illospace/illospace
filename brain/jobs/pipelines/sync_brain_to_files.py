@@ -13,14 +13,14 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))  # repo root
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 WORKSPACE = str(config.WORKSPACE_ROOT)
 MEMORY_DIR = str(config.JOURNAL_DIR)  # illo-brain/journal/ — standalone
 
 
 def sync_lessons():
     """Export high-salience lessons from brain → memory/lessons.md"""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text("""
             SELECT id, content, salience, created_at
             FROM memories

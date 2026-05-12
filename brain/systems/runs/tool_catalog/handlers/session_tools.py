@@ -12,10 +12,10 @@ def _handle_session_write(section: str, value: str, key: str | None = None) -> s
     if section not in _VALID_SECTIONS:
         return json.dumps({"error": f"Invalid section '{section}'. Must be one of: {sorted(_VALID_SECTIONS)}"})
 
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
     worker = _get_current_worker_name()
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         entry = uow.scratchpad.write(
             run_id=run_id, section=section, value=value,
             key=key, worker_name=worker,
@@ -29,9 +29,9 @@ def _handle_session_read(section: str | None = None, key: str | None = None) -> 
     if err:
         return err
 
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         entries = uow.scratchpad.read(run_id=run_id, section=section, key=key)
         return json.dumps({"run_id": run_id, "count": len(entries), "entries": entries})
 
@@ -74,9 +74,9 @@ def _handle_session_list(section: str | None = None) -> str:
     if err:
         return err
 
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         if section:
             entries = uow.scratchpad.read(run_id=run_id, section=section)
             return json.dumps({"run_id": run_id, "section": section, "count": len(entries), "entries": entries})
@@ -93,9 +93,9 @@ def _handle_session_promote() -> str:
     if err:
         return err
 
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return json.dumps(uow.scratchpad.promote(run_id=run_id))
 
 
@@ -105,9 +105,9 @@ def _handle_session_close() -> str:
     if err:
         return err
 
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         count = uow.scratchpad.close(run_id=run_id)
         return json.dumps({"closed": True, "run_id": run_id, "entries_closed": count})
 

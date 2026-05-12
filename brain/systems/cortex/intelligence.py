@@ -13,7 +13,7 @@ import numpy as np
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.memory.embeddings import embed_query, vec_to_pg
 
 log = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ def _parse_embedding(emb_str: str) -> np.ndarray:
 
 def detect_connections(threshold: float = LINK_THRESHOLD) -> dict:
     """Run similarity search across all non-archived ideas, create connections."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         ideas = uow.session.execute(text("""
             SELECT id, title, embedding
             FROM ideas
@@ -51,7 +51,7 @@ def detect_connections(threshold: float = LINK_THRESHOLD) -> dict:
             'emb': _parse_embedding(idea['embedding']),
         })
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         conn_rows = uow.session.execute(text(
             "SELECT source_id, target_id FROM idea_connections"
         )).mappings().all()
@@ -61,7 +61,7 @@ def detect_connections(threshold: float = LINK_THRESHOLD) -> dict:
     created = 0
     pairs_checked = 0
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         for i in range(len(parsed)):
             for j in range(i + 1, len(parsed)):
                 pairs_checked += 1
@@ -90,7 +90,7 @@ def detect_connections(threshold: float = LINK_THRESHOLD) -> dict:
 
 def similarity_matrix() -> dict:
     """Return pairwise similarities for active ideas (threshold > 0.4)."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         ideas = uow.session.execute(text("""
             SELECT id, embedding FROM ideas
             WHERE archived_at IS NULL AND embedding IS NOT NULL
@@ -157,7 +157,7 @@ def compute_gravity(
     status_filter = status_filter or []
     loaded_idea_ids = [str(i) for i in (loaded_idea_ids or []) if i]
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         all_ideas = [dict(r) for r in uow.session.execute(text("""
             SELECT id, title, user_id, status, updated_at, salience_score,
                    CASE WHEN embedding IS NOT NULL THEN true ELSE false END AS has_embedding

@@ -145,7 +145,7 @@ def _handle_manage_workspace_app(
     if mapping_error:
         return json.dumps(mapping_error)
 
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
     from brain.systems.workspace_apps.service import (
         WorkspaceAppContractError,
         WorkspaceAppError,
@@ -170,7 +170,7 @@ def _handle_manage_workspace_app(
     actor_id = str(user_id) if user_id else None
 
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             if action == "list":
                 apps = serialize_apps(
                     uow.session,

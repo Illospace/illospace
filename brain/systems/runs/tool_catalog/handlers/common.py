@@ -380,9 +380,9 @@ def _wrap_brain_encode(original_fn):
         kwargs.setdefault("run_id", run_id)
         if kwargs.get("user_id") and not kwargs.get("org_id"):
             try:
-                from brain.platform.db.repositories.unit_of_work import UnitOfWork
+                from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
                 from brain.platform.db.models.org import User
-                with UnitOfWork() as uow:
+                with open_unit_of_work(UnitOfWork) as uow:
                     user = uow.session.get(User, kwargs["user_id"])
                     if user and getattr(user, "org_id", None):
                         kwargs["org_id"] = user.org_id

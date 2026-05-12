@@ -25,7 +25,7 @@ from brain.app.api.services.notifications import build_notification_summary
 from brain.app.api.ws.manager import ConnectionManager
 from brain.app.api.ws.events import ServerEvent, ClientEvent
 from brain.app.api.ws.auth import WsTokenError, validate_auth_frame_claims, verify_ws_token
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_unit_of_work_task, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -565,7 +565,7 @@ async def _handle_chat_mark_read(user_id: str, org_id: str, data: dict, ws: WebS
 
     try:
         def _mark_read():
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 _, publish = ChatService(
                     uow.session,
                     {"id": user_id, "org_id": org_id},
@@ -579,7 +579,7 @@ async def _handle_chat_mark_read(user_id: str, org_id: str, data: dict, ws: WebS
                 summary = build_notification_summary(uow.session, user_id=user_id, org_id=org_id)
                 return publish, summary.model_dump(mode="json")
 
-        publish, summary_payload = await run_sync_with_unit_of_work(_mark_read)
+        publish, summary_payload = await run_unit_of_work_task(_mark_read)
     except HTTPException as exc:
         await _send_chat_error(ws, _chat_error_code_from_http_exception(exc))
         return
@@ -683,7 +683,7 @@ async def _authorize_chat_subscription(
     thread_root_message_id: int | None = None,
 ) -> str | None:
     def _authorize():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             conversation = ChatConversationRepository(uow.session).get_for_user(
                 conversation_id,
                 user_id,
@@ -706,4 +706,4 @@ async def _authorize_chat_subscription(
                 return "CHAT_THREAD_SUBSCRIPTION_INVALID"
             return None
 
-    return await run_sync_with_unit_of_work(_authorize)
+    return await run_unit_of_work_task(_authorize)

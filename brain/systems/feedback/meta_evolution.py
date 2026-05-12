@@ -19,7 +19,7 @@ from datetime import date, timedelta
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger("feedback.meta_evolution")
 
@@ -66,7 +66,7 @@ def compute_evolution_metrics(period_end: date | None = None, window_days: int =
 
     metrics = EvolutionMetrics(period_start=start, period_end=end)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         session = uow.session
 
         # ── Prediction artifact accuracy ──
@@ -328,7 +328,7 @@ def run_meta_evolution() -> dict:
                     f"[meta-evolution/{insight.category}] {insight.message}"
                     + (f" Suggested: {insight.suggested_action}" if insight.suggested_action else "")
                 )
-                with UnitOfWork() as uow:
+                with open_unit_of_work(UnitOfWork) as uow:
                     uow.session.execute(text("""
                         INSERT INTO memories (content, memory_type, salience, source, tags, decay_eligible)
                         VALUES (:content, 'insight', :salience, 'meta_evolution', :tags, TRUE)
@@ -375,7 +375,7 @@ def _store_parameter(name: str, value: float) -> None:
     In the future, could use a dedicated parameters table.
     """
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             uow.session.execute(text("""
                 INSERT INTO memories (content, memory_type, salience, source, tags, decay_eligible)
                 VALUES (:content, 'decision', 7.0, 'auto_tune', :tags, FALSE)
@@ -393,7 +393,7 @@ def get_tuned_parameter(name: str, default: float) -> float:
     Falls back to default if no tuned value exists.
     """
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             result = uow.session.execute(text("""
                 SELECT content FROM memories
                 WHERE source = 'auto_tune' AND tags @> ARRAY[:name]

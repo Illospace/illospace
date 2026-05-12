@@ -206,8 +206,8 @@ def gather_frame_context(
     if skill_name:
         try:
             from sqlalchemy import text
-            from brain.platform.db.repositories.unit_of_work import UnitOfWork
-            with UnitOfWork() as uow:
+            from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+            with open_unit_of_work(UnitOfWork) as uow:
                 row = uow.session.execute(text("""
                     SELECT name, procedure, pitfalls, maturity, confidence,
                            model_tier, thinking_tier, fitness_score,
@@ -227,8 +227,8 @@ def gather_frame_context(
     if skill_name:
         try:
             from sqlalchemy import text
-            from brain.platform.db.repositories.unit_of_work import UnitOfWork
-            with UnitOfWork() as uow:
+            from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+            with open_unit_of_work(UnitOfWork) as uow:
                 result["heuristics"] = [dict(r) for r in uow.session.execute(text("""
                     SELECT condition, action, confidence
                     FROM skill_heuristics
@@ -289,9 +289,9 @@ def gather_frame_context(
         try:
             from sqlalchemy import select
             from brain.platform.db.models.idea import IdeaThread
-            from brain.platform.db.repositories.unit_of_work import UnitOfWork
+            from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 rows = uow.session.scalars(
                     select(IdeaThread)
                     .where(IdeaThread.idea_id == idea_id)

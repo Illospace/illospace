@@ -9,7 +9,7 @@ import logging
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.memory.embeddings import embed_document, vec_to_pg
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ def _check_near_duplicate(content: str, threshold: float = 0.90) -> dict | None:
     try:
         emb = embed_document(content)
         emb_str = vec_to_pg(emb)
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = uow.session.execute(text("""
                 SELECT id, content, 1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity
                 FROM memories
@@ -119,7 +119,7 @@ def sweep_low_quality(dry_run: bool = True) -> list[dict]:
     Returns list of flagged memories with reason.
     """
     flagged = []
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Short + low salience
         rows = uow.session.execute(text("""
             SELECT id, content, salience, memory_type, LENGTH(content) as len

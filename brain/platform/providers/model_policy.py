@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.integrations.providers import get_active_provider
 
 
@@ -166,7 +166,7 @@ def _provider_defaults(provider: str | None = None) -> dict[str, str]:
 
 def _load_skill_routing_row(skill_name: str) -> dict[str, str | None] | None:
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = uow.session.execute(
                 text(
                     """
@@ -193,7 +193,7 @@ def _resolve_effective_org_id(
     if not user_id:
         return None
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = uow.session.execute(
                 text("SELECT org_id FROM users WHERE id = :user_id LIMIT 1"),
                 {"user_id": user_id},
@@ -220,7 +220,7 @@ def get_provider_model_map(
     if not effective_org_id:
         return model_map
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = uow.session.execute(
                 text(
                     """
@@ -277,7 +277,7 @@ def resolve_provider_selection(
     preferred = (preferred_provider or "").strip().lower()
     fallback_provider = normalize_default_provider(fallback or get_active_provider())
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             effective_org_id = org_id
             if user_id:
                 user_row = uow.session.execute(

@@ -14,7 +14,7 @@ from sqlalchemy import select
 from brain.kernel import config as cfg
 from brain.platform.db.models.org import User
 from brain.platform.db.models.vault import VaultConfig
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 from .embedding_registry import (
     EMBEDDER_SPECS,
@@ -79,7 +79,7 @@ def _runtime_secret_config_key(provider: str | None) -> str:
 
 def _read_runtime_config_value(key: str) -> str | None:
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             config = uow.session.scalars(select(VaultConfig).where(VaultConfig.key == key)).first()
             return config.value if config else None
     except Exception:
@@ -89,7 +89,7 @@ def _read_runtime_config_value(key: str) -> str | None:
 
 def _write_runtime_config_value(key: str, value: str) -> None:
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             config = uow.session.scalars(select(VaultConfig).where(VaultConfig.key == key)).first()
             if config:
                 config.value = value
@@ -376,7 +376,7 @@ def _indexed_vector_count() -> int:
     try:
         from sqlalchemy import text
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             return int(
                 uow.session.execute(
                     text(

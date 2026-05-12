@@ -16,8 +16,8 @@ def _memory_org_for_user(user_id: str | None, org_id: str | None = None) -> str 
         return org_id
     try:
         from brain.platform.db.models.org import User
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        with UnitOfWork() as uow:
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+        with open_unit_of_work(UnitOfWork) as uow:
             user = uow.session.get(User, user_id)
             return user.org_id if user else None
     except Exception:

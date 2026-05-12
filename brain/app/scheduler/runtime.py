@@ -23,6 +23,7 @@ from brain.platform.db.models.scheduler import (
     SchedulerRun,
     SchedulerRunStep,
 )
+from brain.platform.db.session_tasks import run_session_task
 from brain.systems.runs.cortex.recording import (
     trace_id_for_run_id,
     trace_id_for_scheduler_run_id,
@@ -586,7 +587,7 @@ def set_scheduler_job_load_shed(
 
 
 async def _run_scheduler_sync(session: AsyncSession, fn):
-    return await session.run_sync(fn)
+    return await run_session_task(session, fn)
 
 
 async def async_claim_run(

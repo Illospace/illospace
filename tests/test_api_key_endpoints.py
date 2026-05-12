@@ -34,7 +34,7 @@ def run_sync_inline(monkeypatch: pytest.MonkeyPatch):
     async def _run(fn, /, *args, **kwargs):
         return fn(*args, **kwargs)
 
-    monkeypatch.setattr("brain.app.api.routers.cortex._auth_keys.run_sync_with_unit_of_work", _run)
+    monkeypatch.setattr("brain.app.api.routers.cortex._auth_keys.run_unit_of_work_task", _run)
 
 
 def test_list_api_keys_returns_own_shared_and_org_keys():

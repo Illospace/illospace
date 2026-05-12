@@ -78,10 +78,10 @@ def classify_scope(content: str, memory_type: str = None) -> str:
 
 def reclassify_all(dry_run: bool = False) -> dict:
     """Reclassify all existing memories."""
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
     stats = {'total': 0, 'universal': 0, 'personal': 0, 'changed': 0}
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text(
             "SELECT id, content, memory_type, scope FROM memories WHERE NOT archived"
         ))

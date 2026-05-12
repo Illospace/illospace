@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from sqlalchemy import text
 
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.memory.embeddings import embed_document, vec_to_pg
 
 # ============================================================
@@ -228,7 +228,7 @@ def create_skill_in_db(skill_data: dict) -> Optional[int]:
     emb_text = f"{skill_data['name']}: {skill_data['description']}"
     embedding = embed_document(emb_text)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Check if exists
         existing = uow.session.execute(text(
             "SELECT id FROM skills WHERE name = :name"
@@ -305,7 +305,7 @@ def _load_recent_task_inputs(session, days: int) -> list[dict]:
 
 def run_full_analysis(days: int = 7) -> dict:
     """Run the complete meta-skill analysis against the database."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Load all skills
         skill_rows = uow.session.execute(text("""
             SELECT id, name, description, maturity, confidence, use_count,
@@ -377,7 +377,7 @@ def run_full_analysis(days: int = 7) -> dict:
 
 def run_auto_create(days: int = 7, dry_run: bool = False) -> list[dict]:
     """Detect gaps and auto-create skills."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         name_rows = uow.session.execute(text(
             "SELECT name FROM skills WHERE NOT archived"
         )).mappings().all()
@@ -472,7 +472,7 @@ def main():
         print(json.dumps(result, indent=2, default=str))
 
     elif args.command == "weaknesses":
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = uow.session.execute(text(
                 "SELECT name, maturity, confidence, use_count, success_count, failure_count, partial_count, pitfalls, last_used FROM skills WHERE NOT archived"
             )).mappings().all()
@@ -481,7 +481,7 @@ def main():
         print(json.dumps(result, indent=2, default=str))
 
     elif args.command == "gaps":
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             name_rows = uow.session.execute(text(
                 "SELECT name FROM skills WHERE NOT archived"
             )).mappings().all()

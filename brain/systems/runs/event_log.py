@@ -12,7 +12,7 @@ from brain.systems.runs.events import run_event
 from brain.systems.runs.store import AgentRunStore, AsyncAgentRunStore
 from brain.systems.runs.ui_events import run_event_to_ui_message
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 
 def record_run_event(
@@ -39,7 +39,7 @@ def record_run_event(
 
     if session is not None:
         return _write(session)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return _write(uow.session)
 
 

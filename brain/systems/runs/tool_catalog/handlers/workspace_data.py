@@ -1625,7 +1625,7 @@ def query_workspace_data(
     run_id: int | None = None,
 ) -> dict[str, Any]:
     """Query typed workspace data with source-level failure isolation."""
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
     source_names = _normalize_sources(sources)
     start, end, resolved_window = _time_bounds(time_window, start_at=start_at, end_at=end_at)
@@ -1663,7 +1663,7 @@ def query_workspace_data(
         "warnings": [],
     }
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         session = uow.session
         if _session_dialect_name(session) == "postgresql":
             org_id = _normalize_postgres_uuid_filter(payload, field="org_id", value=org_id)

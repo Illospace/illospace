@@ -13,7 +13,7 @@ from brain.systems.runs.store import AgentRunStore
 from brain.systems.runs.cortex.runner import queue_status, start_runner, stop_runner
 from brain.systems.runs.cortex.thread_binding import build_run_request
 from brain.platform.db.models.idea import Idea, IdeaStateLog
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 
 @dataclass(frozen=True)
@@ -38,9 +38,9 @@ class RunAdmissionResult:
 
 def _skill_exists(name: str) -> bool:
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             return bool(uow.skills.get_by_name(name))
     except Exception:
         return False
@@ -134,7 +134,7 @@ def _record_adaptation(run_id: int, adaptation: dict[str, Any] | str, *, session
     if session is not None:
         _write(session)
         return
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         _write(uow.session)
 
 
@@ -145,7 +145,7 @@ def _get_adaptation_history(run_id: int, *, session=None) -> list[dict[str, Any]
 
     if session is not None:
         return _read(session)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return _read(uow.session)
 
 
@@ -168,7 +168,7 @@ def admit_run(request: RunAdmissionRequest, *, session=None) -> RunAdmissionResu
         return RunAdmissionResult(ok=True, run_id=run.id)
     if session is not None:
         return _admit(session)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return _admit(uow.session)
 
 
@@ -183,7 +183,7 @@ def cancel_runs_for_idea(idea_id: str) -> int:
     from brain.platform.db.models.agent_run import AgentRunRow
 
     count = 0
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         store = AgentRunStore(uow.session)
         rows = (
             uow.session.query(AgentRunRow)

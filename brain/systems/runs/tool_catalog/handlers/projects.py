@@ -153,7 +153,7 @@ def _handle_manage_project(
         validated_project_context_snapshot,
     )
     from brain.platform.db.models.idea import IdeaProjectAttachment, ProjectProfile
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
     org_id, user_id, context_idea_id = _project_tool_context()
     if not org_id:
@@ -167,7 +167,7 @@ def _handle_manage_project(
     selected_profile_id = profile_id or project_id
 
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             if action == "list":
                 stmt = _profile_stmt(org_id, include_inactive=include_inactive).order_by(ProjectProfile.created_at.desc())
                 return json.dumps({"projects": [_profile_read(profile) for profile in uow.session.scalars(stmt).all()]}, default=str)

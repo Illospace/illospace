@@ -200,7 +200,7 @@ def test_chat_subscription_authorization_rejects_cross_org_conversation(monkeypa
         return fn(*args, **kwargs)
 
     monkeypatch.setattr(ws_router, "UnitOfWork", FakeUnitOfWork)
-    monkeypatch.setattr(ws_router, "run_sync_with_unit_of_work", run_sync_inline)
+    monkeypatch.setattr(ws_router, "run_unit_of_work_task", run_sync_inline)
     monkeypatch.setattr(ws_router, "ChatConversationRepository", FakeConversationRepository)
 
     assert (

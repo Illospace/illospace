@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from sqlalchemy import text
 
 from brain.kernel import config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.memory.embeddings import embed_document, embed_batch, vec_to_pg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [cortex_emerge] %(message)s")
@@ -40,7 +40,7 @@ LINK_THRESHOLD = 0.6    # auto-link if similarity above this
 
 def _get_existing_ideas_with_embeddings():
     """Return all non-archived ideas with their embeddings."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         rows = uow.session.execute(text("""
             SELECT id, title, description, status, embedding
             FROM ideas
@@ -92,7 +92,7 @@ def _create_emerged_idea(title: str, description: str, origin: str,
     idea_id = str(uuid.uuid4())
     vec_str = vec_to_pg(embedding)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         uow.session.execute(text("""
             INSERT INTO ideas (id, title, description, status, origin, origin_ref,
                                salience_score, embedding, created_at, updated_at)
@@ -138,7 +138,7 @@ def _scan_conversation_patterns() -> list[dict]:
     """Find recurring topics in recent memories (3+ mentions in 7 days)."""
     candidates = []
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             # Find content keywords that appear 3+ times in last 7 days
             uow.session.execute(text("""
                 SELECT
@@ -160,7 +160,7 @@ def _scan_conversation_patterns() -> list[dict]:
 
     # Better approach: find memories with similar semantic content clusters
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = uow.session.execute(text("""
                 SELECT content, memory_type, created_at
                 FROM memories
@@ -226,7 +226,7 @@ def _scan_error_patterns() -> list[dict]:
     """Check for error pattern integrations. Skip gracefully if none."""
     # Check if there's a sentry/rollbar config
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = uow.session.execute(text("""
                 SELECT EXISTS(
                     SELECT 1 FROM information_schema.tables
@@ -303,7 +303,7 @@ def _scan_nightly_insights() -> list[dict]:
     """Query memories from nightly reflection for surfaced themes."""
     candidates = []
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = uow.session.execute(text("""
                 SELECT content, memory_type
                 FROM memories
@@ -348,7 +348,7 @@ DEFAULT_THRESHOLDS = {
 def _load_thresholds() -> dict:
     """Load adjusted thresholds from cortex_config if available."""
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             rows = uow.session.execute(text("""
                 SELECT key, value FROM cortex_config
                 WHERE key LIKE 'threshold_%%'

@@ -5,7 +5,7 @@ from sqlalchemy import delete
 
 from brain.platform.db.models.org import Org, User
 from brain.platform.db.models.system import OrgProviderModelMapping
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.providers.model_policy import DEFAULT_PROVIDER_MODEL_MAPS, get_provider_model_map
 
 from .schemas import RuntimeModelsRead, RuntimeModelsUpdate, RuntimeOption
@@ -60,7 +60,7 @@ def get_runtime_models(user: User) -> RuntimeModelsRead:
 
 def update_runtime_models(user: User, update: RuntimeModelsUpdate) -> RuntimeModelsRead:
     values = {tier: _normalize_model(getattr(update, tier)) for tier in MODEL_TIERS}
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         uow.session.execute(
             delete(OrgProviderModelMapping).where(
                 OrgProviderModelMapping.org_id == user.org_id,

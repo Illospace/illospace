@@ -26,7 +26,7 @@ def get_context(
 ) -> dict:
     """Query the brain for context relevant to this message."""
     from sqlalchemy import text
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
     from brain.systems.memory.embeddings import embed_query
 
     user_id = user_id or os.environ.get("BRAIN_USER_ID")
@@ -43,7 +43,7 @@ def get_context(
         query_emb = embed_query(message)
         emb_str = "[" + ",".join(str(x) for x in query_emb) + "]"
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             # Get top relevant memories (lessons and patterns weighted higher)
             for row in uow.session.execute(text("""
                 SELECT id, content, memory_type, salience,

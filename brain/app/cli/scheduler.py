@@ -7,7 +7,7 @@ import json
 import time
 from datetime import datetime
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.app.scheduler.catalog import list_scheduler_jobs, list_scheduler_runs, normalize_owner_mode, sync_scheduler_catalog
 from brain.app.scheduler.daemon import scheduler_daemon_tick, scheduler_health_snapshot
 from brain.app.scheduler.executor import (
@@ -35,7 +35,7 @@ def _now_from_args(args: argparse.Namespace) -> datetime | None:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         snapshot = scheduler_health_snapshot(
             uow.session,
             owner_mode=args.owner_mode,
@@ -47,7 +47,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_state(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         payload = {
             "jobs": list_scheduler_jobs(uow.session),
             "runs": list_scheduler_runs(uow.session, limit=args.limit),
@@ -57,7 +57,7 @@ def cmd_state(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = sync_scheduler_catalog(
             uow.session,
             owner_mode=args.owner_mode,
@@ -69,7 +69,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 
 def cmd_materialize(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         runs = materialize_due_runs(
             uow.session,
             allowed_owner_modes=(args.owner_mode,),
@@ -86,7 +86,7 @@ def cmd_run_job(args: argparse.Namespace) -> int:
         if args.owner_mode
         else ("scheduler",)
     )
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = run_scheduler_job(
             uow.session,
             args.job_key,
@@ -99,7 +99,7 @@ def cmd_run_job(args: argparse.Namespace) -> int:
 
 
 def cmd_drain(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = drain_scheduler(
             uow.session,
             owner_mode=args.owner_mode,
@@ -114,7 +114,7 @@ def cmd_drain(args: argparse.Namespace) -> int:
 
 
 def cmd_pause_job(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         job = set_scheduler_job_paused(
             uow.session,
             args.job_key,
@@ -127,7 +127,7 @@ def cmd_pause_job(args: argparse.Namespace) -> int:
 
 
 def cmd_resume_job(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         job = set_scheduler_job_paused(
             uow.session,
             args.job_key,
@@ -140,7 +140,7 @@ def cmd_resume_job(args: argparse.Namespace) -> int:
 
 
 def cmd_owner_mode(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         job = set_scheduler_job_owner_mode(
             uow.session,
             args.job_key,
@@ -152,7 +152,7 @@ def cmd_owner_mode(args: argparse.Namespace) -> int:
 
 def cmd_load_shed(args: argparse.Namespace) -> int:
     policy = json.loads(args.load_shed_policy) if args.load_shed_policy else None
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         job = set_scheduler_job_load_shed(
             uow.session,
             args.job_key,
@@ -173,7 +173,7 @@ def cmd_load_shed(args: argparse.Namespace) -> int:
 
 
 def cmd_resume_run(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         run = resume_scheduler_run(
             uow.session,
             args.run_id,
@@ -185,7 +185,7 @@ def cmd_resume_run(args: argparse.Namespace) -> int:
 
 
 def cmd_retry_run(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         run = retry_scheduler_run(uow.session, args.run_id, now=_now_from_args(args))
     _emit({"ok": True, "id": run.id, "status": run.status, "parent_run_id": run.parent_run_id})
     return 0
@@ -195,7 +195,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     tick = 0
     try:
         while True:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 result = scheduler_daemon_tick(
                     uow.session,
                     owner_mode=args.owner_mode,

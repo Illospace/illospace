@@ -49,14 +49,14 @@ def _handle_manage_domain(
         return _manage_tool_guide("manage_domain", operation or "schema")
 
     from brain.systems.user_domains.service import DomainError, DomainNotFound
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
     org_id, user_id, run_id, idea_id = _domain_context()
     if not org_id:
         return json.dumps({"error": "manage_domain requires an org-scoped run"})
 
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             service = uow.domains
             actor_id = str(user_id) if user_id else None
             actor_kind = "human" if user_id else "agent"

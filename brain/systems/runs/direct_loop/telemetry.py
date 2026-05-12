@@ -31,10 +31,10 @@ def record_api_call(
             from sqlalchemy.exc import SQLAlchemyError
 
             from brain.systems.runs.cortex.recording import trace_id_for_run_id
-            from brain.platform.db.repositories.unit_of_work import UnitOfWork
+            from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
             trace_id = trace_id_for_run_id(run_id)
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 params = {
                     "sid": session_id,
                     "did": run_id,

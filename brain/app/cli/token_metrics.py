@@ -22,13 +22,13 @@ from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
 from brain.kernel import config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.systems.runs.token_usage import summarize_recent_run_usage
 
 
 def _runs_for_period(days: int, *, limit: int = 10_000) -> list[dict]:
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         return summarize_recent_run_usage(uow.session, limit=limit, since=since)
 
 

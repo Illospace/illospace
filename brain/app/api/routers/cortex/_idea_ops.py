@@ -50,7 +50,8 @@ from brain.platform.db.models.notification import (
     NOTIFICATION_SOURCE_WORKSPACE,
 )
 from brain.platform.db.models.org import User
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_unit_of_work_task, open_unit_of_work
+from brain.platform.db.session_tasks import run_session_task
 
 logger = logging.getLogger(__name__)
 
@@ -448,13 +449,13 @@ async def _publish_notification_summary_updates(
         return
 
     def _summaries():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             return {
                 user_id: build_notification_summary(uow.session, user_id=user_id, org_id=org_id)
                 for user_id in sorted(user_ids)
             }
 
-    summaries = await run_sync_with_unit_of_work(_summaries)
+    summaries = await run_unit_of_work_task(_summaries)
     for user_id, summary in summaries.items():
         await ws_manager.publish_notification_summary_updated(
             user_id=user_id,
@@ -469,12 +470,12 @@ async def idea_cancel_all(idea_id: str, user: dict[str, Any] = Depends(get_curre
     from brain.systems.runs.cortex import cancel_runs_for_idea
 
     def _cancel():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             _require_idea_for_user(uow.session, idea_id, user)
         count = cancel_runs_for_idea(idea_id)
         return {"ok": True, "canceled": count, "cancelled": count}
 
-    return await run_sync_with_unit_of_work(_cancel)
+    return await run_unit_of_work_task(_cancel)
 
 
 @router.post("/ideas/{idea_id}/mark-read")
@@ -482,7 +483,7 @@ async def mark_read(idea_id: str, request: Request, user: dict[str, Any] = Depen
     user_id = str(user.get("id"))
     org_id = str(user.get("org_id")) if user.get("org_id") else None
     def _mark():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             idea = _require_idea_for_user(uow.session, idea_id, user)
             if idea.status == "unread_reply":
                 idea.status = "needs_input"
@@ -495,7 +496,7 @@ async def mark_read(idea_id: str, request: Request, user: dict[str, Any] = Depen
                 ))
             uow.notifications.mark_read_for_idea(user_id=user_id, idea_id=idea_id)
 
-    await run_sync_with_unit_of_work(_mark)
+    await run_unit_of_work_task(_mark)
     try:
         await _publish_notification_summary_updates(org_id=org_id, user_ids={user_id})
     except Exception as exc:
@@ -507,13 +508,13 @@ async def mark_read(idea_id: str, request: Request, user: dict[str, Any] = Depen
 async def update_position(idea_id: str, request: Request, user: dict[str, Any] = Depends(get_current_user)):
     data = await request.json()
     def _update():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             idea = _require_idea_for_user(uow.session, idea_id, user)
             if idea and idea.archived_at is None:
                 idea.position_x = data.get("x")
                 idea.position_y = data.get("y")
 
-    await run_sync_with_unit_of_work(_update)
+    await run_unit_of_work_task(_update)
     return {"ok": True}
 
 
@@ -538,7 +539,8 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
     notification_user_ids: set[str] = set()
     notification_org_id: str | None = str(org_id) if org_id else None
     async with UnitOfWork() as uow:
-        idea = await uow.session.run_sync(
+        idea = await run_session_task(
+            uow.session,
             lambda sync_db: _require_idea_for_user(sync_db, idea_id, user)
         )
         current_status = idea.status
@@ -577,7 +579,8 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
         uow.session.add(thread_msg)
         await uow.session.flush()
 
-        await uow.session.run_sync(
+        await run_session_task(
+            uow.session,
             lambda sync_db: _append_live_guidance_from_thread_message(
                 session=sync_db,
                 idea_id=idea_id,
@@ -715,7 +718,7 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
     if role == "user":
         feedback_tags = _infer_feedback_tags(content)
         if feedback_tags:
-            await run_sync_with_unit_of_work(_record_implicit_feedback, idea_id, content, feedback_tags)
+            await run_unit_of_work_task(_record_implicit_feedback, idea_id, content, feedback_tags)
 
     await ws_manager.broadcast_product_event(
         "thread_message",
@@ -742,7 +745,7 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
 async def mark_mentions_seen(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
     user_id = user.get("id")
     def _seen():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             _require_idea_for_user(uow.session, idea_id, user)
             count = uow.user_mentions.mark_seen_for_idea(
                 user_id=str(user_id),
@@ -750,19 +753,19 @@ async def mark_mentions_seen(idea_id: str, user: dict[str, Any] = Depends(get_cu
             )
         return {"cleared": count}
 
-    return await run_sync_with_unit_of_work(_seen)
+    return await run_unit_of_work_task(_seen)
 
 
 @router.get("/mentions/unread")
 async def get_unread_mentions(user: dict[str, Any] = Depends(get_current_user)):
     user_id = user.get("id")
     def _list():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             return uow.user_mentions.list_unread_for_user(
                 user_id=str(user_id),
             )
 
-    return await run_sync_with_unit_of_work(_list)
+    return await run_unit_of_work_task(_list)
 
 
 # ── Presence ───────────────────────────────────────────────────
@@ -780,10 +783,10 @@ async def update_presence(request: Request, user: dict[str, Any] = Depends(get_c
         raise HTTPException(status_code=400, detail="idea_id and action (join/leave) required")
 
     def _validate():
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             _require_idea_for_user(uow.session, idea_id, user)
 
-    await run_sync_with_unit_of_work(_validate)
+    await run_unit_of_work_task(_validate)
 
     _presence_cleanup()
     if action == "join":
@@ -819,7 +822,7 @@ def unified_stream_payload(
         raise HTTPException(status_code=401, detail="Not authenticated")
     items = []
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         _require_idea_for_user(uow.session, idea_id, user)
         stmt = (
             select(IdeaThread, User.name.label("user_name"), User.color.label("user_color"))
@@ -852,7 +855,7 @@ def unified_stream_payload(
                 **dp,
             })
     else:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stmt = (
                 select(AgentRun)
                 .where(AgentRun.thread_id == idea_id)
@@ -872,7 +875,7 @@ def unified_stream_payload(
     run_events: dict[int, list[Any]] = {}
     if run_ids:
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 children_stmt = (
                     select(AgentRun)
                     .where(AgentRun.parent_run_id.in_(run_ids))
@@ -922,7 +925,7 @@ def unified_stream_payload(
 
     # Include visual blocks in the stream
     from brain.platform.db.models.idea import VisualBlock
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         vb_stmt = (
             select(VisualBlock)
             .where(VisualBlock.idea_id == idea_id)
@@ -951,7 +954,7 @@ async def idea_unified_stream(
     include_debug: bool = False,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_sync_with_unit_of_work(
+    return await run_unit_of_work_task(
         unified_stream_payload,
         idea_id=idea_id,
         include_debug=include_debug,

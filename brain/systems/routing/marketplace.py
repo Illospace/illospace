@@ -18,7 +18,7 @@ from brain.kernel.common.env import env_int as _shared_env_int
 
 from brain.platform.db.models.agent import AgentApiCall
 from brain.platform.db.models.routing import ProviderHealthSnapshot, RoutingDecision, RoutingExperiment
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.providers.model_policy import (
     DEFAULT_MODEL_TIER,
     DEFAULT_PROVIDER_MODEL_MAPS,
@@ -726,7 +726,7 @@ def refresh_provider_health_snapshots(
     window_start, window_end = _window_range(lookback_hours)
 
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             api_rows = uow.session.execute(
                 text(
                     """
@@ -1211,7 +1211,7 @@ def resolve_marketplace_routing(
     legacy_reasoning_effort = legacy_reasoning_effort or "medium"
 
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             experiment = _resolve_active_experiment(uow.session, task_family)
             if experiment and not experiment_name:
                 experiment_name = experiment.name
@@ -1713,7 +1713,7 @@ def get_routing_marketplace_snapshot(
         "latest_decisions": [],
     }
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             health_rows = uow.session.execute(
                 select(ProviderHealthSnapshot).order_by(ProviderHealthSnapshot.window_end.desc(), ProviderHealthSnapshot.id.desc()).limit(5)
             ).scalars().all()

@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 
 from brain.kernel import config as cfg
 from brain.platform.db.models.agent_run import AgentRunRow
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 from .schemas import RuntimeUpdateRead
 
@@ -286,7 +286,7 @@ def _update_command(root: Path) -> list[str]:
 
 def _active_agent_run_count() -> int:
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             count = uow.session.scalar(
                 select(func.count())
                 .select_from(AgentRunRow)

@@ -21,7 +21,7 @@ import brain.kernel.config as config
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 PROJECT_ROOT = config.BRAIN_DIR
 LOGS_DIR = config.BRAIN_LOG_DIR
@@ -131,7 +131,7 @@ def validate_memory_count(target_date: date) -> tuple[bool, list[str]]:
     """Check memory creation bounds and duplicates."""
     issues = []
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = uow.session.execute(text(
                 "SELECT COUNT(*) as cnt FROM memories WHERE created_at::date = :dt AND NOT archived"
             ), {"dt": target_date}).mappings().first()

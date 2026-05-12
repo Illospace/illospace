@@ -22,7 +22,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [cortex_digest] %(message)s")
 log = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 
 def get_unencoded_ideas(days: int = 1) -> list[dict]:
     """Find ideas with thread activity that haven't been encoded to brain."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text("""
             SELECT DISTINCT i.id, i.title, i.display_title, i.status,
                    COUNT(t.id) as thread_count

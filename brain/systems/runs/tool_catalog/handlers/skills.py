@@ -186,11 +186,11 @@ def _handle_create_skill(
 
         # Atomic upsert — INSERT ... ON CONFLICT avoids race conditions
         from sqlalchemy import text as sa_text
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
         from brain.platform.db.services.skill_bundle_io import SkillBundleIOService
 
         asset_specs = assets or []
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = uow.session.execute(sa_text("""
                 INSERT INTO skills
                     (name, description, procedure, level, model_tier, thinking_tier,
@@ -288,10 +288,10 @@ def _handle_manage_skill_asset(
         return {"ok": False, "error": "action must be 'upsert' or 'delete'"}
 
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
         from brain.platform.db.services.skill_bundle_io import SkillBundleIOService
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             skill = uow.skills.get_by_name(skill_name)
             if skill is None:
                 return {"ok": False, "error": f"Skill '{skill_name}' not found"}

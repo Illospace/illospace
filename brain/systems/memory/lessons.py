@@ -16,13 +16,13 @@ from sqlalchemy import text
 
 import brain.kernel.config as config
 from brain.app.cli.agent_cli import call_agent, extract_json
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.providers.model_policy import get_model_for_tier
 
 
 def audit_lessons(target_date: date) -> dict:
     """Analyze today's lessons for repeats, violations, and new rule candidates."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Get today's lessons
         rows = uow.session.execute(text("""
             SELECT id, content, salience, tags
@@ -88,7 +88,7 @@ def audit_lessons(target_date: date) -> dict:
 
     # Log violations to DB
     for v in report["violations"]:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             uow.session.execute(text("""
                 INSERT INTO violation_log (lesson_id, guardian_rule_id, detected_by, context, session_date)
                 VALUES (:lesson_id, :rule_id, 'nightly_audit', :context, :session_date)
@@ -109,7 +109,7 @@ def audit_lessons(target_date: date) -> dict:
 
 def compile_lesson_to_rule(lesson_id: int) -> int | None:
     """Compile a lesson into a guardian rule using LLM analysis."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         row = uow.session.execute(text(
             "SELECT id, content, salience, tags FROM memories WHERE id = :id"
         ), {"id": lesson_id}).mappings().first()
@@ -151,7 +151,7 @@ Return ONLY the JSON object, no other text."""
         return None
 
     # Insert the rule
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Check for duplicate name
         existing = uow.session.execute(text(
             "SELECT id FROM guardian_rules WHERE name = :name"
@@ -204,7 +204,7 @@ Return ONLY the JSON object, no other text."""
 
 def escalate_rule(rule_id: int):
     """Make a rule stricter when it keeps getting violated."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         uow.session.execute(text("""
             UPDATE guardian_rules SET
                 trust_level_required = GREATEST(0, trust_level_required - 1),
@@ -226,7 +226,7 @@ def generate_checklist():
     prompt files, which makes the repository safe to publish without shipping
     personalized agent prompts.
     """
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Clear old checklist items and regenerate from rules
         uow.session.execute(text("DELETE FROM checklist_items"))
         rows = uow.session.execute(text("""
@@ -251,7 +251,7 @@ def generate_checklist():
             category = "process"
 
         # Priority: more violations = higher priority
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             stats = uow.session.execute(text(
                 "SELECT source_violation_count, times_bounced FROM guardian_rules WHERE id = :id"
             ), {"id": rule["id"]}).mappings().first()
@@ -283,7 +283,7 @@ def _write_agent_checklist(checklist_md: str) -> Path:
 
 def compile_all_high_salience(min_salience: float = 7.0) -> dict:
     """Compile all uncompiled high-salience lessons into rules."""
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         # Get already-compiled lesson IDs
         rule_rows = uow.session.execute(text(
             "SELECT source_lesson_ids FROM guardian_rules WHERE source_lesson_ids IS NOT NULL"

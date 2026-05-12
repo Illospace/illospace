@@ -11,7 +11,7 @@ from datetime import date, timedelta
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ def detect_divergence(
     """
     since = target_date - timedelta(days=lookback_days)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         result = uow.session.execute(text("""
             SELECT m.user_id, u.name AS user_name,
                    array_agg(DISTINCT unnest_tag) AS topic_tags,
@@ -108,7 +108,7 @@ def store_divergence_results(
 
     content = "\n".join(summary_lines)
 
-    with UnitOfWork() as uow:
+    with open_unit_of_work(UnitOfWork) as uow:
         from brain.systems.memory.embeddings import embed_document, vec_to_pg
         embedding = embed_document(content)
 

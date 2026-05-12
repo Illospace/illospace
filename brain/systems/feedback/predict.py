@@ -26,7 +26,7 @@ from sqlalchemy import select, text
 
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.systems.feedback.heuristics import task_family_from_text, task_markers_from_text
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger("feedback.predict")
 
@@ -121,7 +121,7 @@ def _adjust_for_recent_failures(prediction: Prediction) -> Prediction:
     if not prediction.skill_name:
         return prediction
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             cutoff = datetime.now(timezone.utc) - timedelta(days=7)
             rows = uow.session.scalars(
                 select(AgentRunRow)
@@ -239,7 +239,7 @@ def save_prediction(
 ) -> int | None:
     """Save a prediction artifact. Returns artifact row ID."""
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             run = uow.session.get(AgentRunRow, int(run_id))
             artifact = AgentRunArtifactRow(
                 run_id=int(run_id),
@@ -276,7 +276,7 @@ def resolve_prediction(
 ):
     """Update prediction with actual results and computed reward."""
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             artifacts = uow.session.scalars(
                 select(AgentRunArtifactRow)
                 .where(
@@ -338,7 +338,7 @@ def encode_insight(reward: RewardSignal, skill_name: str | None = None):
 def _find_similar_history(task: str, skill_name: str | None) -> list[dict]:
     """Find similar past run outcomes for prediction."""
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             if not skill_name:
                 # Without skill, we can't find similar history reliably
                 return []
@@ -379,7 +379,7 @@ def _find_similar_history(task: str, skill_name: str | None) -> list[dict]:
 def _get_skill_stats(skill_name: str) -> dict | None:
     """Get aggregate stats for a skill."""
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             row = uow.session.execute(text("""
                 SELECT use_count, success_count, failure_count,
                        avg_duration_sec, confidence, fitness_score
@@ -407,7 +407,7 @@ def get_prediction_calibration(days: int = 30) -> dict:
     Shows how well the system predicts outcomes, broken down by strategy.
     """
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             artifacts = uow.session.scalars(
                 select(AgentRunArtifactRow)
@@ -441,7 +441,7 @@ def get_prediction_calibration(days: int = 30) -> dict:
 def summarize_prediction_artifacts(run_id: int) -> dict:
     """Summarize persisted prediction artifacts for a run."""
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             artifacts = uow.session.scalars(
                 select(AgentRunArtifactRow)
                 .where(

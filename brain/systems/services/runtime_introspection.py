@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 
 from brain.platform.db.models.org import OrgApiKey, User, UserApiKey
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.integrations.llm import resolve_llm_client
 from brain.systems.learning.budget import LearningBudgetPolicy
 from brain.systems.learning.policy import build_learning_policy_from_env
@@ -31,7 +31,7 @@ def _resolve_effective_org_id(user_id: str | None, org_id: str | None) -> str | 
     if org_id or not user_id:
         return org_id
     try:
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             user = uow.session.get(User, user_id)
             return user.org_id if user else None
     except Exception:
@@ -59,7 +59,7 @@ def get_provider_auth_status(
 
     if user_id:
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 db_user = uow.session.get(User, user_id)
                 if db_user:
                     personal_default_key_id = db_user.default_api_key_id
@@ -132,7 +132,7 @@ def get_provider_auth_status(
 
     if user_id and runtime_scope in {"personal", "org"}:
         try:
-            with UnitOfWork() as uow:
+            with open_unit_of_work(UnitOfWork) as uow:
                 if runtime_scope == "personal" and personal_default_key_id is not None:
                     key_row = uow.session.get(UserApiKey, personal_default_key_id)
                     if key_row and key_row.provider == provider and key_row.is_active:
