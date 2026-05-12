@@ -46,7 +46,7 @@ def get_context(
         with UnitOfWork() as uow:
             # Get top relevant memories (lessons and patterns weighted higher)
             for row in uow.session.execute(text("""
-                SELECT id, content, memory_type, salience, emotion_label,
+                SELECT id, content, memory_type, salience,
                        1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity
                 FROM memories
                 WHERE NOT archived

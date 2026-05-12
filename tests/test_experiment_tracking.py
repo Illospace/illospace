@@ -24,7 +24,7 @@ class TestExperimentCreation:
             hypothesis="Retry logic reduces delegation failures",
             what_changed="services/delegation.py",
             success_metric="Delegation success rate > 80%",
-            data_source="delegation_quality",
+            data_source="test_results",
             pr_number=123,
         )
 
@@ -44,7 +44,7 @@ class TestExperimentCreation:
         assert meta["hypothesis"] == "Retry logic reduces delegation failures"
         assert meta["what_changed"] == "services/delegation.py"
         assert meta["success_metric"] == "Delegation success rate > 80%"
-        assert meta["data_source"] == "delegation_quality"
+        assert meta["data_source"] == "test_results"
         assert meta["status"] == "active"
         assert meta["pr_number"] == 123
         assert meta["extensions"] == 0
@@ -120,14 +120,6 @@ class TestAssessmentLogic:
     def test_skill_success_inconclusive(self):
         from brain.jobs.pipelines.nightly_assess import _heuristic_assess
         assert _heuristic_assess("skill_success_rates", {"avg_success_pct": 60}) == "inconclusive"
-
-    def test_delegation_passed(self):
-        from brain.jobs.pipelines.nightly_assess import _heuristic_assess
-        assert _heuristic_assess("delegation_quality", {"avg_score": 8.5}) == "passed"
-
-    def test_delegation_failed(self):
-        from brain.jobs.pipelines.nightly_assess import _heuristic_assess
-        assert _heuristic_assess("delegation_quality", {"avg_score": 3.0}) == "failed"
 
     def test_nightly_logs_passed(self):
         from brain.jobs.pipelines.nightly_assess import _heuristic_assess

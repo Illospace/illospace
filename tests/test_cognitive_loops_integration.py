@@ -18,11 +18,6 @@ def test_graduation_constants_exist():
     assert DEMOTION_CONFIDENCE == 0.7
 
 
-def test_emotional_steering_importable():
-    from brain.systems.runs.emotions import apply_emotional_steering as _apply_emotional_steering, NEGATIVE_EMOTIONS
-    assert "frustrated" in NEGATIVE_EMOTIONS
-
-
 def test_adaptation_functions_importable():
     from brain.systems.runs.cortex import _record_adaptation, _get_adaptation_history
 

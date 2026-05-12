@@ -146,7 +146,6 @@ BRAIN_TOOLS = [
                 "content": {"type": "string", "description": "Memory content (min 20 chars)"},
                 "type": {"type": "string", "enum": ["lesson", "pattern", "fact", "episode"], "default": "episode"},
                 "salience": {"type": "number", "description": "Importance 1-10 (default 5)", "default": 5.0},
-                "emotion": {"type": "string", "description": "Emotion label (default neutral)", "default": "neutral"},
             },
             "required": ["content"],
         },

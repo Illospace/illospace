@@ -16,7 +16,7 @@ MCP Tools Exposed:
     brain_skills(task)                — task planning + skill catalog recommendation
     skill_view(name, section?)        — load a skill card/summary/procedure section
     skill_asset(name, path)           — load a versioned skill bundle asset
-    brain_encode(content, type, salience?, emotion?) — record a memory
+    brain_encode(content, type, salience?) — record a memory
     brain_vault(key)                  — retrieve a secret from the vault
     vault_secret_prompt(key_name)     — open a guided vault prompt for missing keys
 
@@ -925,7 +925,6 @@ def tool_brain_encode(
     content: str,
     memory_type: str = "episode",
     salience: float = 5.0,
-    emotion: str = "neutral",
     source: str = "agent_run",
     user_id: str | None = None,
     org_id: str | None = None,
@@ -938,7 +937,7 @@ def tool_brain_encode(
     evidence: dict | None = None,
 ) -> dict:
     """Encode a new memory into the brain, scoped to the current user."""
-    from brain.systems.memory.embeddings import embed_document, make_emotional_embedding
+    from brain.systems.memory.embeddings import embed_document
 
     if len(content.strip()) < 20:
         return {"error": "Content too short (min 20 chars)"}
@@ -966,12 +965,10 @@ def tool_brain_encode(
         return {"error": str(exc)}
 
     semantic_emb = None
-    emotional_emb = None
     degraded_reason = None
 
     try:
         semantic_emb = embed_document(content)
-        emotional_emb = make_emotional_embedding(label=emotion)
     except Exception as exc:
         error_text = str(exc)
         lower = error_text.lower()
@@ -985,9 +982,7 @@ def tool_brain_encode(
             content=content,
             memory_type=memory_type,
             salience=salience,
-            emotion_label=emotion,
             semantic_embedding=semantic_emb,
-            emotional_embedding=emotional_emb,
             context=write_context,
             auto_edge=False,
         )
@@ -1261,7 +1256,6 @@ TOOLS = {
                 "content": {"type": "string", "description": "Memory content (min 20 chars)"},
                 "type": {"type": "string", "enum": ["lesson", "pattern", "fact", "episode"], "default": "episode"},
                 "salience": {"type": "number", "description": "Importance 1-10 (default 5)", "default": 5.0},
-                "emotion": {"type": "string", "description": "Emotion label (default neutral)", "default": "neutral"},
             },
             "required": ["content"],
         },

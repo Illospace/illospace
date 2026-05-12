@@ -34,7 +34,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
 from brain.kernel import config
-from brain.systems.agency import mirror_curiosity_reading
 
 logging.basicConfig(level=logging.INFO, format='[curiosity] %(message)s')
 logger = logging.getLogger(__name__)
@@ -385,16 +384,6 @@ def encode_reading(reading):
                                 cwd=str(SCRIPT_DIR))
         if result.returncode == 0:
             logger.info(f"Encoded: salience={salience}, tags={tags}")
-            candidate = mirror_curiosity_reading(
-                reading=reading,
-                source_refs=[
-                    {"kind": "reading_source", "url": reading.get("item_url")},
-                    {"kind": "source_id", "value": reading.get("source_id", "unknown")},
-                    {"kind": "analysis", "value": reading.get("item_title", "Unknown")},
-                ],
-            )
-            if candidate:
-                logger.info("Mirrored curiosity follow-up candidate into agency")
             # Now create connections to existing memories
             connect_to_existing_memories(reading)
         else:

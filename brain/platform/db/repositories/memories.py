@@ -9,8 +9,6 @@ from datetime import datetime, timedelta
 from sqlalchemy import Integer, and_, func, or_, select, text, update
 from sqlalchemy.orm import aliased, load_only
 
-from brain.kernel.config import MEMORY_EMOTIONAL_EMBEDDING_DIM
-from brain.platform.db.models.emotion import EmotionalSnapshot
 from brain.platform.db.models.memory import Edge, Memory, MemoryContradiction, MemoryReview
 from brain.platform.db.models.org import User
 from brain.platform.db.models.system import RetrievalLog
@@ -46,7 +44,6 @@ GRAPH_EDGE_WEIGHT_BONUS = {
     "consolidated_from": 0.08,
     "crystallized_from": 0.08,
     "similar_to": 0.05,
-    "emotional_echo": 0.03,
     "related_to": 0.03,
 }
 
@@ -66,11 +63,10 @@ class MemoryRepository(BaseRepository[Memory]):
         memory_type: str,
         context: MemoryWriteContext,
         semantic_embedding: Any | None = None,
-        emotional_embedding: Any | None = None,
         salience: float = 5.0,
-        emotion_label: str = "neutral",
-        emotion_valence: float = 0.0,
-        emotion_arousal: float = 0.0,
+        emotion_label: str | None = None,
+        emotion_valence: float | None = None,
+        emotion_arousal: float | None = None,
         tags: list[str] | None = None,
         related_ids: list[int] | None = None,
         rel_type: str = "related_to",
@@ -92,6 +88,7 @@ class MemoryRepository(BaseRepository[Memory]):
         scoped to memories visible to the same writer context.
         """
 
+        del emotion_label, emotion_valence, emotion_arousal
         context = require_memory_write_context(context)
         tags = list(tags or [])
         source_memory_ids = list(source_memory_ids or [])
@@ -109,11 +106,7 @@ class MemoryRepository(BaseRepository[Memory]):
                 memory_type=memory_type,
                 context=context,
                 semantic_embedding=semantic_embedding,
-                emotional_embedding=emotional_embedding,
                 salience=salience,
-                emotion_label=emotion_label,
-                emotion_valence=emotion_valence,
-                emotion_arousal=emotion_arousal,
                 tags=tags,
                 decay_eligible=decay_eligible,
                 scope=scope,
@@ -130,8 +123,8 @@ class MemoryRepository(BaseRepository[Memory]):
             result = self._session.execute(
                 text("""
                     INSERT INTO memories (
-                        content, memory_type, semantic_embedding, emotional_embedding,
-                        salience, emotion_valence, emotion_arousal, emotion_label,
+                        content, memory_type, semantic_embedding,
+                        salience,
                         source, tags, decay_eligible, source_session, scope,
                         memory_tier, source_memory_ids,
                         user_id, org_id, visibility, confidence, source_ref,
@@ -139,8 +132,7 @@ class MemoryRepository(BaseRepository[Memory]):
                     ) VALUES (
                         :content, :memory_type,
                         CAST(:semantic_embedding AS vector),
-                        CAST(:emotional_embedding AS vector),
-                        :salience, :emotion_valence, :emotion_arousal, :emotion_label,
+                        :salience,
                         :source, :tags, :decay_eligible, :source_session, :scope,
                         :memory_tier, :source_memory_ids,
                         :user_id, :org_id, :visibility, :confidence, :source_ref,
@@ -156,15 +148,7 @@ class MemoryRepository(BaseRepository[Memory]):
                         if semantic_embedding is not None
                         else None
                     ),
-                    "emotional_embedding": (
-                        vec_to_pg(emotional_embedding)
-                        if emotional_embedding is not None
-                        else None
-                    ),
                     "salience": salience,
-                    "emotion_valence": emotion_valence,
-                    "emotion_arousal": emotion_arousal,
-                    "emotion_label": emotion_label,
                     "source": context.source,
                     "tags": tags,
                     "decay_eligible": decay_eligible,
@@ -222,7 +206,6 @@ class MemoryRepository(BaseRepository[Memory]):
             "id": memory_id,
             "type": memory_type,
             "salience": salience,
-            "emotion": emotion_label,
             "visibility": context.visibility,
             "user_id": context.user_id,
             "org_id": context.org_id,
@@ -248,11 +231,7 @@ class MemoryRepository(BaseRepository[Memory]):
             content=kwargs["content"],
             memory_type=kwargs["memory_type"],
             semantic_embedding=kwargs["semantic_embedding"],
-            emotional_embedding=kwargs["emotional_embedding"],
             salience=kwargs["salience"],
-            emotion_valence=kwargs["emotion_valence"],
-            emotion_arousal=kwargs["emotion_arousal"],
-            emotion_label=kwargs["emotion_label"],
             source=context.source,
             source_session=context.source_session(),
             tags=kwargs["tags"],
@@ -415,30 +394,21 @@ class MemoryRepository(BaseRepository[Memory]):
         memory_type: str | None = None,
         min_salience: float | None = None,
         tags: list[str] | None = None,
-        emotion_embedding: Any | None = None,
         context: MemoryVisibilityContext | None = None,
         spread: bool = False,
     ) -> dict[str, list[dict]]:
         """Run the legacy multi-signal pgvector memory query behind the repo."""
         qemb = self._embedding_to_pg(query_embedding)
-        eemb = (
-            self._embedding_to_pg(emotion_embedding)
-            if emotion_embedding is not None
-            else self._embedding_to_pg([0.0] * MEMORY_EMOTIONAL_EMBEDDING_DIM)
-        )
         visibility_context = context or MemoryVisibilityContext()
         vis_clause, vis_params = memory_visibility_sql(visibility_context, alias="m")
 
         sql = """
             WITH ranked AS (
                 SELECT
-                    m.id, m.content, m.memory_type, m.salience, m.emotion_label,
+                    m.id, m.content, m.memory_type, m.salience,
                     m.tags, m.created_at, m.last_accessed, m.access_count,
                     m.memory_tier,
                     1 - (m.semantic_embedding <=> CAST(:qemb AS vector)) as semantic_score,
-                    CASE WHEN :has_emo THEN
-                        1 - (m.emotional_embedding <=> CAST(:eemb AS vector))
-                    ELSE 0.0 END as emotion_score,
                     EXP(-0.05 * EXTRACT(EPOCH FROM (NOW() - m.last_accessed)) / 86400) as recency_score,
                     LN(m.access_count + 1) / 5.0 as frequency_score
                 FROM memories m
@@ -448,8 +418,6 @@ class MemoryRepository(BaseRepository[Memory]):
         """
         params: dict[str, Any] = {
             "qemb": qemb,
-            "has_emo": emotion_embedding is not None,
-            "eemb": eemb,
             **vis_params,
         }
 
@@ -469,7 +437,6 @@ class MemoryRepository(BaseRepository[Memory]):
             SELECT *,
                 (semantic_score * 0.35 + (salience / 10.0) * 0.25
                  + recency_score * 0.15 + frequency_score * 0.10
-                 + emotion_score * 0.15
                  + CASE WHEN memory_tier = 'procedural' THEN 0.10
                         WHEN memory_tier = 'semantic' THEN 0.05
                         ELSE 0.0 END
@@ -536,7 +503,7 @@ class MemoryRepository(BaseRepository[Memory]):
         )
         rows = self._session.execute(
             text(f"""
-                SELECT DISTINCT m.id, m.content, m.memory_type, m.salience, m.emotion_label,
+                SELECT DISTINCT m.id, m.content, m.memory_type, m.salience,
                        e.relationship, e.weight as edge_weight, e.source_id as from_id
                 FROM edges e
                 JOIN memories m ON m.id = CASE WHEN e.source_id = ANY(:ids) THEN e.target_id ELSE e.source_id END
@@ -562,7 +529,7 @@ class MemoryRepository(BaseRepository[Memory]):
         visibility_context = context or MemoryVisibilityContext()
         vis_clause, vis_params = memory_visibility_sql(visibility_context, alias="")
         rows = self._session.execute(text(f"""
-            SELECT id, content, memory_type, salience, emotion_label,
+            SELECT id, content, memory_type, salience,
                    COALESCE(visibility, 'private') as visibility,
                    1 - (semantic_embedding <=> CAST(:emb1 AS vector)) as similarity
             FROM memories
@@ -616,7 +583,7 @@ class MemoryRepository(BaseRepository[Memory]):
         params: dict[str, Any] = {"emb": emb, "pool_size": limit * 3, **vis_params}
 
         vector_results = self._session.execute(text(f"""
-            SELECT m.id, m.content, m.memory_type, m.salience, m.emotion_label,
+            SELECT m.id, m.content, m.memory_type, m.salience,
                    COALESCE(m.memory_tier, 'episodic') as memory_tier,
                    COALESCE(m.visibility, 'private') as visibility,
                    COALESCE(m.truth_status, 'unknown') as truth_status,
@@ -703,8 +670,7 @@ class MemoryRepository(BaseRepository[Memory]):
                 m.demoted_at,
                 m.policy_kind,
                 m.policy_scope,
-                m.reviewed_at,
-                m.emotion_label
+                m.reviewed_at
             FROM edges e
             JOIN memories m ON m.id = CASE
                 WHEN e.source_id = ANY(:seed_ids) THEN e.target_id
@@ -995,13 +961,13 @@ class MemoryRepository(BaseRepository[Memory]):
         nodes = self._session.execute(
             text(f"""
                 WITH RECURSIVE neighborhood AS (
-                    SELECT m.id, m.content, m.memory_type, m.salience, m.emotion_label,
+                    SELECT m.id, m.content, m.memory_type, m.salience,
                            0 as depth, ARRAY[m.id] as path
                     FROM memories m
                     WHERE m.id = :sid
                       {vis_clause}
                     UNION ALL
-                    SELECT m.id, m.content, m.memory_type, m.salience, m.emotion_label,
+                    SELECT m.id, m.content, m.memory_type, m.salience,
                            n.depth + 1, n.path || m.id
                     FROM neighborhood n
                     JOIN edges e ON (e.source_id = n.id OR e.target_id = n.id)
@@ -1034,7 +1000,6 @@ class MemoryRepository(BaseRepository[Memory]):
                     "content": row["content"],
                     "type": row["memory_type"],
                     "salience": row["salience"],
-                    "emotion": row["emotion_label"],
                     "distance": row["depth"],
                 }
                 for row in nodes
@@ -1082,8 +1047,7 @@ class MemoryRepository(BaseRepository[Memory]):
                    COALESCE(memory_tier, 'episodic') as memory_tier,
                    COALESCE(truth_status, 'unknown') as truth_status,
                    COALESCE(review_status, 'unreviewed') as review_status,
-                   COALESCE(confidence, 0.5) as confidence,
-                   emotion_label
+                   COALESCE(confidence, 0.5) as confidence
             FROM memories WHERE id = :mem_id
             {center_vis}
         """), {"mem_id": memory_id, **center_params}).mappings().first()
@@ -1182,17 +1146,6 @@ class MemoryRepository(BaseRepository[Memory]):
             .group_by(Memory.memory_type)
             .order_by(func.count(Memory.id).desc())
         ).all()
-        by_emotion_rows = self._session.execute(
-            select(Memory.emotion_label, func.count(Memory.id), func.avg(Memory.salience))
-            .where(
-                self._active_predicate(),
-                Memory.emotion_label.isnot(None),
-            )
-            .group_by(Memory.emotion_label)
-            .order_by(func.count(Memory.id).desc())
-            .limit(10)
-        ).all()
-        snapshots = self._session.scalar(select(func.count(EmotionalSnapshot.id))) or 0
         return {
             "memories": {"total": total, "archived": archived, "active": total - archived},
             "edges": {"total": edge_total, "auto_generated": auto_edges},
@@ -1204,15 +1157,6 @@ class MemoryRepository(BaseRepository[Memory]):
                 }
                 for row in by_type_rows
             ],
-            "by_emotion": [
-                {
-                    "emotion_label": row[0],
-                    "count": row[1],
-                    "avg_salience": round(float(row[2] or 0), 1),
-                }
-                for row in by_emotion_rows
-            ],
-            "emotional_snapshots": snapshots,
         }
 
     def list_org_memories(

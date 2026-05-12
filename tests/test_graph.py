@@ -271,7 +271,7 @@ class TestAutoLinkMemory:
     """Test automatic weak candidate creation for new memories."""
 
     def test_records_valence_candidate_without_contradiction_edge(self):
-        """Valence-only signals should be weak review candidates, not active contradictions."""
+        """Valence-only signals are ignored after the emotion cleanup."""
         from brain.systems.cognition.graph import auto_link_memory
 
         similar_rows = [
@@ -285,10 +285,10 @@ class TestAutoLinkMemory:
 
         stats = auto_link_memory(session, memory_id=1, content="Positive view", memory_type="lesson")
         assert stats["contradictions"] == 0
-        assert stats["contradiction_candidates"] == 1
+        assert stats["contradiction_candidates"] == 0
         assert stats["edges_created"] == 0
-        assert stats["contradiction_records"] >= 1
-        assert stats["contradiction_record_ids"] == [77]
+        assert stats["contradiction_records"] == 0
+        assert stats["contradiction_record_ids"] == []
 
     def test_no_contradiction_same_valence(self):
         """Should not create contradiction for same-valence memories."""
@@ -310,7 +310,7 @@ class TestDetectContradictions:
     """Test nightly weak candidate detection."""
 
     def test_finds_valence_candidates_without_edges(self):
-        """Should record valence candidates without creating active contradiction edges."""
+        """Valence-only contradiction scanning is disabled after the emotion cleanup."""
         from brain.systems.cognition.graph import detect_contradictions
 
         contradiction_rows = [
@@ -324,12 +324,8 @@ class TestDetectContradictions:
         session = _mock_session_execute([contradiction_rows, contradiction_record])
 
         contradictions = detect_contradictions(session)
-        assert len(contradictions) == 1
-        assert contradictions[0]["memory_a"]["id"] == 1
-        assert contradictions[0]["memory_b"]["id"] == 2
-        assert contradictions[0]["record_id"] == 88
-        assert contradictions[0]["status"] == "needs_review"
-        assert session.execute.call_count == 2
+        assert contradictions == []
+        assert session.execute.call_count == 0
 
     def test_empty_when_no_contradictions(self):
         from brain.systems.cognition.graph import detect_contradictions

@@ -66,9 +66,8 @@ class TestGatherContext:
             ctx = gather_context(target)
 
         expected_keys = [
-            "emotional_snapshots", "emotional_trend_7d", "skill_executions",
-            "skills", "retrievals", "tasks", "new_memories",
-            "previous_metrics", "agent_runses", "daily_log"
+            "skill_executions", "skills", "retrievals", "tasks",
+            "new_memories", "previous_metrics", "agent_runses", "daily_log"
         ]
         for key in expected_keys:
             assert key in ctx, f"Missing context section: {key}"
@@ -248,8 +247,6 @@ class TestBuildReflectionPrompt:
     def test_prompt_contains_all_sections(self):
         from brain.jobs.pipelines.nightly_reflect import build_reflection_prompt
         context = {
-            "emotional_snapshots": [{"valence": 0.5}],
-            "emotional_trend_7d": [],
             "skill_executions": [],
             "skills": [],
             "retrievals": [],
@@ -260,7 +257,6 @@ class TestBuildReflectionPrompt:
             "daily_log": "test log",
         }
         prompt = build_reflection_prompt(context, date(2026, 3, 1))
-        assert "Emotional Snapshots" in prompt
         assert "Skill Executions" in prompt
         assert "Retrieval Log" in prompt
         assert "Cortex Runs" in prompt

@@ -20,7 +20,6 @@ from brain.platform.db.repositories.agent_run import (
 from brain.platform.db.repositories.cycles import CycleRepository, CycleRunRepository
 from brain.systems.user_domains.service import DomainService
 from brain.platform.db.repositories.run import RunRepository
-from brain.platform.db.repositories.emotions import EmotionRepository
 from brain.platform.db.repositories.ideas import (
     IdeaConnectionRepository,
     IdeaRepository,
@@ -33,11 +32,6 @@ from brain.platform.db.repositories.chat import (
     ChatMessageMentionRepository,
     ChatMessageRepository,
     ChatNotificationRepository,
-)
-from brain.platform.db.repositories.learning import (
-    LearningSignalRepository,
-    PolicyUpdateCandidateRepository,
-    TrajectoryEvalCaseRepository,
 )
 from brain.platform.db.repositories.notifications import NotificationEventRepository
 from brain.platform.db.repositories.memories import EdgeRepository, MemoryRepository
@@ -52,7 +46,6 @@ from brain.platform.db.repositories.skill_quality import SkillRunEvidenceReposit
 from brain.platform.db.repositories.system import (
     ConsolidationRunRepository,
     DailyMetricsRepository,
-    OperatingParamsRepository,
     RetrievalLogRepository,
 )
 from brain.platform.db.repositories.team import (
@@ -272,17 +265,8 @@ class UnitOfWork:
     def vault_access_log(self):
         return self._repo(VaultAccessLogRepository)
 
-    @cached_property
-    def emotions(self):
-        return self._repo(EmotionRepository)
-
-    @cached_property
     def daily_metrics(self):
         return self._repo(DailyMetricsRepository)
-
-    @cached_property
-    def operating_params(self):
-        return self._repo(OperatingParamsRepository)
 
     @cached_property
     def consolidation_runs(self):
@@ -378,24 +362,5 @@ class UnitOfWork:
     def chat_reads(self):
         return self._repo(ChatConversationReadRepository)
 
-    @cached_property
     def notifications(self):
         return self._repo(NotificationEventRepository)
-
-    @cached_property
-    def learning_signals(self):
-        return self._repo(LearningSignalRepository)
-
-    @cached_property
-    def trajectory_eval_cases(self):
-        return self._repo(TrajectoryEvalCaseRepository)
-
-    @cached_property
-    def policy_update_candidates(self):
-        return self._repo(PolicyUpdateCandidateRepository)
-
-    @cached_property
-    def agency(self):
-        from brain.platform.db.repositories.agency import AgencyRepository
-
-        return self._repo(AgencyRepository)

@@ -223,19 +223,6 @@ async def webhook_reply(request: Request):
     return JSONResponse(content=msg, status_code=201)
 
 
-# ── Delegation stats ───────────────────────────────────────────
-
-@router.get("/delegation-stats")
-async def delegation_stats(days: int = 30, user: dict[str, Any] = Depends(get_current_user)):
-    try:
-        from brain.systems.runs.delegation_tracker import get_delegation_stats
-        stats = await run_sync_with_unit_of_work(get_delegation_stats, days=days)
-        return stats
-    except Exception as exc:
-        logger.exception("delegation-stats failed")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
 # ── GPU health ─────────────────────────────────────────────────
 
 @router.get("/system/gpu-server/health")
@@ -845,7 +832,6 @@ async def audit_apply(
             content=content,
             memory_type=payload.get("memory_type", "lesson"),
             salience=payload.get("salience", 7.0),
-            emotion=payload.get("emotion", "neutral"),
             source="audit",
             write_context=write_context,
         )

@@ -138,7 +138,6 @@ Thought:
             content=summary,
             memory_type=memory_type,
             salience=salience,
-            emotion="neutral",
             source="cortex",
             tags=["cortex", idea_id[:8]],
             write_context=write_context,

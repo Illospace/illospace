@@ -301,7 +301,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 from brain.app.api.routers.ws import router as ws_router
 from brain.app.api.routers.auth import router as auth_router
-from brain.app.api.routers import agency, brain, cortex, cortex_intel, memory, skills, vault, emotions, system, team, costs, journal, learning, domains, workspace_apps, workspace_pins, onboarding
+from brain.app.api.routers import brain, cortex, cortex_intel, memory, skills, vault, system, team, costs, journal, domains, workspace_apps, workspace_pins, onboarding
 from brain.app.api.routers.cycles import router as cycles_router
 from brain.app.api.routers.chat import router as chat_router
 from brain.app.api.routers.notifications import router as notifications_router
@@ -309,14 +309,12 @@ from brain.systems.runtime_settings.router import router as runtime_settings_rou
 
 app.include_router(ws_router)
 app.include_router(auth_router)
-app.include_router(agency.router)
 app.include_router(brain.router)
 app.include_router(cortex.router)
 app.include_router(cortex_intel.router)
 app.include_router(memory.router)
 app.include_router(skills.router)
 app.include_router(vault.router)
-app.include_router(emotions.router)
 app.include_router(system.router)
 app.include_router(runtime_settings_router)
 app.include_router(onboarding.router)
@@ -324,7 +322,6 @@ app.include_router(cycles_router)
 app.include_router(team.router)
 app.include_router(costs.router)
 app.include_router(journal.router)
-app.include_router(learning.router)
 app.include_router(domains.router)
 app.include_router(workspace_apps.router)
 app.include_router(workspace_pins.router)

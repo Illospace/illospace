@@ -178,7 +178,6 @@ def gather_frame_context(
     task: str,
     skill_name: str | None = None,
     idea_id: str | None = None,
-    emotion_context: str | None = None,
     memory_limit: int = 3,
     user_id: str | None = None,
     org_id: str | None = None,
@@ -240,56 +239,25 @@ def gather_frame_context(
         except Exception as e:
             logger.debug(f"Heuristic load failed: {e}")
 
-    # ── Recall relevant memories (with emotional resonance when available) ──
+    # ── Recall relevant memories ──
     try:
-        if emotion_context:
-            # Use full 5-signal retrieval (semantic + salience + recency + frequency + emotion)
-            from brain.app.cli.memory import query_memories
-            raw_memories = query_memories(
-                query=task, limit=memory_limit,
-                emotion_context=emotion_context, spread=True,
-                user_id=user_id, org_id=org_id,
-                expand_lazy_load=_lazy_load_enabled(),
-            )
-            if isinstance(raw_memories, dict):
-                result["candidate_memories"] = raw_memories.get("candidate_results", [])
-                result["suppressed_memories"] = raw_memories.get("suppressed_results", [])
-                result["lazy_load_memories"] = raw_memories.get("lazy_load_results", [])
-                result["attention_decision"] = raw_memories.get("attention_decision")
-                result["attention_explain"] = raw_memories.get("attention_explain")
-                memories = raw_memories.get("results", [])
-            else:
-                memories = raw_memories
-            result["memories"] = [
-                {
-                    "id": m.get("id"),
-                    "content": m.get("content", "")[:300],
-                    "type": m.get("type", "memory"),
-                    "tier": m.get("tier", m.get("memory_tier", "episodic")),
-                    "salience": m.get("salience", 0),
-                    "similarity": m.get("similarity", m.get("scores", {}).get("semantic", 0)),
-                }
-                for m in (memories if isinstance(memories, list) else [])
-            ]
-        else:
-            # Fallback to graph-augmented recall (no emotion, still good)
-            from brain.app.mcp.server import tool_brain_recall
-            memories = tool_brain_recall(
-                query=task,
-                limit=memory_limit,
-                user_id=user_id,
-                org_id=org_id,
-                expand_lazy_load=_lazy_load_enabled(),
-            )
-            if isinstance(memories, dict) and "memories" in memories:
-                result["memories"] = memories["memories"]
-                result["candidate_memories"] = memories.get("candidate_memories", [])
-                result["suppressed_memories"] = memories.get("suppressed_memories", [])
-                result["lazy_load_memories"] = memories.get("lazy_load_memories", [])
-                result["attention_decision"] = memories.get("attention_decision")
-                result["attention_explain"] = memories.get("attention_explain")
-            elif isinstance(memories, list):
-                result["memories"] = memories
+        from brain.app.mcp.server import tool_brain_recall
+        memories = tool_brain_recall(
+            query=task,
+            limit=memory_limit,
+            user_id=user_id,
+            org_id=org_id,
+            expand_lazy_load=_lazy_load_enabled(),
+        )
+        if isinstance(memories, dict) and "memories" in memories:
+            result["memories"] = memories["memories"]
+            result["candidate_memories"] = memories.get("candidate_memories", [])
+            result["suppressed_memories"] = memories.get("suppressed_memories", [])
+            result["lazy_load_memories"] = memories.get("lazy_load_memories", [])
+            result["attention_decision"] = memories.get("attention_decision")
+            result["attention_explain"] = memories.get("attention_explain")
+        elif isinstance(memories, list):
+            result["memories"] = memories
         result["memory_status"] = "found" if result["memories"] else "empty"
     except Exception as e:
         logger.warning(f"Brain recall unavailable (embed server down?): {e}")

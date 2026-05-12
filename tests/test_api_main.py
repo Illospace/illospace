@@ -48,14 +48,11 @@ async def test_health_includes_run_event_backbone(client):
     mock_mem_repo.count_active.return_value = 3
     mock_skill_repo = MagicMock()
     mock_skill_repo.list_active.return_value = [1, 2]
-    mock_emo_repo = MagicMock()
-    mock_emo_repo.count_all.return_value = 4
 
     app.dependency_overrides[get_db] = lambda: _AsyncSession(mock_db)
     try:
         with patch("brain.platform.db.repositories.memories.MemoryRepository", return_value=mock_mem_repo), \
         patch("brain.platform.db.repositories.skills.SkillRepository", return_value=mock_skill_repo), \
-        patch("brain.platform.db.repositories.emotions.EmotionRepository", return_value=mock_emo_repo), \
         patch("brain.systems.runs.event_log.run_event_backbone_status", return_value={
             "consumer_name": "api.websocket_fanout",
             "health": "lagging",

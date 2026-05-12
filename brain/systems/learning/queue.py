@@ -581,53 +581,9 @@ def queue_after_run_learning_for_run(
     policy: LearningBudgetPolicy | None = None,
     ledger: LearningBudgetLedger | None = None,
 ) -> AfterRunLearningQueueResult | None:
-    """Build and persist after-run learning jobs for a completed run."""
-    try:
-        from brain.systems.runs.cortex.recording import load_run_recordings
-        from brain.platform.db.models.run import AgentRun
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-        with UnitOfWork() as uow:
-            run = uow.run.get(run_id) or uow.session.get(AgentRun, run_id)
-            if run is None:
-                return None
-            recordings = load_run_recordings(uow.session, run_id)
-            trajectory = {
-                "trace_id": getattr(run, "trace_id", None),
-                "task": getattr(run, "input_message", ""),
-                "status": getattr(run, "status", None),
-                "recordings": recordings,
-            }
-            eval_case = build_eval_case_from_trajectory(trajectory)
-            skill = _skill_reference_from_trajectory(
-                trajectory,
-                fallback_skill_name=getattr(run, "skill_used", None),
-                skill_repo=uow.skills,
-            )
-            source = AfterRunLearningSource(
-                run_id=run_id,
-                trace_id=_text(trajectory.get("trace_id")) or getattr(run, "trace_id", None),
-                user_id=getattr(run, "user_id", None),
-                org_id=None,
-                visibility="private",
-                trajectory=trajectory,
-                eval_case=eval_case,
-                runtime_metadata={
-                    "summary": _mapping(_mapping(trajectory.get("quality_signals")).get("summary")),
-                    "routing": _mapping(trajectory.get("routing")),
-                    "lease": _mapping(trajectory.get("lease")),
-                },
-                skill=skill,
-            )
-            return AfterRunLearningQueueService(policy=policy, ledger=ledger).queue(
-                source,
-                learning_signals=uow.learning_signals,
-                trajectory_eval_cases=uow.trajectory_eval_cases,
-                skill_run_evidence=uow.skill_run_evidence,
-            )
-    except Exception as exc:
-        logger.debug("after-run learning queue failed for run %s: %s", run_id, exc)
-        return None
+    """Legacy no-op: after-run learning persistence has been removed."""
+    logger.debug("after-run learning queue disabled for run %s", run_id)
+    return None
 
 
 def build_eval_case_from_trajectory(trajectory: Mapping[str, Any]) -> dict[str, Any]:

@@ -1,4 +1,4 @@
-"""Brain router — health score, learnings, stale ideas, prompts, admin, search."""
+"""Brain router — health score, learnings, stale ideas, admin, search."""
 from __future__ import annotations
 
 import logging
@@ -14,14 +14,11 @@ from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.db_utils import run_db
 from brain.platform.db.models.run import AgentRun
-from brain.platform.db.models.emotion import EmotionalSnapshot
 from brain.platform.db.models.idea import Idea, IdeaThread
 from brain.platform.db.models.memory import Memory
 from brain.platform.db.models.org import User
-from brain.platform.db.models.prompt import BrainPrompt
 from brain.platform.db.models.skill import Skill, SkillExecution
 from brain.platform.db.models.system import ConsolidationRun, RetrievalLog
-from brain.platform.db.models.task import Task
 
 logger = logging.getLogger(__name__)
 
@@ -238,100 +235,6 @@ async def stale_ideas(
     return await run_db(db, _list)
 
 
-# ═══════════════════════════════════════════
-# Brain Prompts
-# ═══════════════════════════════════════════
-
-@router.get("/brain-prompts")
-async def list_brain_prompts(
-    db: AsyncSession = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
-):
-    """Self-reflection prompts (max 3)."""
-    def _list(sync_db: Session):
-        try:
-            now = datetime.now(timezone.utc)
-            stmt = (
-                select(BrainPrompt)
-                .where(
-                    BrainPrompt.resolved_at.is_(None),
-                    or_(
-                        BrainPrompt.dismissed_until.is_(None),
-                        BrainPrompt.dismissed_until < now,
-                    ),
-                )
-                .order_by(BrainPrompt.created_at.desc())
-                .limit(3)
-            )
-            rows = sync_db.scalars(stmt).all()
-            return [
-                {
-                    "id": p.id,
-                    "prompt_text": p.content,
-                    "category": p.type,
-                    "created_at": p.created_at.isoformat() if p.created_at else None,
-                }
-                for p in rows
-            ]
-        except Exception as e:
-            logger.warning("brain_prompts_error: %s", e)
-            return []
-
-    return await run_db(db, _list)
-
-
-@router.post("/brain-prompts/{prompt_id}/teach")
-async def teach_prompt(
-    prompt_id: int,
-    db: AsyncSession = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
-):
-    """Encode a lesson from a brain prompt."""
-    def _teach(sync_db: Session):
-        prompt = sync_db.get(BrainPrompt, prompt_id)
-        if not prompt:
-            raise HTTPException(status_code=404, detail="Prompt not found")
-        prompt.resolved_at = datetime.now(timezone.utc)
-        return {"ok": True, "action": "teach", "prompt_id": prompt_id}
-
-    return await run_db(db, _teach)
-
-
-@router.post("/brain-prompts/{prompt_id}/dismiss")
-async def dismiss_prompt(
-    prompt_id: int,
-    db: AsyncSession = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
-):
-    """Snooze a brain prompt for 7 days."""
-    def _dismiss(sync_db: Session):
-        prompt = sync_db.get(BrainPrompt, prompt_id)
-        if not prompt:
-            raise HTTPException(status_code=404, detail="Prompt not found")
-        prompt.dismissed_until = datetime.now(timezone.utc) + timedelta(days=7)
-        return {"ok": True, "action": "dismiss", "prompt_id": prompt_id}
-
-    return await run_db(db, _dismiss)
-
-
-@router.post("/brain-prompts/{prompt_id}/resolve")
-async def resolve_prompt(
-    prompt_id: int,
-    db: AsyncSession = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
-):
-    """Mark a brain prompt as resolved."""
-    def _resolve(sync_db: Session):
-        prompt = sync_db.get(BrainPrompt, prompt_id)
-        if not prompt:
-            raise HTTPException(status_code=404, detail="Prompt not found")
-        prompt.resolved_at = datetime.now(timezone.utc)
-        return {"ok": True, "action": "resolve", "prompt_id": prompt_id}
-
-    return await run_db(db, _resolve)
-
-
-# ═══════════════════════════════════════════
 # Admin — Pending Users
 # ═══════════════════════════════════════════
 

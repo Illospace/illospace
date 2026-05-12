@@ -31,15 +31,6 @@ _ENV_FILES = (
     "brain/.env",
     "core/.env",
 )
-_LEARNING_TABLES = (
-    "run_genomes",
-    "policy_promotions",
-    "practice_runs",
-    "learning_examples",
-    "learning_signals",
-    "trajectory_eval_cases",
-    "policy_update_candidates",
-)
 _LEARNING_INT_ENV = (
     "LEARNING_BUDGET_HOT_PATH_TOKENS",
     "LEARNING_BUDGET_AFTER_RUN_TOKENS",
@@ -185,9 +176,7 @@ def _has_database_config(env: Mapping[str, str]) -> bool:
 
 
 def _looks_like_learning_repo(root: Path) -> bool:
-    return (root / "brain" / "systems" / "learning").is_dir() and (
-        root / "brain" / "platform" / "db" / "models" / "learning.py"
-    ).exists()
+    return (root / "brain" / "systems" / "learning").is_dir()
 
 
 def _first_env(env: Mapping[str, str], *names: str) -> str | None:
@@ -241,55 +230,6 @@ def _read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return ""
-
-
-def _learning_schema_status(root: Path) -> DoctorStatus:
-    model_text = _read_text(root / "brain" / "platform" / "db" / "models" / "learning.py")
-    migration_texts = [
-        _read_text(path)
-        for path in (root / "brain" / "platform" / "db" / "alembic" / "versions").glob("*.py")
-    ]
-    missing_models = [
-        table
-        for table in _LEARNING_TABLES
-        if f'__tablename__ = "{table}"' not in model_text
-        and f"__tablename__ = '{table}'" not in model_text
-    ]
-    missing_migrations = [
-        table
-        for table in _LEARNING_TABLES
-        if not any(f'"{table}"' in text or f"'{table}'" in text for text in migration_texts)
-    ]
-    if any("Base.metadata.create_all" in text for text in migration_texts):
-        missing_migrations = []
-
-    if missing_models or missing_migrations:
-        missing_parts = []
-        if missing_models:
-            missing_parts.append(f"model tables: {', '.join(missing_models)}")
-        if missing_migrations:
-            missing_parts.append(f"migration entries: {', '.join(missing_migrations)}")
-        return DoctorStatus(
-            code="learning-schema-missing",
-            status="error",
-            message=(
-                "Learning storage is incomplete; missing "
-                + "; ".join(missing_parts)
-                + ". Run the current Alembic migrations before enabling learning."
-            ),
-            details={
-                "expected_tables": list(_LEARNING_TABLES),
-                "missing_model_tables": missing_models,
-                "missing_migration_tables": missing_migrations,
-            },
-        )
-
-    return DoctorStatus(
-        code="learning-schema",
-        status="ok",
-        message="Learning tables and migrations are present.",
-        details={"expected_tables": list(_LEARNING_TABLES)},
-    )
 
 
 def _scheduler_status(root: Path) -> DoctorStatus:
@@ -584,7 +524,6 @@ def _embedding_status(root: Path, env: Mapping[str, str]) -> DoctorStatus:
 def _learning_statuses(root: Path, env: Mapping[str, str]) -> tuple[DoctorStatus, ...]:
     return (
         _scheduler_status(root),
-        _learning_schema_status(root),
         _learning_budget_status(env),
         _privacy_status(env),
         _learning_model_status(env),

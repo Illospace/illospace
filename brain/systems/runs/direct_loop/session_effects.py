@@ -63,7 +63,7 @@ def _auto_encode_if_needed(
         )
         add_memory(
             content=f"[auto-encoded] {output[:300]}",
-            memory_type="episode", salience=4.0, emotion="neutral",
+            memory_type="episode", salience=4.0,
             source="agent_auto_encode", tags=["auto_encoded", session_id[:20]],
             write_context=write_context,
         )

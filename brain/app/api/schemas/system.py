@@ -5,8 +5,6 @@ from pydantic import BaseModel
 class DailyMetricsRead(BaseModel):
     id: int
     metric_date: date
-    avg_valence: float | None = None
-    avg_arousal: float | None = None
     total_exchanges: int | None = None
     retrieval_attempts: int | None = None
     retrieval_hits: int | None = None

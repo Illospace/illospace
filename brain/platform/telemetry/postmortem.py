@@ -102,12 +102,6 @@ def _postmortem_worker(run_id: int, error: str, skill_name: str | None):
         # Route to corrective system
         _route_correction(classification, lesson, skill_name)
 
-        try:
-            from brain.systems.learning import record_run_learning_artifacts
-            record_run_learning_artifacts(run_id)
-        except Exception as exc:
-            logger.debug("Run learning artifact capture failed for #%d: %s", run_id, exc)
-
         logger.info(
             "Post-mortem for run #%d: %s → %s",
             run_id, classification["category"], classification["corrective_system"],

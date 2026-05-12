@@ -226,7 +226,6 @@ class SkillExecution(Base):
     outcome_details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_analysis: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     operator_feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    operator_emotion: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     tests_passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     needed_rework: Mapped[bool] = mapped_column(
         Boolean, server_default=text("FALSE"), default=False

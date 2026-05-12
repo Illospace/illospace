@@ -31,7 +31,7 @@ def gather_today_memories(target_date: date, limit: int = 10, org_id: str | None
     _org_params = {"org_id": org_id} if org_id else {}
     with UnitOfWork() as uow:
         result = uow.session.execute(text(f"""
-            SELECT id, content, memory_type, salience, tags, emotion_label
+            SELECT id, content, memory_type, salience, tags
             FROM memories
             WHERE created_at::date = :target_date AND NOT archived {_org_filter}
             ORDER BY salience DESC
@@ -46,7 +46,7 @@ def gather_random_old_memories(target_date: date, limit: int = 10, org_id: str |
     _org_params = {"org_id": org_id} if org_id else {}
     with UnitOfWork() as uow:
         result = uow.session.execute(text(f"""
-            SELECT id, content, memory_type, salience, tags, emotion_label,
+            SELECT id, content, memory_type, salience, tags,
                    created_at::date as created_date
             FROM memories
             WHERE created_at::date < :target_date - INTERVAL '7 days'
@@ -131,7 +131,6 @@ def store_dream_memories(dream_output: dict, target_date: date, dry_run: bool) -
                 content=item,
                 memory_type="dream",
                 salience=3.0,
-                emotion="curious",
                 tags=[f"dream-{target_date.isoformat()}"],
                 source="nightly-dream",
                 decay_eligible=True,
