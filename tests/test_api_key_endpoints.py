@@ -29,6 +29,14 @@ def _uow(session: MagicMock | None = None):
     return uow
 
 
+@pytest.fixture(autouse=True)
+def run_sync_inline(monkeypatch: pytest.MonkeyPatch):
+    async def _run(fn, /, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr("brain.app.api.routers.cortex._auth_keys.run_sync_with_unit_of_work", _run)
+
+
 def test_list_api_keys_returns_own_shared_and_org_keys():
     from brain.app.api.routers.cortex._auth_keys import list_api_keys
 
@@ -70,7 +78,7 @@ def test_list_api_keys_returns_own_shared_and_org_keys():
 
     with patch("brain.app.api.routers.cortex._auth_keys.UnitOfWork", return_value=_uow(session)), \
          patch("brain.systems.vault._decrypt", return_value="sk-org-key"):
-        result = list_api_keys(MagicMock(), _user())
+        result = asyncio.run(list_api_keys(MagicMock(), _user()))
 
     assert result["own"][0]["id"] == 1
     assert result["shared"][0]["shared_by_name"] == "Alice"
@@ -179,7 +187,7 @@ def test_deactivate_key_marks_owned_key_inactive():
     session.scalars.return_value.first.return_value = key
 
     with patch("brain.app.api.routers.cortex._auth_keys.UnitOfWork", return_value=_uow(session)):
-        result = deactivate_key(5, _user())
+        result = asyncio.run(deactivate_key(5, _user()))
 
     assert result == {"status": "deactivated"}
     assert key.is_active is False

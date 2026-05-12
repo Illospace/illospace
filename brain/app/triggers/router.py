@@ -181,7 +181,6 @@ def route_trigger(trigger: IlloTrigger, *, session: Any | None = None) -> Trigge
             source=f"trigger:{trigger.source}",
             producer="trigger",
             idempotency_key=trigger.idempotency_key,
-            capture_emotion=True,
         ),
         session=session,
     )

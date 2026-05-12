@@ -1,4 +1,4 @@
-"""System repositories — daily metrics, operating params, consolidation, retrieval."""
+"""System repositories — daily metrics, consolidation, retrieval."""
 from __future__ import annotations
 
 from typing import Sequence
@@ -8,7 +8,6 @@ from sqlalchemy import select
 from brain.platform.db.models.system import (
     ConsolidationRun,
     DailyMetrics,
-    OperatingParams,
     RetrievalLog,
 )
 from brain.platform.db.repositories.base import BaseRepository
@@ -24,11 +23,6 @@ class DailyMetricsRepository(BaseRepository[DailyMetrics]):
             .limit(limit)
         )
         return self._session.scalars(stmt).all()
-
-
-class OperatingParamsRepository(BaseRepository[OperatingParams]):
-    model = OperatingParams
-    pk_column = "key"
 
 
 class ConsolidationRunRepository(BaseRepository[ConsolidationRun]):

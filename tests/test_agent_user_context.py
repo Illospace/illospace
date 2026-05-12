@@ -96,8 +96,7 @@ class TestBrainEncodeUserScoped:
         }
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
-             patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 2000), \
-             patch("brain.systems.memory.embeddings.make_emotional_embedding", return_value=[0.1] * 2000):
+             patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 2000):
             result = tool_brain_encode(
                 content="This is a test memory with enough content",
                 user_id=USER_A["id"],
@@ -127,8 +126,7 @@ class TestBrainEncodeUserScoped:
         }
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
-             patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 2000), \
-             patch("brain.systems.memory.embeddings.make_emotional_embedding", return_value=[0.1] * 2000):
+             patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 2000):
             result = tool_brain_encode(
                 content="Another test memory long enough to pass",
                 user_id=USER_A["id"],

@@ -36,9 +36,9 @@ def _client():
 
 def test_reveal_requires_unlock_when_pin_is_configured():
     with _client() as client, \
-         patch("brain.systems.vault.has_pin", return_value=True), \
-         patch("brain.systems.vault.validate_vault_token", return_value=False), \
-         patch("brain.systems.vault.reveal_secret") as reveal:
+         patch("brain.systems.vault.async_has_pin", return_value=True), \
+         patch("brain.systems.vault.async_validate_vault_token", return_value=False), \
+         patch("brain.systems.vault.async_reveal_secret") as reveal:
         response = client.get("/api/vault/OPENAI_API_KEY")
 
     assert response.status_code == 423
@@ -48,7 +48,7 @@ def test_reveal_requires_unlock_when_pin_is_configured():
 def test_unlock_rejects_bad_pin_and_returns_session_token_for_good_pin():
     expires = datetime.now(timezone.utc)
     with _client() as client, \
-         patch("brain.systems.vault.unlock_vault", side_effect=[None, ("vault-token", expires)]):
+         patch("brain.systems.vault.async_unlock_vault", side_effect=[None, ("vault-token", expires)]):
         bad = client.post("/api/vault/unlock", json={"pin": "wrong"})
         good = client.post("/api/vault/unlock", json={"pin": "1234"})
 

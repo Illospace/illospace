@@ -2445,7 +2445,7 @@ deploy_up() {
     fi
   fi
   if [ "$build" = "1" ]; then
-    deploy_compose build api web || return 1
+    deploy_compose build api web updater || return 1
   fi
   deploy_compose up -d || return 1
   if [ "$doctor" = "1" ]; then

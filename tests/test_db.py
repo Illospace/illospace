@@ -16,8 +16,8 @@ def test_get_cursor_yields_dict_cursor():
     mock_pool = MagicMock()
     mock_pool.getconn.return_value = mock_conn
 
-    with patch("brain.platform.db._get_pool", return_value=mock_pool):
-        import brain.platform.db as db
+    with patch("brain.platform.db.legacy._get_pool", return_value=mock_pool):
+        import brain.platform.db.legacy as db
         # Reset the module-level pool
         with db.get_cursor() as cur:
             assert cur is mock_cur
@@ -35,8 +35,8 @@ def test_get_cursor_rollback_on_error():
     mock_pool = MagicMock()
     mock_pool.getconn.return_value = mock_conn
 
-    with patch("brain.platform.db._get_pool", return_value=mock_pool):
-        import brain.platform.db as db
+    with patch("brain.platform.db.legacy._get_pool", return_value=mock_pool):
+        import brain.platform.db.legacy as db
         try:
             with db.get_cursor() as cur:
                 raise ValueError("test error")
@@ -53,8 +53,8 @@ def test_get_conn_yields_connection():
     mock_pool = MagicMock()
     mock_pool.getconn.return_value = mock_conn
 
-    with patch("brain.platform.db._get_pool", return_value=mock_pool):
-        import brain.platform.db as db
+    with patch("brain.platform.db.legacy._get_pool", return_value=mock_pool):
+        import brain.platform.db.legacy as db
         with db.get_conn() as conn:
             assert conn is mock_conn
 
@@ -63,7 +63,7 @@ def test_get_conn_yields_connection():
 
 def test_close_pool():
     """close_pool should close all connections and reset _pool."""
-    import brain.platform.db as db
+    import brain.platform.db.legacy as db
     mock_pool = MagicMock()
     db._pool = mock_pool
     db.close_pool()
@@ -73,7 +73,7 @@ def test_close_pool():
 
 def test_close_pool_when_none():
     """close_pool should be safe when pool is None."""
-    import brain.platform.db as db
+    import brain.platform.db.legacy as db
     db._pool = None
     db.close_pool()  # Should not raise
     assert db._pool is None

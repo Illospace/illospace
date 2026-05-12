@@ -117,7 +117,7 @@ def build_eval_example(
     """Build one stable, JSON-serializable eval example.
 
     ``source`` can be a full run trajectory, the compact payload returned by
-    ``build_run_eval_case``, or a TrajectoryEvalCase-like row with a
+    ``build_run_eval_case``, or an eval-case-like row with a
     ``payload`` attribute.
     """
     policy = _coerce_policy(mode, privacy_policy)
@@ -195,7 +195,7 @@ def eval_example_to_eval_case_values(
     visibility: str = "private",
     status: str = "active",
 ) -> dict[str, Any]:
-    """Return kwargs suitable for TrajectoryEvalCaseRepository.upsert_eval_case."""
+    """Return a portable eval-case payload."""
     source = _as_mapping(example.get("source"))
     scoring = _as_mapping(example.get("scoring"))
     quality = _as_mapping(scoring.get("quality"))
@@ -275,7 +275,7 @@ def _source_payload(source: Mapping[str, Any] | Any) -> dict[str, Any]:
     if isinstance(quality, Mapping):
         data.setdefault("quality", _jsonable(dict(quality)))
     if not data:
-        raise TypeError("source must be a mapping or TrajectoryEvalCase-like row")
+        raise TypeError("source must be a mapping or eval-case-like row")
     return data
 
 

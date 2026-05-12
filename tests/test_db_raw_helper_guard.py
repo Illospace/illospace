@@ -19,7 +19,7 @@ def test_brain_runtime_does_not_call_raw_db_helpers():
             if not RAW_HELPER_CALL.search(line):
                 continue
             stripped = line.strip()
-            if rel == "brain/platform/db/__init__.py" and stripped.startswith(ALLOWED_DEFINITIONS):
+            if rel == "brain/platform/db/legacy.py" and stripped.startswith(ALLOWED_DEFINITIONS):
                 continue
             offenders.append(f"{rel}:{line_no}: {stripped}")
 

@@ -127,8 +127,7 @@ def test_add_memory_uses_repository_insert_with_context():
 
     with patch("brain.app.cli.memory.UnitOfWork", return_value=mock_uow), \
          patch("brain.app.cli.memory.check_quality", return_value=SimpleNamespace(passed=True, adjusted_salience=None)), \
-         patch("brain.app.cli.memory.embed_document", return_value=[0.1] * 3), \
-         patch("brain.app.cli.memory.make_emotional_embedding", return_value=[0.0] * 3):
+         patch("brain.app.cli.memory.embed_document", return_value=[0.1] * 3):
         result = add_memory(
             content="This is a durable lesson worth recording in tests",
             memory_type="lesson",

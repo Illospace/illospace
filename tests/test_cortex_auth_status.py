@@ -1,4 +1,9 @@
+import asyncio
 from unittest.mock import MagicMock, patch
+
+
+async def _run_sync_inline(fn, /, *args, **kwargs):
+    return fn(*args, **kwargs)
 
 
 def test_auth_status_reports_runtime_db_key_state():
@@ -20,8 +25,9 @@ def test_auth_status_reports_runtime_db_key_state():
 
     with patch("brain.systems.services.runtime_introspection.resolve_llm_client", return_value=mock_llm), \
          patch("brain.systems.services.runtime_introspection.resolve_default_provider", return_value="anthropic"), \
-         patch("brain.systems.services.runtime_introspection.UnitOfWork", return_value=mock_uow):
-        data = auth_status(provider="anthropic", user=user)
+         patch("brain.systems.services.runtime_introspection.UnitOfWork", return_value=mock_uow), \
+         patch("brain.app.api.routers.cortex._misc.run_sync_with_unit_of_work", _run_sync_inline):
+        data = asyncio.run(auth_status(provider="anthropic", user=user))
 
     assert data["authenticated"] is True
     assert data["has_personal_db_key"] is True
@@ -49,8 +55,9 @@ def test_auth_status_requires_db_key_even_if_env_key_exists():
     mock_uow.session = mock_session
 
     with patch("brain.systems.services.runtime_introspection.resolve_llm_client", side_effect=RuntimeError("missing")), \
-         patch("brain.systems.services.runtime_introspection.UnitOfWork", return_value=mock_uow):
-        data = auth_status(user)
+         patch("brain.systems.services.runtime_introspection.UnitOfWork", return_value=mock_uow), \
+         patch("brain.app.api.routers.cortex._misc.run_sync_with_unit_of_work", _run_sync_inline):
+        data = asyncio.run(auth_status(user=user))
 
     assert data["authenticated"] is False
     assert data["runtime_uses_db_key"] is False
@@ -76,8 +83,9 @@ def test_auth_status_reports_openai_codex_cache_runtime():
 
     with patch("brain.systems.services.runtime_introspection.resolve_llm_client", return_value=mock_llm), \
          patch("brain.systems.services.runtime_introspection.resolve_default_provider", return_value="anthropic"), \
-         patch("brain.systems.services.runtime_introspection.UnitOfWork", return_value=mock_uow):
-        data = auth_status(provider="openai", user=user)
+         patch("brain.systems.services.runtime_introspection.UnitOfWork", return_value=mock_uow), \
+         patch("brain.app.api.routers.cortex._misc.run_sync_with_unit_of_work", _run_sync_inline):
+        data = asyncio.run(auth_status(provider="openai", user=user))
 
     assert data["provider"] == "openai"
     assert data["authenticated"] is True

@@ -28,12 +28,10 @@ from sqlalchemy import text
 
 from brain.platform.db.repositories.memory_visibility import MemoryVisibilityContext, memory_visibility_sql
 from brain.systems.memory.truth_maintenance import (
-    build_contradiction_evidence,
     build_truth_state,
     memory_retrieval_bonus,
     memory_retrieval_priority,
     quarantine_filter_enabled,
-    record_contradiction,
 )
 
 logger = logging.getLogger("cognition.graph")
@@ -47,7 +45,6 @@ EDGE_TYPES = frozenset({
     "depends_on",         # dependency
     "derived_from",       # execution lineage
     "caused_by",          # causal link
-    "emotional_echo",     # shared emotional tone
     "related_to",         # manual/generic
 })
 
@@ -60,7 +57,6 @@ EDGE_WEIGHT_BONUS = {
     "consolidated_from": 0.08,
     "crystallized_from": 0.08,
     "similar_to": 0.05,
-    "emotional_echo": 0.03,
     "related_to": 0.03,
 }
 
@@ -117,7 +113,7 @@ def _legacy_graph_augmented_recall(
     pool_size = limit * 3
     params["pool_size"] = pool_size
     vector_results = session.execute(text(f"""
-        SELECT m.id, m.content, m.memory_type, m.salience, m.emotion_label,
+        SELECT m.id, m.content, m.memory_type, m.salience,
                COALESCE(m.memory_tier, 'episodic') as memory_tier,
                COALESCE(m.visibility, 'private') as visibility,
                COALESCE(m.truth_status, 'unknown') as truth_status,
@@ -211,8 +207,7 @@ def _legacy_graph_augmented_recall(
                 m.demoted_at,
                 m.policy_kind,
                 m.policy_scope,
-                m.reviewed_at,
-                m.emotion_label
+                m.reviewed_at
             FROM edges e
             JOIN memories m ON m.id = CASE
                 WHEN e.source_id = ANY(:seed_ids) THEN e.target_id
@@ -352,113 +347,16 @@ def auto_link_memory(session, memory_id: int, content: str, memory_type: str) ->
         "contradiction_record_ids": [],
     }
 
-    # Contradiction detection: find similar memories with opposite emotion
-    similar_rows = session.execute(text("""
-        SELECT m.id, m.content, m.emotion_valence,
-               1 - (m.semantic_embedding <=> (SELECT semantic_embedding FROM memories WHERE id = :mem_id)) as sim
-        FROM memories m
-        WHERE m.id != :mem_id AND NOT m.archived
-          AND 1 - (m.semantic_embedding <=> (SELECT semantic_embedding FROM memories WHERE id = :mem_id)) > 0.7
-        ORDER BY sim DESC
-        LIMIT 5
-    """), {"mem_id": memory_id}).mappings().all()
-
-    new_valence = _get_valence(session, memory_id)
-
-    for row in similar_rows:
-        sim = float(row["sim"])
-        other_valence = float(row["emotion_valence"] or 0)
-
-        # Opposite valence + high similarity = potential contradiction
-        if new_valence * other_valence < -0.1 and sim > 0.75:
-            weak_confidence = min(0.45, max(0.25, sim * 0.5))
-            contradiction = record_contradiction(
-                session,
-                left_memory_id=memory_id,
-                right_memory_id=row["id"],
-                contradiction_type="valence_candidate",
-                detected_by="graph.auto_link_memory",
-                evidence=build_contradiction_evidence(
-                    similarity=sim,
-                    left_valence=new_valence,
-                    right_valence=other_valence,
-                    detector="auto_link_memory",
-                    note="weak candidate only: opposite valence with high embedding similarity",
-                    confidence=weak_confidence,
-                ),
-                severity=weak_confidence,
-                confidence=weak_confidence,
-                status="needs_review",
-            )
-            stats["contradiction_candidates"] += 1
-            stats["contradiction_records"] += 1
-            stats["contradiction_record_ids"].append(contradiction.get("id"))
-            logger.info(f"Weak contradiction candidate: memory {memory_id} <-> {row['id']} (sim={sim:.2f})")
-
     return stats
 
 
 def detect_contradictions(session, limit: int = 20) -> list[dict]:
     """Find potential contradictions in the memory graph.
 
-    Looks for high-similarity memories with opposing emotional valence
-    and records them as weak review candidates. Valence alone is not
-    trusted enough to create active contradiction edges.
+    Automated contradiction candidates now come from explicit review flows.
     """
-    rows = session.execute(text("""
-        SELECT
-            m1.id as id1, m1.content as content1, m1.emotion_valence as v1,
-            m2.id as id2, m2.content as content2, m2.emotion_valence as v2,
-            e.weight as similarity
-        FROM edges e
-        JOIN memories m1 ON m1.id = e.source_id
-        JOIN memories m2 ON m2.id = e.target_id
-        WHERE e.relationship = 'similar_to'
-          AND e.weight > 0.75
-          AND NOT m1.archived AND NOT m2.archived
-          AND m1.emotion_valence * m2.emotion_valence < -0.1
-          AND NOT EXISTS (
-              SELECT 1 FROM edges e2
-              WHERE e2.relationship = 'contradicts'
-                AND ((e2.source_id = m1.id AND e2.target_id = m2.id)
-                  OR (e2.source_id = m2.id AND e2.target_id = m1.id))
-          )
-        ORDER BY e.weight DESC
-        LIMIT :lim
-    """), {"lim": limit}).mappings().all()
-
-    contradictions = []
-    for row in rows:
-        weak_confidence = min(0.45, max(0.25, float(row["similarity"]) * 0.5))
-        contradiction = record_contradiction(
-            session,
-            left_memory_id=row["id1"],
-            right_memory_id=row["id2"],
-            contradiction_type="valence_candidate",
-            detected_by="graph.detect_contradictions",
-            evidence=build_contradiction_evidence(
-                similarity=float(row["similarity"]),
-                left_valence=float(row["v1"] or 0),
-                right_valence=float(row["v2"] or 0),
-                detector="detect_contradictions",
-                note="weak candidate only: high similarity with opposing emotion valence",
-                confidence=weak_confidence,
-            ),
-            severity=weak_confidence,
-            confidence=weak_confidence,
-            status="needs_review",
-        )
-        contradictions.append({
-            "memory_a": {"id": row["id1"], "content": row["content1"][:200], "valence": float(row["v1"] or 0)},
-            "memory_b": {"id": row["id2"], "content": row["content2"][:200], "valence": float(row["v2"] or 0)},
-            "similarity": round(float(row["similarity"]), 3),
-            "record_id": contradiction.get("id"),
-            "status": contradiction.get("status", "open"),
-            "severity": round(float(contradiction.get("severity", row["similarity"])), 3),
-            "evidence": contradiction.get("evidence", {}),
-        })
-
-    return contradictions
+    del session, limit
+    return []
 
 
 def _legacy_get_memory_neighborhood(
@@ -480,8 +378,7 @@ def _legacy_get_memory_neighborhood(
                COALESCE(memory_tier, 'episodic') as memory_tier,
                COALESCE(truth_status, 'unknown') as truth_status,
                COALESCE(review_status, 'unreviewed') as review_status,
-               COALESCE(confidence, 0.5) as confidence,
-               emotion_label
+               COALESCE(confidence, 0.5) as confidence
         FROM memories WHERE id = :mem_id
         {center_vis}
     """.format(center_vis=center_vis)), {"mem_id": memory_id, **center_vis_params}).mappings().first()
@@ -579,11 +476,3 @@ def _create_edge(
                       last_activated = NOW()
     """), {"source_id": source_id, "target_id": target_id,
            "relationship": relationship, "weight": weight})
-
-
-def _get_valence(session, memory_id: int) -> float:
-    """Get emotion valence for a memory."""
-    row = session.execute(text(
-        "SELECT emotion_valence FROM memories WHERE id = :mem_id"
-    ), {"mem_id": memory_id}).mappings().first()
-    return float(row["emotion_valence"] or 0) if row else 0.0

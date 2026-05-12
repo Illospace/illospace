@@ -14,16 +14,16 @@ from brain.platform.db.models.browser import BrowserSession
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 
-def _get_browser_session_or_404(session_id: str) -> BrowserSession:
-    with UnitOfWork() as uow:
-        record = uow.session.get(BrowserSession, session_id)
+async def _get_browser_session_or_404(session_id: str) -> BrowserSession:
+    async with UnitOfWork() as uow:
+        record = await uow.session.get(BrowserSession, session_id)
         if not record:
             raise HTTPException(status_code=404, detail="Browser session not found")
         return record
 
 
-def _get_browser_session_for_user_or_404(session_id: str, user: dict[str, Any]) -> BrowserSession:
-    record = browser_sessions.get_session_record_for_org(
+async def _get_browser_session_for_user_or_404(session_id: str, user: dict[str, Any]) -> BrowserSession:
+    record = await browser_sessions.get_session_record_for_org_async(
         session_id,
         org_id=str(user.get("org_id")) if user.get("org_id") else None,
     )
@@ -38,9 +38,13 @@ async def create_browser_session(
     payload: BrowserSessionCreate,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    with UnitOfWork() as uow:
-        if user.get("org_id") and not _validate_idea_org_orm(uow.session, idea_id, user.get("org_id")):
-            raise HTTPException(status_code=404, detail="Not found")
+    if user.get("org_id"):
+        async with UnitOfWork() as uow:
+            valid = await uow.session.run_sync(
+                lambda sync_db: _validate_idea_org_orm(sync_db, idea_id, user.get("org_id"))
+            )
+            if not valid:
+                raise HTTPException(status_code=404, detail="Not found")
 
     try:
         runtime = await browser_sessions.create_or_get_session(
@@ -73,16 +77,20 @@ async def create_browser_session(
         active=runtime.status != "closed",
         last_frame_at=None,
         closed_at=None,
-        created_at=_get_browser_session_or_404(runtime.session_id).created_at,
+        created_at=(await _get_browser_session_or_404(runtime.session_id)).created_at,
     )
 
 
 @router.get("/ideas/{idea_id}/browser/session", response_model=BrowserSessionRead | None)
-def get_browser_session(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
-    with UnitOfWork() as uow:
-        if user.get("org_id") and not _validate_idea_org_orm(uow.session, idea_id, user.get("org_id")):
-            raise HTTPException(status_code=404, detail="Not found")
-    record = browser_sessions.get_active_session_record(idea_id)
+async def get_browser_session(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    if user.get("org_id"):
+        async with UnitOfWork() as uow:
+            valid = await uow.session.run_sync(
+                lambda sync_db: _validate_idea_org_orm(sync_db, idea_id, user.get("org_id"))
+            )
+            if not valid:
+                raise HTTPException(status_code=404, detail="Not found")
+    record = await browser_sessions.get_active_session_record_async(idea_id)
     if record is None:
         return None
     return BrowserSessionRead.model_validate(record)
@@ -94,7 +102,7 @@ async def snapshot_browser_session(
     payload: dict[str, Any] | None = None,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _get_browser_session_for_user_or_404(session_id, user)
+    await _get_browser_session_for_user_or_404(session_id, user)
     try:
         return await browser_sessions.command(
             session_id,
@@ -110,6 +118,6 @@ async def snapshot_browser_session(
 
 @router.delete("/browser/session/{session_id}")
 async def close_browser_session(session_id: str, user: dict[str, Any] = Depends(get_current_user)):
-    _get_browser_session_for_user_or_404(session_id, user)
+    await _get_browser_session_for_user_or_404(session_id, user)
     await browser_sessions.command(session_id, "close", {"reason": "user_closed"})
     return {"closed": True, "session_id": session_id}

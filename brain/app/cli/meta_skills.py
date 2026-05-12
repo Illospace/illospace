@@ -285,6 +285,24 @@ def compute_meta_metrics(skills: list[dict], tasks_total: int, tasks_with_skill:
 # Full Analysis (DB-connected)
 # ============================================================
 
+def _load_recent_task_inputs(session, days: int) -> list[dict]:
+    """Load recent task-like prompts from agent_runs.input_message."""
+    rows = session.execute(text("""
+        SELECT input_message AS description,
+               COALESCE(metadata->>'task_type', recipe) AS task_type,
+               CASE
+                   WHEN jsonb_typeof(metadata->'skills_used') = 'array'
+                   THEN metadata->'skills_used'
+                   ELSE '[]'::jsonb
+               END AS skills_used
+        FROM agent_runs
+        WHERE input_message IS NOT NULL
+          AND created_at >= NOW() - CAST(:days_interval AS interval)
+        ORDER BY created_at DESC
+    """), {"days_interval": f"{days} days"}).mappings().all()
+    return [dict(r) for r in rows]
+
+
 def run_full_analysis(days: int = 7) -> dict:
     """Run the complete meta-skill analysis against the database."""
     with UnitOfWork() as uow:
@@ -298,13 +316,8 @@ def run_full_analysis(days: int = 7) -> dict:
         skills = [dict(r) for r in skill_rows]
         skill_names = [s["name"] for s in skills]
 
-        # Load recent tasks
-        task_rows = uow.session.execute(text("""
-            SELECT description, task_type, skills_used
-            FROM tasks
-            WHERE created_at >= CURRENT_DATE - INTERVAL :days_interval
-        """), {"days_interval": f"{days} days"}).mappings().all()
-        tasks = [dict(r) for r in task_rows]
+        # Load recent task-like prompts from agent_runs.
+        tasks = _load_recent_task_inputs(uow.session, days)
 
         # Task coverage counts
         tasks_total = len(tasks)
@@ -370,11 +383,7 @@ def run_auto_create(days: int = 7, dry_run: bool = False) -> list[dict]:
         )).mappings().all()
         skill_names = [r["name"] for r in name_rows]
 
-        task_rows = uow.session.execute(text("""
-            SELECT description, task_type, skills_used
-            FROM tasks WHERE created_at >= CURRENT_DATE - INTERVAL :days_interval
-        """), {"days_interval": f"{days} days"}).mappings().all()
-        tasks = [dict(r) for r in task_rows]
+        tasks = _load_recent_task_inputs(uow.session, days)
 
     gaps = detect_gaps(tasks, skill_names)
     created = []
@@ -477,10 +486,7 @@ def main():
                 "SELECT name FROM skills WHERE NOT archived"
             )).mappings().all()
             skill_names = [r["name"] for r in name_rows]
-            task_rows = uow.session.execute(text(
-                "SELECT description, skills_used FROM tasks WHERE created_at >= CURRENT_DATE - INTERVAL :days_interval"
-            ), {"days_interval": f"{args.days} days"}).mappings().all()
-            tasks = [dict(r) for r in task_rows]
+            tasks = _load_recent_task_inputs(uow.session, args.days)
         result = detect_gaps(tasks, skill_names)
         print(json.dumps(result, indent=2, default=str))
 

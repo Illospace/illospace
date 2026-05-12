@@ -94,6 +94,10 @@ AGENT_TRACE_EXPORT_SCHEMA_VERSION = 1
 TRACE_MAX_MESSAGES = 40
 TRACE_MAX_EVENTS = 300
 TRACE_MAX_ARTIFACTS = 60
+THREAD_TRACE_MAX_MESSAGES = None
+THREAD_TRACE_MAX_RUNS = 100
+THREAD_TRACE_MAX_EVENTS = 1200
+THREAD_TRACE_MAX_ARTIFACTS = 240
 TRACE_MAX_STRING_CHARS = 4000
 TRACE_MAX_COLLECTION_ITEMS = 80
 TRACE_MAX_DEPTH = 6
@@ -161,6 +165,78 @@ def build_agent_trace_snapshot(
     return _jsonable(bundle)
 
 
+def build_thread_trace_snapshot(
+    session,
+    idea_id: str,
+    *,
+    saved_by: str | None = None,
+    max_messages: int | None = THREAD_TRACE_MAX_MESSAGES,
+    max_runs: int = THREAD_TRACE_MAX_RUNS,
+    max_events: int = THREAD_TRACE_MAX_EVENTS,
+    max_artifacts: int = THREAD_TRACE_MAX_ARTIFACTS,
+) -> dict[str, Any]:
+    """Build a bounded export for analyzing a whole Cortex thread conversation."""
+
+    runs = _thread_runs(session, idea_id, max_runs=max_runs)
+    run_ids = [int(run.id) for run in runs if _is_int_like(getattr(run, "id", None))]
+    messages = _trace_thread_messages(session, idea_id, max_messages=max_messages)
+    events = _trace_events(session, run_ids, max_events=max_events)
+    artifacts = _trace_artifacts(session, run_ids, max_artifacts=max_artifacts)
+    trace_id = f"thread:{idea_id}"
+    bundle = {
+        "schema_version": AGENT_TRACE_SNAPSHOT_SCHEMA_VERSION,
+        "export_scope": "thread",
+        "trace_id": trace_id,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "saved_by": saved_by,
+        "storage_policy": {
+            "mode": "bounded_thread_snapshot",
+            "max_messages": max_messages,
+            "messages": "all_thread_messages" if max_messages is None else "latest_thread_messages",
+            "max_runs": max_runs,
+            "max_events": max_events,
+            "max_artifacts": max_artifacts,
+            "max_string_chars": TRACE_MAX_STRING_CHARS,
+            "large_values": "truncated_in_place",
+        },
+        "thread": {
+            "idea_id": idea_id,
+            "messages": messages,
+            "selected_message_count": len(messages),
+            "message_limit": max_messages,
+        },
+        "runs": [
+            _cap_jsonable({
+                **build_run_run_summary(session, int(run.id)),
+                "parent_run_id": getattr(run, "parent_run_id", None),
+                "root_run_id": getattr(run, "root_run_id", None),
+                "input_message": getattr(run, "input_message", None),
+                "target_ref": getattr(run, "target_ref", None) or {},
+                "workspace_ref": getattr(run, "workspace_ref", None) or {},
+                "model_policy": getattr(run, "model_policy", None) or {},
+                "context_summary": getattr(run, "context_summary", None),
+                "metadata": getattr(run, "metadata_", None) or {},
+            })
+            for run in runs
+        ],
+        "run_count": len(runs),
+        "run_limit": max_runs,
+        "related_run_ids": run_ids,
+        "events": events,
+        "event_count": len(events),
+        "event_limit": max_events,
+        "tools": _tool_trace(events),
+        "artifacts": artifacts,
+        "artifact_count": len(artifacts),
+        "artifact_limit": max_artifacts,
+    }
+    bundle["storage_estimate"] = {
+        "json_bytes": len(json.dumps(_jsonable(bundle), sort_keys=True, default=str).encode("utf-8")),
+        "truncated": _contains_truncation(bundle),
+    }
+    return _jsonable(bundle)
+
+
 def build_agent_trace_export_zip(
     snapshot: dict[str, Any],
 ) -> bytes:
@@ -168,12 +244,15 @@ def build_agent_trace_export_zip(
 
     trace = _jsonable(snapshot)
     run = trace.get("run") if isinstance(trace.get("run"), dict) else {}
+    thread = trace.get("thread") if isinstance(trace.get("thread"), dict) else {}
+    is_thread_export = trace.get("export_scope") == "thread"
     manifest = _jsonable({
         "schema_version": AGENT_TRACE_EXPORT_SCHEMA_VERSION,
-        "export_type": "illo_agent_trace",
+        "export_type": "illo_thread_trace" if is_thread_export else "illo_agent_trace",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "trace_id": trace.get("trace_id"),
         "run_id": run.get("run_id"),
+        "idea_id": thread.get("idea_id"),
         "files": [
             {"path": "trace.json", "description": "Bounded JSON trace for agent analysis."},
             {"path": "activity.json", "description": "Compact chronological activity list derived from the trace."},
@@ -195,9 +274,14 @@ def build_agent_trace_export_zip(
 
 
 def agent_trace_export_filename(snapshot: dict[str, Any]) -> str:
+    if snapshot.get("export_scope") == "thread":
+        thread = snapshot.get("thread") if isinstance(snapshot.get("thread"), dict) else {}
+        idea_id = thread.get("idea_id") or snapshot.get("trace_id") or "unknown"
+        safe_idea_id = _safe_filename_part(idea_id)
+        return f"illo-thread-trace-{safe_idea_id or 'unknown'}.zip"
     run = snapshot.get("run") if isinstance(snapshot.get("run"), dict) else {}
     run_id = run.get("run_id") or snapshot.get("trace_id") or "unknown"
-    safe_run_id = "".join(ch if str(ch).isalnum() or ch in {"-", "_"} else "-" for ch in str(run_id)).strip("-")
+    safe_run_id = _safe_filename_part(run_id)
     return f"illo-trace-run-{safe_run_id or 'unknown'}.zip"
 
 
@@ -230,15 +314,34 @@ def _related_run_ids(session, run: AgentRunRow) -> list[int]:
     return ids
 
 
-def _trace_messages(session, run: AgentRunRow, *, max_messages: int) -> list[dict[str, Any]]:
-    rows = session.scalars(
-        select(IdeaThread)
-        .where(IdeaThread.idea_id == run.thread_id)
-        .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
-        .limit(max_messages)
+def _thread_runs(session, idea_id: str, *, max_runs: int) -> list[AgentRunRow]:
+    return session.scalars(
+        select(AgentRunRow)
+        .where(AgentRunRow.thread_id == str(idea_id))
+        .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
+        .limit(max_runs)
     ).all()
+
+
+def _trace_messages(session, run: AgentRunRow, *, max_messages: int) -> list[dict[str, Any]]:
+    return _trace_thread_messages(session, str(run.thread_id), max_messages=max_messages)
+
+
+def _trace_thread_messages(session, idea_id: str, *, max_messages: int | None) -> list[dict[str, Any]]:
+    query = select(IdeaThread).where(IdeaThread.idea_id == str(idea_id))
+    if max_messages is None:
+        rows = session.scalars(
+            query.order_by(IdeaThread.created_at.asc(), IdeaThread.id.asc())
+        ).all()
+    else:
+        limited_rows = session.scalars(
+            query
+            .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
+            .limit(max_messages)
+        ).all()
+        rows = list(reversed(limited_rows))
     messages = []
-    for row in reversed(rows):
+    for row in rows:
         metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
         messages.append(_cap_jsonable({
             "id": row.id,
@@ -258,6 +361,8 @@ def _trace_messages(session, run: AgentRunRow, *, max_messages: int) -> list[dic
 
 
 def _trace_events(session, run_ids: list[int], *, max_events: int) -> list[dict[str, Any]]:
+    if not run_ids:
+        return []
     rows = session.scalars(
         select(AgentRunEventRow)
         .where(AgentRunEventRow.run_id.in_(run_ids))
@@ -281,6 +386,8 @@ def _trace_events(session, run_ids: list[int], *, max_events: int) -> list[dict[
 
 
 def _trace_artifacts(session, run_ids: list[int], *, max_artifacts: int) -> list[dict[str, Any]]:
+    if not run_ids:
+        return []
     rows = session.scalars(
         select(AgentRunArtifactRow)
         .where(
@@ -373,7 +480,10 @@ def _contains_truncation(value: Any) -> bool:
 def _trace_activity_export(snapshot: dict[str, Any]) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     run = snapshot.get("run") if isinstance(snapshot.get("run"), dict) else {}
-    if run:
+    runs = _safe_list(snapshot.get("runs")) or ([run] if run else [])
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
         items.append(_cap_jsonable({
             "kind": "run",
             "at": run.get("started_at") or run.get("created_at"),
@@ -443,7 +553,9 @@ def _trace_activity_export(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": AGENT_TRACE_EXPORT_SCHEMA_VERSION,
         "trace_id": snapshot.get("trace_id"),
-        "run_id": run.get("run_id"),
+        "run_id": run.get("run_id") if isinstance(run, dict) else None,
+        "run_ids": [item.get("run_id") for item in runs if isinstance(item, dict) and item.get("run_id")],
+        "idea_id": thread.get("idea_id"),
         "items": _jsonable(items),
         "item_count": len(items),
     }
@@ -451,14 +563,22 @@ def _trace_activity_export(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 def _trace_export_readme(snapshot: dict[str, Any]) -> str:
     run = snapshot.get("run") if isinstance(snapshot.get("run"), dict) else {}
+    thread = snapshot.get("thread") if isinstance(snapshot.get("thread"), dict) else {}
     estimate = snapshot.get("storage_estimate") if isinstance(snapshot.get("storage_estimate"), dict) else {}
+    is_thread_export = snapshot.get("export_scope") == "thread"
+    title = "Illo thread trace export" if is_thread_export else "Illo agent trace export"
+    scope_note = (
+        "This zip is meant to be attached to a debugging conversation so another agent can inspect the full thread conversation and its related runs."
+        if is_thread_export
+        else "This zip is meant to be attached to a debugging conversation so another agent can inspect why Illo answered the way it did."
+    )
     return "\n".join([
-        "# Illo agent trace export",
+        f"# {title}",
         "",
-        "This zip is meant to be attached to a debugging conversation so another agent can inspect why Illo answered the way it did.",
+        scope_note,
         "",
         "Files:",
-        "- trace.json: the full bounded trace snapshot, including run metadata, recent thread messages, events, tool calls, and artifacts.",
+        "- trace.json: the full bounded trace snapshot, including thread messages, run metadata, events, tool calls, and artifacts.",
         "- activity.json: a compact chronological list derived from trace.json.",
         "- manifest.json: export metadata.",
         "",
@@ -468,6 +588,7 @@ def _trace_export_readme(snapshot: dict[str, Any]) -> str:
         "- This export is generated on demand and is not saved as a database artifact.",
         "",
         f"Trace ID: {snapshot.get('trace_id') or 'unknown'}",
+        f"Idea ID: {thread.get('idea_id') or 'unknown'}",
         f"Run ID: {run.get('run_id') or 'unknown'}",
         f"Estimated JSON bytes: {estimate.get('json_bytes') or 'unknown'}",
         f"Truncated: {bool(estimate.get('truncated'))}",
@@ -487,6 +608,18 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
     return str(value)
+
+
+def _safe_filename_part(value: Any) -> str:
+    return "".join(ch if str(ch).isalnum() or ch in {"-", "_"} else "-" for ch in str(value)).strip("-")
+
+
+def _is_int_like(value: Any) -> bool:
+    try:
+        int(value)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def _get_payload(source: Any, name: str, default: Any = None) -> Any:

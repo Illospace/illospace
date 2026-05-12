@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -28,17 +28,6 @@ def _fake_skill(name="test-skill", maturity="developing", use_count=5):
     s.maturity = maturity
     s.use_count = use_count
     return s
-
-
-def _fake_emotion(label="curious", valence=0.7, arousal=0.5,
-                  trigger_summary="learning", timestamp=None):
-    e = MagicMock()
-    e.label = label
-    e.valence = valence
-    e.arousal = arousal
-    e.trigger_summary = trigger_summary
-    e.timestamp = timestamp or datetime(2026, 3, 18, 12, 0, 0)
-    return e
 
 
 def _fake_consolidation():
@@ -99,13 +88,12 @@ def client():
 class TestOverviewRoute:
 
     @patch("brain.app.api.routers.system.ConsolidationRunRepository")
-    @patch("brain.app.api.routers.system.EmotionRepository")
     @patch("brain.app.api.routers.system.SkillRepository")
     @patch("brain.app.api.routers.system.EdgeRepository")
     @patch("brain.app.api.routers.system.MemoryRepository")
     def test_route_overview_delegates(
         self, MockMemRepo, MockEdgeRepo, MockSkillRepo,
-        MockEmotionRepo, MockConsolRepo, client,
+        MockConsolRepo, client,
     ):
         mem = MockMemRepo.return_value
         mem.count_active.return_value = 42
@@ -120,11 +108,6 @@ class TestOverviewRoute:
             5,
         )
 
-        emotion = MockEmotionRepo.return_value
-        emotion.count_all.return_value = 5
-        emotion.avg_valence_7d.return_value = 0.6
-        emotion.list_recent.return_value = [_fake_emotion()]
-
         MockConsolRepo.return_value.list_recent.return_value = [_fake_consolidation()]
 
         resp = client.get("/api/overview")
@@ -134,13 +117,12 @@ class TestOverviewRoute:
         assert data["edges"] == 18
 
     @patch("brain.app.api.routers.system.ConsolidationRunRepository")
-    @patch("brain.app.api.routers.system.EmotionRepository")
     @patch("brain.app.api.routers.system.SkillRepository")
     @patch("brain.app.api.routers.system.EdgeRepository")
     @patch("brain.app.api.routers.system.MemoryRepository")
     def test_route_500_on_exception(
         self, MockMemRepo, MockEdgeRepo, MockSkillRepo,
-        MockEmotionRepo, MockConsolRepo, client,
+        MockConsolRepo, client,
     ):
         """When a repository raises, the global exception handler returns 500."""
         MockMemRepo.return_value.count_active.side_effect = RuntimeError("db down")
@@ -152,28 +134,28 @@ class TestGraphRoute:
 
     @patch("brain.app.api.routers.memory.UnitOfWork")
     def test_route_graph_delegates(self, MockUnitOfWork, client):
-        uow = MockUnitOfWork.return_value.__enter__.return_value
-        uow.memories.get_graph_data.return_value = {"nodes": [], "edges": []}
+        uow = MockUnitOfWork.return_value.__aenter__.return_value
+        uow.memories.get_graph_data = AsyncMock(return_value={"nodes": [], "edges": []})
         resp = client.get("/api/memory/graph")
         assert resp.status_code == 200
         assert resp.json()["nodes"] == []
-        uow.memories.get_graph_data.assert_called_once()
+        uow.memories.get_graph_data.assert_awaited_once()
 
 
 class TestMemoryDetailRoute:
 
     @patch("brain.app.api.routers.memory.UnitOfWork")
     def test_route_memory_detail_404(self, MockUnitOfWork, client):
-        uow = MockUnitOfWork.return_value.__enter__.return_value
-        uow.memories.get_or_raise_visible.side_effect = LookupError("not found")
+        uow = MockUnitOfWork.return_value.__aenter__.return_value
+        uow.memories.get_or_raise_visible = AsyncMock(side_effect=LookupError("not found"))
         resp = client.get("/api/memory/999")
         assert resp.status_code == 404
 
     @patch("brain.app.api.routers.memory.UnitOfWork")
     def test_route_memory_detail_200(self, MockUnitOfWork, client):
         fake = _fake_memory(id=1, content="hi")
-        uow = MockUnitOfWork.return_value.__enter__.return_value
-        uow.memories.get_or_raise_visible.return_value = fake
+        uow = MockUnitOfWork.return_value.__aenter__.return_value
+        uow.memories.get_or_raise_visible = AsyncMock(return_value=fake)
         resp = client.get("/api/memory/1")
         assert resp.status_code == 200
         data = resp.json()
@@ -184,41 +166,26 @@ class TestSearchRoute:
 
     @patch("brain.app.api.routers.memory.UnitOfWork")
     def test_route_search_delegates(self, MockUnitOfWork, client):
-        uow = MockUnitOfWork.return_value.__enter__.return_value
-        uow.memories.search_visible.return_value = [_fake_memory()]
+        uow = MockUnitOfWork.return_value.__aenter__.return_value
+        uow.memories.search_visible = AsyncMock(return_value=[_fake_memory()])
         resp = client.get("/api/memory/search?q=test+query")
         assert resp.status_code == 200
         assert len(resp.json()) == 1
-        uow.memories.search_visible.assert_called_once()
+        uow.memories.search_visible.assert_awaited_once()
 
 
 class TestHealthRoute:
 
-    @patch("brain.platform.db.repositories.emotions.EmotionRepository")
     @patch("brain.platform.db.repositories.skills.SkillRepository")
     @patch("brain.platform.db.repositories.memories.MemoryRepository")
-    def test_route_health_delegates(self, MockMemRepo, MockSkillRepo, MockEmoRepo, client):
+    def test_route_health_delegates(self, MockMemRepo, MockSkillRepo, client):
         """Health endpoint returns status."""
         MockMemRepo.return_value.count_active.return_value = 10
         MockSkillRepo.return_value.list_active.return_value = []
-        MockEmoRepo.return_value.count_all.return_value = 5
         resp = client.get("/api/health")
         assert resp.status_code == 200
         data = resp.json()
         assert "status" in data
-
-
-class TestEmotionsRoute:
-
-    @patch("brain.app.api.routers.emotions.EmotionRepository")
-    def test_route_emotions_delegates(self, MockEmoRepo, client):
-        MockEmoRepo.return_value.list_recent.return_value = []
-        resp = client.get("/api/emotions/")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "snapshots" in data
-        assert "daily" in data
-        assert "distribution" in data
 
 
 class TestSkillsRoute:
@@ -271,7 +238,7 @@ class TestSkillsRoute:
         resp = client.get("/api/skills/enhanced")
 
         assert resp.status_code == 200
-        ensure_catalog.assert_called_once_with()
+        ensure_catalog.assert_called_once()
         data = resp.json()
         assert data[0]["skill"]["name"] == "develop"
         assert data[0]["package"]["package_kind"] == "legacy_db"

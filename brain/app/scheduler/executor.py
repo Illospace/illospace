@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from brain.kernel.common.time import ensure_utc
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.systems.runs.cortex.recording import (
@@ -162,7 +163,7 @@ def _python_one_liner(code: str) -> list[str]:
 
 
 def _is_callable_handler(job: SchedulerJob) -> bool:
-    if job.handler_kind in {"python_callable", "agency_recommendation"}:
+    if job.handler_kind == "python_callable":
         return True
     return ":" in (job.handler_ref or "")
 
@@ -257,12 +258,6 @@ def _nightly_wrapper_commands(target_date: date, *, split_steps: bool) -> list[l
             "stats = run_meta_evolution(); "
             "print(f'Insights: {stats[\"insights_total\"]}, Regressions: {stats[\"regressions\"]}, Adjustments: {len(stats[\"adjustments\"])}')"
         ),
-        ["python3", "-m", "brain.jobs.pipelines.nightly_evolve_prompts"],
-        _python_one_liner(
-            "from brain.jobs.pipelines.brain_prompts import generate_brain_prompts; "
-            "prompts = generate_brain_prompts(); "
-            "print('Generated %d brain prompts: %s' % (len(prompts), [p['type'] for p in prompts]))"
-        ),
         ["python3", "-m", "brain.jobs.pipelines.nightly_reflect", "--date", target_date.isoformat()],
         ["python3", "-m", "brain.jobs.pipelines.nightly_dream", "--date", target_date.isoformat()],
         ["python3", "-m", "brain.jobs.pipelines.consolidate", "--phase", "index"],
@@ -293,14 +288,6 @@ def _nightly_step_commands(step_key: str, target_date: date) -> list[list[str]]:
                 "from brain.systems.feedback.meta_evolution import run_meta_evolution; "
                 "stats = run_meta_evolution(); "
                 "print(f'Insights: {stats[\"insights_total\"]}, Regressions: {stats[\"regressions\"]}, Adjustments: {len(stats[\"adjustments\"])}')"
-            ),
-        ],
-        "prompt_template_evolution": [["python3", "-m", "brain.jobs.pipelines.nightly_evolve_prompts"]],
-        "brain_prompts": [
-            _python_one_liner(
-                "from brain.jobs.pipelines.brain_prompts import generate_brain_prompts; "
-                "prompts = generate_brain_prompts(); "
-                "print('Generated %d brain prompts: %s' % (len(prompts), [p['type'] for p in prompts]))"
             ),
         ],
         "reflection": [["python3", "-m", "brain.jobs.pipelines.nightly_reflect", "--date", target_date.isoformat()]],
@@ -988,3 +975,76 @@ def set_scheduler_job_load_shed_control(
     load_shed_policy: dict[str, Any],
 ) -> SchedulerJob:
     return set_scheduler_job_load_shed(session, identifier, load_shed_policy=load_shed_policy)
+
+
+async def async_claim_scheduler_run(
+    session: AsyncSession,
+    run_id: int,
+    *,
+    owner_id: str,
+    owner_host: str | None = None,
+    owner_pid: int | None = None,
+    lease_seconds: int = 60,
+    now: datetime | None = None,
+) -> SchedulerLease | None:
+    return await session.run_sync(
+        lambda sync_session: claim_scheduler_run(
+            sync_session,
+            run_id,
+            owner_id=owner_id,
+            owner_host=owner_host,
+            owner_pid=owner_pid,
+            lease_seconds=lease_seconds,
+            now=now,
+        )
+    )
+
+
+async def async_execute_scheduler_run(
+    session: AsyncSession,
+    run_id: int,
+    *,
+    owner_id: str,
+    owner_host: str | None = None,
+    owner_pid: int | None = None,
+    lease_seconds: int = 60,
+    now: datetime | None = None,
+) -> SchedulerRun | None:
+    return await session.run_sync(
+        lambda sync_session: execute_scheduler_run(
+            sync_session,
+            run_id,
+            owner_id=owner_id,
+            owner_host=owner_host,
+            owner_pid=owner_pid,
+            lease_seconds=lease_seconds,
+            now=now,
+        )
+    )
+
+
+async def async_drain_scheduler(
+    session: AsyncSession,
+    *,
+    owner_mode: str = OWNER_MODE_SCHEDULER,
+    job_key: str | None = None,
+    max_runs: int = 10,
+    resume: bool = True,
+    owner_id: str | None = None,
+    runner: Runner = _run_command,
+    now: datetime | None = None,
+    allowed_owner_modes: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    return await session.run_sync(
+        lambda sync_session: drain_scheduler(
+            sync_session,
+            owner_mode=owner_mode,
+            job_key=job_key,
+            max_runs=max_runs,
+            resume=resume,
+            owner_id=owner_id,
+            runner=runner,
+            now=now,
+            allowed_owner_modes=allowed_owner_modes,
+        )
+    )

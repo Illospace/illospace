@@ -1,4 +1,4 @@
-"""Smoke tests for skills, vault, emotions, system, team, costs routers."""
+"""Smoke tests for skills, vault, system, team, costs routers."""
 from contextlib import contextmanager
 from datetime import datetime, date, timezone
 from unittest.mock import MagicMock, patch
@@ -15,7 +15,7 @@ def mock_session_factory():
     def _factory():
         return session
 
-    with patch("brain.app.api.deps.SessionFactory", _factory):
+    with patch("brain.platform.db.legacy.legacy_session_factory", _factory):
         yield session
 
 
@@ -108,7 +108,7 @@ async def test_list_skills(client, mock_session_factory):
 @pytest.mark.asyncio
 async def test_vault_pin_status(client, mock_session_factory):
     with _vault_user(), \
-         patch("brain.systems.vault.get_pin_status", return_value={
+         patch("brain.systems.vault.async_get_pin_status", return_value={
              "has_pin": False,
              "failed_attempts": 0,
              "locked_until": None,
@@ -122,7 +122,7 @@ async def test_vault_pin_status(client, mock_session_factory):
 async def test_vault_unlock(client, mock_session_factory):
     expires = datetime.now(timezone.utc)
     with _vault_user(), \
-         patch("brain.systems.vault.unlock_vault", return_value=("vault-token", expires)):
+         patch("brain.systems.vault.async_unlock_vault", return_value=("vault-token", expires)):
         resp = await client.post("/api/vault/unlock", json={"pin": "1234"})
     assert resp.status_code == 200
     data = resp.json()
@@ -146,34 +146,12 @@ async def test_vault_list_secrets(client, mock_session_factory):
         "shared_by_name": None,
     }
     with _vault_user(), \
-         patch("brain.systems.vault.has_pin", return_value=False), \
-         patch("brain.systems.vault.list_secrets", return_value=[secret]) as list_secrets:
+         patch("brain.systems.vault.async_has_pin", return_value=False), \
+         patch("brain.systems.vault.async_list_secrets", return_value=[secret]) as list_secrets:
         resp = await client.get("/api/vault/")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
     list_secrets.assert_called_once_with(VAULT_USER["id"], category=None, org_id=VAULT_USER["org_id"])
-
-
-# ---- Emotions ----
-
-@pytest.mark.asyncio
-async def test_list_emotions(client, mock_session_factory):
-    snap = _mock_obj(
-        id=1,
-        session_date="2026-03-17",
-        timestamp=datetime.now(timezone.utc),
-        valence=0.7,
-        arousal=0.4,
-        label="content",
-        trigger_summary=None,
-    )
-    with patch("brain.app.api.routers.emotions.EmotionRepository") as MockRepo:
-        MockRepo.return_value.list_recent.return_value = [snap]
-        resp = await client.get("/api/emotions/")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "snapshots" in data
-    assert len(data["snapshots"]) == 1
 
 
 # ---- System ----
@@ -296,47 +274,6 @@ async def test_scheduler_state_surface(client, mock_session_factory):
     data = resp.json()
     assert data["health"]["status"] == "healthy"
     assert data["summary"]["jobs_total"] == 1
-
-
-@pytest.mark.asyncio
-async def test_learning_observatory_admin_read_surface(client, mock_session_factory):
-    from brain.app.api.main import app
-    from brain.app.api.routers import learning as learning_router
-
-    class _ReadModel:
-        def to_payload(self):
-            return {
-                "schema_version": 1,
-                "observatory": {"recent_outcomes": {"total_count": 1}},
-                "controls": [
-                    {
-                        "key": "pause_learning",
-                        "read_only_metadata": True,
-                        "mutation_endpoint": None,
-                    }
-                ],
-            }
-
-    app.dependency_overrides[learning_router.get_current_user] = lambda: {
-        "id": "owner",
-        "role": "owner",
-        "org_id": "org-1",
-    }
-    try:
-        with patch(
-            "brain.app.api.routers.learning.build_learning_observatory_from_db",
-            return_value=_ReadModel(),
-        ) as mock_builder:
-            resp = await client.get("/api/learning/observatory?limit=25")
-    finally:
-        app.dependency_overrides.clear()
-
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["observatory"]["recent_outcomes"]["total_count"] == 1
-    assert data["controls"][0]["read_only_metadata"] is True
-    assert data["controls"][0]["mutation_endpoint"] is None
-    mock_builder.assert_called_once()
 
 
 @pytest.mark.asyncio

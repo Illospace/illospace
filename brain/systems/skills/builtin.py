@@ -447,18 +447,27 @@ Constellation design contract.
      view/control surface over that data.
    - Use app-local state through `manage_workspace_app` only for UI
      preferences, filters, draft input, view settings, and ephemeral state.
-3. Prefer a host-rendered structured UI spec for simple apps:
+   - Archived apps are not candidates for new build/create requests. Only
+     restore an archived app when the user explicitly asks to restore or
+     reopen that archived app; otherwise create a fresh app or update an
+     active app.
+3. Prefer a host-rendered structured UI spec for common app patterns:
    `renderer_key="generated-ui-app"`, `source_kind="json"`, and
    `source_code` as JSON with `schema_version: 1`, `title`, optional
-   `description`, `primary_binding`, and `views`.
-   Use view types `table`, `list`, `cards`, `chart`, `metrics`, `detail`, or
-   `form`. Use editable `status`/`select`/`boolean` columns only when the
-   Domain binding allows `update`.
+   `description`, `primary_binding`, optional `actions`, and `views`.
+   Use view types `table`, `list`, `cards`, `board`, `chart`, `metrics`,
+   `detail`, or `form`. Use `board` for kanban/status-column workflows such
+   as ticket trackers, CRM pipelines, approval queues, sourcing funnels, and
+   work progression. Use editable `status`/`select`/`boolean` columns only
+   when the Domain binding allows `update`.
+   Surface manifest-declared server actions with top-level `actions`, e.g.
+   `[{ "key": "tickets.syncExternal", "label": "Sync GitHub" }]`; do not
+   switch to HTML just to add an action button.
 4. Use `renderer_key="sandboxed-html-app"` and `source_kind="html"` as the
-   first-class full-code app runtime when the user needs custom layout,
-   interaction, charts, drag/drop, canvas, or richer composition than the
-   structured renderer should carry. This is still a native Illospace app:
-   use App Kit classes, design tokens, the manifest, and the host bridge.
+   full-code app runtime only when the requested interaction cannot be
+   represented with structured views or a composed structured workflow. This
+   is still a native Illospace app: use App Kit classes, design tokens, the
+   manifest, and the host bridge.
 5. For full-code apps, use the host bridge:
    - `window.illo.domain(alias)` for bound Domain records and generic workspace
      data primitives.
@@ -500,6 +509,11 @@ Constellation design contract.
      product connector has not been registered yet. Use
      `executor: { "type": "registered", "key": "..." }` only for approved
      server-owned executors.
+   - Missing external credentials are not blockers for creating the app when
+     the external action can be deferred. Do not call `vault_secret_prompt`
+     before producing the requested app. Declare the deferred action, deliver
+     the usable manual/Domain-backed surface, and mention connector setup as a
+     follow-up limitation.
    - Allowed action effects are `domain.read`, `domain.write`,
      `app_state.read`, `app_state.write`, `external.read`,
      `external.write`, `workflow.trigger`, and `agent.run`.
@@ -516,7 +530,9 @@ Constellation design contract.
 7. Save with `manage_workspace_app(action="create" | "update")`.
 8. Verify contract validation, rendered behavior, persistence, dark/light theme
    fit, and thumbnail facade before telling the user the app is done.
-9. Tell the user what app was created and what data it stores.
+9. Tell the user what app was created and what data it stores. Set a thread to
+   `needs_input` only when the main requested app cannot be produced without
+   more information; missing credentials for deferred sync do not qualify.
 
 ## App Contract
 
@@ -546,6 +562,35 @@ Constellation design contract.
   generated UI spec and pass `manifest`, `visual_spec`, and `metadata` as
   separate tool arguments. The app compiler tolerates wrapped envelopes and
   fills safe defaults, but it will not invent durable data models.
+- Use native `board` views for kanban/status-column apps before considering
+  sandboxed HTML. Minimal example:
+
+```json
+{
+  "schema_version": 1,
+  "title": "GitHub Ticket Tracker",
+  "primary_binding": "tickets",
+  "actions": [
+    {"key": "tickets.syncExternal", "label": "Sync GitHub"}
+  ],
+  "views": [
+    {
+      "id": "ticket-board",
+      "type": "board",
+      "title": "Tickets",
+      "binding": "tickets",
+      "group_by": "status",
+      "groups": ["Backlog", "Todo", "In Progress", "In Review", "Done"],
+      "card": {
+        "title": "title",
+        "subtitle": "repo",
+        "badges": ["priority", "milestone"]
+      },
+      "allow_create": true
+    }
+  ]
+}
+```
 - Legacy generated HTML must use fluid layout and container-aware sizing.
 - The persisted manifest must end with `contract_version: 1`, `data_plan`, and
   `design_contract`. The compiler supplies simple app-local UI-state defaults;
@@ -580,7 +625,9 @@ Constellation design contract.
 }
 ```
 
-  The app can call `window.illo.actions.run("tickets.importExternal", payload)`.
+  Generated UI apps can surface this with top-level `actions`, e.g.
+  `[{ "key": "tickets.importExternal", "label": "Import" }]`. Full-code
+  apps can call `window.illo.actions.run("tickets.importExternal", payload)`.
   The server validates the declaration and only runs registered executors.
 - Use the Illo App Kit classes (`illo-app`, `illo-panel`, `illo-toolbar`,
   `illo-input`, `illo-button`, `illo-list`, `illo-row`, `illo-tabs`,
@@ -1034,6 +1081,7 @@ def _ensure_builtin_skill_bundles() -> None:
                     review_status="approved",
                     trust_level=ILLO_CORE_TRUST_LEVEL,
                     source_kind=ILLO_CORE_SOURCE_KIND,
+                    auto_bump_conflicting_semver=True,
                 )
         except Exception as exc:
             logger.warning(

@@ -1359,6 +1359,74 @@ def test_thread_binding_inherits_project_context_from_idea():
     assert request.workspace_ref["project_context_snapshot"]["resources"][0]["path"] == "projects/yc-application"
 
 
+def test_thread_binding_skips_invalid_metadata_project_context_for_valid_idea_context():
+    from brain.systems.runs.cortex.thread_binding import build_run_request
+
+    idea = SimpleNamespace(
+        id="idea-1",
+        org_id="org-1",
+        user_id="u1",
+        title="Thread",
+        agent_details={
+            "project_context": {
+                "name": "Illospace",
+                "resources": [{"type": "repo", "name": "Illospace/illospace"}],
+            },
+        },
+    )
+    session = SimpleNamespace(get=lambda model, idea_id: idea)
+
+    request = build_run_request(
+        session,
+        idea_id="idea-1",
+        event="thread_reply",
+        message="Try again",
+        user_id="u1",
+        metadata={"project_context": {"name": "Stale empty project", "resources": []}},
+    )
+
+    assert request.metadata["project_context"]["name"] == "Illospace"
+    assert request.target_ref["project_context_snapshot"]["resources"][0]["name"] == "Illospace/illospace"
+    assert request.metadata["project_context_validation_errors"] == [
+        {
+            "source": "metadata",
+            "errors": ["project_context_snapshot.resources must contain at least one resource."],
+        }
+    ]
+
+
+def test_thread_binding_drops_invalid_legacy_project_context_when_no_valid_fallback():
+    from brain.systems.runs.cortex.thread_binding import build_run_request
+
+    idea = SimpleNamespace(
+        id="idea-1",
+        org_id="org-1",
+        user_id="u1",
+        title="Thread",
+        agent_details={"project_context": {"name": "Legacy empty project", "resources": []}},
+    )
+    session = SimpleNamespace(get=lambda model, idea_id: idea)
+
+    request = build_run_request(
+        session,
+        idea_id="idea-1",
+        event="thread_reply",
+        message="Try again",
+        user_id="u1",
+        metadata={},
+    )
+
+    assert "project_context" not in request.metadata
+    assert "project_context_snapshot" not in request.target_ref
+    assert request.workspace_ref == {}
+    assert request.metadata["project_context_validation_errors"] == [
+        {
+            "source": "idea",
+            "errors": ["project_context_snapshot.resources must contain at least one resource."],
+        }
+    ]
+
+
 def test_thread_binding_falls_back_to_latest_project_attachment():
     from brain.systems.runs.cortex.thread_binding import build_run_request
 

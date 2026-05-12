@@ -15,7 +15,7 @@ async def client():
 
 @pytest.mark.asyncio
 async def test_login_invalid(client):
-    with patch("brain.app.api.routers.auth.authenticate", return_value=None):
+    with patch("brain.app.api.routers.auth.async_authenticate", return_value=None):
         resp = await client.post("/api/login", json={"email": "x@x.com", "password": "wrong"})
         assert resp.status_code == 401
 
@@ -55,13 +55,13 @@ async def test_me_without_session_ignores_localhost_human_fallback(client):
 
 @pytest.mark.asyncio
 async def test_setup_check_exposes_workspace_context(client):
-    with patch("brain.app.api.routers.auth.has_any_users", return_value=True), \
+    with patch("brain.app.api.routers.auth.async_has_any_users", return_value=True), \
         patch(
-            "brain.app.api.routers.auth.get_default_org_summary",
+            "brain.app.api.routers.auth.async_get_default_org_summary",
             return_value={"id": "org-1", "name": "Main Workspace", "slug": "main"},
         ), \
         patch(
-            "brain.app.api.routers.auth.get_org_summary_by_slug",
+            "brain.app.api.routers.auth.async_get_org_summary_by_slug",
             return_value={"id": "org-2", "name": "Design Studio", "slug": "design"},
         ):
         resp = await client.get("/api/auth/setup-check?workspace=design")
@@ -88,13 +88,13 @@ async def test_register_can_request_access_to_invited_workspace(client):
         "attribution_enabled": True,
         "default_provider": None,
     }
-    with patch("brain.app.api.routers.auth.get_user_by_email", return_value=None), \
-        patch("brain.app.api.routers.auth.has_any_users", return_value=True), \
+    with patch("brain.app.api.routers.auth.async_get_user_by_email", return_value=None), \
+        patch("brain.app.api.routers.auth.async_has_any_users", return_value=True), \
         patch(
-            "brain.app.api.routers.auth.get_org_summary_by_slug",
+            "brain.app.api.routers.auth.async_get_org_summary_by_slug",
             return_value={"id": "org-2", "name": "Design Studio", "slug": "design"},
         ) as get_org, \
-        patch("brain.app.api.routers.auth.create_user", return_value=created) as create_user:
+        patch("brain.app.api.routers.auth.async_create_user", return_value=created) as create_user:
         resp = await client.post(
             "/api/register",
             json={
@@ -115,9 +115,9 @@ async def test_register_can_request_access_to_invited_workspace(client):
 
 @pytest.mark.asyncio
 async def test_register_join_requires_invite_workspace(client):
-    with patch("brain.app.api.routers.auth.get_user_by_email", return_value=None), \
-        patch("brain.app.api.routers.auth.has_any_users", return_value=True), \
-        patch("brain.app.api.routers.auth.create_user") as create_user:
+    with patch("brain.app.api.routers.auth.async_get_user_by_email", return_value=None), \
+        patch("brain.app.api.routers.auth.async_has_any_users", return_value=True), \
+        patch("brain.app.api.routers.auth.async_create_user") as create_user:
         resp = await client.post(
             "/api/register",
             json={
@@ -148,9 +148,9 @@ async def test_register_can_create_workspace_after_first_setup(client):
         "attribution_enabled": True,
         "default_provider": None,
     }
-    with patch("brain.app.api.routers.auth.get_user_by_email", return_value=None), \
-        patch("brain.app.api.routers.auth.has_any_users", return_value=True), \
-        patch("brain.app.api.routers.auth.create_workspace_owner", return_value=created) as create_owner:
+    with patch("brain.app.api.routers.auth.async_get_user_by_email", return_value=None), \
+        patch("brain.app.api.routers.auth.async_has_any_users", return_value=True), \
+        patch("brain.app.api.routers.auth.async_create_workspace_owner", return_value=created) as create_owner:
         resp = await client.post(
             "/api/register",
             json={
@@ -183,10 +183,10 @@ async def test_register_workspace_name_wins_over_stale_invite_state(client):
         "attribution_enabled": True,
         "default_provider": None,
     }
-    with patch("brain.app.api.routers.auth.get_user_by_email", return_value=None), \
-        patch("brain.app.api.routers.auth.has_any_users", return_value=True), \
-        patch("brain.app.api.routers.auth.create_workspace_owner", return_value=created) as create_owner, \
-        patch("brain.app.api.routers.auth.create_user") as create_user:
+    with patch("brain.app.api.routers.auth.async_get_user_by_email", return_value=None), \
+        patch("brain.app.api.routers.auth.async_has_any_users", return_value=True), \
+        patch("brain.app.api.routers.auth.async_create_workspace_owner", return_value=created) as create_owner, \
+        patch("brain.app.api.routers.auth.async_create_user") as create_user:
         resp = await client.post(
             "/api/register",
             json={
@@ -229,14 +229,15 @@ class _Request:
         self.client = _Client(host)
 
 
-def test_internal_bearer_uses_service_principal_not_owner_fallback():
+@pytest.mark.asyncio
+async def test_internal_bearer_uses_service_principal_not_owner_fallback():
     from brain.app.api import auth
 
     request = _Request(headers={"Authorization": "Bearer test-token"})
     with patch.object(auth, "INTERNAL_BEARER_TOKENS", {"test-token"}), \
         patch.object(auth, "INTERNAL_BEARER_TOKEN_SOURCES", {"test-token": "illo_api_token"}), \
         patch.object(auth, "_get_localhost_user") as mock_localhost_user:
-        user = auth.get_current_user(request)
+        user = await auth.get_current_user(request)
 
     assert user["id"] == "service:internal-api"
     assert user["principal_type"] == "service"
@@ -247,39 +248,42 @@ def test_internal_bearer_uses_service_principal_not_owner_fallback():
     mock_localhost_user.assert_not_called()
 
 
-def test_localhost_fallback_rejected_when_disabled():
+@pytest.mark.asyncio
+async def test_localhost_fallback_rejected_when_disabled():
     from brain.app.api import auth
 
     request = _Request(host="127.0.0.1")
     with patch.object(auth, "AUTH_DEV_FALLBACK_ENABLED", False), \
         patch.object(auth, "_get_localhost_user") as mock_localhost_user:
         with pytest.raises(HTTPException) as exc_info:
-            auth.get_current_user(request)
+            await auth.get_current_user(request)
 
     assert exc_info.value.status_code == 401
     mock_localhost_user.assert_not_called()
 
 
-def test_localhost_fallback_requires_local_request_host():
+@pytest.mark.asyncio
+async def test_localhost_fallback_requires_local_request_host():
     from brain.app.api import auth
 
     request = _Request(host="127.0.0.1", headers={"host": "staging.example.com"})
     with patch.object(auth, "AUTH_DEV_FALLBACK_ENABLED", True), \
         patch.object(auth, "_get_localhost_user") as mock_localhost_user:
         with pytest.raises(HTTPException) as exc_info:
-            auth.get_current_user(request)
+            await auth.get_current_user(request)
 
     assert exc_info.value.status_code == 401
     mock_localhost_user.assert_not_called()
 
 
-def test_localhost_fallback_returns_explicit_dev_service_principal_when_enabled_without_user():
+@pytest.mark.asyncio
+async def test_localhost_fallback_returns_explicit_dev_service_principal_when_enabled_without_user():
     from brain.app.api import auth
 
     request = _Request(host="127.0.0.1")
     with patch.object(auth, "AUTH_DEV_FALLBACK_ENABLED", True), \
         patch.object(auth, "_get_localhost_user", return_value=None):
-        user = auth.get_current_user(request)
+        user = await auth.get_current_user(request)
 
     assert user["id"] == "service:dev-localhost"
     assert user["principal_type"] == "service"
@@ -288,7 +292,8 @@ def test_localhost_fallback_returns_explicit_dev_service_principal_when_enabled_
     assert user["audit"]["token_source"] == "localhost"
 
 
-def test_session_auth_preserves_existing_user_context_with_identity_metadata():
+@pytest.mark.asyncio
+async def test_session_auth_preserves_existing_user_context_with_identity_metadata():
     from brain.app.api import auth
 
     db_user = {
@@ -305,9 +310,9 @@ def test_session_auth_preserves_existing_user_context_with_identity_metadata():
     }
     request = _Request(session={"user_id": "user-1"})
 
-    with patch("brain.systems.auth.users.get_user_by_id", return_value=db_user), \
+    with patch("brain.systems.auth.users.async_get_user_by_id", return_value=db_user), \
         patch("brain.systems.auth.users.safe_user_context", return_value=db_user):
-        user = auth.get_current_user(request)
+        user = await auth.get_current_user(request)
 
     assert user["id"] == "user-1"
     assert user["role"] == "owner"

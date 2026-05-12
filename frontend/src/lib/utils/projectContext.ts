@@ -136,6 +136,9 @@ export function normalizeProjectContextResources(resources: ProjectContextResour
 
 export function validateProjectContextResources(resources: ProjectContextResource[]): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
+  if (!resources.length) {
+    errors.push('Project context needs at least one repo, folder, file, or doc.');
+  }
   const seen = new Set<string>();
   for (const resource of normalizeProjectContextResources(resources)) {
     const key = (resource.path ?? resource.repo ?? resource.uri ?? resource.name ?? resource.label ?? '').trim();

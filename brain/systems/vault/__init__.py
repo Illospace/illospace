@@ -28,7 +28,7 @@ from brain.platform.db.models.vault import (
     VaultSession,
     VaultShare,
 )
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +181,33 @@ def _log_access(user_id: str, secret_id: int | None, key_name: str,
         pass  # Never break vault operations for audit logging
 
 
+async def _async_log_access(
+    user_id: str,
+    secret_id: int | None,
+    key_name: str,
+    action: str,
+    accessed_by: str = "user",
+    uow: UnitOfWork | None = None,
+) -> None:
+    """Async variant of vault audit logging. Fail-silent."""
+
+    try:
+        entry = VaultAccessLog(
+            user_id=user_id,
+            secret_id=secret_id,
+            key_name=key_name,
+            action=action,
+            accessed_by=_normalize_accessed_by(accessed_by),
+        )
+        if uow:
+            uow.session.add(entry)
+        else:
+            async with UnitOfWork() as _uow:
+                _uow.session.add(entry)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # CRUD (user-scoped)
 # ---------------------------------------------------------------------------
@@ -233,6 +260,48 @@ def get_secret(
     return None
 
 
+async def async_get_secret(
+    key_name: str,
+    user_id: str,
+    *,
+    org_id: str | None = None,
+    allow_shared: bool = True,
+    allow_env_fallback: bool = False,
+    accessed_by: str = "user",
+) -> str | None:
+    """Async retrieve/decrypt path for user-scoped secrets."""
+
+    if not user_id:
+        raise ValueError("user_id is required to read a vault secret")
+    async with UnitOfWork() as uow:
+        secret = await uow.vault.get_by_key(user_id, key_name)
+        if not secret and allow_shared:
+            stmt = (
+                select(Secret)
+                .join(VaultShare, VaultShare.secret_id == Secret.id)
+                .where(
+                    Secret.key_name == key_name,
+                    VaultShare.shared_with_user_id == user_id,
+                    VaultShare.revoked_at.is_(None),
+                )
+                .limit(1)
+            )
+            if org_id:
+                stmt = stmt.join(User, User.id == Secret.user_id).where(User.org_id == org_id)
+            result = await uow.session.scalars(stmt)
+            secret = result.first()
+
+        if secret:
+            secret.last_accessed_at = datetime.now(timezone.utc)
+            secret.access_count = (secret.access_count or 0) + 1
+            await _async_log_access(user_id, secret.id, key_name, "read", accessed_by, uow=uow)
+            return _decrypt(bytes(secret.encrypted_value))
+
+    if allow_env_fallback and (env_val := os.environ.get(key_name)):
+        return env_val
+    return None
+
+
 def set_secret(
     key_name: str,
     value: str,
@@ -279,6 +348,54 @@ def set_secret(
             uow.session.flush()
             _log_access(user_id, secret.id, key_name, "write", uow=uow)
     resolve_missing(key_name, user_id=user_id, org_id=org_id)
+
+
+async def async_set_secret(
+    key_name: str,
+    value: str,
+    user_id: str,
+    *,
+    org_id: str | None = None,
+    description: str = "",
+    category: str = "general",
+    agent_access_level: str | None = None,
+) -> None:
+    """Async encrypt/upsert path for user-scoped secrets."""
+
+    encrypted = _encrypt(value)
+    now = datetime.now(timezone.utc)
+    if not user_id:
+        raise ValueError("user_id is required to set a secret (user_id is NOT NULL)")
+    normalized_agent_access = (
+        normalize_agent_access_level(agent_access_level)
+        if agent_access_level is not None
+        else None
+    )
+    async with UnitOfWork() as uow:
+        existing = await uow.vault.get_by_key(user_id, key_name)
+        if existing:
+            existing.encrypted_value = encrypted
+            existing.description = description
+            existing.category = category
+            if normalized_agent_access is not None:
+                existing.agent_access_level = normalized_agent_access
+            existing.updated_at = now
+            await uow.session.flush()
+            await _async_log_access(user_id, existing.id, key_name, "write", uow=uow)
+        else:
+            secret = Secret(
+                key_name=key_name,
+                encrypted_value=encrypted,
+                description=description,
+                category=category,
+                agent_access_level=normalized_agent_access or DEFAULT_VAULT_AGENT_ACCESS_LEVEL,
+                user_id=user_id,
+                created_at=now,
+                updated_at=now,
+            )
+            uow.session.add(secret)
+            await uow.session.flush()
+            await _async_log_access(user_id, secret.id, key_name, "write", uow=uow)
 
 
 def delete_secret(key_name: str, user_id: str) -> bool:
@@ -349,9 +466,78 @@ def list_secrets(
         return results
 
 
+async def async_list_secrets(
+    user_id: str,
+    category: str | None = None,
+    *,
+    org_id: str | None = None,
+) -> list[dict]:
+    """Async metadata listing for user's own + shared secrets."""
+
+    if not user_id:
+        raise ValueError("user_id is required to list vault secrets")
+    async with UnitOfWork() as uow:
+        results = []
+
+        stmt = select(Secret).where(Secret.user_id == user_id)
+        if category:
+            stmt = stmt.where(Secret.category == category)
+        own_result = await uow.session.scalars(stmt)
+        for s in own_result.all():
+            results.append({
+                "id": s.id, "key_name": s.key_name, "description": s.description,
+                "category": s.category, "created_at": s.created_at,
+                "updated_at": s.updated_at, "last_accessed_at": s.last_accessed_at,
+                "access_count": s.access_count, "user_id": s.user_id,
+                "agent_access_level": getattr(s, "agent_access_level", None) or DEFAULT_VAULT_AGENT_ACCESS_LEVEL,
+                "shared_by_name": None, "is_shared": False,
+            })
+
+        shared_stmt = (
+            select(Secret, User.name.label("shared_by_name"))
+            .join(VaultShare, VaultShare.secret_id == Secret.id)
+            .join(User, User.id == VaultShare.shared_by_user_id)
+            .where(
+                VaultShare.shared_with_user_id == user_id,
+                VaultShare.revoked_at.is_(None),
+            )
+        )
+        if category:
+            shared_stmt = shared_stmt.where(Secret.category == category)
+        if org_id:
+            shared_stmt = shared_stmt.where(User.org_id == org_id)
+        shared_result = await uow.session.execute(shared_stmt)
+        for s, shared_by_name in shared_result.all():
+            results.append({
+                "id": s.id, "key_name": s.key_name, "description": s.description,
+                "category": s.category, "created_at": s.created_at,
+                "updated_at": s.updated_at, "last_accessed_at": s.last_accessed_at,
+                "access_count": s.access_count, "user_id": s.user_id,
+                "agent_access_level": getattr(s, "agent_access_level", None) or DEFAULT_VAULT_AGENT_ACCESS_LEVEL,
+                "shared_by_name": shared_by_name, "is_shared": True,
+            })
+        results.sort(key=lambda r: (r["category"], r["key_name"], r["is_shared"]))
+        return results
+
+
+async def async_get_secret_record(key_name: str, user_id: str) -> Secret | None:
+    """Async fetch of an owned secret metadata row."""
+
+    if not user_id:
+        raise ValueError("user_id is required to read a vault secret")
+    async with UnitOfWork() as uow:
+        return await uow.vault.get_by_key(user_id, key_name)
+
+
 def reveal_secret(key_name: str, user_id: str, *, org_id: str | None = None) -> str | None:
     """Reveal a secret for the dashboard (updates access stats)."""
     return get_secret(key_name, user_id=user_id, org_id=org_id, accessed_by="user")
+
+
+async def async_reveal_secret(key_name: str, user_id: str, *, org_id: str | None = None) -> str | None:
+    """Async reveal path for the dashboard."""
+
+    return await async_get_secret(key_name, user_id=user_id, org_id=org_id, accessed_by="user")
 
 
 def require_secret(
@@ -1427,6 +1613,121 @@ def authorize_agent_secret_read(
         return {"allowed": False, "status": "pending", "grant": _grant_to_dict(pending)}
 
 
+async def async_delete_secret(key_name: str, user_id: str) -> bool:
+    return await run_sync_with_unit_of_work(delete_secret, key_name, user_id)
+
+
+async def async_revoke_share(share_id: int, user_id: str) -> bool:
+    return await run_sync_with_unit_of_work(revoke_share, share_id, user_id)
+
+
+async def async_get_missing_requests(
+    user_id: str,
+    *,
+    org_id: str | None = None,
+    include_resolved: bool = False,
+) -> list[dict]:
+    return await run_sync_with_unit_of_work(
+        get_missing_requests,
+        user_id,
+        org_id=org_id,
+        include_resolved=include_resolved,
+    )
+
+
+async def async_get_vault_access_log(user_id: str, *, org_id: str | None = None, limit: int = 100) -> list[dict]:
+    return await run_sync_with_unit_of_work(get_vault_access_log, user_id, org_id=org_id, limit=limit)
+
+
+async def async_get_org_users(org_id: str) -> list[dict]:
+    return await run_sync_with_unit_of_work(get_org_users, org_id)
+
+
+async def async_list_agent_grants(
+    user_id: str,
+    *,
+    org_id: str | None = None,
+    statuses: list[str] | None = None,
+) -> list[dict]:
+    return await run_sync_with_unit_of_work(list_agent_grants, user_id, org_id=org_id, statuses=statuses)
+
+
+async def async_approve_agent_grant(
+    grant_id: int,
+    *,
+    approved_by_user_id: str,
+    org_id: str | None = None,
+    ttl_minutes: int = 15,
+    max_reads: int = 1,
+) -> dict | None:
+    return await run_sync_with_unit_of_work(
+        approve_agent_grant,
+        grant_id,
+        approved_by_user_id=approved_by_user_id,
+        org_id=org_id,
+        ttl_minutes=ttl_minutes,
+        max_reads=max_reads,
+    )
+
+
+async def async_deny_agent_grant(
+    grant_id: int,
+    *,
+    denied_by_user_id: str,
+    org_id: str | None = None,
+) -> dict | None:
+    return await run_sync_with_unit_of_work(
+        deny_agent_grant,
+        grant_id,
+        denied_by_user_id=denied_by_user_id,
+        org_id=org_id,
+    )
+
+
+async def async_list_project_bindings(user_id: str, *, org_id: str | None = None) -> list[dict]:
+    return await run_sync_with_unit_of_work(list_project_bindings, user_id=user_id, org_id=org_id)
+
+
+async def async_bind_project_secret(
+    secret_id: int,
+    *,
+    user_id: str,
+    org_id: str | None,
+    project_slug: str,
+    env_name: str,
+    target_registry_id: str | None = None,
+) -> dict | None:
+    return await run_sync_with_unit_of_work(
+        bind_project_secret,
+        secret_id,
+        user_id=user_id,
+        org_id=org_id,
+        project_slug=project_slug,
+        env_name=env_name,
+        target_registry_id=target_registry_id,
+    )
+
+
+async def async_delete_project_binding(binding_id: int, *, user_id: str, org_id: str | None = None) -> bool:
+    return await run_sync_with_unit_of_work(delete_project_binding, binding_id, user_id=user_id, org_id=org_id)
+
+
+async def async_share_secret(
+    secret_id: int,
+    shared_with_user_id: str,
+    owner_user_id: str,
+    *,
+    org_id: str | None = None,
+) -> dict | None:
+    return await run_sync_with_unit_of_work(
+        share_secret,
+        secret_id,
+        shared_with_user_id,
+        owner_user_id,
+        org_id=org_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # PIN Protection
 # ---------------------------------------------------------------------------
@@ -1482,6 +1783,23 @@ def get_pin_status(user_id: str) -> dict:
     }
 
 
+async def async_get_pin_status(user_id: str) -> dict:
+    lockout = await async_get_config(_pin_lockout_key(user_id))
+    locked_until = None
+    if lockout:
+        try:
+            lockout_time = datetime.fromisoformat(lockout)
+            if datetime.now(timezone.utc) < lockout_time:
+                locked_until = lockout_time
+        except ValueError:
+            await async_delete_config(_pin_lockout_key(user_id))
+    return {
+        "has_pin": await async_has_pin(user_id),
+        "failed_attempts": int(await async_get_config(_pin_failures_key(user_id)) or "0"),
+        "locked_until": locked_until,
+    }
+
+
 def set_pin(user_id: str, new_pin: str, current_pin: str | None = None) -> bool:
     if has_pin(user_id) and not verify_pin(user_id, current_pin or ""):
         return False
@@ -1492,8 +1810,22 @@ def set_pin(user_id: str, new_pin: str, current_pin: str | None = None) -> bool:
     return True
 
 
+async def async_set_pin(user_id: str, new_pin: str, current_pin: str | None = None) -> bool:
+    if await async_has_pin(user_id) and not await async_verify_pin(user_id, current_pin or ""):
+        return False
+    pin_hash = bcrypt.hashpw(new_pin.encode(), bcrypt.gensalt()).decode()
+    await async_set_config(_pin_hash_key(user_id), pin_hash)
+    await async_set_config(_pin_failures_key(user_id), "0")
+    await async_delete_config(_pin_lockout_key(user_id))
+    return True
+
+
 def has_pin(user_id: str) -> bool:
     return _get_config(_pin_hash_key(user_id)) is not None
+
+
+async def async_has_pin(user_id: str) -> bool:
+    return await async_get_config(_pin_hash_key(user_id)) is not None
 
 
 def verify_pin(user_id: str, pin: str) -> bool:
@@ -1522,11 +1854,50 @@ def verify_pin(user_id: str, pin: str) -> bool:
     return False
 
 
+async def async_verify_pin(user_id: str, pin: str) -> bool:
+    lockout = await async_get_config(_pin_lockout_key(user_id))
+    if lockout:
+        lockout_time = datetime.fromisoformat(lockout)
+        if datetime.now(timezone.utc) < lockout_time:
+            return False
+        await async_delete_config(_pin_lockout_key(user_id))
+        await async_set_config(_pin_failures_key(user_id), "0")
+
+    stored_hash = await async_get_config(_pin_hash_key(user_id))
+    if not stored_hash:
+        return True
+
+    if bcrypt.checkpw(pin.encode(), stored_hash.encode()):
+        await async_set_config(_pin_failures_key(user_id), "0")
+        return True
+
+    attempts = int(await async_get_config(_pin_failures_key(user_id)) or "0") + 1
+    await async_set_config(_pin_failures_key(user_id), str(attempts))
+    if attempts >= VAULT_LOCKOUT_AFTER_FAILURES:
+        lockout_until = datetime.now(timezone.utc) + VAULT_LOCKOUT_DURATION
+        await async_set_config(_pin_lockout_key(user_id), lockout_until.isoformat())
+    return False
+
+
 def generate_vault_token(user_id: str) -> tuple[str, datetime]:
     token = stdlib_secrets.token_urlsafe(32)
     now = _utcnow_naive()
     expires = now + VAULT_SESSION_TTL
     with UnitOfWork() as uow:
+        uow.session.add(VaultSession(
+            token_hash=_token_hash(token),
+            user_id=user_id,
+            created_at=now,
+            expires_at=expires,
+        ))
+    return token, _as_utc(expires)
+
+
+async def async_generate_vault_token(user_id: str) -> tuple[str, datetime]:
+    token = stdlib_secrets.token_urlsafe(32)
+    now = _utcnow_naive()
+    expires = now + VAULT_SESSION_TTL
+    async with UnitOfWork() as uow:
         uow.session.add(VaultSession(
             token_hash=_token_hash(token),
             user_id=user_id,
@@ -1542,12 +1913,35 @@ def unlock_vault(user_id: str, pin: str) -> tuple[str, datetime] | None:
     return generate_vault_token(user_id)
 
 
+async def async_unlock_vault(user_id: str, pin: str) -> tuple[str, datetime] | None:
+    if not await async_verify_pin(user_id, pin):
+        return None
+    return await async_generate_vault_token(user_id)
+
+
 def validate_vault_token(user_id: str, token: str | None) -> bool:
     if not token:
         return False
     now = _utcnow_naive()
     with UnitOfWork() as uow:
         session = uow.session.get(VaultSession, _token_hash(token))
+        if not session or str(session.user_id) != str(user_id):
+            return False
+        if session.revoked_at is not None:
+            return False
+        if now > _as_db_utc(session.expires_at):
+            session.revoked_at = now
+            return False
+        session.last_seen_at = now
+        return True
+
+
+async def async_validate_vault_token(user_id: str, token: str | None) -> bool:
+    if not token:
+        return False
+    now = _utcnow_naive()
+    async with UnitOfWork() as uow:
+        session = await uow.session.get(VaultSession, _token_hash(token))
         if not session or str(session.user_id) != str(user_id):
             return False
         if session.revoked_at is not None:
@@ -1568,11 +1962,29 @@ def revoke_vault_token(user_id: str, token: str | None) -> None:
             session.revoked_at = _utcnow_naive()
 
 
+async def async_revoke_vault_token(user_id: str, token: str | None) -> None:
+    if not token:
+        return
+    async with UnitOfWork() as uow:
+        session = await uow.session.get(VaultSession, _token_hash(token))
+        if session and str(session.user_id) == str(user_id) and session.revoked_at is None:
+            session.revoked_at = _utcnow_naive()
+
+
 def _get_config(key: str) -> str | None:
     with UnitOfWork() as uow:
         config = uow.session.scalars(
             select(VaultConfig).where(VaultConfig.key == key)
         ).first()
+        return config.value if config else None
+
+
+async def async_get_config(key: str) -> str | None:
+    async with UnitOfWork() as uow:
+        result = await uow.session.scalars(
+            select(VaultConfig).where(VaultConfig.key == key)
+        )
+        config = result.first()
         return config.value if config else None
 
 
@@ -1589,6 +2001,20 @@ def _set_config(key: str, value: str) -> None:
             uow.session.add(VaultConfig(key=key, value=value, updated_at=now))
 
 
+async def async_set_config(key: str, value: str) -> None:
+    now = datetime.now(timezone.utc)
+    async with UnitOfWork() as uow:
+        result = await uow.session.scalars(
+            select(VaultConfig).where(VaultConfig.key == key)
+        )
+        config = result.first()
+        if config:
+            config.value = value
+            config.updated_at = now
+        else:
+            uow.session.add(VaultConfig(key=key, value=value, updated_at=now))
+
+
 def _delete_config(key: str) -> None:
     with UnitOfWork() as uow:
         config = uow.session.scalars(
@@ -1596,3 +2022,13 @@ def _delete_config(key: str) -> None:
         ).first()
         if config:
             uow.session.delete(config)
+
+
+async def async_delete_config(key: str) -> None:
+    async with UnitOfWork() as uow:
+        result = await uow.session.scalars(
+            select(VaultConfig).where(VaultConfig.key == key)
+        )
+        config = result.first()
+        if config:
+            await uow.session.delete(config)

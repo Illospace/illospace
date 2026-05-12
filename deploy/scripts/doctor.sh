@@ -210,7 +210,7 @@ if [ "$runtime_checks" = "0" ]; then
 elif tmp_running="$(mktemp "${TMPDIR:-/tmp}/illospace-compose-running.XXXXXX")" && compose ps --services --status running >"$tmp_running" 2>/dev/null; then
   running="$(cat "$tmp_running")"
   if printf '%s\n' "$running" | grep -qx api; then
-    for service in postgres api web worker scheduler; do
+    for service in postgres api web worker scheduler updater; do
       if printf '%s\n' "$running" | grep -qx "$service"; then
         health="$(container_health "$service" || true)"
         case "$health" in

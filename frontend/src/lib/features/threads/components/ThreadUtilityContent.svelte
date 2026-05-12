@@ -1,12 +1,11 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { cortex } from '$lib/stores/cortex.svelte';
-  import { ConstellationIcon } from '$lib/components/constellation';
   import {
     activityTimeline,
     auditApply,
     auditEval,
-    downloadRunTraceZip,
+    downloadThreadTraceZip,
     getIdea,
     ideaAudit,
     ideaAuditAnalysisResult,
@@ -25,8 +24,6 @@
     meta: string[];
     error?: string;
     state?: string;
-    runId?: number;
-    canSaveTrace?: boolean;
   };
 
   let {
@@ -60,17 +57,9 @@
   let evalResults = $state<Record<number, any>>({});
   let expandedRuns = $state<Set<number>>(new Set());
   let expandedWorkers = $state<Set<string>>(new Set());
-  let traceSaving = $state<Record<number, boolean>>({});
-  let traceSaved = $state<Record<number, { bytes?: number; filename?: string }>>({});
-  let traceErrors = $state<Record<number, string>>({});
-
-  const latestTraceRunId = $derived.by(() => {
-    const item = activityItems.find((candidate) => candidate.canSaveTrace && Number.isFinite(candidate.runId));
-    return item?.runId ?? null;
-  });
-  const latestTraceSaved = $derived(latestTraceRunId ? traceSaved[latestTraceRunId] : null);
-  const latestTraceError = $derived(latestTraceRunId ? traceErrors[latestTraceRunId] : '');
-  const latestTraceIsSaving = $derived(Boolean(latestTraceRunId && traceSaving[latestTraceRunId]));
+  let threadTraceSaving = $state(false);
+  let threadTraceSaved = $state<{ bytes?: number; filename?: string } | null>(null);
+  let threadTraceError = $state('');
 
   let pollAborted = $state(false);
   let loadedForIdeaId = $state<string | null>(null);
@@ -106,9 +95,9 @@
     evalResults = {};
     expandedRuns = new Set();
     expandedWorkers = new Set();
-    traceSaving = {};
-    traceSaved = {};
-    traceErrors = {};
+    threadTraceSaving = false;
+    threadTraceSaved = null;
+    threadTraceError = '';
     pollAborted = false;
   }
 
@@ -196,8 +185,6 @@
             meta: activityMeta([dp.skill_used, dp.model_used, duration, tokens, cost]),
             error: dp.error ? cleanActivityText(String(dp.error).slice(0, 200), '') : undefined,
             state: status,
-            runId: Number.isFinite(Number(runId)) ? Number(runId) : undefined,
-            canSaveTrace: Number.isFinite(Number(runId)),
           };
           const trace = Array.isArray(dp.activity_trace) ? dp.activity_trace : [];
           const traceEvents: ActivityListItem[] = trace.map((entry: any, traceIndex: number) => ({
@@ -278,31 +265,29 @@
     cortex.selectIdea(linkedId);
   }
 
-  async function downloadTraceForRun(runId: number) {
-    if (!Number.isFinite(runId) || traceSaving[runId]) return;
-    traceSaving = { ...traceSaving, [runId]: true };
-    traceErrors = { ...traceErrors, [runId]: '' };
+  async function downloadThreadTrace() {
+    const ideaId = idea?.id;
+    if (!ideaId || threadTraceSaving) return;
+    threadTraceSaving = true;
+    threadTraceError = '';
     try {
-      const result = await downloadRunTraceZip(runId);
+      const result = await downloadThreadTraceZip(ideaId);
       const url = URL.createObjectURL(result.blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = result.filename || `illo-trace-run-${runId}.zip`;
+      link.download = result.filename || `illo-thread-trace-${ideaId}.zip`;
       document.body.appendChild(link);
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      traceSaved = {
-        ...traceSaved,
-        [runId]: {
-          bytes: result.bytes,
-          filename: result.filename,
-        },
+      threadTraceSaved = {
+        bytes: result.bytes,
+        filename: result.filename,
       };
     } catch (e: any) {
-      traceErrors = { ...traceErrors, [runId]: e?.detail || 'Trace download failed' };
+      threadTraceError = e?.detail || 'Trace download failed';
     } finally {
-      traceSaving = { ...traceSaving, [runId]: false };
+      threadTraceSaving = false;
     }
   }
 
@@ -433,69 +418,60 @@
 </script>
 
 {#if activeTab === 'activity'}
+  <div class="activity-trace-toolbar">
+    <div class="activity-trace-copy">
+      <div class="activity-trace-title">Whole conversation trace</div>
+      {#if threadTraceSaved}
+        <div class="activity-trace-note">
+          {threadTraceSaved.filename || 'Trace zip'}
+          {#if threadTraceSaved.bytes}
+            &middot; {threadTraceSaved.bytes.toLocaleString()} bytes
+          {/if}
+        </div>
+      {:else if threadTraceError}
+        <div class="activity-trace-note activity-trace-note-error">{threadTraceError}</div>
+      {:else}
+        <div class="activity-trace-note">Messages, runs, tools, and artifacts</div>
+      {/if}
+    </div>
+    <button
+      type="button"
+      class="activity-trace-button activity-trace-button-primary"
+      disabled={!idea?.id || threadTraceSaving}
+      onclick={downloadThreadTrace}
+    >
+      {threadTraceSaving ? 'Preparing' : threadTraceSaved ? 'Download again' : 'Download conversation trace'}
+    </button>
+  </div>
+
   {#if activityLoading && activityItems.length === 0}
     <div class="tab-empty">Loading activity...</div>
   {:else if activityItems.length === 0}
     <div class="tab-empty">No activity yet.</div>
   {:else}
-    <div class="activity-list-shell" aria-label="Thread activity">
-      {#if latestTraceRunId}
-        <div class="activity-trace-header">
-          <div class="activity-trace-copy">
-            <div class="activity-trace-title">Whole conversation trace</div>
-            <div class="activity-trace-subtitle">Messages, tools, and artifacts</div>
-            {#if latestTraceSaved}
-              <div class="activity-trace-note">
-                {latestTraceSaved.filename || 'Trace zip'}
-                {#if latestTraceSaved.bytes}
-                  &middot; {latestTraceSaved.bytes.toLocaleString()} bytes
-                {/if}
+    <div class="activity-list" aria-label="Thread activity">
+      {#each activityItems as item (item._key)}
+        <div class="activity-list-item" data-state={item.state}>
+          <time class="activity-time" datetime={item.timestamp || undefined}>
+            {timeAgo(item.timestamp)}
+          </time>
+          <div class="activity-body">
+            <div class="activity-title-row">
+              <div class="activity-title">{item.title}</div>
+            </div>
+            {#if item.meta.length}
+              <div class="activity-meta">
+                {#each item.meta as meta}
+                  <span class="activity-meta-part">{meta}</span>
+                {/each}
               </div>
             {/if}
-            {#if latestTraceError}
-              <div class="activity-error">{latestTraceError}</div>
+            {#if item.error}
+              <div class="activity-error">Error: {item.error}</div>
             {/if}
           </div>
-          <button
-            type="button"
-            class="activity-trace-download-button"
-            disabled={latestTraceIsSaving}
-            onclick={() => latestTraceRunId && downloadTraceForRun(latestTraceRunId)}
-          >
-            <ConstellationIcon name="archive" size={13} stroke={1.8} />
-            <span>
-              {latestTraceIsSaving
-                ? 'Preparing'
-                : latestTraceSaved
-                  ? 'Download again'
-                  : 'Download trace'}
-            </span>
-          </button>
         </div>
-      {/if}
-
-      <div class="activity-list">
-        {#each activityItems as item (item._key)}
-          <div class="activity-list-item" data-state={item.state}>
-            <time class="activity-time" datetime={item.timestamp || undefined}>
-              {timeAgo(item.timestamp)}
-            </time>
-            <div class="activity-body">
-              <div class="activity-title">{item.title}</div>
-              {#if item.meta.length}
-                <div class="activity-meta">
-                  {#each item.meta as meta}
-                    <span class="activity-meta-part">{meta}</span>
-                  {/each}
-                </div>
-              {/if}
-              {#if item.error}
-                <div class="activity-error">Error: {item.error}</div>
-              {/if}
-            </div>
-          </div>
-        {/each}
-      </div>
+      {/each}
     </div>
   {/if}
 {:else if activeTab === 'details'}
@@ -1053,97 +1029,30 @@
 
 
   /* Activity tab */
-  .activity-list-shell {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    width: 100%;
-    min-width: 0;
-  }
-
-  .activity-trace-header {
+  .activity-trace-toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    width: 100%;
     min-width: 0;
-    padding: 10px 2px 11px;
-    border-bottom: 1px solid var(--panel-utility-divider-border);
+    width: 100%;
+    margin-bottom: 10px;
+    padding: 10px 2px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   }
 
   .activity-trace-copy {
-    display: grid;
-    gap: 3px;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
   }
 
   .activity-trace-title {
-    min-width: 0;
-    color: var(--panel-utility-primary-text);
-    font-size: 13px;
-    font-weight: 640;
-    line-height: 1.25;
-    overflow-wrap: anywhere;
-  }
-
-  .activity-trace-subtitle {
-    min-width: 0;
-    color: var(--panel-utility-muted-text);
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 10px;
-    line-height: 1.35;
-    overflow-wrap: anywhere;
-  }
-
-  .activity-trace-download-button {
-    flex: 0 0 auto;
-    display: inline-flex;
-    min-width: 0;
-    min-height: 28px;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 5px 9px;
-    border: 1px solid var(--panel-utility-action-border);
-    border-radius: 999px;
-    background: var(--panel-utility-action-background);
-    color: var(--panel-utility-action-text);
-    font: inherit;
-    font-size: 11px;
-    font-weight: 620;
-    line-height: 1.2;
-    white-space: nowrap;
-    cursor: pointer;
-    transition:
-      background 150ms ease,
-      border-color 150ms ease,
-      color 150ms ease,
-      transform 150ms ease;
-  }
-
-  .activity-trace-download-button:hover:not(:disabled),
-  .activity-trace-download-button:focus-visible {
-    background: var(--panel-utility-action-hover-background);
-    color: var(--panel-utility-action-hover-text);
-  }
-
-  .activity-trace-download-button:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--thread-accent, #57CFA0) 35%, transparent);
-    outline-offset: 2px;
-  }
-
-  .activity-trace-download-button:active:not(:disabled) {
-    transform: translateY(1px);
-  }
-
-  .activity-trace-download-button:disabled {
-    cursor: default;
-    opacity: 0.62;
-  }
-
-  .activity-trace-download-button :global(svg) {
-    flex: 0 0 auto;
+    color: rgba(239, 244, 251, 0.92);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.3;
   }
 
   .activity-list {
@@ -1198,6 +1107,53 @@
     word-break: break-word;
   }
 
+  .activity-trace-button {
+    flex: 0 0 auto;
+    min-height: 20px;
+    padding: 2px 7px;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.055);
+    color: rgba(231, 238, 247, 0.66);
+    font: inherit;
+    font-size: 10px;
+    line-height: 1.4;
+    cursor: pointer;
+    transition:
+      background 150ms ease,
+      color 150ms ease,
+      transform 150ms ease;
+  }
+
+  .activity-trace-button-primary {
+    min-height: 28px;
+    padding: 5px 10px;
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 16%, rgba(255, 255, 255, 0.055));
+    color: rgba(239, 244, 251, 0.92);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .activity-trace-button:hover:not(:disabled),
+  .activity-trace-button:focus-visible {
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 14%, transparent);
+    color: rgba(239, 244, 251, 0.9);
+  }
+
+  .activity-trace-button:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--thread-accent, #57CFA0) 35%, transparent);
+    outline-offset: 2px;
+  }
+
+  .activity-trace-button:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  .activity-trace-button:disabled {
+    cursor: default;
+    opacity: 0.62;
+  }
+
   .activity-meta {
     min-width: 0;
     display: flex;
@@ -1222,6 +1178,10 @@
     font-size: 9px;
     line-height: 1.35;
     overflow-wrap: anywhere;
+  }
+
+  .activity-trace-note-error {
+    color: var(--negative, #D4808F);
   }
 
   .activity-error {

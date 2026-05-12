@@ -35,10 +35,6 @@ def test_runtime_settings_tool_returns_model_mappings_and_active_status():
     with patch.object(runtime_settings_service, "get_runtime_settings_snapshot", return_value={
             "selected_provider": "openai",
             "effective_provider": "openai",
-            "agency": {
-                "recommendation_mode": True,
-                "auto_execute_read_only": False,
-            },
             "providers": {"openai": {"status": "in_use"}},
             "provider_model_mappings": {"openai": {"medium": "gpt-5.4"}},
             "worker_backend": {"agent_effective_worker_backend": "predict_rlm"},
@@ -50,8 +46,6 @@ def test_runtime_settings_tool_returns_model_mappings_and_active_status():
     assert data["active"]["status"] == "in_use"
     assert data["provider_model_mappings"]["openai"]["medium"] == "gpt-5.4"
     assert data["worker_backend"]["agent_effective_worker_backend"] == "predict_rlm"
-    assert data["agency"]["recommendation_mode"] is True
-    assert data["agency"]["auto_execute_read_only"] is False
 
 
 def test_store_openai_connection_reports_invalid_format():
@@ -255,7 +249,6 @@ def test_get_llm_info_uses_low_tier_for_background_models(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    monkeypatch.setattr("brain.app.api.routers.system.UnitOfWork", FakeUoW)
     monkeypatch.setattr(
         "brain.platform.providers.model_policy.get_provider_model_maps",
         lambda **kwargs: {"openai": {"low": "gpt-5-mini", "medium": "gpt-5.4"}},
@@ -268,7 +261,7 @@ def test_get_llm_info_uses_low_tier_for_background_models(monkeypatch):
         raising=False,
     )
 
-    info = _get_llm_info({"id": "user-1", "org_id": "org-1"})
+    info = _get_llm_info({"id": "user-1", "org_id": "org-1"}, db=FakeSession())
 
     assert info is not None
     assert info["harvest_model"] == "gpt-5-mini"
@@ -310,7 +303,6 @@ def test_get_llm_info_exposes_provider_health(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    monkeypatch.setattr("brain.app.api.routers.system.UnitOfWork", FakeUoW)
     monkeypatch.setattr("brain.platform.providers.model_policy.get_provider_model_maps", lambda **kwargs: {"openai": {"medium": "gpt-5.4"}})
     monkeypatch.setattr("brain.platform.providers.model_policy.resolve_default_provider", lambda **kwargs: "openai")
     monkeypatch.setattr("brain.platform.providers.model_policy.get_model_for_tier", lambda *args, **kwargs: "gpt-5-mini")
@@ -320,7 +312,7 @@ def test_get_llm_info_exposes_provider_health(monkeypatch):
         raising=False,
     )
 
-    info = _get_llm_info({"id": "user-1", "org_id": "org-1"})
+    info = _get_llm_info({"id": "user-1", "org_id": "org-1"}, db=FakeSession())
 
     assert info is not None
     assert info["provider_health"]["operations"]["verifier"][0]["status"] == "unavailable"
@@ -542,6 +534,7 @@ def test_start_runtime_update_launches_detached_safe_deploy(monkeypatch, tmp_pat
     monkeypatch.setenv("ILLO_SELF_UPDATE_ROOT", str(root))
     monkeypatch.setenv("ILLO_SELF_UPDATE_STATE_DIR", str(state_dir))
     monkeypatch.delenv("ILLO_SELF_UPDATE_COMMAND", raising=False)
+    monkeypatch.delenv("ILLO_SELF_UPDATE_REQUEST_FILE", raising=False)
     monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 2)
     monkeypatch.setattr(self_update, "_pid_running", lambda _pid: False)
     monkeypatch.setattr(self_update.subprocess, "Popen", fake_popen)
@@ -579,6 +572,7 @@ def test_start_runtime_update_reuses_running_update(monkeypatch, tmp_path):
     monkeypatch.setenv("ILLO_SELF_UPDATE_ROOT", str(root))
     monkeypatch.setenv("ILLO_SELF_UPDATE_STATE_DIR", str(state_dir))
     monkeypatch.delenv("ILLO_SELF_UPDATE_COMMAND", raising=False)
+    monkeypatch.delenv("ILLO_SELF_UPDATE_REQUEST_FILE", raising=False)
     monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 1)
     monkeypatch.setattr(self_update, "_pid_running", lambda pid: pid == 5150)
     monkeypatch.setattr(
@@ -605,9 +599,77 @@ def test_start_runtime_update_rejects_non_checkout_without_override(monkeypatch,
     monkeypatch.setenv("ILLO_SELF_UPDATE_ROOT", str(root))
     monkeypatch.setenv("ILLO_SELF_UPDATE_STATE_DIR", str(state_dir))
     monkeypatch.delenv("ILLO_SELF_UPDATE_COMMAND", raising=False)
+    monkeypatch.delenv("ILLO_SELF_UPDATE_REQUEST_FILE", raising=False)
 
     with pytest.raises(Exception) as exc:
         self_update.start_runtime_update(requested_by="owner-1")
 
     assert getattr(exc.value, "status_code", None) == 409
     assert "not running from a git checkout" in exc.value.detail
+
+
+def test_start_runtime_update_queues_compose_sidecar_request(monkeypatch, tmp_path):
+    import json
+
+    import brain.systems.runtime_settings.self_update as self_update
+
+    request_file = tmp_path / "self-update" / "request.json"
+    status_file = tmp_path / "self-update" / "status.json"
+    log_path = tmp_path / "logs" / "illo-self-update.log"
+
+    monkeypatch.setenv("ILLO_SELF_UPDATE_REQUEST_FILE", str(request_file))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_STATUS_FILE", str(status_file))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_LOG_PATH", str(log_path))
+    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 3)
+
+    status = self_update.start_runtime_update(requested_by="owner-1")
+
+    assert status.status == "running"
+    assert status.available is True
+    assert status.pid is None
+    assert status.active_agent_runs == 3
+    assert status.log_path == str(log_path)
+    assert "queued" in (status.detail or "")
+    request_payload = json.loads(request_file.read_text(encoding="utf-8"))
+    status_payload = json.loads(status_file.read_text(encoding="utf-8"))
+    assert request_payload["requested_by"] == "owner-1"
+    assert status_payload["status"] == "queued"
+
+
+def test_runtime_update_status_reports_compose_sidecar_available(monkeypatch, tmp_path):
+    import brain.systems.runtime_settings.self_update as self_update
+
+    request_file = tmp_path / "self-update" / "request.json"
+    status_file = tmp_path / "self-update" / "status.json"
+    status_file.parent.mkdir()
+    status_file.write_text(
+        '{"status": "idle", "detail": "Compose updater sidecar is ready."}',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("ILLO_SELF_UPDATE_REQUEST_FILE", str(request_file))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_STATUS_FILE", str(status_file))
+    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 0)
+
+    status = self_update.get_runtime_update_status()
+
+    assert status.status == "idle"
+    assert status.available is True
+    assert status.detail == "Compose updater sidecar is ready."
+
+
+def test_runtime_update_status_waits_for_compose_sidecar_heartbeat(monkeypatch, tmp_path):
+    import brain.systems.runtime_settings.self_update as self_update
+
+    request_file = tmp_path / "self-update" / "request.json"
+    heartbeat_file = tmp_path / "self-update" / "heartbeat.json"
+
+    monkeypatch.setenv("ILLO_SELF_UPDATE_REQUEST_FILE", str(request_file))
+    monkeypatch.setenv("ILLO_SELF_UPDATE_HEARTBEAT_FILE", str(heartbeat_file))
+    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 0)
+
+    status = self_update.get_runtime_update_status()
+
+    assert status.status == "idle"
+    assert status.available is False
+    assert "waiting for the Compose updater sidecar" in (status.detail or "")

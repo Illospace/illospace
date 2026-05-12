@@ -26,11 +26,18 @@ _RESOURCE_LOCATOR_KEYS = ("path", "uri", "name")
 _BROWSER_ONLY_URI_SCHEMES = {"browser", "browser-file", "browser-folder"}
 
 
+class ProjectContextValidationError(ValueError):
+    """Raised when an explicit Project Context cannot produce a usable snapshot."""
+
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("Invalid project context: " + "; ".join(errors))
+
+
 def _clean_scalar(value: Any) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
-
 
 
 def _redact_remote(remote: str | None) -> str | None:
@@ -49,6 +56,7 @@ def _redact_remote(remote: str | None) -> str | None:
     if "://" not in remote and "@" in remote and ":" in remote.split("@", 1)[-1]:
         return f"***@{remote.split('@', 1)[-1]}"
     return remote
+
 
 def _run_git(path: str, *args: str) -> str | None:
     try:
@@ -176,9 +184,7 @@ def validate_project_context_snapshot(
     if not isinstance(resources, list):
         return "invalid", ["project_context_snapshot.resources must be a list."]
     if not resources:
-        if _clean_scalar(snapshot.get("name")) or _clean_scalar(snapshot.get("id")):
-            return "validated", []
-        return "invalid", ["project_context_snapshot.resources must contain at least one resource unless the project has a name or id."]
+        return "invalid", ["project_context_snapshot.resources must contain at least one resource."]
 
     errors: list[str] = []
     seen_ids: set[str] = set()
@@ -241,6 +247,17 @@ def validate_project_context_snapshot(
     return ("invalid" if errors else "validated", errors)
 
 
+def _finalize_snapshot(snapshot: dict[str, Any], *, validate_local_paths: bool) -> dict[str, Any]:
+    status, errors = validate_project_context_snapshot(snapshot, validate_local_paths=validate_local_paths)
+    snapshot["status"] = status
+    if errors:
+        snapshot["validation_errors"] = errors
+    else:
+        snapshot.pop("validation_errors", None)
+    snapshot["permission_scope"] = derive_project_permission_scope(snapshot)
+    return snapshot
+
+
 def build_project_context_snapshot(
     metadata: Mapping[str, Any] | None,
     *,
@@ -278,14 +295,7 @@ def build_project_context_snapshot(
                 snapshot[key] = value
         if run_id is not None:
             snapshot["run_id"] = run_id
-        if resources or any(k in snapshot for k in ("id", "name")):
-            status, errors = validate_project_context_snapshot(snapshot, validate_local_paths=validate_local_paths)
-            snapshot["status"] = status
-            if errors:
-                snapshot["validation_errors"] = errors
-            snapshot["permission_scope"] = derive_project_permission_scope(snapshot)
-            return snapshot
-        return None
+        return _finalize_snapshot(snapshot, validate_local_paths=validate_local_paths)
 
     target = metadata.get("target")
     if isinstance(target, Mapping):
@@ -299,12 +309,7 @@ def build_project_context_snapshot(
             }
             if run_id is not None:
                 snapshot["run_id"] = run_id
-            status, errors = validate_project_context_snapshot(snapshot, validate_local_paths=validate_local_paths)
-            snapshot["status"] = status
-            if errors:
-                snapshot["validation_errors"] = errors
-            snapshot["permission_scope"] = derive_project_permission_scope(snapshot)
-            return snapshot
+            return _finalize_snapshot(snapshot, validate_local_paths=validate_local_paths)
     return None
 
 
@@ -319,16 +324,18 @@ def snapshot_from_project_context(
         {"project_context": project_context},
         validate_local_paths=validate_local_paths,
     )
-    if snapshot is None:
-        snapshot = dict(project_context)
-        status, errors = validate_project_context_snapshot(
-            snapshot,
-            validate_local_paths=validate_local_paths,
-        )
-        snapshot["status"] = status
-        if errors:
-            snapshot["validation_errors"] = errors
-    snapshot["permission_scope"] = derive_project_permission_scope(snapshot)
+    return snapshot if snapshot is not None else _finalize_snapshot(dict(project_context), validate_local_paths=validate_local_paths)
+
+
+def validated_project_context_snapshot(
+    project_context: Mapping[str, Any],
+    *,
+    validate_local_paths: bool = True,
+) -> dict[str, Any]:
+    snapshot = snapshot_from_project_context(project_context, validate_local_paths=validate_local_paths)
+    if snapshot.get("status") == "invalid":
+        errors = [str(error) for error in (snapshot.get("validation_errors") or [])]
+        raise ProjectContextValidationError(errors or ["Project Context is invalid."])
     return snapshot
 
 
@@ -347,15 +354,7 @@ def attach_project_context_snapshot(
         validate_local_paths=validate_local_paths,
     )
     if snapshot is None and isinstance(metadata, Mapping) and isinstance(metadata.get("project_context_snapshot"), Mapping):
-        snapshot = dict(metadata["project_context_snapshot"])
-        if "status" not in snapshot:
-            status, errors = validate_project_context_snapshot(
-                snapshot,
-                validate_local_paths=validate_local_paths,
-            )
-            snapshot["status"] = status
-            if errors:
-                snapshot["validation_errors"] = errors
+        snapshot = _finalize_snapshot(dict(metadata["project_context_snapshot"]), validate_local_paths=validate_local_paths)
     if snapshot:
         payload["project_context_snapshot"] = snapshot
     return payload

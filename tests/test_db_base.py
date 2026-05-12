@@ -2,6 +2,7 @@
 from sqlalchemy import String, inspect
 from sqlalchemy.orm import Mapped, mapped_column
 from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin, OrgScopedMixin, ArchivableMixin
+from brain.platform.db.models.idea import Idea, IdeaStateLog
 
 
 class _FakeModel(TimestampMixin, ArchivableMixin, Base):
@@ -36,3 +37,24 @@ def test_repr():
 def test_repr_none_id():
     obj = _FakeModel(name="test")
     assert repr(obj) == "<_FakeModel None>"
+
+
+def test_idea_status_lifecycle_timestamps_are_timezone_aware():
+    columns = {
+        column.name: column.type
+        for column in inspect(Idea).columns
+        if column.name in {"created_at", "updated_at", "archived_at", "encoded_at", "read_at"}
+    }
+
+    assert set(columns) == {
+        "created_at",
+        "updated_at",
+        "archived_at",
+        "encoded_at",
+        "read_at",
+    }
+    assert all(
+        getattr(column_type, "timezone", False)
+        for column_type in columns.values()
+    )
+    assert getattr(inspect(IdeaStateLog).columns.changed_at.type, "timezone", False)

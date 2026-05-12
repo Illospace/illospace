@@ -4,10 +4,9 @@ Illo Brain — LLM-Powered Nightly Reflection
 
 Spawns a provider-neutral LLM call with deep thinking to analyze:
 1. Why did skills fail? How should procedures be refined?
-2. What emotional patterns are emerging? What's causing frustration?
-3. Are there cross-skill transfer opportunities?
-4. What new skills should emerge from recurring patterns?
-5. What system improvements should be proposed?
+2. Are there cross-skill transfer opportunities?
+3. What new skills should emerge from recurring patterns?
+4. What system improvements should be proposed?
 
 Uses the configured runtime provider via brain.systems.runs.direct_agent.call_llm.
 Outputs: skill refinements, new memories, journal entry, system proposals.
@@ -27,7 +26,6 @@ from sqlalchemy import text
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))  # repo root
 import brain.kernel.config as config
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.agency import mirror_reflection_result
 
 WORKSPACE = str(config.WORKSPACE_ROOT)
 PRIVATE_HOME = str(config.PRIVATE_HOME)
@@ -41,28 +39,7 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
     with UnitOfWork() as uow:
         context = {}
 
-        # 1. Today's emotional snapshots
-        result = uow.session.execute(text("""
-            SELECT timestamp, valence, arousal, label, trigger_summary, attributed_to
-            FROM emotional_snapshots
-            WHERE session_date = :target_date
-            ORDER BY timestamp
-        """), {"target_date": target_date})
-        context["emotional_snapshots"] = [dict(r) for r in result.mappings().all()]
-
-        # 2. Emotional trend (7 days)
-        result = uow.session.execute(text("""
-            SELECT session_date, AVG(valence)::numeric(3,2) as avg_valence,
-                   AVG(arousal)::numeric(3,2) as avg_arousal,
-                   COUNT(*) as count,
-                   array_agg(DISTINCT label) as emotions
-            FROM emotional_snapshots
-            WHERE session_date >= :target_date - INTERVAL '7 days'
-            GROUP BY session_date ORDER BY session_date
-        """), {"target_date": target_date})
-        context["emotional_trend_7d"] = [dict(r) for r in result.mappings().all()]
-
-        # 3. Today's skill executions
+        # 1. Today's skill executions
         result = uow.session.execute(text("""
             SELECT se.*, s.name as skill_name, s.procedure, s.pitfalls, s.version
             FROM skill_executions se
@@ -72,7 +49,7 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
         """), {"target_date": target_date})
         context["skill_executions"] = [dict(r) for r in result.mappings().all()]
 
-        # 4. All skills with current state
+        # 2. All skills with current state
         result = uow.session.execute(text("""
             SELECT id, name, description, procedure, version, maturity, confidence,
                    use_count, success_count, failure_count, pitfalls, refinements
@@ -96,18 +73,35 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
             print(f"[reflect] Warning: retrieval feedback analysis failed: {e}")
             context["consistently_missed_memories"] = []
 
-        # 6. Today's tasks
+        # 6. Today's task-like prompts, now sourced from agent_runs.input_message.
         result = uow.session.execute(text("""
-            SELECT description, task_type, strategy_chosen, outcome, duration_sec,
-                   operator_satisfaction, guardrails, feedback_notes
-            FROM tasks WHERE created_at::date = :target_date
+            SELECT input_message AS description,
+                   COALESCE(metadata->>'task_type', recipe) AS task_type,
+                   COALESCE(metadata->>'strategy_chosen', recipe) AS strategy_chosen,
+                   COALESCE(metadata->>'outcome', status) AS outcome,
+                   EXTRACT(EPOCH FROM (
+                       COALESCE(completed_at, failed_at, canceled_at, updated_at, created_at) - created_at
+                   ))::float AS duration_sec,
+                   NULL::float AS operator_satisfaction,
+                   CASE
+                       WHEN jsonb_typeof(metadata->'guardrails') = 'array'
+                       THEN metadata->'guardrails'
+                       WHEN jsonb_typeof(metadata->'guardrails_injected') = 'array'
+                       THEN metadata->'guardrails_injected'
+                       ELSE '[]'::jsonb
+                   END AS guardrails,
+                   COALESCE(metadata->>'feedback_notes', metadata->>'outcome_notes') AS feedback_notes
+            FROM agent_runs
+            WHERE created_at::date = :target_date
+              AND input_message IS NOT NULL
+            ORDER BY created_at
         """), {"target_date": target_date})
         context["tasks"] = [dict(r) for r in result.mappings().all()]
 
-        # 7. New memories created today (scoped by org_id if provided)
+        # 5. New memories created today (scoped by org_id if provided)
         params = {"target_date": target_date, **_mem_org_params}
         result = uow.session.execute(text(f"""
-            SELECT id, content, memory_type, salience, emotion_label, source
+            SELECT id, content, memory_type, salience, source
             FROM memories
             WHERE created_at::date = :target_date AND NOT archived {_mem_org_filter}
             ORDER BY salience DESC
@@ -122,18 +116,19 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
         """), {"target_date": target_date})
         context["previous_metrics"] = [dict(r) for r in result.mappings().all()]
 
-        # 9. Cortex run activity (ideas processed via the web UI)
+        # 9. Agent run activity.
         try:
             result = uow.session.execute(text("""
-                SELECT id, idea_id, event, status, skill_used, model_used,
-                       tokens_input, tokens_output, tokens_total,
-                       cache_read, cache_write, estimated_cost,
-                       system_prompt_chars, error_classification,
-                       workers_used, created_at, completed_at,
-                       target_status, target_validation_error,
-                       budget_reason, postmortem,
-                       LEFT(message, 500) as message_preview,
-                       LEFT(error, 2000) as error
+                SELECT id, trace_id, thread_id, parent_run_id, root_run_id,
+                       profile, recipe, status,
+                       COALESCE(metadata->>'skill_used', metadata->>'skill_name') AS skill_used,
+                       model_policy->>'model' AS model_used,
+                       created_at, started_at, completed_at, failed_at, canceled_at,
+                       target_ref, workspace_ref, model_policy,
+                       metadata->'error_classification' AS error_classification,
+                       metadata->'postmortem' AS postmortem,
+                       LEFT(input_message, 500) as message_preview,
+                       LEFT(COALESCE(metadata->>'error', metadata->>'outcome_notes'), 2000) as error
                 FROM agent_runs
                 WHERE created_at::date = :target_date
                 ORDER BY created_at
@@ -182,12 +177,6 @@ Today is {target_date.isoformat()}. You are analyzing today's data to improve th
 
 ## Your Data
 
-### Emotional Snapshots (today)
-{json.dumps(context['emotional_snapshots'], indent=2, default=str)}
-
-### Emotional Trend (7 days)
-{json.dumps(context['emotional_trend_7d'], indent=2, default=str)}
-
 ### Skill Executions (today)
 {json.dumps(context['skill_executions'], indent=2, default=str)}
 
@@ -222,33 +211,27 @@ Today is {target_date.isoformat()}. You are analyzing today's data to improve th
 
 Think deeply about each of these. Use extended reasoning.
 
-### 1. Emotional Analysis
-- What was the operator's emotional trajectory today? What triggered positive/negative moments?
-- Are there recurring frustration patterns? What specifically causes them?
-- Is the overall emotional trend improving or declining vs. the 7-day history?
-- What should Illo do differently to generate more positive interactions?
-
-### 2. Skill Performance Analysis
+### 1. Skill Performance Analysis
 - For each skill execution today: did it succeed? Why or why not?
 - For failures: what was the root cause? What step in the procedure failed?
 - What specific changes to skill procedures would prevent these failures?
 - Are any skills mature enough to level up? Are any declining?
 
-### 3. Retrieval Quality Analysis
+### 2. Retrieval Quality Analysis
 - Were the right memories surfaced when needed?
 - Any cases where important context was missed?
-- Should retrieval weights be adjusted? (Current: semantic 0.35, salience 0.25, recency 0.15, frequency 0.10, emotion 0.15)
+- Should retrieval weights be adjusted? (Current: semantic, salience, recency, and frequency signals)
 
-### 4. Skill Emergence Detection
+### 3. Skill Emergence Detection
 - Were there any tasks or actions today that don't fit existing skills?
 - Should a new skill be created? If so, define its initial procedure.
 - Should any existing skills be split, merged, or have dependencies added?
 
-### 5. Cross-Skill Insights
+### 4. Cross-Skill Insights
 - Did learning in one area transfer to another?
 - Are there abstract patterns that apply across multiple skills?
 
-### 6. Run Telemetry Analysis
+### 5. Run Telemetry Analysis
 - Review the Cortex Failures by Category section above.
 - For each failure category: is this a systemic issue or a one-off?
 - For context_overflow: what caused the context to grow? Should session trimming be more aggressive?
@@ -257,7 +240,7 @@ Think deeply about each of these. Use extended reasoning.
 - Review post-mortem lessons (in the run data) — are they actionable?
 - Are any skills consistently failing? What's the failure-to-success ratio per skill?
 
-### 7. System Improvement Proposals
+### 6. System Improvement Proposals
 - What should change about the memory system, skill system, or nightly process?
 - Are there tools or capabilities Illo should ask the operator for?
 - What experiments should we try?
@@ -268,14 +251,6 @@ Respond with a JSON object (and nothing else) with this structure:
 ```json
 {{
     "date": "{target_date.isoformat()}",
-    "emotional_analysis": {{
-        "summary": "...",
-        "operator_valence_today": 0.0,
-        "trend_vs_7d": "improving|declining|stable",
-        "frustration_triggers": ["..."],
-        "joy_triggers": ["..."],
-        "recommendation": "..."
-    }},
     "skill_refinements": [
         {{
             "skill_name": "...",
@@ -308,10 +283,6 @@ Respond with a JSON object (and nothing else) with this structure:
     ],
     "journal_entry": "A 2-3 paragraph narrative summary of today's analysis for the evolution journal. Include specific metrics, what improved, what declined, and what actions were taken.",
     "daily_metrics_update": {{
-        "avg_valence": 0.0,
-        "valence_trend": 0.0,
-        "frustration_count": 0,
-        "joy_count": 0,
         "competence_architecture": 0.0,
         "competence_debugging": 0.0,
         "competence_frontend": 0.0,
@@ -427,22 +398,16 @@ def apply_reflection(reflection: dict, target_date: date, context: dict | None =
         metrics = reflection.get("daily_metrics_update", {})
         if metrics:
             uow.session.execute(text("""
-                INSERT INTO daily_metrics (metric_date, avg_valence, valence_trend,
-                    frustration_count, joy_count,
+                INSERT INTO daily_metrics (metric_date,
                     competence_architecture, competence_debugging, competence_frontend,
                     competence_provider_apis, competence_communication, competence_proactivity,
                     reflection_notes, behavioral_adjustments,
-                    agent_runses, skill_executions_count, emotional_snapshots_count)
-                VALUES (:metric_date, :avg_valence, :valence_trend, :frustration_count,
-                    :joy_count, :competence_architecture, :competence_debugging,
+                    agent_runses, skill_executions_count)
+                VALUES (:metric_date, :competence_architecture, :competence_debugging,
                     :competence_frontend, :competence_provider_apis, :competence_communication,
                     :competence_proactivity, :reflection_notes, :behavioral_adjustments,
-                    :agent_runses, :skill_executions_count, :emotional_snapshots_count)
+                    :agent_runses, :skill_executions_count)
                 ON CONFLICT (metric_date) DO UPDATE SET
-                    avg_valence = EXCLUDED.avg_valence,
-                    valence_trend = EXCLUDED.valence_trend,
-                    frustration_count = EXCLUDED.frustration_count,
-                    joy_count = EXCLUDED.joy_count,
                     competence_architecture = EXCLUDED.competence_architecture,
                     competence_debugging = EXCLUDED.competence_debugging,
                     competence_frontend = EXCLUDED.competence_frontend,
@@ -452,14 +417,9 @@ def apply_reflection(reflection: dict, target_date: date, context: dict | None =
                     reflection_notes = EXCLUDED.reflection_notes,
                     behavioral_adjustments = EXCLUDED.behavioral_adjustments,
                     agent_runses = EXCLUDED.agent_runses,
-                    skill_executions_count = EXCLUDED.skill_executions_count,
-                    emotional_snapshots_count = EXCLUDED.emotional_snapshots_count
+                    skill_executions_count = EXCLUDED.skill_executions_count
             """), {
                 "metric_date": target_date,
-                "avg_valence": metrics.get("avg_valence"),
-                "valence_trend": metrics.get("valence_trend"),
-                "frustration_count": metrics.get("frustration_count", 0),
-                "joy_count": metrics.get("joy_count", 0),
                 "competence_architecture": metrics.get("competence_architecture"),
                 "competence_debugging": metrics.get("competence_debugging"),
                 "competence_frontend": metrics.get("competence_frontend"),
@@ -470,7 +430,6 @@ def apply_reflection(reflection: dict, target_date: date, context: dict | None =
                 "behavioral_adjustments": metrics.get("behavioral_adjustments"),
                 "agent_runses": len(context.get("agent_runses", [])),
                 "skill_executions_count": len(context.get("skill_executions", [])),
-                "emotional_snapshots_count": len(context.get("emotional_snapshots", [])),
             })
             applied.append("Updated daily metrics")
 
@@ -514,7 +473,7 @@ def run_reflection(target_date: date):
     context = gather_context(target_date)
 
     # Check if there's anything to reflect on
-    total_data = (len(context["emotional_snapshots"]) + len(context["skill_executions"]) +
+    total_data = (len(context["skill_executions"]) +
                   len(context["tasks"]) + len(context["new_memories"]) +
                   len(context["agent_runses"]))
 
@@ -522,8 +481,7 @@ def run_reflection(target_date: date):
         print("[reflect] No data to reflect on today. Skipping.")
         return
 
-    print(f"[reflect] Data: {len(context['emotional_snapshots'])} emotions, "
-          f"{len(context['skill_executions'])} skill execs, "
+    print(f"[reflect] Data: {len(context['skill_executions'])} skill execs, "
           f"{len(context['tasks'])} tasks, "
           f"{len(context['agent_runses'])} cortex runs, "
           f"{len(context['new_memories'])} new memories")
@@ -580,20 +538,11 @@ def run_reflection(target_date: date):
         print(f"[reflect] Meta-skill analysis failed: {e}")
         meta_summary = None
 
-    # 6. Mirror the reflection into bounded agency candidates.
-    print("[reflect] Recording recommendation-only agency candidates...")
-    agency_results = mirror_reflection_result(
-        reflection=reflection,
-        context=context,
-        target_date=datetime.combine(target_date, datetime.min.time()),
-    )
-    print(f"[reflect] Mirrored {len(agency_results)} candidate(s) into agency")
-
-    # 7. Save full reflection for review.
+    # 6. Save full reflection for review.
     with open(output_path, 'w') as f:
         json.dump(reflection, f, indent=2, default=str)
 
-    print("\n[reflect] Complete. Reflection recorded as recommendations only.")
+    print("\n[reflect] Complete.")
     print(f"[reflect] Full reflection saved to {output_path}")
 
     # Memory quality sweep

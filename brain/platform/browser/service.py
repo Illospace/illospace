@@ -15,8 +15,9 @@ import sys
 import tempfile
 from pathlib import Path
 from dataclasses import dataclass
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeVar
 from urllib import request as urlrequest
 from urllib.parse import unquote, urlparse
 
@@ -27,10 +28,11 @@ from brain.systems.cortex.resources.telemetry import build_browser_resource_summ
 from brain.systems.cortex.upload_preview import public_static_upload_url, static_upload_url_for
 from brain.platform.db.models.browser import BrowserSession
 from brain.platform.db.models.idea import Idea, VisualBlock
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, use_sync_session
 from brain.app.web.research import _assert_safe_url
 
 logger = logging.getLogger(__name__)
+ReturnT = TypeVar("ReturnT")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BRAIN_ROOT = PROJECT_ROOT / "brain"
@@ -44,6 +46,21 @@ HARNESS_RESULT_MARKER = "__ILLO_BROWSER_HARNESS_RESULT__"
 
 def _utcnow() -> datetime:
     return _shared_utcnow()
+
+
+async def _run_browser_db(fn: Callable[[], ReturnT]) -> ReturnT:
+    """Run browser service sync DB helpers through the async UnitOfWork bridge."""
+
+    uow = UnitOfWork()
+    if not hasattr(uow, "__aenter__"):
+        return fn()
+
+    async with uow:
+        def _invoke(sync_session):
+            with use_sync_session(sync_session):
+                return fn()
+
+        return await uow.session.run_sync(_invoke)
 
 
 def _normalize_url(url: str) -> str:
@@ -756,18 +773,21 @@ result = page_info()
                 f"alt=\"{title or self.page_title or self.current_url or 'Browser snapshot'}\""
                 " />"
             )
-            with UnitOfWork() as uow:
-                block = VisualBlock(
-                    idea_id=self.idea_id,
-                    content_type="preview",
-                    title=title or self.page_title or "Browser snapshot",
-                    content=html,
-                    display_mode="canvas",
-                    run_id=self.run_id,
-                )
-                uow.session.add(block)
-                uow.session.flush()
-                block_id = block.id
+            def _persist_block() -> int:
+                with UnitOfWork() as uow:
+                    block = VisualBlock(
+                        idea_id=self.idea_id,
+                        content_type="preview",
+                        title=title or self.page_title or "Browser snapshot",
+                        content=html,
+                        display_mode="canvas",
+                        run_id=self.run_id,
+                    )
+                    uow.session.add(block)
+                    uow.session.flush()
+                    return block.id
+
+            block_id = await _run_browser_db(_persist_block)
             publish_safe("visual_reply", {
                 "idea_id": self.idea_id,
                 "block": {
@@ -1271,16 +1291,19 @@ print({json.dumps(marker)} + json.dumps(result))
         self._chrome_process = None
 
     async def _persist_state(self, **updates: Any) -> None:
-        with UnitOfWork() as uow:
-            record = uow.session.get(BrowserSession, self.session_id)
-            if not record:
-                return
-            for key, value in updates.items():
-                setattr(record, key, value)
-            # Keep runtime copy in sync for fields we expose frequently.
-            for key, value in updates.items():
-                if hasattr(self, key):
-                    setattr(self, key, value)
+        def _persist() -> None:
+            with UnitOfWork() as uow:
+                record = uow.session.get(BrowserSession, self.session_id)
+                if not record:
+                    return
+                for key, value in updates.items():
+                    setattr(record, key, value)
+                # Keep runtime copy in sync for fields we expose frequently.
+                for key, value in updates.items():
+                    if hasattr(self, key):
+                        setattr(self, key, value)
+
+        await _run_browser_db(_persist)
 
     async def _handle_runtime_error(self, message: str) -> None:
         self.last_error = message
@@ -1525,13 +1548,16 @@ class BrowserSessionService:
                 return
             except Exception as exc:
                 logger.debug("Failed to close recycled browser session %s: %s", session_id, exc)
-        with UnitOfWork() as uow:
-            record = uow.session.get(BrowserSession, session_id)
-            if record:
-                record.status = "closed"
-                record.active = False
-                record.closed_at = _utcnow()
-                record.last_error = reason
+        def _retire() -> None:
+            with UnitOfWork() as uow:
+                record = uow.session.get(BrowserSession, session_id)
+                if record:
+                    record.status = "closed"
+                    record.active = False
+                    record.closed_at = _utcnow()
+                    record.last_error = reason
+
+        await _run_browser_db(_retire)
 
     def get_idea_org_id(self, idea_id: str) -> str | None:
         try:
@@ -1545,6 +1571,9 @@ class BrowserSessionService:
             logger.debug("Failed to resolve browser session idea org idea=%s: %s", idea_id, exc)
             return None
         return str(org_id) if org_id else None
+
+    async def get_idea_org_id_async(self, idea_id: str) -> str | None:
+        return await _run_browser_db(lambda: self.get_idea_org_id(idea_id))
 
     def get_session_record_for_org(
         self,
@@ -1578,6 +1607,16 @@ class BrowserSessionService:
             setattr(record, "_idea_org_id", str(idea_org_id) if idea_org_id else None)
             return record
 
+    async def get_session_record_for_org_async(
+        self,
+        session_id: str,
+        *,
+        org_id: str | None,
+    ) -> BrowserSession | None:
+        return await _run_browser_db(
+            lambda: self.get_session_record_for_org(session_id, org_id=org_id)
+        )
+
     async def create_or_get_session(
         self,
         *,
@@ -1592,8 +1631,8 @@ class BrowserSessionService:
         allow_file_uploads: bool = True,
     ) -> BrowserSessionRuntime:
         async with self._runtime_lock:
-            record = self._load_active_session(idea_id)
-            org_id = self.get_idea_org_id(idea_id)
+            record = await self.get_active_session_record_async(idea_id)
+            org_id = await self.get_idea_org_id_async(idea_id)
             if record is not None:
                 setattr(record, "_idea_org_id", org_id)
             created_session = False
@@ -1620,23 +1659,27 @@ class BrowserSessionService:
             )
             if record is None:
                 created_session = True
-                with UnitOfWork() as uow:
-                    record = BrowserSession(
-                        idea_id=idea_id,
-                        user_id=user_id,
-                        run_id=run_id,
-                        current_url=url,
-                        viewport_width=viewport_width,
-                        viewport_height=viewport_height,
-                        storage_mode=storage_mode,
-                        allow_downloads=allow_downloads,
-                        allow_file_uploads=allow_file_uploads,
-                        status="starting",
-                    )
-                    uow.session.add(record)
-                    uow.session.flush()
-                    uow.session.refresh(record)
-                    setattr(record, "_idea_org_id", org_id)
+                def _create_record() -> BrowserSession:
+                    with UnitOfWork() as uow:
+                        record = BrowserSession(
+                            idea_id=idea_id,
+                            user_id=user_id,
+                            run_id=run_id,
+                            current_url=url,
+                            viewport_width=viewport_width,
+                            viewport_height=viewport_height,
+                            storage_mode=storage_mode,
+                            allow_downloads=allow_downloads,
+                            allow_file_uploads=allow_file_uploads,
+                            status="starting",
+                        )
+                        uow.session.add(record)
+                        uow.session.flush()
+                        uow.session.refresh(record)
+                        setattr(record, "_idea_org_id", org_id)
+                        return record
+
+                record = await _run_browser_db(_create_record)
                 publish_safe("browser_session_state", {
                     "session_id": str(record.id),
                     "idea_id": idea_id,
@@ -1703,17 +1746,26 @@ class BrowserSessionService:
             runtime = None
         if runtime is not None:
             return runtime
-        with UnitOfWork() as uow:
-            record = uow.session.get(BrowserSession, session_id)
+        def _load_record() -> BrowserSession | None:
+            with UnitOfWork() as uow:
+                record = uow.session.get(BrowserSession, session_id)
+                if record is not None:
+                    org_id = self.get_idea_org_id(str(record.idea_id))
+                    setattr(record, "_idea_org_id", org_id)
+                return record
+
+        record = await _run_browser_db(_load_record)
         if not record or not record.active:
             raise KeyError(f"Unknown or inactive browser session: {session_id}")
-        setattr(record, "_idea_org_id", self.get_idea_org_id(str(record.idea_id)))
         runtime = BrowserSessionRuntime(self, record)
         self._runtimes[session_id] = runtime
         return runtime
 
     def get_active_session_record(self, idea_id: str) -> BrowserSession | None:
         return self._load_active_session(idea_id)
+
+    async def get_active_session_record_async(self, idea_id: str) -> BrowserSession | None:
+        return await _run_browser_db(lambda: self.get_active_session_record(idea_id))
 
     async def subscribe(self, session_id: str, user_id: str | None) -> dict[str, Any]:
         runtime = await self.get_or_restore_runtime(session_id)

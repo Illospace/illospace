@@ -8,12 +8,13 @@ from typing import Any
 
 from fastapi import Depends, HTTPException
 from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.routers.cortex._router import router
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, use_sync_session
 from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_model_tier
 
 logger = logging.getLogger(__name__)
@@ -22,10 +23,10 @@ logger = logging.getLogger(__name__)
 # ── Analytics ──────────────────────────────────────────────────
 
 @router.get("/analytics")
-def analytics(user: dict[str, Any] = Depends(get_current_user)):
-    with UnitOfWork() as uow:
+async def analytics(user: dict[str, Any] = Depends(get_current_user)):
+    async with UnitOfWork() as uow:
         # Complex aggregate — use text() via UnitOfWork session
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT
                 COUNT(*) FILTER (WHERE archived_at IS NULL) AS total_ideas,
                 COUNT(*) FILTER (WHERE archived_at IS NULL AND status = 'working') AS working,
@@ -38,7 +39,7 @@ def analytics(user: dict[str, Any] = Depends(get_current_user)):
         """))
         row = result.fetchone()
 
-        avg_result = uow.session.execute(text("""
+        avg_result = await uow.session.execute(text("""
             SELECT AVG(EXTRACT(EPOCH FROM (t.created_at - i.created_at)) * 1000)::int AS avg_response_time_ms
             FROM idea_threads t
             JOIN ideas i ON t.idea_id = i.id
@@ -57,9 +58,9 @@ def analytics(user: dict[str, Any] = Depends(get_current_user)):
 
 
 @router.get("/ideas/{idea_id}/activity-timeline")
-def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
-    with UnitOfWork() as uow:
-        idea = uow.session.get(Idea, idea_id)
+async def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    async with UnitOfWork() as uow:
+        idea = await uow.session.get(Idea, idea_id)
         if not idea:
             raise HTTPException(status_code=404, detail=f"Idea {idea_id} not found")
 
@@ -75,7 +76,8 @@ def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_current_u
             .where(IdeaStateLog.idea_id == idea_id)
             .order_by(IdeaStateLog.changed_at)
         )
-        for row in uow.session.scalars(stmt).all():
+        state_rows = await uow.session.scalars(stmt)
+        for row in state_rows.all():
             ts = row.changed_at
             events.append({
                 "type": "state_change",
@@ -90,7 +92,8 @@ def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_current_u
             .order_by(IdeaThread.created_at)
         )
         role_map = {"user": "You replied", "illo": "Illo replied", "assistant": "Assistant replied"}
-        for row in uow.session.scalars(stmt).all():
+        thread_rows = await uow.session.scalars(stmt)
+        for row in thread_rows.all():
             prefix = role_map.get(row.role, f"{row.role} replied")
             snippet = (row.content or "")[:80]
             if len(row.content or "") > 80:
@@ -132,7 +135,8 @@ def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_current_u
             )
             .order_by(AgentRunEventRow.created_at)
         )
-        for row in uow.session.execute(stmt).all():
+        tool_rows = await uow.session.execute(stmt)
+        for row in tool_rows.all():
             ts = row.created_at
             payload = row.payload or {}
             try:
@@ -157,10 +161,10 @@ def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_current_u
 # ── Suggested / Slash commands ─────────────────────────────────
 
 @router.get("/suggested")
-def suggested_idea(user: dict[str, Any] = Depends(get_current_user)):
-    with UnitOfWork() as uow:
+async def suggested_idea(user: dict[str, Any] = Depends(get_current_user)):
+    async with UnitOfWork() as uow:
         # Complex query with CASE ordering and subquery — use text() via UnitOfWork
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT id, title, display_title, status, updated_at,
                    EXTRACT(EPOCH FROM (NOW() - updated_at)) / 3600.0 as hours_waiting,
                    (SELECT COUNT(*) FROM idea_threads WHERE idea_id = ideas.id) as thread_count
@@ -189,12 +193,16 @@ def suggested_idea(user: dict[str, Any] = Depends(get_current_user)):
 
 
 @router.get("/slash-commands")
-def api_slash_commands(user: dict[str, Any] = Depends(get_current_user)):
+async def api_slash_commands(user: dict[str, Any] = Depends(get_current_user)):
     from brain.systems.skills.builtin import ensure_builtin_skills_cached
 
-    ensure_builtin_skills_cached()
-    with UnitOfWork() as uow:
-        skills = uow.skills.list_command_summaries()
+    async with UnitOfWork() as uow:
+        def _ensure(sync_db: Session) -> None:
+            with use_sync_session(sync_db):
+                ensure_builtin_skills_cached()
+
+        await uow.session.run_sync(_ensure)
+        skills = await uow.skills.list_command_summaries()
     result = []
     for s in skills:
         use_count = int(getattr(s, "use_count", 0) or 0)

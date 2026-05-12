@@ -1,4 +1,4 @@
-"""Team router — org members and user profile."""
+"""Team router - org members and user profile."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -7,9 +7,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
+from brain.app.api.db_utils import run_db
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.schemas.team import (
     CortexColorRead,
@@ -78,8 +80,8 @@ def _profile_value_taken(
 
 
 def list_members_payload(
-    db: Session = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
+    db: Session,
+    user: dict[str, Any],
 ) -> list[TeamMemberRead]:
     org_id = _org_id_for_user(db, user)
     if not org_id:
@@ -89,31 +91,31 @@ def list_members_payload(
 
 
 @router.get("/team/members", response_model=list[TeamMemberRead])
-def list_members(
-    db: Session = Depends(get_db),
+async def list_members(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return list_members_payload(db=db, user=user)
+    return await run_db(db, lambda sync_db: list_members_payload(db=sync_db, user=user))
 
 
 @router.get("/team/colors", response_model=list[CortexColorRead])
-def list_cortex_colors(
-    db: Session = Depends(get_db),
+async def list_cortex_colors(
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    """Lightweight endpoint returning team members with their cortex colors.
+    """Lightweight endpoint returning team members with their cortex colors."""
 
-    Used by the frontend to position and color user suns in the solar system view.
-    """
-    org_id = _org_id_for_user(db, user)
-    if not org_id:
-        return []
-    repo = TeamRepository(db)
-    members = repo.list_by_org(org_id)
-    return [
-        CortexColorRead(id=str(m.id), name=m.name, cortex_color=m.color)
-        for m in members
-    ]
+    def _list(sync_db: Session):
+        org_id = _org_id_for_user(sync_db, user)
+        if not org_id:
+            return []
+        members = TeamRepository(sync_db).list_by_org(org_id)
+        return [
+            CortexColorRead(id=str(member.id), name=member.name, cortex_color=member.color)
+            for member in members
+        ]
+
+    return await run_db(db, _list)
 
 
 def _empty_token_usage(user_id: str | None = None) -> dict[str, Any]:
@@ -168,12 +170,12 @@ def _add_token_usage(target: dict[str, Any], source: dict[str, Any]) -> None:
         target["last_used_at"] = last_used_at
 
 
-@router.get("/team/token-analytics", response_model=TeamTokenAnalyticsRead)
-def get_team_token_analytics(
-    days: int = Query(30, ge=1, le=365),
-    db: Session = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
-):
+def token_analytics_payload(
+    *,
+    days: int,
+    db: Session,
+    user: dict[str, Any],
+) -> dict[str, Any]:
     """Token usage by workspace member, derived from run-linked API-call telemetry."""
     generated_at = datetime.now(timezone.utc)
     org_id = _org_id_for_user(db, user)
@@ -219,11 +221,31 @@ def get_team_token_analytics(
     }
 
 
+@router.get("/team/token-analytics", response_model=TeamTokenAnalyticsRead)
+async def get_team_token_analytics(
+    days: int = Query(30, ge=1, le=365),
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    return await run_db(
+        db,
+        lambda sync_db: token_analytics_payload(days=days, db=sync_db, user=user),
+    )
+
+
 @router.patch("/users/me", response_model=dict)
+async def update_profile_route(
+    body: UserProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    return await run_db(db, lambda sync_db: update_profile(body=body, db=sync_db, user=user))
+
+
 def update_profile(
     body: UserProfileUpdate,
-    db: Session = Depends(get_db),
-    user: dict[str, Any] = Depends(get_current_user),
+    db: Session,
+    user: dict[str, Any],
 ):
     repo = TeamRepository(db)
     u = repo.get(user["id"])

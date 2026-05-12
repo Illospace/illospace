@@ -146,7 +146,6 @@ BRAIN_TOOLS = [
                 "content": {"type": "string", "description": "Memory content (min 20 chars)"},
                 "type": {"type": "string", "enum": ["lesson", "pattern", "fact", "episode"], "default": "episode"},
                 "salience": {"type": "number", "description": "Importance 1-10 (default 5)", "default": 5.0},
-                "emotion": {"type": "string", "description": "Emotion label (default neutral)", "default": "neutral"},
             },
             "required": ["content"],
         },
@@ -174,8 +173,11 @@ BRAIN_TOOLS = [
         "description": (
             "Open a guided Vault form in the current Cortex thread for a user-supplied secret. "
             "Use before asking the user to paste an API key in chat, when a task needs a missing credential "
-            "or a newly created skill/API integration needs a named key. This tool never reads or stores the "
-            "secret value itself; the user enters the value into Vault UI."
+            "or a newly created skill/API integration needs a named key. Do not use this before producing "
+            "the main requested deliverable when the credential is only needed for a deferred connector or "
+            "future sync; build the app or artifact first, declare the deferred action, and mention setup as "
+            "a follow-up. This tool never reads or stores the secret value itself; the user enters the value "
+            "into Vault UI."
         ),
         "input_schema": {
             "type": "object",
@@ -471,6 +473,8 @@ BRAIN_TOOLS = [
         "description": (
             "Read generated workspace apps/dashboards and optional app-local state. Use this for questions about "
             "what apps exist, what dashboards are available, or what UI state an app currently stores. "
+            "For build/create requests, leave include_archived=false unless the user explicitly asks to inspect "
+            "archived apps; archived apps should not be reused or restored by default. "
             "Use manage_workspace_app only when creating, updating, archiving, restoring, or changing app state."
         ),
         "input_schema": {
@@ -482,7 +486,11 @@ BRAIN_TOOLS = [
                 "start_at": {"type": "string", "description": "ISO timestamp for custom lower bound."},
                 "end_at": {"type": "string", "description": "ISO timestamp for custom upper bound."},
                 "limit": {"type": "integer", "description": "Max records per source (default 20)", "default": 20},
-                "include_archived": {"type": "boolean", "default": False},
+                "include_archived": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include archived apps only when the user explicitly asks about archived/restorable apps.",
+                },
                 "include_state": {"type": "boolean", "description": "Include app-local state rows.", "default": True},
             },
         },
@@ -754,7 +762,12 @@ CORTEX_IDEA_TOOLS = [
                         "done",
                         "archived",
                     ],
-                    "description": "Next status for create, update, or set_status.",
+                    "description": (
+                        "Next status for create, update, or set_status. Use needs_input only when the "
+                        "requested deliverable cannot be produced without user input; missing credentials "
+                        "for deferred integrations are a follow-up limitation, not a reason to block an "
+                        "otherwise buildable app."
+                    ),
                 },
                 "salience_score": {"type": "number", "description": "Optional salience score."},
                 "position_x": {"type": "number", "description": "Optional Cortex canvas x position."},
@@ -894,11 +907,13 @@ WORKSPACE_APP_TOOLS = [
         "description": (
             "Create, list, update, archive, and persist state for generated workspace apps. "
             "This is the action tool to create or change a persistent programmable UI surface or dashboard "
-            "inside Cortex. Use renderer_key='generated-ui-app' and source_kind='json' for simple "
-            "host-rendered structured UIs. Use renderer_key='sandboxed-html-app' and source_kind='html' "
-            "as the first-class full-code runtime for custom layouts, interactions, charts, drag/drop, "
-            "canvas, or app logic that should still follow Illospace App Kit tokens/classes. Do not infer "
-            "that a workflow needs a use-case-specific template or built-in view type. Recordful apps must use manage_domain first; app-local "
+            "inside Cortex. Use renderer_key='generated-ui-app' and source_kind='json' for common "
+            "host-rendered structured UIs, including tables, lists, cards, metrics, charts, forms, details, "
+            "board/kanban views, and manifest action buttons. Use renderer_key='sandboxed-html-app' and source_kind='html' "
+            "only for bespoke interactions or custom blocks that cannot be represented by structured views. "
+            "Use action='restore' only when the user explicitly asks to restore an archived app; for build/create "
+            "requests, create a new app or update an active app instead of resurrecting archived drafts. "
+            "Recordful apps must use manage_domain first; app-local "
             "state is only for UI preferences, filters, drafts, and ephemeral interface state. "
             "For awareness questions about what apps exist or current app state, prefer read_workspace_apps first. "
             "New generated apps must pass the workspace app contract before they are persisted. Use action='help' "
@@ -949,8 +964,10 @@ WORKSPACE_APP_TOOLS = [
                     "type": "string",
                     "description": (
                         "Generated app source. For generated-ui-app, provide a JSON string with "
-                        "schema_version=1, title, optional description, and views. For sandboxed html, "
-                        "provide a responsive HTML/CSS/JS body or document. Canonical calls pass "
+                        "schema_version=1, title, optional description, optional top-level actions "
+                        "referencing manifest.actions, and views. For sandboxed html, "
+                        "provide a responsive HTML/CSS/JS body or document only when structured views are insufficient. "
+                        "Canonical calls pass "
                         "manifest, visual_spec, and metadata as separate tool args; the app compiler "
                         "also normalizes wrapped generated-app envelopes when needed."
                     ),
@@ -998,10 +1015,6 @@ WORKSPACE_APP_TOOLS = [
                     ),
                 },
                 "metadata": {"type": "object", "description": "App metadata for provenance and runtime notes."},
-                "anchor_user_id": {
-                    "type": "string",
-                    "description": "Optional user id whose astre should anchor the app object.",
-                },
                 "initial_state": {"type": "object", "description": "Initial app-local state for create."},
                 "state_key": {
                     "type": "string",
@@ -1012,6 +1025,14 @@ WORKSPACE_APP_TOOLS = [
                 "data_patch": {"type": "object", "description": "Shallow state patch for update_state."},
                 "include_archived": {"type": "boolean", "default": False},
                 "include_prototypes": {"type": "boolean", "default": False},
+                "confirm_restore_archived": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Required for action='restore'. Set true only when the user explicitly asked "
+                        "to restore or reopen an archived app."
+                    ),
+                },
             },
             "required": ["action"],
         },

@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.app.mentions import (
@@ -15,6 +16,7 @@ from brain.app.mentions import (
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
 from brain.app.api.deps import get_db
+from brain.app.api.db_utils import run_db
 from brain.app.api.routers.cortex._helpers import (
     _caller_is_service_principal,
     _require_idea_for_user,
@@ -41,6 +43,13 @@ from brain.platform.db.repositories.ideas import (
 )
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
+
+
+async def _run_db(db: AsyncSession, fn, /, *args, **kwargs):
+    def _sync(sync_db: Session):
+        return fn(sync_db, *args, **kwargs)
+
+    return await run_db(db, _sync)
 
 
 def _last_human_thread_author(idea_id: str, db: Session):
@@ -353,9 +362,10 @@ def _apply_orbit_anchor(
 
 def list_ideas_payload(
     status: str | None = None,
-    db: Session = Depends(get_db),
+    db: Session | None = None,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> list[IdeaRead]:
+    assert db is not None, "list_ideas_payload requires an explicit sync session"
     repo = IdeaRepository(db)
     if _caller_is_service_principal(user):
         ideas = repo.list_by_status(status) if status else repo.list_active()
@@ -367,82 +377,99 @@ def list_ideas_payload(
 
 
 @router.get("/ideas", response_model=list[IdeaRead])
-def list_ideas(
+async def list_ideas(
     status: str | None = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return list_ideas_payload(status=status, db=db, user=user)
+    return await _run_db(
+        db,
+        lambda sync_db: list_ideas_payload(status=status, db=sync_db, user=user),
+    )
 
 
 @router.get("/ideas/archived", response_model=list[IdeaRead])
-def list_archived_ideas(
+async def list_archived_ideas(
     limit: int = 12,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    capped_limit = max(1, min(int(limit or 12), 50))
-    repo = IdeaRepository(db)
-    if _caller_is_service_principal(user):
-        ideas = repo.list_archived(limit=capped_limit)
-        return _ideas_read_with_author(list(ideas), db)
+    def _list(sync_db: Session) -> list[IdeaRead]:
+        capped_limit = max(1, min(int(limit or 12), 50))
+        repo = IdeaRepository(sync_db)
+        if _caller_is_service_principal(user):
+            ideas = repo.list_archived(limit=capped_limit)
+            return _ideas_read_with_author(list(ideas), sync_db)
 
-    org_id = require_org_context(user)
-    ideas = repo.list_archived_for_org(org_id, limit=capped_limit)
-    return _ideas_read_with_author(list(ideas), db)
+        org_id = require_org_context(user)
+        ideas = repo.list_archived_for_org(org_id, limit=capped_limit)
+        return _ideas_read_with_author(list(ideas), sync_db)
+
+    return await _run_db(db, _list)
 
 
 @router.post("/ideas", response_model=IdeaRead, status_code=201)
 async def create_idea(
     body: IdeaCreate,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    repo = IdeaRepository(db)
-    org_id = user.get("org_id") or None
-    if not _caller_is_service_principal(user):
-        org_id = require_org_context(user)
-    kwargs = dict(
-        title=body.title,
-        description=body.description,
-        status=body.status,
-        origin=body.origin,
-        origin_ref=body.origin_ref,
-        parent_id=body.parent_id,
-        user_id=user["id"],
-        org_id=org_id,
-    )
-    if body.salience_score is not None:
-        kwargs["salience_score"] = body.salience_score
-    if body.position_x is not None:
-        kwargs["position_x"] = body.position_x
-    if body.position_y is not None:
-        kwargs["position_y"] = body.position_y
-    idea = repo.create(**kwargs)
-    if body.orbit_anchor_type is not None or body.orbit_anchor_id is not None:
-        _apply_orbit_anchor(
-            idea,
-            anchor_type=body.orbit_anchor_type,
-            anchor_id=body.orbit_anchor_id,
-            db=db,
-            user=user,
+    def _create(sync_db: Session):
+        repo = IdeaRepository(sync_db)
+        org_id = user.get("org_id") or None
+        if not _caller_is_service_principal(user):
+            org_id = require_org_context(user)
+        kwargs = dict(
+            title=body.title,
+            description=body.description,
+            status=body.status,
+            origin=body.origin,
+            origin_ref=body.origin_ref,
+            parent_id=body.parent_id,
+            user_id=user["id"],
+            org_id=org_id,
         )
-    db.flush()
-    db.commit()
+        if body.salience_score is not None:
+            kwargs["salience_score"] = body.salience_score
+        if body.position_x is not None:
+            kwargs["position_x"] = body.position_x
+        if body.position_y is not None:
+            kwargs["position_y"] = body.position_y
+        idea = repo.create(**kwargs)
+        if body.orbit_anchor_type is not None or body.orbit_anchor_id is not None:
+            _apply_orbit_anchor(
+                idea,
+                anchor_type=body.orbit_anchor_type,
+                anchor_id=body.orbit_anchor_id,
+                db=sync_db,
+                user=user,
+            )
+        sync_db.flush()
+        read = _idea_read_with_author(idea, sync_db)
+        sync_db.commit()
+        return read, {
+            "idea_id": str(idea.id),
+            "title": idea.title,
+            "user_id": str(user.get("id")) if user.get("id") else None,
+            "org_id": str(org_id) if org_id else None,
+            "event_org_id": _product_event_org_id(idea, user),
+        }
+
+    created, event = await _run_db(db, _create)
     background_tasks.add_task(
         generate_and_store_idea_display_title,
-        idea_id=str(idea.id),
-        raw_title=idea.title,
-        user_id=str(user.get("id")) if user.get("id") else None,
-        org_id=str(org_id) if org_id else None,
+        idea_id=event["idea_id"],
+        raw_title=event["title"],
+        user_id=event["user_id"],
+        org_id=event["org_id"],
     )
     await ws_manager.broadcast_product_event(
         "idea_created",
-        {"idea_id": idea.id, "title": idea.title},
-        org_id=_product_event_org_id(idea, user),
+        {"idea_id": event["idea_id"], "title": event["title"]},
+        org_id=event["event_org_id"],
     )
-    return _idea_read_with_author(idea, db)
+    return created
 
 
 @router.put("/ideas/positions")
@@ -452,30 +479,40 @@ async def update_positions_batch(request: Request, user: dict[str, Any] = Depend
     positions = data.get("positions", [])
     if not positions:
         return {"ok": True, "updated": 0}
-    updated = 0
-    with UnitOfWork() as uow:
-        repo = IdeaRepository(uow.session)
+    async with UnitOfWork() as uow:
         org_id = None if _caller_is_service_principal(user) else require_org_context(user)
-        for p in positions:
-            idea_id = p.get("id")
-            if not idea_id:
-                continue
-            idea = repo.get(idea_id) if org_id is None else repo.get_for_org(idea_id, org_id)
-            if idea and idea.archived_at is None:
-                idea.position_x = p.get("x")
-                idea.position_y = p.get("y")
-                updated += 1
+
+        def _update(sync_db: Session) -> int:
+            updated = 0
+            repo = IdeaRepository(sync_db)
+            for p in positions:
+                idea_id = p.get("id")
+                if not idea_id:
+                    continue
+                idea = repo.get(idea_id) if org_id is None else repo.get_for_org(idea_id, org_id)
+                if idea and idea.archived_at is None:
+                    idea.position_x = p.get("x")
+                    idea.position_y = p.get("y")
+                    updated += 1
+            return updated
+
+        updated = await run_db(uow.session, _update)
     return {"ok": True, "updated": updated}
 
 
 @router.get("/ideas/{idea_id}", response_model=IdeaRead)
-def get_idea(
+async def get_idea(
     idea_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    idea = _require_idea_for_user(db, idea_id, user)
-    return _idea_read_with_author(idea, db)
+    return await _run_db(
+        db,
+        lambda sync_db: _idea_read_with_author(
+            _require_idea_for_user(sync_db, idea_id, user),
+            sync_db,
+        ),
+    )
 
 
 def _do_update_idea(
@@ -539,55 +576,73 @@ def _do_update_idea(
 async def update_idea(
     idea_id: str,
     body: IdeaUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    idea = _do_update_idea(idea_id, body, db, user)
     updates = body.model_dump(exclude_unset=True)
-    db.commit()
+    def _update(sync_db: Session):
+        idea = _do_update_idea(idea_id, body, sync_db, user)
+        read = _idea_read_with_author(idea, sync_db)
+        event_org_id = _product_event_org_id(idea, user)
+        sync_db.commit()
+        return read, event_org_id
+
+    updated, event_org_id = await _run_db(db, _update)
     await ws_manager.broadcast_product_event(
         "idea_updated",
         {"idea_id": idea_id, "fields": updates},
-        org_id=_product_event_org_id(idea, user),
+        org_id=event_org_id,
     )
-    return _idea_read_with_author(idea, db)
+    return updated
 
 
 @router.put("/ideas/{idea_id}", response_model=IdeaRead)
 async def update_idea_put(
     idea_id: str,
     body: IdeaUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    idea = _do_update_idea(idea_id, body, db, user)
     updates = body.model_dump(exclude_unset=True)
-    db.commit()
+    def _update(sync_db: Session):
+        idea = _do_update_idea(idea_id, body, sync_db, user)
+        read = _idea_read_with_author(idea, sync_db)
+        event_org_id = _product_event_org_id(idea, user)
+        sync_db.commit()
+        return read, event_org_id
+
+    updated, event_org_id = await _run_db(db, _update)
     await ws_manager.broadcast_product_event(
         "idea_updated",
         {"idea_id": idea_id, "fields": updates},
-        org_id=_product_event_org_id(idea, user),
+        org_id=event_org_id,
     )
-    return _idea_read_with_author(idea, db)
+    return updated
 
 
 @router.delete("/ideas/{idea_id}")
 async def archive_idea(
     idea_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    idea = _require_idea_for_user(db, idea_id, user)
-    old_status = idea.status
-    idea.archived_at = datetime.now(timezone.utc)
-    idea.status = "archived"
-    db.add(IdeaStateLog(idea_id=idea_id, from_state=old_status, to_state="archived", trigger="user_archive"))
-    db.flush()
-    archived = _idea_read_with_author(idea, db)
+    def _archive(sync_db: Session):
+        idea = _require_idea_for_user(sync_db, idea_id, user)
+        old_status = idea.status
+        idea.archived_at = datetime.now(timezone.utc)
+        idea.status = "archived"
+        sync_db.add(IdeaStateLog(idea_id=idea_id, from_state=old_status, to_state="archived", trigger="user_archive"))
+        sync_db.flush()
+        archived = _idea_read_with_author(idea, sync_db)
+        event_org_id = _product_event_org_id(idea, user)
+        sync_db.commit()
+        return archived, event_org_id
+
+    archived, event_org_id = await _run_db(db, _archive)
     await ws_manager.broadcast_product_event(
         "idea_archived",
         {"idea_id": idea_id, "idea": archived.model_dump(mode="json")},
-        org_id=_product_event_org_id(idea, user),
+        org_id=event_org_id,
     )
     return {"ok": True}
 
@@ -595,21 +650,27 @@ async def archive_idea(
 @router.post("/ideas/{idea_id}/restore", response_model=IdeaRead)
 async def restore_idea(
     idea_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    idea = _require_idea_for_user(db, idea_id, user)
-    old_status = idea.status
-    idea.archived_at = None
-    if old_status == "archived":
-        idea.status = "emerged"
-    db.add(IdeaStateLog(idea_id=idea_id, from_state=old_status, to_state=idea.status, trigger="user_restore"))
-    db.flush()
-    restored = _idea_read_with_author(idea, db)
+    def _restore(sync_db: Session):
+        idea = _require_idea_for_user(sync_db, idea_id, user)
+        old_status = idea.status
+        idea.archived_at = None
+        if old_status == "archived":
+            idea.status = "emerged"
+        sync_db.add(IdeaStateLog(idea_id=idea_id, from_state=old_status, to_state=idea.status, trigger="user_restore"))
+        sync_db.flush()
+        restored = _idea_read_with_author(idea, sync_db)
+        event_org_id = _product_event_org_id(idea, user)
+        sync_db.commit()
+        return restored, event_org_id
+
+    restored, event_org_id = await _run_db(db, _restore)
     await ws_manager.broadcast_product_event(
         "idea_restored",
         {"idea_id": idea_id, "idea": restored.model_dump(mode="json")},
-        org_id=_product_event_org_id(idea, user),
+        org_id=event_org_id,
     )
     return restored
 
@@ -618,75 +679,83 @@ async def restore_idea(
 async def update_idea_status(
     idea_id: str,
     body: IdeaStatusUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    idea = _require_idea_for_user(db, idea_id, user)
-    old_status = idea.status
-    idea.status = body.status
-    db.add(IdeaStateLog(
-        idea_id=idea_id,
-        from_state=old_status,
-        to_state=body.status,
-        trigger=body.trigger,
-    ))
-    db.commit()
+    def _status(sync_db: Session):
+        idea = _require_idea_for_user(sync_db, idea_id, user)
+        old_status = idea.status
+        idea.status = body.status
+        sync_db.add(IdeaStateLog(
+            idea_id=idea_id,
+            from_state=old_status,
+            to_state=body.status,
+            trigger=body.trigger,
+        ))
+        read = _idea_read_with_author(idea, sync_db)
+        event_org_id = _product_event_org_id(idea, user)
+        sync_db.commit()
+        return read, event_org_id
+
+    updated, event_org_id = await _run_db(db, _status)
     await ws_manager.broadcast_product_event(
         "status_change",
         {"idea_id": idea_id, "new_status": body.status},
-        org_id=_product_event_org_id(idea, user),
+        org_id=event_org_id,
     )
-    return idea
+    return updated
 
 
 @router.get("/ideas/{idea_id}/threads", response_model=list[ThreadMessageRead])
-def list_threads(
+async def list_threads(
     idea_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_idea_for_user(db, idea_id, user)
-    repo = IdeaThreadRepository(db)
-    return repo.list_by_idea(idea_id)
+    def _list(sync_db: Session):
+        _require_idea_for_user(sync_db, idea_id, user)
+        repo = IdeaThreadRepository(sync_db)
+        return repo.list_by_idea(idea_id)
+
+    return await _run_db(db, _list)
 
 
 @router.get("/ideas/{idea_id}/visual-blocks", response_model=list[VisualBlockRead])
-def list_visual_blocks(
+async def list_visual_blocks(
     idea_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return all visual blocks for an idea, ordered by creation time."""
-    from sqlalchemy import select
-    _require_idea_for_user(db, idea_id, user)
-    blocks = db.scalars(
-        select(VisualBlock)
-        .where(VisualBlock.idea_id == idea_id)
-        .order_by(VisualBlock.created_at)
-    ).all()
-    return blocks
+    def _list(sync_db: Session):
+        _require_idea_for_user(sync_db, idea_id, user)
+        return sync_db.scalars(
+            select(VisualBlock)
+            .where(VisualBlock.idea_id == idea_id)
+            .order_by(VisualBlock.created_at)
+        ).all()
+
+    return await _run_db(db, _list)
 
 
 @router.post("/ideas/{idea_id}/threads", response_model=ThreadMessageRead, status_code=201)
 async def create_thread_message(
     idea_id: str,
     body: ThreadMessageCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    idea = _require_idea_for_user(db, idea_id, user)
-    repo = IdeaThreadRepository(db)
-    msg = repo.add_message(
-        idea_id=idea_id,
-        role=body.role,
-        content=body.content,
-        user_id=user["id"],
-    )
-    db.flush()
-    db.commit()
-    await ws_manager.broadcast_product_event(
-        "thread_message",
-        {"idea_id": idea_id, "message": {
+    def _create(sync_db: Session):
+        idea = _require_idea_for_user(sync_db, idea_id, user)
+        repo = IdeaThreadRepository(sync_db)
+        msg = repo.add_message(
+            idea_id=idea_id,
+            role=body.role,
+            content=body.content,
+            user_id=user["id"],
+        )
+        sync_db.flush()
+        message_payload = {
             "id": str(msg.id),
             "idea_id": idea_id,
             "role": msg.role,
@@ -695,21 +764,33 @@ async def create_thread_message(
             "attachments": msg.attachments or [],
             "message_type": getattr(msg, "message_type", None),
             "created_at": msg.created_at.isoformat() if msg.created_at else None,
-        }},
-        org_id=_product_event_org_id(idea, user),
+        }
+        response = ThreadMessageRead.model_validate(msg)
+        event_org_id = _product_event_org_id(idea, user)
+        sync_db.commit()
+        return response, message_payload, event_org_id
+
+    msg, message_payload, event_org_id = await _run_db(db, _create)
+    await ws_manager.broadcast_product_event(
+        "thread_message",
+        {"idea_id": idea_id, "message": message_payload},
+        org_id=event_org_id,
     )
     return msg
 
 
 @router.get("/ideas/{idea_id}/connections", response_model=list[IdeaConnectionRead])
-def list_connections(
+async def list_connections(
     idea_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    _require_idea_for_user(db, idea_id, user)
-    repo = IdeaConnectionRepository(db)
-    return repo.list_by_idea(idea_id)
+    def _list(sync_db: Session):
+        _require_idea_for_user(sync_db, idea_id, user)
+        repo = IdeaConnectionRepository(sync_db)
+        return repo.list_by_idea(idea_id)
+
+    return await _run_db(db, _list)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -730,12 +811,12 @@ async def notify_illo(request: Request, user: dict[str, Any] = Depends(get_curre
     from brain.app.triggers.router import route_trigger
 
     if event == "idea_created":
-        with UnitOfWork() as uow:
-            idea = _require_idea_for_user(uow.session, idea_id, user)
-            if idea:
+        async with UnitOfWork() as uow:
+            def _route(sync_db: Session):
+                idea = _require_idea_for_user(sync_db, idea_id, user)
                 if idea.status in ("emerged", "queued"):
                     idea.status = "active"
-                effective_metadata = _effective_notify_metadata(uow.session, idea_id, metadata)
+                effective_metadata = _effective_notify_metadata(sync_db, idea_id, metadata)
                 effective_thread_message = thread_message or str(effective_metadata.get("thread_message") or "")
                 if not _message_should_invoke_illo(effective_thread_message):
                     return _mention_skip_response()
@@ -748,8 +829,10 @@ async def notify_illo(request: Request, user: dict[str, Any] = Depends(get_curre
                     metadata=effective_metadata,
                     priority=priority,
                 )
-                result = route_trigger(trigger, session=uow.session)
+                result = route_trigger(trigger, session=sync_db)
                 return result.to_response()
+
+            return await run_db(uow.session, _route)
 
     elif event == "thread_reply":
         explicit_queue = isinstance(metadata, dict) and bool(
@@ -758,10 +841,10 @@ async def notify_illo(request: Request, user: dict[str, Any] = Depends(get_curre
         if not explicit_queue and not _thread_reply_should_invoke_illo(thread_message):
             return _mention_skip_response()
 
-        with UnitOfWork() as uow:
-            idea = _require_idea_for_user(uow.session, idea_id, user)
-            if idea:
-                effective_metadata = _effective_notify_metadata(uow.session, idea_id, metadata)
+        async with UnitOfWork() as uow:
+            def _route(sync_db: Session):
+                idea = _require_idea_for_user(sync_db, idea_id, user)
+                effective_metadata = _effective_notify_metadata(sync_db, idea_id, metadata)
                 if isinstance(metadata, dict) and metadata.get("interactive_mode"):
                     effective_metadata["interactive_mode"] = metadata.get("interactive_mode")
                 trigger = build_cortex_notify_trigger(
@@ -774,7 +857,9 @@ async def notify_illo(request: Request, user: dict[str, Any] = Depends(get_curre
                     effective_metadata=effective_metadata if isinstance(effective_metadata, dict) else None,
                     priority=priority,
                 )
-                result = route_trigger(trigger, session=uow.session)
+                result = route_trigger(trigger, session=sync_db)
                 return result.to_response()
+
+            return await run_db(uow.session, _route)
 
     return {"ok": True}

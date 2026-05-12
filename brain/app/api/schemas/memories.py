@@ -31,9 +31,6 @@ class MemoryRead(BaseModel):
     archived: bool = False
     superseded_by: int | None = None
     salience: float
-    emotion_valence: float
-    emotion_arousal: float
-    emotion_label: str | None = None
     source: str | None = None
     source_type: str | None = None
     source_ref: str | None = None

@@ -9,11 +9,6 @@ from datetime import datetime
 from sqlalchemy import text
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.learning import (
-    activate_policy_promotion as _activate_policy_promotion,
-    policy_activation_report as _policy_activation_report,
-    rollback_policy_promotion as _rollback_policy_promotion,
-)
 
 
 def load_rules(active_only: bool = True) -> list[dict]:
@@ -225,45 +220,18 @@ def list_policy_promotions(
     status: str | None = None,
     promotion_type: str | None = None,
 ) -> list[dict]:
-    """List persisted policy recommendations for inspection."""
-    with UnitOfWork() as uow:
-        clause = []
-        params = {}
-        if status:
-            clause.append("status = :status")
-            params["status"] = status
-        if promotion_type:
-            clause.append("promotion_type = :promotion_type")
-            params["promotion_type"] = promotion_type
-        where = f"WHERE {' AND '.join(clause)}" if clause else ""
-        if clause:
-            rows = uow.session.execute(text("""
-                SELECT id, promotion_type, source_kind, source_refs, policy_payload,
-                       status, evidence, version, shadow_metrics, activated_at,
-                       rolled_back_at, reviewer_id, created_at
-                FROM policy_promotions
-                {where}
-                ORDER BY created_at DESC, id DESC
-            """.format(where=where)), params).mappings().all()
-        else:
-            rows = uow.session.execute(text("""
-                SELECT id, promotion_type, source_kind, source_refs, policy_payload,
-                       status, evidence, version, shadow_metrics, activated_at,
-                       rolled_back_at, reviewer_id, created_at
-                FROM policy_promotions
-                ORDER BY created_at DESC, id DESC
-            """)).mappings().all()
-        return [dict(r) for r in rows]
+    """Legacy no-op: policy promotion persistence has been removed."""
+    return []
 
 
 def policy_promotion_activation_report(promotion_id: int) -> dict | None:
-    """Expose policy activation readiness through the guardian layer."""
-    return _policy_activation_report(promotion_id)
+    """Legacy no-op: policy promotion persistence has been removed."""
+    return None
 
 
 def activate_policy_promotion(promotion_id: int, *, reviewer_id: str | None = None) -> dict | None:
-    """Activate a low-risk promotion if it clears the threshold gate."""
-    return _activate_policy_promotion(promotion_id, reviewer_id=reviewer_id)
+    """Legacy no-op: policy promotion persistence has been removed."""
+    return None
 
 
 def rollback_policy_promotion(
@@ -272,5 +240,5 @@ def rollback_policy_promotion(
     reason: str,
     reviewer_id: str | None = None,
 ) -> dict | None:
-    """Rollback a promotion through the enforcement layer."""
-    return _rollback_policy_promotion(promotion_id, reason=reason, reviewer_id=reviewer_id)
+    """Legacy no-op: policy promotion persistence has been removed."""
+    return None

@@ -42,6 +42,19 @@ def _unique_org_slug(uow: UnitOfWork, name: str) -> str:
     return slug
 
 
+async def _async_unique_org_slug(uow: UnitOfWork, name: str) -> str:
+    base = _slug_base(name)
+    slug = base
+    suffix = 2
+    while True:
+        result = await uow.session.scalars(select(Org.id).where(Org.slug == slug).limit(1))
+        if result.first() is None:
+            return slug
+        suffix_text = f"-{suffix}"
+        slug = f"{base[:50 - len(suffix_text)].rstrip('-')}{suffix_text}"
+        suffix += 1
+
+
 def _user_to_dict(user: User, org: Org | None = None) -> dict:
     """Convert a User ORM object to a dict matching the old API."""
     d = {
@@ -68,6 +81,13 @@ def _user_with_org(uow: UnitOfWork, user: User) -> dict:
     return _user_to_dict(user, org)
 
 
+async def _async_user_with_org(uow: UnitOfWork, user: User) -> dict:
+    """Fetch a user's org and return the combined dict using async DB access."""
+
+    org = await uow.orgs.get(user.org_id)
+    return _user_to_dict(user, org)
+
+
 def get_user_by_email(email: str) -> Optional[dict]:
     """Return user row by email, or None if not found."""
     with UnitOfWork() as uow:
@@ -77,6 +97,16 @@ def get_user_by_email(email: str) -> Optional[dict]:
         return _user_with_org(uow, user)
 
 
+async def async_get_user_by_email(email: str) -> Optional[dict]:
+    """Return user row by email via async DB access, or None if not found."""
+
+    async with UnitOfWork() as uow:
+        user = await uow.team.get_by_email(email.lower().strip())
+        if not user:
+            return None
+        return await _async_user_with_org(uow, user)
+
+
 def get_user_by_id(user_id: str) -> Optional[dict]:
     """Return user row by UUID, or None if not found."""
     with UnitOfWork() as uow:
@@ -84,6 +114,16 @@ def get_user_by_id(user_id: str) -> Optional[dict]:
         if not user:
             return None
         return _user_with_org(uow, user)
+
+
+async def async_get_user_by_id(user_id: str) -> Optional[dict]:
+    """Return user row by UUID via async DB access, or None if not found."""
+
+    async with UnitOfWork() as uow:
+        user = await uow.team.get_by_id(str(user_id))
+        if not user:
+            return None
+        return await _async_user_with_org(uow, user)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
@@ -116,15 +156,42 @@ def authenticate(email: str, password: str) -> Optional[dict]:
     return user
 
 
+async def async_authenticate(email: str, password: str) -> Optional[dict]:
+    """Async DB variant of authenticate."""
+
+    user = await async_get_user_by_email(email)
+    if not user:
+        bcrypt.checkpw(b"dummy", _DUMMY_HASH.encode())
+        return None
+    if not user.get("password_hash"):
+        return None
+    if not verify_password(password, user["password_hash"]):
+        return None
+    return user
+
+
 def has_any_users() -> bool:
     """Return True if at least one user exists."""
     with UnitOfWork() as uow:
         return uow.team.has_any()
 
 
+async def async_has_any_users() -> bool:
+    """Return True if at least one user exists using async DB access."""
+
+    async with UnitOfWork() as uow:
+        return bool(await uow.team.has_any())
+
+
 def create_first_user(name: str, email: str, password: str, org_name: str) -> dict:
     """Create the first org + user (setup flow). Returns user dict."""
     return create_workspace_owner(name, email, password, org_name)
+
+
+async def async_create_first_user(name: str, email: str, password: str, org_name: str) -> dict:
+    """Async variant for first-user setup."""
+
+    return await async_create_workspace_owner(name, email, password, org_name)
 
 
 def create_workspace_owner(name: str, email: str, password: str, org_name: str) -> dict:
@@ -152,6 +219,34 @@ def create_workspace_owner(name: str, email: str, password: str, org_name: str) 
     return get_user_by_id(user_id)
 
 
+async def async_create_workspace_owner(name: str, email: str, password: str, org_name: str) -> dict:
+    """Create a new workspace and approved owner using async DB access."""
+
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    async with UnitOfWork() as uow:
+        slug = await _async_unique_org_slug(uow, org_name)
+        org = Org(name=org_name.strip(), slug=slug)
+        uow.session.add(org)
+        await uow.session.flush()
+
+        user = User(
+            name=name.strip(),
+            email=email.lower().strip(),
+            password_hash=hashed,
+            role="owner",
+            org_id=org.id,
+            approved=True,
+            color=random.choice(_USER_COLORS),
+        )
+        uow.session.add(user)
+        await uow.session.flush()
+        user_id = user.id
+    result = await async_get_user_by_id(user_id)
+    if result is None:
+        raise RuntimeError("created user could not be reloaded")
+    return result
+
+
 def create_user(name: str, email: str, password: str, org_id: str, role: str = "member") -> dict:
     """Create a new user in an existing org. Returns user dict."""
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -170,9 +265,36 @@ def create_user(name: str, email: str, password: str, org_id: str, role: str = "
     return get_user_by_id(user_id)
 
 
+async def async_create_user(name: str, email: str, password: str, org_id: str, role: str = "member") -> dict:
+    """Create a new user in an existing org using async DB access."""
+
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    async with UnitOfWork() as uow:
+        user = User(
+            name=name.strip(),
+            email=email.lower().strip(),
+            password_hash=hashed,
+            role=role,
+            org_id=org_id,
+            color=random.choice(_USER_COLORS),
+        )
+        uow.session.add(user)
+        await uow.session.flush()
+        user_id = user.id
+    result = await async_get_user_by_id(user_id)
+    if result is None:
+        raise RuntimeError("created user could not be reloaded")
+    return result
+
+
 def get_default_org_id() -> Optional[str]:
     """Return the first org's ID (for self-registration on single-org deploys)."""
     summary = get_default_org_summary()
+    return summary["id"] if summary else None
+
+
+async def async_get_default_org_id() -> Optional[str]:
+    summary = await async_get_default_org_summary()
     return summary["id"] if summary else None
 
 
@@ -189,6 +311,14 @@ def get_default_org_summary() -> dict | None:
         return _org_summary(org)
 
 
+async def async_get_default_org_summary() -> dict | None:
+    """Return the first org summary using async DB access."""
+
+    async with UnitOfWork() as uow:
+        org = await uow.orgs.get_first()
+        return _org_summary(org)
+
+
 def get_org_summary_by_slug(slug: str) -> dict | None:
     """Return an org summary by slug for invite/signup links."""
     cleaned = (slug or "").strip().lower()
@@ -197,6 +327,18 @@ def get_org_summary_by_slug(slug: str) -> dict | None:
     with UnitOfWork() as uow:
         stmt = select(Org).where(Org.slug == cleaned).limit(1)
         return _org_summary(uow.session.scalars(stmt).first())
+
+
+async def async_get_org_summary_by_slug(slug: str) -> dict | None:
+    """Return an org summary by slug using async DB access."""
+
+    cleaned = (slug or "").strip().lower()
+    if not cleaned:
+        return None
+    async with UnitOfWork() as uow:
+        stmt = select(Org).where(Org.slug == cleaned).limit(1)
+        result = await uow.session.scalars(stmt)
+        return _org_summary(result.first())
 
 
 def get_org_users(org_id: str) -> list[dict]:

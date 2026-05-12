@@ -26,7 +26,11 @@ class ProjectContextMaterializationResult:
 
     @property
     def ok(self) -> bool:
-        return not self.errors
+        return bool(self.workspaces) and not self.errors
+
+    def fail(self, message: str) -> "ProjectContextMaterializationResult":
+        self.errors.append(message)
+        return self
 
 
 def _clean_text(value: Any) -> str | None:
@@ -396,22 +400,24 @@ def materialize_project_context_workspaces(
     """Clone Project Context repos and expose them through AgentRun.workspace_ref."""
 
     result = ProjectContextMaterializationResult()
-    if not run_id or not workspace_root:
-        return result
+    if not run_id:
+        return result.fail("Project Context materialization requires a run id.")
+    if not workspace_root:
+        return result.fail("Project Context materialization requires a workspace root.")
 
     root = Path(workspace_root).expanduser()
     with UnitOfWork() as uow:
         run = uow.session.get(AgentRun, run_id)
         if not run:
-            return result
+            return result.fail(f"Agent run {run_id} was not found.")
         metadata = dict(getattr(run, "metadata_", None) or {})
         snapshot = _snapshot_from_run(run)
         if not isinstance(snapshot, dict):
-            return result
+            return result.fail("Project Context snapshot is missing.")
         snapshot = dict(snapshot)
         resources = [dict(item) for item in snapshot.get("resources") or [] if isinstance(item, dict)]
         if not resources:
-            return result
+            return result.fail("Project Context has no resources to materialize.")
         snapshot["resources"] = resources
         user_id = user_id or (str(run.user_id) if getattr(run, "user_id", None) else None)
         org_id = org_id or _clean_text(getattr(run, "org_id", None)) or _clean_text(metadata.get("org_id"))
@@ -434,7 +440,7 @@ def materialize_project_context_workspaces(
             result.errors.append(error)
 
     if not result.resources_checked:
-        return result
+        return result.fail("Project Context resources do not include a supported repository.")
 
     result.workspaces = workspaces
     status = "materialized" if not result.errors else "failed"

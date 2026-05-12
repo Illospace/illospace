@@ -14,7 +14,8 @@ from brain.app.api.ws.auth import WsTokenClaims
 from brain.app.api.ws.events import ServerEvent
 from brain.app.api.ws.manager import ConnectionManager
 from brain.platform.db.models.chat import ChatConversationRead, ChatNotification
-from tests.test_chat_api_routes import _user_context, chat_db_session
+from brain.platform.db.repositories.unit_of_work import use_sync_session
+from tests.test_chat_api_routes import ORG_ID, USER_1_ID, USER_2_ID, _user_context, chat_db_session
 
 
 pytestmark = pytest.mark.anyio
@@ -146,11 +147,7 @@ async def test_chat_mark_read_rejects_broadcast_only_unread_payload(monkeypatch:
     from brain.app.api.routers import ws as ws_router
 
     fake_ws = AsyncMock()
-    monkeypatch.setattr(
-        ws_router,
-        "SessionFactory",
-        lambda: pytest.fail("broadcast-only mark-read must not open a DB session"),
-    )
+    monkeypatch.setattr(ws_router, "run_sync_with_unit_of_work", AsyncMock())
 
     await ws_router._handle_chat_mark_read(
         "user-2",
@@ -166,8 +163,24 @@ async def test_chat_mark_read_rejects_broadcast_only_unread_payload(monkeypatch:
     fake_ws.send_json.assert_awaited_once_with(
         {"type": ServerEvent.CHAT_ERROR, "code": "CHAT_READ_CURSOR_REQUIRED"}
     )
+    ws_router.run_sync_with_unit_of_work.assert_not_awaited()
 
 
+def _run_sync_with_session(session: Session):
+    async def _run(fn, /, *args, **kwargs):
+        try:
+            with use_sync_session(session):
+                result = fn(*args, **kwargs)
+            session.commit()
+            return result
+        except Exception:
+            session.rollback()
+            raise
+
+    return _run
+
+
+@pytest.mark.requires_db
 async def test_chat_mark_read_persists_and_publishes_server_state_after_commit(
     chat_db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -196,7 +209,7 @@ async def test_chat_mark_read_persists_and_publishes_server_state_after_commit(
         events.append("publish_notification_summary")
         published["notification_summary"] = kwargs
 
-    monkeypatch.setattr(ws_router, "SessionFactory", lambda: chat_db_session)
+    monkeypatch.setattr(ws_router, "run_sync_with_unit_of_work", _run_sync_with_session(chat_db_session))
     monkeypatch.setattr(chat_db_session, "commit", commit_spy)
     monkeypatch.setattr(ws_router.ws_manager, "publish_chat_read_updated", publish_read_updated)
     monkeypatch.setattr(ws_router.ws_manager, "publish_chat_unread_updated", publish_unread_updated)
@@ -208,8 +221,8 @@ async def test_chat_mark_read_persists_and_publishes_server_state_after_commit(
 
     fake_ws = AsyncMock()
     await ws_router._handle_chat_mark_read(
-        "user-2",
-        "org-1",
+        USER_2_ID,
+        ORG_ID,
         {
             "conversation_id": dm.id,
             "last_read_message_id": sent.id,
@@ -227,23 +240,23 @@ async def test_chat_mark_read_persists_and_publishes_server_state_after_commit(
         "publish_notification_summary",
     ]
     assert published["read"] == {
-        "user_id": "user-2",
+        "user_id": USER_2_ID,
         "conversation_id": dm.id,
         "last_read_message_id": sent.id,
         "last_read_conversation_seq": sent.conversation_seq,
     }
     assert published["unread"] == {
-        "user_id": "user-2",
+        "user_id": USER_2_ID,
         "conversation_id": dm.id,
         "unread_summary": {"room": 0, "dms": 0, "total": 0},
     }
-    assert published["notification_summary"]["user_id"] == "user-2"
+    assert published["notification_summary"]["user_id"] == USER_2_ID
     assert published["notification_summary"]["summary"]["chat_unread_total"] == 0
 
     read_state = chat_db_session.scalars(
         select(ChatConversationRead).where(
             ChatConversationRead.conversation_id == dm.id,
-            ChatConversationRead.user_id == "user-2",
+            ChatConversationRead.user_id == USER_2_ID,
         )
     ).one()
     assert read_state.last_read_conversation_seq == sent.conversation_seq
@@ -251,13 +264,14 @@ async def test_chat_mark_read_persists_and_publishes_server_state_after_commit(
 
     notification = chat_db_session.scalars(
         select(ChatNotification).where(
-            ChatNotification.user_id == "user-2",
+            ChatNotification.user_id == USER_2_ID,
             ChatNotification.message_id == sent.id,
         )
     ).one()
     assert notification.read_at is not None
 
 
+@pytest.mark.requires_db
 async def test_chat_mark_read_does_not_publish_when_commit_fails(
     chat_db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -274,7 +288,7 @@ async def test_chat_mark_read_does_not_publish_when_commit_fails(
     async def unexpected_publish(**kwargs):
         events.append("publish")
 
-    monkeypatch.setattr(ws_router, "SessionFactory", lambda: chat_db_session)
+    monkeypatch.setattr(ws_router, "run_sync_with_unit_of_work", _run_sync_with_session(chat_db_session))
     monkeypatch.setattr(chat_db_session, "commit", failing_commit)
     monkeypatch.setattr(ws_router.ws_manager, "publish_chat_read_updated", unexpected_publish)
     monkeypatch.setattr(ws_router.ws_manager, "publish_chat_unread_updated", unexpected_publish)
@@ -286,8 +300,8 @@ async def test_chat_mark_read_does_not_publish_when_commit_fails(
 
     fake_ws = AsyncMock()
     await ws_router._handle_chat_mark_read(
-        "user-2",
-        "org-1",
+        USER_2_ID,
+        ORG_ID,
         {
             "conversation_id": dm.id,
             "last_read_message_id": sent.id,
@@ -304,12 +318,12 @@ async def test_chat_mark_read_does_not_publish_when_commit_fails(
 def _create_unread_dm(chat_db_session: Session):
     dm = ChatService(
         chat_db_session,
-        _user_context(chat_db_session, "user-1"),
-    ).create_or_fetch_dm(ChatDmCreate(user_id="user-2"))
+        _user_context(chat_db_session, USER_1_ID),
+    ).create_or_fetch_dm(ChatDmCreate(user_id=USER_2_ID))
     chat_db_session.commit()
     sent, _ = ChatService(
         chat_db_session,
-        _user_context(chat_db_session, "user-1"),
+        _user_context(chat_db_session, USER_1_ID),
     ).post_conversation_message(
         dm.id,
         ChatMessageCreate(body="Persistent WS read state"),

@@ -9,11 +9,10 @@ import argparse
 import json
 import os
 import sys
-from datetime import date, datetime
+from datetime import datetime
 
 import brain.kernel.config as config
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.db.models.emotion import EmotionalSnapshot
 from brain.platform.db.repositories.memory_write_context import (
     MemoryWriteContext,
     dangerously_build_dev_test_memory_write_context,
@@ -24,7 +23,6 @@ from brain.systems.quality.gate import check_quality
 from brain.systems.memory.embeddings import (
     embed_document,
     embed_query,
-    make_emotional_embedding,
 )
 
 
@@ -61,9 +59,6 @@ def add_memory(
     content: str,
     memory_type: str,
     salience: float = 5.0,
-    emotion: str = "neutral",
-    valence: float = 0.0,
-    arousal: float = 0.0,
     tags: list[str] | None = None,
     source: str = "conversation",
     related_ids: list[int] | None = None,
@@ -92,7 +87,6 @@ def add_memory(
         scope = classify_scope(content, memory_type)
 
     semantic_emb = embed_document(content)
-    emotional_emb = make_emotional_embedding(valence=valence, arousal=arousal, label=emotion)
 
     with UnitOfWork() as uow:
         context = write_context
@@ -113,11 +107,7 @@ def add_memory(
             content=content,
             memory_type=memory_type,
             semantic_embedding=semantic_emb,
-            emotional_embedding=emotional_emb,
             salience=salience,
-            emotion_label=emotion,
-            emotion_valence=valence,
-            emotion_arousal=arousal,
             tags=tags,
             related_ids=related_ids,
             rel_type=rel_type,
@@ -140,11 +130,11 @@ def query_memories(
     memory_type: str | None = None,
     min_salience: float | None = None,
     tags: list[str] | None = None,
-    emotion_context: str | None = None,
     spread: bool = False,
     use_pools: bool = False,
     user_id: str | None = None,
     org_id: str | None = None,
+    emotion_context: str | None = None,
     attention_debug: bool = False,
     expand_lazy_load: bool | None = None,
 ) -> dict:
@@ -154,6 +144,7 @@ def query_memories(
     with adaptive bandit ratios. Falls back to existing behavior on failure.
     When use_pools=False (default), existing behavior is unchanged.
     """
+    del emotion_context
     # Three-pool retrieval path
     if use_pools:
         try:
@@ -162,7 +153,6 @@ def query_memories(
                 limit=limit,
                 org_id=org_id,
                 user_id=user_id,
-                emotion_context=emotion_context,
                 attention_debug=attention_debug,
                 expand_lazy_load=expand_lazy_load,
             )
@@ -174,7 +164,6 @@ def query_memories(
             # Fall through to existing behavior
 
     query_emb = embed_query(query)
-    emotion_emb = make_emotional_embedding(label=emotion_context) if emotion_context else None
 
     with UnitOfWork() as uow:
         visibility_context = MemoryVisibilityContext(
@@ -188,7 +177,6 @@ def query_memories(
             memory_type=memory_type,
             min_salience=min_salience,
             tags=tags,
-            emotion_embedding=emotion_emb,
             context=visibility_context,
             spread=spread,
         )
@@ -198,12 +186,11 @@ def query_memories(
         formatted_results = [{
             "id": r["id"], "content": r["content"], "type": r["memory_type"],
             "tier": r.get("memory_tier", "episodic"),
-            "salience": r["salience"], "emotion": r["emotion_label"], "tags": r["tags"],
+            "salience": r["salience"], "tags": r["tags"],
             "scores": {
                 "combined": round(float(r["combined_score"] or 0), 4),
                 "semantic": round(float(r["semantic_score"] or 0), 4),
                 "recency": round(float(r["recency_score"] or 0), 4),
-                "emotion": round(float(r["emotion_score"] or 0), 4),
             },
             "created": r["created_at"].isoformat() if r["created_at"] else None,
         } for r in results]
@@ -254,7 +241,6 @@ def _query_with_pools(
     limit: int = 5,
     org_id: str | None = None,
     user_id: str | None = None,
-    emotion_context: str | None = None,
     attention_debug: bool = False,
     expand_lazy_load: bool | None = None,
 ) -> dict:
@@ -324,9 +310,6 @@ def get_memory(memory_id: int) -> dict | None:
         "content": memory.content,
         "memory_type": memory.memory_type,
         "salience": memory.salience,
-        "emotion_valence": memory.emotion_valence,
-        "emotion_arousal": memory.emotion_arousal,
-        "emotion_label": memory.emotion_label,
         "source": memory.source,
         "tags": memory.tags,
         "created_at": memory.created_at,
@@ -367,7 +350,6 @@ def list_memories(
                 "content": memory.content,
                 "memory_type": memory.memory_type,
                 "salience": memory.salience,
-                "emotion_label": memory.emotion_label,
                 "tags": memory.tags,
                 "created_at": memory.created_at,
             }
@@ -393,27 +375,6 @@ def connect_memories(source: int, target: int, rel: str, weight: float = 1.0) ->
         )
 
 
-def record_emotion(
-    valence: float, arousal: float, label: str,
-    trigger: str | None = None, topic_tags: list[str] | None = None,
-    attributed_to: str = "operator",
-) -> int:
-    """Record an emotional snapshot."""
-    with UnitOfWork() as uow:
-        snapshot = EmotionalSnapshot(
-            session_date=date.today() if True else None,  # always today
-            valence=valence,
-            arousal=arousal,
-            label=label,
-            trigger_summary=trigger,
-            topic_tags=topic_tags or [],
-            attributed_to=attributed_to,
-        )
-        uow.session.add(snapshot)
-        uow.session.flush()
-        return snapshot.id
-
-
 # ============================================================
 # CLI (backward-compatible wrappers)
 # ============================================================
@@ -424,8 +385,7 @@ def cmd_add(args):
     write_context = _write_context_from_args(args, source=args.source or "conversation")
     result = add_memory(
         content=args.content, memory_type=args.type, salience=args.salience,
-        emotion=args.emotion or "neutral", valence=args.valence or 0.0,
-        arousal=args.arousal or 0.0, tags=tags, source=args.source or "conversation",
+        tags=tags, source=args.source or "conversation",
         related_ids=related, rel_type=args.rel_type or "related_to",
         decay_eligible=not args.no_decay,
         write_context=write_context,
@@ -438,7 +398,7 @@ def cmd_query(args):
     result = query_memories(
         query=args.query, limit=args.limit, memory_type=args.type,
         min_salience=args.min_salience, tags=tags,
-        emotion_context=args.emotion_context, spread=args.spread,
+        spread=args.spread,
         attention_debug=args.attention_debug,
         expand_lazy_load=args.expand_lazy_load,
         user_id=args.user_id,
@@ -467,7 +427,7 @@ def cmd_list(args):
     results = list_memories(memory_type=args.type, limit=args.limit, min_salience=args.min_salience, tags=tags)
     print(json.dumps([{
         "id": r["id"], "content": r["content"][:200], "type": r["memory_type"],
-        "salience": r["salience"], "emotion": r["emotion_label"], "tags": r["tags"],
+        "salience": r["salience"], "tags": r["tags"],
         "created": r["created_at"].isoformat() if r["created_at"] else None,
     } for r in results], indent=2, default=str))
 
@@ -497,29 +457,17 @@ def cmd_decay(args):
 def cmd_index(args):
     with UnitOfWork() as uow:
         memories = uow.memories.list_index_memories(limit=args.limit)
-        trajectory = uow.emotions.trajectory_7d()
 
     by_type: dict = {}
     for m in memories:
         by_type.setdefault(m.memory_type, []).append({
             "id": m.id, "content": m.content[:150],
-            "salience": m.salience, "emotion": m.emotion_label,
+            "salience": m.salience,
         })
     print(json.dumps({
         "generated": datetime.now().isoformat(), "total_active": len(memories),
         "memories_by_type": by_type,
-        "emotional_trajectory_7d": trajectory if trajectory else [],
     }, indent=2, default=str))
-
-
-def cmd_emotion(args):
-    snap_id = record_emotion(
-        valence=args.valence, arousal=args.arousal, label=args.label,
-        trigger=args.trigger,
-        topic_tags=[t.strip() for t in args.topic_tags.split(",")] if args.topic_tags else None,
-        attributed_to=args.attributed_to or "operator",
-    )
-    print(json.dumps({"snapshot_id": snap_id, "valence": args.valence, "arousal": args.arousal, "label": args.label}))
 
 
 def _write_context_from_args(args, *, source: str) -> MemoryWriteContext | None:
@@ -592,10 +540,9 @@ def main():
 
     p = sub.add_parser("add")
     p.add_argument("--content", "-c", required=True)
-    p.add_argument("--type", "-t", required=True, choices=["episode", "fact", "lesson", "decision", "preference", "procedure", "pattern", "insight", "emotion", "observation"])
+    p.add_argument("--type", "-t", required=True, choices=["episode", "fact", "lesson", "decision", "preference", "procedure", "pattern", "insight", "observation"])
     p.add_argument("--salience", "-s", type=float, default=5.0)
-    p.add_argument("--emotion", "-e"); p.add_argument("--valence", type=float)
-    p.add_argument("--arousal", type=float); p.add_argument("--tags")
+    p.add_argument("--tags")
     p.add_argument("--related"); p.add_argument("--rel-type", default="related_to")
     p.add_argument("--source", default="conversation"); p.add_argument("--no-decay", action="store_true")
     p.add_argument("--user-id")
@@ -611,7 +558,7 @@ def main():
     p = sub.add_parser("query")
     p.add_argument("query"); p.add_argument("--limit", "-l", type=int, default=5)
     p.add_argument("--type", "-t"); p.add_argument("--min-salience", type=float)
-    p.add_argument("--tags"); p.add_argument("--emotion-context")
+    p.add_argument("--tags")
     p.add_argument("--spread", action="store_true")
     p.add_argument("--attention-debug", action="store_true")
     p.add_argument("--expand-lazy-load", action="store_true")
@@ -635,17 +582,13 @@ def main():
 
     p = sub.add_parser("index"); p.add_argument("--limit", "-l", type=int, default=50)
 
-    p = sub.add_parser("emotion"); p.add_argument("--valence", type=float, required=True)
-    p.add_argument("--arousal", type=float, required=True); p.add_argument("--label", required=True)
-    p.add_argument("--trigger"); p.add_argument("--topic-tags"); p.add_argument("--attributed-to", default="operator")
-
     p = sub.add_parser("import-md"); p.add_argument("file")
 
     args = parser.parse_args()
     cmd_map = {
         "add": cmd_add, "query": cmd_query, "get": cmd_get, "context": cmd_context,
         "connect": cmd_connect, "list": cmd_list, "stats": cmd_stats, "decay": cmd_decay,
-        "index": cmd_index, "emotion": cmd_emotion, "import-md": cmd_import_md,
+        "index": cmd_index, "import-md": cmd_import_md,
     }
     cmd_map[args.command](args)
 

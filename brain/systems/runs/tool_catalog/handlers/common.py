@@ -48,10 +48,7 @@ _MODEL_TIER_ALIASES: dict[str, str] = {}
 _REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh"}
 
 # Workspace root — configurable, defaults to project root
-WORKSPACE_ROOT = os.environ.get(
-    "ILLO_WORKSPACE_ROOT",
-    str(brain_config.BRAIN_DIR),
-)
+WORKSPACE_ROOT = str(brain_config.resolve_workspace_root(default=brain_config.BRAIN_DIR))
 
 # Max output size for tool results (from budget config)
 _MAX_RESULT_CHARS = int(os.environ.get("BUDGET_MAX_TOOL_RESULT_CHARS", "10000"))
@@ -211,7 +208,11 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
             "effect": "update a generated workspace app",
         },
         "archive": {"required": ["app_id or key"], "optional": [], "effect": "archive an app"},
-        "restore": {"required": ["app_id or key"], "optional": [], "effect": "restore an archived app"},
+        "restore": {
+            "required": ["app_id or key", "confirm_restore_archived"],
+            "optional": [],
+            "effect": "restore an archived app only when the user explicitly requested restore/reopen",
+        },
         "get_state": {"required": ["app_id"], "optional": ["state_key"], "effect": "read app-local state"},
         "update_state": {"required": ["app_id"], "optional": ["state_key", "data", "data_patch"], "effect": "write app-local state"},
     },

@@ -372,9 +372,6 @@ async def discover_openapi_context(client: httpx.AsyncClient, idea_ids: list[str
     ctx.set("run_id", run_id)
     ctx.set_many("run_id", run_ids[:3])
 
-    candidates = await try_get("/api/agency/candidates")
-    ctx.set("candidate_id", first_value(candidates, "id"))
-
     memories = await try_get("/api/memory/org-memories")
     ctx.set("memory_id", first_value(memories, "id"))
     ctx.set_many("memory_id", [item["id"] for item in all_items(memories)[:3] if isinstance(item, dict) and item.get("id") is not None])

@@ -144,6 +144,55 @@ def test_structured_generated_ui_payload_is_accepted():
     assert any("views[0].type" in error for error in rejected["errors"])
 
 
+def test_structured_generated_ui_actions_must_reference_manifest_actions():
+    source = {
+        "schema_version": 1,
+        "title": "Task Tracker",
+        "primary_binding": "tasks",
+        "actions": [{"key": "tasks.syncExternal", "label": "Sync"}],
+        "views": [{"id": "tasks", "type": "board", "title": "Tasks", "binding": "tasks"}],
+    }
+    manifest = {
+        **VALID_DOMAIN_MANIFEST,
+        "actions": {
+            "tasks.syncExternal": {
+                "kind": "connector",
+                "effects": ["external.read", "domain.write"],
+                "executor": {"type": "deferred"},
+            }
+        },
+    }
+
+    accepted = _report(
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(source),
+        manifest=manifest,
+    )
+    assert accepted["status"] == "passed"
+
+    rejected = _report(
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(source),
+    )
+    assert rejected["status"] == "failed"
+    assert any("must reference a manifest.actions declaration" in error for error in rejected["errors"])
+
+    secret_source = {
+        **source,
+        "actions": [{"key": "tasks.syncExternal", "payload": {"github_token": "ghp_123456789012345678901234567890123456"}}],
+    }
+    secret_rejected = _report(
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(secret_source),
+        manifest=manifest,
+    )
+    assert secret_rejected["status"] == "failed"
+    assert any("must not contain raw credentials" in error for error in secret_rejected["errors"])
+
+
 def test_old_quick_todo_style_payload_is_rejected():
     report = _report(
         manifest={
@@ -462,6 +511,75 @@ def test_manage_workspace_app_extracts_embedded_contract_fields_on_update():
     assert "manifest" not in json.loads(kwargs["source_code"])
 
 
+def test_manage_workspace_app_update_normalizes_empty_optional_fields():
+    from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
+
+    app = object()
+    serialized = {"id": "app-1", "key": "tasks", "name": "Task Tracker"}
+
+    with patch(
+        "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
+        return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
+    ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
+        "brain.systems.workspace_apps.service.update_app",
+        return_value=app,
+    ) as update_app, patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
+        "brain.systems.workspace_apps.events.publish_workspace_app_change"
+    ):
+        result = json.loads(
+            _handle_manage_workspace_app(
+                action="update",
+                app_id="app-1",
+                name="",
+                description="",
+                anchor_user_id="",
+                include_archived="false",
+                manifest="",
+                visual_spec="",
+            )
+        )
+
+    assert result["app"] == serialized
+    kwargs = update_app.call_args.kwargs
+    assert kwargs["name"] is None
+    assert kwargs["description"] is None
+    assert kwargs["anchor_user_id"] is None
+    assert kwargs["manifest"] is None
+    assert kwargs["visual_spec"] is None
+
+
+def test_manage_workspace_app_update_parses_json_object_strings():
+    from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
+
+    app = object()
+    serialized = {"id": "app-1", "key": "tasks", "name": "Task Tracker"}
+    manifest = {"contract_version": 1, "data_plan": {"mode": "app_local", "scope": "ui_state"}}
+    visual_spec = {"thumbnail": {"label": "Tasks", "status": "Ready"}}
+
+    with patch(
+        "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
+        return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
+    ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
+        "brain.systems.workspace_apps.service.update_app",
+        return_value=app,
+    ) as update_app, patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
+        "brain.systems.workspace_apps.events.publish_workspace_app_change"
+    ):
+        result = json.loads(
+            _handle_manage_workspace_app(
+                action="update",
+                app_id="app-1",
+                manifest=json.dumps(manifest),
+                visual_spec=json.dumps(visual_spec),
+            )
+        )
+
+    assert result["app"] == serialized
+    kwargs = update_app.call_args.kwargs
+    assert kwargs["manifest"] == manifest
+    assert kwargs["visual_spec"] == visual_spec
+
+
 def test_manage_workspace_app_publishes_change_after_create():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
@@ -525,7 +643,13 @@ def test_manage_workspace_app_publishes_change_after_restore():
     ), patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
         "brain.systems.workspace_apps.events.publish_workspace_app_change"
     ) as publish:
-        result = json.loads(_handle_manage_workspace_app(action="restore", app_id="app-1"))
+        result = json.loads(
+            _handle_manage_workspace_app(
+                action="restore",
+                app_id="app-1",
+                confirm_restore_archived=True,
+            )
+        )
 
     assert result["app"] == serialized
     publish.assert_called_once_with(
@@ -533,3 +657,18 @@ def test_manage_workspace_app_publishes_change_after_restore():
         action="restore",
         app=serialized,
     )
+
+
+def test_manage_workspace_app_restore_requires_explicit_confirmation():
+    from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
+
+    with patch(
+        "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
+        return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
+    ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
+        "brain.systems.workspace_apps.service.restore_app",
+    ) as restore_app:
+        result = json.loads(_handle_manage_workspace_app(action="restore", app_id="app-1"))
+
+    assert "confirm_restore_archived=true" in result["error"]
+    restore_app.assert_not_called()

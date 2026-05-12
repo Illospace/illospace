@@ -42,7 +42,7 @@ def client():
 
     app.dependency_overrides[get_current_user] = lambda: USER_A
     app.dependency_overrides[get_db] = lambda: MagicMock()
-    with patch("brain.systems.vault.has_pin", return_value=False):
+    with patch("brain.systems.vault.async_has_pin", return_value=False):
         yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
 
@@ -53,13 +53,13 @@ class TestVaultUserScoping:
 
     def test_list_secrets_returns_user_secrets(self, client):
         """GET /api/vault/ should return scoped vault metadata."""
-        with patch("brain.systems.vault.list_secrets", return_value=[]) as mock_list:
+        with patch("brain.systems.vault.async_list_secrets", return_value=[]) as mock_list:
             resp = client.get("/api/vault/")
         assert resp.status_code == 200
         mock_list.assert_called_once_with(USER_A["id"], category=None, org_id=USER_A["org_id"])
 
     def test_create_secret_calls_set_secret(self, client):
-        """POST /api/vault should call vault.set_secret with user_id."""
+        """POST /api/vault should call vault.async_set_secret with user_id."""
         from datetime import datetime, timezone
         mock_secret = MagicMock()
         mock_secret.id = 1
@@ -73,9 +73,8 @@ class TestVaultUserScoping:
         mock_secret.user_id = USER_A["id"]
         mock_secret.is_shared = False
         mock_secret.shared_by_name = None
-        with patch("brain.systems.vault.set_secret") as mock_set, \
-             patch("brain.platform.db.repositories.vault.VaultRepository") as MockRepo:
-            MockRepo.return_value.get_by_key.return_value = mock_secret
+        with patch("brain.systems.vault.async_set_secret") as mock_set, \
+             patch("brain.systems.vault.async_get_secret_record", return_value=mock_secret):
             resp = client.post("/api/vault/",
                                json={"key_name": "TEST_KEY", "value": "secret123"})
         assert resp.status_code == 201
@@ -86,7 +85,7 @@ class TestVaultUserScoping:
 
     def test_create_secret_reports_missing_vault_master_key(self, client):
         with patch(
-            "brain.systems.vault.set_secret",
+            "brain.systems.vault.async_set_secret",
             side_effect=RuntimeError("VAULT_MASTER_KEY is required. Refusing to auto-generate a vault key."),
         ):
             resp = client.post("/api/vault/", json={"key_name": "TEST_KEY", "value": "secret123"})
@@ -95,15 +94,15 @@ class TestVaultUserScoping:
         assert "VAULT_MASTER_KEY" in resp.json()["detail"]
 
     def test_reveal_passes_user_id(self, client):
-        """GET /api/vault/<key> should pass user_id to vault.reveal_secret."""
-        with patch("brain.systems.vault.reveal_secret", return_value="secret_value") as mock_reveal:
+        """GET /api/vault/<key> should pass user_id to vault.async_reveal_secret."""
+        with patch("brain.systems.vault.async_reveal_secret", return_value="secret_value") as mock_reveal:
             resp = client.get("/api/vault/MY_KEY")
         assert resp.status_code == 200
         mock_reveal.assert_called_once_with("MY_KEY", user_id=USER_A["id"], org_id=USER_A["org_id"])
 
     def test_reveal_reports_missing_vault_master_key(self, client):
         with patch(
-            "brain.systems.vault.reveal_secret",
+            "brain.systems.vault.async_reveal_secret",
             side_effect=RuntimeError("VAULT_MASTER_KEY is required. Refusing to auto-generate a vault key."),
         ):
             resp = client.get("/api/vault/MY_KEY")
@@ -113,7 +112,7 @@ class TestVaultUserScoping:
 
     def test_delete_passes_user_id(self, client):
         """DELETE /api/vault/<key> should pass user_id."""
-        with patch("brain.systems.vault.delete_secret", return_value=True) as mock_del:
+        with patch("brain.systems.vault.async_delete_secret", return_value=True) as mock_del:
             resp = client.delete("/api/vault/MY_KEY")
         assert resp.status_code == 200
         mock_del.assert_called_once_with("MY_KEY", user_id=USER_A["id"])
@@ -125,7 +124,7 @@ class TestVaultSharing:
 
     def test_share_secret_200(self, client):
         share_result = {"id": 1, "secret_id": 42, "shared_at": "2026-03-13T00:00:00"}
-        with patch("brain.systems.vault.share_secret", return_value=share_result) as share:
+        with patch("brain.systems.vault.async_share_secret", return_value=share_result) as share:
             resp = client.post("/api/vault/42/share",
                                json={"shared_with_user_id": USER_B["id"]})
         assert resp.status_code == 200
@@ -134,18 +133,18 @@ class TestVaultSharing:
         share.assert_called_once_with(42, USER_B["id"], USER_A["id"], org_id=USER_A["org_id"])
 
     def test_share_not_found_404(self, client):
-        with patch("brain.systems.vault.share_secret", return_value=None):
+        with patch("brain.systems.vault.async_share_secret", return_value=None):
             resp = client.post("/api/vault/999/share",
                                json={"shared_with_user_id": USER_B["id"]})
         assert resp.status_code == 404
 
     def test_revoke_share_200(self, client):
-        with patch("brain.systems.vault.revoke_share", return_value=True):
+        with patch("brain.systems.vault.async_revoke_share", return_value=True):
             resp = client.delete("/api/vault/shares/1")
         assert resp.status_code == 200
 
     def test_vault_log(self, client):
-        with patch("brain.systems.vault.get_vault_access_log") as mock_log:
+        with patch("brain.systems.vault.async_get_vault_access_log") as mock_log:
             mock_log.return_value = [
                 {"id": 1, "key_name": "TEST", "action": "read", "accessed_at": "2026-03-13T00:00:00"}
             ]
@@ -154,12 +153,10 @@ class TestVaultSharing:
         assert len(resp.json()) == 1
 
     def test_org_users(self, client):
-        mock_user = MagicMock()
-        mock_user.id = USER_B["id"]
-        mock_user.name = "Bob"
-        mock_user.email = "bob@example.test"
-        with patch("brain.app.api.routers.vault.TeamRepository") as MockRepo:
-            MockRepo.return_value.list_approved.return_value = [mock_user]
+        with patch(
+            "brain.systems.vault.async_get_org_users",
+            return_value=[{"id": USER_B["id"], "name": "Bob", "email": "bob@example.test"}],
+        ):
             resp = client.get("/api/vault/org-users")
         assert resp.status_code == 200
 

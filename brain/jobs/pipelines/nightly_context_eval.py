@@ -15,7 +15,6 @@ from typing import Any
 from brain.systems.learning.context_evals import (
     ContextPolicyCandidate,
     ContextPolicyEvalThresholds,
-    candidate_to_policy_update_values,
     evaluate_context_policy_candidates,
 )
 
@@ -27,26 +26,8 @@ def gather_recent_context_policy_eval_sources(
     user_id: str | None = None,
     status: str = "active",
 ) -> list[Mapping[str, Any]]:
-    """Load recent trajectory eval cases using the existing learning models."""
-    from sqlalchemy import select
-
-    from brain.platform.db.models.learning import TrajectoryEvalCase
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-    limit = max(1, int(limit or 50))
-    with UnitOfWork() as uow:
-        stmt = select(TrajectoryEvalCase).order_by(
-            TrajectoryEvalCase.created_at.desc(),
-            TrajectoryEvalCase.id.desc(),
-        )
-        if status:
-            stmt = stmt.where(TrajectoryEvalCase.status == status)
-        if org_id is not None:
-            stmt = stmt.where(TrajectoryEvalCase.org_id == org_id)
-        if user_id is not None:
-            stmt = stmt.where(TrajectoryEvalCase.user_id == user_id)
-        rows = uow.session.scalars(stmt.limit(limit)).all()
-        return list(rows)
+    """Return no persisted sources: learning eval-case storage was removed."""
+    return []
 
 
 def persist_context_policy_candidate_decisions(
@@ -56,28 +37,8 @@ def persist_context_policy_candidate_decisions(
     org_id: str | None = None,
     visibility: str = "private",
 ) -> list[dict[str, Any]]:
-    """Persist candidate decisions as reviewable policy-update candidates."""
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-    persisted: list[dict[str, Any]] = []
-    with UnitOfWork() as uow:
-        for candidate_eval in evaluation_payload.get("candidates") or []:
-            if not isinstance(candidate_eval, Mapping):
-                continue
-            values = candidate_to_policy_update_values(
-                candidate_eval,
-                user_id=user_id,
-                org_id=org_id,
-                visibility=visibility,
-            )
-            row = uow.policy_update_candidates.upsert_candidate(**values)
-            persisted.append({
-                "candidate_digest": values["candidate_digest"],
-                "candidate_type": values["candidate_type"],
-                "status": getattr(row, "status", values.get("status")),
-                "row_id": getattr(row, "id", None),
-            })
-    return persisted
+    """Legacy no-op: policy-update candidate storage was removed."""
+    return []
 
 
 def run_nightly_context_policy_eval(

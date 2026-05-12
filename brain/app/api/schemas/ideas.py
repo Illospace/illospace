@@ -4,6 +4,12 @@ from typing import Any
 from uuid import UUID
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
+
+def _jsonish_or_none(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool, dict, list)):
+        return value
+    return None
+
 class _UUIDMixin:
     """Serialize UUID fields to strings automatically."""
     model_config = {"from_attributes": True}
@@ -63,6 +69,16 @@ class IdeaRead(_UUIDMixin, BaseModel):
     @classmethod
     def coerce_optional_project_context(cls, value):
         return value if isinstance(value, dict) else None
+
+    @field_validator("agent_details", mode="before")
+    @classmethod
+    def coerce_agent_details(cls, value):
+        return _jsonish_or_none(value)
+
+    @field_validator("attachments", mode="before")
+    @classmethod
+    def coerce_attachments(cls, value):
+        return value if isinstance(value, list) else []
 
 
 class IdeaCreate(BaseModel):

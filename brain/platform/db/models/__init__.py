@@ -4,8 +4,6 @@ from brain.platform.db.models.memory import *  # noqa
 from brain.platform.db.models.skill import *  # noqa
 from brain.platform.db.models.skill_bundle import *  # noqa
 from brain.platform.db.models.skill_quality import *  # noqa
-from brain.platform.db.models.emotion import *  # noqa
-from brain.platform.db.models.task import *  # noqa
 from brain.platform.db.models.run import *  # noqa
 from brain.platform.db.models.agent_run import *  # noqa
 from brain.platform.db.models.cortex_event import *  # noqa
@@ -17,18 +15,13 @@ from brain.platform.db.models.narrative import *  # noqa
 from brain.platform.db.models.memory_health import *  # noqa
 from brain.platform.db.models.system import *  # noqa
 from brain.platform.db.models.environment import *  # noqa
-from brain.platform.db.models.quality import *  # noqa
-from brain.platform.db.models.prompt import *  # noqa
 from brain.platform.db.models.vault import *  # noqa
 from brain.platform.db.models.scratchpad import *  # noqa
 from brain.platform.db.models.browser import *  # noqa
 from brain.platform.db.models.scheduler import *  # noqa
-from brain.platform.db.models.agency import *  # noqa
 from brain.platform.db.models.resource_pool import *  # noqa
 from brain.platform.db.models.retrieval import *  # noqa
-from brain.platform.db.models.learning import *  # noqa
 from brain.platform.db.models.routing import *  # noqa
-from brain.platform.db.models.habit import *  # noqa
 from brain.platform.db.models.chat import *  # noqa
 from brain.platform.db.models.notification import *  # noqa
 from brain.platform.db.models.domain import *  # noqa

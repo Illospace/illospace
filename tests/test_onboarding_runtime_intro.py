@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +11,14 @@ def _uow_with_session(session):
     uow.__exit__.return_value = False
     uow.session = session
     return uow
+
+
+class _AsyncSession:
+    def __init__(self, session):
+        self._session = session
+
+    async def run_sync(self, fn):
+        return fn(self._session)
 
 
 def _personal_openai_status():
@@ -26,16 +35,14 @@ def test_runtime_ready_intro_reuses_existing_thread():
     session.scalars.return_value.first.side_effect = [existing, completed_run]
 
     with patch(
-        "brain.app.api.routers.onboarding.UnitOfWork",
-        return_value=_uow_with_session(session),
-    ), patch(
         "brain.app.api.routers.onboarding.get_provider_auth_status",
         return_value=_personal_openai_status(),
     ), patch("brain.app.api.routers.onboarding.route_trigger") as route_trigger:
-        result = start_runtime_ready_intro(
-            {"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+        result = asyncio.run(start_runtime_ready_intro(
+            db=_AsyncSession(session),
+            user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
             background_tasks=background_tasks,
-        )
+        ))
 
     assert result == {
         "ok": True,
@@ -58,19 +65,17 @@ def test_runtime_ready_intro_recovers_failed_existing_thread():
     session.scalars.return_value.first.side_effect = [existing, failed_run]
 
     with patch(
-        "brain.app.api.routers.onboarding.UnitOfWork",
-        return_value=_uow_with_session(session),
-    ), patch(
         "brain.app.api.routers.onboarding.get_provider_auth_status",
         return_value=_personal_openai_status(),
     ), patch(
         "brain.app.api.routers.onboarding.route_trigger",
         return_value=TriggerRouteResult(ok=True, route="run", run_id=77),
     ) as route_trigger:
-        result = start_runtime_ready_intro(
-            {"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+        result = asyncio.run(start_runtime_ready_intro(
+            db=_AsyncSession(session),
+            user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
             background_tasks=background_tasks,
-        )
+        ))
 
     assert result["created"] is False
     assert result["idea_id"] == "idea-existing"
@@ -101,19 +106,17 @@ def test_runtime_ready_intro_creates_thread_and_run():
     session.flush.side_effect = flush
 
     with patch(
-        "brain.app.api.routers.onboarding.UnitOfWork",
-        return_value=_uow_with_session(session),
-    ), patch(
         "brain.app.api.routers.onboarding.get_provider_auth_status",
         return_value=_personal_openai_status(),
     ), patch(
         "brain.app.api.routers.onboarding.route_trigger",
         return_value=TriggerRouteResult(ok=True, route="run", run_id=42),
     ) as route_trigger:
-        result = start_runtime_ready_intro(
-            {"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+        result = asyncio.run(start_runtime_ready_intro(
+            db=_AsyncSession(session),
+            user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
             background_tasks=background_tasks,
-        )
+        ))
 
     idea = next(obj for obj in added if isinstance(obj, Idea))
 
@@ -153,9 +156,10 @@ def test_runtime_ready_intro_requires_openai_runtime():
         return_value={"runtime_key_available": False},
     ):
         with pytest.raises(HTTPException) as exc:
-            start_runtime_ready_intro(
-                {"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
-            )
+            asyncio.run(start_runtime_ready_intro(
+                db=_AsyncSession(MagicMock()),
+                user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+            ))
 
     assert exc.value.status_code == 409
     assert "personal OpenAI account" in exc.value.detail
@@ -173,11 +177,11 @@ def test_runtime_ready_intro_rejects_workspace_openai_runtime():
         return_value={"runtime_key_available": True, "runtime_key_source": "org_main"},
     ):
         with pytest.raises(HTTPException) as exc:
-            runtime_ready_intro_draft(user)
+            asyncio.run(runtime_ready_intro_draft(db=_AsyncSession(MagicMock()), user=user))
         assert exc.value.status_code == 409
         assert "personal OpenAI account" in exc.value.detail
 
         with pytest.raises(HTTPException) as exc:
-            start_runtime_ready_intro(user)
+            asyncio.run(start_runtime_ready_intro(db=_AsyncSession(MagicMock()), user=user))
         assert exc.value.status_code == 409
         assert "personal OpenAI account" in exc.value.detail

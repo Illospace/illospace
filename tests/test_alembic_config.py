@@ -22,6 +22,9 @@ BROAD_DESTRUCTIVE_SQL_PATTERNS = (
     r"\bTRUNCATE\s+TABLE\b",
     r"\bREASSIGN\s+OWNED\b",
 )
+REVIEWED_DESTRUCTIVE_MIGRATIONS = {
+    "0003_schema_simplification.py",
+}
 
 
 def _migration_files() -> list[Path]:
@@ -190,9 +193,12 @@ def test_alembic_revision_headers_match_identifiers():
 
 
 def test_public_tree_has_single_schema_baseline():
-    """Fresh public releases start from one current-state schema baseline."""
+    """Fresh public releases keep one current-state schema baseline."""
     migration_files = _material_schema_migration_files()
-    assert [path.name for path in migration_files] == [PUBLIC_BASELINE]
+    assert migration_files[0].name == PUBLIC_BASELINE
+    assert [path.name for path in migration_files if "baseline" in path.name] == [
+        PUBLIC_BASELINE
+    ]
 
     content = (VERSIONS_DIR / PUBLIC_BASELINE).read_text()
     assert "CREATE EXTENSION IF NOT EXISTS vector" in content
@@ -226,7 +232,7 @@ def test_future_migrations_do_not_use_broad_destructive_drops():
     """New migrations must not hide table/schema/database drops in Alembic or raw SQL."""
     violations: list[str] = []
     for path in _migration_files():
-        if path.name == PUBLIC_BASELINE:
+        if path.name == PUBLIC_BASELINE or path.name in REVIEWED_DESTRUCTIVE_MIGRATIONS:
             continue
 
         module = ast.parse(path.read_text(), filename=str(path))

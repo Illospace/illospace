@@ -17,6 +17,17 @@ from brain.systems.cortex.events import run_event_scope
 from brain.platform.db.models.run import RunEvent
 
 
+class _AsyncUoW:
+    def __init__(self, rows):
+        self.session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(all=lambda: rows)))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 def test_record_run_event_allocates_next_sequence_and_normalizes_payload():
     session = MagicMock()
     session.get.return_value = SimpleNamespace(id=42, root_run_id=42)
@@ -233,11 +244,7 @@ async def test_fanout_run_events_once_broadcasts_run_events(monkeypatch):
         payload={"label": "Reading"},
     )
     run = SimpleNamespace(id=42, org_id="org-1", thread_id="idea-1", profile="fast")
-    mock_uow = MagicMock()
-    mock_uow.__enter__.return_value = mock_uow
-    mock_uow.__exit__.return_value = False
-    mock_uow.session.execute.return_value.all.return_value = [(event, run)]
-    monkeypatch.setattr(run_events, "UnitOfWork", MagicMock(return_value=mock_uow))
+    monkeypatch.setattr(run_events, "UnitOfWork", lambda: _AsyncUoW([(event, run)]))
     monkeypatch.setattr(run_events, "_last_event_id", 0)
     ws_manager = SimpleNamespace(broadcast_run_event=AsyncMock())
 
@@ -282,11 +289,7 @@ async def test_fanout_run_events_once_skips_unscoped_run_events(monkeypatch):
         payload={"label": "Reading"},
     )
     run = SimpleNamespace(id=43, org_id=None, thread_id="idea-1", profile="fast")
-    mock_uow = MagicMock()
-    mock_uow.__enter__.return_value = mock_uow
-    mock_uow.__exit__.return_value = False
-    mock_uow.session.execute.return_value.all.return_value = [(event, run)]
-    monkeypatch.setattr(run_events, "UnitOfWork", MagicMock(return_value=mock_uow))
+    monkeypatch.setattr(run_events, "UnitOfWork", lambda: _AsyncUoW([(event, run)]))
     monkeypatch.setattr(run_events, "_last_event_id", 0)
     ws_manager = SimpleNamespace(broadcast_run_event=AsyncMock())
 

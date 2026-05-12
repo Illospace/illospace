@@ -110,6 +110,91 @@ def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
     assert "not copied" not in str(snapshot)
 
 
+def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
+    from brain.systems.runs.cortex.recording import (
+        agent_trace_export_filename,
+        build_thread_trace_snapshot,
+    )
+    from brain.platform.db.models.agent_run import AgentRunRow
+
+    now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+    run = _run(id=42, trace_id="run:42", input_message="Start the thread")
+    child = _run(
+        id=43,
+        trace_id="run:43",
+        parent_run_id=42,
+        root_run_id=42,
+        input_message="Worker slice",
+    )
+    first_message = SimpleNamespace(
+        id=10,
+        idea_id="idea-1",
+        role="user",
+        content="Can you analyze this whole thread?",
+        attachments=[],
+        metadata_={"run_id": 42, "trace_id": "run:42", "private": "not copied"},
+        message_type="message",
+        created_at=now,
+    )
+    second_message = SimpleNamespace(
+        id=11,
+        idea_id="idea-1",
+        role="illo",
+        content="Here is the full-thread answer.",
+        attachments=[],
+        metadata_={"run_id": 43, "trace_id": "run:43"},
+        message_type="message",
+        created_at=now,
+    )
+    event = SimpleNamespace(
+        id=99,
+        run_id=43,
+        root_run_id=42,
+        sequence_no=3,
+        event_type="run.tool_completed",
+        payload={"tool_name": "read_thread_messages", "result": "ok"},
+        producer="agent_runtime",
+        visibility="public",
+        created_at=now,
+    )
+    artifact = SimpleNamespace(
+        id=100,
+        run_id=43,
+        root_run_id=42,
+        artifact_type="reply",
+        title="Thread answer",
+        payload={"summary": "ok"},
+        text="artifact text",
+        uri=None,
+        visibility="public",
+        created_at=now,
+    )
+
+    session = MagicMock()
+    session.get.side_effect = lambda model, key: {42: run, 43: child}.get(key) if model is AgentRunRow else None
+    session.scalars.side_effect = [
+        _result([run, child]),
+        _result([first_message, second_message]),
+        _result([event]),
+        _result([artifact]),
+    ]
+
+    snapshot = build_thread_trace_snapshot(session, "idea-1", saved_by="user-1")
+
+    assert snapshot["export_scope"] == "thread"
+    assert snapshot["trace_id"] == "thread:idea-1"
+    assert snapshot["storage_policy"]["messages"] == "all_thread_messages"
+    assert snapshot["thread"]["message_limit"] is None
+    assert snapshot["thread"]["idea_id"] == "idea-1"
+    assert [message["id"] for message in snapshot["thread"]["messages"]] == [10, 11]
+    assert [run["run_id"] for run in snapshot["runs"]] == [42, 43]
+    assert snapshot["related_run_ids"] == [42, 43]
+    assert snapshot["tools"][0]["tool_name"] == "read_thread_messages"
+    assert snapshot["artifacts"][0]["artifact_type"] == "reply"
+    assert agent_trace_export_filename(snapshot) == "illo-thread-trace-idea-1.zip"
+    assert "not copied" not in str(snapshot)
+
+
 def test_agent_trace_export_zip_contains_shareable_trace_files():
     from brain.systems.runs.cortex.recording import (
         agent_trace_export_filename,

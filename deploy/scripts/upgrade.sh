@@ -9,6 +9,7 @@ ENV_FILE="${ILLO_COMPOSE_ENV_FILE:-$COMPOSE_DIR/.env}"
 
 BUILD=0
 PULL=1
+SKIP_UPDATER_RESTART="${ILLO_COMPOSE_SKIP_UPDATER_RESTART:-0}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -44,6 +45,22 @@ fi
 
 compose() {
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+non_worker_services() {
+  if [ "$SKIP_UPDATER_RESTART" = "1" ]; then
+    printf '%s\n' api scheduler web
+  else
+    printf '%s\n' api scheduler web updater
+  fi
+}
+
+all_runtime_services() {
+  if [ "$SKIP_UPDATER_RESTART" = "1" ]; then
+    printf '%s\n' postgres api worker scheduler web
+  else
+    printf '%s\n' postgres api worker scheduler web updater
+  fi
 }
 
 active_agent_run_count() {
@@ -123,24 +140,26 @@ update_worker_after_drain() {
 }
 
 if [ "$PULL" = "1" ]; then
-  compose pull postgres api web || {
+  compose pull postgres api web updater || {
     echo "Image pull failed. If release images are not published yet, rerun with --build." >&2
     exit 1
   }
 fi
 
 if [ "$BUILD" = "1" ]; then
-  compose build api web
+  compose build api web updater
 fi
 
 compose up -d postgres
 compose run --rm migrate
 ACTIVE_RUNS="$(active_agent_run_count)"
 if [ "$ACTIVE_RUNS" = "0" ]; then
-  compose up -d --remove-orphans
+  mapfile -t runtime_services < <(all_runtime_services)
+  compose up -d --remove-orphans "${runtime_services[@]}"
 else
   echo "Updating API, scheduler, and web while preserving active worker AgentRuns."
-  compose up -d --no-deps api scheduler web
+  mapfile -t services < <(non_worker_services)
+  compose up -d --no-deps "${services[@]}"
   update_worker_after_drain "$ACTIVE_RUNS"
 fi
 

@@ -1,6 +1,6 @@
 """Tests for memory router — graph, search."""
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -14,7 +14,7 @@ def mock_session_factory():
     def _factory():
         return session
 
-    with patch("brain.app.api.deps.SessionFactory", _factory):
+    with patch("brain.platform.db.legacy.legacy_session_factory", _factory):
         yield session
 
 
@@ -72,18 +72,38 @@ def _make_edge(**overrides):
 
 def _make_uow():
     uow = MagicMock()
-    uow.__enter__ = MagicMock(return_value=uow)
-    uow.__exit__ = MagicMock(return_value=False)
+    uow.__aenter__ = AsyncMock(return_value=uow)
+    uow.__aexit__ = AsyncMock(return_value=False)
+    uow.memories = MagicMock()
+    uow.memories.get_graph_data = AsyncMock()
+    uow.memories.search_visible = AsyncMock()
+    uow.memories.get_truth_snapshot = AsyncMock()
+    uow.session = MagicMock()
+    uow.session.flush = AsyncMock()
     return uow
 
 
 @pytest_asyncio.fixture
-async def client():
+async def client(mock_session_factory):
+    from brain.app.api.deps import get_db
     from brain.app.api.main import app
 
+    class _AsyncSession:
+        async def run_sync(self, fn):
+            return fn(mock_session_factory)
+
+    async def _get_db():
+        yield _AsyncSession()
+
+    overrides = dict(app.dependency_overrides)
+    app.dependency_overrides[get_db] = _get_db
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(overrides)
 
 
 @pytest.mark.asyncio

@@ -186,6 +186,14 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
         )
         return self._session.scalars(stmt).first()
 
+    def get_version_by_digest(
+        self,
+        bundle: SkillBundle | int,
+        content_digest: str,
+    ) -> SkillBundleVersion | None:
+        """Return an existing immutable version by content digest."""
+        return self._get_version_by_digest(self._bundle_id(bundle), content_digest)
+
     # ------------------------------------------------------------------
     # Assets
     # ------------------------------------------------------------------

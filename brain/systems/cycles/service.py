@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -17,7 +16,7 @@ from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
 from brain.platform.db.models.org import User
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
 
 logger = logging.getLogger("cycles")
 
@@ -322,21 +321,6 @@ def _admit_cycle_run(
     return result.run_id if result.ok else None
 
 
-def _capture_cycle_emotion(message: str, user_id: str | None) -> None:
-    if not message:
-        return
-
-    def _capture() -> None:
-        try:
-            from brain.systems.memory.emotions import sense_emotion
-
-            sense_emotion(message, attributed_to=user_id or "operator")
-        except Exception as exc:
-            logger.warning("Emotion capture on cycle enqueue failed: %s", exc)
-
-    threading.Thread(target=_capture, daemon=True).start()
-
-
 def _append_cycle_thread_message(
     session,
     idea: Idea,
@@ -450,6 +434,10 @@ def run_cycle_now(cycle_id: int) -> dict:
     with UnitOfWork() as uow:
         run = uow.session.get(CycleRun, run_id)
         return serialize_cycle_run(run)
+
+
+async def async_run_cycle_now(cycle_id: int) -> dict:
+    return await run_sync_with_unit_of_work(run_cycle_now, cycle_id)
 
 
 def schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
@@ -638,7 +626,6 @@ def execute_cycle_run(run_id: int) -> None:
             _short_identifier(idea_id),
             cycle_name,
         )
-        _capture_cycle_emotion(run_message or "", cycle_user_id)
 
 
 def finalize_cycle_run_from_run(

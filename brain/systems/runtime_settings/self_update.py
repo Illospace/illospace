@@ -4,7 +4,7 @@ import json
 import os
 import shlex
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,10 +22,15 @@ _LOG_NAME = "illo-self-update.log"
 _META_NAME = "illo-self-update.json"
 _PID_NAME = "illo-self-update.pid"
 _START_LOCK_NAME = "illo-self-update.starting"
+_REQUEST_RUNNING_STATUSES = {"queued", "starting", "running"}
 
 
 def get_runtime_update_status() -> RuntimeUpdateRead:
     root = _repo_root()
+    request_file = _request_file()
+    if request_file is not None:
+        return _request_update_status(request_file)
+
     state_dir = _state_dir(root)
     available, detail = _availability(root)
     metadata = _read_metadata(state_dir)
@@ -46,6 +51,10 @@ def get_runtime_update_status() -> RuntimeUpdateRead:
 
 def start_runtime_update(*, requested_by: str | None = None) -> RuntimeUpdateRead:
     root = _repo_root()
+    request_file = _request_file()
+    if request_file is not None:
+        return _start_request_update(request_file, requested_by=requested_by)
+
     available, detail = _availability(root)
     if not available:
         raise HTTPException(status_code=409, detail=detail or "Illospace self-update is unavailable.")
@@ -137,6 +146,121 @@ def _state_dir(root: Path) -> Path:
     return Path(cfg.BRAIN_LOG_DIR).resolve()
 
 
+def _request_file() -> Path | None:
+    raw = os.getenv("ILLO_SELF_UPDATE_REQUEST_FILE", "").strip()
+    return Path(raw).resolve() if raw else None
+
+
+def _request_status_file(request_file: Path) -> Path:
+    raw = os.getenv("ILLO_SELF_UPDATE_STATUS_FILE", "").strip()
+    return Path(raw).resolve() if raw else request_file.with_name("status.json")
+
+
+def _request_log_path(request_file: Path) -> Path:
+    raw = os.getenv("ILLO_SELF_UPDATE_LOG_PATH", "").strip()
+    if raw:
+        return Path(raw).resolve()
+    return Path(cfg.BRAIN_LOG_DIR).resolve() / _LOG_NAME
+
+
+def _request_heartbeat_file(request_file: Path) -> Path | None:
+    raw = os.getenv("ILLO_SELF_UPDATE_HEARTBEAT_FILE", "").strip()
+    return Path(raw).resolve() if raw else None
+
+
+def _request_availability(request_file: Path) -> tuple[bool, str | None]:
+    try:
+        request_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return False, f"Illospace update queue is unavailable: {exc}"
+    if not os.access(request_file.parent, os.W_OK):
+        return False, f"Illospace update queue is not writable: {request_file.parent}"
+    heartbeat_file = _request_heartbeat_file(request_file)
+    if heartbeat_file is not None:
+        heartbeat = _read_json(heartbeat_file)
+        updated_at = _parse_datetime(heartbeat.get("updated_at"))
+        if updated_at is None:
+            return False, "Illospace update is waiting for the Compose updater sidecar."
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - updated_at > timedelta(seconds=60):
+            return False, "Illospace update is unavailable because the Compose updater sidecar heartbeat is stale."
+    return True, "Queues the update for the Compose updater sidecar."
+
+
+def _request_update_status(request_file: Path) -> RuntimeUpdateRead:
+    available, availability_detail = _request_availability(request_file)
+    status_data = _read_json(_request_status_file(request_file))
+    raw_status = str(status_data.get("status") or "").strip().lower()
+    running = raw_status in _REQUEST_RUNNING_STATUSES or request_file.exists()
+    detail = status_data.get("detail") if isinstance(status_data.get("detail"), str) else None
+
+    return RuntimeUpdateRead(
+        status="running" if running else "idle",
+        available=available,
+        pid=None,
+        started_at=_parse_datetime(status_data.get("started_at") or status_data.get("requested_at")),
+        active_agent_runs=_active_agent_run_count(),
+        log_path=str(_request_log_path(request_file)),
+        detail=detail or availability_detail,
+    )
+
+
+def _start_request_update(request_file: Path, *, requested_by: str | None) -> RuntimeUpdateRead:
+    available, detail = _request_availability(request_file)
+    if not available:
+        raise HTTPException(status_code=409, detail=detail or "Illospace self-update is unavailable.")
+
+    existing = _request_update_status(request_file)
+    if existing.status == "running":
+        return RuntimeUpdateRead(
+            **{
+                **existing.model_dump(),
+                "detail": "Illospace update is already running.",
+            }
+        )
+
+    lock_path = request_file.with_name(f".{request_file.name}.starting")
+    lock_fd = _acquire_start_lock(lock_path)
+    if lock_fd is None:
+        return RuntimeUpdateRead(
+            **{
+                **_request_update_status(request_file).model_dump(),
+                "status": "running",
+                "detail": "Illospace update is starting.",
+            }
+        )
+
+    try:
+        started_at = datetime.now(timezone.utc)
+        payload = {
+            "requested_at": started_at.isoformat(),
+            "requested_by": requested_by,
+        }
+        _write_json_atomic(request_file, payload)
+        _write_json_atomic(
+            _request_status_file(request_file),
+            {
+                **payload,
+                "started_at": started_at.isoformat(),
+                "status": "queued",
+                "detail": "Illospace update queued for the Compose updater sidecar.",
+            },
+        )
+        active_runs = _active_agent_run_count()
+        return RuntimeUpdateRead(
+            status="running",
+            available=True,
+            pid=None,
+            started_at=started_at,
+            active_agent_runs=active_runs,
+            log_path=str(_request_log_path(request_file)),
+            detail="Illospace update queued for the Compose updater sidecar.",
+        )
+    finally:
+        _release_start_lock(lock_fd, lock_path)
+
+
 def _availability(root: Path) -> tuple[bool, str | None]:
     if os.getenv("ILLO_SELF_UPDATE_COMMAND", "").strip():
         return True, "Self-update uses the configured update command."
@@ -174,8 +298,12 @@ def _active_agent_run_count() -> int:
 
 
 def _read_metadata(state_dir: Path) -> dict[str, Any]:
+    return _read_json(state_dir / _META_NAME)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
     try:
-        data = json.loads((state_dir / _META_NAME).read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -224,6 +352,13 @@ def _write_log_header(log_path: Path, started_at: datetime, *, requested_by: str
         handle.write(f"=== Illospace self-update requested at {started_at.isoformat()} ===\n".encode("utf-8"))
         if requested_by:
             handle.write(f"Requested by: {requested_by}\n".encode("utf-8"))
+
+
+def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _acquire_start_lock(path: Path) -> int | None:

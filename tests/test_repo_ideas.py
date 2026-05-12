@@ -1,6 +1,6 @@
 """IdeaRepository tests using in-memory SQLite."""
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import re
 
@@ -18,6 +18,11 @@ from brain.platform.db.repositories.ideas import (
     IdeaRepository,
     IdeaThreadRepository,
 )
+
+ORG_1 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1"
+ORG_2 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2"
+USER_1 = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1"
+USER_2 = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2"
 
 
 def _patch_sqlite_for_pg_types():
@@ -39,7 +44,7 @@ def _patch_sqlite_for_pg_types():
 
 def _register_sqlite_functions(dbapi_conn, connection_record):
     """Register PG-compatible functions for SQLite."""
-    dbapi_conn.create_function("NOW", 0, lambda: datetime.utcnow().isoformat())
+    dbapi_conn.create_function("NOW", 0, lambda: datetime.now(timezone.utc).isoformat())
     dbapi_conn.create_function(
         "gen_random_uuid", 0, lambda: str(uuid.uuid4())
     )
@@ -75,9 +80,9 @@ def engine():
 def session(engine):
     s = Session(engine)
     # seed org + user for FK constraints
-    org = Org(id="org-1", name="Test Org", slug="test-org")
+    org = Org(id=ORG_1, name="Test Org", slug="test-org")
     s.add(org)
-    user = User(id="user-1", org_id="org-1", name="Alex", email="alex@test.com")
+    user = User(id=USER_1, org_id=ORG_1, name="Alex", email="alex@test.com")
     s.add(user)
     s.flush()
     yield s
@@ -103,7 +108,7 @@ def _make_idea(session, **kwargs):
     defaults = {
         "id": str(uuid.uuid4()),
         "title": "Test Idea",
-        "user_id": "user-1",
+        "user_id": USER_1,
     }
     defaults.update(kwargs)
     idea = Idea(**defaults)
@@ -112,7 +117,7 @@ def _make_idea(session, **kwargs):
     return idea
 
 
-def _seed_org_user(session, org_id="org-2", user_id="user-2"):
+def _seed_org_user(session, org_id=ORG_2, user_id=USER_2):
     org = Org(id=org_id, name=f"Test {org_id}", slug=org_id)
     user = User(id=user_id, org_id=org_id, name=f"User {user_id}", email=f"{user_id}@test.com")
     session.add_all([org, user])
@@ -136,23 +141,23 @@ class TestIdeaRepository:
         assert len(result) == 1
 
     def test_list_by_org(self, repo, session):
-        _make_idea(session, org_id="org-1")
+        _make_idea(session, org_id=ORG_1)
         _make_idea(session, org_id=None)
-        result = repo.list_by_org("org-1")
+        result = repo.list_by_org(ORG_1)
         assert len(result) == 1
 
     def test_get_for_org_returns_only_matching_org(self, repo, session):
-        idea = _make_idea(session, org_id="org-1")
-        assert repo.get_for_org(idea.id, "org-1") == idea
-        assert repo.get_for_org(idea.id, "org-2") is None
+        idea = _make_idea(session, org_id=ORG_1)
+        assert repo.get_for_org(idea.id, ORG_1) == idea
+        assert repo.get_for_org(idea.id, ORG_2) is None
 
     def test_list_active_for_org_excludes_other_orgs(self, repo, session):
         _seed_org_user(session)
-        _make_idea(session, org_id="org-1")
-        _make_idea(session, id=str(uuid.uuid4()), user_id="user-2", org_id="org-2")
-        result = repo.list_active_for_org("org-1")
+        _make_idea(session, org_id=ORG_1)
+        _make_idea(session, id=str(uuid.uuid4()), user_id=USER_2, org_id=ORG_2)
+        result = repo.list_active_for_org(ORG_1)
         assert len(result) == 1
-        assert result[0].org_id == "org-1"
+        assert result[0].org_id == ORG_1
 
     def test_list_by_status(self, repo, session):
         _make_idea(session, status="emerged")
@@ -162,11 +167,11 @@ class TestIdeaRepository:
 
     def test_list_by_status_for_org_excludes_other_orgs(self, repo, session):
         _seed_org_user(session)
-        _make_idea(session, status="emerged", org_id="org-1")
-        _make_idea(session, id=str(uuid.uuid4()), user_id="user-2", org_id="org-2", status="emerged")
-        result = repo.list_by_status_for_org("emerged", "org-1")
+        _make_idea(session, status="emerged", org_id=ORG_1)
+        _make_idea(session, id=str(uuid.uuid4()), user_id=USER_2, org_id=ORG_2, status="emerged")
+        result = repo.list_by_status_for_org("emerged", ORG_1)
         assert len(result) == 1
-        assert result[0].org_id == "org-1"
+        assert result[0].org_id == ORG_1
 
     def test_update_status(self, repo, session):
         idea = _make_idea(session, status="emerged")
@@ -225,15 +230,15 @@ class TestIdeaConnectionRepository:
 
     def test_connection_queries_scope_both_ends_to_org(self, conn_repo, session):
         _seed_org_user(session)
-        org1_a = _make_idea(session, org_id="org-1")
-        org1_b = _make_idea(session, org_id="org-1", title="Same org")
-        org2 = _make_idea(session, id=str(uuid.uuid4()), user_id="user-2", org_id="org-2")
+        org1_a = _make_idea(session, org_id=ORG_1)
+        org1_b = _make_idea(session, org_id=ORG_1, title="Same org")
+        org2 = _make_idea(session, id=str(uuid.uuid4()), user_id=USER_2, org_id=ORG_2)
         same_org = IdeaConnection(id=str(uuid.uuid4()), source_id=org1_a.id, target_id=org1_b.id)
         cross_org = IdeaConnection(id=str(uuid.uuid4()), source_id=org1_a.id, target_id=org2.id)
         session.add_all([same_org, cross_org])
         session.flush()
 
-        assert conn_repo.list_all_active_for_org("org-1") == [same_org]
-        assert conn_repo.list_by_idea_for_org(org1_a.id, "org-1") == [same_org]
-        assert conn_repo.get_for_org(str(same_org.id), "org-1") == same_org
-        assert conn_repo.get_for_org(str(cross_org.id), "org-1") is None
+        assert conn_repo.list_all_active_for_org(ORG_1) == [same_org]
+        assert conn_repo.list_by_idea_for_org(org1_a.id, ORG_1) == [same_org]
+        assert conn_repo.get_for_org(str(same_org.id), ORG_1) == same_org
+        assert conn_repo.get_for_org(str(cross_org.id), ORG_1) is None
