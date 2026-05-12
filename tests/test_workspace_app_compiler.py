@@ -123,6 +123,67 @@ def test_compiler_infers_domain_backed_table_from_single_binding():
     assert _validation_report(compiled)["status"] == "passed"
 
 
+def test_compiler_accepts_domain_backed_board_view():
+    compiled = compile_workspace_app_input(
+        action="create",
+        name="GitHub Ticket Tracker",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(
+            {
+                "schema_version": 1,
+                "title": "GitHub Ticket Tracker",
+                "primary_binding": "tickets",
+                "actions": [{"key": "tickets.syncExternal", "label": "Sync GitHub"}],
+                "views": [
+                    {
+                        "id": "ticket-board",
+                        "type": "kanban",
+                        "title": "Tickets",
+                        "binding": "tickets",
+                        "groups": ["Backlog", "Todo", "In Progress", "In Review", "Done"],
+                    }
+                ],
+            }
+        ),
+        manifest={
+            "contract_version": 1,
+            "data_plan": {
+                "mode": "domain",
+                "bindings": {
+                    "tickets": {
+                        "domain_id": 1,
+                        "object_key": "ticket",
+                        "fields": ["title", "status", "priority", "repo", "assignee"],
+                        "operations": ["schema", "list", "query", "create", "update", "archive"],
+                    }
+                },
+            },
+            "actions": {
+                "tickets.syncExternal": {
+                    "kind": "connector",
+                    "description": "Sync GitHub issues into the tickets Domain.",
+                    "effects": ["external.read", "domain.write"],
+                    "connectors": [{"key": "github", "provider": "github", "auth": "project_vault_binding"}],
+                    "executor": {"type": "deferred"},
+                }
+            },
+        },
+    )
+
+    source = json.loads(compiled.source_code)
+    assert source["actions"] == [{"key": "tickets.syncExternal", "label": "Sync GitHub"}]
+    board = source["views"][0]
+    assert board["type"] == "board"
+    assert board["group_by"] == "status"
+    assert board["card"] == {
+        "title": "title",
+        "subtitle": "repo",
+        "badges": ["priority", "status"],
+    }
+    assert _validation_report(compiled)["status"] == "passed"
+
+
 def test_compiler_does_not_silently_repair_recordful_app_local_state():
     compiled = compile_workspace_app_input(
         action="create",

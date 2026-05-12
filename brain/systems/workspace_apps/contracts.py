@@ -39,7 +39,7 @@ ACTION_EFFECTS = {
 }
 ACTION_EXECUTOR_TYPES = {"registered", "deferred"}
 APP_LOCAL_SCOPES = {"ui_state", "preferences", "filters", "draft", "ephemeral"}
-GENERATED_UI_VIEW_TYPES = {"table", "list", "cards", "chart", "metrics", "detail", "form"}
+GENERATED_UI_VIEW_TYPES = {"table", "list", "cards", "board", "chart", "metrics", "detail", "form"}
 GENERATED_UI_CHART_TYPES = {"bar", "line", "pie", "scatter"}
 RECORD_LIKE_STATE_KEYS = {
     "records",
@@ -139,7 +139,7 @@ def build_contract_validation_report(
     if normalized_renderer == "sandboxed-html-app" and normalized_source_kind == "html":
         _validate_html_source(source_code or "", errors)
     if _is_structured_ui_renderer(normalized_renderer, normalized_source_kind):
-        _validate_generated_ui_source(source_code or "", errors)
+        _validate_generated_ui_source(source_code or "", errors, manifest=manifest_dict)
 
     return {
         "status": "passed" if not errors else "failed",
@@ -331,7 +331,12 @@ def _is_structured_ui_renderer(renderer_key: str, source_kind: str) -> bool:
     }
 
 
-def _validate_generated_ui_source(source: str, errors: list[str]) -> None:
+def _validate_generated_ui_source(
+    source: str,
+    errors: list[str],
+    *,
+    manifest: Mapping[str, Any] | None = None,
+) -> None:
     if not source.strip():
         errors.append("source_code is required for generated-ui apps")
         return
@@ -349,6 +354,8 @@ def _validate_generated_ui_source(source: str, errors: list[str]) -> None:
         errors.append("generated UI schema_version must be 1 when provided")
     if not str(spec.get("title") or "").strip():
         errors.append("generated UI spec.title is required")
+
+    _validate_generated_ui_actions(spec, errors, manifest=manifest)
 
     views = spec.get("views")
     if not isinstance(views, list) or not views:
@@ -375,6 +382,10 @@ def _validate_generated_ui_source(source: str, errors: list[str]) -> None:
                         errors.append(
                             f"generated UI spec.views[{index}].columns[{col_index}] must include a key"
                         )
+        if view_type == "board":
+            group_by = raw_view.get("group_by", raw_view.get("groupBy"))
+            if group_by is not None and not str(group_by or "").strip():
+                errors.append(f"generated UI spec.views[{index}].group_by must be non-empty when provided")
         if view_type == "chart":
             chart_type = str(raw_view.get("chart_type") or raw_view.get("chart") or "bar").strip()
             if chart_type not in GENERATED_UI_CHART_TYPES:
@@ -382,6 +393,50 @@ def _validate_generated_ui_source(source: str, errors: list[str]) -> None:
                     f"generated UI spec.views[{index}].chart_type must be one of: "
                     f"{', '.join(sorted(GENERATED_UI_CHART_TYPES))}"
                 )
+
+
+def _validate_generated_ui_actions(
+    spec: Mapping[str, Any],
+    errors: list[str],
+    *,
+    manifest: Mapping[str, Any] | None = None,
+) -> None:
+    actions = spec.get("actions")
+    if actions is None:
+        return
+    if not isinstance(actions, list):
+        errors.append("generated UI spec.actions must be a list when provided")
+        return
+    declared_action_keys = _declared_action_keys(manifest or {})
+    for index, raw_action in enumerate(actions):
+        key = ""
+        if isinstance(raw_action, str):
+            key = raw_action.strip()
+        elif isinstance(raw_action, Mapping):
+            key = str(raw_action.get("key") or raw_action.get("action_key") or "").strip()
+            payload = raw_action.get("payload")
+            if payload is not None and not isinstance(payload, Mapping):
+                errors.append(f"generated UI spec.actions[{index}].payload must be an object when provided")
+            if _forbidden_secret_paths(raw_action):
+                errors.append(f"generated UI spec.actions[{index}] must not contain raw credentials or secret values")
+        else:
+            errors.append(f"generated UI spec.actions[{index}] must be an action key or object")
+            continue
+        if not key or not re.match(r"^[a-zA-Z][\w.-]*$", key):
+            errors.append(f"generated UI spec.actions[{index}].key must be a stable action identifier")
+        elif key not in declared_action_keys:
+            errors.append(
+                f"generated UI spec.actions[{index}].key must reference a manifest.actions declaration"
+            )
+
+
+def _declared_action_keys(manifest: Mapping[str, Any]) -> set[str]:
+    actions = manifest.get("actions")
+    if actions is None:
+        actions = _as_mapping(manifest.get("action_plan")).get("actions")
+    if not isinstance(actions, Mapping):
+        return set()
+    return {str(key or "").strip() for key in actions.keys() if str(key or "").strip()}
 
 
 class _AppKitHtmlParser(HTMLParser):

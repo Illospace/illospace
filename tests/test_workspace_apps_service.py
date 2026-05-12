@@ -270,6 +270,48 @@ def test_valid_structured_generated_ui_app_saves(session):
     assert json.loads(version.source_code)["views"][0]["type"] == "table"
 
 
+def test_valid_structured_board_generated_ui_app_saves(session):
+    domain = _todo_domain(session)
+    board_spec = {
+        "schema_version": 1,
+        "title": "Todo Board",
+        "primary_binding": "todos",
+        "actions": [{"key": "tickets.syncExternal", "label": "Sync external"}],
+        "views": [
+            {
+                "id": "todo-board",
+                "type": "board",
+                "title": "Todo board",
+                "binding": "todos",
+                "group_by": "completed",
+                "groups": [
+                    {"label": "Open", "value": False},
+                    {"label": "Done", "value": True},
+                ],
+                "card": {"title": "title", "badges": ["notes"]},
+            }
+        ],
+    }
+
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="todo-board-ui",
+        name="Todo Board UI",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(board_spec),
+        manifest=_manifest_with_action(domain.id),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    version = active_version(session, app.id)
+    assert version is not None
+    assert json.loads(version.source_code)["actions"][0]["key"] == "tickets.syncExternal"
+    assert json.loads(version.source_code)["views"][0]["type"] == "board"
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
