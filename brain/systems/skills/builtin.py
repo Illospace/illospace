@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
+import asyncio
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -21,7 +21,12 @@ ILLO_CORE_TRUST_LEVEL = "illo_core"
 BUILTIN_SKILL_BUNDLE_ROOT = Path(__file__).with_name("builtin_skill_bundles")
 _BUILTIN_SKILLS_ENSURE_TTL_SECONDS = 300.0
 _BUILTIN_SKILLS_LAST_ENSURED_AT = 0.0
-_BUILTIN_SKILLS_ENSURE_LOCK = threading.Lock()
+_BUILTIN_SKILLS_ENSURE_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _builtin_skills_ensure_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    return _BUILTIN_SKILLS_ENSURE_LOCKS.setdefault(id(loop), asyncio.Lock())
 
 
 def _trigger(pattern: str, direction: str = "for") -> dict[str, str]:
@@ -917,7 +922,7 @@ def _sql_params(skill: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def ensure_builtin_skills() -> None:
+async def ensure_builtin_skills() -> None:
     """Upsert code-owned product skills into DB.
 
     Only rows still marked ``builtin`` are overwritten. If a row has
@@ -930,8 +935,8 @@ def ensure_builtin_skills() -> None:
 
         for name, skill in BUILTIN_SKILLS.items():
             try:
-                with UnitOfWork() as uow:
-                    row = uow.session.execute(
+                async with UnitOfWork() as uow:
+                    result = await uow.session.execute(
                         text(
                             """
                             SELECT
@@ -953,10 +958,11 @@ def ensure_builtin_skills() -> None:
                             """
                         ),
                         {"name": name},
-                    ).mappings().first()
+                    )
+                    row = result.mappings().first()
 
                     if row is None:
-                        uow.session.execute(
+                        await uow.session.execute(
                             text(
                                 """
                                 INSERT INTO skills (
@@ -990,7 +996,7 @@ def ensure_builtin_skills() -> None:
                         logger.debug("Built-in skill already current: %s", name)
                         continue
 
-                    uow.session.execute(
+                    await uow.session.execute(
                         text(
                             """
                             UPDATE skills
@@ -1025,25 +1031,25 @@ def ensure_builtin_skills() -> None:
     except Exception as exc:
         logger.warning("ensure_builtin_skills failed (non-fatal): %s", exc)
 
-    _ensure_builtin_skill_bundles()
+    await _ensure_builtin_skill_bundles()
 
 
-def ensure_builtin_skills_cached(*, ttl_seconds: float = _BUILTIN_SKILLS_ENSURE_TTL_SECONDS) -> None:
+async def ensure_builtin_skills_cached(*, ttl_seconds: float = _BUILTIN_SKILLS_ENSURE_TTL_SECONDS) -> None:
     """Avoid re-upserting built-ins on every read-only catalog request."""
     global _BUILTIN_SKILLS_LAST_ENSURED_AT
     now = time.monotonic()
     if now - _BUILTIN_SKILLS_LAST_ENSURED_AT < ttl_seconds:
         return
 
-    with _BUILTIN_SKILLS_ENSURE_LOCK:
+    async with _builtin_skills_ensure_lock():
         now = time.monotonic()
         if now - _BUILTIN_SKILLS_LAST_ENSURED_AT < ttl_seconds:
             return
-        ensure_builtin_skills()
+        await ensure_builtin_skills()
         _BUILTIN_SKILLS_LAST_ENSURED_AT = time.monotonic()
 
 
-def _ensure_builtin_skill_bundles() -> None:
+async def _ensure_builtin_skill_bundles() -> None:
     """Attach progressive filesystem bundles for code-owned built-ins."""
     if not BUILTIN_SKILL_BUNDLE_ROOT.exists():
         return
@@ -1064,25 +1070,23 @@ def _ensure_builtin_skill_bundles() -> None:
             continue
 
         try:
-            with UnitOfWork() as uow:
-                # Unit tests often patch UnitOfWork with a MagicMock; skip bundle
-                # import there while keeping the row-bootstrap SQL behavior covered.
-                if not isinstance(uow.skills, SkillRepository) or not isinstance(
-                    uow.skill_bundles,
-                    SkillBundleRepository,
-                ):
-                    return
-                service = SkillBundleIOService(uow.skills, uow.skill_bundles)
-                service.import_bundle(
-                    bundle_dir,
-                    namespace="illo_core",
-                    enabled_scope="system",
-                    update_policy="pinned",
-                    review_status="approved",
-                    trust_level=ILLO_CORE_TRUST_LEVEL,
-                    source_kind=ILLO_CORE_SOURCE_KIND,
-                    auto_bump_conflicting_semver=True,
-                )
+            async with UnitOfWork() as uow:
+                def _import_bundle(sync_db) -> None:
+                    skill_repo = SkillRepository(sync_db)
+                    bundle_repo = SkillBundleRepository(sync_db)
+                    service = SkillBundleIOService(skill_repo, bundle_repo)
+                    service.import_bundle(
+                        bundle_dir,
+                        namespace="illo_core",
+                        enabled_scope="system",
+                        update_policy="pinned",
+                        review_status="approved",
+                        trust_level=ILLO_CORE_TRUST_LEVEL,
+                        source_kind=ILLO_CORE_SOURCE_KIND,
+                        auto_bump_conflicting_semver=True,
+                    )
+
+                await uow.session.run_sync(_import_bundle)
         except Exception as exc:
             logger.warning(
                 "ensure_builtin_skill_bundle_failed skill=%s error=%s",

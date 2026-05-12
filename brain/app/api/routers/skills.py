@@ -18,7 +18,6 @@ from brain.platform.db.models.skill import Skill
 from brain.platform.db.models.skill_bundle import SkillAsset, SkillBundle, SkillBundleVersion, SkillInstallation
 from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
 from brain.platform.db.repositories.skills import SkillRepository
-from brain.platform.db.repositories.unit_of_work import use_sync_session
 from brain.platform.db.schemas.skills import (
     SkillAssetContentRead,
     SkillAssetRead,
@@ -81,14 +80,10 @@ def _require_skills_manage(user: dict[str, Any]) -> None:
         raise HTTPException(status_code=403, detail="Permission denied")
 
 
-def _ensure_builtin_skill_catalog(db: Session | None = None) -> None:
+async def _ensure_builtin_skill_catalog() -> None:
     from brain.systems.skills.builtin import ensure_builtin_skills_cached
 
-    if db is None:
-        ensure_builtin_skills_cached()
-        return
-    with use_sync_session(db):
-        ensure_builtin_skills_cached()
+    await ensure_builtin_skills_cached()
 
 
 def _needs_attention(skill: Skill) -> bool:
@@ -311,8 +306,9 @@ async def list_skills(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
+    await _ensure_builtin_skill_catalog()
+
     def _list(sync_db: Session):
-        _ensure_builtin_skill_catalog(sync_db)
         repo = SkillRepository(sync_db)
         if not include_executions:
             return repo.list_active_for_dashboard()
@@ -347,8 +343,9 @@ async def export_skills(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
+    await _ensure_builtin_skill_catalog()
+
     def _export(sync_db: Session):
-        _ensure_builtin_skill_catalog(sync_db)
         repo = SkillRepository(sync_db)
         return repo.list_active()
 
@@ -382,8 +379,9 @@ async def needing_attention(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
+    await _ensure_builtin_skill_catalog()
+
     def _list(sync_db: Session):
-        _ensure_builtin_skill_catalog(sync_db)
         repo = SkillRepository(sync_db)
         return repo.needing_attention()
 
@@ -395,8 +393,9 @@ async def list_enhanced_skills(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
+    await _ensure_builtin_skill_catalog()
+
     def _list(sync_db: Session):
-        _ensure_builtin_skill_catalog(sync_db)
         repo = SkillRepository(sync_db)
         return [_enhanced_skill(sync_db, skill) for skill in repo.list_active()]
 

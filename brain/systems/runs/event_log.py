@@ -136,8 +136,39 @@ def list_run_events_after_for_principal(
     return rows
 
 
+async def list_run_events_after_for_principal_async(
+    session: AsyncSession,
+    principal: Mapping[str, Any],
+    *,
+    last_event_id: int = 0,
+    limit: int = 100,
+) -> list[AgentRunEventRow]:
+    stmt = (
+        select(AgentRunEventRow, AgentRunRow.thread_id, AgentRunRow.profile, AgentRunRow.org_id)
+        .join(AgentRunRow, AgentRunRow.id == AgentRunEventRow.run_id)
+        .where(AgentRunEventRow.id > int(last_event_id))
+        .order_by(AgentRunEventRow.id.asc())
+        .limit(limit)
+    )
+    if not _principal_can_replay_all(principal):
+        org_id = str(principal.get("org_id") or "").strip()
+        if not org_id:
+            stmt = stmt.where(false())
+        else:
+            stmt = stmt.where(AgentRunRow.org_id == org_id)
+    result = await session.execute(stmt)
+    rows = []
+    for event, thread_id, profile, row_org_id in result.all():
+        setattr(event, "_agent_run_thread_id", thread_id)
+        setattr(event, "_agent_run_profile", profile)
+        setattr(event, "_agent_run_org_id", row_org_id)
+        rows.append(event)
+    return rows
+
+
 __all__ = [
     "async_record_run_event",
+    "list_run_events_after_for_principal_async",
     "list_run_events_after_for_principal",
     "record_run_degraded_event",
     "record_run_event",

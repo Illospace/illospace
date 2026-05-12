@@ -754,12 +754,12 @@ def test_slash_commands_materializes_builtin_skills():
     mock_uow.session.run_sync = AsyncMock(side_effect=run_sync)
 
     with (
-        patch("brain.systems.skills.builtin.ensure_builtin_skills_cached") as ensure_builtin,
+        patch("brain.systems.skills.builtin.ensure_builtin_skills_cached", new=AsyncMock()) as ensure_builtin,
         patch.object(analytics_mod, "UnitOfWork", return_value=mock_uow),
     ):
         result = asyncio.run(analytics_mod.api_slash_commands(user={"id": "user-1"}))
 
-    ensure_builtin.assert_called_once_with()
+    ensure_builtin.assert_awaited_once_with()
     assert result[0]["name"] == "develop"
 
 

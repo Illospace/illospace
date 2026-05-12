@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -117,6 +118,27 @@ def test_publish_live_fans_out_without_durable_storage(monkeypatch):
     events.publish_live("browser_session_frame", {"idea_id": "idea-1", "delta": "hello"})
 
     assert published == [("browser_session_frame", {"idea_id": "idea-1", "delta": "hello"})]
+
+
+@pytest.mark.asyncio
+async def test_publish_records_cortex_event_async_inside_running_loop(monkeypatch):
+    from brain.systems.cortex import events
+
+    async_record = AsyncMock()
+    sync_record = MagicMock(side_effect=AssertionError("sync event writes are not allowed in async runtime"))
+    publisher = MagicMock()
+
+    monkeypatch.setattr(events, "record_cortex_event_async", async_record)
+    monkeypatch.setattr(events, "record_cortex_event", sync_record)
+    monkeypatch.setattr(events, "_publisher", publisher)
+
+    payload = {"idea_id": "idea-1", "new_status": "active"}
+    events.publish("status_change", payload)
+    await asyncio.sleep(0)
+
+    async_record.assert_awaited_once_with("status_change", payload)
+    sync_record.assert_not_called()
+    publisher.assert_called_once_with("status_change", payload)
 
 
 def test_browser_run_events_live_publish_after_durable_record(monkeypatch):

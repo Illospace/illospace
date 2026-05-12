@@ -96,6 +96,20 @@ def serialize_active_runs(scope: RunReadScope | None = None, *, uow_factory=Unit
         return [run_stream_payload(row) for row in rows]
 
 
+async def serialize_active_runs_async(
+    scope: RunReadScope | None = None,
+    *,
+    uow_factory=UnitOfWork,
+) -> list[dict[str, Any]]:
+    async with uow_factory() as uow:
+        result = await uow.session.scalars(
+            _visible_query(scope)
+            .where(AgentRunRow.status.in_(sorted(ACTIVE_STATUSES)))
+            .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
+        )
+        return [run_stream_payload(row) for row in result.all()]
+
+
 def serialize_recent_runs(
     scope: RunReadScope | None = None,
     *,
@@ -116,6 +130,30 @@ def serialize_recent_runs(
         return payloads
 
 
+async def serialize_recent_runs_async(
+    scope: RunReadScope | None = None,
+    *,
+    limit: int = 50,
+    include_debug: bool = False,
+    uow_factory=UnitOfWork,
+) -> list[dict[str, Any]]:
+    async with uow_factory() as uow:
+        result = await uow.session.scalars(
+            _visible_query(scope)
+            .order_by(AgentRunRow.created_at.desc(), AgentRunRow.id.desc())
+            .limit(limit)
+        )
+        payloads = [run_stream_payload(row) for row in result.all()]
+        if include_debug:
+            for payload in payloads:
+                payload["debug"] = await serialize_run_debug_async(
+                    int(payload["run_id"]),
+                    scope,
+                    uow_factory=uow_factory,
+                )
+        return payloads
+
+
 def serialize_run_history(
     idea_id: str,
     *,
@@ -132,6 +170,29 @@ def serialize_run_history(
     if include_debug:
         for payload in payloads:
             payload["debug"] = serialize_run_debug(int(payload["run_id"]), None, uow_factory=uow_factory)
+        return payloads
+
+
+async def serialize_run_history_async(
+    idea_id: str,
+    *,
+    include_debug: bool = False,
+    uow_factory=UnitOfWork,
+) -> list[dict[str, Any]]:
+    async with uow_factory() as uow:
+        result = await uow.session.scalars(
+            select(AgentRunRow)
+            .where(AgentRunRow.thread_id == idea_id)
+            .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
+        )
+        payloads = [run_stream_payload(row) for row in result.all()]
+    if include_debug:
+        for payload in payloads:
+            payload["debug"] = await serialize_run_debug_async(
+                int(payload["run_id"]),
+                None,
+                uow_factory=uow_factory,
+            )
     return payloads
 
 
@@ -185,6 +246,58 @@ def serialize_run_debug(
         }
 
 
+async def serialize_run_debug_async(
+    run_id: int,
+    scope: RunReadScope | None = None,
+    *,
+    uow_factory=UnitOfWork,
+    **_: Any,
+) -> dict[str, Any] | None:
+    async with uow_factory() as uow:
+        run = await uow.session.get(AgentRunRow, int(run_id))
+        if run is None or (scope is not None and not run_belongs_to_scope(uow.session, run, scope)):
+            return None
+        events_result = await uow.session.scalars(
+            select(AgentRunEventRow)
+            .where(AgentRunEventRow.run_id == run.id)
+            .order_by(AgentRunEventRow.sequence_no.asc())
+        )
+        artifacts_result = await uow.session.scalars(
+            select(AgentRunArtifactRow)
+            .where(AgentRunArtifactRow.run_id == run.id)
+            .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
+        )
+        events = events_result.all()
+        artifacts = artifacts_result.all()
+        return {
+            "run": run_stream_payload(run),
+            "events": [
+                {
+                    "id": event.id,
+                    "sequence_no": event.sequence_no,
+                    "event_type": event.event_type,
+                    "payload": event.payload or {},
+                    "visibility": event.visibility,
+                    "created_at": _iso(event.created_at),
+                }
+                for event in events
+            ],
+            "artifacts": [
+                {
+                    "id": artifact.id,
+                    "artifact_type": artifact.artifact_type,
+                    "title": artifact.title,
+                    "payload": artifact.payload or {},
+                    "text": artifact.text,
+                    "uri": artifact.uri,
+                    "visibility": artifact.visibility,
+                    "created_at": _iso(artifact.created_at),
+                }
+                for artifact in artifacts
+            ],
+        }
+
+
 def tenant_safe_queue_status(status: dict[str, Any], _scope: RunReadScope | None = None) -> dict[str, Any]:
     return dict(status or {})
 
@@ -195,8 +308,12 @@ __all__ = [
     "run_belongs_to_scope",
     "run_stream_payload",
     "serialize_active_runs",
+    "serialize_active_runs_async",
     "serialize_recent_runs",
+    "serialize_recent_runs_async",
     "serialize_run_debug",
+    "serialize_run_debug_async",
     "serialize_run_history",
+    "serialize_run_history_async",
     "tenant_safe_queue_status",
 ]

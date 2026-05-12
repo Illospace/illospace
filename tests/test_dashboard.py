@@ -223,13 +223,15 @@ class TestEmotionsRoute:
 
 class TestSkillsRoute:
 
+    @patch("brain.app.api.routers.skills._ensure_builtin_skill_catalog", new_callable=AsyncMock)
     @patch("brain.app.api.routers.skills.SkillRepository")
-    def test_route_skills_delegates(self, MockSkillRepo, client):
+    def test_route_skills_delegates(self, MockSkillRepo, ensure_catalog, client):
         MockSkillRepo.return_value.list_active_with_executions.return_value = []
         resp = client.get("/api/skills/")
         assert resp.status_code == 200
+        ensure_catalog.assert_awaited_once_with()
 
-    @patch("brain.app.api.routers.skills._ensure_builtin_skill_catalog")
+    @patch("brain.app.api.routers.skills._ensure_builtin_skill_catalog", new_callable=AsyncMock)
     @patch("brain.app.api.routers.skills.SkillRepository")
     def test_route_enhanced_skills_marks_legacy_projection(self, MockSkillRepo, ensure_catalog, client):
         skill = SimpleNamespace(

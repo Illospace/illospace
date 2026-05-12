@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Callable
 
 from sqlalchemy import false, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.platform.db.models.run import CortexEvent
@@ -154,6 +156,30 @@ def _lookup_idea_org_id(idea_id: str, *, session: Session | None = None) -> str 
     return org_id
 
 
+async def _lookup_idea_org_id_async(
+    idea_id: str,
+    *,
+    session: AsyncSession | None = None,
+) -> str | None:
+    cache_key = str(idea_id)
+    if cache_key in _idea_org_cache:
+        return _idea_org_cache[cache_key]
+    try:
+        if session is not None:
+            idea = await session.get(Idea, cache_key)
+            org_id = _optional_text(getattr(idea, "org_id", None)) if idea is not None else None
+        else:
+            async with UnitOfWork() as uow:
+                idea = await uow.session.get(Idea, cache_key)
+                org_id = _optional_text(getattr(idea, "org_id", None)) if idea is not None else None
+    except Exception as exc:
+        logger.debug("event_org_lookup_by_idea_failed idea_id=%s error=%s", cache_key, exc)
+        return None
+    if org_id:
+        _idea_org_cache[cache_key] = org_id
+    return org_id
+
+
 def _lookup_run_org_id(run_id: int, *, session: Session | None = None) -> str | None:
     cache_key = int(run_id)
     if cache_key in _run_org_cache:
@@ -167,6 +193,32 @@ def _lookup_run_org_id(run_id: int, *, session: Session | None = None) -> str | 
         else:
             with UnitOfWork() as uow:
                 run = uow.session.get(AgentRunRow, cache_key)
+                org_id = _optional_text(getattr(run, "org_id", None)) if run is not None else None
+    except Exception as exc:
+        logger.debug("event_org_lookup_by_run_failed run_id=%s error=%s", cache_key, exc)
+        return None
+    if org_id:
+        _run_org_cache[cache_key] = org_id
+    return org_id
+
+
+async def _lookup_run_org_id_async(
+    run_id: int,
+    *,
+    session: AsyncSession | None = None,
+) -> str | None:
+    cache_key = int(run_id)
+    if cache_key in _run_org_cache:
+        return _run_org_cache[cache_key]
+    try:
+        from brain.platform.db.models.agent_run import AgentRunRow
+
+        if session is not None:
+            run = await session.get(AgentRunRow, cache_key)
+            org_id = _optional_text(getattr(run, "org_id", None)) if run is not None else None
+        else:
+            async with UnitOfWork() as uow:
+                run = await uow.session.get(AgentRunRow, cache_key)
                 org_id = _optional_text(getattr(run, "org_id", None)) if run is not None else None
     except Exception as exc:
         logger.debug("event_org_lookup_by_run_failed run_id=%s error=%s", cache_key, exc)
@@ -201,6 +253,31 @@ def resolve_event_org_id(
     return None
 
 
+async def resolve_event_org_id_async(
+    payload: Mapping[str, Any],
+    *,
+    session: AsyncSession | None = None,
+) -> str | None:
+    """Resolve the org scope for a live Cortex event payload without sync DB access."""
+    org_id = _optional_text(payload.get("org_id"))
+    if org_id:
+        return org_id
+    idea = payload.get("idea")
+    if isinstance(idea, Mapping):
+        org_id = _optional_text(idea.get("org_id"))
+        if org_id:
+            return org_id
+    idea_id = _infer_idea_id(payload)
+    if idea_id:
+        org_id = await _lookup_idea_org_id_async(idea_id, session=session)
+        if org_id:
+            return org_id
+    run_id = _infer_run_id(payload)
+    if run_id is not None:
+        return await _lookup_run_org_id_async(run_id, session=session)
+    return None
+
+
 def _write_cortex_event(
     session: Session,
     *,
@@ -221,6 +298,26 @@ def _write_cortex_event(
     return event
 
 
+async def _write_cortex_event_async(
+    session: AsyncSession,
+    *,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+) -> CortexEvent:
+    normalized_payload = _normalize_payload(payload)
+    event = CortexEvent(
+        event_type=str(event_type),
+        idea_id=_infer_idea_id(normalized_payload),
+        target_id=_optional_text(normalized_payload.get("target_id")),
+        session_id=_optional_text(normalized_payload.get("session_id")),
+        duration_ms=_optional_int(normalized_payload.get("duration_ms")),
+        metadata_=normalized_payload,
+    )
+    session.add(event)
+    await session.flush()
+    return event
+
+
 def record_cortex_event(
     event_type: str,
     payload: dict[str, Any] | None = None,
@@ -233,6 +330,38 @@ def record_cortex_event(
 
     with UnitOfWork() as uow:
         return _write_cortex_event(uow.session, event_type=event_type, payload=payload)
+
+
+async def record_cortex_event_async(
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    session: AsyncSession | None = None,
+) -> CortexEvent:
+    """Persist a generic Cortex websocket event using the async DB runtime."""
+    if session is not None:
+        return await _write_cortex_event_async(session, event_type=event_type, payload=payload)
+
+    async with UnitOfWork() as uow:
+        return await _write_cortex_event_async(uow.session, event_type=event_type, payload=payload)
+
+
+def _active_async_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+def _log_async_event_write_failure(event_type: str, task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except Exception as exc:
+        logger.warning(
+            "cortex_event_write_failed event_type=%s error=%s",
+            event_type,
+            exc,
+        )
 
 
 def cortex_event_to_message(
@@ -286,8 +415,34 @@ def list_cortex_events_after_for_principal(
         else:
             stmt = stmt.join(Idea, Idea.id == CortexEvent.idea_id).where(
                 Idea.org_id == org_id
-            )
+        )
     return list(session.scalars(stmt).all())
+
+
+async def list_cortex_events_after_for_principal_async(
+    session: AsyncSession,
+    principal: Mapping[str, Any],
+    *,
+    last_event_id: int = 0,
+    limit: int = 100,
+) -> list[CortexEvent]:
+    """Return Cortex events visible to a replay principal after a cursor."""
+    stmt = (
+        select(CortexEvent)
+        .where(CortexEvent.id > int(last_event_id))
+        .order_by(CortexEvent.id.asc())
+        .limit(limit)
+    )
+    if not _principal_can_replay_all(principal):
+        org_id = str(principal.get("org_id") or "").strip()
+        if not org_id:
+            stmt = stmt.where(false())
+        else:
+            stmt = stmt.join(Idea, Idea.id == CortexEvent.idea_id).where(
+                Idea.org_id == org_id
+            )
+    result = await session.scalars(stmt)
+    return list(result.all())
 
 
 def publish(event_type: str, data: dict[str, Any]) -> None:
@@ -322,14 +477,24 @@ def publish(event_type: str, data: dict[str, Any]) -> None:
         return
 
     if not recorded_durable and _infer_idea_id(data) is not None:
-        try:
-            record_cortex_event(event_type, data)
-        except Exception as exc:
-            logger.warning(
-                "cortex_event_write_failed event_type=%s error=%s",
-                event_type,
-                exc,
+        loop = _active_async_loop()
+        if loop is not None:
+            task = loop.create_task(record_cortex_event_async(event_type, data))
+            task.add_done_callback(
+                lambda done_task, event_type=event_type: _log_async_event_write_failure(
+                    event_type,
+                    done_task,
+                )
             )
+        else:
+            try:
+                record_cortex_event(event_type, data)
+            except Exception as exc:
+                logger.warning(
+                    "cortex_event_write_failed event_type=%s error=%s",
+                    event_type,
+                    exc,
+                )
 
     if _publisher:
         try:

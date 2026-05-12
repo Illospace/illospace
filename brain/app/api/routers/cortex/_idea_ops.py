@@ -679,7 +679,14 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
                 to_state=new_status,
                 trigger=f"auto_{role}_message",
             ))
-            publish("status_change", {"idea_id": idea_id, "old_status": current_status, "new_status": new_status})
+            status_payload = {
+                "idea_id": idea_id,
+                "old_status": current_status,
+                "new_status": new_status,
+            }
+            if notification_org_id:
+                status_payload["org_id"] = notification_org_id
+            publish("status_change", status_payload)
             if (
                 new_status == "unread_reply"
                 and notification_org_id

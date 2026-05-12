@@ -25,9 +25,10 @@ from brain.systems.runs.cortex.recording import (
 )
 from brain.systems.runs.cortex.read_models import (
     serialize_active_runs,
-    serialize_recent_runs,
-    serialize_run_debug,
-    serialize_run_history,
+    serialize_active_runs_async,
+    serialize_recent_runs_async,
+    serialize_run_debug_async,
+    serialize_run_history_async,
     tenant_safe_queue_status,
 )
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
@@ -102,7 +103,7 @@ def _serialize_active_runs(user: dict[str, Any] | None = None) -> list[dict[str,
 
 @router.get("/ops/active")
 async def ops_active_runs(user: dict[str, Any] = Depends(get_current_user)):
-    return await run_sync_with_unit_of_work(_serialize_active_runs, user)
+    return await serialize_active_runs_async(_run_read_scope(user), uow_factory=UnitOfWork)
 
 
 @router.get("/ops/recent")
@@ -111,8 +112,7 @@ async def ops_recent_runs(
     include_debug: bool = False,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_sync_with_unit_of_work(
-        serialize_recent_runs,
+    return await serialize_recent_runs_async(
         _run_read_scope(user),
         limit=limit,
         include_debug=include_debug,
@@ -169,18 +169,21 @@ async def run_history(
     include_debug: bool = False,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _history():
-        with UnitOfWork() as uow:
-            _require_idea_for_run_history(uow.session, idea_id, user)
-        return serialize_run_history(idea_id, include_debug=include_debug, uow_factory=UnitOfWork)
+    async with UnitOfWork() as uow:
+        scope = _run_read_scope(user)
+        if scope is None:
+            raise HTTPException(status_code=404, detail="Idea not found")
+        if not scope.unrestricted:
+            idea = await uow.session.get(Idea, idea_id)
+            if not idea or str(idea.org_id) != str(scope.org_id):
+                raise HTTPException(status_code=404, detail="Idea not found")
 
-    return await run_sync_with_unit_of_work(_history)
+    return await serialize_run_history_async(idea_id, include_debug=include_debug, uow_factory=UnitOfWork)
 
 
 @router.get("/run/{run_id}/debug")
 async def run_debug(run_id: int, user: dict[str, Any] = Depends(get_current_user)):
-    result = await run_sync_with_unit_of_work(
-        serialize_run_debug,
+    result = await serialize_run_debug_async(
         run_id,
         _run_read_scope(user),
         uow_factory=UnitOfWork,

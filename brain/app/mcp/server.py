@@ -26,6 +26,7 @@ Public release note: internal issue links were removed from source comments.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -418,7 +419,7 @@ def tool_brain_skills(task: str) -> dict:
     from brain.systems.skills.builtin import ensure_builtin_skills_cached
     from brain.systems.memory.embeddings import embed_query, vec_to_pg
 
-    ensure_builtin_skills_cached()
+    asyncio.run(ensure_builtin_skills_cached())
 
     def _coerce_triggers(value) -> list:
         if not value:

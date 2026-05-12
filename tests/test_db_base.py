@@ -2,6 +2,7 @@
 from sqlalchemy import String, inspect
 from sqlalchemy.orm import Mapped, mapped_column
 from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin, OrgScopedMixin, ArchivableMixin
+from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaStateLog
 
 
@@ -58,3 +59,35 @@ def test_idea_status_lifecycle_timestamps_are_timezone_aware():
         for column_type in columns.values()
     )
     assert getattr(inspect(IdeaStateLog).columns.changed_at.type, "timezone", False)
+
+
+def test_agent_run_lifecycle_timestamps_are_timezone_aware():
+    columns = {
+        column.name: column.type
+        for column in inspect(AgentRunRow).columns
+        if column.name in {
+            "created_at",
+            "updated_at",
+            "started_at",
+            "paused_at",
+            "completed_at",
+            "failed_at",
+            "canceled_at",
+        }
+    }
+
+    assert set(columns) == {
+        "created_at",
+        "updated_at",
+        "started_at",
+        "paused_at",
+        "completed_at",
+        "failed_at",
+        "canceled_at",
+    }
+    assert all(
+        getattr(column_type, "timezone", False)
+        for column_type in columns.values()
+    )
+    assert getattr(inspect(AgentRunEventRow).columns.created_at.type, "timezone", False)
+    assert getattr(inspect(AgentRunArtifactRow).columns.created_at.type, "timezone", False)
