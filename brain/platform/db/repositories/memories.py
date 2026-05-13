@@ -771,6 +771,17 @@ class MemoryRepository(BaseRepository[Memory]):
         memories = self._session.scalars(stmt).all()
         return self._truth_ranked(memories, limit=limit)
 
+    async def a_list_active(self, *, limit: int | None = 500) -> Sequence[Memory]:
+        stmt = (
+            select(Memory)
+            .where(or_(Memory.archived == False, Memory.archived.is_(None)))  # noqa: E712
+            .order_by(Memory.salience.desc())
+        )
+        if limit:
+            stmt = stmt.limit(limit * 2)
+        result = await self._session.scalars(stmt)
+        return self._truth_ranked(result.all(), limit=limit)
+
     def list_visible(
         self,
         context: MemoryVisibilityContext,
@@ -1108,6 +1119,15 @@ class MemoryRepository(BaseRepository[Memory]):
             )
             return self._session.scalar(stmt) or 0
         return len(self.list_active(limit=None))
+
+    async def a_count_active(self) -> int:
+        """Count non-archived memories using an async session."""
+        if not quarantine_filter_enabled():
+            stmt = select(func.count(Memory.id)).where(
+                or_(Memory.archived == False, Memory.archived.is_(None))  # noqa: E712
+            )
+            return await self._session.scalar(stmt) or 0
+        return len(await self.a_list_active(limit=None))
 
     def count_archived(self) -> int:
         """Count archived memories."""

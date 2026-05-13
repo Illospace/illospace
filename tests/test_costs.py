@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
@@ -63,7 +64,12 @@ def client():
         "role": "admin",
         "internal": True,
     }
-    app.dependency_overrides[get_db] = lambda: MagicMock()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
+    db.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
+    db.scalar = AsyncMock(return_value=0)
+    db.get = AsyncMock(return_value=None)
+    app.dependency_overrides[get_db] = lambda: db
     yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
 
@@ -72,7 +78,7 @@ def client():
 
 class TestGetCosts:
 
-    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_returns_structure(self, mock_usage, client):
         mock_usage.return_value = []
         result = client.get("/api/costs/")
@@ -85,7 +91,7 @@ class TestGetCosts:
         assert "daily" in data
         assert "top_ideas" in data
 
-    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_summary_counts(self, mock_usage, client):
         idea = "idea-001"
         runs = [
@@ -102,7 +108,7 @@ class TestGetCosts:
         assert s["total_runs"] == 2
         assert s["total_cost"] >= 0.15
 
-    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_by_model_groups(self, mock_usage, client):
         runs = [
             _fake_run(id=1, model_used="anthropic/claude-opus-4-6", estimated_cost=0.10),
@@ -116,7 +122,7 @@ class TestGetCosts:
         assert "anthropic/claude-opus-4-6" in models
         assert "anthropic/claude-haiku-4-5" in models
 
-    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_by_model_normalizes_provider_prefixes(self, mock_usage, client):
         runs = [
             _fake_run(id=1, model_used="openai:gpt-5.4", estimated_cost=0.10),
@@ -133,7 +139,7 @@ class TestGetCosts:
         assert models["openai/gpt-5.4"]["normalized_model"] == "gpt-5.4"
         assert models["openai/gpt-5.4"]["runs"] == 3
 
-    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_by_skill_groups(self, mock_usage, client):
         runs = [
             _fake_run(id=1, skill_used="develop", estimated_cost=0.10),
@@ -147,7 +153,7 @@ class TestGetCosts:
         assert "develop" in skills
         assert "investigate" in skills
 
-    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_daily_list(self, mock_usage, client):
         runs = [
             _fake_run(id=1, created_at=datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)),
@@ -160,7 +166,7 @@ class TestGetCosts:
         assert isinstance(data["daily"], list)
         assert len(data["daily"]) >= 1
 
-    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_month_cost(self, mock_usage, client):
         runs = [
             _fake_run(id=1, estimated_cost=0.25,
@@ -172,7 +178,7 @@ class TestGetCosts:
         data = result.json()
         assert float(data["month"]["month_cost"]) >= 0.25
 
-    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_empty_runs(self, mock_usage, client):
         """No runs should return zeroed summary."""
         mock_usage.return_value = []
@@ -182,7 +188,7 @@ class TestGetCosts:
         assert data["summary"]["total_runs"] == 0
         assert data["summary"]["total_cost"] == 0
 
-    @patch("brain.app.api.routers.costs.summarize_recent_run_usage")
+    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_top_ideas_limited(self, mock_usage, client):
         """Top ideas list should be capped at 10."""
         # Create 15 runs with different idea_ids
@@ -214,7 +220,8 @@ def test_run_breakdown_wraps_legacy_agent_api_calls_table():
     from brain.app.api.routers.costs import run_breakdown
 
     db = MagicMock()
-    db.execute.side_effect = SQLAlchemyError("legacy table")
+    db.execute = AsyncMock(side_effect=SQLAlchemyError("legacy table"))
+    db.rollback = AsyncMock()
 
     result = asyncio.run(run_breakdown(42, db=db, user={"id": "system"}))
 
@@ -224,4 +231,44 @@ def test_run_breakdown_wraps_legacy_agent_api_calls_table():
         "turns": [],
         "summary": None,
     }
-    assert db.rollback.called
+    assert db.rollback.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_async_summarize_recent_run_usage_uses_async_session():
+    from brain.systems.runs.token_usage import async_summarize_recent_run_usage
+
+    created_at = datetime(2026, 5, 13, tzinfo=timezone.utc)
+    run = SimpleNamespace(
+        id=7,
+        trace_id="trace-7",
+        thread_id="idea-7",
+        profile="fast",
+        recipe=None,
+        status="completed",
+        created_at=created_at,
+        metadata_={},
+        target_ref={},
+        model_policy={},
+    )
+    call = SimpleNamespace(
+        run_id=7,
+        model="openai/gpt-5.4",
+        api_calls=2,
+        tokens_input=10,
+        tokens_output=5,
+        cache_read=3,
+        cache_write=1,
+        last_call_at=created_at,
+    )
+
+    session = MagicMock()
+    session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: [run]))
+    session.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: [call]))
+
+    rows = await async_summarize_recent_run_usage(session, limit=10, org_id="org-1")
+
+    assert rows[0]["id"] == 7
+    assert rows[0]["tokens_total"] == 15
+    assert rows[0]["api_calls"] == 2
+    assert rows[0]["model_used"] == "openai/gpt-5.4"

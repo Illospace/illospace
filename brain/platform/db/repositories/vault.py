@@ -36,6 +36,13 @@ class VaultRepository(BaseRepository[Secret]):
         )
         return self._session.scalars(stmt).first()
 
+    async def a_get_by_key(self, user_id: str, key_name: str) -> Secret | None:
+        stmt = select(Secret).where(
+            Secret.user_id == user_id, Secret.key_name == key_name
+        )
+        result = await self._session.scalars(stmt)
+        return result.first()
+
     def list_missing_requests(
         self,
         *,

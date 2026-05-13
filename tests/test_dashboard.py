@@ -180,7 +180,7 @@ class TestHealthRoute:
     @patch("brain.platform.db.repositories.memories.MemoryRepository")
     def test_route_health_delegates(self, MockMemRepo, MockSkillRepo, client):
         """Health endpoint returns status."""
-        MockMemRepo.return_value.count_active.return_value = 10
+        MockMemRepo.return_value.a_count_active = AsyncMock(return_value=10)
         MockSkillRepo.return_value.list_active.return_value = []
         resp = client.get("/api/health")
         assert resp.status_code == 200

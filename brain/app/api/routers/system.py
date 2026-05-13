@@ -696,12 +696,9 @@ async def health_ready(
     db: AsyncSession = Depends(get_db),
 ):
     """Readiness probe: DB, Alembic head, and event backbone are usable."""
-    snapshot = await run_db(
-        db,
-        lambda sync_db: readiness_health_snapshot(
-            consumer_running=_run_event_consumer_running(),
-            session=sync_db,
-        )
+    snapshot = await readiness_health_snapshot(
+        consumer_running=_run_event_consumer_running(),
+        session=db,
     )
     return JSONResponse(
         status_code=200 if snapshot["ready"] else 503,
@@ -714,12 +711,9 @@ async def health_deep(
     db: AsyncSession = Depends(get_db),
 ):
     """Deep product health snapshot for operators."""
-    return await run_db(
-        db,
-        lambda sync_db: deep_health_snapshot(
-            consumer_running=_run_event_consumer_running(),
-            session=sync_db,
-        )
+    return await deep_health_snapshot(
+        consumer_running=_run_event_consumer_running(),
+        session=db,
     )
 
 

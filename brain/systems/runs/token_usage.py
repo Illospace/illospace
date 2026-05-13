@@ -142,14 +142,49 @@ def summarize_recent_run_usage(
     to avoid per-run lookups.
     """
 
-    run_stmt = select(AgentRunRow).order_by(AgentRunRow.created_at.desc()).limit(limit)
-    if org_id:
-        run_stmt = run_stmt.where(AgentRunRow.org_id == org_id)
-    if since:
-        run_stmt = run_stmt.where(AgentRunRow.created_at >= since)
-    run_stmt = _apply_status_filter(run_stmt, statuses)
+    run_stmt = _recent_run_usage_stmt(
+        limit=limit,
+        org_id=org_id,
+        since=since,
+        statuses=statuses,
+    )
     runs = list(session.scalars(run_stmt).all())
     return summarize_runs_usage(session, runs)
+
+
+async def async_summarize_recent_run_usage(
+    session: AsyncSession,
+    *,
+    limit: int = 500,
+    org_id: str | None = None,
+    since: datetime | None = None,
+    statuses: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Async recent-run token/cost usage aggregation."""
+
+    run_stmt = _recent_run_usage_stmt(
+        limit=limit,
+        org_id=org_id,
+        since=since,
+        statuses=statuses,
+    )
+    result = await session.scalars(run_stmt)
+    return await async_summarize_runs_usage(session, result.all())
+
+
+def _recent_run_usage_stmt(
+    *,
+    limit: int,
+    org_id: str | None,
+    since: datetime | None,
+    statuses: Iterable[str] | None,
+):
+    stmt = select(AgentRunRow).order_by(AgentRunRow.created_at.desc()).limit(limit)
+    if org_id:
+        stmt = stmt.where(AgentRunRow.org_id == org_id)
+    if since:
+        stmt = stmt.where(AgentRunRow.created_at >= since)
+    return _apply_status_filter(stmt, statuses)
 
 
 def summarize_run_usage(session: Session, run_id: int) -> dict[str, Any] | None:
@@ -186,22 +221,7 @@ def summarize_runs_usage(session: Session, runs: Iterable[AgentRunRow]) -> list[
     if not run_ids:
         return []
 
-    call_stmt = (
-        select(
-            AgentApiCall.run_id.label("run_id"),
-            AgentApiCall.model.label("model"),
-            func.count(AgentApiCall.id).label("api_calls"),
-            func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
-            func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
-            func.coalesce(func.sum(AgentApiCall.cache_read), 0).label("cache_read"),
-            func.coalesce(func.sum(AgentApiCall.cache_write), 0).label("cache_write"),
-            func.max(AgentApiCall.created_at).label("last_call_at"),
-        )
-        .where(AgentApiCall.run_id.in_(run_ids))
-        .group_by(AgentApiCall.run_id, AgentApiCall.model)
-    )
-
-    for call_row in session.execute(call_stmt).all():
+    for call_row in session.execute(_run_usage_call_stmt(run_ids)).all():
         row = usage_by_run.get(call_row.run_id)
         if row is None:
             continue
@@ -221,6 +241,75 @@ def summarize_runs_usage(session: Session, runs: Iterable[AgentRunRow]) -> list[
             usage_by_run[run_id]["model_used"] = max(ranks.items(), key=lambda item: item[1])[0]
 
     return [usage_by_run[run.id] for run in runs]
+
+
+async def async_summarize_runs_usage(
+    session: AsyncSession,
+    runs: Iterable[AgentRunRow],
+) -> list[dict[str, Any]]:
+    runs = list(runs)
+    run_ids = [run.id for run in runs]
+
+    usage_by_run: dict[int, dict[str, Any]] = {}
+    model_rank: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for run in runs:
+        row = _empty_usage()
+        row.update(
+            {
+                "id": run.id,
+                "trace_id": run.trace_id,
+                "idea_id": run.thread_id,
+                "thread_id": run.thread_id,
+                "skill_used": infer_run_skill(run),
+                "model_used": infer_run_model(run),
+                "status": run.status,
+                "created_at": run.created_at,
+                "event": infer_run_event(run),
+            }
+        )
+        usage_by_run[run.id] = row
+
+    if not run_ids:
+        return []
+
+    call_stmt = _run_usage_call_stmt(run_ids)
+    for call_row in (await session.execute(call_stmt)).all():
+        row = usage_by_run.get(call_row.run_id)
+        if row is None:
+            continue
+        _add_call_usage(row, call_row)
+        cost = _model_cost(call_row)
+        row["estimated_cost"] += cost
+        model = call_row.model or row.get("model_used")
+        if isinstance(model, str) and model:
+            model_rank[call_row.run_id][model] += (
+                _coerce_int(call_row.tokens_input)
+                + _coerce_int(call_row.tokens_output)
+                + cost
+            )
+
+    for run_id, ranks in model_rank.items():
+        if ranks:
+            usage_by_run[run_id]["model_used"] = max(ranks.items(), key=lambda item: item[1])[0]
+
+    return [usage_by_run[run.id] for run in runs]
+
+
+def _run_usage_call_stmt(run_ids: list[int]):
+    return (
+        select(
+            AgentApiCall.run_id.label("run_id"),
+            AgentApiCall.model.label("model"),
+            func.count(AgentApiCall.id).label("api_calls"),
+            func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
+            func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
+            func.coalesce(func.sum(AgentApiCall.cache_read), 0).label("cache_read"),
+            func.coalesce(func.sum(AgentApiCall.cache_write), 0).label("cache_write"),
+            func.max(AgentApiCall.created_at).label("last_call_at"),
+        )
+        .where(AgentApiCall.run_id.in_(run_ids))
+        .group_by(AgentApiCall.run_id, AgentApiCall.model)
+    )
 
 
 def summarize_member_token_usage(

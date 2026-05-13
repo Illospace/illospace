@@ -223,7 +223,7 @@ async def test_list_costs(client, mock_session_factory):
         estimated_cost=0.01,
         created_at=datetime.now(timezone.utc),
     )
-    with patch("brain.app.api.routers.costs.summarize_recent_run_usage", return_value=[cost]):
+    with patch("brain.app.api.routers.costs.async_summarize_recent_run_usage", return_value=[cost]):
         resp = await client.get("/api/costs/")
     assert resp.status_code == 200
     data = resp.json()

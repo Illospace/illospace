@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.platform.db.models.scheduler import OWNER_MODE_SCHEDULER, SchedulerJob, SchedulerRun
@@ -372,6 +373,13 @@ def list_scheduler_jobs(session: Session) -> list[dict[str, Any]]:
     return [_serialize_job(job) for job in jobs]
 
 
+async def async_list_scheduler_jobs(session: AsyncSession) -> list[dict[str, Any]]:
+    result = await session.scalars(
+        select(SchedulerJob).order_by(SchedulerJob.family.asc(), SchedulerJob.id.asc())
+    )
+    return [_serialize_job(job) for job in result.all()]
+
+
 def list_scheduler_runs(session: Session, *, limit: int = 50) -> list[dict[str, Any]]:
     runs = session.scalars(
         select(SchedulerRun)
@@ -379,3 +387,16 @@ def list_scheduler_runs(session: Session, *, limit: int = 50) -> list[dict[str, 
         .limit(limit)
     ).all()
     return [_serialize_run(run) for run in runs]
+
+
+async def async_list_scheduler_runs(
+    session: AsyncSession,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    result = await session.scalars(
+        select(SchedulerRun)
+        .order_by(SchedulerRun.scheduled_for.desc(), SchedulerRun.id.desc())
+        .limit(limit)
+    )
+    return [_serialize_run(run) for run in result.all()]

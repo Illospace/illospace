@@ -100,6 +100,23 @@ def run_event_backbone_status(
     )
 
 
+async def async_run_event_backbone_status(
+    session: AsyncSession,
+    consumer_name: str = "api.websocket_fanout",
+    *,
+    consumer_running: bool | None = None,
+    stale_after_seconds: int = 120,
+) -> dict[str, Any]:
+    from brain.app.api.ws.run_events import async_run_event_backbone_status as _status
+
+    return await _status(
+        session,
+        consumer_name,
+        consumer_running=consumer_running,
+        stale_after_seconds=stale_after_seconds,
+    )
+
+
 def _principal_can_replay_all(principal: Mapping[str, Any]) -> bool:
     permissions = set(principal.get("permissions") or [])
     return principal.get("principal_type") == "service" and (
@@ -164,6 +181,7 @@ async def list_run_events_after_for_principal_async(
 
 __all__ = [
     "async_record_run_event",
+    "async_run_event_backbone_status",
     "list_run_events_after_for_principal_async",
     "list_run_events_after_for_principal",
     "record_run_degraded_event",

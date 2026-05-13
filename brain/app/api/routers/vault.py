@@ -6,12 +6,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import can_audit_vault, can_share_vault
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.db_utils import run_db
 from brain.app.api.schemas.vault import (
     SecretCreate,
     SecretRead,
@@ -85,16 +83,6 @@ def _raise_if_vault_not_configured(exc: RuntimeError) -> None:
         status_code=503,
         detail="Vault master key is not configured. Set VAULT_MASTER_KEY before saving or revealing secrets.",
     ) from exc
-
-
-def _require_unlocked(request: Request, user: dict[str, Any]) -> None:
-    from brain.systems.vault import has_pin, validate_vault_token
-
-    user_id = _require_user_id(user)
-    if not has_pin(user_id):
-        return
-    if not validate_vault_token(user_id, _vault_token(request)):
-        raise HTTPException(status_code=423, detail="Vault locked")
 
 
 async def _async_require_unlocked(request: Request, user: dict[str, Any]) -> None:
@@ -187,7 +175,8 @@ async def update_secret(
     user_id = _require_user_id(user)
     from brain.platform.db.repositories.vault import VaultRepository
 
-    secret = await run_db(db, lambda sync_db: VaultRepository(sync_db).get_by_key(user_id, key_name))
+    repo = VaultRepository(db)
+    secret = await repo.a_get_by_key(user_id, key_name)
     if not secret:
         raise HTTPException(status_code=404, detail="Secret not found")
     updates = body.model_dump(exclude_unset=True)
@@ -206,17 +195,11 @@ async def update_secret(
             _raise_if_vault_not_configured(exc)
             raise
     else:
-        def _update(sync_db: Session) -> None:
-            scoped_secret = VaultRepository(sync_db).get_by_key(user_id, key_name)
-            if scoped_secret is None:
-                raise HTTPException(status_code=404, detail="Secret not found")
-            for k, v in updates.items():
-                if k == "agent_access_level":
-                    v = normalize_agent_access_level(v)
-                setattr(scoped_secret, k, v)
-            sync_db.flush()
-
-        await run_db(db, _update)
+        for k, v in updates.items():
+            if k == "agent_access_level":
+                v = normalize_agent_access_level(v)
+            setattr(secret, k, v)
+        await db.flush()
     return {"updated": True}
 
 

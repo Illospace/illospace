@@ -10,7 +10,8 @@ Tests cover:
 from __future__ import annotations
 
 import os
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -116,6 +117,32 @@ class TestVaultUserScoping:
             resp = client.delete("/api/vault/MY_KEY")
         assert resp.status_code == 200
         mock_del.assert_called_once_with("MY_KEY", user_id=USER_A["id"])
+
+    @pytest.mark.asyncio
+    async def test_update_secret_metadata_uses_async_session(self):
+        """PUT /api/vault/{key} updates metadata without a sync session bridge."""
+        from brain.app.api.routers import vault as vault_router
+
+        secret = SimpleNamespace(description="old", category="general", agent_access_level="ask")
+        scalar_result = MagicMock()
+        scalar_result.first.return_value = secret
+        db = MagicMock()
+        db.scalars = AsyncMock(return_value=scalar_result)
+        db.flush = AsyncMock()
+
+        with patch.object(vault_router, "_async_require_unlocked", new=AsyncMock()):
+            result = await vault_router.update_secret(
+                "MY_KEY",
+                vault_router.SecretUpdate(description="new", agent_access_level="available"),
+                request=MagicMock(headers={}),
+                db=db,
+                user=USER_A,
+            )
+
+        assert result == {"updated": True}
+        assert secret.description == "new"
+        assert secret.agent_access_level == "available"
+        db.flush.assert_awaited_once()
 
 
 # ── Sharing endpoints ────────────────────────────────────────────────────────

@@ -150,18 +150,15 @@ def run_status(user: dict[str, Any] = Depends(get_current_user)):
 
 @router.get("/run/events/status")
 async def run_events_status(user: dict[str, Any] = Depends(get_current_user)):
-    from brain.systems.runs.event_log import run_event_backbone_status
+    from brain.systems.runs.event_log import async_run_event_backbone_status
     from brain.app.api.ws.run_events import DEFAULT_CONSUMER_NAME
 
-    def _status():
-        with open_unit_of_work(UnitOfWork) as uow:
-            return run_event_backbone_status(
-                uow.session,
-                DEFAULT_CONSUMER_NAME,
-                consumer_running=_run_event_consumer_running(),
-            )
-
-    return await run_unit_of_work_task(_status)
+    async with UnitOfWork() as uow:
+        return await async_run_event_backbone_status(
+            uow.session,
+            DEFAULT_CONSUMER_NAME,
+            consumer_running=_run_event_consumer_running(),
+        )
 
 
 @router.get("/run/history/{idea_id}")
