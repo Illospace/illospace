@@ -50,7 +50,11 @@ from brain.app.scheduler.catalog import (
     sync_scheduler_catalog,
     upsert_scheduler_job,
 )
-from brain.app.scheduler.daemon import scheduler_daemon_tick, scheduler_health_snapshot
+from brain.app.scheduler.daemon import (
+    async_scheduler_health_snapshot,
+    scheduler_daemon_tick,
+    scheduler_health_snapshot,
+)
 from brain.app.scheduler.executor import (
     retry_scheduler_run,
     resume_scheduler_run,
@@ -1014,7 +1018,7 @@ async def list_metrics(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(db, lambda sync_db: DailyMetricsRepository(sync_db).list_recent())
+    return await DailyMetricsRepository(db).a_list_recent()
 
 
 @router.get("/consolidations", response_model=list[ConsolidationRunRead])
@@ -1022,7 +1026,7 @@ async def list_consolidations(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(db, lambda sync_db: ConsolidationRunRepository(sync_db).list_recent())
+    return await ConsolidationRunRepository(db).a_list_recent()
 
 
 @router.get("/retrieval")
@@ -1030,11 +1034,7 @@ async def retrieval_stats(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(db, lambda sync_db: RetrievalLogRepository(sync_db).list_recent())
-
-
-def _scheduler_snapshot(db: Session) -> dict[str, Any]:
-    return scheduler_health_snapshot(db)
+    return await RetrievalLogRepository(db).a_list_recent()
 
 
 @router.get("/system/scheduler")
@@ -1043,7 +1043,7 @@ async def scheduler_state(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return the DB-backed scheduler state."""
-    return await run_db(db, _scheduler_snapshot)
+    return await async_scheduler_health_snapshot(db)
 
 
 @router.get("/system/scheduler/health")
@@ -1052,7 +1052,7 @@ async def scheduler_health(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return the scheduler health snapshot."""
-    return await run_db(db, _scheduler_snapshot)
+    return await async_scheduler_health_snapshot(db)
 
 
 class SchedulerSyncRequest(BaseModel):

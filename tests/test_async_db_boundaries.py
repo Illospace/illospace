@@ -88,6 +88,24 @@ def test_health_routes_stay_on_native_async_db_path():
         assert "open_unit_of_work" not in source
 
 
+def test_system_read_routes_stay_on_native_async_db_path():
+    root = Path(__file__).resolve().parents[1]
+    system_path = root / "brain/app/api/routers/system.py"
+    route_sources = [
+        _function_source(system_path, "list_metrics"),
+        _function_source(system_path, "list_consolidations"),
+        _function_source(system_path, "retrieval_stats"),
+        _function_source(system_path, "scheduler_state"),
+        _function_source(system_path, "scheduler_health"),
+    ]
+
+    for source in route_sources:
+        assert "run_db" not in source
+        assert "run_session_task" not in source
+        assert "run_unit_of_work_task" not in source
+        assert "open_unit_of_work" not in source
+
+
 def test_cortex_run_event_status_uses_native_async_db_path():
     root = Path(__file__).resolve().parents[1]
     path = root / "brain/app/api/routers/cortex/_run.py"
@@ -137,6 +155,18 @@ def test_costs_router_stays_on_native_async_db_path():
 def test_brain_router_stays_on_native_async_db_path():
     root = Path(__file__).resolve().parents[1]
     path = root / "brain/app/api/routers/brain.py"
+    text = path.read_text(encoding="utf-8")
+
+    assert "run_db" not in text
+    assert "run_session_task" not in text
+    assert "run_unit_of_work_task" not in text
+    assert "open_unit_of_work" not in text
+    assert "from sqlalchemy.orm import Session" not in text
+
+
+def test_cycles_router_stays_on_native_async_db_path():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "brain/app/api/routers/cycles.py"
     text = path.read_text(encoding="utf-8")
 
     assert "run_db" not in text

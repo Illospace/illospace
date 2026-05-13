@@ -1,7 +1,7 @@
 """Smoke tests for skills, vault, system, team, costs routers."""
 from contextlib import contextmanager
 from datetime import datetime, date, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -177,7 +177,7 @@ async def test_list_metrics(client, mock_session_factory):
         retrieval_hits=40,
     )
     with patch("brain.app.api.routers.system.DailyMetricsRepository") as MockRepo:
-        MockRepo.return_value.list_recent.return_value = [metric]
+        MockRepo.return_value.a_list_recent = AsyncMock(return_value=[metric])
         resp = await client.get("/api/metrics")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
@@ -246,7 +246,7 @@ async def test_system_info_omits_cortex_concurrency_settings(client, mock_sessio
 
 @pytest.mark.asyncio
 async def test_scheduler_state_surface(client, mock_session_factory):
-    with patch("brain.app.api.routers.system.scheduler_health_snapshot", return_value={
+    with patch("brain.app.api.routers.system.async_scheduler_health_snapshot", new=AsyncMock(return_value={
         "now": "2026-04-21T03:01:00+00:00",
         "daemon": {"owner_mode": "scheduler", "service_ready": True},
         "summary": {
@@ -266,7 +266,7 @@ async def test_scheduler_state_surface(client, mock_session_factory):
         "lag": {"lag_seconds": 0, "oldest_due_at": None, "lagging_jobs": []},
         "jobs": [],
         "runs": [],
-    }):
+    })):
         resp = await client.get("/api/system/scheduler")
 
     assert resp.status_code == 200
