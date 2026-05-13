@@ -26,6 +26,8 @@ VALID_THINKING_OVERRIDES = {"none", "low", "medium", "high", "xhigh"}
 ACTIVE_RUN_STATUSES = {"queued", "running", "pending_approval"}
 TERMINAL_RUN_STATUSES = {"completed", "failed", "skipped"}
 ONE_TIME_SCHEDULE_PREFIX = "at:"
+CYCLE_LAUNCH_ENVELOPE_VERSION = 1
+CYCLE_CONTROL_TOOLS = ("manage_cycle",)
 
 
 def validate_nonempty_trimmed(value: str, field_name: str) -> str:
@@ -159,6 +161,19 @@ def humanize_schedule(schedule_expr: str, timezone_name: str) -> str:
     if minute.isdigit() and hour.isdigit() and dom == "*" and month == "*" and dow == "*":
         dt = datetime(2000, 1, 1, int(hour), int(minute))
         return f"Every day at {dt.strftime('%-I:%M %p')} ({tz})"
+    weekday_names = {
+        "0": "Sundays",
+        "1": "Mondays",
+        "2": "Tuesdays",
+        "3": "Wednesdays",
+        "4": "Thursdays",
+        "5": "Fridays",
+        "6": "Saturdays",
+        "7": "Sundays",
+    }
+    if minute.isdigit() and hour.isdigit() and dom == "*" and month == "*" and dow in weekday_names:
+        dt = datetime(2000, 1, 1, int(hour), int(minute))
+        return f"{weekday_names[dow]} at {dt.strftime('%-I:%M %p')} ({tz})"
     if (
         minute.isdigit()
         and hour.isdigit()
@@ -321,6 +336,66 @@ def _admit_cycle_run(
     return result.run_id if result.ok else None
 
 
+def _cycle_launch_envelope(cycle: Cycle, run: CycleRun) -> dict:
+    """Return the minimal scheduler semantics around an otherwise free-form prompt."""
+
+    return {
+        "version": CYCLE_LAUNCH_ENVELOPE_VERSION,
+        "origin": "scheduled_cycle",
+        "cycle_id": cycle.id,
+        "cycle_run_id": run.id,
+        "cycle_name": cycle.name,
+        "scheduled_for": run.scheduled_for.isoformat() if run.scheduled_for else None,
+        "launch_mode": "reuse_same_thread",
+        "active_instruction_source": "cycle.prompt",
+        "prior_thread_role": "context_only",
+        "lifecycle_owner": "cycle_run",
+        "thread_visibility": "visible",
+    }
+
+
+def _cycle_run_metadata(cycle: Cycle, run: CycleRun) -> dict:
+    envelope = _cycle_launch_envelope(cycle, run)
+    return {
+        "source": "cycle",
+        "origin": "cycle",
+        "cycle_id": cycle.id,
+        "cycle_run_id": run.id,
+        "model_override": cycle.model_override,
+        "thinking_override": cycle.thinking_override,
+        "launch_envelope": envelope,
+        "contract": {
+            "kind": "scheduled_prompt",
+            "active_instruction_source": "cycle.prompt",
+            "lifecycle_owner": "cycle_run",
+        },
+        "context_policy": {
+            "current_instruction_role": "scheduled_prompt",
+            "prior_thread_role": "context_only",
+        },
+        "tool_policy": {
+            "disabled_tools": list(CYCLE_CONTROL_TOOLS),
+            "reason": "Cycle executions run the scheduled prompt; scheduler mutation belongs to explicit control-plane requests.",
+        },
+    }
+
+
+def _cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
+    envelope = _cycle_launch_envelope(cycle, run)
+    header = (
+        f"[Idea: \"{idea.title}\" | {idea.id}]\n\n"
+        "## Scheduled Prompt Launch\n"
+        f"- Origin: {envelope['origin']}\n"
+        f"- Cycle ID: {cycle.id}\n"
+        f"- Cycle run ID: {run.id}\n"
+        "- The scheduled prompt below is the current user instruction.\n"
+        "- Prior thread messages are background context only, not active commands.\n"
+        "- Do not create, update, delete, or run Cycles from this execution; scheduler changes belong to explicit control-plane turns.\n\n"
+        "## Scheduled Prompt\n"
+    )
+    return f"{header}{cycle.prompt[:2000]}"
+
+
 def _append_cycle_thread_message(
     session,
     idea: Idea,
@@ -333,6 +408,7 @@ def _append_cycle_thread_message(
         "source": "cycle",
         "cycle_id": cycle.id,
         "cycle_run_id": cycle_run.id,
+        "launch_envelope": _cycle_launch_envelope(cycle, cycle_run),
     }
     thread_msg = IdeaThread(
         idea_id=idea.id,
@@ -577,14 +653,8 @@ def execute_cycle_run(run_id: int) -> None:
         run.started_at = datetime.now(timezone.utc)
         run.status = "running"
         idea_id = idea.id
-        run_metadata = {
-            "source": "cycle",
-            "cycle_id": cycle.id,
-            "cycle_run_id": run.id,
-            "model_override": cycle.model_override,
-            "thinking_override": cycle.thinking_override,
-        }
-        run_message = f"[Idea: \"{idea.title}\" | {idea.id}]\n\n{cycle.prompt[:2000]}"
+        run_metadata = _cycle_run_metadata(cycle, run)
+        run_message = _cycle_run_message(idea, cycle, run)
         agent_run_id = _admit_cycle_run(
             uow.session,
             idea_id=idea.id,

@@ -38,11 +38,24 @@ Operating rules:
 _FAST_HIDDEN_TOOL_NAMES = {"cortex_reply", "cortex_visual_reply"}
 
 
+def _disabled_tool_names(runtime: RunRuntime) -> set[str]:
+    policy = runtime.request.metadata.get("tool_policy")
+    if not isinstance(policy, dict):
+        return set()
+    raw_names = policy.get("disabled_tools") or policy.get("blocked_tools") or []
+    if isinstance(raw_names, str):
+        raw_names = [raw_names]
+    if not isinstance(raw_names, list):
+        return set()
+    return {str(name).strip() for name in raw_names if str(name or "").strip()}
+
+
 def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:
+    hidden = _FAST_HIDDEN_TOOL_NAMES | _disabled_tool_names(runtime)
     return [
         tool
         for tool in build_agent_tools("coordinator")
-        if str(tool.get("name") or "") not in _FAST_HIDDEN_TOOL_NAMES
+        if str(tool.get("name") or "") not in hidden
     ]
 
 
@@ -98,8 +111,14 @@ class FastRecipe(BaseRunRecipe):
         def _guidance() -> list[str]:
             return runtime.drain_steering()
 
+        disabled_tools = _disabled_tool_names(runtime)
+        raw_tool_handlers = build_tool_handlers(workspace_root=workspace_root)
+        if disabled_tools:
+            raw_tool_handlers = {
+                name: handler for name, handler in raw_tool_handlers.items() if name not in disabled_tools
+            }
         tool_handlers = wrap_tool_handlers(
-            build_tool_handlers(workspace_root=workspace_root),
+            raw_tool_handlers,
             executor=runtime.tool_executor(),
             run_id=runtime.run.id,
             root_run_id=runtime.run.root_run_id,

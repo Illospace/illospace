@@ -270,6 +270,18 @@ class TestToolDefinitions:
             assert "input_schema" in tool, f"Tool {tool['name']} missing input_schema"
             assert tool["input_schema"]["type"] == "object"
 
+    def test_tool_policy_filters_model_tools_and_handlers(self):
+        from brain.systems.runs.direct_agent import _apply_tool_policy
+
+        tools, handlers = _apply_tool_policy(
+            [{"name": "manage_cycle"}, {"name": "web_search"}],
+            {"manage_cycle": object(), "web_search": object()},
+            {"tool_policy": {"disabled_tools": ["manage_cycle"]}},
+        )
+
+        assert tools == [{"name": "web_search"}]
+        assert sorted(handlers) == ["web_search"]
+
 
 class TestBrainGate:
     """Test the brain gate enforcement mechanism."""
