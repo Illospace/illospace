@@ -574,6 +574,96 @@ def test_manage_workspace_app_extracts_embedded_contract_fields_on_update():
     assert "manifest" not in json.loads(kwargs["source_code"])
 
 
+def test_manage_workspace_app_update_repairs_domain_ops_with_generic_http_action():
+    from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
+
+    manifest = json.loads(json.dumps(VALID_DOMAIN_MANIFEST))
+    manifest["data_plan"]["bindings"]["tasks"]["operations"] = ["read", "write"]
+    manifest["actions"] = {
+        "tasks.syncExternal": {
+            "kind": "connector",
+            "effects": ["external.read", "domain.write"],
+            "executor": {"type": "registered", "key": "generic.http"},
+            "connector_spec": {
+                "kind": "http_sync",
+                "request": {
+                    "method": "GET",
+                    "url": "https://jsonplaceholder.typicode.com/todos",
+                },
+                "response": {"items_path": ""},
+                "sync": {
+                    "binding": "tasks",
+                    "remote_id": "id",
+                    "title": "title",
+                    "fields": {
+                        "status": {
+                            "if": {"path": "completed", "equals": True},
+                            "then": "Done",
+                            "else": "Todo",
+                        }
+                    },
+                },
+            },
+        }
+    }
+    source_code = json.dumps(
+        {
+            **json.loads(VALID_GENERATED_UI_SOURCE),
+            "actions": [{"key": "tasks.syncExternal", "label": "Sync"}],
+        }
+    )
+    app = object()
+    serialized = {"id": "app-1", "key": "tasks", "name": "Task Tracker"}
+
+    with patch(
+        "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
+        return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
+    ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
+        "brain.systems.workspace_apps.service.update_app",
+        return_value=app,
+    ) as update_app, patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
+        "brain.systems.workspace_apps.events.publish_workspace_app_change"
+    ):
+        result = json.loads(
+            _handle_manage_workspace_app(
+                action="update",
+                app_id="app-1",
+                renderer_key="generated-ui-app",
+                source_kind="json",
+                source_code=source_code,
+                manifest=manifest,
+            )
+        )
+
+    assert result["app"] == serialized
+    assert result["compiler_repairs"] == [
+        {
+            "field": "manifest.data_plan.bindings.tasks.operations",
+            "message": "normalized Domain binding operations",
+        }
+    ]
+    kwargs = update_app.call_args.kwargs
+    assert kwargs["manifest"]["data_plan"]["bindings"]["tasks"]["operations"] == [
+        "schema",
+        "list",
+        "get",
+        "query",
+        "create",
+        "update",
+    ]
+    assert kwargs["manifest"]["actions"]["tasks.syncExternal"]["executor"]["key"] == "generic.http"
+    assert (
+        build_contract_validation_report(
+            renderer_key=kwargs["renderer_key"],
+            source_kind=kwargs["source_kind"],
+            source_code=kwargs["source_code"],
+            manifest=kwargs["manifest"],
+            visual_spec=VALID_THUMBNAIL,
+        )["status"]
+        == "passed"
+    )
+
+
 def test_manage_workspace_app_update_normalizes_empty_optional_fields():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
