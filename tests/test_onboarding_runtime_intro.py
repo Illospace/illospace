@@ -1,6 +1,6 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import BackgroundTasks
 
@@ -17,8 +17,17 @@ class _AsyncSession:
     def __init__(self, session):
         self._session = session
 
-    async def run_sync(self, fn):
-        return fn(self._session)
+    async def scalars(self, *args, **kwargs):
+        return self._session.scalars(*args, **kwargs)
+
+    def add(self, *args, **kwargs):
+        return self._session.add(*args, **kwargs)
+
+    async def flush(self):
+        return self._session.flush()
+
+    async def commit(self):
+        return self._session.commit()
 
 
 def _personal_openai_status():
@@ -37,7 +46,7 @@ def test_runtime_ready_intro_reuses_existing_thread():
     with patch(
         "brain.app.api.routers.onboarding.get_provider_auth_status",
         return_value=_personal_openai_status(),
-    ), patch("brain.app.api.routers.onboarding.route_trigger") as route_trigger:
+    ), patch("brain.app.api.routers.onboarding.async_route_trigger") as route_trigger:
         result = asyncio.run(start_runtime_ready_intro(
             db=_AsyncSession(session),
             user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
@@ -68,8 +77,8 @@ def test_runtime_ready_intro_recovers_failed_existing_thread():
         "brain.app.api.routers.onboarding.get_provider_auth_status",
         return_value=_personal_openai_status(),
     ), patch(
-        "brain.app.api.routers.onboarding.route_trigger",
-        return_value=TriggerRouteResult(ok=True, route="run", run_id=77),
+        "brain.app.api.routers.onboarding.async_route_trigger",
+        AsyncMock(return_value=TriggerRouteResult(ok=True, route="run", run_id=77)),
     ) as route_trigger:
         result = asyncio.run(start_runtime_ready_intro(
             db=_AsyncSession(session),
@@ -80,7 +89,7 @@ def test_runtime_ready_intro_recovers_failed_existing_thread():
     assert result["created"] is False
     assert result["idea_id"] == "idea-existing"
     assert result["run_id"] == 77
-    route_trigger.assert_called_once()
+    route_trigger.assert_awaited_once()
     assert background_tasks.tasks == []
 
 
@@ -109,8 +118,8 @@ def test_runtime_ready_intro_creates_thread_and_run():
         "brain.app.api.routers.onboarding.get_provider_auth_status",
         return_value=_personal_openai_status(),
     ), patch(
-        "brain.app.api.routers.onboarding.route_trigger",
-        return_value=TriggerRouteResult(ok=True, route="run", run_id=42),
+        "brain.app.api.routers.onboarding.async_route_trigger",
+        AsyncMock(return_value=TriggerRouteResult(ok=True, route="run", run_id=42)),
     ) as route_trigger:
         result = asyncio.run(start_runtime_ready_intro(
             db=_AsyncSession(session),
@@ -127,7 +136,7 @@ def test_runtime_ready_intro_creates_thread_and_run():
     assert idea.origin_ref == "runtime-ready-intro:user-1"
     assert idea.title == INTRO_PROMPT
     assert idea.display_title is None
-    route_trigger.assert_called_once()
+    route_trigger.assert_awaited_once()
     trigger = route_trigger.call_args.args[0]
     assert trigger.payload["thread_message"] == INTRO_PROMPT
     assert trigger.payload["metadata"]["prompt_visibility"] == "hidden"

@@ -32,14 +32,20 @@ class _AsyncSession:
     async def scalars(self, *args, **kwargs):
         return self.sync_session.scalars(*args, **kwargs)
 
+    async def execute(self, *args, **kwargs):
+        return self.sync_session.execute(*args, **kwargs)
+
     async def run_sync(self, fn):
         return fn(self.sync_session)
 
+    async def flush(self):
+        return self.sync_session.flush()
+
     async def commit(self):
-        return None
+        return self.sync_session.commit()
 
     async def rollback(self):
-        return None
+        return self.sync_session.rollback()
 
     async def close(self):
         return None
@@ -237,7 +243,8 @@ def test_notify_metadata_preserves_thread_project_context():
         "execution_profile": "deep",
     }
 
-    result = _effective_notify_metadata(db, "idea-1", {"execution_profile": "fast"})
+    async_db = _AsyncSession(db)
+    result = asyncio.run(_effective_notify_metadata(async_db, "idea-1", {"execution_profile": "fast"}))
 
     assert result["project_context"] == snapshot
     assert result["execution_profile"] == "fast"
@@ -817,7 +824,7 @@ async def test_list_ideas(client, mock_session_factory):
     with patch(
         "brain.app.api.routers.cortex._ideas.IdeaRepository"
     ) as MockRepo:
-        MockRepo.return_value.list_active_for_org.return_value = [idea]
+        MockRepo.return_value.a_list_active_for_org = AsyncMock(return_value=[idea])
         resp = await client.get("/api/cortex/ideas")
     assert resp.status_code == 200
     data = resp.json()
@@ -852,9 +859,9 @@ async def test_cortex_bootstrap_core_preserves_existing_payload_shapes(client):
     }
 
     with (
-        patch.object(bootstrap_mod, "list_ideas_payload", return_value=[idea]),
-        patch.object(bootstrap_mod, "list_connections_payload", return_value=[connection]),
-        patch.object(bootstrap_mod, "list_members_payload", return_value=[member]),
+        patch.object(bootstrap_mod, "list_ideas_payload", AsyncMock(return_value=[idea])),
+        patch.object(bootstrap_mod, "list_connections_payload", AsyncMock(return_value=[connection])),
+        patch.object(bootstrap_mod, "list_members_payload", AsyncMock(return_value=[member])),
     ):
         resp = await client.get("/api/cortex/bootstrap")
 
@@ -874,8 +881,8 @@ async def test_cortex_bootstrap_can_skip_team_members_for_direct_threads(client)
     from brain.app.api.routers.cortex import _bootstrap as bootstrap_mod
 
     with (
-        patch.object(bootstrap_mod, "list_ideas_payload", return_value=[]),
-        patch.object(bootstrap_mod, "list_connections_payload", return_value=[]),
+        patch.object(bootstrap_mod, "list_ideas_payload", AsyncMock(return_value=[])),
+        patch.object(bootstrap_mod, "list_connections_payload", AsyncMock(return_value=[])),
         patch.object(bootstrap_mod, "list_members_payload") as list_members,
     ):
         resp = await client.get("/api/cortex/bootstrap?include=ideas,connections")
@@ -903,8 +910,8 @@ async def test_cortex_bootstrap_direct_thread_reuses_stream_payload(client):
     ]
 
     with (
-        patch.object(bootstrap_mod, "list_ideas_payload", return_value=[]),
-        patch.object(bootstrap_mod, "list_connections_payload", return_value=[]),
+        patch.object(bootstrap_mod, "list_ideas_payload", AsyncMock(return_value=[])),
+        patch.object(bootstrap_mod, "list_connections_payload", AsyncMock(return_value=[])),
         patch.object(bootstrap_mod, "unified_stream_payload", return_value=stream) as stream_payload,
     ):
         resp = await client.get("/api/cortex/bootstrap?include=ideas,connections,direct_thread&idea_id=idea-1")
@@ -935,7 +942,7 @@ async def test_cortex_bootstrap_direct_thread_can_return_selected_idea_without_g
     ]
 
     with (
-        patch.object(bootstrap_mod, "_require_idea_for_user", return_value=idea) as require_idea,
+        patch.object(bootstrap_mod, "_require_idea_for_user", AsyncMock(return_value=idea)) as require_idea,
         patch.object(bootstrap_mod, "list_ideas_payload") as list_ideas,
         patch.object(bootstrap_mod, "list_connections_payload") as list_connections,
         patch.object(bootstrap_mod, "unified_stream_payload", return_value=stream),
@@ -949,7 +956,7 @@ async def test_cortex_bootstrap_direct_thread_can_return_selected_idea_without_g
     assert data["selected_idea"]["id"] == "idea-1"
     assert data["selected_idea"]["title"] == "Selected Thread"
     assert data["direct_thread"] == {"idea_id": "idea-1", "stream": stream}
-    require_idea.assert_called_once()
+    require_idea.assert_awaited_once()
     list_ideas.assert_not_called()
     list_connections.assert_not_called()
 
@@ -960,10 +967,10 @@ async def test_list_ideas_with_status_filter(client, mock_session_factory):
     with patch(
         "brain.app.api.routers.cortex._ideas.IdeaRepository"
     ) as MockRepo:
-        MockRepo.return_value.list_by_status_for_org.return_value = [idea]
+        MockRepo.return_value.a_list_by_status_for_org = AsyncMock(return_value=[idea])
         resp = await client.get("/api/cortex/ideas?status=working")
     assert resp.status_code == 200
-    MockRepo.return_value.list_by_status_for_org.assert_called_once_with("working", ANY)
+    MockRepo.return_value.a_list_by_status_for_org.assert_awaited_once_with("working", ANY)
 
 
 @pytest.mark.asyncio
@@ -973,13 +980,13 @@ async def test_list_archived_ideas(client, mock_session_factory):
     with patch(
         "brain.app.api.routers.cortex._ideas.IdeaRepository"
     ) as MockRepo:
-        MockRepo.return_value.list_archived_for_org.return_value = [idea]
+        MockRepo.return_value.a_list_archived_for_org = AsyncMock(return_value=[idea])
         resp = await client.get("/api/cortex/ideas/archived?limit=5")
 
     assert resp.status_code == 200, resp.text
     payload = resp.json()
     assert payload[0]["archived_at"] is not None
-    MockRepo.return_value.list_archived_for_org.assert_called_once_with(ANY, limit=5)
+    MockRepo.return_value.a_list_archived_for_org.assert_awaited_once_with(ANY, limit=5)
 
 
 @pytest.mark.asyncio
@@ -1023,7 +1030,7 @@ async def test_create_idea(client, mock_session_factory):
     ), patch(
         "brain.app.api.routers.cortex._ideas.generate_and_store_idea_display_title"
     ) as mock_generate_title:
-        MockRepo.return_value.create.return_value = idea
+        MockRepo.return_value.a_create = AsyncMock(return_value=idea)
         resp = await client.post(
             "/api/cortex/ideas",
             json={"title": "New Idea"},
@@ -1060,7 +1067,7 @@ async def test_create_thread_message(client, mock_session_factory):
     with patch(
         "brain.app.api.routers.cortex._ideas.IdeaThreadRepository"
     ) as MockRepo:
-        MockRepo.return_value.add_message.return_value = msg
+        MockRepo.return_value.a_add_message = AsyncMock(return_value=msg)
         resp = await client.post(
             "/api/cortex/ideas/some-id/threads",
             json={"content": "Hello", "role": "user"},
@@ -1080,9 +1087,9 @@ async def test_create_thread_message_commits_before_broadcast(client, mock_sessi
         order.append("broadcast")
 
     with patch("brain.app.api.routers.cortex._ideas.IdeaThreadRepository") as MockRepo, \
-         patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea), \
+         patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)), \
          patch("brain.app.api.routers.cortex._ideas.ws_manager.broadcast_product_event", side_effect=_broadcast):
-        MockRepo.return_value.add_message.return_value = msg
+        MockRepo.return_value.a_add_message = AsyncMock(return_value=msg)
         resp = await client.post(
             "/api/cortex/ideas/some-id/threads",
             json={"content": "Hello", "role": "user"},
@@ -1103,7 +1110,7 @@ async def test_update_idea_status_commits_before_broadcast(client, mock_session_
     async def _broadcast(*_args, **_kwargs):
         order.append("broadcast")
 
-    with patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea), \
+    with patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)), \
          patch("brain.app.api.routers.cortex._ideas.ws_manager.broadcast_product_event", side_effect=_broadcast):
         resp = await client.patch(
             "/api/cortex/ideas/status-idea/status",
@@ -1121,7 +1128,7 @@ async def test_restore_archived_idea(client, mock_session_factory):
     archived_at = datetime.now(timezone.utc)
     idea = _make_idea(id="restore-id", status="archived", archived_at=archived_at)
 
-    with patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea):
+    with patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)):
         resp = await client.post(f"/api/cortex/ideas/{idea.id}/restore")
 
     assert resp.status_code == 200, resp.text
@@ -1153,7 +1160,7 @@ async def test_update_idea_user_id_handoff_same_org(client, mock_session_factory
     mock_session_factory.execute.return_value.one_or_none.return_value = None
 
     with (
-        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea),
+        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)),
         patch("brain.app.api.routers.cortex._ideas.require_org_context", return_value=org_id),
     ):
         resp = await client.put(f"/api/cortex/ideas/{idea.id}", json={"user_id": target_id})
@@ -1182,7 +1189,7 @@ async def test_update_idea_user_id_handoff_rejects_cross_org(client, mock_sessio
     mock_session_factory.scalar.return_value = target_user
 
     with (
-        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea),
+        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)),
         patch("brain.app.api.routers.cortex._ideas.require_org_context", return_value=org_id),
     ):
         resp = await client.patch(f"/api/cortex/ideas/{idea.id}", json={"user_id": target_id})
@@ -1214,7 +1221,7 @@ async def test_update_idea_user_id_handoff_preserves_previous_owner_color_withou
     ]
 
     with (
-        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea),
+        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)),
         patch("brain.app.api.routers.cortex._ideas.require_org_context", return_value=org_id),
     ):
         resp = await client.put(f"/api/cortex/ideas/{idea.id}", json={"user_id": target_id})
@@ -1242,7 +1249,7 @@ async def test_update_idea_orbit_anchor_pin_keeps_owner(client, mock_session_fac
     mock_session_factory.execute.return_value.one_or_none.return_value = None
 
     with (
-        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea),
+        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)),
         patch("brain.app.api.routers.cortex._ideas.require_org_context", return_value=org_id),
     ):
         resp = await client.patch(
@@ -1273,7 +1280,7 @@ async def test_list_ideas_uses_last_human_thread_author_color(client, mock_sessi
     last_author.color = "#abcdef"
 
     with patch("brain.app.api.routers.cortex._ideas.IdeaRepository") as MockRepo:
-        MockRepo.return_value.list_active_for_org.return_value = [idea]
+        MockRepo.return_value.a_list_active_for_org = AsyncMock(return_value=[idea])
         mock_session_factory.execute.return_value.all.return_value = [
             SimpleNamespace(
                 idea_id="color-id",

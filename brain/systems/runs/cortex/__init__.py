@@ -9,9 +9,9 @@ from typing import Any
 from brain.systems.runs.domain import AgentRunRequest
 from brain.systems.runs.events import run_event
 from brain.systems.runs.skill_commands import iter_slash_skill_commands, parse_slash_skill_names
-from brain.systems.runs.store import AgentRunStore
+from brain.systems.runs.store import AgentRunStore, AsyncAgentRunStore
 from brain.systems.runs.cortex.runner import queue_status, start_runner, stop_runner
-from brain.systems.runs.cortex.thread_binding import build_run_request
+from brain.systems.runs.cortex.thread_binding import a_build_run_request, build_run_request
 from brain.platform.db.models.idea import Idea, IdeaStateLog
 from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
@@ -113,6 +113,45 @@ def _mark_idea_working_for_run_admission(session, idea_id: str, run_id: int) -> 
     }
 
 
+async def _a_mark_idea_working_for_run_admission(session, idea_id: str, run_id: int) -> dict[str, Any] | None:
+    idea = await session.get(Idea, str(idea_id))
+    if idea is None:
+        return None
+
+    previous_status = str(getattr(idea, "status", "") or "")
+    if previous_status in {"archived", "resolved"}:
+        return None
+    if previous_status == "working":
+        return {
+            "idea_id": str(idea_id),
+            "old_status": previous_status,
+            "new_status": "working",
+            "run_id": int(run_id),
+            "changed": False,
+        }
+
+    now = datetime.now(timezone.utc)
+    idea.status = "working"
+    idea.updated_at = now
+    session.add(
+        IdeaStateLog(
+            idea_id=str(idea_id),
+            from_state=previous_status or None,
+            to_state="working",
+            changed_at=now,
+            trigger="agent_run_admitted",
+        )
+    )
+    await session.flush()
+    return {
+        "idea_id": str(idea_id),
+        "old_status": previous_status,
+        "new_status": "working",
+        "run_id": int(run_id),
+        "changed": True,
+    }
+
+
 def _record_adaptation(run_id: int, adaptation: dict[str, Any] | str, *, session=None) -> None:
     """Record an adaptation as AgentRun metadata and as an append-only event."""
 
@@ -172,6 +211,30 @@ def admit_run(request: RunAdmissionRequest, *, session=None) -> RunAdmissionResu
         return _admit(uow.session)
 
 
+async def async_admit_run(request: RunAdmissionRequest, *, session=None) -> RunAdmissionResult:
+    async def _admit(active_session) -> RunAdmissionResult:
+        run_request: AgentRunRequest = await a_build_run_request(
+            active_session,
+            idea_id=request.idea_id,
+            event=request.event,
+            message=request.message,
+            user_id=request.user_id,
+            metadata=request.metadata or {},
+            priority=request.priority,
+            source=request.source,
+            producer=request.producer,
+            idempotency_key=request.idempotency_key,
+        )
+        run = await AsyncAgentRunStore(active_session).create_run(run_request)
+        await _a_mark_idea_working_for_run_admission(active_session, request.idea_id, int(run.id))
+        return RunAdmissionResult(ok=True, run_id=run.id)
+
+    if session is not None:
+        return await _admit(session)
+    async with UnitOfWork() as uow:
+        return await _admit(uow.session)
+
+
 def idea_run_history(idea_id: str) -> list[dict[str, Any]]:
     from brain.systems.runs.cortex.read_models import serialize_run_history
 
@@ -215,11 +278,13 @@ __all__ = [
     "RunAdmissionRequest",
     "RunAdmissionResult",
     "_get_adaptation_history",
+    "_a_mark_idea_working_for_run_admission",
     "_mark_idea_working_for_run_admission",
     "_parse_skill_mentions",
     "_parse_skill_override",
     "_record_adaptation",
     "admit_run",
+    "async_admit_run",
     "cancel_idea_runs",
     "cancel_runs_for_idea",
     "idea_run_history",

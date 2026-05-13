@@ -115,6 +115,62 @@ def build_agent_visible_thread_context(
     }
 
 
+async def async_build_agent_visible_thread_context(
+    session: Any,
+    idea_id: str,
+    *,
+    current_thread_message_id: int | None = None,
+    current_message: str | None = None,
+    limit: int = DEFAULT_THREAD_CONTEXT_LIMIT,
+    char_limit: int = DEFAULT_THREAD_CONTEXT_CHAR_LIMIT,
+) -> dict[str, Any] | None:
+    """Async equivalent of ``build_agent_visible_thread_context``."""
+
+    if not idea_id or not hasattr(session, "execute"):
+        return None
+
+    try:
+        entries = [
+            *(await _a_thread_message_entries(
+                session,
+                idea_id,
+                max_rows=max(int(limit) * 3, int(limit) + 8),
+            )),
+            *(await _a_final_answer_entries(
+                session,
+                idea_id,
+                max_rows=max(int(limit) * 2, int(limit) + 4),
+            )),
+        ]
+    except Exception:
+        logger.debug("agent_visible_thread_context_load_failed", exc_info=True)
+        return None
+
+    entries = _drop_current_message(
+        entries,
+        current_thread_message_id=current_thread_message_id,
+        current_message=current_message,
+    )
+    entries = _drop_duplicate_final_answers(entries)
+    if not entries:
+        return None
+
+    entries.sort(key=lambda entry: (entry.timestamp(), entry.source, entry.thread_message_id or entry.artifact_id or 0))
+    entries = entries[-max(1, int(limit)) :]
+    formatted, kept_entries = _format_entries(entries, char_limit=max(1, int(char_limit)))
+    if not kept_entries or not formatted:
+        return None
+
+    return {
+        "source": "cortex_visible_thread",
+        "idea_id": str(idea_id),
+        "omits_current_message": True,
+        "message_count": len(kept_entries),
+        "formatted": formatted,
+        "messages": [entry.to_payload() for entry in kept_entries],
+    }
+
+
 def _thread_message_entries(session: Any, idea_id: str, *, max_rows: int) -> list[ThreadContextEntry]:
     rows = session.execute(
         select(
@@ -151,6 +207,43 @@ def _thread_message_entries(session: Any, idea_id: str, *, max_rows: int) -> lis
     return entries
 
 
+async def _a_thread_message_entries(session: Any, idea_id: str, *, max_rows: int) -> list[ThreadContextEntry]:
+    result = await session.execute(
+        select(
+            IdeaThread.id,
+            IdeaThread.role,
+            IdeaThread.content,
+            IdeaThread.created_at,
+            IdeaThread.metadata_,
+        )
+        .where(IdeaThread.idea_id == idea_id)
+        .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
+        .limit(max(1, int(max_rows)))
+    )
+    rows = result.all()
+    entries: list[ThreadContextEntry] = []
+    for row in rows:
+        content = _clean_content(row.content)
+        if not content:
+            continue
+        role = _normalize_role(row.role)
+        if role not in {"user", "illo", "assistant"}:
+            continue
+        metadata = row.metadata_
+        metadata = metadata if isinstance(metadata, dict) else {}
+        entries.append(
+            ThreadContextEntry(
+                role="illo" if role == "assistant" else role,
+                content=content,
+                created_at=row.created_at,
+                source="thread",
+                thread_message_id=_coerce_int(row.id),
+                run_id=_coerce_int(metadata.get("run_id")),
+            )
+        )
+    return entries
+
+
 def _final_answer_entries(session: Any, idea_id: str, *, max_rows: int) -> list[ThreadContextEntry]:
     rows = session.execute(
         select(AgentRunArtifactRow, AgentRunRow)
@@ -162,6 +255,36 @@ def _final_answer_entries(session: Any, idea_id: str, *, max_rows: int) -> list[
         .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())
         .limit(max(1, int(max_rows)))
     ).all()
+    entries: list[ThreadContextEntry] = []
+    for artifact, run in rows:
+        content = _clean_content(getattr(artifact, "text", None))
+        if not content:
+            continue
+        entries.append(
+            ThreadContextEntry(
+                role="illo",
+                content=content,
+                created_at=getattr(artifact, "created_at", None) or getattr(run, "completed_at", None),
+                source="run_final_answer",
+                run_id=_coerce_int(getattr(run, "id", None)),
+                artifact_id=_coerce_int(getattr(artifact, "id", None)),
+            )
+        )
+    return entries
+
+
+async def _a_final_answer_entries(session: Any, idea_id: str, *, max_rows: int) -> list[ThreadContextEntry]:
+    result = await session.execute(
+        select(AgentRunArtifactRow, AgentRunRow)
+        .join(AgentRunRow, AgentRunRow.id == AgentRunArtifactRow.run_id)
+        .where(
+            AgentRunRow.thread_id == str(idea_id),
+            AgentRunArtifactRow.artifact_type == "final_answer",
+        )
+        .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())
+        .limit(max(1, int(max_rows)))
+    )
+    rows = result.all()
     entries: list[ThreadContextEntry] = []
     for artifact, run in rows:
         content = _clean_content(getattr(artifact, "text", None))
@@ -282,5 +405,6 @@ __all__ = [
     "DEFAULT_THREAD_CONTEXT_CHAR_LIMIT",
     "DEFAULT_THREAD_CONTEXT_LIMIT",
     "ThreadContextEntry",
+    "async_build_agent_visible_thread_context",
     "build_agent_visible_thread_context",
 ]

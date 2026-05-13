@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -111,6 +111,47 @@ def test_router_sends_cortex_trigger_through_run_queue():
         return_value=RunAdmissionResult(ok=True, run_id=123),
     ) as mock_admit:
         result = route_trigger(trigger, session=session)
+
+    assert result.ok is True
+    assert result.route == "run"
+    assert result.run_id == 123
+    request = mock_admit.call_args.args[0]
+    assert request.idea_id == "idea-1"
+    assert request.event == "idea_created"
+    assert request.message == '[Idea: "Build triggers" | idea-1]\n\n/hello4 hello'
+    assert request.priority == 1
+    assert request.user_id == "user-1"
+    assert request.source == "trigger:cortex"
+    assert request.producer == "trigger"
+    assert request.idempotency_key == trigger.idempotency_key
+    assert request.metadata["target"]["repo"] == "illo-brain"
+    assert mock_admit.call_args.kwargs["session"] is session
+    assert request.metadata["illo_trigger"]["event_type"] == "cortex.idea_created"
+    assert request.metadata["illo_trigger"]["idempotency_key"] == trigger.idempotency_key
+
+
+@pytest.mark.asyncio
+async def test_async_router_sends_cortex_trigger_through_run_queue():
+    from brain.app.triggers.adapters.internal import build_cortex_notify_trigger
+    from brain.systems.runs.cortex import RunAdmissionResult
+    from brain.app.triggers.router import async_route_trigger
+
+    trigger = build_cortex_notify_trigger(
+        event="idea_created",
+        idea_id="idea-1",
+        idea=_idea(),
+        user=_user(),
+        thread_message="/hello4 hello",
+        metadata={"target": {"repo": "illo-brain"}},
+        priority=1,
+    )
+
+    session = object()
+    with patch(
+        "brain.app.triggers.router.async_admit_run",
+        AsyncMock(return_value=RunAdmissionResult(ok=True, run_id=123)),
+    ) as mock_admit:
+        result = await async_route_trigger(trigger, session=session)
 
     assert result.ok is True
     assert result.route == "run"

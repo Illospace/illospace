@@ -133,6 +133,22 @@ def _get_idea_for_user(session, idea_id: str, user: dict | None) -> Idea | None:
     return session.scalars(stmt).first()
 
 
+async def _a_get_idea_for_user(session, idea_id: str, user: dict | None) -> Idea | None:
+    repo = IdeaRepository(session)
+    if _caller_is_service_principal(user):
+        return await repo.a_get(idea_id)
+    org_id = require_org_context(user or {})
+    org_user_ids = select(User.id).where(User.org_id == str(org_id))
+    stmt = select(Idea).where(
+        Idea.id == idea_id,
+        or_(
+            Idea.org_id == str(org_id),
+            and_(Idea.org_id.is_(None), Idea.user_id.in_(org_user_ids)),
+        ),
+    )
+    return (await session.scalars(stmt)).first()
+
+
 def _require_idea_for_user(
     session,
     idea_id: str,
@@ -141,6 +157,19 @@ def _require_idea_for_user(
     detail: str = "Idea not found",
 ) -> Idea:
     idea = _get_idea_for_user(session, idea_id, user)
+    if idea is None:
+        raise HTTPException(status_code=404, detail=detail)
+    return idea
+
+
+async def _a_require_idea_for_user(
+    session,
+    idea_id: str,
+    user: dict | None,
+    *,
+    detail: str = "Idea not found",
+) -> Idea:
+    idea = await _a_get_idea_for_user(session, idea_id, user)
     if idea is None:
         raise HTTPException(status_code=404, detail=detail)
     return idea

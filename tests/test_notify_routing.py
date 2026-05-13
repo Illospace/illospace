@@ -14,14 +14,48 @@ class _RequestStub:
         return self._payload
 
 
+class _AsyncResult:
+    def __init__(self, *, first=None, scalar_one=None):
+        self._first = first
+        self._scalar_one = scalar_one
+
+    def first(self):
+        return self._first
+
+    def scalar_one_or_none(self):
+        return self._scalar_one
+
+
+class _AsyncSessionStub:
+    def __init__(self, idea):
+        self.idea = idea
+
+    async def get(self, *_args, **_kwargs):
+        return self.idea
+
+    async def scalars(self, *_args, **_kwargs):
+        return _AsyncResult(first=self.idea)
+
+    async def execute(self, *_args, **_kwargs):
+        return _AsyncResult(scalar_one={})
+
+    def add(self, *_args, **_kwargs):
+        return None
+
+    async def flush(self):
+        return None
+
+    def get_bind(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+
 def _uow_with_idea(idea):
     uow = MagicMock()
     uow.__enter__ = MagicMock(return_value=uow)
     uow.__exit__ = MagicMock(return_value=False)
     uow.__aenter__ = AsyncMock(return_value=uow)
     uow.__aexit__ = AsyncMock(return_value=False)
-    uow.session.get.return_value = idea
-    uow.session.scalars.return_value.first.return_value = idea
+    uow.session = _AsyncSessionStub(idea)
     return uow
 
 
@@ -48,7 +82,7 @@ def test_notify_idea_created_preserves_thread_message_for_skill_routing():
     route_result.to_response.return_value = {"ok": True}
     uow = _uow_with_idea(idea)
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=uow), \
-         patch("brain.app.triggers.router.route_trigger", return_value=route_result) as mock_route:
+         patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
         result = asyncio.run(notify_illo(request=request, user=user))
 
     assert result["ok"] is True
@@ -79,7 +113,7 @@ def test_notify_idea_created_keeps_generic_message_without_thread_message():
     route_result = MagicMock()
     route_result.to_response.return_value = {"ok": True}
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=_uow_with_idea(idea)), \
-         patch("brain.app.triggers.router.route_trigger", return_value=route_result) as mock_route:
+         patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
         result = asyncio.run(notify_illo(request=request, user=user))
 
     assert result["ok"] is True
@@ -112,7 +146,7 @@ def test_notify_idea_created_preserves_execution_profile_metadata():
     route_result = MagicMock()
     route_result.to_response.return_value = {"ok": True}
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=_uow_with_idea(idea)), \
-         patch("brain.app.triggers.router.route_trigger", return_value=route_result) as mock_route:
+         patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
         result = asyncio.run(notify_illo(request=request, user=user))
 
     assert result["ok"] is True
@@ -142,7 +176,7 @@ def test_notify_idea_created_to_team_member_does_not_enqueue_agent_run():
     uow = _uow_with_idea(idea)
 
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=uow), \
-         patch("brain.app.triggers.router.route_trigger") as mock_route:
+         patch("brain.app.triggers.router.async_route_trigger") as mock_route:
         result = asyncio.run(notify_illo(request=request, user=user))
 
     assert result == {
@@ -177,9 +211,9 @@ def test_notify_idea_created_to_team_member_from_thread_metadata_does_not_enqueu
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=uow), \
          patch(
              "brain.app.api.routers.cortex._ideas._latest_user_thread_metadata",
-             return_value={"thread_message": "@Riley can you take a look?"},
+             AsyncMock(return_value={"thread_message": "@Riley can you take a look?"}),
          ), \
-         patch("brain.app.triggers.router.route_trigger") as mock_route:
+         patch("brain.app.triggers.router.async_route_trigger") as mock_route:
         result = asyncio.run(notify_illo(request=request, user=user))
 
     assert result == {
@@ -214,7 +248,7 @@ def test_notify_idea_created_with_illo_and_teammate_enqueues_agent_run():
     route_result.to_response.return_value = {"ok": True}
 
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=_uow_with_idea(idea)), \
-         patch("brain.app.triggers.router.route_trigger", return_value=route_result) as mock_route:
+         patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
         result = asyncio.run(notify_illo(request=request, user=user))
 
     assert result["ok"] is True
@@ -245,7 +279,7 @@ def test_notify_thread_reply_preserves_execution_profile_metadata():
     route_result.to_response.return_value = {"ok": True}
     uow = _uow_with_idea(idea)
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=uow), \
-         patch("brain.app.triggers.router.route_trigger", return_value=route_result) as mock_route:
+         patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
         result = asyncio.run(notify_illo(request=request, user=user))
 
     assert result["ok"] is True
@@ -267,7 +301,7 @@ def test_notify_thread_reply_to_team_member_does_not_enqueue_agent_run():
     )
     user = {"id": "user-1", "org_id": "org-1", "role": "member"}
 
-    with patch("brain.app.triggers.router.route_trigger") as mock_route:
+    with patch("brain.app.triggers.router.async_route_trigger") as mock_route:
         result = asyncio.run(notify_illo(request=request, user=user))
 
     assert result == {
@@ -301,7 +335,7 @@ def test_notify_thread_reply_with_illo_mention_still_enqueues_agent_run():
     route_result = MagicMock()
     route_result.to_response.return_value = {"ok": True}
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=_uow_with_idea(idea)), \
-         patch("brain.app.triggers.router.route_trigger", return_value=route_result) as mock_route:
+         patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
         result = asyncio.run(notify_illo(request=request, user=user))
 
     assert result["ok"] is True

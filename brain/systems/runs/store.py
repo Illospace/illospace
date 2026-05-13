@@ -591,7 +591,8 @@ class AgentRunStore:
             )
         )
 
-    def to_domain(self, row: AgentRunRow) -> AgentRun:
+    @staticmethod
+    def to_domain(row: AgentRunRow) -> AgentRun:
         return AgentRun(
             id=row.id,
             trace_id=row.trace_id or trace_id_for_run_id(row.id) or "",
@@ -633,13 +634,7 @@ class AgentRunStore:
 
 
 class AsyncAgentRunStore:
-    """Async facade for the agent-run store.
-
-    Each method runs the existing synchronous domain operation inside
-    ``AsyncSession.run_sync``. Callers should open a short-lived async session,
-    perform the persistence operation, then commit before any long-running
-    model, tool, browser, or connector I/O.
-    """
+    """Async persistence boundary for agent runs."""
 
     def __init__(self, session: AsyncSession, *, auto_commit: bool = False):
         self.session = session
@@ -652,7 +647,38 @@ class AsyncAgentRunStore:
         return await run_session_task(self.session, _invoke)
 
     async def create_run(self, request: AgentRunRequest) -> AgentRun:
-        return await self._run(lambda store: store.create_run(request))
+        profile = request.normalized_profile
+        recipe = request.normalized_recipe
+        row = AgentRunRow(
+            org_id=request.org_id,
+            user_id=request.user_id,
+            thread_id=request.thread_id,
+            parent_run_id=request.parent_run_id,
+            root_run_id=request.root_run_id,
+            profile=profile.value,
+            recipe=recipe.value,
+            status=RunStatus.QUEUED.value,
+            input_message=request.message,
+            target_ref=dict(request.target_ref or {}),
+            workspace_ref=dict(request.workspace_ref or {}),
+            model_policy=dict(request.model_policy or {}),
+            metadata_=dict(request.metadata or {}),
+        )
+        self.session.add(row)
+        await self.session.flush()
+        row.trace_id = trace_id_for_run_id(row.id)
+        if row.root_run_id is None:
+            row.root_run_id = row.id
+        await self.session.flush()
+        await self.append_event(
+            run_event(
+                row.id,
+                "run.created",
+                {"profile": profile.value, "recipe": recipe.value},
+                root_run_id=row.root_run_id,
+            )
+        )
+        return AgentRunStore.to_domain(row)
 
     async def create_child_run(self, parent: AgentRun | AgentRunRow, **kwargs: Any) -> AgentRun:
         return await self._run(lambda store: store.create_child_run(parent, **kwargs))
@@ -667,10 +693,45 @@ class AsyncAgentRunStore:
         return await self._run(lambda store: store.set_status(run_id, status, reason=reason))
 
     async def append_event(self, event: AgentRunEvent) -> AgentRunEventRow:
-        return await self._run(lambda store: store.append_event(event))
+        with _event_lock(int(event.run_id)):
+            if self._dialect_name() == "postgresql":
+                await self.session.execute(
+                    text("SELECT pg_advisory_xact_lock(:run_id)"),
+                    {"run_id": int(event.run_id)},
+                )
+            sequence_no = event.sequence_no
+            if sequence_no is None:
+                sequence_no = int(
+                    await self.session.scalar(
+                        select(func.coalesce(func.max(AgentRunEventRow.sequence_no), 0)).where(
+                            AgentRunEventRow.run_id == event.run_id
+                        )
+                    )
+                    or 0
+                ) + 1
+            row = AgentRunEventRow(
+                run_id=event.run_id,
+                root_run_id=event.root_run_id or event.run_id,
+                sequence_no=sequence_no,
+                event_type=event.event_type,
+                payload=dict(event.payload or {}),
+                producer=event.producer,
+                visibility=(
+                    event.visibility.value if isinstance(event.visibility, EventVisibility) else str(event.visibility)
+                ),
+            )
+            self.session.add(row)
+            await self.session.flush()
+            if self.auto_commit:
+                await self.session.commit()
+            return row
 
     async def append_artifact(self, artifact: AgentRunArtifact) -> AgentRunArtifactRow:
         return await self._run(lambda store: store.append_artifact(artifact))
+
+    def _dialect_name(self) -> str:
+        bind = self.session.get_bind()
+        return str(getattr(getattr(bind, "dialect", None), "name", "") or "")
 
 
 __all__ = ["AgentRunStore", "AsyncAgentRunStore"]

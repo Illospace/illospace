@@ -48,7 +48,8 @@ class IdeaRepository(BaseRepository[Idea]):
     model = Idea
     pk_column = "id"
 
-    def list_active(self, *, limit: int | None = None) -> Sequence[Idea]:
+    @staticmethod
+    def _list_active_stmt(*, limit: int | None = None):
         stmt = (
             select(Idea)
             .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
@@ -57,26 +58,14 @@ class IdeaRepository(BaseRepository[Idea]):
         )
         if limit:
             stmt = stmt.limit(limit)
-        return self._session.scalars(stmt).all()
+        return stmt
 
-    def list_by_org(
-        self, org_id: str, *, limit: int | None = None
-    ) -> Sequence[Idea]:
-        return self.list_active_for_org(org_id, limit=limit)
+    @staticmethod
+    def _get_for_org_stmt(idea_id: str, org_id: str):
+        return select(Idea).where(Idea.id == idea_id, Idea.org_id == org_id)
 
-    def get_for_org(self, idea_id: str, org_id: str) -> Idea | None:
-        stmt = select(Idea).where(Idea.id == idea_id, Idea.org_id == org_id)
-        return self._session.scalars(stmt).first()
-
-    def get_for_org_or_raise(self, idea_id: str, org_id: str) -> Idea:
-        idea = self.get_for_org(idea_id, org_id)
-        if idea is None:
-            raise LookupError(f"Idea {idea_id} not found")
-        return idea
-
-    def list_active_for_org(
-        self, org_id: str, *, limit: int | None = None
-    ) -> Sequence[Idea]:
+    @staticmethod
+    def _list_active_for_org_stmt(org_id: str, *, limit: int | None = None):
         stmt = (
             select(Idea)
             .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
@@ -85,9 +74,10 @@ class IdeaRepository(BaseRepository[Idea]):
         )
         if limit:
             stmt = stmt.limit(limit)
-        return self._session.scalars(stmt).all()
+        return stmt
 
-    def list_archived(self, *, limit: int | None = None) -> Sequence[Idea]:
+    @staticmethod
+    def _list_archived_stmt(*, limit: int | None = None):
         stmt = (
             select(Idea)
             .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
@@ -96,11 +86,10 @@ class IdeaRepository(BaseRepository[Idea]):
         )
         if limit:
             stmt = stmt.limit(limit)
-        return self._session.scalars(stmt).all()
+        return stmt
 
-    def list_archived_for_org(
-        self, org_id: str, *, limit: int | None = None
-    ) -> Sequence[Idea]:
+    @staticmethod
+    def _list_archived_for_org_stmt(org_id: str, *, limit: int | None = None):
         org_user_ids = select(User.id).where(User.org_id == str(org_id))
         stmt = (
             select(Idea)
@@ -116,7 +105,7 @@ class IdeaRepository(BaseRepository[Idea]):
         )
         if limit:
             stmt = stmt.limit(limit)
-        return self._session.scalars(stmt).all()
+        return stmt
 
     def hard_delete_archived(self) -> int:
         idea_ids = list(
@@ -125,6 +114,16 @@ class IdeaRepository(BaseRepository[Idea]):
             ).all()
         )
         return self._hard_delete_by_ids(idea_ids)
+
+    async def a_hard_delete_archived(self) -> int:
+        idea_ids = list(
+            (
+                await self._session.scalars(
+                    select(Idea.id).where(Idea.archived_at.is_not(None))
+                )
+            ).all()
+        )
+        return await self._a_hard_delete_by_ids(idea_ids)
 
     def hard_delete_archived_for_org(self, org_id: str) -> int:
         org_user_ids = select(User.id).where(User.org_id == str(org_id))
@@ -140,6 +139,23 @@ class IdeaRepository(BaseRepository[Idea]):
             ).all()
         )
         return self._hard_delete_by_ids(idea_ids)
+
+    async def a_hard_delete_archived_for_org(self, org_id: str) -> int:
+        org_user_ids = select(User.id).where(User.org_id == str(org_id))
+        idea_ids = list(
+            (
+                await self._session.scalars(
+                    select(Idea.id).where(
+                        Idea.archived_at.is_not(None),
+                        or_(
+                            Idea.org_id == org_id,
+                            and_(Idea.org_id.is_(None), Idea.user_id.in_(org_user_ids)),
+                        ),
+                    )
+                )
+            ).all()
+        )
+        return await self._a_hard_delete_by_ids(idea_ids)
 
     def _hard_delete_by_ids(self, idea_ids: Sequence[str]) -> int:
         ids = [str(idea_id) for idea_id in idea_ids if idea_id]
@@ -159,17 +175,36 @@ class IdeaRepository(BaseRepository[Idea]):
         self._session.flush()
         return len(ids)
 
-    def list_by_status(self, status: str) -> Sequence[Idea]:
-        stmt = (
+    async def _a_hard_delete_by_ids(self, idea_ids: Sequence[str]) -> int:
+        ids = [str(idea_id) for idea_id in idea_ids if idea_id]
+        if not ids:
+            return 0
+        await self._session.execute(
+            update(Idea)
+            .where(Idea.parent_id.in_(ids))
+            .values(parent_id=None)
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.execute(
+            delete(Idea)
+            .where(Idea.id.in_(ids))
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.flush()
+        return len(ids)
+
+    @staticmethod
+    def _list_by_status_stmt(status: str):
+        return (
             select(Idea)
             .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
             .where(Idea.status == status, Idea.archived_at.is_(None))
             .order_by(Idea.updated_at.desc())
         )
-        return self._session.scalars(stmt).all()
 
-    def list_by_status_for_org(self, status: str, org_id: str) -> Sequence[Idea]:
-        stmt = (
+    @staticmethod
+    def _list_by_status_for_org_stmt(status: str, org_id: str):
+        return (
             select(Idea)
             .options(load_only(*IDEA_LIST_LOAD_COLUMNS))
             .where(
@@ -179,7 +214,92 @@ class IdeaRepository(BaseRepository[Idea]):
             )
             .order_by(Idea.updated_at.desc())
         )
+
+    def list_active(self, *, limit: int | None = None) -> Sequence[Idea]:
+        stmt = self._list_active_stmt(limit=limit)
         return self._session.scalars(stmt).all()
+
+    async def a_list_active(self, *, limit: int | None = None) -> Sequence[Idea]:
+        stmt = self._list_active_stmt(limit=limit)
+        return (await self._session.scalars(stmt)).all()
+
+    def list_by_org(
+        self, org_id: str, *, limit: int | None = None
+    ) -> Sequence[Idea]:
+        return self.list_active_for_org(org_id, limit=limit)
+
+    async def a_list_by_org(
+        self, org_id: str, *, limit: int | None = None
+    ) -> Sequence[Idea]:
+        return await self.a_list_active_for_org(org_id, limit=limit)
+
+    def get_for_org(self, idea_id: str, org_id: str) -> Idea | None:
+        stmt = self._get_for_org_stmt(idea_id, org_id)
+        return self._session.scalars(stmt).first()
+
+    async def a_get_for_org(self, idea_id: str, org_id: str) -> Idea | None:
+        stmt = self._get_for_org_stmt(idea_id, org_id)
+        return (await self._session.scalars(stmt)).first()
+
+    def get_for_org_or_raise(self, idea_id: str, org_id: str) -> Idea:
+        idea = self.get_for_org(idea_id, org_id)
+        if idea is None:
+            raise LookupError(f"Idea {idea_id} not found")
+        return idea
+
+    async def a_get_for_org_or_raise(self, idea_id: str, org_id: str) -> Idea:
+        idea = await self.a_get_for_org(idea_id, org_id)
+        if idea is None:
+            raise LookupError(f"Idea {idea_id} not found")
+        return idea
+
+    def list_active_for_org(
+        self, org_id: str, *, limit: int | None = None
+    ) -> Sequence[Idea]:
+        stmt = self._list_active_for_org_stmt(org_id, limit=limit)
+        return self._session.scalars(stmt).all()
+
+    async def a_list_active_for_org(
+        self, org_id: str, *, limit: int | None = None
+    ) -> Sequence[Idea]:
+        stmt = self._list_active_for_org_stmt(org_id, limit=limit)
+        return (await self._session.scalars(stmt)).all()
+
+    def list_archived(self, *, limit: int | None = None) -> Sequence[Idea]:
+        stmt = self._list_archived_stmt(limit=limit)
+        return self._session.scalars(stmt).all()
+
+    async def a_list_archived(self, *, limit: int | None = None) -> Sequence[Idea]:
+        stmt = self._list_archived_stmt(limit=limit)
+        return (await self._session.scalars(stmt)).all()
+
+    def list_archived_for_org(
+        self, org_id: str, *, limit: int | None = None
+    ) -> Sequence[Idea]:
+        stmt = self._list_archived_for_org_stmt(org_id, limit=limit)
+        return self._session.scalars(stmt).all()
+
+    async def a_list_archived_for_org(
+        self, org_id: str, *, limit: int | None = None
+    ) -> Sequence[Idea]:
+        stmt = self._list_archived_for_org_stmt(org_id, limit=limit)
+        return (await self._session.scalars(stmt)).all()
+
+    def list_by_status(self, status: str) -> Sequence[Idea]:
+        stmt = self._list_by_status_stmt(status)
+        return self._session.scalars(stmt).all()
+
+    async def a_list_by_status(self, status: str) -> Sequence[Idea]:
+        stmt = self._list_by_status_stmt(status)
+        return (await self._session.scalars(stmt)).all()
+
+    def list_by_status_for_org(self, status: str, org_id: str) -> Sequence[Idea]:
+        stmt = self._list_by_status_for_org_stmt(status, org_id)
+        return self._session.scalars(stmt).all()
+
+    async def a_list_by_status_for_org(self, status: str, org_id: str) -> Sequence[Idea]:
+        stmt = self._list_by_status_for_org_stmt(status, org_id)
+        return (await self._session.scalars(stmt)).all()
 
     def update_status(
         self, idea_id: str, new_status: str, trigger: str | None = None
@@ -215,6 +335,14 @@ class IdeaThreadRepository(BaseRepository[IdeaThread]):
         )
         return self._session.scalars(stmt).all()
 
+    async def a_list_by_idea(self, idea_id: str) -> Sequence[IdeaThread]:
+        stmt = (
+            select(IdeaThread)
+            .where(IdeaThread.idea_id == idea_id)
+            .order_by(IdeaThread.created_at.asc())
+        )
+        return (await self._session.scalars(stmt)).all()
+
     def add_message(
         self,
         idea_id: str,
@@ -227,6 +355,20 @@ class IdeaThreadRepository(BaseRepository[IdeaThread]):
         )
         self._session.add(msg)
         return msg
+
+    async def a_add_message(
+        self,
+        idea_id: str,
+        role: str,
+        content: str,
+        user_id: str | None = None,
+    ) -> IdeaThread:
+        return self.add_message(
+            idea_id=idea_id,
+            role=role,
+            content=content,
+            user_id=user_id,
+        )
 
 
 class IdeaConnectionRepository(BaseRepository[IdeaConnection]):
@@ -242,8 +384,20 @@ class IdeaConnectionRepository(BaseRepository[IdeaConnection]):
         )
         return self._session.scalars(stmt).all()
 
+    async def a_list_by_idea(self, idea_id: str) -> Sequence[IdeaConnection]:
+        stmt = select(IdeaConnection).where(
+            or_(
+                IdeaConnection.source_id == idea_id,
+                IdeaConnection.target_id == idea_id,
+            )
+        )
+        return (await self._session.scalars(stmt)).all()
+
     def list_all_active(self) -> Sequence[IdeaConnection]:
         return self._session.scalars(select(IdeaConnection)).all()
+
+    async def a_list_all_active(self) -> Sequence[IdeaConnection]:
+        return (await self._session.scalars(select(IdeaConnection))).all()
 
     def list_by_idea_for_org(
         self, idea_id: str, org_id: str
@@ -268,6 +422,29 @@ class IdeaConnectionRepository(BaseRepository[IdeaConnection]):
         )
         return self._session.scalars(stmt).all()
 
+    async def a_list_by_idea_for_org(
+        self, idea_id: str, org_id: str
+    ) -> Sequence[IdeaConnection]:
+        source = aliased(Idea)
+        target = aliased(Idea)
+        stmt = (
+            select(IdeaConnection)
+            .join(source, IdeaConnection.source_id == source.id)
+            .join(target, IdeaConnection.target_id == target.id)
+            .where(
+                and_(
+                    or_(
+                        IdeaConnection.source_id == idea_id,
+                        IdeaConnection.target_id == idea_id,
+                    ),
+                    source.org_id == org_id,
+                    target.org_id == org_id,
+                )
+            )
+            .order_by(IdeaConnection.created_at)
+        )
+        return (await self._session.scalars(stmt)).all()
+
     def list_all_active_for_org(self, org_id: str) -> Sequence[IdeaConnection]:
         source = aliased(Idea)
         target = aliased(Idea)
@@ -279,6 +456,18 @@ class IdeaConnectionRepository(BaseRepository[IdeaConnection]):
             .order_by(IdeaConnection.created_at)
         )
         return self._session.scalars(stmt).all()
+
+    async def a_list_all_active_for_org(self, org_id: str) -> Sequence[IdeaConnection]:
+        source = aliased(Idea)
+        target = aliased(Idea)
+        stmt = (
+            select(IdeaConnection)
+            .join(source, IdeaConnection.source_id == source.id)
+            .join(target, IdeaConnection.target_id == target.id)
+            .where(source.org_id == org_id, target.org_id == org_id)
+            .order_by(IdeaConnection.created_at)
+        )
+        return (await self._session.scalars(stmt)).all()
 
     def get_for_org(self, connection_id: str, org_id: str) -> IdeaConnection | None:
         source = aliased(Idea)
@@ -294,6 +483,21 @@ class IdeaConnectionRepository(BaseRepository[IdeaConnection]):
             )
         )
         return self._session.scalars(stmt).first()
+
+    async def a_get_for_org(self, connection_id: str, org_id: str) -> IdeaConnection | None:
+        source = aliased(Idea)
+        target = aliased(Idea)
+        stmt = (
+            select(IdeaConnection)
+            .join(source, IdeaConnection.source_id == source.id)
+            .join(target, IdeaConnection.target_id == target.id)
+            .where(
+                IdeaConnection.id == connection_id,
+                source.org_id == org_id,
+                target.org_id == org_id,
+            )
+        )
+        return (await self._session.scalars(stmt)).first()
 
 
 class UserMentionRepository(BaseRepository[UserMention]):

@@ -13,6 +13,7 @@ from typing import Annotated, Any
 from fastapi import Depends, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, load_only
 
 from brain.app.api.auth import get_current_user
@@ -24,6 +25,7 @@ from brain.app.api.routers.cortex._helpers import (
     UPLOAD_FALLBACK_CONTENT_TYPES,
     VIDEO_EXTENSIONS,
     _caller_is_service_principal,
+    _a_require_idea_for_user,
     _require_idea_for_user,
     _row_to_dict,
 )
@@ -96,6 +98,27 @@ def list_connections_payload(
             rows = repo.list_all_active()
         else:
             rows = repo.list_all_active_for_org(require_org_context(user))
+    return [_row_to_dict(r) for r in rows]
+
+
+async def async_list_connections_payload(
+    idea_id: str | None = None,
+    *,
+    db: AsyncSession,
+    user: dict[str, Any],
+) -> list[dict[str, Any]]:
+    repo = IdeaConnectionRepository(db)
+    if idea_id:
+        await _a_require_idea_for_user(db, idea_id, user)
+        if _caller_is_service_principal(user):
+            rows = await repo.a_list_by_idea(idea_id)
+        else:
+            rows = await repo.a_list_by_idea_for_org(idea_id, require_org_context(user))
+    else:
+        if _caller_is_service_principal(user):
+            rows = await repo.a_list_all_active()
+        else:
+            rows = await repo.a_list_all_active_for_org(require_org_context(user))
     return [_row_to_dict(r) for r in rows]
 
 
