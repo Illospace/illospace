@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -324,11 +325,15 @@ def _mapped_value(expr: Any, item: Mapping[str, Any]) -> Any:
             return _extract_path(item, str(expr.get("path") or ""))
         if "template" in expr:
             return _render_template(str(expr.get("template") or ""), item)
+        if "now" in expr:
+            if expr.get("now") is True:
+                return _utc_now_iso()
+            raise WorkspaceAppActionContractError("mapping expression.now must be true")
         if "if" in expr:
             condition = _mapping(expr.get("if"), "mapping expression.if")
             branch = expr.get("then") if _condition_matches(condition, item) else expr.get("else")
             return _literal_or_mapped_value(branch, item)
-        raise WorkspaceAppActionContractError("mapping expressions must use const, path, template, or if/then/else")
+        raise WorkspaceAppActionContractError("mapping expressions must use const, path, template, now, or if/then/else")
     if expr is None:
         return None
     return _extract_path(item, str(expr))
@@ -405,6 +410,10 @@ def _render_template(template: str, payload: Mapping[str, Any]) -> str:
         return "" if value is None else str(value)
 
     return _TEMPLATE_RE.sub(replace, template)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _validate_url(url: str) -> None:

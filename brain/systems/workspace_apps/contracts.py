@@ -44,7 +44,8 @@ GENERATED_UI_CHART_TYPES = {"bar", "line", "pie", "scatter"}
 GENERIC_HTTP_EXECUTOR_KEY = "generic.http"
 GENERIC_HTTP_KINDS = {"http_request", "http_sync"}
 GENERIC_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
-GENERIC_HTTP_MAPPING_KEYS = ("const", "path", "template", "if")
+GENERIC_HTTP_MAPPING_KEYS = ("const", "path", "template", "if", "now")
+GENERIC_HTTP_MAPPING_DESCRIPTION = "const, path, template, now, or if/then/else"
 RECORD_LIKE_STATE_KEYS = {
     "records",
     "items",
@@ -358,16 +359,18 @@ def _validate_generic_http_mapping_expr(
     if isinstance(expr, Mapping):
         present = [key for key in GENERIC_HTTP_MAPPING_KEYS if key in expr]
         if not present:
-            errors.append(f"{field_path} mapping expressions must use const, path, template, or if/then/else")
+            errors.append(f"{field_path} mapping expressions must use {GENERIC_HTTP_MAPPING_DESCRIPTION}")
             return
         if len(present) > 1:
-            errors.append(f"{field_path} mapping expression must use only one of const, path, template, or if")
+            errors.append(f"{field_path} mapping expression must use only one of const, path, template, now, or if")
             return
         key = present[0]
         if key == "path" and not isinstance(expr.get("path"), str):
             errors.append(f"{field_path}.path must be a string")
         elif key == "template" and not isinstance(expr.get("template"), str):
             errors.append(f"{field_path}.template must be a string")
+        elif key == "now" and expr.get("now") is not True:
+            errors.append(f"{field_path}.now must be true")
         elif key == "if":
             _validate_generic_http_condition(f"{field_path}.if", expr.get("if"), errors)
             if "then" not in expr:
