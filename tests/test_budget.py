@@ -1,8 +1,6 @@
 """Tests for core.budget — Budget Guardian (circuit breaker pattern)."""
 
-import pytest
 from unittest.mock import patch, MagicMock
-from datetime import datetime, timezone
 
 from brain.systems.budget import (
     check_budget,
@@ -16,32 +14,34 @@ from brain.systems.budget import (
 )
 
 
-def _make_uow(*fetchone_results):
-    """Return a mock UnitOfWork whose session.execute chains return mapping results.
-
-    Each call to uow.session.execute(...).mappings().first() returns the next
-    item from *fetchone_results*.
-    """
-    mock_session = MagicMock()
-
-    # Build a side_effect list: each execute() call returns a mock whose
-    # .mappings().first() returns the next result dict.
-    execute_results = []
-    for row in fetchone_results:
-        mapping_mock = MagicMock()
-        mapping_mock.first.return_value = row
-        mapping_mock.__getitem__ = lambda self, key, _r=row: _r[key]
-        exec_mock = MagicMock()
-        exec_mock.mappings.return_value = mapping_mock
-        execute_results.append(exec_mock)
-
-    mock_session.execute.side_effect = execute_results
-
+def _make_uow():
+    """Return a mock UnitOfWork; token totals are supplied by helper patches."""
     mock_uow = MagicMock()
     mock_uow.__enter__ = MagicMock(return_value=mock_uow)
     mock_uow.__exit__ = MagicMock(return_value=False)
-    mock_uow.session = mock_session
+    mock_uow.session = MagicMock()
     return mock_uow
+
+
+def _token_usage(tokens_total: int, *, runs: int = 1, estimated_cost: float = 0.0) -> dict:
+    return {
+        "runs": runs,
+        "api_calls": runs,
+        "tokens_input": tokens_total,
+        "tokens_output": 0,
+        "tokens_total": tokens_total,
+        "cache_read": 0,
+        "cache_write": 0,
+        "estimated_cost": estimated_cost,
+        "last_used_at": None,
+    }
+
+
+def _patch_budget_usage(*token_totals: int):
+    return patch(
+        "brain.systems.budget.summarize_token_totals",
+        side_effect=[_token_usage(total) for total in token_totals],
+    )
 
 
 class TestBudgetDecision:
@@ -87,43 +87,37 @@ class TestEstimateTokens:
 class TestCheckBudget:
     def test_within_budget(self):
         """Normal run well within circuit breaker thresholds."""
-        mock_uow = _make_uow(
-            {"tokens_used": 10000},   # hourly: 10K used
-            {"tokens_used": 50000},   # daily: 50K used
-        )
-        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow):
+        mock_uow = _make_uow()
+        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
+             _patch_budget_usage(10000, 50000):
             result = check_budget("test-idea-id", 10000, model="anthropic/claude-opus-4-6")
         assert result.allowed
+        assert result.reason == ""
         assert result.downgrade_model is None
         assert result.warning is None
 
     def test_warning_on_high_hourly_usage(self):
         """Logs warning on high hourly usage but still allows run."""
-        mock_uow = _make_uow(
-            {"tokens_used": WARN_PER_IDEA_HOUR + 1000},  # above warning
-            {"tokens_used": 50000},                        # daily fine
-        )
-        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow):
+        mock_uow = _make_uow()
+        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
+             _patch_budget_usage(WARN_PER_IDEA_HOUR + 1000, 50000):
             result = check_budget("test-idea-id", 10000)
         assert result.allowed  # never blocks on warning
         assert result.warning is not None
 
     def test_circuit_breaker_hourly(self):
         """Circuit breaker fires on catastrophic hourly token usage."""
-        mock_uow = _make_uow(
-            {"tokens_used": CIRCUIT_BREAKER_PER_IDEA_HOUR + 1},  # over 1M
-        )
-        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow):
+        mock_uow = _make_uow()
+        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
+             _patch_budget_usage(CIRCUIT_BREAKER_PER_IDEA_HOUR + 1):
             result = check_budget("test-idea-id", 10000)
         assert not result.allowed
         assert "circuit breaker" in result.reason.lower()
 
     def test_repair_task_gets_hourly_closure_grace(self):
-        mock_uow = _make_uow(
-            {"tokens_used": CIRCUIT_BREAKER_PER_IDEA_HOUR + 100000},
-            {"tokens_used": 50000},
-        )
-        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow):
+        mock_uow = _make_uow()
+        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
+             _patch_budget_usage(CIRCUIT_BREAKER_PER_IDEA_HOUR + 100000):
             result = check_budget(
                 "test-idea-id",
                 40000,
@@ -135,21 +129,17 @@ class TestCheckBudget:
 
     def test_circuit_breaker_daily(self):
         """Circuit breaker fires on catastrophic daily token usage."""
-        mock_uow = _make_uow(
-            {"tokens_used": 50000},                        # hourly fine
-            {"tokens_used": CIRCUIT_BREAKER_PER_DAY + 1},  # daily over 10M
-        )
-        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow):
+        mock_uow = _make_uow()
+        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
+             _patch_budget_usage(50000, CIRCUIT_BREAKER_PER_DAY + 1):
             result = check_budget("test-idea-id", 10000)
         assert not result.allowed
         assert "circuit breaker" in result.reason.lower()
 
     def test_repair_task_gets_daily_closure_grace(self):
-        mock_uow = _make_uow(
-            {"tokens_used": 50000},
-            {"tokens_used": CIRCUIT_BREAKER_PER_DAY + 1000000},
-        )
-        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow):
+        mock_uow = _make_uow()
+        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
+             _patch_budget_usage(50000, CIRCUIT_BREAKER_PER_DAY + 1000000):
             result = check_budget(
                 "test-idea-id",
                 40000,
@@ -159,11 +149,9 @@ class TestCheckBudget:
         assert result.closure_mode
 
     def test_large_repair_run_still_blocked(self):
-        mock_uow = _make_uow(
-            {"tokens_used": CIRCUIT_BREAKER_PER_IDEA_HOUR + 100000},
-            {"tokens_used": 50000},
-        )
-        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow):
+        mock_uow = _make_uow()
+        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
+             _patch_budget_usage(CIRCUIT_BREAKER_PER_IDEA_HOUR + 100000):
             result = check_budget(
                 "test-idea-id",
                 250000,
@@ -173,11 +161,9 @@ class TestCheckBudget:
 
     def test_opus_never_downgraded(self):
         """Opus model is NEVER downgraded — model choice is not budget's job."""
-        mock_uow = _make_uow(
-            {"tokens_used": WARN_PER_IDEA_HOUR + 50000},  # high but under breaker
-            {"tokens_used": WARN_PER_DAY + 100000},        # high but under breaker
-        )
-        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow):
+        mock_uow = _make_uow()
+        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
+             _patch_budget_usage(WARN_PER_IDEA_HOUR + 50000, WARN_PER_DAY + 100000):
             result = check_budget("test-idea-id", 50000, model="anthropic/claude-opus-4-6")
         assert result.allowed
         assert result.downgrade_model is None
@@ -193,11 +179,15 @@ class TestCheckBudget:
 
 class TestBudgetStatus:
     def test_returns_status(self):
-        mock_uow = _make_uow(
-            {"daily_tokens": 100000, "daily_runs": 10, "daily_cost": 1.5},
-            {"hourly_tokens": 20000, "hourly_runs": 3},
-        )
-        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow):
+        mock_uow = _make_uow()
+        with patch("brain.systems.budget.UnitOfWork", return_value=mock_uow), \
+             patch(
+                 "brain.systems.budget.summarize_token_totals",
+                 side_effect=[
+                     _token_usage(100000, runs=10, estimated_cost=1.5),
+                     _token_usage(20000, runs=3),
+                 ],
+             ):
             status = get_budget_status()
         assert status["daily_tokens"] == 100000
         assert status["daily_runs"] == 10
