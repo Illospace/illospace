@@ -802,10 +802,6 @@
     }
   }
 
-  function closeSidePanel() {
-    onBrowserOpenChange?.(false);
-  }
-
   function addBrowserTab() {
     applySidePanelState(addBrowserThreadSidePanelTab(sidePanelState()));
   }
@@ -1238,7 +1234,6 @@
               onTabChange={openSidePanelTab}
               onTabClose={closeSidePanelTab}
               onAddMenuItem={handleSidePanelAddMenuItem}
-              onClose={closeSidePanel}
               browserPane={browserPane}
               previewPane={previewPane}
               utilityPane={utilityPane}

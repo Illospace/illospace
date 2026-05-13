@@ -912,6 +912,46 @@
 {/if}
 
 <style>
+  :global(.thread-utility-surface) {
+    --panel-utility-primary-text: rgba(239, 244, 251, 0.9);
+    --panel-utility-primary-hover-text: rgba(243, 247, 255, 0.96);
+    --panel-utility-muted-text: rgba(231, 238, 247, 0.5);
+    --panel-utility-divider-border: rgba(255, 255, 255, 0.06);
+    --panel-utility-card-border: rgba(255, 255, 255, 0.04);
+    --panel-utility-card-background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015));
+    --panel-utility-link-dot-shadow: 0 0 0 4px rgba(255, 255, 255, 0.03);
+    --panel-utility-eval-button-border: rgba(255, 255, 255, 0.08);
+    --panel-utility-eval-button-background: rgba(255, 255, 255, 0.03);
+    --panel-utility-eval-button-text: rgba(231, 238, 247, 0.66);
+    --panel-utility-eval-button-hover-background: rgba(255, 255, 255, 0.06);
+    --panel-utility-eval-button-hover-text: rgba(239, 244, 251, 0.92);
+    --panel-utility-action-border: color-mix(in srgb, var(--thread-accent, #57CFA0) 24%, rgba(255, 255, 255, 0.08));
+    --panel-utility-action-background: color-mix(in srgb, var(--thread-accent, #57CFA0) 12%, rgba(255, 255, 255, 0.035));
+    --panel-utility-action-hover-background: color-mix(in srgb, var(--thread-accent, #57CFA0) 18%, rgba(255, 255, 255, 0.04));
+    --panel-utility-action-text: rgba(239, 244, 251, 0.88);
+    --panel-utility-action-hover-text: #ffffff;
+  }
+
+  :global(:root[data-color-scheme='light'] .thread-utility-surface) {
+    --panel-utility-primary-text: rgba(18, 27, 36, 0.92);
+    --panel-utility-primary-hover-text: rgba(18, 27, 36, 0.98);
+    --panel-utility-muted-text: rgba(82, 98, 111, 0.72);
+    --panel-utility-divider-border: rgba(126, 92, 52, 0.12);
+    --panel-utility-card-border: rgba(126, 92, 52, 0.1);
+    --panel-utility-card-background: rgba(248, 250, 248, 0.58);
+    --panel-utility-link-dot-shadow: 0 0 0 4px rgba(54, 70, 82, 0.06);
+    --panel-utility-eval-button-border: rgba(126, 92, 52, 0.12);
+    --panel-utility-eval-button-background: rgba(255, 253, 247, 0.76);
+    --panel-utility-eval-button-text: rgba(49, 63, 76, 0.82);
+    --panel-utility-eval-button-hover-background: rgba(255, 253, 247, 0.98);
+    --panel-utility-eval-button-hover-text: rgba(18, 27, 36, 0.96);
+    --panel-utility-action-border: color-mix(in srgb, var(--thread-accent, #57CFA0) 32%, rgba(126, 92, 52, 0.12));
+    --panel-utility-action-background: color-mix(in srgb, var(--thread-accent, #57CFA0) 14%, rgba(255, 253, 247, 0.9));
+    --panel-utility-action-hover-background: color-mix(in srgb, var(--thread-accent, #57CFA0) 20%, rgba(255, 253, 247, 0.98));
+    --panel-utility-action-text: rgba(20, 112, 82, 0.92);
+    --panel-utility-action-hover-text: rgba(11, 78, 58, 0.98);
+  }
+
   .tab-empty {
     color: rgba(231, 238, 247, 0.48);
     font-size: 13px;
@@ -1053,13 +1093,6 @@
     display: flex;
     flex-direction: column;
     gap: 3px;
-  }
-
-  .activity-title-row {
-    min-width: 0;
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
   }
 
   .activity-title {
@@ -1970,6 +2003,7 @@
   .activity-trace-note,
   .details-empty,
   .details-meta,
+  .details-section-title,
   .link-meta,
   .metrics-label,
   .metrics-row .metrics-value,

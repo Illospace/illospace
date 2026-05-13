@@ -1,23 +1,28 @@
-"""Team router — org members and user profile."""
+"""Team router - org members and user profile."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import re
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import String, cast, func, select
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
-from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.db_utils import run_db
-from brain.app.api.schemas.team import CortexColorRead, TeamMemberRead, UserProfileUpdate
-from brain.platform.db.models.agent_run import AgentRunRow
-from brain.platform.db.models.idea import Idea
+from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.schemas.team import (
+    CortexColorRead,
+    TeamMemberRead,
+    TeamTokenAnalyticsRead,
+    TeamTokenUsageRead,
+    UserProfileUpdate,
+)
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.team import TeamRepository
+from brain.systems.runs.token_usage import summarize_member_token_usage
 
 router = APIRouter(
     prefix="/api",
@@ -28,15 +33,19 @@ router = APIRouter(
 _PROFILE_COLOR_RE = re.compile(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
 
-def _team_activity_skill_name(run: AgentRunRow) -> str | None:
-    metadata = run.metadata_ if isinstance(run.metadata_, dict) else {}
-    routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
-    skill_name = routing.get("selected_skill")
-    return str(skill_name) if skill_name else None
-
-
 def _should_skip_org_lookup(user: dict[str, Any]) -> bool:
     return bool(user.get("internal") or user.get("principal_type") == "service")
+
+
+def _org_id_for_user(db: Session, user: dict[str, Any]) -> str | None:
+    org_id = user.get("org_id") or None
+    if not org_id and _should_skip_org_lookup(user):
+        return None
+    if not org_id and user.get("id") != "system":
+        from brain.systems.auth.users import get_user_by_id
+        db_user = get_user_by_id(user["id"])
+        org_id = db_user.get("org_id") if db_user else None
+    return org_id
 
 
 def _normalize_profile_color(value: str | None) -> str | None:
@@ -74,14 +83,7 @@ def list_members_payload(
     db: Session,
     user: dict[str, Any],
 ) -> list[TeamMemberRead]:
-    org_id = user.get("org_id") or None
-    if not org_id and _should_skip_org_lookup(user):
-        return []
-    if not org_id and user.get("id") != "system":
-        # Fallback: look up org_id from the user's DB record
-        from brain.systems.auth.users import get_user_by_id
-        db_user = get_user_by_id(user["id"])
-        org_id = db_user.get("org_id") if db_user else None
+    org_id = _org_id_for_user(db, user)
     if not org_id:
         return []
     repo = TeamRepository(db)
@@ -101,85 +103,134 @@ async def list_cortex_colors(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    """Lightweight endpoint returning team members with their cortex colors.
+    """Lightweight endpoint returning team members with their cortex colors."""
 
-    Used by the frontend to position and color user suns in the solar system view.
-    """
     def _list(sync_db: Session):
-        org_id = user.get("org_id") or None
-        if not org_id and _should_skip_org_lookup(user):
-            return []
-        if not org_id and user.get("id") != "system":
-            from brain.systems.auth.users import get_user_by_id
-            db_user = get_user_by_id(user["id"])
-            org_id = db_user.get("org_id") if db_user else None
+        org_id = _org_id_for_user(sync_db, user)
         if not org_id:
             return []
-        repo = TeamRepository(sync_db)
-        members = repo.list_by_org(org_id)
+        members = TeamRepository(sync_db).list_by_org(org_id)
         return [
-            CortexColorRead(id=str(m.id), name=m.name, cortex_color=m.color)
-            for m in members
+            CortexColorRead(id=str(member.id), name=member.name, cortex_color=member.color)
+            for member in members
         ]
 
     return await run_db(db, _list)
 
 
-def get_team_activity(
-    hours: int = 48,
-    db: Session | None = None,
-    user: dict[str, Any] | None = None,
-):
-    """Recent team activity — skills used, ideas created, etc."""
-    assert db is not None, "get_team_activity requires a sync session"
-    user = user or {}
-    org_id = user.get("org_id")
+def _empty_token_usage(user_id: str | None = None) -> dict[str, Any]:
+    return {
+        "user_id": user_id,
+        "runs": 0,
+        "api_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "estimated_cost": 0.0,
+        "last_used_at": None,
+    }
+
+
+def _token_usage_from_summary(user_id: str | None, summary: dict[str, Any]) -> dict[str, Any]:
+    input_tokens = int(summary.get("tokens_input") or 0)
+    output_tokens = int(summary.get("tokens_output") or 0)
+    return {
+        "user_id": user_id,
+        "runs": int(summary.get("runs") or 0),
+        "api_calls": int(summary.get("api_calls") or 0),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "cache_read": int(summary.get("cache_read") or 0),
+        "cache_write": int(summary.get("cache_write") or 0),
+        "estimated_cost": round(float(summary.get("estimated_cost") or 0.0), 6),
+        "last_used_at": summary.get("last_used_at"),
+    }
+
+
+def _add_token_usage(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key in (
+        "runs",
+        "api_calls",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_read",
+        "cache_write",
+    ):
+        target[key] += int(source.get(key) or 0)
+    target["estimated_cost"] = round(
+        float(target.get("estimated_cost") or 0.0) + float(source.get("estimated_cost") or 0.0),
+        6,
+    )
+    last_used_at = source.get("last_used_at")
+    if last_used_at and (not target.get("last_used_at") or last_used_at > target["last_used_at"]):
+        target["last_used_at"] = last_used_at
+
+
+def token_analytics_payload(
+    *,
+    days: int,
+    db: Session,
+    user: dict[str, Any],
+) -> dict[str, Any]:
+    """Token usage by workspace member, derived from run-linked API-call telemetry."""
+    generated_at = datetime.now(timezone.utc)
+    org_id = _org_id_for_user(db, user)
     if not org_id:
-        return []
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    # Query recent runs + thread messages as team activity
-    try:
-        stmt = (
-            select(
-                AgentRunRow,
-                func.coalesce(Idea.display_title, Idea.title).label("idea_title"),
-                User.name.label("user_name"),
-            )
-            .join(Idea, cast(Idea.id, String) == AgentRunRow.thread_id)
-            .outerjoin(User, User.id == AgentRunRow.user_id)
-            .where(
-                Idea.org_id == org_id,
-                AgentRunRow.created_at >= cutoff,
-            )
-            .order_by(AgentRunRow.created_at.desc())
-            .limit(50)
-        )
-        rows = db.execute(stmt).all()
-        return [
-            {
-                "user_id": run.user_id,
-                "user_name": user_name,
-                "skill_name": _team_activity_skill_name(run),
-                "status": run.status,
-                "created_at": run.created_at.isoformat() if run.created_at else None,
-                "idea_title": idea_title,
-                "type": "run",
-            }
-            for run, idea_title, user_name in rows
-        ]
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning("team_activity_error: %s", e)
-        return []
+        empty = _empty_token_usage()
+        return {
+            "window_days": days,
+            "generated_at": generated_at,
+            "members": [],
+            "unattributed": empty,
+            "totals": empty,
+        }
+
+    cutoff = generated_at - timedelta(days=days)
+    members = TeamRepository(db).list_by_org(org_id)
+    usage_by_user = {str(member.id): _empty_token_usage(str(member.id)) for member in members}
+    unattributed = _empty_token_usage(None)
+    raw_usage = summarize_member_token_usage(db, org_id=org_id, since=cutoff)
+    for raw_user_id, summary in raw_usage.items():
+        user_id = str(raw_user_id) if raw_user_id else None
+        item = _token_usage_from_summary(user_id, summary)
+        if user_id:
+            usage_by_user[user_id] = item
+        else:
+            unattributed = item
+
+    member_rows = sorted(
+        usage_by_user.values(),
+        key=lambda item: (int(item.get("total_tokens") or 0), int(item.get("api_calls") or 0)),
+        reverse=True,
+    )
+    totals = _empty_token_usage(None)
+    for item in member_rows:
+        _add_token_usage(totals, item)
+    _add_token_usage(totals, unattributed)
+
+    return {
+        "window_days": days,
+        "generated_at": generated_at,
+        "members": [TeamTokenUsageRead(**item) for item in member_rows],
+        "unattributed": TeamTokenUsageRead(**unattributed),
+        "totals": TeamTokenUsageRead(**totals),
+    }
 
 
-@router.get("/team/activity")
-async def get_team_activity_route(
-    hours: int = 48,
+@router.get("/team/token-analytics", response_model=TeamTokenAnalyticsRead)
+async def get_team_token_analytics(
+    days: int = Query(30, ge=1, le=365),
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(db, lambda sync_db: get_team_activity(hours=hours, db=sync_db, user=user))
+    return await run_db(
+        db,
+        lambda sync_db: token_analytics_payload(days=days, db=sync_db, user=user),
+    )
 
 
 @router.patch("/users/me", response_model=dict)

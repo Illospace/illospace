@@ -9,10 +9,10 @@ Usage:
     python3 -m brain.app.cli.token_metrics daily [--days 7]
     python3 -m brain.app.cli.token_metrics wasteful [--days 7] [--threshold 40000]
     python3 -m brain.app.cli.token_metrics baseline
-    python3 -m brain.app.cli.token_metrics backfill-sessions
 """
 
 import argparse
+from collections import defaultdict
 import json
 import os
 import sys
@@ -21,117 +21,159 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
-from sqlalchemy import text
-
 from brain.kernel import config
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.runs.token_usage import summarize_recent_run_usage
 
-# Legacy session paths (kept for backfill compatibility)
-SESSION_DIR = os.path.expanduser(
-    os.environ.get("ILLO_LEGACY_SESSION_DIR", "~/.illo/agents/main/sessions")
-)
-SESSION_STORE = os.path.join(SESSION_DIR, "sessions.json")
+
+def _runs_for_period(days: int, *, limit: int = 10_000) -> list[dict]:
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    with UnitOfWork() as uow:
+        return summarize_recent_run_usage(uow.session, limit=limit, since=since)
+
+
+def _avg(values: list[int | float]) -> float:
+    return sum(values) / len(values) if values else 0
+
+
+def _run_cost(run: dict) -> float:
+    return float(run.get("estimated_cost") or 0.0)
+
+
+def _run_tokens(run: dict, key: str) -> int:
+    return int(run.get(key) or 0)
 
 
 def report(days: int = 7) -> dict:
     """Comprehensive token usage report for cortex runs."""
-    with UnitOfWork() as uow:
-        # Overall stats
-        overall = dict(uow.session.execute(text("""
-            SELECT
-                COUNT(*) as total_runs,
-                COUNT(*) FILTER (WHERE tokens_total IS NOT NULL AND tokens_total > 0) as with_token_data,
-                COUNT(*) FILTER (WHERE tokens_total IS NULL OR tokens_total = 0) as missing_token_data,
-                COUNT(*) FILTER (WHERE status = 'completed') as completed,
-                COUNT(*) FILTER (WHERE status = 'failed') as failed,
-                COUNT(*) FILTER (WHERE status = 'timeout') as timed_out,
-                COALESCE(SUM(tokens_total), 0) as total_tokens,
-                COALESCE(SUM(tokens_input), 0) as total_input,
-                COALESCE(SUM(tokens_output), 0) as total_output,
-                COALESCE(SUM(cache_read), 0) as total_cache_read,
-                COALESCE(SUM(cache_write), 0) as total_cache_write,
-                ROUND(AVG(tokens_total)::numeric, 0) as avg_tokens_total,
-                ROUND(AVG(tokens_input)::numeric, 0) as avg_tokens_input,
-                ROUND(AVG(tokens_output)::numeric, 0) as avg_tokens_output,
-                MAX(tokens_total) as max_tokens_total,
-                MIN(tokens_total) FILTER (WHERE tokens_total > 0) as min_tokens_total,
-                ROUND(SUM(estimated_cost)::numeric, 4) as total_cost,
-                ROUND(AVG(estimated_cost)::numeric, 4) as avg_cost
-            FROM agent_runs
-            WHERE created_at >= NOW() - INTERVAL '1 day' * :days
-        """), {"days": days}).mappings().first())
+    runs = _runs_for_period(days)
+    runs_with_tokens = [run for run in runs if _run_tokens(run, "tokens_total") > 0]
 
-        # Token tracking coverage
-        total = overall["total_runs"]
-        with_data = overall["with_token_data"]
-        coverage_pct = round(100 * with_data / max(total, 1), 1)
+    total = len(runs)
+    total_cost = sum(_run_cost(run) for run in runs)
+    overall = {
+        "total_runs": total,
+        "with_token_data": len(runs_with_tokens),
+        "missing_token_data": total - len(runs_with_tokens),
+        "completed": sum(1 for run in runs if run.get("status") == "completed"),
+        "failed": sum(1 for run in runs if run.get("status") == "failed"),
+        "timed_out": sum(1 for run in runs if run.get("status") == "timeout"),
+        "total_tokens": sum(_run_tokens(run, "tokens_total") for run in runs),
+        "total_input": sum(_run_tokens(run, "tokens_input") for run in runs),
+        "total_output": sum(_run_tokens(run, "tokens_output") for run in runs),
+        "total_cache_read": sum(_run_tokens(run, "cache_read") for run in runs),
+        "total_cache_write": sum(_run_tokens(run, "cache_write") for run in runs),
+        "avg_tokens_total": round(_avg([_run_tokens(run, "tokens_total") for run in runs])),
+        "avg_tokens_input": round(_avg([_run_tokens(run, "tokens_input") for run in runs])),
+        "avg_tokens_output": round(_avg([_run_tokens(run, "tokens_output") for run in runs])),
+        "max_tokens_total": max([_run_tokens(run, "tokens_total") for run in runs], default=0),
+        "min_tokens_total": min([_run_tokens(run, "tokens_total") for run in runs_with_tokens], default=0),
+        "total_cost": round(total_cost, 4),
+        "avg_cost": round(total_cost / max(total, 1), 4),
+    }
 
-        # Per-model breakdown
-        by_model = [dict(r) for r in uow.session.execute(text("""
-            SELECT
-                model_used,
-                COUNT(*) as runs,
-                ROUND(AVG(tokens_total)::numeric, 0) as avg_tokens,
-                ROUND(AVG(tokens_input)::numeric, 0) as avg_input,
-                ROUND(AVG(tokens_output)::numeric, 0) as avg_output,
-                COALESCE(SUM(tokens_total), 0) as total_tokens,
-                ROUND(SUM(estimated_cost)::numeric, 4) as total_cost,
-                ROUND(AVG(estimated_cost)::numeric, 4) as avg_cost
-            FROM agent_runs
-            WHERE created_at >= NOW() - INTERVAL '1 day' * :days
-              AND tokens_total IS NOT NULL AND tokens_total > 0
-              AND model_used IS NOT NULL
-            GROUP BY model_used
-            ORDER BY total_cost DESC
-        """), {"days": days}).mappings().all()]
+    coverage_pct = round(100 * len(runs_with_tokens) / max(total, 1), 1)
 
-        # Per-skill breakdown
-        by_skill = [dict(r) for r in uow.session.execute(text("""
-            SELECT
-                skill_used,
-                COUNT(*) as runs,
-                ROUND(AVG(tokens_total)::numeric, 0) as avg_tokens,
-                ROUND(AVG(tokens_input)::numeric, 0) as avg_input,
-                COALESCE(SUM(tokens_total), 0) as total_tokens,
-                ROUND(SUM(estimated_cost)::numeric, 4) as total_cost,
-                COUNT(*) FILTER (WHERE skill_outcome = 'success') as successes,
-                COUNT(*) FILTER (WHERE skill_outcome = 'failure') as failures
-            FROM agent_runs
-            WHERE created_at >= NOW() - INTERVAL '1 day' * :days
-              AND skill_used IS NOT NULL
-            GROUP BY skill_used
-            ORDER BY total_cost DESC
-        """), {"days": days}).mappings().all()]
+    model_map: dict[str, dict] = defaultdict(
+        lambda: {
+            "runs": 0,
+            "total_tokens": 0,
+            "total_input": 0,
+            "total_output": 0,
+            "total_cost": 0.0,
+        }
+    )
+    for run in runs_with_tokens:
+        model = run.get("model_used") or "unknown"
+        bucket = model_map[model]
+        bucket["runs"] += 1
+        bucket["total_tokens"] += _run_tokens(run, "tokens_total")
+        bucket["total_input"] += _run_tokens(run, "tokens_input")
+        bucket["total_output"] += _run_tokens(run, "tokens_output")
+        bucket["total_cost"] += _run_cost(run)
+    by_model = sorted(
+        [
+            {
+                "model_used": model,
+                **bucket,
+                "avg_tokens": round(bucket["total_tokens"] / max(bucket["runs"], 1)),
+                "avg_input": round(bucket["total_input"] / max(bucket["runs"], 1)),
+                "avg_output": round(bucket["total_output"] / max(bucket["runs"], 1)),
+                "total_cost": round(bucket["total_cost"], 4),
+                "avg_cost": round(bucket["total_cost"] / max(bucket["runs"], 1), 4),
+            }
+            for model, bucket in model_map.items()
+        ],
+        key=lambda item: item["total_cost"],
+        reverse=True,
+    )
 
-        # Cache efficiency
-        cache = dict(uow.session.execute(text("""
-            SELECT
-                ROUND(AVG(
-                    CASE WHEN (cache_read + cache_write) > 0
-                    THEN 100.0 * cache_read / (cache_read + cache_write)
-                    ELSE 0 END
-                )::numeric, 1) as avg_cache_hit_pct,
-                ROUND(AVG(cache_read)::numeric, 0) as avg_cache_read,
-                ROUND(AVG(cache_write)::numeric, 0) as avg_cache_write
-            FROM agent_runs
-            WHERE created_at >= NOW() - INTERVAL '1 day' * :days
-              AND cache_read IS NOT NULL
-              AND tokens_total > 0
-        """), {"days": days}).mappings().first())
+    skill_map: dict[str, dict] = defaultdict(
+        lambda: {
+            "runs": 0,
+            "total_tokens": 0,
+            "total_input": 0,
+            "total_cost": 0.0,
+            "successes": 0,
+            "failures": 0,
+        }
+    )
+    for run in runs:
+        skill = run.get("skill_used") or "unknown"
+        bucket = skill_map[skill]
+        bucket["runs"] += 1
+        bucket["total_tokens"] += _run_tokens(run, "tokens_total")
+        bucket["total_input"] += _run_tokens(run, "tokens_input")
+        bucket["total_cost"] += _run_cost(run)
+        if run.get("status") == "completed":
+            bucket["successes"] += 1
+        elif run.get("status") in {"failed", "error", "canceled", "cancelled"}:
+            bucket["failures"] += 1
+    by_skill = sorted(
+        [
+            {
+                "skill_used": skill,
+                **bucket,
+                "avg_tokens": round(bucket["total_tokens"] / max(bucket["runs"], 1)),
+                "avg_input": round(bucket["total_input"] / max(bucket["runs"], 1)),
+                "total_cost": round(bucket["total_cost"], 4),
+            }
+            for skill, bucket in skill_map.items()
+        ],
+        key=lambda item: item["total_cost"],
+        reverse=True,
+    )
 
-        # Top 5 most expensive runs
-        top_expensive = [dict(r) for r in uow.session.execute(text("""
-            SELECT
-                id, skill_used, model_used, tokens_total, tokens_input,
-                tokens_output, estimated_cost, status,
-                EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW()) - started_at))::int as duration_sec,
-                created_at
-            FROM agent_runs
-            WHERE created_at >= NOW() - INTERVAL '1 day' * :days
-              AND tokens_total > 0
-            ORDER BY tokens_total DESC
-            LIMIT 5
-        """), {"days": days}).mappings().all()]
+    cache_hit_values = [
+        100.0 * _run_tokens(run, "cache_read")
+        / max(_run_tokens(run, "cache_read") + _run_tokens(run, "cache_write"), 1)
+        for run in runs_with_tokens
+    ]
+    cache = {
+        "avg_cache_hit_pct": round(_avg(cache_hit_values), 1),
+        "avg_cache_read": round(_avg([_run_tokens(run, "cache_read") for run in runs_with_tokens])),
+        "avg_cache_write": round(_avg([_run_tokens(run, "cache_write") for run in runs_with_tokens])),
+    }
+
+    top_expensive = sorted(
+        [
+            {
+                "id": run.get("id"),
+                "thread_id": run.get("thread_id"),
+                "skill_used": run.get("skill_used"),
+                "model_used": run.get("model_used"),
+                "tokens_total": _run_tokens(run, "tokens_total"),
+                "tokens_input": _run_tokens(run, "tokens_input"),
+                "tokens_output": _run_tokens(run, "tokens_output"),
+                "estimated_cost": round(_run_cost(run), 4),
+                "status": run.get("status"),
+                "created_at": run.get("created_at"),
+            }
+            for run in runs_with_tokens
+        ],
+        key=lambda item: item["tokens_total"],
+        reverse=True,
+    )[:5]
 
     return {
         "period_days": days,
@@ -146,45 +188,62 @@ def report(days: int = 7) -> dict:
 
 def daily_breakdown(days: int = 7) -> list[dict]:
     """Day-by-day token usage and cost."""
-    with UnitOfWork() as uow:
-        rows = uow.session.execute(text("""
-            SELECT
-                created_at::date as day,
-                COUNT(*) as runs,
-                COUNT(*) FILTER (WHERE tokens_total > 0) as with_tokens,
-                COALESCE(SUM(tokens_total), 0) as total_tokens,
-                COALESCE(SUM(tokens_input), 0) as total_input,
-                COALESCE(SUM(tokens_output), 0) as total_output,
-                ROUND(AVG(tokens_total)::numeric, 0) as avg_tokens,
-                ROUND(SUM(estimated_cost)::numeric, 4) as total_cost,
-                MAX(tokens_total) as max_run_tokens
-            FROM agent_runs
-            WHERE created_at >= NOW() - INTERVAL '1 day' * :days
-            GROUP BY created_at::date
-            ORDER BY day DESC
-        """), {"days": days}).mappings().all()
-        return [dict(r) for r in rows]
+    buckets: dict[str, dict] = defaultdict(
+        lambda: {
+            "runs": 0,
+            "with_tokens": 0,
+            "total_tokens": 0,
+            "total_input": 0,
+            "total_output": 0,
+            "total_cost": 0.0,
+            "max_run_tokens": 0,
+        }
+    )
+    for run in _runs_for_period(days):
+        created_at = run.get("created_at")
+        day = created_at.date().isoformat() if created_at else "unknown"
+        bucket = buckets[day]
+        total_tokens = _run_tokens(run, "tokens_total")
+        bucket["runs"] += 1
+        bucket["with_tokens"] += 1 if total_tokens > 0 else 0
+        bucket["total_tokens"] += total_tokens
+        bucket["total_input"] += _run_tokens(run, "tokens_input")
+        bucket["total_output"] += _run_tokens(run, "tokens_output")
+        bucket["total_cost"] += _run_cost(run)
+        bucket["max_run_tokens"] = max(bucket["max_run_tokens"], total_tokens)
+    return [
+        {
+            "day": day,
+            **bucket,
+            "avg_tokens": round(bucket["total_tokens"] / max(bucket["runs"], 1)),
+            "total_cost": round(bucket["total_cost"], 4),
+        }
+        for day, bucket in sorted(buckets.items(), reverse=True)
+    ]
 
 
 def find_wasteful(days: int = 7, threshold: int = 40000) -> list[dict]:
     """Find runs with unusually high token usage — optimization targets."""
-    with UnitOfWork() as uow:
-        rows = uow.session.execute(text("""
-            SELECT
-                id, idea_id, skill_used, model_used,
-                tokens_total, tokens_input, tokens_output,
-                cache_read, cache_write, estimated_cost,
-                status, event,
-                EXTRACT(EPOCH FROM (COALESCE(completed_at, NOW()) - started_at))::int as duration_sec,
-                created_at,
-                LEFT(message, 200) as message_preview
-            FROM agent_runs
-            WHERE created_at >= NOW() - INTERVAL '1 day' * :days
-              AND tokens_total > :threshold
-            ORDER BY tokens_total DESC
-            LIMIT 20
-        """), {"days": days, "threshold": threshold}).mappings().all()
-        return [dict(r) for r in rows]
+    rows = [
+        {
+            "id": run.get("id"),
+            "thread_id": run.get("thread_id"),
+            "skill_used": run.get("skill_used"),
+            "model_used": run.get("model_used"),
+            "tokens_total": _run_tokens(run, "tokens_total"),
+            "tokens_input": _run_tokens(run, "tokens_input"),
+            "tokens_output": _run_tokens(run, "tokens_output"),
+            "cache_read": _run_tokens(run, "cache_read"),
+            "cache_write": _run_tokens(run, "cache_write"),
+            "estimated_cost": round(_run_cost(run), 4),
+            "status": run.get("status"),
+            "event": run.get("event"),
+            "created_at": run.get("created_at"),
+        }
+        for run in _runs_for_period(days)
+        if _run_tokens(run, "tokens_total") > threshold
+    ]
+    return sorted(rows, key=lambda row: row["tokens_total"], reverse=True)[:20]
 
 
 def baseline_snapshot() -> dict:
@@ -230,73 +289,6 @@ def baseline_snapshot() -> dict:
     return baseline
 
 
-def backfill_from_sessions() -> dict:
-    """Backfill token data for runs that have null tokens.
-
-    Reads from agent_sessions DB table (coordinator sessions).
-    Falls back to a legacy local session store if available.
-    """
-    fixed = 0
-    skipped = 0
-
-    with UnitOfWork() as uow:
-        # Find runs missing token data
-        missing = uow.session.execute(text("""
-            SELECT id, idea_id
-            FROM agent_runs
-            WHERE (tokens_total IS NULL OR tokens_total = 0)
-              AND status IN ('completed', 'failed')
-        """)).mappings().all()
-
-        for row in missing:
-            run_id = row["id"]
-            idea_id = str(row["idea_id"])
-
-            # Try to find matching agent session in DB
-            session_id = f"coordinator-idea-{idea_id}"
-            session = uow.session.execute(text(
-                "SELECT total_input_tokens, total_output_tokens, total_cache_read, total_cache_creation "
-                "FROM agent_sessions WHERE session_id = :sid"
-            ), {"sid": session_id}).mappings().first()
-
-            if not session or not (session["total_input_tokens"] or session["total_output_tokens"]):
-                skipped += 1
-                continue
-
-            tokens_input = session["total_input_tokens"] or 0
-            tokens_output = session["total_output_tokens"] or 0
-            tokens_total = tokens_input + tokens_output
-            cache_read = session["total_cache_read"] or 0
-            cache_write = session["total_cache_creation"] or 0
-
-            # Calculate cost
-            model_row = uow.session.execute(text(
-                "SELECT model_used FROM agent_runs WHERE id = :id"
-            ), {"id": run_id}).mappings().first()
-            model = model_row["model_used"] if model_row else None
-
-            estimated_cost = None
-            if model:
-                try:
-                    from brain.systems.runs.modeling import calculate_cost
-                    estimated_cost = calculate_cost(model, tokens_input, tokens_output)
-                except Exception:
-                    pass
-
-            uow.session.execute(text(
-                "UPDATE agent_runs SET tokens_input = :ti, tokens_output = :to, "
-                "tokens_total = :tt, cache_read = :cr, cache_write = :cw, estimated_cost = :cost "
-                "WHERE id = :id"
-            ), {
-                "ti": tokens_input, "to": tokens_output, "tt": tokens_total,
-                "cr": cache_read, "cw": cache_write, "cost": estimated_cost,
-                "id": run_id,
-            })
-            fixed += 1
-
-    return {"fixed": fixed, "skipped": skipped, "total_missing": len(missing)}
-
-
 # ── CLI ───────────────────────────────────────────────────────
 
 def cmd_report(args):
@@ -321,11 +313,6 @@ def cmd_baseline(args):
     print(f"\nBaseline saved to: {baseline_path}", file=sys.stderr)
 
 
-def cmd_backfill(args):
-    data = backfill_from_sessions()
-    print(json.dumps(data, indent=2, default=str))
-
-
 def main():
     parser = argparse.ArgumentParser(description="Token Metrics CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -342,15 +329,12 @@ def main():
 
     sub.add_parser("baseline", help="Capture baseline snapshot")
 
-    sub.add_parser("backfill-sessions", help="Backfill tokens from session store")
-
     args = parser.parse_args()
     {
         "report": cmd_report,
         "daily": cmd_daily,
         "wasteful": cmd_wasteful,
         "baseline": cmd_baseline,
-        "backfill-sessions": cmd_backfill,
     }[args.command](args)
 
 

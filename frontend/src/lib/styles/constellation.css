@@ -56,6 +56,8 @@
   --constellation-control-toggle-active-background: rgba(240, 240, 250, 0.08);
   --constellation-control-toggle-active-text: rgba(240, 240, 250, 0.92);
   --constellation-system-chrome-background: linear-gradient(180deg, rgba(0, 0, 0, 0.94), rgba(4, 7, 13, 0.88));
+  --constellation-nav-rail-background: linear-gradient(180deg, #000000, #04070d);
+  --constellation-nav-rail-backdrop-filter: none;
   --constellation-system-chrome-border: rgba(240, 240, 250, 0.08);
   --constellation-system-chrome-shadow:
     0 24px 80px rgba(0, 0, 0, 0.22),
@@ -1030,7 +1032,7 @@
 
   --constellation-nav-rail-brand-mark-background: #fffdf7;
   --constellation-nav-rail-brand-mark-color: #18212a;
-  --constellation-nav-rail-background: rgba(255, 253, 247, 0.88);
+  --constellation-nav-rail-background: #fffdf7;
   --constellation-nav-rail-border: transparent;
   --constellation-nav-rail-shadow: 0 14px 34px rgba(54, 70, 82, 0.11);
   --constellation-nav-rail-backdrop-filter: none;
@@ -1303,7 +1305,7 @@
   );
   --nav-rail-background: var(
     --constellation-nav-rail-background,
-    var(--constellation-system-chrome-background, linear-gradient(180deg, rgba(0, 0, 0, 0.82), rgba(4, 7, 13, 0.72)))
+    var(--constellation-system-chrome-background, linear-gradient(180deg, #000000, #04070d))
   );
   --nav-rail-border: var(
     --constellation-nav-rail-border,

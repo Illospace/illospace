@@ -39,6 +39,27 @@ class CortexColorRead(BaseModel):
         return str(v) if v is not None else None
 
 
+class TeamTokenUsageRead(BaseModel):
+    user_id: str | None = None
+    runs: int = 0
+    api_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    estimated_cost: float = 0.0
+    last_used_at: datetime | None = None
+
+
+class TeamTokenAnalyticsRead(BaseModel):
+    window_days: int
+    generated_at: datetime
+    members: list[TeamTokenUsageRead]
+    unattributed: TeamTokenUsageRead
+    totals: TeamTokenUsageRead
+
+
 class UserProfileUpdate(BaseModel):
     name: str | None = None
     color: str | None = None

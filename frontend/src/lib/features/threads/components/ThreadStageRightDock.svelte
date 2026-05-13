@@ -41,7 +41,6 @@
     onTabChange,
     onTabClose,
     onAddMenuItem,
-    onClose,
     label = 'Thread side panel',
     className,
     browserPane,
@@ -63,7 +62,6 @@
     onTabChange?: (tabId: string) => void;
     onTabClose?: (tabId: string) => void;
     onAddMenuItem?: (item: ThreadStageRightDockAddMenuItem) => void;
-    onClose?: () => void;
     label?: string;
     className?: string;
     browserPane?: Snippet;
@@ -298,15 +296,6 @@
           {/if}
         </div>
 
-        <div class="right-dock-header-actions">
-          <ConstellationIconButton
-            label="Close side panel"
-            title="Close side panel"
-            onclick={onClose}
-          >
-            <ConstellationIcon name="close" size={13} stroke={1.8} />
-          </ConstellationIconButton>
-        </div>
       </header>
 
       <div class="right-dock-content" data-active-tab={resolvedActiveTab?.kind ?? 'empty'}>
@@ -467,14 +456,6 @@
     gap: 4px;
     overflow-x: auto;
     scrollbar-width: none;
-  }
-
-  .right-dock-header-actions {
-    position: relative;
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 6px;
   }
 
   .right-dock-tabs::-webkit-scrollbar {

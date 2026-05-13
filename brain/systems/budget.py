@@ -19,9 +19,8 @@ import os
 import re
 from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import text
-
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.runs.token_usage import summarize_token_totals
 
 logger = logging.getLogger("cortex.budget")
 
@@ -47,6 +46,7 @@ MAX_THREAD_SUMMARY_CHARS = int(os.environ.get("BUDGET_MAX_THREAD_SUMMARY_CHARS",
 MAX_LAST_MESSAGES = int(os.environ.get("BUDGET_MAX_LAST_MESSAGES", "5"))
 REPAIR_GRACE_MULTIPLIER = float(os.environ.get("BUDGET_REPAIR_GRACE_MULTIPLIER", "1.75"))
 REPAIR_MAX_ESTIMATED_INPUT = int(os.environ.get("BUDGET_REPAIR_MAX_ESTIMATED_INPUT", "120000"))
+BUDGET_STATUSES = ("completed", "running")
 
 _REPAIR_TASK_RE = re.compile(
     r"(?i)\b("
@@ -97,13 +97,13 @@ def check_budget(idea_id: str, estimated_input_tokens: int,
         with UnitOfWork() as uow:
             # 1. Per-idea hourly usage
             hour_ago = now - timedelta(hours=1)
-            idea_hour_tokens = uow.session.execute(text("""
-                SELECT COALESCE(SUM(tokens_total), 0) as tokens_used
-                FROM agent_runs
-                WHERE idea_id = :idea_id
-                  AND status IN ('completed', 'running')
-                  AND created_at > :hour_ago
-            """), {"idea_id": idea_id, "hour_ago": hour_ago}).mappings().first()["tokens_used"]
+            idea_hour = summarize_token_totals(
+                uow.session,
+                since=hour_ago,
+                thread_id=idea_id,
+                statuses=BUDGET_STATUSES,
+            )
+            idea_hour_tokens = int(idea_hour["tokens_total"] or 0)
 
             # Warning: log for visibility
             if idea_hour_tokens > WARN_PER_IDEA_HOUR:
@@ -141,12 +141,12 @@ def check_budget(idea_id: str, estimated_input_tokens: int,
 
             # 2. Daily usage
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            daily_tokens = uow.session.execute(text("""
-                SELECT COALESCE(SUM(tokens_total), 0) as tokens_used
-                FROM agent_runs
-                WHERE status IN ('completed', 'running')
-                  AND created_at > :today_start
-            """), {"today_start": today_start}).mappings().first()["tokens_used"]
+            daily = summarize_token_totals(
+                uow.session,
+                since=today_start,
+                statuses=BUDGET_STATUSES,
+            )
+            daily_tokens = int(daily["tokens_total"] or 0)
 
             if daily_tokens > WARN_PER_DAY:
                 logger.warning(
@@ -221,36 +221,29 @@ def get_budget_status() -> dict:
         with UnitOfWork() as uow:
             # Daily usage
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            daily = uow.session.execute(text("""
-                SELECT
-                    COALESCE(SUM(tokens_total), 0) as daily_tokens,
-                    COUNT(*) as daily_runs,
-                    COALESCE(SUM(estimated_cost), 0) as daily_cost
-                FROM agent_runs
-                WHERE status IN ('completed', 'running')
-                  AND created_at > :today_start
-            """), {"today_start": today_start}).mappings().first()
+            daily = summarize_token_totals(
+                uow.session,
+                since=today_start,
+                statuses=BUDGET_STATUSES,
+            )
 
             # Hourly usage
             hour_ago = now - timedelta(hours=1)
-            hourly = uow.session.execute(text("""
-                SELECT
-                    COALESCE(SUM(tokens_total), 0) as hourly_tokens,
-                    COUNT(*) as hourly_runs
-                FROM agent_runs
-                WHERE status IN ('completed', 'running')
-                  AND created_at > :hour_ago
-            """), {"hour_ago": hour_ago}).mappings().first()
+            hourly = summarize_token_totals(
+                uow.session,
+                since=hour_ago,
+                statuses=BUDGET_STATUSES,
+            )
 
         return {
-            "daily_tokens": daily["daily_tokens"],
+            "daily_tokens": daily["tokens_total"],
             "daily_warn": WARN_PER_DAY,
             "daily_circuit_breaker": CIRCUIT_BREAKER_PER_DAY,
-            "daily_pct": round(100 * daily["daily_tokens"] / CIRCUIT_BREAKER_PER_DAY, 1),
-            "daily_runs": daily["daily_runs"],
-            "daily_cost": float(daily["daily_cost"]),
-            "hourly_tokens": hourly["hourly_tokens"],
-            "hourly_runs": hourly["hourly_runs"],
+            "daily_pct": round(100 * daily["tokens_total"] / CIRCUIT_BREAKER_PER_DAY, 1),
+            "daily_runs": daily["runs"],
+            "daily_cost": float(daily["estimated_cost"]),
+            "hourly_tokens": hourly["tokens_total"],
+            "hourly_runs": hourly["runs"],
         }
     except Exception as e:
         logger.error(f"Budget status query failed: {e}")
