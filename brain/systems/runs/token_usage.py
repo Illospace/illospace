@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.platform.db.models.agent import AgentApiCall
@@ -232,7 +233,40 @@ def summarize_member_token_usage(
 
     usage_by_user: dict[Any, dict[str, Any]] = defaultdict(_empty_usage)
 
-    usage_stmt = (
+    for row in session.execute(_member_usage_stmt(org_id=org_id, since=since)).all():
+        target = usage_by_user[row.user_id]
+        target["runs"] = _coerce_int(row.runs)
+        _add_call_usage(target, row)
+
+    for row in session.execute(_member_cost_stmt(org_id=org_id, since=since)).all():
+        usage_by_user[row.user_id]["estimated_cost"] += _model_cost(row)
+
+    return dict(usage_by_user)
+
+
+async def async_summarize_member_token_usage(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    since: datetime,
+) -> dict[Any, dict[str, Any]]:
+    """Async aggregate of org-scoped token usage by run owner."""
+
+    usage_by_user: dict[Any, dict[str, Any]] = defaultdict(_empty_usage)
+
+    for row in (await session.execute(_member_usage_stmt(org_id=org_id, since=since))).all():
+        target = usage_by_user[row.user_id]
+        target["runs"] = _coerce_int(row.runs)
+        _add_call_usage(target, row)
+
+    for row in (await session.execute(_member_cost_stmt(org_id=org_id, since=since))).all():
+        usage_by_user[row.user_id]["estimated_cost"] += _model_cost(row)
+
+    return dict(usage_by_user)
+
+
+def _member_usage_stmt(*, org_id: str, since: datetime):
+    return (
         select(
             AgentRunRow.user_id.label("user_id"),
             func.count(func.distinct(AgentRunRow.id)).label("runs"),
@@ -248,12 +282,9 @@ def summarize_member_token_usage(
         .group_by(AgentRunRow.user_id)
     )
 
-    for row in session.execute(usage_stmt).all():
-        target = usage_by_user[row.user_id]
-        target["runs"] = _coerce_int(row.runs)
-        _add_call_usage(target, row)
 
-    cost_stmt = (
+def _member_cost_stmt(*, org_id: str, since: datetime):
+    return (
         select(
             AgentRunRow.user_id.label("user_id"),
             AgentApiCall.model.label("model"),
@@ -266,11 +297,6 @@ def summarize_member_token_usage(
         .where(AgentRunRow.org_id == org_id, AgentApiCall.created_at >= since)
         .group_by(AgentRunRow.user_id, AgentApiCall.model)
     )
-
-    for row in session.execute(cost_stmt).all():
-        usage_by_user[row.user_id]["estimated_cost"] += _model_cost(row)
-
-    return dict(usage_by_user)
 
 
 def summarize_token_totals(

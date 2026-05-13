@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-from brain.app.api.routers.team import _normalize_profile_color, update_profile
+from brain.app.api.routers.team import _normalize_profile_color, async_update_profile, update_profile
 from brain.app.api.schemas.team import CortexColorRead, TeamMemberRead, UserProfileUpdate
 
 
@@ -113,3 +113,33 @@ class TestUpdateProfile:
         assert current_user.name == "Alex E"
         assert current_user.color == "#aabbcc"
         db.flush.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_async_updates_unique_name_and_color(self):
+        class _Db:
+            def __init__(self):
+                self.flushed = False
+
+            async def get(self, model, id):
+                assert id == "user-1"
+                return current_user
+
+            async def scalar(self, stmt):
+                return None
+
+            async def flush(self):
+                self.flushed = True
+
+        current_user = SimpleNamespace(id="user-1", org_id="org-1", name="Alex", color="#5ea898")
+        db = _Db()
+
+        result = await async_update_profile(
+            body=UserProfileUpdate(name="Alex E", color="#ABC"),
+            db=db,
+            user={"id": "user-1"},
+        )
+
+        assert result == {"updated": True}
+        assert current_user.name == "Alex E"
+        assert current_user.color == "#aabbcc"
+        assert db.flushed is True

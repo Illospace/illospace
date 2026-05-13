@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
-from brain.app.api.db_utils import run_db
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.schemas.team import (
     CortexColorRead,
@@ -22,7 +21,7 @@ from brain.app.api.schemas.team import (
 )
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.team import TeamRepository
-from brain.systems.runs.token_usage import summarize_member_token_usage
+from brain.systems.runs.token_usage import async_summarize_member_token_usage, summarize_member_token_usage
 
 router = APIRouter(
     prefix="/api",
@@ -45,6 +44,16 @@ def _org_id_for_user(db: Session, user: dict[str, Any]) -> str | None:
         from brain.systems.auth.users import get_user_by_id
         db_user = get_user_by_id(user["id"])
         org_id = db_user.get("org_id") if db_user else None
+    return org_id
+
+
+async def _async_org_id_for_user(db: AsyncSession, user: dict[str, Any]) -> str | None:
+    org_id = user.get("org_id") or None
+    if not org_id and _should_skip_org_lookup(user):
+        return None
+    if not org_id and user.get("id") != "system":
+        db_user = await db.get(User, user["id"])
+        org_id = str(db_user.org_id) if db_user else None
     return org_id
 
 
@@ -79,6 +88,27 @@ def _profile_value_taken(
     return db.scalar(stmt) is not None
 
 
+async def _async_profile_value_taken(
+    db: AsyncSession,
+    *,
+    org_id: str,
+    current_user_id: str,
+    column: Any,
+    value: str,
+) -> bool:
+    stmt = (
+        select(User.id)
+        .where(
+            User.org_id == org_id,
+            User.id != current_user_id,
+            func.lower(column) == value.lower(),
+        )
+        .limit(1)
+    )
+    value = await db.scalar(stmt)
+    return value is not None
+
+
 def list_members_payload(
     db: Session,
     user: dict[str, Any],
@@ -90,12 +120,23 @@ def list_members_payload(
     return repo.list_by_org(org_id)
 
 
+async def async_list_members_payload(
+    db: AsyncSession,
+    user: dict[str, Any],
+) -> list[TeamMemberRead]:
+    org_id = await _async_org_id_for_user(db, user)
+    if not org_id:
+        return []
+    members = await TeamRepository(db).a_list_by_org(org_id)
+    return list(members)
+
+
 @router.get("/team/members", response_model=list[TeamMemberRead])
 async def list_members(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(db, lambda sync_db: list_members_payload(db=sync_db, user=user))
+    return await async_list_members_payload(db=db, user=user)
 
 
 @router.get("/team/colors", response_model=list[CortexColorRead])
@@ -104,18 +145,14 @@ async def list_cortex_colors(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Lightweight endpoint returning team members with their cortex colors."""
-
-    def _list(sync_db: Session):
-        org_id = _org_id_for_user(sync_db, user)
-        if not org_id:
-            return []
-        members = TeamRepository(sync_db).list_by_org(org_id)
-        return [
-            CortexColorRead(id=str(member.id), name=member.name, cortex_color=member.color)
-            for member in members
-        ]
-
-    return await run_db(db, _list)
+    org_id = await _async_org_id_for_user(db, user)
+    if not org_id:
+        return []
+    members = await TeamRepository(db).a_list_by_org(org_id)
+    return [
+        CortexColorRead(id=str(member.id), name=member.name, cortex_color=member.color)
+        for member in members
+    ]
 
 
 def _empty_token_usage(user_id: str | None = None) -> dict[str, Any]:
@@ -221,16 +258,64 @@ def token_analytics_payload(
     }
 
 
+async def async_token_analytics_payload(
+    *,
+    days: int,
+    db: AsyncSession,
+    user: dict[str, Any],
+) -> dict[str, Any]:
+    """Async token usage by workspace member."""
+    generated_at = datetime.now(timezone.utc)
+    org_id = await _async_org_id_for_user(db, user)
+    if not org_id:
+        empty = _empty_token_usage()
+        return {
+            "window_days": days,
+            "generated_at": generated_at,
+            "members": [],
+            "unattributed": empty,
+            "totals": empty,
+        }
+
+    cutoff = generated_at - timedelta(days=days)
+    members = list(await TeamRepository(db).a_list_by_org(org_id))
+    usage_by_user = {str(member.id): _empty_token_usage(str(member.id)) for member in members}
+    unattributed = _empty_token_usage(None)
+    raw_usage = await async_summarize_member_token_usage(db, org_id=org_id, since=cutoff)
+    for raw_user_id, summary in raw_usage.items():
+        user_id = str(raw_user_id) if raw_user_id else None
+        item = _token_usage_from_summary(user_id, summary)
+        if user_id:
+            usage_by_user[user_id] = item
+        else:
+            unattributed = item
+
+    member_rows = sorted(
+        usage_by_user.values(),
+        key=lambda item: (int(item.get("total_tokens") or 0), int(item.get("api_calls") or 0)),
+        reverse=True,
+    )
+    totals = _empty_token_usage(None)
+    for item in member_rows:
+        _add_token_usage(totals, item)
+    _add_token_usage(totals, unattributed)
+
+    return {
+        "window_days": days,
+        "generated_at": generated_at,
+        "members": [TeamTokenUsageRead(**item) for item in member_rows],
+        "unattributed": TeamTokenUsageRead(**unattributed),
+        "totals": TeamTokenUsageRead(**totals),
+    }
+
+
 @router.get("/team/token-analytics", response_model=TeamTokenAnalyticsRead)
 async def get_team_token_analytics(
     days: int = Query(30, ge=1, le=365),
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(
-        db,
-        lambda sync_db: token_analytics_payload(days=days, db=sync_db, user=user),
-    )
+    return await async_token_analytics_payload(days=days, db=db, user=user)
 
 
 @router.patch("/users/me", response_model=dict)
@@ -239,7 +324,7 @@ async def update_profile_route(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(db, lambda sync_db: update_profile(body=body, db=sync_db, user=user))
+    return await async_update_profile(body=body, db=db, user=user)
 
 
 def update_profile(
@@ -287,4 +372,52 @@ def update_profile(
     for key, value in updates.items():
         setattr(u, key, value)
     db.flush()
+    return {"updated": True}
+
+
+async def async_update_profile(
+    body: UserProfileUpdate,
+    db: AsyncSession,
+    user: dict[str, Any],
+):
+    repo = TeamRepository(db)
+    u = await repo.a_get(user["id"])
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    updates = body.model_dump(exclude_unset=True)
+    if "name" in updates:
+        name = (updates.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name cannot be empty")
+        if await _async_profile_value_taken(
+            db,
+            org_id=u.org_id,
+            current_user_id=str(u.id),
+            column=User.name,
+            value=name,
+        ):
+            raise HTTPException(status_code=409, detail="name is already taken in this workspace")
+        updates["name"] = name
+    if "color" in updates:
+        color = _normalize_profile_color(updates.get("color"))
+        if not color:
+            raise HTTPException(status_code=400, detail="color must be a hex color")
+        if await _async_profile_value_taken(
+            db,
+            org_id=u.org_id,
+            current_user_id=str(u.id),
+            column=User.color,
+            value=color,
+        ):
+            raise HTTPException(status_code=409, detail="color is already taken in this workspace")
+        updates["color"] = color
+    provider = updates.get("default_provider")
+    if provider is not None:
+        provider = provider.strip().lower() or None
+        if provider not in (None, "anthropic", "openai"):
+            raise HTTPException(status_code=400, detail="default_provider must be anthropic or openai")
+        updates["default_provider"] = provider
+    for key, value in updates.items():
+        setattr(u, key, value)
+    await db.flush()
     return {"updated": True}

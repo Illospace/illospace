@@ -29,12 +29,23 @@ class TeamRepository(BaseRepository[User]):
         )
         return self._session.scalars(stmt).all()
 
+    async def a_list_by_org(self, org_id: str) -> Sequence[User]:
+        stmt = (
+            select(User)
+            .where(User.org_id == org_id)
+            .order_by(User.name)
+        )
+        return (await self._session.scalars(stmt)).all()
+
     def get_by_email(self, email: str) -> User | None:
         stmt = select(User).where(User.email == email)
         return self._session.scalars(stmt).first()
 
     def get_by_id(self, user_id: str) -> User | None:
         return self._session.get(User, user_id)
+
+    async def a_get_by_id(self, user_id: str) -> User | None:
+        return await self._session.get(User, user_id)
 
     def list_approved(self, org_id: str) -> Sequence[User]:
         stmt = (
