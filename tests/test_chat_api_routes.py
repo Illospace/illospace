@@ -1,6 +1,7 @@
 """Focused route verification for the native chat backend MVP."""
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable, Generator
 from unittest.mock import AsyncMock
@@ -104,6 +105,64 @@ def _user_context(session: Session, user_id: str) -> dict[str, str]:
     }
 
 
+class _AsyncSessionTransaction:
+    def __init__(self, transaction):
+        self._transaction = transaction
+
+    async def __aenter__(self):
+        return self._transaction.__enter__()
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return self._transaction.__exit__(exc_type, exc_val, exc_tb)
+
+
+class _AsyncSession:
+    def __init__(self, sync_session: Session):
+        self.sync_session = sync_session
+
+    def add(self, *args, **kwargs):
+        return self.sync_session.add(*args, **kwargs)
+
+    def add_all(self, *args, **kwargs):
+        return self.sync_session.add_all(*args, **kwargs)
+
+    def begin_nested(self):
+        return _AsyncSessionTransaction(self.sync_session.begin_nested())
+
+    def get_bind(self, *args, **kwargs):
+        return self.sync_session.get_bind(*args, **kwargs)
+
+    async def get(self, *args, **kwargs):
+        return self.sync_session.get(*args, **kwargs)
+
+    async def execute(self, *args, **kwargs):
+        return self.sync_session.execute(*args, **kwargs)
+
+    async def scalars(self, *args, **kwargs):
+        return self.sync_session.scalars(*args, **kwargs)
+
+    async def scalar(self, *args, **kwargs):
+        return self.sync_session.scalar(*args, **kwargs)
+
+    async def flush(self, *args, **kwargs):
+        return self.sync_session.flush(*args, **kwargs)
+
+    async def commit(self):
+        return self.sync_session.commit()
+
+    async def rollback(self):
+        return self.sync_session.rollback()
+
+    async def delete(self, *args, **kwargs):
+        return self.sync_session.delete(*args, **kwargs)
+
+    async def refresh(self, *args, **kwargs):
+        return self.sync_session.refresh(*args, **kwargs)
+
+    async def close(self):
+        return None
+
+
 @pytest.fixture
 def chat_db_session() -> Generator[Session, None, None]:
     schema = _schema_name()
@@ -133,9 +192,9 @@ def chat_db_session() -> Generator[Session, None, None]:
 
 @pytest.fixture
 def request_as(chat_db_session: Session) -> Callable[..., object]:
-    def override_db() -> Generator[Session, None, None]:
+    def override_db() -> Generator[_AsyncSession, None, None]:
         try:
-            yield chat_db_session
+            yield _AsyncSession(chat_db_session)
             chat_db_session.commit()
         except Exception:
             chat_db_session.rollback()
@@ -553,10 +612,12 @@ def test_agent_message_posts_to_room_and_rejects_dm(
     from brain.app.api.services.chat import ChatService
 
     room = request_as(USER_1_ID, "GET", "/api/chat/bootstrap").json()["room"]
-    service = ChatService(chat_db_session, _user_context(chat_db_session, USER_1_ID))
-    message, publish = service.post_agent_message(
-        conversation_id=room["id"],
-        body="I created a Cortex thought for this.",
+    service = ChatService(_AsyncSession(chat_db_session), _user_context(chat_db_session, USER_1_ID))
+    message, publish = asyncio.run(
+        service.post_agent_message(
+            conversation_id=room["id"],
+            body="I created a Cortex thought for this.",
+        )
     )
     chat_db_session.commit()
 
@@ -567,9 +628,14 @@ def test_agent_message_posts_to_room_and_rejects_dm(
 
     dm = request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID}).json()
     with pytest.raises(HTTPException, match="team room"):
-        ChatService(chat_db_session, _user_context(chat_db_session, USER_1_ID)).post_agent_message(
-            conversation_id=dm["id"],
-            body="Nope",
+        asyncio.run(
+            ChatService(
+                _AsyncSession(chat_db_session),
+                _user_context(chat_db_session, USER_1_ID),
+            ).post_agent_message(
+                conversation_id=dm["id"],
+                body="Nope",
+            )
         )
 
 
@@ -794,9 +860,9 @@ def test_message_publish_waits_for_commit(
 
     monkeypatch.setattr(chat_db_session, "commit", failing_commit)
 
-    def override_db() -> Generator[Session, None, None]:
+    def override_db() -> Generator[_AsyncSession, None, None]:
         try:
-            yield chat_db_session
+            yield _AsyncSession(chat_db_session)
             chat_db_session.commit()
         except Exception:
             chat_db_session.rollback()

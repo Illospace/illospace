@@ -239,6 +239,68 @@ def test_skills_router_stays_on_native_async_db_path():
     assert "from sqlalchemy.orm import Session" not in text
 
 
+def test_chat_api_and_realtime_paths_stay_on_native_async_db_path():
+    root = Path(__file__).resolve().parents[1]
+    paths = [
+        root / "brain/app/api/routers/chat.py",
+        root / "brain/app/api/routers/ws.py",
+        root / "brain/systems/runs/tool_catalog/handlers/chat.py",
+    ]
+
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        assert "run_db" not in text
+        assert "run_session_task" not in text
+        assert "run_unit_of_work_task" not in text
+        assert "open_unit_of_work" not in text
+        assert "from sqlalchemy.orm import Session" not in text
+
+
+def test_chat_service_has_single_async_db_implementation():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "brain/app/api/services/chat.py"
+    text = path.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    service = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ChatService"
+    )
+    db_methods = {
+        "bootstrap",
+        "list_conversations",
+        "create_or_fetch_dm",
+        "get_conversation_messages",
+        "post_conversation_message",
+        "get_message_thread",
+        "search_room_messages",
+        "post_thread_reply",
+        "post_agent_message",
+        "mark_conversation_read",
+        "list_notifications",
+        "mark_notification_read",
+        "mark_all_notifications_read",
+        "build_unread_summary_for_user",
+        "build_unread_summaries_for_users",
+        "ensure_org_room",
+        "get_conversation_or_404",
+        "get_root_message_or_404",
+    }
+    methods = {
+        node.name: node
+        for node in service.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+    assert "class AsyncChatService" not in text
+    assert "from sqlalchemy.orm import Session" not in text
+    assert "run_db" not in text
+    assert "run_session_task" not in text
+    assert "run_unit_of_work_task" not in text
+    assert "open_unit_of_work" not in text
+    for name in db_methods:
+        assert isinstance(methods[name], ast.AsyncFunctionDef), name
+
+
 def test_cortex_project_context_routes_use_native_async_db_path():
     root = Path(__file__).resolve().parents[1]
     path = root / "brain/app/api/routers/cortex/_project_context.py"

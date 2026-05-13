@@ -14,7 +14,14 @@ from brain.app.api.ws.auth import WsTokenClaims
 from brain.app.api.ws.events import ServerEvent
 from brain.app.api.ws.manager import ConnectionManager
 from brain.platform.db.models.chat import ChatConversationRead, ChatNotification
-from tests.test_chat_api_routes import ORG_ID, USER_1_ID, USER_2_ID, _user_context, chat_db_session
+from tests.test_chat_api_routes import (
+    ORG_ID,
+    USER_1_ID,
+    USER_2_ID,
+    _AsyncSession,
+    _user_context,
+    chat_db_session,
+)
 
 
 pytestmark = pytest.mark.anyio
@@ -146,7 +153,11 @@ async def test_chat_mark_read_rejects_broadcast_only_unread_payload(monkeypatch:
     from brain.app.api.routers import ws as ws_router
 
     fake_ws = AsyncMock()
-    monkeypatch.setattr(ws_router, "run_unit_of_work_task", AsyncMock())
+    monkeypatch.setattr(
+        ws_router,
+        "UnitOfWork",
+        lambda: pytest.fail("invalid read payload should not open a database session"),
+    )
 
     await ws_router._handle_chat_mark_read(
         "user-2",
@@ -162,34 +173,22 @@ async def test_chat_mark_read_rejects_broadcast_only_unread_payload(monkeypatch:
     fake_ws.send_json.assert_awaited_once_with(
         {"type": ServerEvent.CHAT_ERROR, "code": "CHAT_READ_CURSOR_REQUIRED"}
     )
-    ws_router.run_unit_of_work_task.assert_not_awaited()
 
 
-def _run_sync_with_session(session: Session):
-    async def _run(fn, /, *args, **kwargs):
-        from brain.app.api.routers import ws as ws_router
+class _SessionUnitOfWork:
+    def __init__(self, session: Session):
+        self._sync_session = session
+        self.session = _AsyncSession(session)
 
-        class _SessionUnitOfWork:
-            def __enter__(self):
-                self.session = session
-                return self
+    async def __aenter__(self):
+        return self
 
-            def __exit__(self, exc_type, exc_val, exc_tb):
-                return False
-
-        original_uow = ws_router.UnitOfWork
-        ws_router.UnitOfWork = lambda: _SessionUnitOfWork()
-        try:
-            result = fn(*args, **kwargs)
-            session.commit()
-            return result
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            ws_router.UnitOfWork = original_uow
-
-    return _run
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if exc_type:
+            self._sync_session.rollback()
+        else:
+            self._sync_session.commit()
+        return False
 
 
 @pytest.mark.requires_db
@@ -199,7 +198,7 @@ async def test_chat_mark_read_persists_and_publishes_server_state_after_commit(
 ):
     from brain.app.api.routers import ws as ws_router
 
-    dm, sent = _create_unread_dm(chat_db_session)
+    dm, sent = await _create_unread_dm(chat_db_session)
     events: list[str] = []
     published: dict[str, dict] = {}
 
@@ -221,7 +220,7 @@ async def test_chat_mark_read_persists_and_publishes_server_state_after_commit(
         events.append("publish_notification_summary")
         published["notification_summary"] = kwargs
 
-    monkeypatch.setattr(ws_router, "run_unit_of_work_task", _run_sync_with_session(chat_db_session))
+    monkeypatch.setattr(ws_router, "UnitOfWork", lambda: _SessionUnitOfWork(chat_db_session))
     monkeypatch.setattr(chat_db_session, "commit", commit_spy)
     monkeypatch.setattr(ws_router.ws_manager, "publish_chat_read_updated", publish_read_updated)
     monkeypatch.setattr(ws_router.ws_manager, "publish_chat_unread_updated", publish_unread_updated)
@@ -290,7 +289,7 @@ async def test_chat_mark_read_does_not_publish_when_commit_fails(
 ):
     from brain.app.api.routers import ws as ws_router
 
-    dm, sent = _create_unread_dm(chat_db_session)
+    dm, sent = await _create_unread_dm(chat_db_session)
     events: list[str] = []
 
     def failing_commit():
@@ -300,7 +299,7 @@ async def test_chat_mark_read_does_not_publish_when_commit_fails(
     async def unexpected_publish(**kwargs):
         events.append("publish")
 
-    monkeypatch.setattr(ws_router, "run_unit_of_work_task", _run_sync_with_session(chat_db_session))
+    monkeypatch.setattr(ws_router, "UnitOfWork", lambda: _SessionUnitOfWork(chat_db_session))
     monkeypatch.setattr(chat_db_session, "commit", failing_commit)
     monkeypatch.setattr(ws_router.ws_manager, "publish_chat_read_updated", unexpected_publish)
     monkeypatch.setattr(ws_router.ws_manager, "publish_chat_unread_updated", unexpected_publish)
@@ -327,14 +326,14 @@ async def test_chat_mark_read_does_not_publish_when_commit_fails(
     )
 
 
-def _create_unread_dm(chat_db_session: Session):
-    dm = ChatService(
-        chat_db_session,
+async def _create_unread_dm(chat_db_session: Session):
+    dm = await ChatService(
+        _AsyncSession(chat_db_session),
         _user_context(chat_db_session, USER_1_ID),
     ).create_or_fetch_dm(ChatDmCreate(user_id=USER_2_ID))
     chat_db_session.commit()
-    sent, _ = ChatService(
-        chat_db_session,
+    sent, _ = await ChatService(
+        _AsyncSession(chat_db_session),
         _user_context(chat_db_session, USER_1_ID),
     ).post_conversation_message(
         dm.id,

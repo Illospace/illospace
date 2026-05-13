@@ -51,27 +51,17 @@ def _coerce_optional_int(value: Any) -> int | None:
         raise ValueError("thread_root_message_id must be an integer")
 
 
-def _publish_chat_events(publish, *, org_id: str, db) -> None:
-    async def _publish() -> None:
-        from brain.app.api.routers.chat import (
-            _publish_message_events,
-            _publish_notification_summaries,
-        )
+async def _publish_chat_events(publish, summaries: dict[str, dict[str, Any]]) -> None:
+    from brain.app.api.routers.chat import (
+        _publish_message_events,
+        _publish_notification_summary_payloads,
+    )
 
-        await _publish_message_events(
-            publish,
-            is_thread_reply=publish.root_message is not None,
-        )
-        await _publish_notification_summaries(
-            db,
-            org_id=org_id,
-            user_ids=publish.member_ids,
-        )
-
-    try:
-        _run_coro_sync(_publish())
-    except Exception as exc:
-        logger.warning("agent_chat_publish_failed: %s", exc)
+    await _publish_message_events(
+        publish,
+        is_thread_reply=publish.root_message is not None,
+    )
+    await _publish_notification_summary_payloads(summaries)
 
 
 def _handle_post_chat_message(
@@ -80,8 +70,9 @@ def _handle_post_chat_message(
     thread_root_message_id: int | None = None,
 ) -> str:
     """Post an Illo-authored message to the native team room."""
+    from brain.app.api.routers.chat import _notification_summary_payloads
     from brain.app.api.services.chat import ChatService
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
     trigger = _current_chat_trigger()
     response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
@@ -98,30 +89,37 @@ def _handle_post_chat_message(
     if not actor_user_id or not org_id:
         return json.dumps({"error": "post_chat_message requires a user-scoped org run"})
 
-    publish = None
-    message_payload = None
-    with open_unit_of_work(UnitOfWork) as uow:
-        message, publish = ChatService(
-            uow.session,
-            {
-                "id": actor_user_id,
-                "org_id": org_id,
-                "role": "member",
-            },
-        ).post_agent_message(
-            conversation_id=target_conversation_id,
-            body=body,
-            thread_root_message_id=target_thread_root_message_id,
-            metadata={
-                "created_by_run_id": _current_run_id(),
-                "chat_trigger_message_id": trigger.get("message_id"),
-            },
-        )
-        message_payload = message.model_dump(mode="json")
-        uow.session.flush()
+    async def _create_message():
+        async with UnitOfWork() as uow:
+            message, publish = await ChatService(
+                uow.session,
+                {
+                    "id": actor_user_id,
+                    "org_id": org_id,
+                    "role": "member",
+                },
+            ).post_agent_message(
+                conversation_id=target_conversation_id,
+                body=body,
+                thread_root_message_id=target_thread_root_message_id,
+                metadata={
+                    "created_by_run_id": _current_run_id(),
+                    "chat_trigger_message_id": trigger.get("message_id"),
+                },
+            )
+            summaries = await _notification_summary_payloads(
+                uow.session,
+                org_id=org_id,
+                user_ids=publish.member_ids,
+            )
+            return message.model_dump(mode="json"), publish, summaries
+
+    message_payload, publish, summaries = _run_coro_sync(_create_message())
     if publish is not None:
-        with open_unit_of_work(UnitOfWork) as publish_uow:
-            _publish_chat_events(publish, org_id=org_id, db=publish_uow.session)
+        try:
+            _run_coro_sync(_publish_chat_events(publish, summaries))
+        except Exception as exc:
+            logger.warning("agent_chat_publish_failed: %s", exc)
     return json.dumps({"ok": True, "message": message_payload}, default=str)
 
 

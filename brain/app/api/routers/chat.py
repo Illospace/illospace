@@ -6,11 +6,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.db_utils import run_db
 from brain.app.api.schemas.chat import (
     ChatBootstrapRead,
     ChatConversationSummaryRead,
@@ -32,7 +30,7 @@ from brain.app.api.services.chat import (
     resolve_user_mentions,
     validated_limit,
 )
-from brain.app.api.services.notifications import build_notification_summary
+from brain.app.api.services.notifications import async_build_notification_summary
 from brain.platform.db.models.chat import ChatConversation, ChatMessage
 
 router = APIRouter(
@@ -42,22 +40,6 @@ router = APIRouter(
 )
 logger = logging.getLogger(__name__)
 
-
-async def _run_db(db: AsyncSession, fn):
-    return await run_db(db, fn)
-
-
-async def _commit_then_publish(
-    db: Session,
-    publish_fn,
-    *args,
-    **kwargs,
-) -> None:
-    db.commit()
-    try:
-        await publish_fn(*args, **kwargs)
-    except Exception as exc:
-        logger.warning("chat_publish_failed: %s", exc)
 
 async def _publish_message_events(publish: ChatPublishState, *, is_thread_reply: bool) -> None:
     from brain.app.api.routers.ws import ws_manager
@@ -109,22 +91,6 @@ async def _publish_read_event(publish: ChatReadPublishState) -> None:
     )
 
 
-async def _publish_notification_summaries(
-    db: Session,
-    *,
-    org_id: str,
-    user_ids: list[str],
-) -> None:
-    from brain.app.api.routers.ws import ws_manager
-
-    for user_id in sorted(set(user_ids)):
-        summary = build_notification_summary(db, user_id=user_id, org_id=org_id)
-        await ws_manager.publish_notification_summary_updated(
-            user_id=user_id,
-            summary=summary.model_dump(mode="json"),
-        )
-
-
 async def _publish_notification_summary_payloads(summaries: dict[str, dict[str, Any]]) -> None:
     from brain.app.api.routers.ws import ws_manager
 
@@ -135,27 +101,27 @@ async def _publish_notification_summary_payloads(summaries: dict[str, dict[str, 
         )
 
 
-def _route_chat_illo_if_needed(
-    db: Session,
+async def _route_chat_illo_if_needed(
+    db: AsyncSession,
     *,
     user: dict[str, Any],
     message_id: int,
 ) -> None:
-    message = db.get(ChatMessage, int(message_id))
+    message = await db.get(ChatMessage, int(message_id))
     if message is None:
         return
     metadata = dict(message.metadata_ or {})
     if not metadata.get("illo_invoked"):
         return
-    conversation = db.get(ChatConversation, str(message.conversation_id))
+    conversation = await db.get(ChatConversation, str(message.conversation_id))
     if conversation is None or conversation.type != "room":
         return
 
     from brain.app.triggers.adapters.internal import build_chat_mention_trigger
-    from brain.app.triggers.router import route_trigger
+    from brain.app.triggers.router import async_route_trigger
 
     root_message = (
-        db.get(ChatMessage, int(message.thread_root_message_id))
+        await db.get(ChatMessage, int(message.thread_root_message_id))
         if message.thread_root_message_id
         else None
     )
@@ -167,10 +133,28 @@ def _route_chat_illo_if_needed(
         root_message=root_message,
         user=user,
     )
-    result = route_trigger(trigger, session=db)
+    result = await async_route_trigger(trigger, session=db)
     if result.ok and result.run_id is not None:
         metadata["illo_run_id"] = result.run_id
         message.metadata_ = metadata
+
+
+async def _notification_summary_payloads(
+    db: AsyncSession,
+    *,
+    org_id: str,
+    user_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    return {
+        user_id: (
+            await async_build_notification_summary(
+                db,
+                user_id=user_id,
+                org_id=org_id,
+            )
+        ).model_dump(mode="json")
+        for user_id in sorted(set(user_ids))
+    }
 
 
 @router.get("/bootstrap", response_model=ChatBootstrapRead)
@@ -178,7 +162,7 @@ async def get_chat_bootstrap(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await _run_db(db, lambda sync_db: ChatService(sync_db, user).bootstrap())
+    return await ChatService(db, user).bootstrap()
 
 
 @router.get("/conversations", response_model=list[ChatConversationSummaryRead])
@@ -186,7 +170,7 @@ async def list_conversations(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await _run_db(db, lambda sync_db: ChatService(sync_db, user).list_conversations())
+    return await ChatService(db, user).list_conversations()
 
 
 @router.post("/dms", response_model=ChatConversationSummaryRead)
@@ -195,7 +179,7 @@ async def create_or_fetch_dm(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await _run_db(db, lambda sync_db: ChatService(sync_db, user).create_or_fetch_dm(body))
+    return await ChatService(db, user).create_or_fetch_dm(body)
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=ChatMessagePageRead)
@@ -206,13 +190,10 @@ async def get_conversation_messages(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await _run_db(
-        db,
-        lambda sync_db: ChatService(sync_db, user).get_conversation_messages(
-            conversation_id,
-            before_seq=before_seq,
-            limit=validated_limit(limit),
-        ),
+    return await ChatService(db, user).get_conversation_messages(
+        conversation_id,
+        before_seq=before_seq,
+        limit=validated_limit(limit),
     )
 
 
@@ -223,12 +204,9 @@ async def search_room_messages(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await _run_db(
-        db,
-        lambda sync_db: ChatService(sync_db, user).search_room_messages(
-            query=query,
-            limit=validated_limit(limit),
-        ),
+    return await ChatService(db, user).search_room_messages(
+        query=query,
+        limit=validated_limit(limit),
     )
 
 
@@ -239,21 +217,14 @@ async def post_conversation_message(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _post(sync_db: Session):
-        message, publish = ChatService(sync_db, user).post_conversation_message(conversation_id, body)
-        _route_chat_illo_if_needed(sync_db, user=user, message_id=message.id)
-        sync_db.commit()
-        summaries = {
-            user_id: build_notification_summary(
-                sync_db,
-                user_id=user_id,
-                org_id=str(user["org_id"]),
-            ).model_dump(mode="json")
-            for user_id in sorted(set(publish.member_ids))
-        }
-        return message, publish, summaries
-
-    message, publish, summaries = await _run_db(db, _post)
+    message, publish = await ChatService(db, user).post_conversation_message(conversation_id, body)
+    await _route_chat_illo_if_needed(db, user=user, message_id=message.id)
+    await db.commit()
+    summaries = await _notification_summary_payloads(
+        db,
+        org_id=str(user["org_id"]),
+        user_ids=publish.member_ids,
+    )
     await _publish_message_events(publish, is_thread_reply=False)
     try:
         await _publish_notification_summary_payloads(summaries)
@@ -270,13 +241,10 @@ async def get_message_thread(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await _run_db(
-        db,
-        lambda sync_db: ChatService(sync_db, user).get_message_thread(
-            message_id,
-            before_seq=before_seq,
-            limit=validated_limit(limit),
-        ),
+    return await ChatService(db, user).get_message_thread(
+        message_id,
+        before_seq=before_seq,
+        limit=validated_limit(limit),
     )
 
 
@@ -287,21 +255,14 @@ async def post_thread_reply(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _post(sync_db: Session):
-        reply, publish = ChatService(sync_db, user).post_thread_reply(message_id, body)
-        _route_chat_illo_if_needed(sync_db, user=user, message_id=reply.id)
-        sync_db.commit()
-        summaries = {
-            user_id: build_notification_summary(
-                sync_db,
-                user_id=user_id,
-                org_id=str(user["org_id"]),
-            ).model_dump(mode="json")
-            for user_id in sorted(set(publish.member_ids))
-        }
-        return reply, publish, summaries
-
-    reply, publish, summaries = await _run_db(db, _post)
+    reply, publish = await ChatService(db, user).post_thread_reply(message_id, body)
+    await _route_chat_illo_if_needed(db, user=user, message_id=reply.id)
+    await db.commit()
+    summaries = await _notification_summary_payloads(
+        db,
+        org_id=str(user["org_id"]),
+        user_ids=publish.member_ids,
+    )
     await _publish_message_events(publish, is_thread_reply=True)
     try:
         await _publish_notification_summary_payloads(summaries)
@@ -317,19 +278,13 @@ async def mark_conversation_read(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _mark(sync_db: Session):
-        unread_summary, publish = ChatService(sync_db, user).mark_conversation_read(conversation_id, body)
-        sync_db.commit()
-        summaries = {
-            str(user["id"]): build_notification_summary(
-                sync_db,
-                user_id=str(user["id"]),
-                org_id=str(user["org_id"]),
-            ).model_dump(mode="json")
-        }
-        return unread_summary, publish, summaries
-
-    unread_summary, publish, summaries = await _run_db(db, _mark)
+    unread_summary, publish = await ChatService(db, user).mark_conversation_read(conversation_id, body)
+    await db.commit()
+    summaries = await _notification_summary_payloads(
+        db,
+        org_id=str(user["org_id"]),
+        user_ids=[str(user["id"])],
+    )
     await _publish_read_event(publish)
     try:
         await _publish_notification_summary_payloads(summaries)
@@ -344,10 +299,7 @@ async def list_notifications(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await _run_db(
-        db,
-        lambda sync_db: ChatService(sync_db, user).list_notifications(limit=validated_limit(limit)),
-    )
+    return await ChatService(db, user).list_notifications(limit=validated_limit(limit))
 
 
 @router.post("/notifications/{notification_id}/read", response_model=dict[str, bool])
@@ -356,7 +308,7 @@ async def mark_notification_read(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    await _run_db(db, lambda sync_db: ChatService(sync_db, user).mark_notification_read(notification_id))
+    await ChatService(db, user).mark_notification_read(notification_id)
     return {"ok": True}
 
 
@@ -365,5 +317,5 @@ async def mark_all_notifications_read(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    count = await _run_db(db, lambda sync_db: ChatService(sync_db, user).mark_all_notifications_read())
+    count = await ChatService(db, user).mark_all_notifications_read()
     return {"updated": count}
