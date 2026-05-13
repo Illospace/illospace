@@ -14,7 +14,26 @@ import {
   orbitAnchorTargetWithinRadius,
   orbitPhysicsProfileForAttractor,
   orbitPhysicsProfileForKind,
+  sortTeamMembersForSharedAttractorLayout,
 } from './attractors.ts';
+
+test('sortTeamMembersForSharedAttractorLayout is independent of the local viewer', () => {
+  const redaFirst = [
+    { id: 'user-reda', name: 'Reda', color: '#ff0000' },
+    { id: 'user-axel', name: 'Axel', color: '#00ff00' },
+    { id: 'user-jules', name: 'Jules', color: '#0000ff' },
+  ];
+  const axelFirst = [
+    { id: 'user-axel', name: 'Axel', color: '#00ff00' },
+    { id: 'user-reda', name: 'Reda', color: '#ff0000' },
+    { id: 'user-jules', name: 'Jules', color: '#0000ff' },
+  ];
+
+  assert.deepEqual(
+    sortTeamMembersForSharedAttractorLayout(redaFirst).map((member) => member.id),
+    sortTeamMembersForSharedAttractorLayout(axelFirst).map((member) => member.id),
+  );
+});
 
 test('getDualUserSpacingDistance keeps a minimum but does not cap dense clusters to the viewport', () => {
   assert.equal(getDualUserSpacingDistance(1000, 800, 120, 120), 500);
