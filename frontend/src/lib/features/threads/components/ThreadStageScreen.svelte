@@ -218,7 +218,7 @@
     buildThreadSidePanelAddMenuItems(sidePanelTabs, workspaceApps.visibleApps),
   );
   const activeVaultSecretPrompt = $derived(
-    cortex.vaultSecretPrompt?.idea_id === idea?.id ? cortex.vaultSecretPrompt : null,
+    String(cortex.vaultSecretPrompt?.idea_id ?? '') === String(idea?.id ?? '') ? cortex.vaultSecretPrompt : null,
   );
 
   function ideaDisplayTitle(source: { display_title?: string | null; title?: string | null }): string {
@@ -901,7 +901,7 @@
 
   $effect(() => {
     const prompt = cortex.vaultSecretPrompt;
-    const promptId = prompt && prompt.idea_id === idea?.id ? prompt.id : null;
+    const promptId = prompt && String(prompt.idea_id ?? '') === String(idea?.id ?? '') ? prompt.id : null;
     if (!promptId) {
       lastAutoOpenedVaultPromptId = null;
       return;

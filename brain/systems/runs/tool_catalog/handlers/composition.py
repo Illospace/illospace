@@ -68,6 +68,49 @@ from brain.systems.runs.tool_catalog.handlers.workspace_data import (
 from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
 
+def _current_agent_value(name: str):
+    value = getattr(_agent_context, name, None)
+    if value:
+        return value
+    run = getattr(_agent_context, "run", None)
+    value = getattr(run, name, None)
+    if value:
+        return value
+    execution_metadata = getattr(_agent_context, "execution_metadata", None)
+    if isinstance(execution_metadata, dict):
+        value = execution_metadata.get(name)
+        if value:
+            return value
+    return None
+
+
+def _current_run_id():
+    run = getattr(_agent_context, "run", None)
+    return getattr(run, "run_id", None) or _current_agent_value("run_id")
+
+
+def _current_idea_id():
+    idea_id = _current_agent_value("idea_id")
+    if idea_id:
+        return str(idea_id)
+    run = getattr(_agent_context, "run", None)
+    thread_id = getattr(run, "thread_id", None)
+    if thread_id:
+        return str(thread_id)
+    metadata = getattr(_agent_context, "execution_metadata", None)
+    if isinstance(metadata, dict):
+        target_ref = metadata.get("target_ref")
+        if isinstance(target_ref, dict):
+            candidate = target_ref.get("idea_id") or target_ref.get("thread_id")
+            if candidate:
+                return str(candidate)
+    return None
+
+
+def _current_requested_by():
+    return getattr(_agent_context, "worker_name", None) or "agent"
+
+
 def _get_tool_handlers(
     workspace_root: str | None = None,
     allowed_workspaces: list[str | dict] | None = None,
@@ -105,10 +148,10 @@ def _get_tool_handlers(
         "brain_vault": lambda key, reason=None: tool_brain_vault(
             key,
             reason=reason,
-            user_id=getattr(_agent_context, "user_id", None),
-            org_id=getattr(_agent_context, "org_id", None),
-            run_id=getattr(getattr(_agent_context, "run", None), "run_id", None),
-            requested_by=getattr(_agent_context, "worker_name", None) or "agent",
+            user_id=_current_agent_value("user_id"),
+            org_id=_current_agent_value("org_id"),
+            run_id=_current_run_id(),
+            requested_by=_current_requested_by(),
             **_current_project_token_context(),
         ),
         "vault_secret_prompt": (
@@ -117,11 +160,11 @@ def _get_tool_handlers(
                 description=description,
                 category=category,
                 reason=reason,
-                user_id=getattr(_agent_context, "user_id", None),
-                org_id=getattr(_agent_context, "org_id", None),
-                run_id=getattr(getattr(_agent_context, "run", None), "run_id", None),
-                idea_id=getattr(_agent_context, "idea_id", None),
-                requested_by=getattr(_agent_context, "worker_name", None) or "agent",
+                user_id=_current_agent_value("user_id"),
+                org_id=_current_agent_value("org_id"),
+                run_id=_current_run_id(),
+                idea_id=_current_idea_id(),
+                requested_by=_current_requested_by(),
             )
         ),
         "runtime_settings": lambda provider=None: tool_runtime_settings(

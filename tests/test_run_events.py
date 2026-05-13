@@ -188,6 +188,34 @@ def test_non_browser_run_events_skip_live_publish_after_durable_record(monkeypat
     publisher.assert_not_called()
 
 
+def test_vault_secret_prompt_publishes_live_after_durable_record(monkeypatch):
+    import brain.systems.cortex.events as cortex_events
+
+    durable_records = []
+    live_events = []
+
+    monkeypatch.setattr(
+        "brain.systems.runs.event_log.record_run_event",
+        lambda *args, **kwargs: durable_records.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        cortex_events,
+        "_publisher",
+        lambda event_type, payload: live_events.append((event_type, payload)),
+    )
+
+    payload = {
+        "idea_id": "idea-1",
+        "run_id": 42,
+        "prompt": {"id": "prompt-1", "idea_id": "idea-1", "key_name": "GITHUB_TOKEN"},
+    }
+    with run_event_scope(42, idea_id="idea-1", session=object()):
+        cortex_events.publish("vault_secret_prompt", payload)
+
+    assert durable_records
+    assert live_events == [("vault_secret_prompt", payload)]
+
+
 def test_run_replay_query_scopes_human_principal_to_authenticated_org():
     session = MagicMock()
     session.execute.return_value.all.return_value = []

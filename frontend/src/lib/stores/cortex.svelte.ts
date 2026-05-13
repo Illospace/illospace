@@ -56,6 +56,7 @@ import {
   type CortexRunStreamItem,
 } from '$lib/utils/cortexRunStream';
 import { normalizeHexColor } from '$lib/utils/constellationPresence';
+import { normalizeVaultSecretPromptMessage } from '$lib/utils/vaultSecretPrompt';
 import type {
   AgentRunOptions,
   BrowserDiscoveryResult,
@@ -360,24 +361,7 @@ class CortexStore {
   }
 
   private _normalizeVaultSecretPrompt(msg: any): VaultSecretPrompt | null {
-    const source = msg?.prompt && typeof msg.prompt === 'object' ? msg.prompt : msg;
-    const keyName = typeof source?.key_name === 'string' ? source.key_name.trim() : '';
-    const ideaId = typeof msg?.idea_id === 'string'
-      ? msg.idea_id
-      : typeof source?.idea_id === 'string'
-        ? source.idea_id
-        : null;
-    if (!keyName || !ideaId) return null;
-    return {
-      id: String(source?.id || `vault-secret-${ideaId}-${keyName}`),
-      idea_id: ideaId,
-      key_name: keyName,
-      description: typeof source?.description === 'string' ? source.description : msg?.description ?? null,
-      category: typeof source?.category === 'string' ? source.category : msg?.category ?? 'api',
-      reason: typeof source?.reason === 'string' ? source.reason : msg?.reason ?? null,
-      requested_by: typeof source?.requested_by === 'string' ? source.requested_by : msg?.requested_by ?? null,
-      created_at: typeof source?.created_at === 'string' ? source.created_at : msg?.created_at ?? null,
-    };
+    return normalizeVaultSecretPromptMessage(msg);
   }
 
   private _applyVaultSecretPrompt(prompt: VaultSecretPrompt) {

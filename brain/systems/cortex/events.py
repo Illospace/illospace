@@ -38,6 +38,7 @@ _LIVE_AFTER_DURABLE_EVENT_TYPES = {
     "browser_session_delta",
     "browser_session_error",
     "browser_session_closed",
+    "vault_secret_prompt",
 }
 
 
