@@ -1,5 +1,6 @@
 """Tests for the create_skill agent tool handler."""
 
+import json
 import os
 import sys
 from unittest.mock import patch, MagicMock
@@ -8,7 +9,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
 
-from brain.systems.runs.tool_handlers import _handle_create_skill
+from brain.systems.runs.tool_handlers import _handle_create_skill, _handle_manage_skill
 
 
 VALID_PROCEDURE = (
@@ -174,3 +175,33 @@ class TestCreateSkillDBInsert:
 
         assert result["created"] is False
         assert "error" in result
+
+
+class TestManageSkillUmbrella:
+    """Test the public manage_skill umbrella surface."""
+
+    def test_help_lists_skill_operations(self):
+        result = json.loads(_handle_manage_skill(action="help"))
+
+        assert result["tool"] == "manage_skill"
+        assert "create" in result["operations"]
+        assert "upsert_asset" in result["operations"]
+
+    @patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]")
+    @patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 384)
+    @patch("brain.platform.db.repositories.unit_of_work.UnitOfWork")
+    def test_create_action_delegates_to_skill_creator(self, MockUoW, mock_embed, mock_vec):
+        MockUoW.return_value = _make_uow({"id": 45})
+
+        result = json.loads(_handle_manage_skill(
+            action="create",
+            name="write-issues",
+            description="Write well-structured GitHub issues with context and acceptance criteria",
+            procedure=VALID_PROCEDURE,
+            user_requested=True,
+        ))
+
+        assert result["ok"] is True
+        assert result["created"] is True
+        assert result["skill_id"] == 45
+        assert result["source_kind"] == "private_local"

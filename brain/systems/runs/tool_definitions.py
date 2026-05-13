@@ -118,6 +118,86 @@ BRAIN_TOOLS = [
         },
     },
     {
+        "name": "manage_skill",
+        "description": (
+            "Create, update, archive, bundle, or edit assets for installed Illo skills. "
+            "This is the action tool for durable slash-routable skill changes. Use brain_skills "
+            "and skill_view first when discovering existing skills. Use action='help' or "
+            "action='schema' with operation to inspect arguments before mutating."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "help",
+                        "schema",
+                        "list",
+                        "get",
+                        "create",
+                        "update",
+                        "edit",
+                        "archive",
+                        "delete",
+                        "convert_to_bundle",
+                        "list_assets",
+                        "get_asset",
+                        "upsert_asset",
+                        "delete_asset",
+                    ],
+                    "description": "What to do. Use help/schema to inspect skill operations before mutating.",
+                },
+                "operation": {
+                    "type": "string",
+                    "description": "Optional operation name to inspect when action is help or schema.",
+                },
+                "skill_id": {"type": "integer", "description": "Skill id for existing-skill actions."},
+                "skill_name": {
+                    "type": "string",
+                    "description": "Existing skill name for lookup when skill_id is not known.",
+                },
+                "name": {"type": "string", "description": "Skill name for create, or replacement name for update."},
+                "description": {"type": "string", "description": "Skill description."},
+                "procedure": {"type": "string", "description": "Skill procedure/instructions."},
+                "model_tier": {"type": "string", "enum": ["local", "low", "medium", "high"], "default": "medium"},
+                "thinking_tier": {
+                    "type": "string",
+                    "enum": ["none", "low", "medium", "high", "xhigh"],
+                    "default": "medium",
+                },
+                "triggers": {"type": "array", "items": {"type": "object"}, "description": "Routing triggers."},
+                "guardrails": {"type": "array", "items": {"type": "object"}, "description": "Skill guardrails."},
+                "pitfalls": {"type": "array", "items": {}, "description": "Known failure modes or cautions."},
+                "refinements": {"type": "array", "items": {}, "description": "Improvement notes."},
+                "assets": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Initial package assets for create. Each item needs path and content.",
+                },
+                "create_as_package": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Create or convert the skill as a portable local bundle package.",
+                },
+                "user_requested": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Whether the user explicitly requested this durable skill change.",
+                },
+                "path": {"type": "string", "description": "Asset path for get/upsert/delete asset actions."},
+                "content": {"type": "string", "description": "Text content for upsert_asset."},
+                "asset_kind": {"type": "string", "description": "Optional asset kind override."},
+                "mime_type": {"type": "string", "description": "Optional MIME type override."},
+                "loading_budget_tokens": {"type": "integer", "description": "Optional loading budget for the asset."},
+                "limit": {"type": "integer", "default": 50, "description": "Maximum skills or assets to return."},
+                "max_chars": {"type": "integer", "default": 12000, "description": "Maximum asset content chars to return."},
+                "include_archived": {"type": "boolean", "default": False},
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "skill_asset",
         "description": "Load a specific versioned skill bundle asset by relative path.",
         "input_schema": {

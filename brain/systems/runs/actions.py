@@ -382,6 +382,21 @@ def build_action_target(
             "schedule": _json_safe(kwargs_dict.get("schedule") or kwargs_dict.get("schedule_expr")),
             "cycle_id": _json_safe(kwargs_dict.get("id")),
         })
+    if tool_name == "manage_skill":
+        procedure = kwargs_dict.get("procedure")
+        content = kwargs_dict.get("content")
+        assets = kwargs_dict.get("assets")
+        return ActionTarget({
+            "action": _json_safe(_arg_at(args, kwargs_dict, "action", 0)),
+            "skill_id": _json_safe(kwargs_dict.get("skill_id")),
+            "skill_name": _json_safe(kwargs_dict.get("skill_name")),
+            "name": _json_safe(kwargs_dict.get("name")),
+            "asset_path": _json_safe(kwargs_dict.get("path")),
+            "procedure_chars": len(str(procedure or "")),
+            "content_chars": len(str(content or "")),
+            "asset_count": len(assets) if isinstance(assets, list) else None,
+            "create_as_package": bool(kwargs_dict.get("create_as_package")),
+        })
     if tool_name == "manage_soul":
         content = kwargs_dict.get("content") or _arg_at(args, kwargs_dict, "content", 1, "")
         reason = kwargs_dict.get("reason") or _arg_at(args, kwargs_dict, "reason", 2, "")

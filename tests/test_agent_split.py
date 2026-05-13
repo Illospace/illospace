@@ -136,6 +136,7 @@ class TestToolDefinitionContracts:
             "brain_guardrails",
             "brain_skills",
             "skill_view",
+            "manage_skill",
             "skill_asset",
             "brain_encode",
             "brain_vault",
@@ -186,9 +187,10 @@ class TestToolDefinitionContracts:
         assert "cortex_visual_reply" in names
         assert "my_activity" in names
 
-    def test_dormant_skill_authoring_tools_are_not_model_exposed(self):
+    def test_skill_authoring_uses_umbrella_tool(self):
         from brain.systems.runs.direct_agent import COORDINATOR_TOOLS, WORKER_TOOLS
         names = {t["name"] for t in COORDINATOR_TOOLS + WORKER_TOOLS}
+        assert "manage_skill" in names
         assert "create_skill" not in names
         assert "manage_skill_asset" not in names
         assert "flag_skill_gap" not in names
