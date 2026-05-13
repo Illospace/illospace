@@ -20,7 +20,7 @@ from brain.systems.workspace_apps.actions import (
     WorkspaceAppActionContractError,
     WorkspaceAppActionError,
 )
-from brain.systems.user_domains.service import DomainService
+from brain.systems.user_domains.service import DomainError, DomainService
 
 
 GENERIC_HTTP_EXECUTOR_KEY = "generic.http"
@@ -241,30 +241,35 @@ def _sync_items_to_domain(
         title_text = str(title).strip() if title is not None else None
 
         existing = existing_by_remote.get(str(remote_id)) if remote_id is not None else None
-        if existing is not None:
-            record = service.update_record(
-                context.org_id,
-                domain_id,
-                existing.id,
-                data_patch=data,
-                title=title_text,
-                actor_id=context.user_id,
-                actor_kind="workspace_app_action",
-            )
-            updated += 1
-        else:
-            record = service.create_record(
-                context.org_id,
-                domain_id,
-                object_key,
-                data=data,
-                title=title_text,
-                actor_id=context.user_id,
-                actor_kind="workspace_app_action",
-            )
-            created += 1
-            if remote_id_field and remote_id is not None:
-                existing_by_remote[str(remote_id)] = record
+        try:
+            if existing is not None:
+                record = service.update_record(
+                    context.org_id,
+                    domain_id,
+                    existing.id,
+                    data_patch=data,
+                    title=title_text,
+                    actor_id=context.user_id,
+                    actor_kind="workspace_app_action",
+                )
+                updated += 1
+            else:
+                record = service.create_record(
+                    context.org_id,
+                    domain_id,
+                    object_key,
+                    data=data,
+                    title=title_text,
+                    actor_id=context.user_id,
+                    actor_kind="workspace_app_action",
+                )
+                created += 1
+                if remote_id_field and remote_id is not None:
+                    existing_by_remote[str(remote_id)] = record
+        except DomainError as exc:
+            raise WorkspaceAppActionContractError(
+                f"connector_spec.sync produced invalid Domain data: {exc}"
+            ) from exc
         synced_records.append(service.serialize_record(record))
 
     return {

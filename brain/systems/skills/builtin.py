@@ -539,8 +539,10 @@ Constellation design contract.
      (`"title"`), `{ "path": "nested.id" }`, `{ "const": "Todo" }`,
      `{ "template": "ISSUE-{number}" }`, or
      `{ "if": { "field": "completed", "equals": true }, "then": "Done",
-     "else": "Todo" }`. Use `deferred` only when the API cannot fit the
-     generic spec yet.
+     "else": "Todo" }`. Put only real Domain data fields in `sync.fields`;
+     use `sync.title` for the record title, and do not invent helper fields
+     that are not in the bound Domain object. Use `deferred` only when the API
+     cannot fit the generic spec yet.
    - Missing external credentials are not blockers for creating the app when
      the external action can be deferred. Do not call `vault_secret_prompt`
      before producing the requested app. Declare the deferred action, deliver

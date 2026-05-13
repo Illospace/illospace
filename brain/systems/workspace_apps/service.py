@@ -164,6 +164,7 @@ def validate_domain_bindings(
     from brain.systems.user_domains.service import DomainNotFound, DomainService
 
     service = DomainService(session)
+    binding_field_keys: dict[str, set[str]] = {}
     for alias, binding in bindings.items():
         alias_text = str(alias).strip() or "<empty>"
         if not isinstance(binding, dict):
@@ -198,6 +199,7 @@ def validate_domain_bindings(
 
         fields = service.list_fields(obj.id)
         field_keys = {field.key for field in fields}
+        binding_field_keys[alias_text] = field_keys
         bindable_field_keys = set(field_keys)
         bindable_field_keys.add("title")
         declared_fields = _string_list(alias_text, binding.get("fields"), "fields")
@@ -226,6 +228,81 @@ def validate_domain_bindings(
                     alias_text,
                     f"declares unsupported operation(s): {', '.join(unknown_ops)}; allowed: {allowed}",
                 )
+    _validate_generic_http_domain_sync_fields(manifest or {}, binding_field_keys)
+
+
+def _validate_generic_http_domain_sync_fields(
+    manifest: dict[str, Any],
+    binding_field_keys: dict[str, set[str]],
+) -> None:
+    errors: list[str] = []
+    actions = _action_declarations(manifest)
+    for action_key, action in actions.items():
+        if not isinstance(action, dict) or _executor_key(action) != "generic.http":
+            continue
+        spec = action.get("connector_spec") or action.get("connector") or action.get("http")
+        if not isinstance(spec, dict):
+            continue
+        sync = spec.get("sync") or spec.get("domain_sync")
+        if not isinstance(sync, dict):
+            continue
+        binding_alias = str(sync.get("binding") or sync.get("domain_binding") or "").strip()
+        field_keys = binding_field_keys.get(binding_alias)
+        if not field_keys:
+            continue
+
+        remote_id_field = str(sync.get("remote_id_field") or sync.get("external_id_field") or "").strip()
+        if remote_id_field and remote_id_field not in field_keys:
+            errors.append(
+                f"manifest.actions.{action_key}.connector_spec.sync.remote_id_field "
+                f"must be a field on binding '{binding_alias}'"
+            )
+
+        fields_map = sync.get("fields")
+        if not isinstance(fields_map, dict):
+            continue
+        for raw_field_key in fields_map:
+            field_key = str(raw_field_key or "").strip()
+            if not field_key:
+                continue
+            if field_key == "title":
+                errors.append(
+                    f"manifest.actions.{action_key}.connector_spec.sync.fields.title is not a Domain data field; "
+                    "use connector_spec.sync.title instead"
+                )
+            elif field_key not in field_keys:
+                errors.append(
+                    f"manifest.actions.{action_key}.connector_spec.sync.fields.{field_key} "
+                    f"must be a field on binding '{binding_alias}'"
+                )
+
+    if errors:
+        raise WorkspaceAppContractError(
+            {
+                "status": "failed",
+                "contract_version": CONTRACT_VERSION,
+                "errors": errors,
+                "warnings": [],
+            }
+        )
+
+
+def _action_declarations(manifest: dict[str, Any]) -> dict[str, Any]:
+    actions = manifest.get("actions")
+    if actions is None:
+        action_plan = manifest.get("action_plan")
+        if isinstance(action_plan, dict):
+            actions = action_plan.get("actions")
+    return dict(actions) if isinstance(actions, dict) else {}
+
+
+def _executor_key(action: dict[str, Any]) -> str:
+    executor = action.get("executor")
+    if not isinstance(executor, dict):
+        return ""
+    if str(executor.get("type") or "").strip() != "registered":
+        return ""
+    return str(executor.get("key") or "").strip()
 
 
 def active_version(session: Session, app_id: str) -> WorkspaceAppVersion | None:
