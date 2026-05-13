@@ -60,65 +60,87 @@ def mock_session_factory():
     yield session
 
 
+def _async_execute_session(results_sequence):
+    session = MagicMock()
+    session.execute = AsyncMock()
+    call_results = []
+    for item in results_sequence:
+        result_mock = MagicMock()
+        mappings_mock = MagicMock()
+        if isinstance(item, list):
+            mappings_mock.all.return_value = item
+            mappings_mock.first.return_value = item[0] if item else None
+        else:
+            mappings_mock.first.return_value = item
+            mappings_mock.all.return_value = [item] if item else []
+        result_mock.mappings.return_value = mappings_mock
+        call_results.append(result_mock)
+    session.execute.side_effect = call_results
+    return session
+
+
 # -- Recall visibility filtering ---------------------------------------------
 
 class TestRecallVisibilityFilter:
 
-    def test_no_user_context_denies_global_memory_recall(self):
+    async def test_no_user_context_denies_global_memory_recall(self):
         from brain.systems.cognition.graph import graph_augmented_recall
-        session = MagicMock()
-        result_mock = MagicMock()
-        result_mock.mappings.return_value.all.return_value = []
-        session.execute.return_value = result_mock
-        graph_augmented_recall(session, "test", limit=3)
+        session = _async_execute_session([[]])
+        await graph_augmented_recall(session, "test", limit=3)
         sql_arg = session.execute.call_args[0][0]
         query_text = sql_arg.text if hasattr(sql_arg, 'text') else str(sql_arg)
         assert "AND FALSE" in query_text
 
-    def test_with_user_and_org_applies_visibility_clause(self):
+    async def test_with_user_and_org_applies_visibility_clause(self):
         from brain.systems.cognition.graph import graph_augmented_recall
-        session = MagicMock()
-        result_mock = MagicMock()
-        result_mock.mappings.return_value.all.return_value = []
-        session.execute.return_value = result_mock
-        graph_augmented_recall(session, "test", limit=3,
-                               user_id=USER_A["id"], org_id=USER_A["org_id"])
+        session = _async_execute_session([[]])
+        await graph_augmented_recall(
+            session,
+            "test",
+            limit=3,
+            user_id=USER_A["id"],
+            org_id=USER_A["org_id"],
+        )
         sql_arg = session.execute.call_args[0][0]
         query_text = sql_arg.text if hasattr(sql_arg, 'text') else str(sql_arg)
         assert "visibility" in query_text
         assert "private" in query_text
 
-    def test_params_include_user_and_org_ids(self):
+    async def test_params_include_user_and_org_ids(self):
         from brain.systems.cognition.graph import graph_augmented_recall
-        session = MagicMock()
-        result_mock = MagicMock()
-        result_mock.mappings.return_value.all.return_value = []
-        session.execute.return_value = result_mock
-        graph_augmented_recall(session, "test", limit=3,
-                               user_id=USER_A["id"], org_id=USER_A["org_id"])
+        session = _async_execute_session([[]])
+        await graph_augmented_recall(
+            session,
+            "test",
+            limit=3,
+            user_id=USER_A["id"],
+            org_id=USER_A["org_id"],
+        )
         params = session.execute.call_args[0][1]
         assert USER_A["id"] in params.values()
         assert USER_A["org_id"] in params.values()
 
-    def test_graph_traversal_also_filters_visibility(self):
+    async def test_graph_traversal_also_filters_visibility(self):
         """Graph hop must re-apply visibility filter to prevent private memory leakage."""
         from brain.systems.cognition.graph import graph_augmented_recall
-        session = MagicMock()
+        session = _async_execute_session([
+            [
+                {"id": 1, "content": "seed", "memory_type": "lesson", "salience": 5,
+                 "emotion_label": None, "memory_tier": "episodic", "visibility": "org",
+                 "similarity": 0.8}
+            ],
+            [],
+            None,
+            None,
+        ])
 
-        # First execute: vector search returns results; subsequent: graph traversal, updates
-        vector_result = MagicMock()
-        vector_result.mappings.return_value.all.return_value = [
-            {"id": 1, "content": "seed", "memory_type": "lesson", "salience": 5,
-             "emotion_label": None, "memory_tier": "episodic", "visibility": "org",
-             "similarity": 0.8}
-        ]
-        graph_result = MagicMock()
-        graph_result.mappings.return_value.all.return_value = []
-        update_result = MagicMock()
-        session.execute.side_effect = [vector_result, graph_result, update_result, update_result]
-
-        graph_augmented_recall(session, "test", limit=3,
-                               user_id=USER_A["id"], org_id=USER_A["org_id"])
+        await graph_augmented_recall(
+            session,
+            "test",
+            limit=3,
+            user_id=USER_A["id"],
+            org_id=USER_A["org_id"],
+        )
         # The second execute call (graph traversal) should include visibility filter
         graph_sql = session.execute.call_args_list[1][0][0]
         graph_query = graph_sql.text if hasattr(graph_sql, 'text') else str(graph_sql)

@@ -14,6 +14,7 @@ from brain.systems.runs.event_log import (
     list_run_events_after_for_principal_async,
     run_event_to_message,
 )
+from brain.systems.runs.events import async_record_tool_call
 from brain.systems.cortex.events import run_event_scope
 from brain.platform.db.models.run import RunEvent
 
@@ -55,6 +56,40 @@ async def test_record_run_event_allocates_next_sequence_and_normalizes_payload()
     assert added.event_type == "run.activity"
     assert added.producer == "fast"
     session.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_async_record_tool_call_persists_redacted_tool_trace(monkeypatch):
+    recorded = []
+
+    async def _record(run_id, event_type, payload, **kwargs):
+        recorded.append((run_id, event_type, payload, kwargs))
+
+    monkeypatch.setattr("brain.systems.runs.event_log.async_record_run_event", _record)
+
+    await async_record_tool_call(
+        42,
+        "idea-1",
+        "brain_vault",
+        {"key": "OPENAI_API_KEY"},
+        '{"key":"OPENAI_API_KEY","value":"sk-secret"}',
+        source="runner:test",
+    )
+
+    assert recorded == [
+        (
+            42,
+            "run.tool_completed",
+            {
+                "idea_id": "idea-1",
+                "tool_name": "brain_vault",
+                "args": {"key": "OPENAI_API_KEY"},
+                "result": "[secret redacted]",
+                "source": "runner:test",
+            },
+            {"producer": "runner:test"},
+        )
+    ]
 
 
 def test_run_event_to_message_handles_projected_rows_and_replay_flag():

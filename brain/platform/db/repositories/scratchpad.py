@@ -66,13 +66,13 @@ class ScratchpadRepository:
         )
         return [row[0] for row in (await self._session.execute(stmt)).all()]
 
-    def promote(self, run_id: str) -> dict:
+    async def promote(self, run_id: str) -> dict:
         """Gather all scratchpad entries for an AgentRun, formatted for review.
 
         Returns a structured summary organized by section. The parent run
         decides which entries are worth encoding as long-term brain memories.
         """
-        entries = self.read(run_id=run_id)
+        entries = await self.read(run_id=run_id)
         if not entries:
             return {"run_id": run_id, "sections": {}, "total_entries": 0}
 

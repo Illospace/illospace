@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.systems.runs.events import record_tool_call
+from brain.systems.runs.events import async_record_tool_call
 from brain.platform.db.models.org import Org, User
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.integrations.llm import _resolve_key_from_db, _resolve_key_from_env, resolve_llm_client
@@ -923,7 +923,7 @@ def _make_async_tool_wrapper(
             if on_tool_call:
                 on_tool_call(tool_name, kwargs, safe_result_text)
             if run_id and idea_id:
-                record_tool_call(
+                await async_record_tool_call(
                     run_id,
                     idea_id,
                     tool_name,
@@ -938,7 +938,7 @@ def _make_async_tool_wrapper(
         if on_tool_call:
             on_tool_call(tool_name, kwargs, safe_result_text)
         if run_id and idea_id:
-            record_tool_call(
+            await async_record_tool_call(
                 run_id,
                 idea_id,
                 tool_name,

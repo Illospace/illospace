@@ -63,7 +63,7 @@ EDGE_WEIGHT_BONUS = {
 
 
 
-def graph_augmented_recall(
+async def graph_augmented_recall(
     session,
     query_emb_str: str,
     limit: int = 5,
@@ -72,7 +72,7 @@ def graph_augmented_recall(
     org_id: str | None = None,
     service_retrieval: bool = False,
 ) -> list[dict]:
-    """Compatibility wrapper around MemoryRepository graph recall."""
+    """Delegate graph recall to the async memory repository."""
     from brain.platform.db.repositories.memories import MemoryRepository
 
     visibility_context = MemoryVisibilityContext(
@@ -81,7 +81,7 @@ def graph_augmented_recall(
         allow_global=service_retrieval or (user_id == "system"),
         principal_type="service" if service_retrieval or user_id == "system" else None,
     )
-    return MemoryRepository(session).graph_augmented_recall(
+    return await MemoryRepository(session).graph_augmented_recall(
         query_embedding=query_emb_str,
         limit=limit,
         hops=hops,
@@ -120,14 +120,14 @@ def detect_contradictions(session, limit: int = 20) -> list[dict]:
 
 
 
-def get_memory_neighborhood(
+async def get_memory_neighborhood(
     session,
     memory_id: int,
     hops: int = 1,
     user_id: str | None = None,
     org_id: str | None = None,
 ) -> dict:
-    """Compatibility wrapper around MemoryRepository neighborhood reads."""
+    """Delegate neighborhood reads to the async memory repository."""
     from brain.platform.db.repositories.memories import MemoryRepository
 
     visibility_context = MemoryVisibilityContext(
@@ -135,7 +135,7 @@ def get_memory_neighborhood(
         org_id=org_id,
         allow_global=(user_id == "system"),
     )
-    return MemoryRepository(session).get_memory_neighborhood(
+    return await MemoryRepository(session).get_memory_neighborhood(
         memory_id,
         hops=hops,
         context=visibility_context,

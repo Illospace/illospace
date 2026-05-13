@@ -1950,7 +1950,7 @@ class TestExecutionArtifacts:
             if hasattr(_agent_context, "execution_metadata"):
                 delattr(_agent_context, "execution_metadata")
 
-    def test_my_activity_includes_execution_artifacts(self):
+    async def test_my_activity_includes_execution_artifacts(self):
         from brain.systems.runs.direct_agent import _handle_my_activity, _agent_context
 
         class _Run:
@@ -1964,7 +1964,7 @@ class TestExecutionArtifacts:
         _agent_context.tool_calls_log = []
         _agent_context.execution_artifacts = [{"type": "pr", "number": 123, "url": "https://github.com/x/y/pull/123"}]
         try:
-            result = _handle_my_activity()
+            result = await _handle_my_activity()
             assert result["execution_artifacts"][0]["type"] == "pr"
             assert result["execution_artifacts"][0]["number"] == 123
         finally:
@@ -1974,7 +1974,7 @@ class TestExecutionArtifacts:
             _agent_context.tool_calls_log = []
             _agent_context.execution_artifacts = []
 
-    def test_my_activity_loads_persisted_execution_artifacts_from_execution_id(self):
+    async def test_my_activity_loads_persisted_execution_artifacts_from_execution_id(self):
         from brain.systems.runs.direct_agent import _handle_my_activity, _agent_context
 
         class _Run:
@@ -1991,15 +1991,15 @@ class TestExecutionArtifacts:
         try:
             with patch(
                 "brain.systems.runs.tool_catalog.handlers.activity.load_execution_artifacts",
-                return_value=[{"type": "commit", "sha": "abc1234", "summary": "Fix provenance"}],
+                new=AsyncMock(return_value=[{"type": "commit", "sha": "abc1234", "summary": "Fix provenance"}]),
             ) as mock_load, patch(
                 "brain.platform.db.repositories.unit_of_work.UnitOfWork",
                 side_effect=AssertionError("my_activity should not load run execution_artifacts"),
             ):
-                result = _handle_my_activity()
+                result = await _handle_my_activity()
 
             assert result["execution_artifacts"] == [{"type": "commit", "sha": "abc1234", "summary": "Fix provenance"}]
-            mock_load.assert_called_once_with(execution_id="exec-123")
+            mock_load.assert_awaited_once_with(execution_id="exec-123")
         finally:
             _agent_context.run = None
             _agent_context.start_time = None
@@ -2009,7 +2009,7 @@ class TestExecutionArtifacts:
             if hasattr(_agent_context, "execution_metadata"):
                 delattr(_agent_context, "execution_metadata")
 
-    def test_my_activity_does_not_load_persisted_artifacts_without_execution_id(self):
+    async def test_my_activity_does_not_load_persisted_artifacts_without_execution_id(self):
         from brain.systems.runs.direct_agent import _handle_my_activity, _agent_context
 
         class _Run:
@@ -2022,10 +2022,10 @@ class TestExecutionArtifacts:
         _agent_context.reply_contents = []
         _agent_context.tool_calls_log = []
         _agent_context.execution_artifacts = []
-        _agent_context.execution_metadata = {"run_id": 42, "run_id": "run-123"}
+        _agent_context.execution_metadata = {"run_id": "run-123"}
         try:
-            with patch("brain.systems.runs.tool_handlers.load_execution_artifacts") as mock_load:
-                result = _handle_my_activity()
+            with patch("brain.systems.runs.tool_catalog.handlers.activity.load_execution_artifacts") as mock_load:
+                result = await _handle_my_activity()
 
             assert "execution_artifacts" not in result
             mock_load.assert_not_called()

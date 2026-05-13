@@ -15,7 +15,7 @@ import json
 import os
 import re
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -33,15 +33,18 @@ EXPECTED_COLORS = {
 API_STATUSES = ['emerged', 'queued', 'active', 'working', 'needs_input',
                 'unread_reply', 'blocked', 'failed', 'resolved', 'stale']
 
-# Frontend source paths (Svelte component that contains COLORS + bubbleOpacity)
-SVELTE_PATH = Path(__file__).parent.parent / 'frontend' / 'src' / 'lib' / 'components' / 'cortex' / 'CortexSVG.svelte'
+# Frontend source paths (visual helpers + scene component that consume them)
+FRONTEND_SRC = Path(__file__).parent.parent / 'frontend' / 'src'
+VISUALS_PATH = FRONTEND_SRC / 'lib' / 'utils' / 'cortexSvgVisuals.ts'
+SCENE_PATH = FRONTEND_SRC / 'lib' / 'features' / 'workspace-scene' / 'components' / 'WorkspaceScene.svelte'
 
 
 # ── Fixtures ──────────────────────────────────────────────────
 @pytest.fixture
 def svelte_source():
-    assert SVELTE_PATH.exists(), f"CortexSVG.svelte not found at {SVELTE_PATH}"
-    return SVELTE_PATH.read_text()
+    assert VISUALS_PATH.exists(), f"cortexSvgVisuals.ts not found at {VISUALS_PATH}"
+    assert SCENE_PATH.exists(), f"WorkspaceScene.svelte not found at {SCENE_PATH}"
+    return VISUALS_PATH.read_text() + "\n" + SCENE_PATH.read_text()
 
 
 def _fake_idea(id="idea-001", title="Test", status="emerged"):
@@ -67,6 +70,20 @@ def _fake_idea(id="idea-001", title="Test", status="emerged"):
     return m
 
 
+def _fake_async_db():
+    db = MagicMock()
+    empty_result = MagicMock()
+    empty_result.all.return_value = []
+    empty_result.one_or_none.return_value = None
+    db.execute = AsyncMock(return_value=empty_result)
+    db.scalar = AsyncMock(return_value=None)
+    db.scalars = AsyncMock(return_value=empty_result)
+    db.flush = AsyncMock()
+    db.commit = AsyncMock()
+    db.add = MagicMock()
+    return db
+
+
 @pytest.fixture()
 def client():
     """TestClient with auth and DB dependencies overridden."""
@@ -75,7 +92,7 @@ def client():
     from brain.app.api.deps import get_db
 
     app.dependency_overrides[get_current_user] = lambda: service_principal_context("test-cortex-palette")
-    app.dependency_overrides[get_db] = lambda: MagicMock()
+    app.dependency_overrides[get_db] = _fake_async_db
     yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
 
@@ -147,12 +164,12 @@ class TestCortexAPIStatuses:
     @patch("brain.app.api.routers.cortex._ideas.IdeaStateLog")
     def test_update_idea_status(self, MockStateLog, MockIdeaRepo, client, status):
         fake = _fake_idea(status="emerged")
-        MockIdeaRepo.return_value.get.return_value = fake
+        MockIdeaRepo.return_value.a_get = AsyncMock(return_value=fake)
         # After update, the mock should reflect the new status
         fake.status = status
 
         with patch("brain.app.api.routers.cortex._helpers.IdeaRepository") as MockHelperIdeaRepo:
-            MockHelperIdeaRepo.return_value.get.return_value = fake
+            MockHelperIdeaRepo.return_value.a_get = AsyncMock(return_value=fake)
             resp = client.put(
                 "/api/cortex/ideas/idea-001",
                 json={"status": status},
@@ -163,6 +180,6 @@ class TestCortexAPIStatuses:
 
     @patch("brain.app.api.routers.cortex._ideas.IdeaRepository")
     def test_filter_by_status(self, MockIdeaRepo, client):
-        MockIdeaRepo.return_value.list_by_status.return_value = []
+        MockIdeaRepo.return_value.a_list_by_status = AsyncMock(return_value=[])
         resp = client.get("/api/cortex/ideas?status=emerged")
         assert resp.status_code == 200

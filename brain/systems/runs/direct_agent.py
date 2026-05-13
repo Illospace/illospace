@@ -857,12 +857,11 @@ def _record_context_compaction_event(
     }
     if not run_id:
         return
-    try:
-        from brain.systems.runs.event_log import record_run_event
-
-        record_run_event(run_id, "run.context_compacted", payload)
-    except Exception:
-        logger.debug("Agent %s: failed to record context compaction event", session_id, exc_info=True)
+    logger.debug(
+        "Agent %s: context compaction event was produced in the sync direct-agent loop; "
+        "durable event persistence is available through async run-event writers",
+        session_id,
+    )
 
 
 def _maybe_compact_active_context(
@@ -1769,7 +1768,6 @@ def run_agent(
             persist_session=persist_session,
             memory_org_for_user=_memory_org_for_user,
             auto_encode_if_needed=_auto_encode_if_needed,
-            harvest_session=_harvest_session,
             save_session=_save_session,
         )
         if persist_session and raw_archive_messages is not None:

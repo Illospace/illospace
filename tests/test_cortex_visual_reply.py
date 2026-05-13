@@ -34,7 +34,7 @@ def test_cortex_visual_reply_schema_preserves_supported_content_types():
     assert schema["required"] == ["content_type", "title", "content"]
 
 
-def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
+async def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
     import sys
     import brain.systems.runs.tool_catalog.handlers.cortex_reply as cortex_reply
 
@@ -49,7 +49,7 @@ def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
             self.created_at = None
 
     class FakeSession:
-        def execute(self, *_args, **_kwargs):
+        async def execute(self, *_args, **_kwargs):
             return SimpleNamespace(scalar=lambda: 42)
 
         def add(self, block):
@@ -57,17 +57,17 @@ def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
             block.created_at = now
             added_blocks.append(block)
 
-        def flush(self):
+        async def flush(self):
             pass
 
     class FakeUnitOfWork:
         def __init__(self):
             self.session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type, exc, tb):
             return False
 
     run = SimpleNamespace(run_id=123)
@@ -81,7 +81,7 @@ def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
     monkeypatch.setitem(sys.modules, "brain.platform.db.repositories.unit_of_work", fake_uow_mod)
     monkeypatch.setitem(sys.modules, "brain.platform.db.models.idea", fake_idea_mod)
 
-    result = cortex_reply._handle_cortex_visual_reply(
+    result = await cortex_reply._handle_cortex_visual_reply(
         content_type="chart",
         title="Build health",
         content='{"type":"bar","data":[{"label":"passed","value":3}]}',

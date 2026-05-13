@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 class _ScalarResult:
@@ -72,17 +72,17 @@ def _command(binding_id=2, command_id=4, safe_default=True):
     )
 
 
-def test_resolve_run_target_binding_resolves_exact_binding_and_persists_row():
+async def test_resolve_run_target_binding_resolves_exact_binding_and_persists_row():
     from brain.systems.environment import resolve_run_target_binding
 
     session = MagicMock()
-    session.get.return_value = _run()
-    session.scalars.side_effect = [
+    session.get = AsyncMock(return_value=_run())
+    session.scalars = AsyncMock(side_effect=[
         _ScalarResult([_registry()]),
         _ScalarResult([_binding()]),
         _ScalarResult([_service()]),
         _ScalarResult([]),
-    ]
+    ])
 
     added = []
 
@@ -92,8 +92,8 @@ def test_resolve_run_target_binding_resolves_exact_binding_and_persists_row():
 
     session.add.side_effect = _track_add
 
-    with patch("brain.systems.environment.resolver.get_run_target_binding", return_value=None):
-        binding = resolve_run_target_binding(
+    with patch("brain.systems.environment.resolver.get_run_target_binding", new=AsyncMock(return_value=None)):
+        binding = await resolve_run_target_binding(
             session,
             42,
             raw_target_metadata={
@@ -125,21 +125,21 @@ def test_resolve_run_target_binding_resolves_exact_binding_and_persists_row():
     assert binding.resolution_notes["confidence"] >= 0.9
 
 
-def test_resolve_run_target_binding_returns_partial_for_registry_only_match():
+async def test_resolve_run_target_binding_returns_partial_for_registry_only_match():
     from brain.systems.environment import resolve_run_target_binding
 
     session = MagicMock()
-    session.get.return_value = _run(43)
-    session.scalars.side_effect = [
+    session.get = AsyncMock(return_value=_run(43))
+    session.scalars = AsyncMock(side_effect=[
         _ScalarResult([_registry()]),
         _ScalarResult([]),
         _ScalarResult([]),
         _ScalarResult([]),
-    ]
+    ])
     session.add.side_effect = lambda obj: setattr(obj, "id", 100)
 
-    with patch("brain.systems.environment.resolver.get_run_target_binding", return_value=None):
-        binding = resolve_run_target_binding(session, 43, raw_target_metadata={"repo": "illo-brain"})
+    with patch("brain.systems.environment.resolver.get_run_target_binding", new=AsyncMock(return_value=None)):
+        binding = await resolve_run_target_binding(session, 43, raw_target_metadata={"repo": "illo-brain"})
 
     assert binding.resolution_status == "partial"
     assert binding.target_registry_id == 1
@@ -149,21 +149,21 @@ def test_resolve_run_target_binding_returns_partial_for_registry_only_match():
     assert binding.resolution_notes["confidence"] < 0.8
 
 
-def test_resolve_run_target_binding_returns_unknown_for_empty_target():
+async def test_resolve_run_target_binding_returns_unknown_for_empty_target():
     from brain.systems.environment import resolve_run_target_binding
 
     session = MagicMock()
-    session.get.return_value = _run(44)
-    session.scalars.side_effect = [
+    session.get = AsyncMock(return_value=_run(44))
+    session.scalars = AsyncMock(side_effect=[
         _ScalarResult([]),
         _ScalarResult([]),
         _ScalarResult([]),
         _ScalarResult([]),
-    ]
+    ])
     session.add.side_effect = lambda obj: setattr(obj, "id", 101)
 
-    with patch("brain.systems.environment.resolver.get_run_target_binding", return_value=None):
-        binding = resolve_run_target_binding(session, 44, raw_target_metadata={})
+    with patch("brain.systems.environment.resolver.get_run_target_binding", new=AsyncMock(return_value=None)):
+        binding = await resolve_run_target_binding(session, 44, raw_target_metadata={})
 
     assert binding.resolution_status == "unknown"
     assert binding.target_registry_id is None
@@ -173,20 +173,20 @@ def test_resolve_run_target_binding_returns_unknown_for_empty_target():
     assert binding.resolution_notes["confidence"] == 0.0
 
 
-def test_resolve_run_target_binding_uses_materialized_project_context_resource():
+async def test_resolve_run_target_binding_uses_materialized_project_context_resource():
     from brain.systems.environment import resolve_run_target_binding
 
     session = MagicMock()
-    session.get.return_value = _run(46)
-    session.scalars.side_effect = [
+    session.get = AsyncMock(return_value=_run(46))
+    session.scalars = AsyncMock(side_effect=[
         _ScalarResult([]),
         _ScalarResult([]),
         _ScalarResult([]),
-    ]
+    ])
     session.add.side_effect = lambda obj: setattr(obj, "id", 103)
 
-    with patch("brain.systems.environment.resolver.get_run_target_binding", return_value=None):
-        binding = resolve_run_target_binding(
+    with patch("brain.systems.environment.resolver.get_run_target_binding", new=AsyncMock(return_value=None)):
+        binding = await resolve_run_target_binding(
             session,
             46,
             raw_target_metadata={
@@ -215,12 +215,12 @@ def test_resolve_run_target_binding_uses_materialized_project_context_resource()
     assert "Project Context" in binding.resolution_notes["messages"][0]
 
 
-def test_resolve_run_target_binding_stays_partial_when_multiple_bindings_match():
+async def test_resolve_run_target_binding_stays_partial_when_multiple_bindings_match():
     from brain.systems.environment import resolve_run_target_binding
 
     session = MagicMock()
-    session.get.return_value = _run(45)
-    session.scalars.side_effect = [
+    session.get = AsyncMock(return_value=_run(45))
+    session.scalars = AsyncMock(side_effect=[
         _ScalarResult([_registry()]),
         _ScalarResult([
             _binding(),
@@ -237,11 +237,11 @@ def test_resolve_run_target_binding_stays_partial_when_multiple_bindings_match()
         ]),
         _ScalarResult([]),
         _ScalarResult([]),
-    ]
+    ])
     session.add.side_effect = lambda obj: setattr(obj, "id", 102)
 
-    with patch("brain.systems.environment.resolver.get_run_target_binding", return_value=None):
-        binding = resolve_run_target_binding(
+    with patch("brain.systems.environment.resolver.get_run_target_binding", new=AsyncMock(return_value=None)):
+        binding = await resolve_run_target_binding(
             session,
             45,
             raw_target_metadata={
@@ -257,12 +257,12 @@ def test_resolve_run_target_binding_stays_partial_when_multiple_bindings_match()
     assert binding.resolution_notes["confidence"] < 0.8
 
 
-def test_load_run_target_context_exposes_safe_commands_and_services():
+async def test_load_run_target_context_exposes_safe_commands_and_services():
     from brain.systems.environment import load_run_target_context
 
     session = MagicMock()
 
-    with patch("brain.systems.environment.resolver.get_run_target_binding", return_value=SimpleNamespace(
+    with patch("brain.systems.environment.resolver.get_run_target_binding", new=AsyncMock(return_value=SimpleNamespace(
         id=10,
         run_id=45,
         raw_target_metadata={"repo": "illo-brain"},
@@ -273,8 +273,8 @@ def test_load_run_target_context_exposes_safe_commands_and_services():
         resolved_branch="main",
         resolved_service_set=[],
         resolution_notes={"confidence": 0.95, "messages": ["Exact curated binding matched the explicit target metadata."]},
-    )):
-        session.get.side_effect = lambda model, identity: _registry() if getattr(model, "__name__", "") == "TargetRegistry" else SimpleNamespace(
+    ))):
+        session.get = AsyncMock(side_effect=lambda model, identity: _registry() if getattr(model, "__name__", "") == "TargetRegistry" else SimpleNamespace(
             id=2,
             target_registry_id=1,
             env_name="backend",
@@ -283,12 +283,12 @@ def test_load_run_target_context_exposes_safe_commands_and_services():
             deploy_target="local",
             org_id=None,
             metadata_={},
-        )
-        session.scalars.side_effect = [
+        ))
+        session.scalars = AsyncMock(side_effect=[
             _ScalarResult([_command(), _command(command_id=5, safe_default=False)]),
             _ScalarResult([_service(test_command_id=4)]),
-        ]
-        context = load_run_target_context(session, 45)
+        ])
+        context = await load_run_target_context(session, 45)
 
     assert context["binding"]["resolution_status"] == "resolved"
     assert context["binding"]["resolution_confidence"] == 0.95
@@ -301,12 +301,12 @@ def test_load_run_target_context_exposes_safe_commands_and_services():
     assert context["service_test_commands"][0]["command_name"] == "test"
 
 
-def test_load_run_target_context_exposes_execution_defaults_for_low_ambiguity_binding():
+async def test_load_run_target_context_exposes_execution_defaults_for_low_ambiguity_binding():
     from brain.systems.environment import load_run_target_context
 
     session = MagicMock()
 
-    with patch("brain.systems.environment.resolver.get_run_target_binding", return_value=SimpleNamespace(
+    with patch("brain.systems.environment.resolver.get_run_target_binding", new=AsyncMock(return_value=SimpleNamespace(
         id=10,
         run_id=45,
         raw_target_metadata={"repo": "illo-brain"},
@@ -318,8 +318,8 @@ def test_load_run_target_context_exposes_execution_defaults_for_low_ambiguity_bi
         resolved_branch="main",
         resolved_service_set=[],
         resolution_notes={"confidence": 0.95, "messages": ["Exact curated binding matched the explicit target metadata."]},
-    )):
-        session.get.side_effect = lambda model, identity: _registry() if getattr(model, "__name__", "") == "TargetRegistry" else SimpleNamespace(
+    ))):
+        session.get = AsyncMock(side_effect=lambda model, identity: _registry() if getattr(model, "__name__", "") == "TargetRegistry" else SimpleNamespace(
             id=2,
             target_registry_id=1,
             env_name="backend",
@@ -328,12 +328,12 @@ def test_load_run_target_context_exposes_execution_defaults_for_low_ambiguity_bi
             deploy_target="local",
             org_id=None,
             metadata_={},
-        )
-        session.scalars.side_effect = [
+        ))
+        session.scalars = AsyncMock(side_effect=[
             _ScalarResult([_command(), _command(command_id=5, safe_default=False)]),
             _ScalarResult([_service(test_command_id=4)]),
-        ]
-        context = load_run_target_context(session, 45)
+        ])
+        context = await load_run_target_context(session, 45)
 
     defaults = context["execution_defaults"]
     assert defaults["workspace_root"] == "/repos/backend"
@@ -342,12 +342,12 @@ def test_load_run_target_context_exposes_execution_defaults_for_low_ambiguity_bi
     assert defaults["safe_command"]["command_name"] == "test"
 
 
-def test_load_run_target_context_leaves_execution_defaults_empty_when_binding_is_partial():
+async def test_load_run_target_context_leaves_execution_defaults_empty_when_binding_is_partial():
     from brain.systems.environment import load_run_target_context
 
     session = MagicMock()
 
-    with patch("brain.systems.environment.resolver.get_run_target_binding", return_value=SimpleNamespace(
+    with patch("brain.systems.environment.resolver.get_run_target_binding", new=AsyncMock(return_value=SimpleNamespace(
         id=11,
         run_id=46,
         raw_target_metadata={"repo": "illo-brain"},
@@ -359,13 +359,13 @@ def test_load_run_target_context_leaves_execution_defaults_empty_when_binding_is
         resolved_branch=None,
         resolved_service_set=[],
         resolution_notes={"confidence": 0.55, "messages": ["Registry matched, but there was not enough explicit data to bind a specific environment."]},
-    )):
-        session.get.return_value = _registry()
-        session.scalars.side_effect = [
+    ))):
+        session.get = AsyncMock(return_value=_registry())
+        session.scalars = AsyncMock(side_effect=[
             _ScalarResult([_command(), _command(command_id=5, safe_default=False)]),
             _ScalarResult([]),
-        ]
-        context = load_run_target_context(session, 46)
+        ])
+        context = await load_run_target_context(session, 46)
 
     defaults = context["execution_defaults"]
     assert defaults["workspace_root"] is None

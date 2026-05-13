@@ -154,12 +154,12 @@ class TestValidateCuriosityOutput:
 
 
 class TestAuditLastNight:
-    def test_audit_report_structure(self, tmp_path):
+    async def test_audit_report_structure(self, tmp_path):
         """audit_last_night returns proper report structure."""
         with patch("brain.systems.quality.validate.LOGS_DIR", tmp_path / "logs"), \
              patch("brain.systems.quality.validate.PENDING_REFLECTION_PATH", tmp_path / "PENDING_REFLECTION.json"), \
              patch("brain.systems.quality.validate.validate_memory_count", return_value=(True, [])):
-            report = audit_last_night(date(2026, 3, 1))
+            report = await audit_last_night(date(2026, 3, 1))
 
         assert "date" in report
         assert "checks" in report
@@ -167,11 +167,11 @@ class TestAuditLastNight:
         assert "nightly_cycle" in report["checks"]
         assert "curiosity" in report["checks"]
 
-    def test_audit_detects_critical_issues(self, tmp_path):
+    async def test_audit_detects_critical_issues(self, tmp_path):
         with patch("brain.systems.quality.validate.LOGS_DIR", tmp_path / "logs"), \
              patch("brain.systems.quality.validate.PENDING_REFLECTION_PATH", tmp_path / "PENDING_REFLECTION.json"), \
              patch("brain.systems.quality.validate.validate_memory_count", return_value=(True, [])):
-            report = audit_last_night(date(2026, 3, 1))
+            report = await audit_last_night(date(2026, 3, 1))
 
         assert not report["all_passed"]
         assert report["total_issues"] > 0

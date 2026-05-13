@@ -730,7 +730,7 @@ class MemoryRepository(BaseRepository[Memory]):
         results = ranked[:limit]
         result_ids = [item["id"] for item in results]
         await self.touch_memories(result_ids)
-        EdgeRepository(self._session).activate_between(result_ids)
+        await EdgeRepository(self._session).activate_between(result_ids)
         for item in results:
             item.pop("priority", None)
         return results

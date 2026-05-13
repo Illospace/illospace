@@ -192,33 +192,40 @@ class TestVaultSharing:
 
 class TestVaultIsolation:
 
-    def test_user_b_cannot_see_user_a_secrets(self):
+    async def test_user_b_cannot_see_user_a_secrets(self):
         """Vault list_secrets with user_id should scope by user via ORM."""
         from brain.systems.vault import list_secrets
 
         mock_uow = MagicMock()
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
-        mock_uow.session.scalars.return_value.all.return_value = []
-        mock_uow.session.execute.return_value.all.return_value = []
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
+        scalars_result = MagicMock()
+        scalars_result.all.return_value = []
+        execute_result = MagicMock()
+        execute_result.all.return_value = []
+        mock_uow.session.scalars = AsyncMock(return_value=scalars_result)
+        mock_uow.session.execute = AsyncMock(return_value=execute_result)
 
         with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-            result = list_secrets(user_id=USER_B["id"])
+            result = await list_secrets(user_id=USER_B["id"])
         assert isinstance(result, list)
-        mock_uow.session.scalars.assert_called()
+        mock_uow.session.scalars.assert_awaited()
 
-    def test_get_secret_checks_user_id(self):
+    async def test_get_secret_checks_user_id(self):
         """get_secret with user_id should use vault repo's user-scoped lookup."""
         from brain.systems.vault import get_secret
 
         mock_uow = MagicMock()
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
-        mock_uow.vault.get_by_key.return_value = None
-        mock_uow.session.scalars.return_value.first.return_value = None
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
+        mock_uow.vault.get_by_key = AsyncMock(return_value=None)
+        scalars_result = MagicMock()
+        scalars_result.first.return_value = None
+        mock_uow.session.scalars = AsyncMock(return_value=scalars_result)
 
         with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow), \
-             patch("brain.systems.vault._record_missing"), \
+             patch("brain.systems.vault._async_record_missing", new=AsyncMock()), \
              patch.dict(os.environ, {}, clear=False):
-            result = get_secret("SOME_KEY", user_id=USER_A["id"])
-        mock_uow.vault.get_by_key.assert_called_with(USER_A["id"], "SOME_KEY")
+            result = await get_secret("SOME_KEY", user_id=USER_A["id"])
+        assert result is None
+        mock_uow.vault.get_by_key.assert_awaited_once_with(USER_A["id"], "SOME_KEY")

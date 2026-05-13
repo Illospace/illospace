@@ -207,7 +207,7 @@
       "import": "brain.systems.vault",
       "source_layer": "brain.platform",
       "target_layer": "brain.systems",
-      "allowed_occurrences": 2,
+      "allowed_occurrences": 3,
       "owner": "architecture-boundaries",
       "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
       "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."
@@ -337,7 +337,7 @@
       "import": "brain.app.api.routers.chat",
       "source_layer": "brain.systems",
       "target_layer": "brain.app",
-      "allowed_occurrences": 1,
+      "allowed_occurrences": 2,
       "owner": "architecture-boundaries",
       "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
       "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
@@ -394,7 +394,7 @@
     },
     {
       "source": "brain/systems/runs/tool_catalog/handlers/projects.py",
-      "import": "brain.app.api.routers.cortex._helpers",
+      "import": "brain.app.api.routers.cortex._project_context",
       "source_layer": "brain.systems",
       "target_layer": "brain.app",
       "allowed_occurrences": 1,

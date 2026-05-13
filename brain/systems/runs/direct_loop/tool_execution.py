@@ -369,7 +369,7 @@ def emit_resolved_tool_call(
     run_id,
     idea_id,
     tool_call_source: str,
-) -> None:
+) -> str:
     """Append tool_result content and record side effects in block order."""
     tool_results.append({
         "type": "tool_result",
@@ -382,10 +382,30 @@ def emit_resolved_tool_call(
         callback_result_text = "[secret redacted]"
     if on_tool_call:
         on_tool_call(resolved.tool_name, resolved.tool_input, callback_result_text)
-    if run_id and idea_id:
-        from brain.systems.runs.events import record_tool_call
+    return callback_result_text
 
-        record_tool_call(
+
+async def async_emit_resolved_tool_call(
+    resolved: ResolvedToolCall,
+    tool_results: list[dict],
+    on_tool_call,
+    run_id,
+    idea_id,
+    tool_call_source: str,
+) -> None:
+    """Append a tool result and persist its trace through the async event log."""
+    callback_result_text = emit_resolved_tool_call(
+        resolved,
+        tool_results,
+        on_tool_call,
+        None,
+        None,
+        tool_call_source,
+    )
+    if run_id and idea_id:
+        from brain.systems.runs.events import async_record_tool_call
+
+        await async_record_tool_call(
             run_id,
             idea_id,
             resolved.tool_name,
@@ -444,7 +464,7 @@ async def async_execute_parallel_tool_batch(
     threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
     if max_parallel_tool_calls <= 1:
         for request in pending:
-            emit_resolved_tool_call(
+            await async_emit_resolved_tool_call(
                 await async_resolve_tool_call(
                     request,
                     agent_context=agent_context,
@@ -483,7 +503,7 @@ async def async_execute_parallel_tool_batch(
                     result_text=f"Error: {exc}",
                     is_error=True,
                 )
-            emit_resolved_tool_call(
+            await async_emit_resolved_tool_call(
                 resolved,
                 tool_results,
                 on_tool_call,
@@ -721,7 +741,7 @@ async def async_execute_tool_calls(
             continue
 
         await flush_parallel_batch()
-        emit_resolved_tool_call(
+        await async_emit_resolved_tool_call(
             await async_resolve_tool_call(
                 request,
                 agent_context=agent_context,

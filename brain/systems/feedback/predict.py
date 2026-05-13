@@ -309,7 +309,7 @@ async def resolve_prediction(
         logger.warning(f"Failed to resolve prediction: {e}")
 
 
-def encode_insight(reward: RewardSignal, skill_name: str | None = None):
+async def encode_insight(reward: RewardSignal, skill_name: str | None = None):
     """Encode a prediction insight as a brain memory and/or heuristic.
 
     Called when prediction error is high enough to be worth learning from.
@@ -321,7 +321,7 @@ def encode_insight(reward: RewardSignal, skill_name: str | None = None):
     try:
         from brain.app.cli.memory import add_memory
         salience = min(8.0, 5.0 + reward.prediction_error * 3)
-        add_memory(
+        await add_memory(
             content=reward.insight,
             memory_type="lesson",
             salience=salience,

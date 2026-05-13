@@ -15,29 +15,31 @@ import pytest
 class TestScratchpadRepository:
     """Test the repository layer with a mock session."""
 
-    def test_write_creates_entry(self):
+    async def test_write_creates_entry(self):
         from brain.platform.db.repositories.scratchpad import ScratchpadRepository
         from brain.platform.db.models.scratchpad import SessionScratchpad
 
         mock_session = MagicMock()
+        mock_session.flush = AsyncMock()
         repo = ScratchpadRepository(mock_session)
-        entry = repo.write(
+        entry = await repo.write(
             run_id="abc123", section="findings",
             value="Found a bug", key="bug-1", worker_name="develop",
         )
         mock_session.add.assert_called_once()
-        mock_session.flush.assert_called_once()
+        mock_session.flush.assert_awaited_once()
         assert isinstance(entry, SessionScratchpad)
         assert entry.run_id == "abc123"
         assert entry.section == "findings"
         assert entry.key == "bug-1"
 
-    def test_write_without_key(self):
+    async def test_write_without_key(self):
         from brain.platform.db.repositories.scratchpad import ScratchpadRepository
 
         mock_session = MagicMock()
+        mock_session.flush = AsyncMock()
         repo = ScratchpadRepository(mock_session)
-        entry = repo.write(
+        entry = await repo.write(
             run_id="abc123", section="decisions",
             value="Use approach A",
         )

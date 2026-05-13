@@ -357,9 +357,9 @@ async def test_notify_thread_reply_rejects_cross_org_idea_before_enqueue():
     user = {"id": "user-1", "org_id": "org-1", "role": "member"}
 
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=uow), \
-         patch("brain.systems.runs.cortex.admit_run") as mock_admit, \
+         patch("brain.app.triggers.router.async_route_trigger", new=AsyncMock()) as mock_route, \
          pytest.raises(HTTPException) as exc_info:
         await notify_illo(request=request, user=user)
 
     assert exc_info.value.status_code == 404
-    mock_admit.assert_not_called()
+    mock_route.assert_not_called()

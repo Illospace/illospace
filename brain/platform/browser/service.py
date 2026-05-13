@@ -79,7 +79,7 @@ def _browser_harness_state_base() -> Path:
     return Path(WORKSPACE_BROWSER_STATE_DIR).parent / ".browser-harness"
 
 
-def _record_browser_harness_tool_call(
+async def _record_browser_harness_tool_call(
     *,
     run_id: int | None,
     idea_id: str,
@@ -92,7 +92,7 @@ def _record_browser_harness_tool_call(
     if run_id is None:
         return
     try:
-        from brain.systems.runs.events import record_tool_call
+        from brain.systems.runs.events import async_record_tool_call
 
         args = {
             "action": action,
@@ -108,7 +108,7 @@ def _record_browser_harness_tool_call(
         }
         if detail:
             result["detail"] = detail
-        record_tool_call(
+        await async_record_tool_call(
             int(run_id),
             str(idea_id),
             "browser_harness",
@@ -1703,7 +1703,7 @@ class BrowserSessionService:
                     await runtime.navigate(url)
             await runtime.capture_visible_frame(reason="created" if created_session else "opened")
         except Exception as exc:
-            _record_browser_harness_tool_call(
+            await _record_browser_harness_tool_call(
                 run_id=run_id,
                 idea_id=idea_id,
                 session_id=getattr(runtime, "session_id", None),
@@ -1714,7 +1714,7 @@ class BrowserSessionService:
             )
             await runtime._handle_runtime_error(str(exc))
             raise
-        _record_browser_harness_tool_call(
+        await _record_browser_harness_tool_call(
             run_id=run_id,
             idea_id=idea_id,
             session_id=runtime.session_id,

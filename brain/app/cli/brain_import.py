@@ -81,7 +81,7 @@ async def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
                 if dry_run:
                     print(f"  [DRY] Would import: [{m.get('memory_type', '?')}] {m['content'][:60]}...")
                 else:
-                    result = add_memory(
+                    result = await add_memory(
                         content=m['content'],
                         memory_type=m.get('memory_type', 'lesson'),
                         salience=m.get('salience', 5.0),
@@ -190,7 +190,7 @@ async def import_from_workspace(workspace_dir: str, dry_run: bool = False) -> di
         if dry_run:
             print(f"  [{scope}] [{mem['type']}] {mem['content'][:70]}...")
         else:
-            add_memory(
+            await add_memory(
                 content=mem['content'],
                 memory_type=mem['type'],
                 salience=mem.get('salience', 5.0),

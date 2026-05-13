@@ -5,8 +5,10 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from httpx import ASGITransport, AsyncClient, Response
+import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateTable
 
@@ -166,7 +168,11 @@ def _build_request_as(async_session: AsyncSession) -> Callable[..., Awaitable[Re
 async def notification_db_session() -> AsyncIterator[AsyncSession]:
     schema = _schema_name()
     engine = create_async_engine(config.DB_URL)
-    admin_conn = await engine.connect()
+    try:
+        admin_conn = await engine.connect()
+    except (OSError, SQLAlchemyError) as exc:
+        await engine.dispose()
+        pytest.skip(f"Postgres test DB unavailable: {exc}")
     admin_conn = await admin_conn.execution_options(isolation_level="AUTOCOMMIT")
     await admin_conn.execute(text(f'CREATE SCHEMA "{schema}"'))
     conn = await engine.connect()

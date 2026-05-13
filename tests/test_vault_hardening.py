@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from starlette.testclient import TestClient
 
@@ -57,30 +57,30 @@ def test_unlock_rejects_bad_pin_and_returns_session_token_for_good_pin():
     assert good.json()["token"] == "vault-token"
 
 
-def test_brain_vault_requires_user_context():
+async def test_brain_vault_requires_user_context():
     from brain.app.mcp.server import tool_brain_vault
 
-    result = tool_brain_vault("OPENAI_API_KEY")
+    result = await tool_brain_vault("OPENAI_API_KEY")
 
     assert "authenticated user context" in result["error"]
 
 
-def test_vault_secret_prompt_requires_user_context():
+async def test_vault_secret_prompt_requires_user_context():
     from brain.app.mcp.server import tool_vault_secret_prompt
 
-    result = tool_vault_secret_prompt("OPENAI_API_KEY")
+    result = await tool_vault_secret_prompt("OPENAI_API_KEY")
 
     assert "authenticated user context" in result["error"]
 
 
-def test_vault_secret_prompt_records_missing_and_broadcasts_thread_event():
+async def test_vault_secret_prompt_records_missing_and_broadcasts_thread_event():
     from brain.app.mcp.server import tool_vault_secret_prompt
 
     published = []
 
-    with patch("brain.systems.vault.record_missing_request") as record_missing, \
+    with patch("brain.systems.vault.record_missing_request", new=AsyncMock()) as record_missing, \
          patch("brain.systems.cortex.events.publish_safe", side_effect=lambda event, payload: published.append((event, payload))):
-        result = tool_vault_secret_prompt(
+        result = await tool_vault_secret_prompt(
             "example_api_key",
             description="Example API access for generated product workflows.",
             category="api",
@@ -100,7 +100,7 @@ def test_vault_secret_prompt_records_missing_and_broadcasts_thread_event():
     assert result["prompt"]["key_name"] == "EXAMPLE_API_KEY"
     assert "value" not in result
     assert "secret" not in result
-    record_missing.assert_called_once_with(
+    record_missing.assert_awaited_once_with(
         "EXAMPLE_API_KEY",
         user_id=USER["id"],
         org_id=USER["org_id"],
@@ -117,14 +117,14 @@ def test_vault_secret_prompt_records_missing_and_broadcasts_thread_event():
     assert "value" not in payload["prompt"]
 
 
-def test_vault_secret_prompt_handler_uses_execution_metadata_context(monkeypatch):
+async def test_vault_secret_prompt_handler_uses_execution_metadata_context(monkeypatch):
     from brain.systems.runs.execution_context import _agent_context
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_handlers import _get_tool_handlers
 
     captured = {}
 
-    def fake_prompt(key_name, **kwargs):
+    async def fake_prompt(key_name, **kwargs):
         captured["key_name"] = key_name
         captured.update(kwargs)
         return {"status": "opened"}
@@ -144,7 +144,7 @@ def test_vault_secret_prompt_handler_uses_execution_metadata_context(monkeypatch
             },
             "worker_name": "codex-worker",
         }):
-            result = _get_tool_handlers()["vault_secret_prompt"]("github_token")
+            result = await _get_tool_handlers()["vault_secret_prompt"]("github_token")
     finally:
         for key in list(vars(_agent_context).keys()):
             delattr(_agent_context, key)
@@ -160,16 +160,16 @@ def test_vault_secret_prompt_handler_uses_execution_metadata_context(monkeypatch
     assert captured["requested_by"] == "codex-worker"
 
 
-def test_brain_vault_requests_grant_before_reading():
+async def test_brain_vault_requests_grant_before_reading():
     from brain.app.mcp.server import tool_brain_vault
 
-    with patch("brain.systems.vault.authorize_agent_secret_read", return_value={
+    with patch("brain.systems.vault.authorize_agent_secret_read", new=AsyncMock(return_value={
         "allowed": False,
         "status": "pending",
         "grant": {"id": 123},
-    }) as authorize, \
-         patch("brain.systems.vault.get_secret") as get_secret:
-        result = tool_brain_vault(
+    })) as authorize, \
+         patch("brain.systems.vault.get_secret", new=AsyncMock()) as get_secret:
+        result = await tool_brain_vault(
             "OPENAI_API_KEY",
             reason="Need provider access for this run",
             user_id=USER["id"],
@@ -182,16 +182,16 @@ def test_brain_vault_requests_grant_before_reading():
         "grant_id": 123,
         "status": "pending",
     }
-    authorize.assert_called_once()
-    get_secret.assert_not_called()
+    authorize.assert_awaited_once()
+    get_secret.assert_not_awaited()
 
 
-def test_brain_vault_uses_scoped_agent_read_after_grant():
+async def test_brain_vault_uses_scoped_agent_read_after_grant():
     from brain.app.mcp.server import tool_brain_vault
 
-    with patch("brain.systems.vault.authorize_agent_secret_read", return_value={"allowed": True, "status": "approved"}), \
-         patch("brain.systems.vault.get_secret", return_value="secret-value") as get_secret:
-        result = tool_brain_vault(
+    with patch("brain.systems.vault.authorize_agent_secret_read", new=AsyncMock(return_value={"allowed": True, "status": "approved"})), \
+         patch("brain.systems.vault.get_secret", new=AsyncMock(return_value="secret-value")) as get_secret:
+        result = await tool_brain_vault(
             "OPENAI_API_KEY",
             reason="Need provider access for this run",
             user_id=USER["id"],
@@ -200,7 +200,7 @@ def test_brain_vault_uses_scoped_agent_read_after_grant():
         )
 
     assert result == {"key": "OPENAI_API_KEY", "value": "secret-value"}
-    get_secret.assert_called_once_with(
+    get_secret.assert_awaited_once_with(
         "OPENAI_API_KEY",
         user_id=USER["id"],
         org_id=USER["org_id"],
@@ -209,21 +209,12 @@ def test_brain_vault_uses_scoped_agent_read_after_grant():
 
 
 def test_vault_tool_trace_result_is_redacted():
-    from brain.systems.runs.events import record_tool_call
+    from brain.systems.runs.events import redact_tool_call_result
 
-    recorded = []
-
-    def _record(run_id, event_type, payload, **kwargs):
-        recorded.append((run_id, event_type, payload, kwargs))
-
-    with patch("brain.systems.runs.event_log.record_run_event", side_effect=_record):
-        record_tool_call(
-            42,
-            "idea-1",
+    assert (
+        redact_tool_call_result(
             "brain_vault",
-            {"key": "OPENAI_API_KEY"},
             '{"key":"OPENAI_API_KEY","value":"sk-secret"}',
         )
-
-    assert recorded
-    assert recorded[0][2]["result"] == "[secret redacted]"
+        == "[secret redacted]"
+    )

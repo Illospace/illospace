@@ -11,7 +11,7 @@ import logging
 logger = logging.getLogger("agent")
 
 
-def _harvest_session(
+async def _harvest_session(
     session_id: str,
     messages: list[dict],
     *,
@@ -76,7 +76,7 @@ def _harvest_session(
                     confidence=item.confidence,
                     evidence=evidence,
                 )
-                add_memory(
+                await add_memory(
                     content=item.content,
                     memory_type=item.memory_type,
                     salience=item.salience,
@@ -100,7 +100,7 @@ def _harvest_session(
             try:
                 # Build a brief session summary from the first harvest item
                 session_summary = items[0].content[:300]
-                link_session_to_narratives(
+                await link_session_to_narratives(
                     session_id=session_id,
                     session_date=date.today(),
                     session_summary=session_summary,

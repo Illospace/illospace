@@ -132,17 +132,16 @@ def test_create_browser_session_endpoint(monkeypatch):
     assert body["allow_file_uploads"] is False
 
 
-def test_browser_tool_handlers_record_preview_and_screenshot_artifacts(monkeypatch):
+async def test_browser_tool_handlers_record_preview_and_screenshot_artifacts(monkeypatch):
     from brain.systems.runs.tool_catalog.handlers import browser as browser_handlers
 
     persisted: list[dict] = []
-    monkeypatch.setattr(
-        browser_handlers,
-        "_persist_execution_artifacts",
-        lambda artifacts, run_id=None: persisted.extend(artifacts),
-    )
+    async def fake_persist_execution_artifacts(artifacts, run_id=None):
+        persisted.extend(artifacts)
 
-    browser_handlers._record_browser_preview_artifact(
+    monkeypatch.setattr(browser_handlers, "_persist_execution_artifacts_async", fake_persist_execution_artifacts)
+
+    await browser_handlers._record_browser_preview_artifact(
         {
             "id": "sess-preview",
             "status": "ready",
@@ -153,7 +152,7 @@ def test_browser_tool_handlers_record_preview_and_screenshot_artifacts(monkeypat
         },
         source_tool="browser_session_open",
     )
-    browser_handlers._record_browser_saved_artifact(
+    await browser_handlers._record_browser_saved_artifact(
         {
             "session_id": "sess-preview",
             "artifact": {
@@ -195,17 +194,16 @@ def test_browser_tool_handlers_record_preview_and_screenshot_artifacts(monkeypat
     ]
 
 
-def test_browser_tool_handlers_do_not_record_failed_preview(monkeypatch):
+async def test_browser_tool_handlers_do_not_record_failed_preview(monkeypatch):
     from brain.systems.runs.tool_catalog.handlers import browser as browser_handlers
 
     persisted: list[dict] = []
-    monkeypatch.setattr(
-        browser_handlers,
-        "_persist_execution_artifacts",
-        lambda artifacts, run_id=None: persisted.extend(artifacts),
-    )
+    async def fake_persist_execution_artifacts(artifacts, run_id=None):
+        persisted.extend(artifacts)
 
-    browser_handlers._record_browser_preview_artifact(
+    monkeypatch.setattr(browser_handlers, "_persist_execution_artifacts_async", fake_persist_execution_artifacts)
+
+    await browser_handlers._record_browser_preview_artifact(
         {
             "id": "sess-error",
             "status": "error",
@@ -215,7 +213,7 @@ def test_browser_tool_handlers_do_not_record_failed_preview(monkeypatch):
         source_tool="browser_session_open",
     )
 
-    browser_handlers._record_browser_snapshot_artifact(
+    await browser_handlers._record_browser_snapshot_artifact(
         {
             "session_id": "sess-error",
             "frame": {
@@ -232,7 +230,7 @@ def test_browser_tool_handlers_do_not_record_failed_preview(monkeypatch):
         },
         source_tool="browser_snapshot",
     )
-    browser_handlers._record_browser_saved_artifact(
+    await browser_handlers._record_browser_saved_artifact(
         {
             "session_id": "sess-error",
             "artifact": {
@@ -789,9 +787,12 @@ async def test_browser_service_captures_visible_frame_when_agent_opens_session(m
     monkeypatch.setattr(BrowserSessionRuntime, "start", fake_start)
     monkeypatch.setattr(BrowserSessionRuntime, "new_tab", fake_new_tab)
     monkeypatch.setattr(BrowserSessionRuntime, "capture_visible_frame", fake_capture_visible_frame)
+    async def fake_record_browser_harness_tool_call(**kwargs):
+        tool_traces.append(kwargs)
+
     monkeypatch.setattr(
         "brain.platform.browser.service._record_browser_harness_tool_call",
-        lambda **kwargs: tool_traces.append(kwargs),
+        fake_record_browser_harness_tool_call,
     )
 
     class _Session:

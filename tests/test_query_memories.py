@@ -206,13 +206,14 @@ async def test_query_memories_expands_lazy_loads_when_enabled(mock_uow, mock_emb
     mock_load.assert_awaited_once()
 
 
-def test_repository_touch_memories_updates_access_count():
+async def test_repository_touch_memories_updates_access_count():
     from brain.platform.db.repositories.memories import MemoryRepository
 
     session = MagicMock()
+    session.execute = AsyncMock(return_value=MagicMock())
     repo = MemoryRepository(session)
 
-    repo.touch_memories([1, 2])
+    await repo.touch_memories([1, 2])
 
     stmt = session.execute.call_args.args[0]
     compiled = str(
@@ -226,15 +227,17 @@ def test_repository_touch_memories_updates_access_count():
     assert "memories.id IN (1, 2)" in compiled
 
 
-def test_graph_context_applies_visibility_scope_to_recursive_query():
+async def test_graph_context_applies_visibility_scope_to_recursive_query():
     from brain.platform.db.repositories.memories import MemoryRepository
     from brain.platform.db.repositories.memory_visibility import MemoryVisibilityContext
 
     session = MagicMock()
-    session.execute.return_value.mappings.return_value.all.return_value = []
+    result = MagicMock()
+    result.mappings.return_value.all.return_value = []
+    session.execute = AsyncMock(return_value=result)
     repo = MemoryRepository(session)
 
-    repo.get_graph_context(
+    await repo.get_graph_context(
         42,
         context=MemoryVisibilityContext(user_id="user-1", org_id="org-1"),
     )

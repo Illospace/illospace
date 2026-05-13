@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -305,25 +305,22 @@ def test_contract_state_updates_reject_record_collections():
 class _FakeUow:
     session = object()
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    def commit(self):
+    async def commit(self):
         return None
 
 
 class _FakeAsyncDb:
     def __init__(self):
-        self.sync_session = MagicMock()
-
-    async def run_sync(self, fn):
-        return fn(self.sync_session)
+        self.commit = AsyncMock()
 
 
-def test_manage_workspace_app_surfaces_contract_errors():
+async def test_manage_workspace_app_surfaces_contract_errors():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     report = _report(source_code="<main></main>")
@@ -332,17 +329,17 @@ def test_manage_workspace_app_surfaces_contract_errors():
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
-        "brain.systems.workspace_apps.service.create_app",
-        side_effect=WorkspaceAppContractError(report),
+        "brain.systems.workspace_apps.service.a_create_app",
+        new=AsyncMock(side_effect=WorkspaceAppContractError(report)),
     ):
-        result = json.loads(_handle_manage_workspace_app(action="create", name="Bad App"))
+        result = json.loads(await _handle_manage_workspace_app(action="create", name="Bad App"))
 
     assert result["contract_validation"]["status"] == "failed"
     assert "Workspace app contract validation failed" in result["error"]
 
 
 @pytest.mark.asyncio
-async def test_workspace_app_action_route_uses_sync_session_bridge():
+async def test_workspace_app_action_route_uses_async_session():
     from fastapi import HTTPException
 
     from brain.app.api.routers.workspace_apps import run_workspace_app_declared_action
@@ -351,8 +348,8 @@ async def test_workspace_app_action_route_uses_sync_session_bridge():
     db = _FakeAsyncDb()
 
     with patch(
-        "brain.app.api.routers.workspace_apps.run_workspace_app_action",
-        side_effect=WorkspaceAppActionExecutorMissing("missing executor"),
+        "brain.app.api.routers.workspace_apps.async_run_workspace_app_action",
+        new=AsyncMock(side_effect=WorkspaceAppActionExecutorMissing("missing executor")),
     ) as run_action:
         with pytest.raises(HTTPException) as exc:
             await run_workspace_app_declared_action(
@@ -364,14 +361,14 @@ async def test_workspace_app_action_route_uses_sync_session_bridge():
 
     assert exc.value.status_code == 501
     assert exc.value.detail == "missing executor"
-    assert run_action.call_args.args[0] is db.sync_session
+    assert run_action.call_args.args[0] is db
 
 
-def test_manage_workspace_app_schema_ignores_extra_tool_args():
+async def test_manage_workspace_app_schema_ignores_extra_tool_args():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     result = json.loads(
-        _handle_manage_workspace_app(
+        await _handle_manage_workspace_app(
             action="schema",
             operation="create",
             limit=10,
@@ -382,20 +379,20 @@ def test_manage_workspace_app_schema_ignores_extra_tool_args():
     assert result["operation"] == "create"
 
 
-def test_manage_workspace_app_archived_lookup_requires_confirmation():
+async def test_manage_workspace_app_archived_lookup_requires_confirmation():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     with patch(
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork") as uow:
-        result = json.loads(_handle_manage_workspace_app(action="get", app_id="app-1", include_archived=True))
+        result = json.loads(await _handle_manage_workspace_app(action="get", app_id="app-1", include_archived=True))
 
     assert "confirm_include_archived=true" in result["error"]
     uow.assert_not_called()
 
 
-def test_manage_workspace_app_extracts_embedded_contract_fields_from_source_code():
+async def test_manage_workspace_app_extracts_embedded_contract_fields_from_source_code():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     wrapped_source = json.dumps(
@@ -413,13 +410,13 @@ def test_manage_workspace_app_extracts_embedded_contract_fields_from_source_code
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
-        "brain.systems.workspace_apps.service.create_app",
-        return_value=app,
-    ) as create_app, patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
+        "brain.systems.workspace_apps.service.a_create_app",
+        new=AsyncMock(return_value=app),
+    ) as create_app, patch("brain.systems.workspace_apps.service.a_serialize_app", new=AsyncMock(return_value=serialized)), patch(
         "brain.systems.workspace_apps.events.publish_workspace_app_change"
     ):
         result = json.loads(
-            _handle_manage_workspace_app(
+            await _handle_manage_workspace_app(
                 action="create",
                 key="tasks",
                 name="Task Tracker",
@@ -441,7 +438,7 @@ def test_manage_workspace_app_extracts_embedded_contract_fields_from_source_code
     assert "metadata" not in saved_source
 
 
-def test_manage_workspace_app_compiles_minimal_generated_ui_create_payload():
+async def test_manage_workspace_app_compiles_minimal_generated_ui_create_payload():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     app = object()
@@ -451,13 +448,13 @@ def test_manage_workspace_app_compiles_minimal_generated_ui_create_payload():
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
-        "brain.systems.workspace_apps.service.create_app",
-        return_value=app,
-    ) as create_app, patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
+        "brain.systems.workspace_apps.service.a_create_app",
+        new=AsyncMock(return_value=app),
+    ) as create_app, patch("brain.systems.workspace_apps.service.a_serialize_app", new=AsyncMock(return_value=serialized)), patch(
         "brain.systems.workspace_apps.events.publish_workspace_app_change"
     ):
         result = json.loads(
-            _handle_manage_workspace_app(
+            await _handle_manage_workspace_app(
                 action="create",
                 key="leads",
                 name="Lead CRM",
@@ -478,7 +475,7 @@ def test_manage_workspace_app_compiles_minimal_generated_ui_create_payload():
     assert saved_source["views"][0]["type"] == "table"
 
 
-def test_manage_workspace_app_normalizes_wrapped_source_before_contract_errors():
+async def test_manage_workspace_app_normalizes_wrapped_source_before_contract_errors():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     wrapped_source = json.dumps(
@@ -504,11 +501,11 @@ def test_manage_workspace_app_normalizes_wrapped_source_before_contract_errors()
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
-        "brain.systems.workspace_apps.service.create_app",
-        side_effect=validate_then_raise,
+        "brain.systems.workspace_apps.service.a_create_app",
+        new=AsyncMock(side_effect=validate_then_raise),
     ):
         result = json.loads(
-            _handle_manage_workspace_app(
+            await _handle_manage_workspace_app(
                 action="create",
                 key="tasks",
                 name="Task Tracker",
@@ -527,7 +524,7 @@ def test_manage_workspace_app_normalizes_wrapped_source_before_contract_errors()
     assert result["repair_guidance"]["failure_kind"] == "generated_ui_source_shape"
 
 
-def test_manage_workspace_app_extracts_embedded_contract_fields_on_update():
+async def test_manage_workspace_app_extracts_embedded_contract_fields_on_update():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     explicit_manifest = {
@@ -550,13 +547,13 @@ def test_manage_workspace_app_extracts_embedded_contract_fields_on_update():
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
-        "brain.systems.workspace_apps.service.update_app",
-        return_value=app,
-    ) as update_app, patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
+        "brain.systems.workspace_apps.service.a_update_app",
+        new=AsyncMock(return_value=app),
+    ) as update_app, patch("brain.systems.workspace_apps.service.a_serialize_app", new=AsyncMock(return_value=serialized)), patch(
         "brain.systems.workspace_apps.events.publish_workspace_app_change"
     ):
         result = json.loads(
-            _handle_manage_workspace_app(
+            await _handle_manage_workspace_app(
                 action="update",
                 app_id="app-1",
                 renderer_key="generated-ui-app",
@@ -574,7 +571,7 @@ def test_manage_workspace_app_extracts_embedded_contract_fields_on_update():
     assert "manifest" not in json.loads(kwargs["source_code"])
 
 
-def test_manage_workspace_app_update_normalizes_empty_optional_fields():
+async def test_manage_workspace_app_update_normalizes_empty_optional_fields():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     app = object()
@@ -584,13 +581,13 @@ def test_manage_workspace_app_update_normalizes_empty_optional_fields():
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
-        "brain.systems.workspace_apps.service.update_app",
-        return_value=app,
-    ) as update_app, patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
+        "brain.systems.workspace_apps.service.a_update_app",
+        new=AsyncMock(return_value=app),
+    ) as update_app, patch("brain.systems.workspace_apps.service.a_serialize_app", new=AsyncMock(return_value=serialized)), patch(
         "brain.systems.workspace_apps.events.publish_workspace_app_change"
     ):
         result = json.loads(
-            _handle_manage_workspace_app(
+            await _handle_manage_workspace_app(
                 action="update",
                 app_id="app-1",
                 name="",
@@ -611,7 +608,7 @@ def test_manage_workspace_app_update_normalizes_empty_optional_fields():
     assert kwargs["visual_spec"] is None
 
 
-def test_manage_workspace_app_update_parses_json_object_strings():
+async def test_manage_workspace_app_update_parses_json_object_strings():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     app = object()
@@ -623,13 +620,13 @@ def test_manage_workspace_app_update_parses_json_object_strings():
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
-        "brain.systems.workspace_apps.service.update_app",
-        return_value=app,
-    ) as update_app, patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
+        "brain.systems.workspace_apps.service.a_update_app",
+        new=AsyncMock(return_value=app),
+    ) as update_app, patch("brain.systems.workspace_apps.service.a_serialize_app", new=AsyncMock(return_value=serialized)), patch(
         "brain.systems.workspace_apps.events.publish_workspace_app_change"
     ):
         result = json.loads(
-            _handle_manage_workspace_app(
+            await _handle_manage_workspace_app(
                 action="update",
                 app_id="app-1",
                 manifest=json.dumps(manifest),
@@ -643,7 +640,7 @@ def test_manage_workspace_app_update_parses_json_object_strings():
     assert kwargs["visual_spec"] == visual_spec
 
 
-def test_manage_workspace_app_publishes_change_after_create():
+async def test_manage_workspace_app_publishes_change_after_create():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     app = object()
@@ -653,12 +650,12 @@ def test_manage_workspace_app_publishes_change_after_create():
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
-        "brain.systems.workspace_apps.service.create_app",
-        return_value=app,
-    ), patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
+        "brain.systems.workspace_apps.service.a_create_app",
+        new=AsyncMock(return_value=app),
+    ), patch("brain.systems.workspace_apps.service.a_serialize_app", new=AsyncMock(return_value=serialized)), patch(
         "brain.systems.workspace_apps.events.publish_workspace_app_change"
     ) as publish:
-        result = json.loads(_handle_manage_workspace_app(action="create", name="Quick App"))
+        result = json.loads(await _handle_manage_workspace_app(action="create", name="Quick App"))
 
     assert result["app"] == serialized
     publish.assert_called_once_with(
@@ -668,7 +665,7 @@ def test_manage_workspace_app_publishes_change_after_create():
     )
 
 
-def test_manage_workspace_app_publishes_change_after_archive():
+async def test_manage_workspace_app_publishes_change_after_archive():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     archive_result = {"archived": {"id": "app-1", "key": "quick"}}
@@ -677,10 +674,10 @@ def test_manage_workspace_app_publishes_change_after_archive():
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
-        "brain.systems.workspace_apps.service.archive_app",
-        return_value=archive_result,
+        "brain.systems.workspace_apps.service.a_archive_app",
+        new=AsyncMock(return_value=archive_result),
     ), patch("brain.systems.workspace_apps.events.publish_workspace_app_change") as publish:
-        result = json.loads(_handle_manage_workspace_app(action="archive", app_id="app-1"))
+        result = json.loads(await _handle_manage_workspace_app(action="archive", app_id="app-1"))
 
     assert result == archive_result
     publish.assert_called_once_with(
@@ -691,7 +688,7 @@ def test_manage_workspace_app_publishes_change_after_archive():
     )
 
 
-def test_manage_workspace_app_publishes_change_after_restore():
+async def test_manage_workspace_app_publishes_change_after_restore():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     app = object()
@@ -701,13 +698,13 @@ def test_manage_workspace_app_publishes_change_after_restore():
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
-        "brain.systems.workspace_apps.service.restore_app",
-        return_value=app,
-    ), patch("brain.systems.workspace_apps.service.serialize_app", return_value=serialized), patch(
+        "brain.systems.workspace_apps.service.a_restore_app",
+        new=AsyncMock(return_value=app),
+    ), patch("brain.systems.workspace_apps.service.a_serialize_app", new=AsyncMock(return_value=serialized)), patch(
         "brain.systems.workspace_apps.events.publish_workspace_app_change"
     ) as publish:
         result = json.loads(
-            _handle_manage_workspace_app(
+            await _handle_manage_workspace_app(
                 action="restore",
                 app_id="app-1",
                 confirm_restore_archived=True,
@@ -722,16 +719,16 @@ def test_manage_workspace_app_publishes_change_after_restore():
     )
 
 
-def test_manage_workspace_app_restore_requires_explicit_confirmation():
+async def test_manage_workspace_app_restore_requires_explicit_confirmation():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
     with patch(
         "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
         return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
     ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=_FakeUow()), patch(
-        "brain.systems.workspace_apps.service.restore_app",
+        "brain.systems.workspace_apps.service.a_restore_app",
     ) as restore_app:
-        result = json.loads(_handle_manage_workspace_app(action="restore", app_id="app-1"))
+        result = json.loads(await _handle_manage_workspace_app(action="restore", app_id="app-1"))
 
     assert "confirm_restore_archived=true" in result["error"]
     restore_app.assert_not_called()

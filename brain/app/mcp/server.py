@@ -200,14 +200,14 @@ def _validate_skill_asset_path(path: str) -> str:
     return cleaned
 
 
-def _add_attribution(session, memories: list[dict], current_user_id: str) -> list[dict]:
+async def _add_attribution(session, memories: list[dict], current_user_id: str) -> list[dict]:
     """Add attribution info to shared memories from other users.
 
     If the source user has attribution_enabled=True, shows their name.
     Otherwise, shows "A teammate" (anonymous).
     """
     try:
-        return MemoryRepository(session).add_attribution(memories, current_user_id)
+        return await MemoryRepository(session).add_attribution(memories, current_user_id)
     except Exception:
         pass
     return memories
@@ -1105,7 +1105,7 @@ def tool_brain_encode(
     )
 
 
-def tool_brain_vault(
+async def tool_brain_vault(
     key: str,
     reason: str | None = None,
     user_id: str | None = None,
@@ -1120,7 +1120,7 @@ def tool_brain_vault(
     from brain.systems.vault import authorize_agent_secret_read, get_secret
     if not user_id:
         return {"error": "Vault access requires an authenticated user context"}
-    authorization = authorize_agent_secret_read(
+    authorization = await authorize_agent_secret_read(
         key,
         user_id=user_id,
         org_id=org_id,
@@ -1140,7 +1140,7 @@ def tool_brain_vault(
                 "status": "pending",
             }
         return {"error": authorization.get("reason") or "Vault grant denied"}
-    value = get_secret(
+    value = await get_secret(
         key,
         user_id=user_id,
         org_id=org_id,
@@ -1192,7 +1192,7 @@ def _vault_prompt_url(
     })
 
 
-def tool_vault_secret_prompt(
+async def tool_vault_secret_prompt(
     key_name: str,
     description: str | None = None,
     category: str = "api",
@@ -1242,7 +1242,7 @@ def tool_vault_secret_prompt(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    record_missing_request(normalized_key, user_id=normalized_user_id, org_id=normalized_org_id)
+    await record_missing_request(normalized_key, user_id=normalized_user_id, org_id=normalized_org_id)
 
     if normalized_idea_id:
         publish_safe("vault_secret_prompt", {

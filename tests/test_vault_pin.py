@@ -3,7 +3,7 @@
 import os
 import pytest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 from cryptography.fernet import Fernet
 
@@ -36,6 +36,8 @@ def mock_vault_uow(config_store, session_store):
     mock_uow = MagicMock()
     mock_uow.__enter__ = MagicMock(return_value=mock_uow)
     mock_uow.__exit__ = MagicMock(return_value=False)
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
 
     def scalars_side_effect(stmt):
         """Simulate SELECT on VaultConfig by key."""
@@ -86,14 +88,14 @@ def mock_vault_uow(config_store, session_store):
             return session_store.get(primary_key)
         return None
 
-    mock_uow.session.scalars.side_effect = scalars_side_effect
+    mock_uow.session.scalars = AsyncMock(side_effect=scalars_side_effect)
     mock_uow.session.add.side_effect = add_side_effect
-    mock_uow.session.delete.side_effect = delete_side_effect
-    mock_uow.session.get.side_effect = get_side_effect
+    mock_uow.session.delete = AsyncMock(side_effect=delete_side_effect)
+    mock_uow.session.get = AsyncMock(side_effect=get_side_effect)
 
     # Also mock vault repo for get_secret/require_secret
     mock_uow.vault = MagicMock()
-    mock_uow.vault.get_by_key.return_value = None
+    mock_uow.vault.get_by_key = AsyncMock(return_value=None)
     mock_uow.session.execute = MagicMock()
 
     return mock_uow
@@ -106,70 +108,70 @@ def patch_uow(mock_vault_uow):
         yield mock_vault_uow
 
 
-def test_set_pin_stores_hash(patch_uow, config_store):
+async def test_set_pin_stores_hash(patch_uow, config_store):
     from brain.systems.vault import set_pin, has_pin
-    result = set_pin(USER_ID, "1234")
+    result = await set_pin(USER_ID, "1234")
     assert result is True
     assert f"pin:{USER_ID}:hash" in config_store
     assert len(config_store[f"pin:{USER_ID}:hash"]) > 0
 
 
-def test_has_pin_false_initially(patch_uow):
+async def test_has_pin_false_initially(patch_uow):
     from brain.systems.vault import has_pin
-    assert has_pin(USER_ID) is False
+    assert await has_pin(USER_ID) is False
 
 
-def test_has_pin_true_after_set(patch_uow, config_store):
+async def test_has_pin_true_after_set(patch_uow, config_store):
     from brain.systems.vault import set_pin, has_pin
-    set_pin(USER_ID, "1234")
-    assert has_pin(USER_ID) is True
+    await set_pin(USER_ID, "1234")
+    assert await has_pin(USER_ID) is True
 
 
-def test_verify_pin_correct(patch_uow, config_store):
+async def test_verify_pin_correct(patch_uow, config_store):
     from brain.systems.vault import set_pin, verify_pin
-    set_pin(USER_ID, "1234")
-    assert verify_pin(USER_ID, "1234") is True
+    await set_pin(USER_ID, "1234")
+    assert await verify_pin(USER_ID, "1234") is True
 
 
-def test_verify_pin_wrong(patch_uow, config_store):
+async def test_verify_pin_wrong(patch_uow, config_store):
     from brain.systems.vault import set_pin, verify_pin
-    set_pin(USER_ID, "1234")
-    assert verify_pin(USER_ID, "wrong") is False
+    await set_pin(USER_ID, "1234")
+    assert await verify_pin(USER_ID, "wrong") is False
     assert config_store[f"pin:{USER_ID}:failures"] == '1'
 
 
-def test_verify_pin_lockout_after_3_failures(patch_uow, config_store):
+async def test_verify_pin_lockout_after_3_failures(patch_uow, config_store):
     from brain.systems.vault import set_pin, verify_pin
-    set_pin(USER_ID, "1234")
-    verify_pin(USER_ID, "wrong1")
-    verify_pin(USER_ID, "wrong2")
-    verify_pin(USER_ID, "wrong3")
+    await set_pin(USER_ID, "1234")
+    await verify_pin(USER_ID, "wrong1")
+    await verify_pin(USER_ID, "wrong2")
+    await verify_pin(USER_ID, "wrong3")
     assert f"pin:{USER_ID}:lockout" in config_store
     assert config_store[f"pin:{USER_ID}:lockout"] != ''
     # Should still fail even with correct pin during lockout
-    assert verify_pin(USER_ID, "1234") is False
+    assert await verify_pin(USER_ID, "1234") is False
 
 
-def test_verify_pin_lockout_expires(patch_uow, config_store):
+async def test_verify_pin_lockout_expires(patch_uow, config_store):
     from brain.systems.vault import set_pin, verify_pin
-    set_pin(USER_ID, "1234")
-    verify_pin(USER_ID, "wrong1")
-    verify_pin(USER_ID, "wrong2")
-    verify_pin(USER_ID, "wrong3")
+    await set_pin(USER_ID, "1234")
+    await verify_pin(USER_ID, "wrong1")
+    await verify_pin(USER_ID, "wrong2")
+    await verify_pin(USER_ID, "wrong3")
     # Set lockout to past
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     config_store[f"pin:{USER_ID}:lockout"] = past
-    assert verify_pin(USER_ID, "1234") is True
+    assert await verify_pin(USER_ID, "1234") is True
 
 
-def test_verify_pin_no_pin_set(patch_uow):
+async def test_verify_pin_no_pin_set(patch_uow):
     from brain.systems.vault import verify_pin
-    assert verify_pin(USER_ID, "anything") is True
+    assert await verify_pin(USER_ID, "anything") is True
 
 
-def test_generate_vault_token(patch_uow, session_store):
+async def test_generate_vault_token(patch_uow, session_store):
     from brain.systems.vault import generate_vault_token
-    token, expires = generate_vault_token(USER_ID)
+    token, expires = await generate_vault_token(USER_ID)
     assert token is not None
     assert len(token) > 10
     assert expires > datetime.now(timezone.utc)
@@ -181,82 +183,82 @@ def test_generate_vault_token(patch_uow, session_store):
     assert stored.expires_at.tzinfo is not None
 
 
-def test_validate_vault_token_valid(patch_uow, session_store):
+async def test_validate_vault_token_valid(patch_uow, session_store):
     from brain.systems.vault import generate_vault_token, validate_vault_token
-    token, _ = generate_vault_token(USER_ID)
-    assert validate_vault_token(USER_ID, token) is True
+    token, _ = await generate_vault_token(USER_ID)
+    assert await validate_vault_token(USER_ID, token) is True
     stored = next(iter(session_store.values()))
     assert stored.last_seen_at is not None
     assert stored.last_seen_at.tzinfo is not None
 
 
-def test_validate_vault_token_expired(patch_uow, session_store):
+async def test_validate_vault_token_expired(patch_uow, session_store):
     from brain.systems.vault import generate_vault_token, validate_vault_token
-    token, _ = generate_vault_token(USER_ID)
+    token, _ = await generate_vault_token(USER_ID)
     # Set expiry to past
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).replace(tzinfo=None).isoformat()
     stored = next(iter(session_store.values()))
     stored.expires_at = datetime.fromisoformat(past)
-    assert validate_vault_token(USER_ID, token) is False
+    assert await validate_vault_token(USER_ID, token) is False
     assert stored.revoked_at is not None
     assert stored.revoked_at.tzinfo is not None
 
 
-def test_validate_vault_token_accepts_naive_utc_session_in_non_utc_db_timezone(patch_uow, session_store):
+async def test_validate_vault_token_accepts_naive_utc_session_in_non_utc_db_timezone(patch_uow, session_store):
     from brain.systems.vault import generate_vault_token, validate_vault_token
 
-    token, expires = generate_vault_token(USER_ID)
+    token, expires = await generate_vault_token(USER_ID)
     stored = next(iter(session_store.values()))
 
     # Test doubles and old rows can still surface naive UTC values. These must
     # be treated as UTC timestamps, not as local server wall time.
     stored.expires_at = expires.replace(tzinfo=None)
-    assert validate_vault_token(USER_ID, token) is True
+    assert await validate_vault_token(USER_ID, token) is True
 
 
-def test_validate_vault_token_empty(patch_uow):
+async def test_validate_vault_token_empty(patch_uow):
     from brain.systems.vault import validate_vault_token
-    assert validate_vault_token(USER_ID, "") is False
-    assert validate_vault_token(USER_ID, None) is False
+    assert await validate_vault_token(USER_ID, "") is False
+    assert await validate_vault_token(USER_ID, None) is False
 
 
-def test_validate_vault_token_unknown(patch_uow):
+async def test_validate_vault_token_unknown(patch_uow):
     from brain.systems.vault import validate_vault_token
-    assert validate_vault_token(USER_ID, "nonexistent-token") is False
+    assert await validate_vault_token(USER_ID, "nonexistent-token") is False
 
 
-def test_validate_vault_token_rejects_other_user(patch_uow):
+async def test_validate_vault_token_rejects_other_user(patch_uow):
     from brain.systems.vault import generate_vault_token, validate_vault_token
-    token, _ = generate_vault_token(USER_ID)
-    assert validate_vault_token("user-2", token) is False
+    token, _ = await generate_vault_token(USER_ID)
+    assert await validate_vault_token("user-2", token) is False
 
 
-def test_revoke_vault_token(patch_uow, session_store):
+async def test_revoke_vault_token(patch_uow, session_store):
     from brain.systems.vault import generate_vault_token, revoke_vault_token, validate_vault_token
-    token, _ = generate_vault_token(USER_ID)
-    revoke_vault_token(USER_ID, token)
+    token, _ = await generate_vault_token(USER_ID)
+    await revoke_vault_token(USER_ID, token)
     stored = next(iter(session_store.values()))
     assert stored.revoked_at is not None
     assert stored.revoked_at.tzinfo is not None
-    assert validate_vault_token(USER_ID, token) is False
+    assert await validate_vault_token(USER_ID, token) is False
 
 
-def test_require_secret_raises_when_missing(patch_uow):
+async def test_require_secret_raises_when_missing(patch_uow):
     from brain.systems.vault import require_secret
     with pytest.raises(ValueError, match="not found"):
-        require_secret("NONEXISTENT_KEY", user_id=USER_ID)
+        await require_secret("NONEXISTENT_KEY", user_id=USER_ID)
 
 
-def test_require_secret_returns_value(patch_uow, monkeypatch):
+async def test_require_secret_returns_value(patch_uow, monkeypatch):
     monkeypatch.setenv("SOME_SECRET", "hello")
     from brain.systems.vault import require_secret
-    assert require_secret("SOME_SECRET", user_id=USER_ID, allow_env_fallback=True) == "hello"
+    assert await require_secret("SOME_SECRET", user_id=USER_ID, allow_env_fallback=True) == "hello"
 
 
-def test_set_pin_change_requires_current(patch_uow, config_store):
+async def test_set_pin_change_requires_current(patch_uow, config_store):
     from brain.systems.vault import set_pin
-    set_pin(USER_ID, "1234")
+    await set_pin(USER_ID, "1234")
     # Try changing without correct current PIN
-    assert set_pin(USER_ID, "5678", "wrong") is False
+    assert await set_pin(USER_ID, "5678", "wrong") is False
     # Change with correct current PIN
-    assert set_pin(USER_ID, "5678", "1234") is True
+    assert await set_pin(USER_ID, "5678", "1234") is True
