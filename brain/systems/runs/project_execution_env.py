@@ -22,21 +22,66 @@ class ProjectExecutionEnv:
     sensitive_values: list[str]
 
 
+def _current_context_run_id() -> int | str | None:
+    run = getattr(_agent_context, "run", None)
+    return getattr(run, "run_id", None) or getattr(run, "id", None) or getattr(_agent_context, "run_id", None)
+
+
+def _run_payload_context(run: object) -> dict | None:
+    target_payload = dict(
+        getattr(run, "target_metadata", None)
+        or getattr(run, "target_ref", None)
+        or {}
+    )
+    workspace_payload = dict(getattr(run, "workspace_ref", None) or {})
+    snapshot = target_payload.get("project_context_snapshot") or workspace_payload.get("project_context_snapshot")
+    if isinstance(snapshot, dict):
+        target_payload["project_context_snapshot"] = snapshot
+
+    workspace_root = (
+        workspace_payload.get("resolved_workspace_root")
+        or workspace_payload.get("workspace_root")
+    )
+    workspaces = workspace_payload.get("workspaces")
+    if (not isinstance(workspace_root, str) or not workspace_root.strip()) and isinstance(workspaces, list):
+        workspace_root = next(
+            (
+                item["path"].strip()
+                for item in workspaces
+                if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"].strip()
+            ),
+            None,
+        )
+
+    if not target_payload and not workspace_root:
+        return None
+
+    workspace_root = workspace_root.strip() if isinstance(workspace_root, str) and workspace_root.strip() else None
+    defaults = {"workspace_root": workspace_root, "workspace_hint": workspace_root} if workspace_root else {}
+    return {"binding": {"raw_target_metadata": target_payload}, "execution_defaults": defaults}
+
+
 def _current_run_target_context() -> dict | None:
     """Load the current run target context, if the tool call is running inside one."""
-    run = getattr(_agent_context, "run", None)
-    run_id = getattr(run, "run_id", None)
+    run_id = _current_context_run_id()
     if not run_id:
         return None
 
     try:
+        from brain.platform.db.models.run import AgentRun
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
         from brain.systems.environment import load_run_target_context
 
         with UnitOfWork() as uow:
-            return load_run_target_context(uow.session, run_id)
+            context = load_run_target_context(uow.session, int(run_id))
+            if context:
+                return context
+            run = uow.session.get(AgentRun, int(run_id))
+            if run:
+                return _run_payload_context(run)
     except Exception:
         return None
+    return None
 
 
 def _current_workspace_root_hint() -> str | None:
