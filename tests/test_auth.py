@@ -9,16 +9,15 @@ import os
 import sys
 import json
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import bcrypt
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Patch legacy DB pool before importing server (it may touch DB at import)
-with patch("brain.platform.db.legacy._get_pool"), \
-     patch("brain.systems.runs.cortex.ensure_schema"), \
+# Patch runtime side effects before importing server.
+with patch("brain.systems.runs.cortex.ensure_schema"), \
      patch("brain.systems.runs.cortex.start_runner"):
     import brain.app.api.main as server_module
     from brain.app.api.main import app
@@ -62,33 +61,33 @@ def client():
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestAuthenticate:
-    def test_correct_password_returns_user(self):
+    async def test_correct_password_returns_user(self):
         user = _make_user(password="correct")
-        with patch("brain.systems.auth.users.get_user_by_email", return_value=user):
-            from brain.systems.auth.users import authenticate
-            result = authenticate("alex@illo.ai", "correct")
+        with patch("brain.systems.auth.users.async_get_user_by_email", new=AsyncMock(return_value=user)):
+            from brain.systems.auth.users import async_authenticate
+            result = await async_authenticate("alex@illo.ai", "correct")
             assert result is not None
             assert result["email"] == "alex@illo.ai"
 
-    def test_wrong_password_returns_none(self):
+    async def test_wrong_password_returns_none(self):
         user = _make_user(password="correct")
-        with patch("brain.systems.auth.users.get_user_by_email", return_value=user):
-            from brain.systems.auth.users import authenticate
-            result = authenticate("alex@illo.ai", "wrong")
+        with patch("brain.systems.auth.users.async_get_user_by_email", new=AsyncMock(return_value=user)):
+            from brain.systems.auth.users import async_authenticate
+            result = await async_authenticate("alex@illo.ai", "wrong")
             assert result is None
 
-    def test_unknown_email_returns_none(self):
-        with patch("brain.systems.auth.users.get_user_by_email", return_value=None):
-            from brain.systems.auth.users import authenticate
-            result = authenticate("nobody@example.com", "anything")
+    async def test_unknown_email_returns_none(self):
+        with patch("brain.systems.auth.users.async_get_user_by_email", new=AsyncMock(return_value=None)):
+            from brain.systems.auth.users import async_authenticate
+            result = await async_authenticate("nobody@example.com", "anything")
             assert result is None
 
-    def test_no_password_hash_returns_none(self):
+    async def test_no_password_hash_returns_none(self):
         user = _make_user()
         user["password_hash"] = None
-        with patch("brain.systems.auth.users.get_user_by_email", return_value=user):
-            from brain.systems.auth.users import authenticate
-            result = authenticate("alex@illo.ai", "hunter2")
+        with patch("brain.systems.auth.users.async_get_user_by_email", new=AsyncMock(return_value=user)):
+            from brain.systems.auth.users import async_authenticate
+            result = await async_authenticate("alex@illo.ai", "hunter2")
             assert result is None
 
 
@@ -185,28 +184,28 @@ class TestCrossUserIsolation:
     require a live DB with two users and should run in the migration acceptance suite.
     """
 
-    def test_get_user_by_email_returns_none_for_unknown(self):
+    async def test_get_user_by_email_returns_none_for_unknown(self):
         """DB layer: unknown email -> None (not another user's record)."""
         mock_uow = MagicMock()
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
-        mock_uow.team.get_by_email.return_value = None
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
+        mock_uow.team.get_by_email = AsyncMock(return_value=None)
 
         with patch("brain.systems.auth.users.UnitOfWork", return_value=mock_uow):
-            from brain.systems.auth.users import get_user_by_email
-            result = get_user_by_email("nobody@example.com")
+            from brain.systems.auth.users import async_get_user_by_email
+            result = await async_get_user_by_email("nobody@example.com")
             assert result is None
 
-    def test_get_user_by_id_returns_none_for_wrong_id(self):
+    async def test_get_user_by_id_returns_none_for_wrong_id(self):
         """DB layer: wrong user_id -> None."""
         mock_uow = MagicMock()
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
-        mock_uow.team.get_by_id.return_value = None
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
+        mock_uow.team.get_by_id = AsyncMock(return_value=None)
 
         with patch("brain.systems.auth.users.UnitOfWork", return_value=mock_uow):
-            from brain.systems.auth.users import get_user_by_id
-            result = get_user_by_id("ffffffff-ffff-ffff-ffff-ffffffffffff")
+            from brain.systems.auth.users import async_get_user_by_id
+            result = await async_get_user_by_id("ffffffff-ffff-ffff-ffff-ffffffffffff")
             assert result is None
 
     def test_safe_user_context_strips_password_hash(self):

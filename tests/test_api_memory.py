@@ -10,12 +10,7 @@ from httpx import ASGITransport, AsyncClient
 @pytest.fixture(autouse=True)
 def mock_session_factory():
     session = MagicMock()
-
-    def _factory():
-        return session
-
-    with patch("brain.platform.db.legacy.legacy_session_factory", _factory):
-        yield session
+    yield session
 
 
 def _make_memory(**overrides):

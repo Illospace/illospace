@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import json
+import inspect
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,7 @@ from statistics import median
 from typing import Any
 
 from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.common.env import env_flag as _shared_env_flag
 from brain.kernel.common.env import env_float as _shared_env_float
@@ -18,21 +20,21 @@ from brain.kernel.common.env import env_int as _shared_env_int
 
 from brain.platform.db.models.agent import AgentApiCall
 from brain.platform.db.models.routing import ProviderHealthSnapshot, RoutingDecision, RoutingExperiment
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.providers.model_policy import (
     DEFAULT_MODEL_TIER,
     DEFAULT_PROVIDER_MODEL_MAPS,
     SkillRoutingProfile,
+    async_get_provider_model_map,
+    async_resolve_default_provider,
+    async_resolve_provider_selection,
+    async_resolve_skill_routing_profile,
+    async_resolve_skill_runtime,
     calculate_model_cost,
-    get_provider_model_map,
     infer_provider_from_model,
     normalize_model_name,
     normalize_model_tier,
     normalize_runtime_provider,
-    resolve_default_provider,
-    resolve_provider_selection,
-    resolve_skill_routing_profile,
-    resolve_skill_runtime,
 )
 
 logger = logging.getLogger("routing.marketplace")
@@ -48,6 +50,26 @@ def _env_int(name: str, default: int) -> int:
 
 def _env_float(name: str, default: float) -> float:
     return _shared_env_float(name, default)
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _session_execute(session: Any, *args: Any, **kwargs: Any) -> Any:
+    return await _maybe_await(session.execute(*args, **kwargs))
+
+
+async def _session_scalars(session: Any, *args: Any, **kwargs: Any) -> Any:
+    return await _maybe_await(session.scalars(*args, **kwargs))
+
+
+async def _session_flush(session: Any) -> None:
+    flush = getattr(session, "flush", None)
+    if callable(flush):
+        await _maybe_await(flush())
 
 
 def _optional_text(value: Any) -> str | None:
@@ -219,21 +241,24 @@ def _health_confidence(snapshot: dict[str, Any] | None, *, min_samples: int) -> 
     }
 
 
-def _load_provider_health_rollup(
-    session,
+async def _load_provider_health_rollup(
+    session: Any,
     provider: str,
     *,
     lookback_hours: int,
 ) -> dict[str, Any] | None:
     window_start, window_end = _window_range(lookback_hours)
     try:
-        rows = session.execute(
-            select(ProviderHealthSnapshot)
-            .where(
-                ProviderHealthSnapshot.provider == provider,
-                ProviderHealthSnapshot.window_end >= window_start,
+        rows = (
+            await _session_execute(
+                session,
+                select(ProviderHealthSnapshot)
+                .where(
+                    ProviderHealthSnapshot.provider == provider,
+                    ProviderHealthSnapshot.window_end >= window_start,
+                )
+                .order_by(ProviderHealthSnapshot.window_end.desc(), ProviderHealthSnapshot.id.desc()),
             )
-            .order_by(ProviderHealthSnapshot.window_end.desc(), ProviderHealthSnapshot.id.desc())
         ).scalars().all()
     except Exception:
         return None
@@ -282,15 +307,15 @@ def _load_provider_health_rollup(
     }
 
 
-def _load_health_context(
-    session,
+async def _load_health_context(
+    session: Any,
     provider: str,
     model: str,
     *,
     lookback_hours: int,
 ) -> dict[str, Any]:
-    model_snapshot = _load_latest_health_snapshot(session, provider, model)
-    provider_snapshot = _load_provider_health_rollup(session, provider, lookback_hours=lookback_hours)
+    model_snapshot = await _load_latest_health_snapshot(session, provider, model)
+    provider_snapshot = await _load_provider_health_rollup(session, provider, lookback_hours=lookback_hours)
     active_snapshot = model_snapshot or provider_snapshot
     if not active_snapshot and provider_snapshot:
         active_snapshot = provider_snapshot
@@ -372,12 +397,15 @@ def _task_family_match(value: str | None, task_family: str) -> bool:
     return task_family == value or task_family.startswith(value)
 
 
-def _resolve_active_experiment(session, task_family: str) -> RoutingExperiment | None:
+async def _resolve_active_experiment(session: Any, task_family: str) -> RoutingExperiment | None:
     try:
-        rows = session.scalars(
-            select(RoutingExperiment)
-            .where(RoutingExperiment.status == "active")
-            .order_by(RoutingExperiment.started_at.desc().nullslast(), RoutingExperiment.id.desc())
+        rows = (
+            await _session_scalars(
+                session,
+                select(RoutingExperiment)
+                .where(RoutingExperiment.status == "active")
+                .order_by(RoutingExperiment.started_at.desc().nullslast(), RoutingExperiment.id.desc()),
+            )
         ).all()
     except Exception:
         return None
@@ -611,20 +639,27 @@ def _post_run_outcome_failed(outcome: dict[str, Any], policy: dict[str, Any]) ->
     return bool(outcome.get("degraded"))
 
 
-def _maybe_roll_back_experiment(session, experiment: RoutingExperiment | None, policy: dict[str, Any]) -> str | None:
+async def _maybe_roll_back_experiment(
+    session: Any,
+    experiment: RoutingExperiment | None,
+    policy: dict[str, Any],
+) -> str | None:
     if not experiment or experiment.status != "active":
         return None
     window_size = int(policy.get("rollback_window_decisions") or 10)
     min_failed = int(policy.get("rollback_min_failed_decisions") or 3)
     try:
-        rows = session.scalars(
-            select(RoutingDecision)
-            .where(
-                RoutingDecision.experiment_id == experiment.id,
-                RoutingDecision.applied.is_(True),
+        rows = (
+            await _session_scalars(
+                session,
+                select(RoutingDecision)
+                .where(
+                    RoutingDecision.experiment_id == experiment.id,
+                    RoutingDecision.applied.is_(True),
+                )
+                .order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc())
+                .limit(window_size),
             )
-            .order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc())
-            .limit(window_size)
         ).all()
     except Exception:
         return None
@@ -716,7 +751,7 @@ def _provider_health_from_rows(
     return snapshots
 
 
-def refresh_provider_health_snapshots(
+async def refresh_provider_health_snapshots(
     *,
     lookback_hours: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -726,26 +761,30 @@ def refresh_provider_health_snapshots(
     window_start, window_end = _window_range(lookback_hours)
 
     try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            api_rows = uow.session.execute(
-                text(
-                    """
-                    SELECT model, latency_ms, error, status, created_at
-                    FROM agent_api_calls
-                    WHERE created_at >= :window_start
-                    """
-                ),
-                {"window_start": window_start},
+        async with UnitOfWork() as uow:
+            api_rows = (
+                await uow.session.execute(
+                    text(
+                        """
+                        SELECT model, latency_ms, error, status, created_at
+                        FROM agent_api_calls
+                        WHERE created_at >= :window_start
+                        """
+                    ),
+                    {"window_start": window_start},
+                )
             ).mappings().all()
-            summary_rows = uow.session.execute(
-                text(
-                    """
-                    SELECT provider_used, model_used, verifier_status, settlement_state, created_at
-                    FROM run_run_summaries
-                    WHERE created_at >= :window_start
-                    """
-                ),
-                {"window_start": window_start},
+            summary_rows = (
+                await uow.session.execute(
+                    text(
+                        """
+                        SELECT provider_used, model_used, verifier_status, settlement_state, created_at
+                        FROM run_run_summaries
+                        WHERE created_at >= :window_start
+                        """
+                    ),
+                    {"window_start": window_start},
+                )
             ).mappings().all()
 
             snapshots = _provider_health_from_rows(
@@ -757,13 +796,15 @@ def refresh_provider_health_snapshots(
             )
 
             for payload in snapshots:
-                existing = uow.session.execute(
-                    select(ProviderHealthSnapshot).where(
-                        ProviderHealthSnapshot.provider == payload["provider"],
-                        ProviderHealthSnapshot.model == payload["model"],
-                        ProviderHealthSnapshot.window_start == payload["window_start"],
-                        ProviderHealthSnapshot.window_end == payload["window_end"],
-                        ProviderHealthSnapshot.source == payload["source"],
+                existing = (
+                    await uow.session.execute(
+                        select(ProviderHealthSnapshot).where(
+                            ProviderHealthSnapshot.provider == payload["provider"],
+                            ProviderHealthSnapshot.model == payload["model"],
+                            ProviderHealthSnapshot.window_start == payload["window_start"],
+                            ProviderHealthSnapshot.window_end == payload["window_end"],
+                            ProviderHealthSnapshot.source == payload["source"],
+                        )
                     )
                 ).scalar_one_or_none()
                 if existing:
@@ -782,15 +823,18 @@ def refresh_provider_health_snapshots(
         return []
 
 
-def _load_latest_health_snapshot(session, provider: str, model: str) -> dict[str, Any] | None:
+async def _load_latest_health_snapshot(session: Any, provider: str, model: str) -> dict[str, Any] | None:
     try:
-        row = session.execute(
-            select(ProviderHealthSnapshot)
-            .where(
-                ProviderHealthSnapshot.provider == provider,
-                ProviderHealthSnapshot.model == model,
+        row = (
+            await _session_execute(
+                session,
+                select(ProviderHealthSnapshot)
+                .where(
+                    ProviderHealthSnapshot.provider == provider,
+                    ProviderHealthSnapshot.model == model,
+                )
+                .order_by(ProviderHealthSnapshot.window_end.desc(), ProviderHealthSnapshot.id.desc()),
             )
-            .order_by(ProviderHealthSnapshot.window_end.desc(), ProviderHealthSnapshot.id.desc())
         ).scalars().first()
     except Exception:
         return None
@@ -811,8 +855,8 @@ def _load_latest_health_snapshot(session, provider: str, model: str) -> dict[str
     }
 
 
-def _load_verifier_evidence(
-    session,
+async def _load_verifier_evidence(
+    session: Any,
     provider: str,
     model: str,
     *,
@@ -820,17 +864,20 @@ def _load_verifier_evidence(
 ) -> dict[str, Any]:
     window_start, _ = _window_range(lookback_hours)
     try:
-        rows = session.execute(
-            text(
-                """
-                SELECT verifier_status
-                FROM run_run_summaries
-                WHERE created_at >= :window_start
-                  AND provider_used = :provider
-                  AND model_used = :model
-                """
-            ),
-            {"window_start": window_start, "provider": provider, "model": model},
+        rows = (
+            await _session_execute(
+                session,
+                text(
+                    """
+                    SELECT verifier_status
+                    FROM run_run_summaries
+                    WHERE created_at >= :window_start
+                      AND provider_used = :provider
+                      AND model_used = :model
+                    """
+                ),
+                {"window_start": window_start, "provider": provider, "model": model},
+            )
         ).mappings().all()
     except Exception:
         rows = []
@@ -962,7 +1009,8 @@ def _score_candidate(
     return score, evidence
 
 
-def _candidate_pool(
+async def _candidate_pool(
+    session: AsyncSession,
     *,
     task_family: str,
     lane: str,
@@ -971,21 +1019,21 @@ def _candidate_pool(
     org_id: str | None,
     preferred_provider: str | None,
 ) -> tuple[list[RoutingCandidate], dict[str, Any], SkillRoutingProfile, str, str, str]:
-    provider_resolution = resolve_provider_selection(
+    provider_resolution = await async_resolve_provider_selection(
+        session,
         user_id=user_id,
         org_id=org_id,
         preferred_provider=preferred_provider,
     )
-    skill_profile = resolve_skill_routing_profile(
+    skill_profile = await async_resolve_skill_routing_profile(
+        session,
         skill_name or "",
-        user_id=user_id,
-        org_id=org_id,
-        preferred_provider=preferred_provider,
     ) if skill_name else SkillRoutingProfile(
         skill_name=skill_name or "",
         reasoning_effort=None,
     )
-    legacy_runtime = resolve_skill_runtime(
+    legacy_runtime = await async_resolve_skill_runtime(
+        session,
         skill_name or "coordinate",
         user_id=user_id,
         org_id=org_id,
@@ -996,7 +1044,10 @@ def _candidate_pool(
     legacy_model = (
         f"{legacy_runtime.provider}/{legacy_runtime.model_name}"
         if legacy_runtime
-        else f"{provider_resolution.provider}/{get_provider_model_map(provider_resolution.provider, user_id=user_id, org_id=org_id).get(DEFAULT_MODEL_TIER)}"
+        else (
+            f"{provider_resolution.provider}/"
+            f"{(await async_get_provider_model_map(session, provider_resolution.provider, user_id=user_id, org_id=org_id)).get(DEFAULT_MODEL_TIER)}"
+        )
     )
     legacy_reasoning_effort = legacy_runtime.reasoning_effort if legacy_runtime else "medium"
 
@@ -1038,7 +1089,12 @@ def _candidate_pool(
         ))
     else:
         for provider in provider_names:
-            model_map = get_provider_model_map(provider, user_id=user_id, org_id=org_id)
+            model_map = await async_get_provider_model_map(
+                session,
+                provider,
+                user_id=user_id,
+                org_id=org_id,
+            )
             model_tier = normalize_model_tier(
                 skill_profile.model_tier or (legacy_runtime.model_tier if legacy_runtime else None)
             ) or DEFAULT_MODEL_TIER
@@ -1068,7 +1124,8 @@ def _candidate_pool(
     return candidates, candidate_constraints, skill_profile, legacy_provider, legacy_model, legacy_reasoning_effort
 
 
-def _apply_hard_constraints(
+async def _apply_hard_constraints(
+    session: AsyncSession,
     *,
     candidates: list[RoutingCandidate],
     provider_resolution,
@@ -1076,7 +1133,7 @@ def _apply_hard_constraints(
     user_id: str | None,
     org_id: str | None,
 ) -> list[RoutingCandidate]:
-    from brain.systems.services.runtime_introspection import get_provider_auth_status
+    from brain.systems.services.runtime_introspection import async_get_provider_auth_status
 
     filtered: list[RoutingCandidate] = []
     for candidate in candidates:
@@ -1087,7 +1144,12 @@ def _apply_hard_constraints(
         auth_status = None
         if not exclusion_reason:
             try:
-                auth_status = get_provider_auth_status(user_id=user_id, org_id=org_id, provider=candidate.provider)
+                auth_status = await async_get_provider_auth_status(
+                    session,
+                    user_id=user_id,
+                    org_id=org_id,
+                    provider=candidate.provider,
+                )
                 if not auth_status.get("authenticated", False):
                     exclusion_reason = "provider_auth_unavailable"
             except Exception:
@@ -1114,13 +1176,13 @@ def _apply_hard_constraints(
     return filtered
 
 
-def _maybe_refresh_health_snapshots(flags: dict[str, Any]) -> None:
+async def _maybe_refresh_health_snapshots(flags: dict[str, Any]) -> None:
     if flags.get("force_legacy"):
         return
-    refresh_provider_health_snapshots(lookback_hours=flags["lookback_hours"])
+    await refresh_provider_health_snapshots(lookback_hours=flags["lookback_hours"])
 
 
-def apply_marketplace_route(
+async def apply_marketplace_route(
     *,
     task_family: str,
     lane: str,
@@ -1142,7 +1204,7 @@ def apply_marketplace_route(
     Coordinator and worker lanes share this helper so active canaries, fallback
     reasons, and routing trace metadata are applied consistently.
     """
-    decision = resolve_marketplace_routing(
+    decision = await resolve_marketplace_routing(
         task_family=task_family,
         lane=lane,
         skill_name=skill_name,
@@ -1180,7 +1242,7 @@ def apply_marketplace_route(
     return legacy_model, legacy_thinking, decision
 
 
-def resolve_marketplace_routing(
+async def resolve_marketplace_routing(
     *,
     task_family: str,
     lane: str,
@@ -1203,23 +1265,45 @@ def resolve_marketplace_routing(
     org_id = _optional_text(org_id)
     task_family = (task_family or skill_name or "general").strip() or "general"
     lane = (lane or "coordinator").strip() or "coordinator"
-    legacy_provider = normalize_runtime_provider(legacy_provider or resolve_default_provider(user_id=user_id, org_id=org_id))
-    if legacy_model:
-        legacy_model = legacy_model.strip()
-    else:
-        legacy_model = f"{legacy_provider}/{get_provider_model_map(legacy_provider, user_id=user_id, org_id=org_id).get(DEFAULT_MODEL_TIER)}"
+    provided_legacy_provider = legacy_provider
+    provided_legacy_model = legacy_model
+    legacy_provider = normalize_runtime_provider(legacy_provider)
+    legacy_model = (
+        legacy_model.strip()
+        if legacy_model
+        else f"{legacy_provider}/{DEFAULT_PROVIDER_MODEL_MAPS[legacy_provider][DEFAULT_MODEL_TIER]}"
+    )
     legacy_reasoning_effort = legacy_reasoning_effort or "medium"
 
     try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            experiment = _resolve_active_experiment(uow.session, task_family)
+        async with UnitOfWork() as uow:
+            legacy_provider = normalize_runtime_provider(
+                provided_legacy_provider
+                or await async_resolve_default_provider(
+                    uow.session,
+                    user_id=user_id,
+                    org_id=org_id,
+                )
+            )
+            if provided_legacy_model:
+                legacy_model = provided_legacy_model.strip()
+            else:
+                provider_map = await async_get_provider_model_map(
+                    uow.session,
+                    legacy_provider,
+                    user_id=user_id,
+                    org_id=org_id,
+                )
+                legacy_model = f"{legacy_provider}/{provider_map.get(DEFAULT_MODEL_TIER)}"
+
+            experiment = await _resolve_active_experiment(uow.session, task_family)
             if experiment and not experiment_name:
                 experiment_name = experiment.name
             canary_policy = _parse_allocation_policy(
                 experiment.allocation_policy if experiment else None,
                 flags,
             )
-            rollback_reason = _maybe_roll_back_experiment(uow.session, experiment, canary_policy)
+            rollback_reason = await _maybe_roll_back_experiment(uow.session, experiment, canary_policy)
             if rollback_reason:
                 logger.warning(
                     "Routing experiment %s rolled back: %s",
@@ -1227,8 +1311,9 @@ def resolve_marketplace_routing(
                     rollback_reason,
                 )
 
-            _maybe_refresh_health_snapshots(flags)
-            candidates, constraints, skill_profile, legacy_provider, legacy_model, legacy_reasoning_effort = _candidate_pool(
+            await _maybe_refresh_health_snapshots(flags)
+            candidates, constraints, skill_profile, legacy_provider, legacy_model, legacy_reasoning_effort = await _candidate_pool(
+                uow.session,
                 task_family=task_family,
                 lane=lane,
                 skill_name=skill_name,
@@ -1236,12 +1321,14 @@ def resolve_marketplace_routing(
                 org_id=org_id,
                 preferred_provider=legacy_provider,
             )
-            provider_resolution = resolve_provider_selection(
+            provider_resolution = await async_resolve_provider_selection(
+                uow.session,
                 user_id=user_id,
                 org_id=org_id,
                 preferred_provider=legacy_provider,
             )
-            constrained_candidates = _apply_hard_constraints(
+            constrained_candidates = await _apply_hard_constraints(
+                uow.session,
                 candidates=candidates,
                 provider_resolution=provider_resolution,
                 skill_profile=skill_profile,
@@ -1267,17 +1354,17 @@ def resolve_marketplace_routing(
             health_cache: dict[tuple[str, str], dict[str, Any]] = {}
             verifier_cache: dict[tuple[str, str], dict[str, Any]] = {}
 
-            def _candidate_context(provider: str, model: str) -> tuple[dict[str, Any], dict[str, Any]]:
+            async def _candidate_context(provider: str, model: str) -> tuple[dict[str, Any], dict[str, Any]]:
                 key = (provider, model)
                 if key not in health_cache:
-                    health_cache[key] = _load_health_context(
+                    health_cache[key] = await _load_health_context(
                         uow.session,
                         provider,
                         model,
                         lookback_hours=window_hours,
                     )
                 if key not in verifier_cache:
-                    verifier_cache[key] = _load_verifier_evidence(
+                    verifier_cache[key] = await _load_verifier_evidence(
                         uow.session,
                         provider,
                         model,
@@ -1285,7 +1372,7 @@ def resolve_marketplace_routing(
                     )
                 return health_cache[key], verifier_cache[key]
 
-            legacy_health_context, legacy_verifier = _candidate_context(legacy_provider, legacy_model_name)
+            legacy_health_context, legacy_verifier = await _candidate_context(legacy_provider, legacy_model_name)
             legacy_score, legacy_evidence = _score_candidate(
                 candidate_provider=legacy_provider,
                 candidate_model=legacy_model_name,
@@ -1302,7 +1389,7 @@ def resolve_marketplace_routing(
             )
 
             for candidate in constrained_candidates:
-                health_context, verifier = _candidate_context(candidate.provider, candidate.model)
+                health_context, verifier = await _candidate_context(candidate.provider, candidate.model)
                 model_snapshot = health_context["model_snapshot"]
                 provider_snapshot = health_context["provider_snapshot"]
                 snapshot = health_context["snapshot"]
@@ -1599,7 +1686,7 @@ def resolve_marketplace_routing(
                 applied=applied,
                 fallback_used=fallback_used,
             )
-            return persist_routing_decision(uow.session, result)
+            return await persist_routing_decision(uow.session, result)
     except Exception as exc:
         logger.warning("Marketplace routing failed, using legacy route: %s", exc)
         return RoutingDecisionResult(
@@ -1643,13 +1730,16 @@ def resolve_marketplace_routing(
         )
 
 
-def persist_routing_decision(session, decision: RoutingDecisionResult) -> RoutingDecisionResult:
+async def persist_routing_decision(session: Any, decision: RoutingDecisionResult) -> RoutingDecisionResult:
     """Persist or update the latest routing decision for a run."""
     try:
         existing = None
         if decision.run_id is not None:
-            existing = session.execute(
-                select(RoutingDecision).where(RoutingDecision.run_id == decision.run_id)
+            existing = (
+                await _session_execute(
+                    session,
+                    select(RoutingDecision).where(RoutingDecision.run_id == decision.run_id),
+                )
             ).scalar_one_or_none()
         if existing:
             row = existing
@@ -1671,8 +1761,7 @@ def persist_routing_decision(session, decision: RoutingDecisionResult) -> Routin
                 post_run_outcome=_jsonable(decision.post_run_outcome) if decision.post_run_outcome is not None else None,
             )
             session.add(row)
-            if hasattr(session, "flush"):
-                session.flush()
+            await _session_flush(session)
         row.task_family = decision.task_family
         row.lane = decision.lane
         row.decision_mode = decision.decision_mode
@@ -1695,7 +1784,8 @@ def persist_routing_decision(session, decision: RoutingDecisionResult) -> Routin
         return decision
 
 
-def get_routing_marketplace_snapshot(
+async def get_routing_marketplace_snapshot(
+    session: AsyncSession | None = None,
     *,
     user_id: str | None = None,
     org_id: str | None = None,
@@ -1713,67 +1803,80 @@ def get_routing_marketplace_snapshot(
         "latest_decisions": [],
     }
     try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            health_rows = uow.session.execute(
+        if session is None:
+            async with UnitOfWork() as uow:
+                return await get_routing_marketplace_snapshot(
+                    uow.session,
+                    user_id=user_id,
+                    org_id=org_id,
+                    provider=provider,
+                )
+        health_rows = (
+            await _session_execute(
+                session,
                 select(ProviderHealthSnapshot).order_by(ProviderHealthSnapshot.window_end.desc(), ProviderHealthSnapshot.id.desc()).limit(5)
-            ).scalars().all()
-            decision_rows = uow.session.execute(
+            )
+        ).scalars().all()
+        decision_rows = (
+            await _session_execute(
+                session,
                 select(RoutingDecision).order_by(RoutingDecision.created_at.desc(), RoutingDecision.id.desc()).limit(5)
-            ).scalars().all()
-            snapshot["latest_health_snapshots"] = [
-                _jsonable({
-                    "provider": row.provider,
-                    "model": row.model,
-                    "window_start": row.window_start,
-                    "window_end": row.window_end,
-                    "p50_latency_ms": row.p50_latency_ms,
-                    "p95_latency_ms": row.p95_latency_ms,
-                    "error_rate": row.error_rate,
-                    "auth_fail_rate": row.auth_fail_rate,
-                    "rate_limit_rate": row.rate_limit_rate,
-                    "sample_count": row.sample_count,
-                    "source": row.source,
-                })
-                for row in health_rows
-            ]
-            latest_decisions: list[dict[str, Any]] = []
-            for row in decision_rows:
-                inputs = row.inputs if isinstance(row.inputs, dict) else {}
-                constraints = row.constraints if isinstance(row.constraints, dict) else {}
-                route_summary = inputs.get("route_summary") if isinstance(inputs, dict) else None
-                if not isinstance(route_summary, dict):
-                    route_summary = constraints.get("route_summary") if isinstance(constraints, dict) else None
-                if not isinstance(route_summary, dict):
-                    route_summary = {}
-                legacy = route_summary.get("legacy") if isinstance(route_summary.get("legacy"), dict) else {}
-                selected = route_summary.get("selected") if isinstance(route_summary.get("selected"), dict) else {}
-                shadow_winner = route_summary.get("shadow_winner") if isinstance(route_summary.get("shadow_winner"), dict) else None
-                latest_decisions.append(_jsonable({
-                    "run_id": row.run_id,
-                    "task_family": row.task_family,
-                    "lane": row.lane,
-                    "decision_mode": row.decision_mode,
-                    "selected_provider": row.selected_provider,
-                    "selected_model": row.selected_model,
-                    "selected_reasoning_effort": row.selected_reasoning_effort,
-                    "applied": row.applied,
-                    "fallback_used": row.fallback_used,
-                    "fallback_reason": constraints.get("fallback_reason") or route_summary.get("fallback_reason"),
-                    "candidate_count": route_summary.get("candidate_count"),
-                    "eligible_candidate_count": route_summary.get("eligible_candidate_count"),
-                    "legacy_score": legacy.get("score"),
-                    "selected_score": selected.get("score"),
-                    "selected_over_legacy_delta": (
-                        round(float(selected.get("score")) - float(legacy.get("score")), 4)
-                        if isinstance(selected.get("score"), (int, float)) and isinstance(legacy.get("score"), (int, float))
-                        else None
-                    ),
-                    "shadow_winner": shadow_winner,
-                    "route_summary": route_summary,
-                    "created_at": row.created_at,
-                }))
-            snapshot["latest_decisions"] = latest_decisions
-            snapshot["healthy"] = bool(health_rows or decision_rows)
+            )
+        ).scalars().all()
+        snapshot["latest_health_snapshots"] = [
+            _jsonable({
+                "provider": row.provider,
+                "model": row.model,
+                "window_start": row.window_start,
+                "window_end": row.window_end,
+                "p50_latency_ms": row.p50_latency_ms,
+                "p95_latency_ms": row.p95_latency_ms,
+                "error_rate": row.error_rate,
+                "auth_fail_rate": row.auth_fail_rate,
+                "rate_limit_rate": row.rate_limit_rate,
+                "sample_count": row.sample_count,
+                "source": row.source,
+            })
+            for row in health_rows
+        ]
+        latest_decisions: list[dict[str, Any]] = []
+        for row in decision_rows:
+            inputs = row.inputs if isinstance(row.inputs, dict) else {}
+            constraints = row.constraints if isinstance(row.constraints, dict) else {}
+            route_summary = inputs.get("route_summary") if isinstance(inputs, dict) else None
+            if not isinstance(route_summary, dict):
+                route_summary = constraints.get("route_summary") if isinstance(constraints, dict) else None
+            if not isinstance(route_summary, dict):
+                route_summary = {}
+            legacy = route_summary.get("legacy") if isinstance(route_summary.get("legacy"), dict) else {}
+            selected = route_summary.get("selected") if isinstance(route_summary.get("selected"), dict) else {}
+            shadow_winner = route_summary.get("shadow_winner") if isinstance(route_summary.get("shadow_winner"), dict) else None
+            latest_decisions.append(_jsonable({
+                "run_id": row.run_id,
+                "task_family": row.task_family,
+                "lane": row.lane,
+                "decision_mode": row.decision_mode,
+                "selected_provider": row.selected_provider,
+                "selected_model": row.selected_model,
+                "selected_reasoning_effort": row.selected_reasoning_effort,
+                "applied": row.applied,
+                "fallback_used": row.fallback_used,
+                "fallback_reason": constraints.get("fallback_reason") or route_summary.get("fallback_reason"),
+                "candidate_count": route_summary.get("candidate_count"),
+                "eligible_candidate_count": route_summary.get("eligible_candidate_count"),
+                "legacy_score": legacy.get("score"),
+                "selected_score": selected.get("score"),
+                "selected_over_legacy_delta": (
+                    round(float(selected.get("score")) - float(legacy.get("score")), 4)
+                    if isinstance(selected.get("score"), (int, float)) and isinstance(legacy.get("score"), (int, float))
+                    else None
+                ),
+                "shadow_winner": shadow_winner,
+                "route_summary": route_summary,
+                "created_at": row.created_at,
+            }))
+        snapshot["latest_decisions"] = latest_decisions
+        snapshot["healthy"] = bool(health_rows or decision_rows)
     except Exception as exc:
         logger.debug("Routing snapshot unavailable: %s", exc)
     return snapshot

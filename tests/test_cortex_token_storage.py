@@ -1,4 +1,3 @@
-import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,7 +10,7 @@ def _mock_request(payload: dict):
     return req
 
 
-def test_add_api_key_trusts_failed_setup_token_verification():
+async def test_add_api_key_trusts_failed_setup_token_verification():
     from brain.app.api.routers.cortex import add_api_key
 
     request = _mock_request({"provider": "anthropic", "label": "default", "api_key": "sk-ant-oat01-test-token"})
@@ -23,7 +22,7 @@ def test_add_api_key_trusts_failed_setup_token_verification():
         session = MagicMock()
         session.scalars.return_value.first.return_value = None
         session.add.side_effect = lambda key: setattr(key, "id", 42)
-        resp = asyncio.run(add_api_key(request, user, db=_AsyncSession(session)))
+        resp = await add_api_key(request, user, db=_AsyncSession(session))
 
     assert resp["id"] == 42
     assert resp["status"] == "stored"
@@ -32,7 +31,7 @@ def test_add_api_key_trusts_failed_setup_token_verification():
     session.add.assert_called_once()
 
 
-def test_set_org_main_key_trusts_failed_setup_token_verification():
+async def test_set_org_main_key_trusts_failed_setup_token_verification():
     from brain.app.api.routers.cortex import set_org_main_key
 
     request = _mock_request({"provider": "anthropic", "api_key": "sk-ant-oat01-test-token"})
@@ -43,7 +42,7 @@ def test_set_org_main_key_trusts_failed_setup_token_verification():
     with patch("brain.app.api.routers.cortex._auth_keys._verify_provider_api_key", side_effect=RuntimeError("401 invalid x-api-key")), \
          patch("brain.app.api.routers.cortex._auth_keys._should_trust_failed_key_verification", return_value=True), \
          patch("brain.systems.vault._encrypt", return_value=b"enc"):
-        resp = asyncio.run(set_org_main_key(request, user, db=_AsyncSession(mock_session)))
+        resp = await set_org_main_key(request, user, db=_AsyncSession(mock_session))
 
     assert resp["status"] == "org_key_stored"
     assert resp["verified"] is False

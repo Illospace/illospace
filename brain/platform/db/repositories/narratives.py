@@ -20,7 +20,7 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
     # Lookup
     # ------------------------------------------------------------------
 
-    def get_by_slug(
+    async def a_get_by_slug(
         self,
         slug: str,
         org_id: str | None = None,
@@ -39,9 +39,9 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
         )
         if not include_stale:
             stmt = stmt.where(ProjectNarrative.stale_at.is_(None))
-        return self._session.scalars(stmt).first()
+        return (await self._session.scalars(stmt)).first()
 
-    def find_by_topic_fuzzy(
+    async def a_find_by_topic_fuzzy(
         self,
         topic: str,
         org_id: str | None = None,
@@ -65,9 +65,9 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
         if not include_stale:
             stmt = stmt.where(ProjectNarrative.stale_at.is_(None))
         stmt = stmt.order_by(ProjectNarrative.updated_at.desc())
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def list_active(
+    async def a_list_active(
         self,
         org_id: str | None = None,
         limit: int = 20,
@@ -87,9 +87,9 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
         if not include_stale:
             stmt = stmt.where(ProjectNarrative.stale_at.is_(None))
         stmt = stmt.order_by(ProjectNarrative.updated_at.desc()).limit(limit)
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def mark_stale(
+    async def a_mark_stale(
         self,
         narrative_id: int,
         reason: str,
@@ -97,7 +97,7 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
         stale_at: datetime | None = None,
     ) -> bool:
         """Mark a narrative stale without deleting its historical sessions."""
-        result = self._session.execute(
+        result = await self._session.execute(
             update(ProjectNarrative)
             .where(ProjectNarrative.id == narrative_id)
             .where(ProjectNarrative.stale_at.is_(None))
@@ -106,18 +106,8 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
                 stale_reason=str(reason or "narrative source changed"),
             )
         )
-        self._session.flush()
+        await self._session.flush()
         return bool(result.rowcount)
-
-    def mark_stale_for_memory(
-        self,
-        memory_id: int,
-        reason: str,
-        *,
-        stale_at: datetime | None = None,
-    ) -> int:
-        """Mark narratives stale when a source session contains ``memory_id``."""
-        return self.mark_stale_for_memories([memory_id], reason, stale_at=stale_at)
 
     async def a_mark_stale_for_memory(
         self,
@@ -128,39 +118,6 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
     ) -> int:
         """Mark narratives stale when a source session contains ``memory_id``."""
         return await self.a_mark_stale_for_memories([memory_id], reason, stale_at=stale_at)
-
-    def mark_stale_for_memories(
-        self,
-        memory_ids: Sequence[int],
-        reason: str,
-        *,
-        stale_at: datetime | None = None,
-    ) -> int:
-        """Mark narratives stale through memory.source_session -> narrative session."""
-        source_ids = [int(memory_id) for memory_id in memory_ids if memory_id is not None]
-        if not source_ids:
-            return 0
-
-        narrative_stmt = (
-            select(NarrativeSession.narrative_id)
-            .join(Memory, Memory.source_session == NarrativeSession.session_id)
-            .where(Memory.id.in_(source_ids))
-        )
-        narrative_ids = set(self._session.scalars(narrative_stmt).all())
-        if not narrative_ids:
-            return 0
-
-        result = self._session.execute(
-            update(ProjectNarrative)
-            .where(ProjectNarrative.id.in_(narrative_ids))
-            .where(ProjectNarrative.stale_at.is_(None))
-            .values(
-                stale_at=stale_at or datetime.now(timezone.utc),
-                stale_reason=str(reason or "narrative source memory changed"),
-            )
-        )
-        self._session.flush()
-        return int(result.rowcount or 0)
 
     async def a_mark_stale_for_memories(
         self,
@@ -199,7 +156,7 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
     # Session entries
     # ------------------------------------------------------------------
 
-    def add_session_entry(
+    async def a_add_session_entry(
         self,
         narrative_id: int,
         session_id: str,
@@ -214,10 +171,10 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
             summary=summary,
         )
         self._session.add(entry)
-        self._session.flush()
+        await self._session.flush()
         return entry
 
-    def get_session_entries(
+    async def a_get_session_entries(
         self, narrative_id: int
     ) -> Sequence[NarrativeSession]:
         """Return session entries for a narrative, ordered by date ascending."""
@@ -226,7 +183,7 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
             .where(NarrativeSession.narrative_id == narrative_id)
             .order_by(NarrativeSession.session_date.asc())
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
     # ------------------------------------------------------------------
     # Internal helpers

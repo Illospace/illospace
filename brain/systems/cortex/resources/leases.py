@@ -7,11 +7,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from sqlalchemy import select
+
 from brain.kernel.common.time import utcnow as _shared_utcnow
 
 from brain.systems.cortex.events import publish_safe
 from brain.platform.db.models.resource_pool import ResourceLease
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,7 @@ class ResourceLeaseManager:
     def __init__(self, *, default_ttl_seconds: int = _DEFAULT_LEASE_TTL_SEC):
         self.default_ttl_seconds = max(1, int(default_ttl_seconds))
 
-    def acquire_lease(
+    async def acquire_lease(
         self,
         resource_type: str,
         resource_id: str,
@@ -73,17 +75,18 @@ class ResourceLeaseManager:
         token = lease_token or uuid.uuid4().hex
 
         try:
-            with open_unit_of_work(UnitOfWork) as uow:
+            async with UnitOfWork() as uow:
                 active_lease = (
-                    uow.session.query(ResourceLease)
-                    .filter(
-                        ResourceLease.resource_type == resource_type,
-                        ResourceLease.resource_id == resource_id,
-                        ResourceLease.released_at.is_(None),
+                    await uow.session.scalars(
+                        select(ResourceLease)
+                        .where(
+                            ResourceLease.resource_type == resource_type,
+                            ResourceLease.resource_id == resource_id,
+                            ResourceLease.released_at.is_(None),
+                        )
+                        .order_by(ResourceLease.created_at.desc())
                     )
-                    .order_by(ResourceLease.created_at.desc())
-                    .first()
-                )
+                ).first()
                 if active_lease:
                     if active_lease.expires_at is not None and active_lease.expires_at <= now:
                         active_lease.released_at = now
@@ -111,17 +114,18 @@ class ResourceLeaseManager:
                         )
 
                 active_lease = (
-                    uow.session.query(ResourceLease)
-                    .filter(
-                        ResourceLease.resource_type == resource_type,
-                        ResourceLease.resource_id == resource_id,
-                        ResourceLease.released_at.is_(None),
-                        ResourceLease.expires_at.isnot(None),
-                        ResourceLease.expires_at > now,
+                    await uow.session.scalars(
+                        select(ResourceLease)
+                        .where(
+                            ResourceLease.resource_type == resource_type,
+                            ResourceLease.resource_id == resource_id,
+                            ResourceLease.released_at.is_(None),
+                            ResourceLease.expires_at.isnot(None),
+                            ResourceLease.expires_at > now,
+                        )
+                        .order_by(ResourceLease.created_at.desc())
                     )
-                    .order_by(ResourceLease.created_at.desc())
-                    .first()
-                )
+                ).first()
                 if active_lease:
                     return LeaseDecision(
                         acquired=False,
@@ -145,7 +149,7 @@ class ResourceLeaseManager:
                     expires_at=expires_at,
                 )
                 uow.session.add(lease)
-                uow.session.flush()
+                await uow.session.flush()
 
                 publish_safe("resource_lease", {
                     "event": "leased",
@@ -179,23 +183,24 @@ class ResourceLeaseManager:
                 reason=f"lease acquisition failed: {exc}",
             )
 
-    def release_lease(self, lease_token: str, *, release_reason: str = "released") -> bool:
+    async def release_lease(self, lease_token: str, *, release_reason: str = "released") -> bool:
         """Release an active lease by token."""
         token = (lease_token or "").strip()
         if not token:
             return False
 
         try:
-            with open_unit_of_work(UnitOfWork) as uow:
+            async with UnitOfWork() as uow:
                 lease = (
-                    uow.session.query(ResourceLease)
-                    .filter(
-                        ResourceLease.lease_token == token,
-                        ResourceLease.released_at.is_(None),
+                    await uow.session.scalars(
+                        select(ResourceLease)
+                        .where(
+                            ResourceLease.lease_token == token,
+                            ResourceLease.released_at.is_(None),
+                        )
+                        .order_by(ResourceLease.created_at.desc())
                     )
-                    .order_by(ResourceLease.created_at.desc())
-                    .first()
-                )
+                ).first()
                 if not lease:
                     return False
 
@@ -217,23 +222,24 @@ class ResourceLeaseManager:
             logger.warning("Lease release failed for %s: %s", token, exc)
             return False
 
-    def heartbeat_lease(self, lease_token: str, *, ttl_seconds: int | None = None) -> bool:
+    async def heartbeat_lease(self, lease_token: str, *, ttl_seconds: int | None = None) -> bool:
         """Extend an active lease."""
         token = (lease_token or "").strip()
         if not token:
             return False
 
         try:
-            with open_unit_of_work(UnitOfWork) as uow:
+            async with UnitOfWork() as uow:
                 lease = (
-                    uow.session.query(ResourceLease)
-                    .filter(
-                        ResourceLease.lease_token == token,
-                        ResourceLease.released_at.is_(None),
+                    await uow.session.scalars(
+                        select(ResourceLease)
+                        .where(
+                            ResourceLease.lease_token == token,
+                            ResourceLease.released_at.is_(None),
+                        )
+                        .order_by(ResourceLease.created_at.desc())
                     )
-                    .order_by(ResourceLease.created_at.desc())
-                    .first()
-                )
+                ).first()
                 if not lease:
                     return False
 
@@ -245,22 +251,22 @@ class ResourceLeaseManager:
             logger.warning("Lease heartbeat failed for %s: %s", token, exc)
             return False
 
-    def reclaim_expired(self, *, resource_type: str | None = None) -> int:
+    async def reclaim_expired(self, *, resource_type: str | None = None) -> int:
         """Mark expired leases as released so they can be swept safely."""
         now = _utcnow()
         reclaimed = 0
 
         try:
-            with open_unit_of_work(UnitOfWork) as uow:
-                query = uow.session.query(ResourceLease).filter(
+            async with UnitOfWork() as uow:
+                stmt = select(ResourceLease).where(
                     ResourceLease.released_at.is_(None),
                     ResourceLease.expires_at.isnot(None),
                     ResourceLease.expires_at <= now,
                 )
                 if resource_type:
-                    query = query.filter(ResourceLease.resource_type == resource_type)
+                    stmt = stmt.where(ResourceLease.resource_type == resource_type)
 
-                for lease in query.all():
+                for lease in (await uow.session.scalars(stmt)).all():
                     lease.released_at = now
                     lease.release_reason = "expired"
                     reclaimed += 1

@@ -7,21 +7,22 @@ The brain is the source of truth; files are a cache for quick access.
 
 import os
 import sys
+import asyncio
 from datetime import datetime
 
 from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))  # repo root
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 WORKSPACE = str(config.WORKSPACE_ROOT)
 MEMORY_DIR = str(config.JOURNAL_DIR)  # illo-brain/journal/ — standalone
 
 
-def sync_lessons():
+async def sync_lessons():
     """Export high-salience lessons from brain → memory/lessons.md"""
-    with open_unit_of_work(UnitOfWork) as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             SELECT id, content, salience, created_at
             FROM memories
             WHERE memory_type = 'lesson' AND NOT archived
@@ -55,5 +56,5 @@ def sync_lessons():
 
 
 if __name__ == '__main__':
-    sync_lessons()
+    asyncio.run(sync_lessons())
     print("Brain → files sync complete.")

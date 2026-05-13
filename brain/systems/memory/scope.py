@@ -5,6 +5,7 @@ Usage:
     python3 -m services.scope_classifier --reclassify-all [--dry-run]
 """
 import argparse
+import asyncio
 import os
 import re
 import sys
@@ -76,13 +77,13 @@ def classify_scope(content: str, memory_type: str = None) -> str:
     return 'personal'
 
 
-def reclassify_all(dry_run: bool = False) -> dict:
+async def reclassify_all(dry_run: bool = False) -> dict:
     """Reclassify all existing memories."""
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
     stats = {'total': 0, 'universal': 0, 'personal': 0, 'changed': 0}
-    with open_unit_of_work(UnitOfWork) as uow:
-        result = uow.session.execute(text(
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text(
             "SELECT id, content, memory_type, scope FROM memories WHERE NOT archived"
         ))
         rows = result.mappings().all()
@@ -96,13 +97,13 @@ def reclassify_all(dry_run: bool = False) -> dict:
             if new_scope != old_scope:
                 stats['changed'] += 1
                 if not dry_run:
-                    uow.session.execute(text(
+                    await uow.session.execute(text(
                         "UPDATE memories SET scope = :scope WHERE id = :id"
                     ), {"scope": new_scope, "id": row['id']})
                 print(f"  [{row['id']}] {old_scope} → {new_scope}: {row['content'][:80]}")
 
         if dry_run:
-            uow.rollback()
+            await uow.rollback()
 
     return stats
 
@@ -114,7 +115,7 @@ def main():
     args = parser.parse_args()
 
     if args.reclassify_all:
-        stats = reclassify_all(dry_run=args.dry_run)
+        stats = asyncio.run(reclassify_all(dry_run=args.dry_run))
         mode = "DRY RUN" if args.dry_run else "APPLIED"
         print(f"\n[{mode}] {stats['total']} memories: "
               f"{stats['universal']} universal, {stats['personal']} personal, "

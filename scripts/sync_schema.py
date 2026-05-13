@@ -11,6 +11,7 @@ Usage:
     ./venv/bin/python3 scripts/sync_schema.py --apply   # actually apply changes
 """
 import argparse
+import asyncio
 import os
 import sys
 
@@ -20,7 +21,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.schema import CreateTable
 from brain.kernel.config import DB_URL as DATABASE_URL
 from brain.platform.db.models import *  # noqa — registers all models with Base.metadata
 from brain.platform.db.base import Base
@@ -123,104 +126,128 @@ def safe_not_null(type_ddl, default, not_null):
     return default, not_null
 
 
-def main():
+async def _inspect_schema(conn):
+    table_result = await conn.execute(text("""
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = current_schema()
+          AND table_type = 'BASE TABLE'
+    """))
+    existing_tables = {row.table_name for row in table_result}
+
+    column_result = await conn.execute(text("""
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+    """))
+    existing_columns = {table_name: [] for table_name in existing_tables}
+    for row in column_result:
+        existing_columns.setdefault(row.table_name, []).append({"name": row.column_name})
+
+    return existing_tables, existing_columns
+
+
+async def main():
     parser = argparse.ArgumentParser(description="Sync DB schema to match SQLAlchemy models")
     parser.add_argument("--apply", action="store_true", help="Apply changes (default is dry-run)")
     args = parser.parse_args()
 
-    engine = create_engine(DATABASE_URL)
-    inspector = inspect(engine)
-    dialect = engine.dialect
+    engine = create_async_engine(DATABASE_URL)
+    try:
+        async with engine.connect() as conn:
+            existing_tables, existing_columns = await _inspect_schema(conn)
+        dialect = engine.sync_engine.dialect
 
-    existing_tables = set(inspector.get_table_names())
-    model_tables = Base.metadata.tables
+        model_tables = Base.metadata.tables
 
-    statements = []
-    table_creates = []
-    column_adds = []
+        table_creates = []
+        column_adds = []
 
-    # ── Phase 1: Missing tables ──────────────────────────────────
-    for table_name, table in sorted(model_tables.items()):
-        if table_name not in existing_tables:
-            # Generate CREATE TABLE from the model
-            table_creates.append(table_name)
+        # ── Phase 1: Missing tables ──────────────────────────────────
+        for table_name, table in sorted(model_tables.items()):
+            if table_name not in existing_tables:
+                # Generate CREATE TABLE from the model
+                table_creates.append(table_name)
 
-    if table_creates:
-        print(f"\n🆕 {len(table_creates)} missing table(s):")
-        for tn in table_creates:
-            print(f"   + {tn}")
-
-    # ── Phase 2: Missing columns ─────────────────────────────────
-    for table_name, table in sorted(model_tables.items()):
-        if table_name not in existing_tables:
-            continue  # handled in phase 1
-
-        existing_cols = {c["name"]: c for c in inspector.get_columns(table_name)}
-        model_cols = {c.name: c for c in table.columns}
-
-        missing = []
-        for col_name, col in model_cols.items():
-            if col_name not in existing_cols:
-                type_ddl = get_sqlalchemy_type_ddl(col, dialect)
-                default = get_default_clause(col)
-                not_null = get_not_null_clause(col)
-                default, not_null = safe_not_null(type_ddl, default, not_null)
-
-                stmt = f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {col_name} {type_ddl}{default}{not_null};"
-                column_adds.append(stmt)
-                missing.append(col_name)
-
-        if missing:
-            print(f"\n📋 {table_name}: {len(missing)} missing column(s)")
-            for name in missing:
-                print(f"   + {name}")
-
-    total = len(table_creates) + len(column_adds)
-    if total == 0:
-        print("\n✅ Database schema is up to date — no changes needed.")
-        return
-
-    print(f"\n{'=' * 60}")
-    print(f"Total: {len(table_creates)} table(s) + {len(column_adds)} column(s) to add")
-    print(f"{'=' * 60}\n")
-
-    if args.apply:
-        print("🔧 Applying changes...\n")
-
-        # Create missing tables using SQLAlchemy metadata
         if table_creates:
-            print("  Creating missing tables...")
-            tables_to_create = [
-                model_tables[tn] for tn in table_creates
-                if tn in model_tables
-            ]
-            Base.metadata.create_all(engine, tables=tables_to_create)
+            print(f"\n🆕 {len(table_creates)} missing table(s):")
             for tn in table_creates:
-                print(f"    ✓ {tn}")
+                print(f"   + {tn}")
 
-        # Add missing columns
-        if column_adds:
-            print("\n  Adding missing columns...")
-            with engine.begin() as conn:
+        # ── Phase 2: Missing columns ─────────────────────────────────
+        for table_name, table in sorted(model_tables.items()):
+            if table_name not in existing_tables:
+                continue  # handled in phase 1
+
+            existing_cols = {c["name"]: c for c in existing_columns[table_name]}
+            model_cols = {c.name: c for c in table.columns}
+
+            missing = []
+            for col_name, col in model_cols.items():
+                if col_name not in existing_cols:
+                    type_ddl = get_sqlalchemy_type_ddl(col, dialect)
+                    default = get_default_clause(col)
+                    not_null = get_not_null_clause(col)
+                    default, not_null = safe_not_null(type_ddl, default, not_null)
+
+                    stmt = f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {col_name} {type_ddl}{default}{not_null};"
+                    column_adds.append(stmt)
+                    missing.append(col_name)
+
+            if missing:
+                print(f"\n📋 {table_name}: {len(missing)} missing column(s)")
+                for name in missing:
+                    print(f"   + {name}")
+
+        total = len(table_creates) + len(column_adds)
+        if total == 0:
+            print("\n✅ Database schema is up to date — no changes needed.")
+            return
+
+        print(f"\n{'=' * 60}")
+        print(f"Total: {len(table_creates)} table(s) + {len(column_adds)} column(s) to add")
+        print(f"{'=' * 60}\n")
+
+        if args.apply:
+            print("🔧 Applying changes...\n")
+
+            # Create missing tables using SQLAlchemy metadata
+            if table_creates:
+                print("  Creating missing tables...")
+                tables_to_create = [
+                    table for table in Base.metadata.sorted_tables
+                    if table.name in table_creates
+                ]
+                async with engine.begin() as conn:
+                    for table in tables_to_create:
+                        await conn.execute(CreateTable(table, if_not_exists=True))
+                        print(f"    ✓ {table.name}")
+
+            # Add missing columns
+            if column_adds:
+                print("\n  Adding missing columns...")
+                async with engine.begin() as conn:
+                    for stmt in column_adds:
+                        print(f"    {stmt}")
+                        await conn.execute(text(stmt))
+
+            print("\n✅ All changes applied successfully.")
+            print("   Restart ./illo start to pick up the new schema.")
+        else:
+            print("DRY RUN — changes that would be made:\n")
+            if table_creates:
+                print("  Tables to create:")
+                for tn in table_creates:
+                    print(f"    CREATE TABLE {tn}")
+            if column_adds:
+                print("\n  Columns to add:")
                 for stmt in column_adds:
                     print(f"    {stmt}")
-                    conn.execute(text(stmt))
-
-        print("\n✅ All changes applied successfully.")
-        print("   Restart ./illo start to pick up the new schema.")
-    else:
-        print("DRY RUN — changes that would be made:\n")
-        if table_creates:
-            print("  Tables to create:")
-            for tn in table_creates:
-                print(f"    CREATE TABLE {tn}")
-        if column_adds:
-            print("\n  Columns to add:")
-            for stmt in column_adds:
-                print(f"    {stmt}")
-        print(f"\nRe-run with --apply to execute.")
-        print("  ./venv/bin/python3 scripts/sync_schema.py --apply")
+            print(f"\nRe-run with --apply to execute.")
+            print("  ./venv/bin/python3 scripts/sync_schema.py --apply")
+    finally:
+        await engine.dispose()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

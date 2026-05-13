@@ -15,6 +15,9 @@ CENTRAL_SESSION_BRIDGES = {
     Path("brain/platform/db/repositories/unit_of_work.py"),
     Path("brain/platform/db/session_tasks.py"),
 }
+REQUIRED_ALEMBIC_BRIDGES = {
+    Path("brain/platform/db/alembic/env.py"),
+}
 SYNC_DB_API_NAMES = {
     "open_unit_of_work",
     "run_unit_of_work_task",
@@ -140,7 +143,11 @@ def test_production_db_references_are_async_shaped():
             if any(name in line for name in BANNED_BRIDGES):
                 offenders.append(f"{relative_path}:{line_number}: {line.strip()}")
                 continue
-            if relative_path not in CENTRAL_SESSION_BRIDGES and RUN_SYNC_REFERENCE.search(line):
+            if (
+                relative_path not in CENTRAL_SESSION_BRIDGES
+                and relative_path not in REQUIRED_ALEMBIC_BRIDGES
+                and RUN_SYNC_REFERENCE.search(line)
+            ):
                 offenders.append(f"{relative_path}:{line_number}: {line.strip()}")
 
     assert offenders == [], (

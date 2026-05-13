@@ -15,6 +15,8 @@ from brain.kernel.common.time import utcnow as _shared_utcnow
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
 from brain.kernel.common.env import env_flag as _shared_env_flag
 from brain.kernel.common.env import env_int as _shared_env_int
 
@@ -24,7 +26,7 @@ from brain.systems.cortex.resources.telemetry import (
     build_workspace_resource_summary,
 )
 from brain.platform.db.models.resource_pool import BrowserPoolEntry, WorkspacePoolEntry
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +167,7 @@ class ResourcePoolManager:
             return None
         return "|".join((str(profile_key), str(browser_version), selected_mode))
 
-    def plan_workspace(
+    async def plan_workspace(
         self,
         *,
         repo_root: str | None,
@@ -197,16 +199,17 @@ class ResourcePoolManager:
             reason = "warm workspace reuse not enabled in this slice"
             return self._workspace_cold_plan(repo_root, base_commit, runtime_fingerprint, pool_key, reason)
 
-        with open_unit_of_work(UnitOfWork) as uow:
+        async with UnitOfWork() as uow:
             entry = (
-                uow.session.query(WorkspacePoolEntry)
-                .filter(
-                    WorkspacePoolEntry.pool_key == pool_key,
-                    WorkspacePoolEntry.status.in_(sorted(_WORKSPACE_STATUS_READY)),
+                await uow.session.scalars(
+                    select(WorkspacePoolEntry)
+                    .where(
+                        WorkspacePoolEntry.pool_key == pool_key,
+                        WorkspacePoolEntry.status.in_(sorted(_WORKSPACE_STATUS_READY)),
+                    )
+                    .order_by(WorkspacePoolEntry.last_used_at.asc().nullsfirst(), WorkspacePoolEntry.created_at.asc())
                 )
-                .order_by(WorkspacePoolEntry.last_used_at.asc().nullsfirst(), WorkspacePoolEntry.created_at.asc())
-                .first()
-            )
+            ).first()
 
         if not entry:
             return self._workspace_cold_plan(
@@ -219,7 +222,7 @@ class ResourcePoolManager:
 
         valid, reason = self._validate_workspace_entry(entry)
         if not valid:
-            self._destroy_workspace_entry(entry, reason or "workspace pool entry failed validation")
+            await self._destroy_workspace_entry(entry, reason or "workspace pool entry failed validation")
             return self._workspace_cold_plan(
                 repo_root,
                 base_commit,
@@ -228,7 +231,7 @@ class ResourcePoolManager:
                 "no safe warm workspace candidate available",
             )
 
-        lease = self.lease_manager.acquire_lease(
+        lease = await self.lease_manager.acquire_lease(
             "workspace_pool_entry",
             str(entry.id),
             owner_run_id=run_id,
@@ -255,8 +258,8 @@ class ResourcePoolManager:
             self._materialize_workspace_entry(entry, workspace_path, mode=selected_mode)
         except Exception as exc:
             logger.warning("Warm workspace handoff failed for pool entry %s: %s", entry.id, exc)
-            self.lease_manager.release_lease(lease.lease_token, release_reason="handoff_failed")
-            self._destroy_workspace_entry(entry, f"warm handoff failed: {exc}")
+            await self.lease_manager.release_lease(lease.lease_token, release_reason="handoff_failed")
+            await self._destroy_workspace_entry(entry, f"warm handoff failed: {exc}")
             return self._workspace_cold_plan(
                 repo_root,
                 base_commit,
@@ -265,7 +268,7 @@ class ResourcePoolManager:
                 "warm workspace handoff failed",
             )
 
-        self._mark_workspace_entry_leased(entry.id, lease.lease_token, workspace_path, selected_mode)
+        await self._mark_workspace_entry_leased(entry.id, lease.lease_token, workspace_path, selected_mode)
         summary = build_workspace_resource_summary(
             mode=selected_mode,
             warm_start_used=True,
@@ -293,7 +296,7 @@ class ResourcePoolManager:
             cleanup_required=True,
         )
 
-    def acquire_workspace(
+    async def acquire_workspace(
         self,
         *,
         repo_root: str | None,
@@ -305,7 +308,7 @@ class ResourcePoolManager:
         worker_id: str | None = None,
         target_path: str | None = None,
     ) -> PoolPlan:
-        return self.plan_workspace(
+        return await self.plan_workspace(
             repo_root=repo_root,
             base_commit=base_commit,
             runtime_fingerprint=runtime_fingerprint,
@@ -316,7 +319,7 @@ class ResourcePoolManager:
             target_path=target_path,
         )
 
-    def plan_browser(
+    async def plan_browser(
         self,
         *,
         profile_key: str | None,
@@ -342,18 +345,19 @@ class ResourcePoolManager:
             reason = "warm browser reuse not enabled in this slice"
             return self._browser_cold_plan(profile_key, browser_version, selected_mode, pool_key, reason)
 
-        with open_unit_of_work(UnitOfWork) as uow:
+        async with UnitOfWork() as uow:
             entry = (
-                uow.session.query(BrowserPoolEntry)
-                .filter(
-                    BrowserPoolEntry.profile_key == profile_key,
-                    BrowserPoolEntry.browser_version == browser_version,
-                    BrowserPoolEntry.context_mode == selected_mode,
-                    BrowserPoolEntry.status.in_(sorted(_BROWSER_STATUS_READY)),
+                await uow.session.scalars(
+                    select(BrowserPoolEntry)
+                    .where(
+                        BrowserPoolEntry.profile_key == profile_key,
+                        BrowserPoolEntry.browser_version == browser_version,
+                        BrowserPoolEntry.context_mode == selected_mode,
+                        BrowserPoolEntry.status.in_(sorted(_BROWSER_STATUS_READY)),
+                    )
+                    .order_by(BrowserPoolEntry.last_used_at.asc().nullsfirst(), BrowserPoolEntry.created_at.asc())
                 )
-                .order_by(BrowserPoolEntry.last_used_at.asc().nullsfirst(), BrowserPoolEntry.created_at.asc())
-                .first()
-            )
+            ).first()
 
         if not entry:
             return self._browser_cold_plan(
@@ -366,7 +370,7 @@ class ResourcePoolManager:
 
         valid, reason = self._validate_browser_entry(entry)
         if not valid:
-            self._destroy_browser_entry(entry, reason or "browser pool entry failed validation")
+            await self._destroy_browser_entry(entry, reason or "browser pool entry failed validation")
             return self._browser_cold_plan(
                 profile_key,
                 browser_version,
@@ -375,7 +379,7 @@ class ResourcePoolManager:
                 "no safe warm browser candidate available",
             )
 
-        lease = self.lease_manager.acquire_lease(
+        lease = await self.lease_manager.acquire_lease(
             "browser_pool_entry",
             str(entry.id),
             owner_run_id=owner_run_id,
@@ -391,7 +395,7 @@ class ResourcePoolManager:
                 lease.reason or "active lease exists",
             )
 
-        self._mark_browser_entry_leased(entry.id, lease.lease_token, selected_mode)
+        await self._mark_browser_entry_leased(entry.id, lease.lease_token, selected_mode)
         summary = build_browser_resource_summary(
             mode=selected_mode,
             warm_start_used=True,
@@ -416,7 +420,7 @@ class ResourcePoolManager:
             cleanup_required=True,
         )
 
-    def acquire_browser(
+    async def acquire_browser(
         self,
         *,
         profile_key: str | None,
@@ -426,7 +430,7 @@ class ResourcePoolManager:
         owner_run_id: int | None = None,
         owner_worker_id: str | None = None,
     ) -> PoolPlan:
-        return self.plan_browser(
+        return await self.plan_browser(
             profile_key=profile_key,
             browser_version=browser_version,
             context_mode=context_mode,
@@ -435,7 +439,7 @@ class ResourcePoolManager:
             owner_worker_id=owner_worker_id,
         )
 
-    def release_workspace(
+    async def release_workspace(
         self,
         lease_token: str | None,
         *,
@@ -444,11 +448,11 @@ class ResourcePoolManager:
     ) -> bool:
         if not lease_token:
             return False
-        released = self.lease_manager.release_lease(lease_token, release_reason=release_reason)
-        self._finalize_workspace_entry(pool_entry_id, lease_token, release_reason)
+        released = await self.lease_manager.release_lease(lease_token, release_reason=release_reason)
+        await self._finalize_workspace_entry(pool_entry_id, lease_token, release_reason)
         return released
 
-    def release_browser(
+    async def release_browser(
         self,
         lease_token: str | None,
         *,
@@ -457,18 +461,18 @@ class ResourcePoolManager:
     ) -> bool:
         if not lease_token:
             return False
-        released = self.lease_manager.release_lease(lease_token, release_reason=release_reason)
-        self._finalize_browser_entry(pool_entry_id, lease_token, release_reason)
+        released = await self.lease_manager.release_lease(lease_token, release_reason=release_reason)
+        await self._finalize_browser_entry(pool_entry_id, lease_token, release_reason)
         return released
 
-    def reclaim_workspace(self) -> int:
-        reclaimed = self.lease_manager.reclaim_expired(resource_type="workspace_pool_entry")
-        self._reconcile_expired_workspace_entries()
+    async def reclaim_workspace(self) -> int:
+        reclaimed = await self.lease_manager.reclaim_expired(resource_type="workspace_pool_entry")
+        await self._reconcile_expired_workspace_entries()
         return reclaimed
 
-    def reclaim_browser(self) -> int:
-        reclaimed = self.lease_manager.reclaim_expired(resource_type="browser_pool_entry")
-        self._reconcile_expired_browser_entries()
+    async def reclaim_browser(self) -> int:
+        reclaimed = await self.lease_manager.reclaim_expired(resource_type="browser_pool_entry")
+        await self._reconcile_expired_browser_entries()
         return reclaimed
 
     def _workspace_cold_plan(
@@ -604,14 +608,14 @@ class ResourcePoolManager:
             return
         shutil.copytree(source, target_path, dirs_exist_ok=False)
 
-    def _destroy_workspace_entry(self, entry: WorkspacePoolEntry, reason: str) -> None:
+    async def _destroy_workspace_entry(self, entry: WorkspacePoolEntry, reason: str) -> None:
         try:
             shutil.rmtree(entry.base_path, ignore_errors=True)
         except Exception:
             pass
         try:
-            with open_unit_of_work(UnitOfWork) as uow:
-                row = uow.session.get(WorkspacePoolEntry, entry.id)
+            async with UnitOfWork() as uow:
+                row = await uow.session.get(WorkspacePoolEntry, entry.id)
                 if row:
                     row.status = "destroyed"
                     row.health = {**(row.health or {}), "destroyed_reason": reason, "destroyed_at": _utcnow().isoformat()}
@@ -619,10 +623,10 @@ class ResourcePoolManager:
         except Exception:
             logger.debug("Failed to mark workspace pool entry %s destroyed", entry.id)
 
-    def _destroy_browser_entry(self, entry: BrowserPoolEntry, reason: str) -> None:
+    async def _destroy_browser_entry(self, entry: BrowserPoolEntry, reason: str) -> None:
         try:
-            with open_unit_of_work(UnitOfWork) as uow:
-                row = uow.session.get(BrowserPoolEntry, entry.id)
+            async with UnitOfWork() as uow:
+                row = await uow.session.get(BrowserPoolEntry, entry.id)
                 if row:
                     row.status = "destroyed"
                     row.health = {**(row.health or {}), "destroyed_reason": reason, "destroyed_at": _utcnow().isoformat()}
@@ -630,10 +634,10 @@ class ResourcePoolManager:
         except Exception:
             logger.debug("Failed to mark browser pool entry %s destroyed", entry.id)
 
-    def _mark_workspace_entry_leased(self, entry_id: int, lease_token: str, workspace_path: Path, mode: str) -> None:
+    async def _mark_workspace_entry_leased(self, entry_id: int, lease_token: str, workspace_path: Path, mode: str) -> None:
         try:
-            with open_unit_of_work(UnitOfWork) as uow:
-                row = uow.session.get(WorkspacePoolEntry, entry_id)
+            async with UnitOfWork() as uow:
+                row = await uow.session.get(WorkspacePoolEntry, entry_id)
                 if row:
                     row.status = "leased"
                     row.last_used_at = _utcnow()
@@ -647,10 +651,10 @@ class ResourcePoolManager:
         except Exception:
             logger.debug("Failed to mark workspace pool entry %s leased", entry_id)
 
-    def _mark_browser_entry_leased(self, entry_id: int, lease_token: str, mode: str) -> None:
+    async def _mark_browser_entry_leased(self, entry_id: int, lease_token: str, mode: str) -> None:
         try:
-            with open_unit_of_work(UnitOfWork) as uow:
-                row = uow.session.get(BrowserPoolEntry, entry_id)
+            async with UnitOfWork() as uow:
+                row = await uow.session.get(BrowserPoolEntry, entry_id)
                 if row:
                     row.status = "leased"
                     row.last_used_at = _utcnow()
@@ -663,12 +667,12 @@ class ResourcePoolManager:
         except Exception:
             logger.debug("Failed to mark browser pool entry %s leased", entry_id)
 
-    def _finalize_workspace_entry(self, pool_entry_id: int | None, lease_token: str, release_reason: str) -> None:
+    async def _finalize_workspace_entry(self, pool_entry_id: int | None, lease_token: str, release_reason: str) -> None:
         if pool_entry_id is None:
             return
         try:
-            with open_unit_of_work(UnitOfWork) as uow:
-                row = uow.session.get(WorkspacePoolEntry, pool_entry_id)
+            async with UnitOfWork() as uow:
+                row = await uow.session.get(WorkspacePoolEntry, pool_entry_id)
                 if row:
                     row.last_used_at = _utcnow()
                     row.health = {
@@ -680,12 +684,12 @@ class ResourcePoolManager:
         except Exception:
             logger.debug("Failed to finalize workspace pool entry %s", pool_entry_id)
 
-    def _finalize_browser_entry(self, pool_entry_id: int | None, lease_token: str, release_reason: str) -> None:
+    async def _finalize_browser_entry(self, pool_entry_id: int | None, lease_token: str, release_reason: str) -> None:
         if pool_entry_id is None:
             return
         try:
-            with open_unit_of_work(UnitOfWork) as uow:
-                row = uow.session.get(BrowserPoolEntry, pool_entry_id)
+            async with UnitOfWork() as uow:
+                row = await uow.session.get(BrowserPoolEntry, pool_entry_id)
                 if row:
                     row.last_used_at = _utcnow()
                     row.health = {
@@ -697,38 +701,38 @@ class ResourcePoolManager:
         except Exception:
             logger.debug("Failed to finalize browser pool entry %s", pool_entry_id)
 
-    def _reconcile_expired_workspace_entries(self) -> None:
+    async def _reconcile_expired_workspace_entries(self) -> None:
         try:
             now = _utcnow()
-            with open_unit_of_work(UnitOfWork) as uow:
+            async with UnitOfWork() as uow:
                 rows = (
-                    uow.session.query(WorkspacePoolEntry)
-                    .filter(
-                        WorkspacePoolEntry.status == "leased",
-                        WorkspacePoolEntry.ttl_expires_at.isnot(None),
-                        WorkspacePoolEntry.ttl_expires_at <= now,
+                    await uow.session.scalars(
+                        select(WorkspacePoolEntry).where(
+                            WorkspacePoolEntry.status == "leased",
+                            WorkspacePoolEntry.ttl_expires_at.isnot(None),
+                            WorkspacePoolEntry.ttl_expires_at <= now,
+                        )
                     )
-                    .all()
-                )
+                ).all()
                 for row in rows:
                     row.status = "ready"
                     row.health = {**(row.health or {}), "reclaimed_at": now.isoformat(), "reclaimed_reason": "expired"}
         except Exception:
             logger.debug("Failed to reconcile expired workspace entries")
 
-    def _reconcile_expired_browser_entries(self) -> None:
+    async def _reconcile_expired_browser_entries(self) -> None:
         try:
             now = _utcnow()
-            with open_unit_of_work(UnitOfWork) as uow:
+            async with UnitOfWork() as uow:
                 rows = (
-                    uow.session.query(BrowserPoolEntry)
-                    .filter(
-                        BrowserPoolEntry.status == "leased",
-                        BrowserPoolEntry.ttl_expires_at.isnot(None),
-                        BrowserPoolEntry.ttl_expires_at <= now,
+                    await uow.session.scalars(
+                        select(BrowserPoolEntry).where(
+                            BrowserPoolEntry.status == "leased",
+                            BrowserPoolEntry.ttl_expires_at.isnot(None),
+                            BrowserPoolEntry.ttl_expires_at <= now,
+                        )
                     )
-                    .all()
-                )
+                ).all()
                 for row in rows:
                     row.status = "ready"
                     row.health = {**(row.health or {}), "reclaimed_at": now.isoformat(), "reclaimed_reason": "expired"}
@@ -739,7 +743,7 @@ class ResourcePoolManager:
 class WorkspacePoolManager(ResourcePoolManager):
     """Backward-compatible wrapper for workspace-specific callers."""
 
-    def plan(
+    async def plan(
         self,
         *,
         repo_root: str | None,
@@ -751,7 +755,7 @@ class WorkspacePoolManager(ResourcePoolManager):
         worker_id: str | None = None,
         target_path: str | None = None,
     ) -> PoolPlan:
-        return self.plan_workspace(
+        return await self.plan_workspace(
             repo_root=repo_root,
             base_commit=base_commit,
             runtime_fingerprint=runtime_fingerprint,
@@ -766,7 +770,7 @@ class WorkspacePoolManager(ResourcePoolManager):
 class BrowserPoolManager(ResourcePoolManager):
     """Backward-compatible wrapper for browser-specific callers."""
 
-    def plan(
+    async def plan(
         self,
         *,
         profile_key: str | None,
@@ -776,7 +780,7 @@ class BrowserPoolManager(ResourcePoolManager):
         owner_run_id: int | None = None,
         owner_worker_id: str | None = None,
     ) -> PoolPlan:
-        return self.plan_browser(
+        return await self.plan_browser(
             profile_key=profile_key,
             browser_version=browser_version,
             context_mode=context_mode,

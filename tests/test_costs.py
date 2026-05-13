@@ -8,7 +8,6 @@ Run: pytest tests/test_costs.py -v --tb=short
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -216,14 +215,14 @@ class TestGetStaleIdeas:
         assert isinstance(resp.json(), list)
 
 
-def test_run_breakdown_wraps_legacy_agent_api_calls_table():
+async def test_run_breakdown_wraps_legacy_agent_api_calls_table():
     from brain.app.api.routers.costs import run_breakdown
 
     db = MagicMock()
     db.execute = AsyncMock(side_effect=SQLAlchemyError("legacy table"))
     db.rollback = AsyncMock()
 
-    result = asyncio.run(run_breakdown(42, db=db, user={"id": "system"}))
+    result = await run_breakdown(42, db=db, user={"id": "system"})
 
     assert result == {
         "run_id": 42,

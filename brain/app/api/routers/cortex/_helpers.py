@@ -99,9 +99,9 @@ def _rows_to_list(rows):
     return [_row_to_dict(r) for r in rows]
 
 
-def _validate_idea_org_orm(session, idea_id, org_id):
+async def _validate_idea_org_orm(session, idea_id, org_id):
     """Check idea belongs to org, return Idea or None."""
-    return IdeaRepository(session).get_for_org(idea_id, org_id)
+    return await IdeaRepository(session).a_get_for_org(idea_id, org_id)
 
 
 # Legacy alias used by older tests
@@ -117,23 +117,7 @@ def _require_worker_principal(user: dict | None) -> None:
         raise HTTPException(status_code=403, detail="Worker service principal required")
 
 
-def _get_idea_for_user(session, idea_id: str, user: dict | None) -> Idea | None:
-    repo = IdeaRepository(session)
-    if _caller_is_service_principal(user):
-        return repo.get(idea_id)
-    org_id = require_org_context(user or {})
-    org_user_ids = select(User.id).where(User.org_id == str(org_id))
-    stmt = select(Idea).where(
-        Idea.id == idea_id,
-        or_(
-            Idea.org_id == str(org_id),
-            and_(Idea.org_id.is_(None), Idea.user_id.in_(org_user_ids)),
-        ),
-    )
-    return session.scalars(stmt).first()
-
-
-async def _a_get_idea_for_user(session, idea_id: str, user: dict | None) -> Idea | None:
+async def _get_idea_for_user(session, idea_id: str, user: dict | None) -> Idea | None:
     repo = IdeaRepository(session)
     if _caller_is_service_principal(user):
         return await repo.a_get(idea_id)
@@ -149,30 +133,21 @@ async def _a_get_idea_for_user(session, idea_id: str, user: dict | None) -> Idea
     return (await session.scalars(stmt)).first()
 
 
-def _require_idea_for_user(
+async def _require_idea_for_user(
     session,
     idea_id: str,
     user: dict | None,
     *,
     detail: str = "Idea not found",
 ) -> Idea:
-    idea = _get_idea_for_user(session, idea_id, user)
+    idea = await _get_idea_for_user(session, idea_id, user)
     if idea is None:
         raise HTTPException(status_code=404, detail=detail)
     return idea
 
 
-async def _a_require_idea_for_user(
-    session,
-    idea_id: str,
-    user: dict | None,
-    *,
-    detail: str = "Idea not found",
-) -> Idea:
-    idea = await _a_get_idea_for_user(session, idea_id, user)
-    if idea is None:
-        raise HTTPException(status_code=404, detail=detail)
-    return idea
+_a_get_idea_for_user = _get_idea_for_user
+_a_require_idea_for_user = _require_idea_for_user
 
 
 def _parse_message_type(content, role="user"):

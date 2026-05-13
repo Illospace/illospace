@@ -3,7 +3,7 @@
 Tests mock UnitOfWork at the module boundary so no DB is needed.
 """
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 from brain.platform.db.models.org import Org, User
 
@@ -47,14 +47,26 @@ class _FakeUoW:
 
     def __init__(self):
         self.team = MagicMock()
+        self.team.get_by_email = AsyncMock()
+        self.team.get_by_id = AsyncMock()
+        self.team.has_any = AsyncMock()
+        self.team.list_by_org = AsyncMock()
+        self.team.list_all = AsyncMock()
+        self.team.list_pending = AsyncMock()
         self.orgs = MagicMock()
+        self.orgs.get = AsyncMock()
+        self.orgs.get_first = AsyncMock()
         self.session = MagicMock()
+        self.session.delete = AsyncMock()
+        self.session.flush = AsyncMock()
+        scalar_result = MagicMock()
+        self.session.scalars = AsyncMock(return_value=scalar_result)
         self._committed = False
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, *args):
+    async def __aexit__(self, *args):
         if not args[0]:
             self._committed = True
 
@@ -76,72 +88,72 @@ def patch_uow(uow):
 # ── get_user_by_email ──────────────────────────────────────────
 
 class TestGetUserByEmail:
-    def test_returns_dict_when_found(self, patch_uow):
-        from brain.systems.auth.users import get_user_by_email
+    async def test_returns_dict_when_found(self, patch_uow):
+        from brain.systems.auth.users import async_get_user_by_email
 
         user = _make_user()
         org = _make_org()
         patch_uow.team.get_by_email.return_value = user
         patch_uow.orgs.get.return_value = org
 
-        result = get_user_by_email("Alice@Test.com")
+        result = await async_get_user_by_email("Alice@Test.com")
 
-        patch_uow.team.get_by_email.assert_called_once_with("alice@test.com")
+        patch_uow.team.get_by_email.assert_awaited_once_with("alice@test.com")
         assert result["id"] == "user-1"
         assert result["name"] == "Alice"
         assert result["org_name"] == "Test Org"
 
-    def test_returns_none_when_not_found(self, patch_uow):
-        from brain.systems.auth.users import get_user_by_email
+    async def test_returns_none_when_not_found(self, patch_uow):
+        from brain.systems.auth.users import async_get_user_by_email
 
         patch_uow.team.get_by_email.return_value = None
-        assert get_user_by_email("nobody@test.com") is None
+        assert await async_get_user_by_email("nobody@test.com") is None
 
 
 # ── get_user_by_id ─────────────────────────────────────────────
 
 class TestGetUserById:
-    def test_returns_dict_when_found(self, patch_uow):
-        from brain.systems.auth.users import get_user_by_id
+    async def test_returns_dict_when_found(self, patch_uow):
+        from brain.systems.auth.users import async_get_user_by_id
 
         user = _make_user()
         org = _make_org()
         patch_uow.team.get_by_id.return_value = user
         patch_uow.orgs.get.return_value = org
 
-        result = get_user_by_id("user-1")
+        result = await async_get_user_by_id("user-1")
 
         assert result["id"] == "user-1"
         assert result["org_slug"] == "test-org"
 
-    def test_returns_none_when_not_found(self, patch_uow):
-        from brain.systems.auth.users import get_user_by_id
+    async def test_returns_none_when_not_found(self, patch_uow):
+        from brain.systems.auth.users import async_get_user_by_id
 
         patch_uow.team.get_by_id.return_value = None
-        assert get_user_by_id("nope") is None
+        assert await async_get_user_by_id("nope") is None
 
 
 # ── has_any_users ──────────────────────────────────────────────
 
 class TestHasAnyUsers:
-    def test_true(self, patch_uow):
-        from brain.systems.auth.users import has_any_users
+    async def test_true(self, patch_uow):
+        from brain.systems.auth.users import async_has_any_users
 
         patch_uow.team.has_any.return_value = True
-        assert has_any_users() is True
+        assert await async_has_any_users() is True
 
-    def test_false(self, patch_uow):
-        from brain.systems.auth.users import has_any_users
+    async def test_false(self, patch_uow):
+        from brain.systems.auth.users import async_has_any_users
 
         patch_uow.team.has_any.return_value = False
-        assert has_any_users() is False
+        assert await async_has_any_users() is False
 
 
 # ── authenticate ───────────────────────────────────────────────
 
 class TestAuthenticate:
-    def test_success(self, patch_uow):
-        from brain.systems.auth.users import authenticate
+    async def test_success(self, patch_uow):
+        from brain.systems.auth.users import async_authenticate
         import bcrypt
 
         pw_hash = bcrypt.hashpw(b"secret123", bcrypt.gensalt()).decode()
@@ -150,12 +162,12 @@ class TestAuthenticate:
         patch_uow.team.get_by_email.return_value = user
         patch_uow.orgs.get.return_value = org
 
-        result = authenticate("alice@test.com", "secret123")
+        result = await async_authenticate("alice@test.com", "secret123")
         assert result is not None
         assert result["id"] == "user-1"
 
-    def test_wrong_password(self, patch_uow):
-        from brain.systems.auth.users import authenticate
+    async def test_wrong_password(self, patch_uow):
+        from brain.systems.auth.users import async_authenticate
         import bcrypt
 
         pw_hash = bcrypt.hashpw(b"secret123", bcrypt.gensalt()).decode()
@@ -164,33 +176,33 @@ class TestAuthenticate:
         patch_uow.team.get_by_email.return_value = user
         patch_uow.orgs.get.return_value = org
 
-        result = authenticate("alice@test.com", "wrong")
+        result = await async_authenticate("alice@test.com", "wrong")
         assert result is None
 
-    def test_user_not_found(self, patch_uow):
-        from brain.systems.auth.users import authenticate
+    async def test_user_not_found(self, patch_uow):
+        from brain.systems.auth.users import async_authenticate
 
         patch_uow.team.get_by_email.return_value = None
-        result = authenticate("nobody@test.com", "pass")
+        result = await async_authenticate("nobody@test.com", "pass")
         assert result is None
 
-    def test_no_password_hash(self, patch_uow):
-        from brain.systems.auth.users import authenticate
+    async def test_no_password_hash(self, patch_uow):
+        from brain.systems.auth.users import async_authenticate
 
         user = _make_user(password_hash=None)
         org = _make_org()
         patch_uow.team.get_by_email.return_value = user
         patch_uow.orgs.get.return_value = org
 
-        result = authenticate("alice@test.com", "pass")
+        result = await async_authenticate("alice@test.com", "pass")
         assert result is None
 
 
 # ── create_first_user ──────────────────────────────────────────
 
 class TestCreateFirstUser:
-    def test_creates_org_and_user(self, patch_uow):
-        from brain.systems.auth.users import create_first_user
+    async def test_creates_org_and_user(self, patch_uow):
+        from brain.systems.auth.users import async_create_first_user
 
         # flush() assigns IDs via side_effect
         flush_count = [0]
@@ -205,7 +217,7 @@ class TestCreateFirstUser:
         patch_uow.team.get_by_id.return_value = user
         patch_uow.orgs.get.return_value = org
 
-        result = create_first_user("Alice", "alice@test.com", "pass123", "My Org")
+        result = await async_create_first_user("Alice", "alice@test.com", "pass123", "My Org")
 
         assert result["id"] == "new-user"
         assert patch_uow.session.add.call_count == 2  # org + user
@@ -215,30 +227,30 @@ class TestCreateFirstUser:
 # ── get_default_org_id ─────────────────────────────────────────
 
 class TestGetDefaultOrgId:
-    def test_returns_id(self, patch_uow):
-        from brain.systems.auth.users import get_default_org_id
+    async def test_returns_id(self, patch_uow):
+        from brain.systems.auth.users import async_get_default_org_id
 
         patch_uow.orgs.get_first.return_value = _make_org(id="org-42")
-        assert get_default_org_id() == "org-42"
+        assert await async_get_default_org_id() == "org-42"
 
-    def test_returns_none(self, patch_uow):
-        from brain.systems.auth.users import get_default_org_id
+    async def test_returns_none(self, patch_uow):
+        from brain.systems.auth.users import async_get_default_org_id
 
         patch_uow.orgs.get_first.return_value = None
-        assert get_default_org_id() is None
+        assert await async_get_default_org_id() is None
 
 
 # ── get_org_users ──────────────────────────────────────────────
 
 class TestGetOrgUsers:
-    def test_returns_list(self, patch_uow):
-        from brain.systems.auth.users import get_org_users
+    async def test_returns_list(self, patch_uow):
+        from brain.systems.auth.users import async_get_org_users
 
         u1 = _make_user(id="u1", name="Alice", email="a@t.com", color="#aaa")
         u2 = _make_user(id="u2", name="Bob", email="b@t.com", color="#bbb")
         patch_uow.team.list_by_org.return_value = [u1, u2]
 
-        result = get_org_users("org-1")
+        result = await async_get_org_users("org-1")
         assert len(result) == 2
         assert result[0]["name"] == "Alice"
         assert result[1]["name"] == "Bob"
@@ -247,76 +259,76 @@ class TestGetOrgUsers:
 # ── approve_user ───────────────────────────────────────────────
 
 class TestApproveUser:
-    def test_owner_can_approve(self, patch_uow):
-        from brain.systems.auth.users import approve_user
+    async def test_owner_can_approve(self, patch_uow):
+        from brain.systems.auth.users import async_approve_user
 
         approver = _make_user(id="owner-1", role="owner")
         pending = _make_user(id="pending-1", approved=False)
         patch_uow.team.get_by_id.side_effect = lambda uid: approver if uid == "owner-1" else pending
 
-        assert approve_user("pending-1", "owner-1") is True
+        assert await async_approve_user("pending-1", "owner-1") is True
         assert pending.approved is True
 
-    def test_member_can_approve_same_org(self, patch_uow):
-        from brain.systems.auth.users import approve_user
+    async def test_member_can_approve_same_org(self, patch_uow):
+        from brain.systems.auth.users import async_approve_user
 
         member = _make_user(id="member-1", role="member")
         pending = _make_user(id="pending-1", approved=False)
         patch_uow.team.get_by_id.side_effect = lambda uid: member if uid == "member-1" else pending
 
-        assert approve_user("pending-1", "member-1") is True
+        assert await async_approve_user("pending-1", "member-1") is True
         assert pending.approved is True
 
-    def test_pending_member_cannot_approve(self, patch_uow):
-        from brain.systems.auth.users import approve_user
+    async def test_pending_member_cannot_approve(self, patch_uow):
+        from brain.systems.auth.users import async_approve_user
 
         member = _make_user(id="member-1", role="member", approved=False)
         patch_uow.team.get_by_id.return_value = member
 
-        assert approve_user("pending-1", "member-1") is False
+        assert await async_approve_user("pending-1", "member-1") is False
 
-    def test_cannot_approve_outside_org(self, patch_uow):
-        from brain.systems.auth.users import approve_user
+    async def test_cannot_approve_outside_org(self, patch_uow):
+        from brain.systems.auth.users import async_approve_user
 
         member = _make_user(id="member-1", role="member", org_id="org-1")
         pending = _make_user(id="pending-1", approved=False, org_id="org-2")
         patch_uow.team.get_by_id.side_effect = lambda uid: member if uid == "member-1" else pending
 
-        assert approve_user("pending-1", "member-1") is False
+        assert await async_approve_user("pending-1", "member-1") is False
         assert pending.approved is False
 
 
 # ── reject_user ────────────────────────────────────────────────
 
 class TestRejectUser:
-    def test_owner_can_reject(self, patch_uow):
-        from brain.systems.auth.users import reject_user
+    async def test_owner_can_reject(self, patch_uow):
+        from brain.systems.auth.users import async_reject_user
 
         approver = _make_user(id="owner-1", role="owner")
         pending = _make_user(id="pending-1", approved=False)
         patch_uow.team.get_by_id.side_effect = lambda uid: approver if uid == "owner-1" else pending
 
-        assert reject_user("pending-1", "owner-1") is True
-        patch_uow.session.delete.assert_called_once_with(pending)
+        assert await async_reject_user("pending-1", "owner-1") is True
+        patch_uow.session.delete.assert_awaited_once_with(pending)
 
-    def test_cannot_reject_approved(self, patch_uow):
-        from brain.systems.auth.users import reject_user
+    async def test_cannot_reject_approved(self, patch_uow):
+        from brain.systems.auth.users import async_reject_user
 
         approver = _make_user(id="owner-1", role="owner")
         approved = _make_user(id="user-1", approved=True)
         patch_uow.team.get_by_id.side_effect = lambda uid: approver if uid == "owner-1" else approved
 
-        assert reject_user("user-1", "owner-1") is False
+        assert await async_reject_user("user-1", "owner-1") is False
 
-    def test_cannot_reject_outside_org(self, patch_uow):
-        from brain.systems.auth.users import reject_user
+    async def test_cannot_reject_outside_org(self, patch_uow):
+        from brain.systems.auth.users import async_reject_user
 
         approver = _make_user(id="owner-1", role="owner", org_id="org-1")
         pending = _make_user(id="pending-1", approved=False, org_id="org-2")
         patch_uow.team.get_by_id.side_effect = lambda uid: approver if uid == "owner-1" else pending
 
-        assert reject_user("pending-1", "owner-1") is False
-        patch_uow.session.delete.assert_not_called()
+        assert await async_reject_user("pending-1", "owner-1") is False
+        patch_uow.session.delete.assert_not_awaited()
 
 
 # ── safe_user_context ──────────────────────────────────────────

@@ -11,12 +11,12 @@ from datetime import date, timedelta
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 logger = logging.getLogger(__name__)
 
 
-def detect_divergence(
+async def detect_divergence(
     target_date: date,
     org_id: str,
     lookback_days: int = 7,
@@ -27,8 +27,8 @@ def detect_divergence(
     """
     since = target_date - timedelta(days=lookback_days)
 
-    with open_unit_of_work(UnitOfWork) as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             SELECT m.user_id, u.name AS user_name,
                    array_agg(DISTINCT unnest_tag) AS topic_tags,
                    string_agg(DISTINCT LEFT(m.content, 100), ' | ') AS content_sample
@@ -93,7 +93,7 @@ def format_sync_suggestion(
     )
 
 
-def store_divergence_results(
+async def store_divergence_results(
     target_date: date,
     org_id: str,
     overlaps: list[dict],
@@ -108,11 +108,11 @@ def store_divergence_results(
 
     content = "\n".join(summary_lines)
 
-    with open_unit_of_work(UnitOfWork) as uow:
-        from brain.systems.memory.embeddings import embed_document, vec_to_pg
-        embedding = embed_document(content)
+    from brain.systems.memory.embeddings import embed_document, vec_to_pg
+    embedding = embed_document(content)
 
-        uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        await uow.session.execute(text("""
             INSERT INTO memories (content, memory_type, semantic_embedding,
                 salience, tags, source, org_id, user_id, scope)
             VALUES (:content, 'meta', :embedding, 7.0, :tags, 'nightly:divergence', :org_id,

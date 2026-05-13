@@ -1,9 +1,10 @@
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+
+pytestmark = pytest.mark.asyncio
 
 
 class _RequestStub:
@@ -59,7 +60,7 @@ def _uow_with_idea(idea):
     return uow
 
 
-def test_notify_idea_created_preserves_thread_message_for_skill_routing():
+async def test_notify_idea_created_preserves_thread_message_for_skill_routing():
     from brain.app.api.routers.cortex._ideas import notify_illo
 
     idea = SimpleNamespace(
@@ -83,7 +84,7 @@ def test_notify_idea_created_preserves_thread_message_for_skill_routing():
     uow = _uow_with_idea(idea)
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=uow), \
          patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
-        result = asyncio.run(notify_illo(request=request, user=user))
+        result = await notify_illo(request=request, user=user)
 
     assert result["ok"] is True
     trigger = mock_route.call_args.args[0]
@@ -92,7 +93,7 @@ def test_notify_idea_created_preserves_thread_message_for_skill_routing():
     assert mock_route.call_args.kwargs["session"] is uow.session
 
 
-def test_notify_idea_created_keeps_generic_message_without_thread_message():
+async def test_notify_idea_created_keeps_generic_message_without_thread_message():
     from brain.app.api.routers.cortex._ideas import notify_illo
 
     idea = SimpleNamespace(
@@ -114,7 +115,7 @@ def test_notify_idea_created_keeps_generic_message_without_thread_message():
     route_result.to_response.return_value = {"ok": True}
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=_uow_with_idea(idea)), \
          patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
-        result = asyncio.run(notify_illo(request=request, user=user))
+        result = await notify_illo(request=request, user=user)
 
     assert result["ok"] is True
     trigger = mock_route.call_args.args[0]
@@ -123,7 +124,7 @@ def test_notify_idea_created_keeps_generic_message_without_thread_message():
     assert "Context" in msg
 
 
-def test_notify_idea_created_preserves_execution_profile_metadata():
+async def test_notify_idea_created_preserves_execution_profile_metadata():
     from brain.app.api.routers.cortex._ideas import notify_illo
 
     idea = SimpleNamespace(
@@ -147,14 +148,14 @@ def test_notify_idea_created_preserves_execution_profile_metadata():
     route_result.to_response.return_value = {"ok": True}
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=_uow_with_idea(idea)), \
          patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
-        result = asyncio.run(notify_illo(request=request, user=user))
+        result = await notify_illo(request=request, user=user)
 
     assert result["ok"] is True
     trigger = mock_route.call_args.args[0]
     assert trigger.payload["metadata"]["execution_profile"] == "fast"
 
 
-def test_notify_idea_created_to_team_member_does_not_enqueue_agent_run():
+async def test_notify_idea_created_to_team_member_does_not_enqueue_agent_run():
     from brain.app.api.routers.cortex._ideas import notify_illo
 
     idea = SimpleNamespace(
@@ -177,7 +178,7 @@ def test_notify_idea_created_to_team_member_does_not_enqueue_agent_run():
 
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=uow), \
          patch("brain.app.triggers.router.async_route_trigger") as mock_route:
-        result = asyncio.run(notify_illo(request=request, user=user))
+        result = await notify_illo(request=request, user=user)
 
     assert result == {
         "ok": True,
@@ -188,7 +189,7 @@ def test_notify_idea_created_to_team_member_does_not_enqueue_agent_run():
     mock_route.assert_not_called()
 
 
-def test_notify_idea_created_to_team_member_from_thread_metadata_does_not_enqueue_agent_run():
+async def test_notify_idea_created_to_team_member_from_thread_metadata_does_not_enqueue_agent_run():
     from brain.app.api.routers.cortex._ideas import notify_illo
 
     idea = SimpleNamespace(
@@ -214,7 +215,7 @@ def test_notify_idea_created_to_team_member_from_thread_metadata_does_not_enqueu
              AsyncMock(return_value={"thread_message": "@Riley can you take a look?"}),
          ), \
          patch("brain.app.triggers.router.async_route_trigger") as mock_route:
-        result = asyncio.run(notify_illo(request=request, user=user))
+        result = await notify_illo(request=request, user=user)
 
     assert result == {
         "ok": True,
@@ -225,7 +226,7 @@ def test_notify_idea_created_to_team_member_from_thread_metadata_does_not_enqueu
     mock_route.assert_not_called()
 
 
-def test_notify_idea_created_with_illo_and_teammate_enqueues_agent_run():
+async def test_notify_idea_created_with_illo_and_teammate_enqueues_agent_run():
     from brain.app.api.routers.cortex._ideas import notify_illo
 
     idea = SimpleNamespace(
@@ -249,13 +250,13 @@ def test_notify_idea_created_with_illo_and_teammate_enqueues_agent_run():
 
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=_uow_with_idea(idea)), \
          patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
-        result = asyncio.run(notify_illo(request=request, user=user))
+        result = await notify_illo(request=request, user=user)
 
     assert result["ok"] is True
     mock_route.assert_called_once()
 
 
-def test_notify_thread_reply_preserves_execution_profile_metadata():
+async def test_notify_thread_reply_preserves_execution_profile_metadata():
     from brain.app.api.routers.cortex._ideas import notify_illo
 
     idea = SimpleNamespace(
@@ -280,7 +281,7 @@ def test_notify_thread_reply_preserves_execution_profile_metadata():
     uow = _uow_with_idea(idea)
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=uow), \
          patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
-        result = asyncio.run(notify_illo(request=request, user=user))
+        result = await notify_illo(request=request, user=user)
 
     assert result["ok"] is True
     trigger = mock_route.call_args.args[0]
@@ -288,7 +289,7 @@ def test_notify_thread_reply_preserves_execution_profile_metadata():
     assert mock_route.call_args.kwargs["session"] is uow.session
 
 
-def test_notify_thread_reply_to_team_member_does_not_enqueue_agent_run():
+async def test_notify_thread_reply_to_team_member_does_not_enqueue_agent_run():
     from brain.app.api.routers.cortex._ideas import notify_illo
 
     request = _RequestStub(
@@ -302,7 +303,7 @@ def test_notify_thread_reply_to_team_member_does_not_enqueue_agent_run():
     user = {"id": "user-1", "org_id": "org-1", "role": "member"}
 
     with patch("brain.app.triggers.router.async_route_trigger") as mock_route:
-        result = asyncio.run(notify_illo(request=request, user=user))
+        result = await notify_illo(request=request, user=user)
 
     assert result == {
         "ok": True,
@@ -312,7 +313,7 @@ def test_notify_thread_reply_to_team_member_does_not_enqueue_agent_run():
     mock_route.assert_not_called()
 
 
-def test_notify_thread_reply_with_illo_mention_still_enqueues_agent_run():
+async def test_notify_thread_reply_with_illo_mention_still_enqueues_agent_run():
     from brain.app.api.routers.cortex._ideas import notify_illo
 
     idea = SimpleNamespace(
@@ -336,13 +337,13 @@ def test_notify_thread_reply_with_illo_mention_still_enqueues_agent_run():
     route_result.to_response.return_value = {"ok": True}
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=_uow_with_idea(idea)), \
          patch("brain.app.triggers.router.async_route_trigger", AsyncMock(return_value=route_result)) as mock_route:
-        result = asyncio.run(notify_illo(request=request, user=user))
+        result = await notify_illo(request=request, user=user)
 
     assert result["ok"] is True
     mock_route.assert_called_once()
 
 
-def test_notify_thread_reply_rejects_cross_org_idea_before_enqueue():
+async def test_notify_thread_reply_rejects_cross_org_idea_before_enqueue():
     from brain.app.api.routers.cortex._ideas import notify_illo
 
     uow = _uow_with_idea(None)
@@ -358,7 +359,7 @@ def test_notify_thread_reply_rejects_cross_org_idea_before_enqueue():
     with patch("brain.app.api.routers.cortex._ideas.UnitOfWork", return_value=uow), \
          patch("brain.systems.runs.cortex.admit_run") as mock_admit, \
          pytest.raises(HTTPException) as exc_info:
-        asyncio.run(notify_illo(request=request, user=user))
+        await notify_illo(request=request, user=user)
 
     assert exc_info.value.status_code == 404
     mock_admit.assert_not_called()

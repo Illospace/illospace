@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from brain.systems.runs.event_log import (
-    list_run_events_after_for_principal,
-    record_run_event,
-    run_event_backbone_status,
+    async_record_run_event,
+    async_run_event_backbone_status,
+    list_run_events_after_for_principal_async,
     run_event_to_message,
 )
 from brain.systems.cortex.events import run_event_scope
@@ -29,13 +29,15 @@ class _AsyncUoW:
         return False
 
 
-def test_record_run_event_allocates_next_sequence_and_normalizes_payload():
+@pytest.mark.asyncio
+async def test_record_run_event_allocates_next_sequence_and_normalizes_payload():
     session = MagicMock()
-    session.get.return_value = SimpleNamespace(id=42, root_run_id=42)
+    session.get = AsyncMock(return_value=SimpleNamespace(id=42, root_run_id=42))
     session.get_bind.return_value.dialect.name = "sqlite"
-    session.scalar.return_value = 4
+    session.scalar = AsyncMock(return_value=4)
+    session.flush = AsyncMock()
 
-    event = record_run_event(
+    event = await async_record_run_event(
         42,
         "run.activity",
         {"label": "Reading README", "nested": {"value": 1}},
@@ -52,6 +54,7 @@ def test_record_run_event_allocates_next_sequence_and_normalizes_payload():
     added = session.add.call_args.args[0]
     assert added.event_type == "run.activity"
     assert added.producer == "fast"
+    session.flush.assert_awaited_once()
 
 
 def test_run_event_to_message_handles_projected_rows_and_replay_flag():
@@ -113,7 +116,6 @@ def test_publish_live_fans_out_without_durable_storage(monkeypatch):
     published = []
 
     monkeypatch.setattr(events, "_publisher", lambda event_type, data: published.append((event_type, data)))
-    monkeypatch.setattr(events, "record_cortex_event", MagicMock(side_effect=AssertionError("live events are not durable")))
 
     events.publish_live("browser_session_frame", {"idea_id": "idea-1", "delta": "hello"})
 
@@ -125,11 +127,9 @@ async def test_publish_records_cortex_event_async_inside_running_loop(monkeypatc
     from brain.systems.cortex import events
 
     async_record = AsyncMock()
-    sync_record = MagicMock(side_effect=AssertionError("sync event writes are not allowed in async runtime"))
     publisher = MagicMock()
 
     monkeypatch.setattr(events, "record_cortex_event_async", async_record)
-    monkeypatch.setattr(events, "record_cortex_event", sync_record)
     monkeypatch.setattr(events, "_publisher", publisher)
 
     payload = {"idea_id": "idea-1", "new_status": "active"}
@@ -137,25 +137,20 @@ async def test_publish_records_cortex_event_async_inside_running_loop(monkeypatc
     await asyncio.sleep(0)
 
     async_record.assert_awaited_once_with("status_change", payload)
-    sync_record.assert_not_called()
     publisher.assert_called_once_with("status_change", payload)
 
 
-def test_browser_run_events_live_publish_after_durable_record(monkeypatch):
+@pytest.mark.asyncio
+async def test_browser_run_events_live_publish_after_durable_record(monkeypatch):
     import brain.systems.cortex.events as cortex_events
 
     durable_records = []
     live_events = []
 
-    monkeypatch.setattr(
-        "brain.systems.runs.event_log.record_run_event",
-        lambda *args, **kwargs: durable_records.append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        cortex_events,
-        "record_cortex_event",
-        MagicMock(side_effect=AssertionError("run event should not duplicate into cortex_events")),
-    )
+    async def _record(*args, **kwargs):
+        durable_records.append((args, kwargs))
+
+    monkeypatch.setattr("brain.systems.runs.event_log.async_record_run_event", _record)
     monkeypatch.setattr(
         cortex_events,
         "_publisher",
@@ -169,35 +164,41 @@ def test_browser_run_events_live_publish_after_durable_record(monkeypatch):
     }
     with run_event_scope(42, idea_id="idea-1", session=object()):
         cortex_events.publish("browser_session_state", payload)
+    await asyncio.sleep(0)
 
     assert durable_records
     assert durable_records[0][0][:3] == (42, "browser_session_state", payload)
     assert live_events == [("browser_session_state", payload)]
 
 
-def test_non_browser_run_events_skip_live_publish_after_durable_record(monkeypatch):
+@pytest.mark.asyncio
+async def test_non_browser_run_events_skip_live_publish_after_durable_record(monkeypatch):
     import brain.systems.cortex.events as cortex_events
 
-    monkeypatch.setattr("brain.systems.runs.event_log.record_run_event", lambda *args, **kwargs: None)
+    async_record = AsyncMock()
+    monkeypatch.setattr("brain.systems.runs.event_log.async_record_run_event", async_record)
     publisher = MagicMock()
     monkeypatch.setattr(cortex_events, "_publisher", publisher)
 
     with run_event_scope(42, idea_id="idea-1", session=object()):
         cortex_events.publish("run.activity", {"idea_id": "idea-1", "activity": "Working"})
+    await asyncio.sleep(0)
 
+    async_record.assert_awaited_once()
     publisher.assert_not_called()
 
 
-def test_vault_secret_prompt_publishes_live_after_durable_record(monkeypatch):
+@pytest.mark.asyncio
+async def test_vault_secret_prompt_publishes_live_after_durable_record(monkeypatch):
     import brain.systems.cortex.events as cortex_events
 
     durable_records = []
     live_events = []
 
-    monkeypatch.setattr(
-        "brain.systems.runs.event_log.record_run_event",
-        lambda *args, **kwargs: durable_records.append((args, kwargs)),
-    )
+    async def _record(*args, **kwargs):
+        durable_records.append((args, kwargs))
+
+    monkeypatch.setattr("brain.systems.runs.event_log.async_record_run_event", _record)
     monkeypatch.setattr(
         cortex_events,
         "_publisher",
@@ -211,16 +212,18 @@ def test_vault_secret_prompt_publishes_live_after_durable_record(monkeypatch):
     }
     with run_event_scope(42, idea_id="idea-1", session=object()):
         cortex_events.publish("vault_secret_prompt", payload)
+    await asyncio.sleep(0)
 
     assert durable_records
     assert live_events == [("vault_secret_prompt", payload)]
 
 
-def test_run_replay_query_scopes_human_principal_to_authenticated_org():
+@pytest.mark.asyncio
+async def test_run_replay_query_scopes_human_principal_to_authenticated_org():
     session = MagicMock()
-    session.execute.return_value.all.return_value = []
+    session.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
 
-    list_run_events_after_for_principal(
+    await list_run_events_after_for_principal_async(
         session,
         {
             "id": "user-1",
@@ -231,18 +234,19 @@ def test_run_replay_query_scopes_human_principal_to_authenticated_org():
         limit=5,
     )
 
-    stmt = session.execute.call_args.args[0]
+    stmt = session.execute.await_args.args[0]
     sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "JOIN agent_runs" in sql
     assert "agent_run_events.id > 7" in sql
     assert "agent_runs.org_id = '00000000000000000000000000000001'" in sql
 
 
-def test_run_replay_query_allows_internal_service_permission_scope():
+@pytest.mark.asyncio
+async def test_run_replay_query_allows_internal_service_permission_scope():
     session = MagicMock()
-    session.execute.return_value.all.return_value = []
+    session.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
 
-    list_run_events_after_for_principal(
+    await list_run_events_after_for_principal_async(
         session,
         {
             "id": "service:worker",
@@ -253,21 +257,22 @@ def test_run_replay_query_allows_internal_service_permission_scope():
         limit=5,
     )
 
-    stmt = session.execute.call_args.args[0]
+    stmt = session.execute.await_args.args[0]
     sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "JOIN agent_runs" in sql
     assert "agent_run_events.id > 7" in sql
     assert "agent_runs.org_id =" not in sql
 
 
-def test_run_event_backbone_status_reports_lag_and_health(monkeypatch):
+@pytest.mark.asyncio
+async def test_run_event_backbone_status_reports_lag_and_health(monkeypatch):
     import brain.app.api.ws.run_events as run_events
 
     session = MagicMock()
-    session.scalar.return_value = 11
+    session.scalar = AsyncMock(return_value=11)
     monkeypatch.setattr(run_events, "_last_event_id", 8)
 
-    status = run_event_backbone_status(
+    status = await async_run_event_backbone_status(
         session,
         "api.websocket_fanout",
         consumer_running=True,

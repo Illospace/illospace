@@ -1,5 +1,4 @@
 """Tests for cortex router — ideas CRUD, threads."""
-import asyncio
 import json
 import inspect
 import uuid
@@ -59,11 +58,7 @@ def mock_session_factory():
     def _async_factory():
         return _AsyncSession(session)
 
-    def _legacy_factory():
-        return session
-
-    with patch("brain.app.api.deps.SessionFactory", _async_factory), \
-         patch("brain.platform.db.legacy.legacy_session_factory", _legacy_factory):
+    with patch("brain.app.api.deps.SessionFactory", _async_factory):
         yield session
 
 
@@ -233,7 +228,7 @@ def test_project_context_merge_into_idea_agent_details():
     assert idea.agent_details["project_context"] == snapshot
 
 
-def test_notify_metadata_preserves_thread_project_context():
+async def test_notify_metadata_preserves_thread_project_context():
     from brain.app.api.routers.cortex._ideas import _effective_notify_metadata
 
     snapshot = {"resources": [{"path": "/workspace/context.md"}]}
@@ -244,13 +239,13 @@ def test_notify_metadata_preserves_thread_project_context():
     }
 
     async_db = _AsyncSession(db)
-    result = asyncio.run(_effective_notify_metadata(async_db, "idea-1", {"execution_profile": "fast"}))
+    result = await _effective_notify_metadata(async_db, "idea-1", {"execution_profile": "fast"})
 
     assert result["project_context"] == snapshot
     assert result["execution_profile"] == "fast"
 
 
-def test_project_profile_resource_endpoints_mutate_context(tmp_path):
+async def test_project_profile_resource_endpoints_mutate_context(tmp_path):
     from brain.app.api.routers.cortex import _project_context
     from brain.systems.cortex.project_context.schemas import (
         ProjectResourcesCreate,
@@ -279,31 +274,27 @@ def test_project_profile_resource_endpoints_mutate_context(tmp_path):
     db = _AsyncSession(session)
     user = {"id": "user-1", "org_id": "test-org", "role": "owner"}
 
-    asyncio.run(
-        _project_context.add_project_resources(
-            "project-1",
-            ProjectResourcesCreate(resources=[{"kind": "file", "path": str(second), "name": "brief"}]),
-            db=db,
-            user=user,
-        )
+    await _project_context.add_project_resources(
+        "project-1",
+        ProjectResourcesCreate(resources=[{"kind": "file", "path": str(second), "name": "brief"}]),
+        db=db,
+        user=user,
     )
 
     assert [resource["path"] for resource in profile.project_context["resources"]] == [str(first), str(second)]
     added_id = profile.project_context["resources"][1]["id"]
 
-    asyncio.run(
-        _project_context.reorder_project_resources(
-            "project-1",
-            ProjectResourcesReorder(resource_ids=[added_id, "r1"]),
-            db=db,
-            user=user,
-        )
+    await _project_context.reorder_project_resources(
+        "project-1",
+        ProjectResourcesReorder(resource_ids=[added_id, "r1"]),
+        db=db,
+        user=user,
     )
 
     assert [resource["id"] for resource in profile.project_context["resources"]] == [added_id, "r1"]
 
 
-def test_project_profile_resource_reorder_rejects_duplicates(tmp_path):
+async def test_project_profile_resource_reorder_rejects_duplicates(tmp_path):
     from fastapi import HTTPException
 
     from brain.app.api.routers.cortex import _project_context
@@ -336,13 +327,11 @@ def test_project_profile_resource_reorder_rejects_duplicates(tmp_path):
     db = _AsyncSession(session)
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(
-            _project_context.reorder_project_resources(
-                "project-1",
-                ProjectResourcesReorder(resource_ids=["r1", "r1"]),
-                db=db,
-                user={"id": "user-1", "org_id": "test-org", "role": "owner"},
-            )
+        await _project_context.reorder_project_resources(
+            "project-1",
+            ProjectResourcesReorder(resource_ids=["r1", "r1"]),
+            db=db,
+            user={"id": "user-1", "org_id": "test-org", "role": "owner"},
         )
 
     assert exc_info.value.status_code == 422
@@ -364,7 +353,7 @@ def test_manage_idea_tool_is_available_to_agents():
     assert "manage_idea" in _get_tool_handlers()
 
 
-def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
+async def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
 
@@ -377,36 +366,38 @@ def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
             self.session = session
             self.notifications = MagicMock()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
             return None
 
-    def require_idea(session_arg, idea_id, actor):
+    async def require_idea(session_arg, idea_id, actor):
         assert session_arg is session
         assert idea_id == "idea-1"
         assert actor["org_id"] == "org-1"
         return idea
 
+    session.flush = AsyncMock()
+
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
-    monkeypatch.setattr("brain.app.api.routers.cortex._helpers._require_idea_for_user", require_idea)
-    monkeypatch.setattr(
-        idea_tools,
-        "_serialize_idea",
-        lambda idea_arg, session_arg: {
+    monkeypatch.setattr("brain.app.api.routers.cortex._helpers._a_require_idea_for_user", require_idea)
+
+    async def serialize_idea(idea_arg, session_arg):
+        return {
             "id": str(idea_arg.id),
             "status": idea_arg.status,
             "archived_at": idea_arg.archived_at.isoformat() if idea_arg.archived_at else None,
-        },
-    )
+        }
+
+    monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
     monkeypatch.setattr(
         "brain.systems.cortex.events.publish_safe",
         lambda event_type, data: published.append((event_type, data)),
     )
 
     with bind_agent_context({"idea_id": "idea-1", "org_id": "org-1", "user_id": "user-1"}):
-        payload = json.loads(idea_tools._handle_manage_idea(action="archive"))
+        payload = json.loads(await idea_tools._handle_manage_idea(action="archive"))
 
     assert payload["ok"] is True
     assert payload["archived"] is True
@@ -416,7 +407,7 @@ def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
     assert published == [("idea_archived", {"idea_id": "idea-1", "idea": payload["idea"]})]
 
 
-def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
+async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
 
@@ -427,7 +418,7 @@ def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     def add(obj):
         added.append(obj)
 
-    def flush():
+    async def flush():
         for obj in added:
             if obj.__class__.__name__ == "Idea" and getattr(obj, "id", None) is None:
                 obj.id = "idea-created"
@@ -438,20 +429,20 @@ def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
         def __init__(self):
             self.session = session
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
             return None
 
     session.add.side_effect = add
-    session.flush.side_effect = flush
+    session.flush = AsyncMock(side_effect=flush)
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
-    monkeypatch.setattr(
-        idea_tools,
-        "_serialize_idea",
-        lambda idea_arg, session_arg: {"id": str(idea_arg.id), "status": idea_arg.status},
-    )
+
+    async def serialize_idea(idea_arg, session_arg):
+        return {"id": str(idea_arg.id), "status": idea_arg.status}
+
+    monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
     monkeypatch.setattr(
         "brain.systems.cortex.events.publish_safe",
         lambda event_type, data: published.append((event_type, data)),
@@ -459,7 +450,7 @@ def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
 
     with bind_agent_context({"idea_id": "parent-idea", "org_id": "org-1", "user_id": "user-1", "execution_metadata": {"run_id": 7}}):
         payload = json.loads(
-            idea_tools._handle_manage_idea(
+            await idea_tools._handle_manage_idea(
                 action="create",
                 title="Check vault state",
                 description="Inspect vault and AWS credential handoff path.",
@@ -479,7 +470,7 @@ def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     assert published == [("idea_created", {"idea_id": "idea-created", "title": "Check vault state"})]
 
 
-def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch):
+async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
 
@@ -490,14 +481,14 @@ def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch
     def add(obj):
         added.append(obj)
 
-    def flush():
+    async def flush():
         for obj in added:
             if obj.__class__.__name__ == "Idea" and getattr(obj, "id", None) is None:
                 obj.id = "idea-created"
             if obj.__class__.__name__ == "IdeaThread" and getattr(obj, "id", None) is None:
                 obj.id = 43
 
-    def admit(session_arg, *, idea, seed_content, actor_user_id, parent_id, origin_ref, thread_message_id):
+    async def admit(session_arg, *, idea, seed_content, actor_user_id, parent_id, origin_ref, thread_message_id):
         assert session_arg is session
         assert idea.status == "emerged"
         assert seed_content == "Do the theme color work."
@@ -513,26 +504,26 @@ def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch
         def __init__(self):
             self.session = session
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
             return None
 
     session.add.side_effect = add
-    session.flush.side_effect = flush
+    session.flush = AsyncMock(side_effect=flush)
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
     monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
     monkeypatch.setattr(idea_tools, "_admit_created_idea_run", admit)
-    monkeypatch.setattr(
-        idea_tools,
-        "_serialize_idea",
-        lambda idea_arg, session_arg: {"id": str(idea_arg.id), "status": idea_arg.status},
-    )
+
+    async def serialize_idea(idea_arg, session_arg):
+        return {"id": str(idea_arg.id), "status": idea_arg.status}
+
+    monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
 
     with bind_agent_context({"idea_id": "parent-idea", "org_id": "org-1", "user_id": "user-1"}):
         payload = json.loads(
-            idea_tools._handle_manage_idea(
+            await idea_tools._handle_manage_idea(
                 action="create",
                 title="Fix streaming color",
                 description="Do the theme color work.",
@@ -752,7 +743,7 @@ def test_notify_route_uses_scoped_idea_guard():
     assert "_require_idea_for_user" in source
 
 
-def test_slash_commands_materializes_builtin_skills():
+async def test_slash_commands_materializes_builtin_skills():
     from brain.app.api.routers.cortex import _analytics as analytics_mod
 
     skill = SimpleNamespace(
@@ -779,7 +770,7 @@ def test_slash_commands_materializes_builtin_skills():
         patch("brain.systems.skills.builtin.ensure_builtin_skills_cached", new=AsyncMock()) as ensure_builtin,
         patch.object(analytics_mod, "UnitOfWork", return_value=mock_uow),
     ):
-        result = asyncio.run(analytics_mod.api_slash_commands(user={"id": "user-1"}))
+        result = await analytics_mod.api_slash_commands(user={"id": "user-1"})
 
     ensure_builtin.assert_awaited_once_with()
     assert result[0]["name"] == "develop"

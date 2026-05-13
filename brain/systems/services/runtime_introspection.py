@@ -9,37 +9,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.org import OrgApiKey, User, UserApiKey
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
-from brain.platform.integrations.llm import async_resolve_llm_client, resolve_llm_client
+from brain.platform.integrations.llm import async_resolve_llm_client
 from brain.systems.learning.budget import LearningBudgetPolicy
 from brain.systems.learning.policy import build_learning_policy_from_env
 from brain.platform.providers.model_policy import (
     async_get_provider_model_map,
     async_resolve_default_provider,
     async_resolve_effective_org_id,
-    get_provider_model_map,
     normalize_default_provider,
     normalize_runtime_provider,
-    resolve_default_provider,
 )
 from brain.platform.provider_health import provider_health_snapshot
 from brain.systems.routing import get_routing_marketplace_snapshot
-from brain.systems.runs.predict_rlm_backend import async_get_agent_worker_backend_settings, get_agent_worker_backend_settings
+from brain.systems.runs.predict_rlm_backend import async_get_agent_worker_backend_settings
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _resolve_effective_org_id(user_id: str | None, org_id: str | None) -> str | None:
-    if org_id or not user_id:
-        return org_id
-    try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            user = uow.session.get(User, user_id)
-            return user.org_id if user else None
-    except Exception:
-        return org_id
 
 
 def _provider_auth_payload(
@@ -128,115 +114,12 @@ def get_provider_auth_status(
     org_id: str | None,
     provider: str | None = None,
 ) -> dict[str, Any]:
-    """Return provider-specific auth/runtime status for a user/org."""
-    org_id = _resolve_effective_org_id(user_id, org_id)
-    effective_provider = normalize_default_provider(resolve_default_provider(user_id=user_id, org_id=org_id))
-    provider = normalize_runtime_provider(provider or effective_provider)
-    if provider not in {"anthropic", "openai"}:
-        raise ValueError(f"Unsupported provider: {provider}")
+    """Legacy sync auth status entrypoint.
 
-    has_personal_key = False
-    has_org_key = False
-    personal_default_key_id = None
-    runtime_credential_id = None
-    runtime_credential_name = None
-
-    if user_id:
-        try:
-            with open_unit_of_work(UnitOfWork) as uow:
-                db_user = uow.session.get(User, user_id)
-                if db_user:
-                    personal_default_key_id = db_user.default_api_key_id
-                stmt = (
-                    select(UserApiKey.id)
-                    .where(
-                        UserApiKey.user_id == user_id,
-                        UserApiKey.provider == provider,
-                        UserApiKey.is_active == True,  # noqa: E712
-                    )
-                    .limit(1)
-                )
-                if uow.session.scalars(stmt).first():
-                    has_personal_key = True
-                if org_id:
-                    stmt = (
-                        select(OrgApiKey.id)
-                        .where(
-                            OrgApiKey.org_id == org_id,
-                            OrgApiKey.provider == provider,
-                        )
-                        .limit(1)
-                    )
-                    if uow.session.scalars(stmt).first():
-                        has_org_key = True
-        except Exception:
-            pass
-
-    llm = None
-    runtime_available = False
-    runtime_source = "none"
-    runtime_auth_mode = None
-    runtime_uses_external_auth = False
-    if user_id:
-        try:
-            llm = resolve_llm_client(
-                user_id=user_id,
-                org_id=org_id,
-                provider=provider,
-            )
-            runtime_available = True
-            runtime_source = llm.source
-            runtime_auth_mode = getattr(llm, "auth_mode", None)
-            runtime_uses_external_auth = runtime_source == "codex_cache"
-        except Exception:
-            pass
-
-    runtime_scope = (
-        "personal" if runtime_source == "user_default"
-        else "org" if runtime_source == "org_main"
-        else "external" if runtime_source == "codex_cache"
-        else "env" if runtime_source in {"env", "dotenv"}
-        else "none"
-    )
-
-    if user_id and runtime_scope in {"personal", "org"}:
-        try:
-            with open_unit_of_work(UnitOfWork) as uow:
-                if runtime_scope == "personal" and personal_default_key_id is not None:
-                    key_row = uow.session.get(UserApiKey, personal_default_key_id)
-                    if key_row and key_row.provider == provider and key_row.is_active:
-                        runtime_credential_id = key_row.id
-                        runtime_credential_name = key_row.label or "default"
-                elif runtime_scope == "org" and org_id:
-                    stmt = (
-                        select(OrgApiKey)
-                        .where(
-                            OrgApiKey.org_id == org_id,
-                            OrgApiKey.provider == provider,
-                        )
-                        .limit(1)
-                    )
-                    org_key_row = uow.session.scalars(stmt).first()
-                    if org_key_row:
-                        runtime_credential_id = org_key_row.id
-                        runtime_credential_name = org_key_row.label or "org default"
-        except Exception:
-            pass
-
-    return _provider_auth_payload(
-        provider=provider,
-        effective_provider=effective_provider,
-        has_personal_key=has_personal_key,
-        has_org_key=has_org_key,
-        personal_default_key_id=personal_default_key_id,
-        runtime_available=runtime_available,
-        runtime_source=runtime_source,
-        runtime_auth_mode=runtime_auth_mode,
-        runtime_uses_external_auth=runtime_uses_external_auth,
-        runtime_credential_id=runtime_credential_id,
-        runtime_credential_name=runtime_credential_name,
-        llm=llm,
-    )
+    Runtime/auth introspection is DB-backed, so callers must provide an async
+    session via ``async_get_provider_auth_status``.
+    """
+    raise RuntimeError("Use async_get_provider_auth_status(session, ...) for provider auth status.")
 
 
 async def async_get_provider_auth_status(
@@ -374,13 +257,56 @@ def get_runtime_settings_snapshot(
     org_id: str | None,
     provider: str | None = None,
 ) -> dict[str, Any]:
+    """Legacy sync runtime snapshot entrypoint."""
+    raise RuntimeError("Use async_get_runtime_settings_snapshot(session, ...) for runtime settings.")
+
+
+async def async_get_runtime_settings_snapshot(
+    session: AsyncSession,
+    *,
+    user_id: str | None,
+    org_id: str | None,
+    provider: str | None = None,
+) -> dict[str, Any]:
     """Return a compact runtime/settings snapshot for agent introspection."""
-    effective_provider = normalize_default_provider(resolve_default_provider(user_id=user_id, org_id=org_id))
+    effective_provider = normalize_default_provider(
+        await async_resolve_default_provider(session, user_id=user_id, org_id=org_id)
+    )
     selected_provider = normalize_runtime_provider(provider or effective_provider)
-    provider_status = get_provider_auth_status(
+    provider_status = await async_get_provider_auth_status(
+        session,
         user_id=user_id,
         org_id=org_id,
         provider=selected_provider,
+    )
+    anthropic_status = await async_get_provider_auth_status(
+        session,
+        user_id=user_id,
+        org_id=org_id,
+        provider="anthropic",
+    )
+    openai_status = await async_get_provider_auth_status(
+        session,
+        user_id=user_id,
+        org_id=org_id,
+        provider="openai",
+    )
+    anthropic_models = await async_get_provider_model_map(
+        session,
+        "anthropic",
+        user_id=user_id,
+        org_id=org_id,
+    )
+    openai_models = await async_get_provider_model_map(
+        session,
+        "openai",
+        user_id=user_id,
+        org_id=org_id,
+    )
+    worker_backend = await async_get_agent_worker_backend_settings(
+        session,
+        user_id=user_id,
+        org_id=org_id,
     )
     return {
         "selected_provider": selected_provider,
@@ -391,16 +317,17 @@ def get_runtime_settings_snapshot(
         "learning_policy": get_learning_policy_runtime_settings(),
         "provider_health": provider_health_snapshot(),
         "providers": {
-            "anthropic": get_provider_auth_status(user_id=user_id, org_id=org_id, provider="anthropic"),
-            "openai": get_provider_auth_status(user_id=user_id, org_id=org_id, provider="openai"),
+            "anthropic": anthropic_status,
+            "openai": openai_status,
         },
         "provider_model_mappings": {
-            "anthropic": get_provider_model_map("anthropic", user_id=user_id, org_id=org_id),
-            "openai": get_provider_model_map("openai", user_id=user_id, org_id=org_id),
+            "anthropic": anthropic_models,
+            "openai": openai_models,
         },
-        "worker_backend": get_agent_worker_backend_settings(user_id=user_id, org_id=org_id).to_dict(),
+        "worker_backend": worker_backend.to_dict(),
         "active": provider_status,
-        "routing_marketplace": get_routing_marketplace_snapshot(
+        "routing_marketplace": await get_routing_marketplace_snapshot(
+            session,
             user_id=user_id,
             org_id=org_id,
             provider=selected_provider,

@@ -365,7 +365,7 @@ def _wrap_action_manifest_audit(tool_name: str, handler):
 
 def _wrap_brain_encode(original_fn):
     """Wrap brain_encode to handle the 'type' → 'memory_type' rename."""
-    def wrapper(**kwargs):
+    async def wrapper(**kwargs):
         if "type" in kwargs:
             kwargs["memory_type"] = kwargs.pop("type")
         kwargs.setdefault("user_id", getattr(_agent_context, "user_id", None))
@@ -380,10 +380,10 @@ def _wrap_brain_encode(original_fn):
         kwargs.setdefault("run_id", run_id)
         if kwargs.get("user_id") and not kwargs.get("org_id"):
             try:
-                from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+                from brain.platform.db.repositories.unit_of_work import UnitOfWork
                 from brain.platform.db.models.org import User
-                with open_unit_of_work(UnitOfWork) as uow:
-                    user = uow.session.get(User, kwargs["user_id"])
+                async with UnitOfWork() as uow:
+                    user = await uow.session.get(User, kwargs["user_id"])
                     if user and getattr(user, "org_id", None):
                         kwargs["org_id"] = user.org_id
             except Exception:
@@ -523,7 +523,7 @@ def _attach_issue_number(artifact: dict, issue_number: int | None) -> dict:
 
 
 def _persist_execution_artifacts(artifacts: list[dict], run_id: int | None = None) -> None:
-    """Persist normalized execution artifacts to AgentRun context and run state."""
+    """Attach normalized execution artifacts to the active AgentRun context."""
     if not artifacts:
         return
 
@@ -536,9 +536,6 @@ def _persist_execution_artifacts(artifacts: list[dict], run_id: int | None = Non
 
     normalized_artifacts = [dict(artifact) for artifact in artifacts]
 
-    if run_id:
-        append_run_execution_artifacts(run_id=run_id, artifacts=normalized_artifacts)
-
     existing = getattr(_agent_context, "execution_artifacts", None)
     if existing is None:
         _agent_context.execution_artifacts = []
@@ -547,6 +544,25 @@ def _persist_execution_artifacts(artifacts: list[dict], run_id: int | None = Non
     for artifact in normalized_artifacts:
         if artifact not in existing:
             existing.append(artifact)
+
+
+async def _persist_execution_artifacts_async(artifacts: list[dict], run_id: int | None = None) -> None:
+    """Persist normalized execution artifacts to AgentRun context and run state."""
+    if not artifacts:
+        return
+
+    from brain.systems.runs.cortex.recording import trace_id_for_run_id
+
+    run = getattr(_agent_context, "run", None)
+    execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
+    run_id = run_id or getattr(run, "run_id", None) or execution_metadata.get("run_id")
+    trace_id = execution_metadata.get("trace_id") or trace_id_for_run_id(run_id)
+
+    normalized_artifacts = [dict(artifact) for artifact in artifacts]
+    _persist_execution_artifacts(normalized_artifacts, run_id=run_id)
+
+    if run_id:
+        await append_run_execution_artifacts(run_id=run_id, artifacts=normalized_artifacts)
 
     execution_id = execution_metadata.get("execution_id")
     if execution_id:
@@ -557,7 +573,7 @@ def _persist_execution_artifacts(artifacts: list[dict], run_id: int | None = Non
             "session_id": execution_metadata.get("session_id"),
             "node_id": execution_metadata.get("node_id") or execution_metadata.get("step_id"),
         }
-        append_execution_artifacts(
+        await append_execution_artifacts(
             execution_id=execution_id,
             provenance=provenance,
             artifacts=[

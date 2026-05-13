@@ -8,37 +8,38 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-from sqlalchemy.orm import Session
 
 from brain.platform.db.models.scheduler import SchedulerJob, SchedulerLease, SchedulerRun, SchedulerRunStep
-from brain.app.scheduler.catalog import list_scheduler_jobs, sync_scheduler_catalog
+from brain.app.scheduler.catalog import async_list_scheduler_jobs, async_sync_scheduler_catalog
 from brain.app.scheduler.contracts import (
     extract_declared_actions,
     normalize_recurring_task_contract,
     validate_declared_actions,
     validate_recurring_task_contract,
 )
-from brain.app.scheduler.daemon import scheduler_daemon_tick, scheduler_health_snapshot
+from brain.app.scheduler.daemon import async_scheduler_daemon_tick, async_scheduler_health_snapshot
 from brain.app.scheduler.executor import (
-    execute_scheduler_run,
-    run_scheduler_run,
-    set_scheduler_job_load_shed,
-    set_scheduler_job_owner_mode,
-    set_scheduler_job_paused,
+    async_execute_scheduler_run,
+    async_run_scheduler_run,
+    async_set_scheduler_job_load_shed,
+    async_set_scheduler_job_owner_mode,
+    async_set_scheduler_job_paused,
 )
-from brain.app.scheduler.planner import materialize_due_runs
+from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.programs import build_scheduler_step_plan
 from brain.app.scheduler.runtime import (
     RUN_STATUS_EXPIRED,
     RUN_STATUS_SETTLED_SUCCESS,
     RUN_STATUS_SHELVED,
-    claim_next_due_run,
-    ensure_run_steps,
-    reclaim_expired_leases,
-    update_run_step,
+    async_claim_next_due_run,
+    async_ensure_run_steps,
+    async_reclaim_expired_leases,
+    async_update_run_step,
 )
+
+pytestmark = pytest.mark.asyncio
 
 
 def _patch_sqlite_for_pg_types():
@@ -72,23 +73,18 @@ def _register_sqlite_adapters():
 
 
 @pytest.fixture
-def engine():
+async def session(async_sqlite_session_factory):
     _patch_sqlite_for_pg_types()
     _register_sqlite_adapters()
-    eng = create_engine("sqlite://", echo=False)
-    event.listen(eng, "connect", _register_sqlite_functions)
-    SchedulerJob.__table__.create(eng, checkfirst=True)
-    SchedulerRun.__table__.create(eng, checkfirst=True)
-    SchedulerLease.__table__.create(eng, checkfirst=True)
-    SchedulerRunStep.__table__.create(eng, checkfirst=True)
-    return eng
-
-
-@pytest.fixture
-def session(engine):
-    s = Session(engine)
-    yield s
-    s.close()
+    return await async_sqlite_session_factory(
+        [
+            SchedulerJob.__table__,
+            SchedulerRun.__table__,
+            SchedulerLease.__table__,
+            SchedulerRunStep.__table__,
+        ],
+        connect_listener=_register_sqlite_functions,
+    )
 
 
 def _make_scheduler_job(**overrides):
@@ -118,14 +114,14 @@ def _make_scheduler_job(**overrides):
     return SchedulerJob(**defaults)
 
 
-def test_sync_scheduler_catalog_seeds_scheduler_jobs_without_cron_table(session):
+async def test_sync_scheduler_catalog_seeds_scheduler_jobs_without_cron_table(session):
     now = datetime(2026, 4, 21, 0, 0, tzinfo=timezone.utc)
 
-    result = sync_scheduler_catalog(session, timezone_name="UTC", now=now)
-    session.flush()
+    result = await async_sync_scheduler_catalog(session, timezone_name="UTC", now=now)
+    await session.flush()
 
     assert result == {"upserted": 2}
-    jobs = {job["job_key"]: job for job in list_scheduler_jobs(session)}
+    jobs = {job["job_key"]: job for job in await async_list_scheduler_jobs(session)}
     assert set(jobs) == {"curiosity_cron", "nightly_sleep"}
     assert jobs["nightly_sleep"]["owner_mode"] == "scheduler"
     assert jobs["nightly_sleep"]["handler_kind"] == "scheduler_builtin"
@@ -138,16 +134,16 @@ def test_sync_scheduler_catalog_seeds_scheduler_jobs_without_cron_table(session)
         assert "legacy_cron_retired" not in job["default_payload"]
 
 
-def test_due_run_materialization_records_scheduler_jobs(session):
+async def test_due_run_materialization_records_scheduler_jobs(session):
     job = _make_scheduler_job()
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    created = materialize_due_runs(
+    created = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
     )
-    session.refresh(job)
+    await session.refresh(job)
 
     assert len(created) == 1
     run = created[0]
@@ -160,7 +156,7 @@ def test_due_run_materialization_records_scheduler_jobs(session):
     assert job.next_run_at.isoformat().startswith("2026-04-22T03:00:00")
 
 
-def test_recurring_task_contract_normalization_and_validation():
+async def test_recurring_task_contract_normalization_and_validation():
     job = _make_scheduler_job(
         cron_expr="*/15 * * * *",
         timezone="America/Toronto",
@@ -183,7 +179,7 @@ def test_recurring_task_contract_normalization_and_validation():
     assert validate_recurring_task_contract(contract) == []
 
 
-def test_declared_actions_must_fit_contract_scope(session):
+async def test_declared_actions_must_fit_contract_scope(session):
     job = _make_scheduler_job(
         default_payload={
             "name": "Nightly Sleep",
@@ -198,7 +194,7 @@ def test_declared_actions_must_fit_contract_scope(session):
         },
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
     contract = normalize_recurring_task_contract(job)
 
@@ -207,7 +203,7 @@ def test_declared_actions_must_fit_contract_scope(session):
         "Action(s) outside recurring task contract: vault.delete_secret"
     ]
 
-    created = materialize_due_runs(
+    created = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
     )
@@ -218,7 +214,7 @@ def test_declared_actions_must_fit_contract_scope(session):
     assert "vault.delete_secret" in created[0].result_summary["contract_errors"][0]
 
 
-def test_run_scheduler_run_blocks_invalid_recurring_contract(session):
+async def test_async_run_scheduler_run_blocks_invalid_recurring_contract(session):
     job = _make_scheduler_job(
         owner_mode="scheduler",
         task_contract={
@@ -228,7 +224,7 @@ def test_run_scheduler_run_blocks_invalid_recurring_contract(session):
         },
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
     run = SchedulerRun(
         job_id=job.id,
@@ -241,9 +237,9 @@ def test_run_scheduler_run_blocks_invalid_recurring_contract(session):
         payload={},
     )
     session.add(run)
-    session.flush()
+    await session.flush()
 
-    result = run_scheduler_run(
+    result = await async_run_scheduler_run(
         session,
         run.id,
         owner_id="tester",
@@ -256,38 +252,38 @@ def test_run_scheduler_run_blocks_invalid_recurring_contract(session):
     assert "memory_scope.user_id" in result.error_text
 
 
-def test_due_run_materialization_skip_misfire_drops_backlog(session):
+async def test_due_run_materialization_skip_misfire_drops_backlog(session):
     job = _make_scheduler_job(
         misfire_policy="skip",
         next_run_at=datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc),
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    created = materialize_due_runs(
+    created = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 23, 3, 1, tzinfo=timezone.utc),
     )
-    session.refresh(job)
+    await session.refresh(job)
 
     assert created == []
-    assert session.scalar(select(func.count()).select_from(SchedulerRun)) == 0
+    assert await session.scalar(select(func.count()).select_from(SchedulerRun)) == 0
     assert job.next_run_at.isoformat().startswith("2026-04-24T03:00:00")
 
 
-def test_due_run_materialization_catch_up_records_missed_fires(session):
+async def test_due_run_materialization_catch_up_records_missed_fires(session):
     job = _make_scheduler_job(
         misfire_policy="catch_up",
         next_run_at=datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc),
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    created = materialize_due_runs(
+    created = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 23, 3, 1, tzinfo=timezone.utc),
     )
-    session.refresh(job)
+    await session.refresh(job)
 
     assert [run.scheduled_for.isoformat() for run in created] == [
         "2026-04-21T03:00:00+00:00",
@@ -298,38 +294,38 @@ def test_due_run_materialization_catch_up_records_missed_fires(session):
     assert job.next_run_at.isoformat().startswith("2026-04-24T03:00:00")
 
 
-def test_due_run_materialization_is_idempotent_after_restart(session):
+async def test_due_run_materialization_is_idempotent_after_restart(session):
     job = _make_scheduler_job()
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    first = materialize_due_runs(
+    first = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
     )
     job.next_run_at = datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
-    session.flush()
+    await session.flush()
 
-    second = materialize_due_runs(
+    second = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
     )
-    session.refresh(job)
+    await session.refresh(job)
 
     assert len(first) == 1
     assert second == []
-    assert session.scalar(select(func.count()).select_from(SchedulerRun)) == 1
+    assert await session.scalar(select(func.count()).select_from(SchedulerRun)) == 1
     assert job.next_run_at.isoformat().startswith("2026-04-22T03:00:00")
 
 
-def test_load_shed_pause_new_runs_shelves_due_run(session):
+async def test_load_shed_pause_new_runs_shelves_due_run(session):
     job = _make_scheduler_job(
         load_shed_policy={"pause_new_runs": True, "reason": "operator_pause"},
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    created = materialize_due_runs(
+    created = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
     )
@@ -338,7 +334,7 @@ def test_load_shed_pause_new_runs_shelves_due_run(session):
     assert created[0].status == RUN_STATUS_SHELVED
     assert created[0].result_summary["reason"] == "pause_new_runs"
     assert (
-        claim_next_due_run(
+        await async_claim_next_due_run(
             session,
             owner_id="scheduler-worker-a",
             now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
@@ -347,13 +343,13 @@ def test_load_shed_pause_new_runs_shelves_due_run(session):
     )
 
 
-def test_max_concurrency_counts_active_leases(session):
+async def test_max_concurrency_counts_active_leases(session):
     job = _make_scheduler_job(
         owner_mode="scheduler",
         next_run_at=datetime(2026, 4, 21, 4, 0, tzinfo=timezone.utc),
     )
     session.add(job)
-    session.flush()
+    await session.flush()
     active_run = SchedulerRun(
         job_id=job.id,
         scheduled_for=datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc),
@@ -365,7 +361,7 @@ def test_max_concurrency_counts_active_leases(session):
         payload={},
     )
     session.add(active_run)
-    session.flush()
+    await session.flush()
     active_lease = SchedulerLease(
         run_id=active_run.id,
         owner_id="scheduler-worker-a",
@@ -376,11 +372,11 @@ def test_max_concurrency_counts_active_leases(session):
         expires_at=datetime(2026, 4, 21, 5, 0, tzinfo=timezone.utc),
     )
     session.add(active_lease)
-    session.flush()
+    await session.flush()
     active_run.lease_id = active_lease.id
-    session.flush()
+    await session.flush()
 
-    created = materialize_due_runs(
+    created = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 21, 4, 1, tzinfo=timezone.utc),
         allowed_owner_modes=("scheduler",),
@@ -392,39 +388,39 @@ def test_max_concurrency_counts_active_leases(session):
     assert created[0].result_summary["active_leases"] == 1
 
 
-def test_due_run_materialization_skips_legacy_owner_modes_by_default(session):
+async def test_due_run_materialization_skips_legacy_owner_modes_by_default(session):
     job = _make_scheduler_job(
         owner_mode="mirror",
         next_run_at=datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc),
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    created = materialize_due_runs(
+    created = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
     )
-    session.refresh(job)
+    await session.refresh(job)
 
     assert created == []
-    assert session.scalar(select(func.count()).select_from(SchedulerRun)) == 0
+    assert await session.scalar(select(func.count()).select_from(SchedulerRun)) == 0
     assert job.next_run_at.isoformat().startswith("2026-04-21T03:00:00")
 
 
-def test_scheduler_cutover_materializes_and_persists_split_nightly_steps(session):
+async def test_scheduler_cutover_materializes_and_persists_split_nightly_steps(session):
     job = _make_scheduler_job(
         owner_mode="scheduler",
         default_payload={"name": "Nightly Sleep", "scheduler_split_steps": True},
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    created = materialize_due_runs(
+    created = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 22, 3, 1, tzinfo=timezone.utc),
         allowed_owner_modes=("scheduler",),
     )
-    session.refresh(job)
+    await session.refresh(job)
 
     assert len(created) == 1
     assert created[0].status == "recorded"
@@ -443,7 +439,7 @@ def test_scheduler_cutover_materializes_and_persists_split_nightly_steps(session
     assert job.next_run_at.isoformat().startswith("2026-04-22T03:00:00")
 
 
-def test_nightly_step_plan_can_accept_budget_allowed_step_subset(session):
+async def test_nightly_step_plan_can_accept_budget_allowed_step_subset(session):
     job = _make_scheduler_job(
         owner_mode="scheduler",
         default_payload={
@@ -464,21 +460,21 @@ def test_nightly_step_plan_can_accept_budget_allowed_step_subset(session):
     assert step_plan[2]["payload"]["night_budget"]["work_type"] == "reflection_dream"
 
 
-def test_scheduler_lease_claim_and_reclaim(session):
+async def test_scheduler_lease_claim_and_reclaim(session):
     job = _make_scheduler_job(
         owner_mode="scheduler",
         default_payload={"name": "Nightly Sleep"},
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    materialize_due_runs(
+    await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
         allowed_owner_modes=("scheduler",),
     )
 
-    claimed = claim_next_due_run(
+    claimed = await async_claim_next_due_run(
         session,
         owner_id="scheduler-worker-a",
         allowed_owner_modes=("scheduler",),
@@ -490,18 +486,18 @@ def test_scheduler_lease_claim_and_reclaim(session):
     assert claimed_run.status == "claimed"
     assert claimed_run.lease_id == claimed_lease.id
 
-    reclaimed = reclaim_expired_leases(
+    reclaimed = await async_reclaim_expired_leases(
         session,
         now=datetime(2026, 4, 21, 3, 2, 31, tzinfo=timezone.utc),
     )
-    session.refresh(claimed_run)
+    await session.refresh(claimed_run)
 
     assert len(reclaimed) == 1
     assert reclaimed[0].id == claimed_run.id
     assert claimed_run.status == RUN_STATUS_EXPIRED
     assert claimed_run.attempt == 1
 
-    reclaimed_again = claim_next_due_run(
+    reclaimed_again = await async_claim_next_due_run(
         session,
         owner_id="scheduler-worker-b",
         allowed_owner_modes=("scheduler",),
@@ -516,16 +512,16 @@ def test_scheduler_lease_claim_and_reclaim(session):
     assert reclaimed_run.lease_id == reclaimed_lease.id
 
 
-def test_scheduler_rejects_legacy_owner_mode_cutback(session):
+async def test_scheduler_rejects_legacy_owner_mode_cutback(session):
     job = _make_scheduler_job(default_payload={"name": "Nightly Sleep"})
     session.add(job)
-    session.flush()
+    await session.flush()
 
     with pytest.raises(ValueError, match="Legacy cron/mirror owner modes are retired"):
-        set_scheduler_job_owner_mode(session, job.job_key, owner_mode="mirror")
+        await async_set_scheduler_job_owner_mode(session, job.job_key, owner_mode="mirror")
 
 
-def test_scheduler_health_snapshot_reports_lag_and_paused_jobs(session):
+async def test_scheduler_health_snapshot_reports_lag_and_paused_jobs(session):
     due_job = _make_scheduler_job(
         job_key="scheduler_due",
         family="scheduler_due",
@@ -549,9 +545,9 @@ def test_scheduler_health_snapshot_reports_lag_and_paused_jobs(session):
         default_payload={"name": "Scheduler Paused"},
     )
     session.add_all([due_job, paused_job])
-    session.flush()
+    await session.flush()
 
-    snapshot = scheduler_health_snapshot(
+    snapshot = await async_scheduler_health_snapshot(
         session,
         owner_mode="scheduler",
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
@@ -565,7 +561,7 @@ def test_scheduler_health_snapshot_reports_lag_and_paused_jobs(session):
     assert snapshot["pause"]["global_pause"] is False
 
 
-def test_scheduler_health_snapshot_reports_fully_paused_scope(session):
+async def test_scheduler_health_snapshot_reports_fully_paused_scope(session):
     job = _make_scheduler_job(
         job_key="scheduler_paused_only",
         family="scheduler_paused_only",
@@ -579,9 +575,9 @@ def test_scheduler_health_snapshot_reports_fully_paused_scope(session):
         default_payload={"name": "Scheduler Paused Only"},
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    snapshot = scheduler_health_snapshot(
+    snapshot = await async_scheduler_health_snapshot(
         session,
         owner_mode="scheduler",
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
@@ -592,7 +588,7 @@ def test_scheduler_health_snapshot_reports_fully_paused_scope(session):
     assert snapshot["pause"]["paused_job_keys"] == ["scheduler_paused_only"]
 
 
-def test_scheduler_daemon_tick_executes_due_scheduler_job(session):
+async def test_scheduler_daemon_tick_executes_due_scheduler_job(session):
     job = _make_scheduler_job(
         job_key="scheduler_tick",
         family="scheduler_tick",
@@ -604,27 +600,27 @@ def test_scheduler_daemon_tick_executes_due_scheduler_job(session):
         default_payload={"name": "Scheduler Tick"},
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    result = scheduler_daemon_tick(
+    result = await async_scheduler_daemon_tick(
         session,
         owner_mode="scheduler",
         max_runs=5,
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
     )
-    session.refresh(job)
+    await session.refresh(job)
 
     assert result["ok"] is True
     assert result["reclaimed"] == 0
     assert result["drain"]["executed"] == 1
     assert result["snapshot"]["health"]["status"] == "healthy"
-    run = session.scalar(select(SchedulerRun).where(SchedulerRun.job_id == job.id))
+    run = await session.scalar(select(SchedulerRun).where(SchedulerRun.job_id == job.id))
     assert run is not None
     assert run.status == "settled_success"
     assert run.finished_at is not None
 
 
-def test_scheduler_job_controls_pause_resume_cutover_and_load_shed(session):
+async def test_scheduler_job_controls_pause_resume_cutover_and_load_shed(session):
     job = _make_scheduler_job(
         job_key="scheduler_controls",
         family="scheduler_controls",
@@ -635,20 +631,20 @@ def test_scheduler_job_controls_pause_resume_cutover_and_load_shed(session):
         default_payload={"name": "Scheduler Controls"},
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    paused = set_scheduler_job_paused(session, job.job_key, paused=True, reason="manual_pause")
+    paused = await async_set_scheduler_job_paused(session, job.job_key, paused=True, reason="manual_pause")
     assert paused.enabled is False
     assert paused.pause_reason == "manual_pause"
 
-    resumed = set_scheduler_job_paused(session, job.job_key, paused=False)
+    resumed = await async_set_scheduler_job_paused(session, job.job_key, paused=False)
     assert resumed.enabled is True
     assert resumed.pause_reason is None
 
-    cutover = set_scheduler_job_owner_mode(session, job.job_key, owner_mode="scheduler")
+    cutover = await async_set_scheduler_job_owner_mode(session, job.job_key, owner_mode="scheduler")
     assert cutover.owner_mode == "scheduler"
 
-    load_shed = set_scheduler_job_load_shed(
+    load_shed = await async_set_scheduler_job_load_shed(
         session,
         job.job_key,
         max_concurrency=2,
@@ -660,19 +656,19 @@ def test_scheduler_job_controls_pause_resume_cutover_and_load_shed(session):
     assert load_shed.load_shed_policy["reason"] == "backlog"
 
 
-def test_step_persistence_upserts_and_updates(session):
+async def test_step_persistence_upserts_and_updates(session):
     job = _make_scheduler_job()
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    materialize_due_runs(
+    await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
     )
-    run = session.scalar(select(SchedulerRun).order_by(SchedulerRun.id.asc()))
+    run = await session.scalar(select(SchedulerRun).order_by(SchedulerRun.id.asc()))
     assert run is not None
 
-    steps = ensure_run_steps(
+    steps = await async_ensure_run_steps(
         session,
         run,
         [
@@ -681,11 +677,11 @@ def test_step_persistence_upserts_and_updates(session):
         ],
     )
     assert [step.step_key for step in steps] == ["nightly_wrapper", "phase_a"]
-    assert session.scalar(
+    assert await session.scalar(
         select(func.count()).select_from(SchedulerRunStep).where(SchedulerRunStep.run_id == run.id)
     ) == 2
 
-    steps_again = ensure_run_steps(
+    steps_again = await async_ensure_run_steps(
         session,
         run,
         [
@@ -695,19 +691,19 @@ def test_step_persistence_upserts_and_updates(session):
     )
     assert len(steps_again) == 2
 
-    updated = update_run_step(
+    updated = await async_update_run_step(
         session,
         steps[0],
         status=RUN_STATUS_SETTLED_SUCCESS,
         result_summary={"ok": True},
         finished_at=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
     )
-    session.refresh(updated)
+    await session.refresh(updated)
     assert updated.status == RUN_STATUS_SETTLED_SUCCESS
     assert updated.result_summary == {"ok": True}
 
 
-def test_run_scheduler_run_persists_step_failures_and_resumes(session):
+async def test_async_run_scheduler_run_persists_step_failures_and_resumes(session):
     job = _make_scheduler_job(
         owner_mode="scheduler",
         default_payload={
@@ -719,9 +715,9 @@ def test_run_scheduler_run_persists_step_failures_and_resumes(session):
         },
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
-    created = materialize_due_runs(
+    created = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
         allowed_owner_modes=("scheduler",),
@@ -737,18 +733,20 @@ def test_run_scheduler_run_persists_step_failures_and_resumes(session):
             return SimpleNamespace(returncode=1, stdout="step ok", stderr="step failed")
         return SimpleNamespace(returncode=0, stdout="step ok", stderr="")
 
-    first = run_scheduler_run(
+    first = await async_run_scheduler_run(
         session,
         run.id,
         owner_id="tester",
         runner=runner,
         now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
     )
-    session.refresh(first)
+    await session.refresh(first)
 
     assert first.status == "retryable"
-    steps = session.scalars(
+    steps = (
+        await session.scalars(
         select(SchedulerRunStep).where(SchedulerRunStep.run_id == run.id).order_by(SchedulerRunStep.sequence_no.asc())
+        )
     ).all()
     assert steps[0].status == RUN_STATUS_SETTLED_SUCCESS
     assert steps[1].status == "retryable"
@@ -756,24 +754,26 @@ def test_run_scheduler_run_persists_step_failures_and_resumes(session):
 
     calls.clear()
 
-    resumed = run_scheduler_run(
+    resumed = await async_run_scheduler_run(
         session,
         run.id,
         owner_id="tester",
         runner=lambda command, *, cwd=None: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
         now=datetime(2026, 4, 21, 3, 10, tzinfo=timezone.utc),
     )
-    session.refresh(resumed)
+    await session.refresh(resumed)
 
     assert resumed.status == "settled_success"
-    steps = session.scalars(
+    steps = (
+        await session.scalars(
         select(SchedulerRunStep).where(SchedulerRunStep.run_id == run.id).order_by(SchedulerRunStep.sequence_no.asc())
+        )
     ).all()
     assert all(step.status == RUN_STATUS_SETTLED_SUCCESS for step in steps)
     assert all("brain.jobs.pipelines.consolidate" not in call for call in calls)
 
 
-def test_retry_policy_backoff_controls_automatic_reclaim(session):
+async def test_retry_policy_backoff_controls_automatic_reclaim(session):
     job = _make_scheduler_job(
         owner_mode="scheduler",
         retry_policy={"max_attempts": 2, "backoff_seconds": 300},
@@ -785,27 +785,28 @@ def test_retry_policy_backoff_controls_automatic_reclaim(session):
         },
     )
     session.add(job)
-    session.flush()
-    run = materialize_due_runs(
+    await session.flush()
+    runs = await async_materialize_due_runs(
         session,
         now=datetime(2026, 4, 21, 3, 1, tzinfo=timezone.utc),
         allowed_owner_modes=("scheduler",),
-    )[0]
+    )
+    run = runs[0]
 
-    failed = run_scheduler_run(
+    failed = await async_run_scheduler_run(
         session,
         run.id,
         owner_id="tester",
         runner=lambda command, *, cwd=None: SimpleNamespace(returncode=1, stdout="", stderr="failed"),
         now=datetime(2026, 4, 21, 3, 2, tzinfo=timezone.utc),
     )
-    session.refresh(failed)
+    await session.refresh(failed)
 
     assert failed.status == "retryable"
     assert failed.attempt == 1
     assert failed.result_summary["next_retry_at"] == "2026-04-21T03:07:00+00:00"
     assert (
-        claim_next_due_run(
+        await async_claim_next_due_run(
             session,
             owner_id="scheduler-worker-a",
             allowed_owner_modes=("scheduler",),
@@ -814,7 +815,7 @@ def test_retry_policy_backoff_controls_automatic_reclaim(session):
         is None
     )
 
-    retry_claim = claim_next_due_run(
+    retry_claim = await async_claim_next_due_run(
         session,
         owner_id="scheduler-worker-a",
         allowed_owner_modes=("scheduler",),
@@ -828,7 +829,7 @@ def test_retry_policy_backoff_controls_automatic_reclaim(session):
     assert retry_run.lease_id == retry_lease.id
 
 
-def test_execute_scheduler_run_blocks_invalid_callable_private_contract(session, monkeypatch):
+async def test_async_execute_scheduler_run_blocks_invalid_callable_private_contract(session, monkeypatch):
     job = _make_scheduler_job(
         handler_kind="python_callable",
         handler_ref="tests.test_scheduler:should_not_run",
@@ -840,7 +841,7 @@ def test_execute_scheduler_run_blocks_invalid_callable_private_contract(session,
         },
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
     run = SchedulerRun(
         job_id=job.id,
@@ -853,33 +854,33 @@ def test_execute_scheduler_run_blocks_invalid_callable_private_contract(session,
         payload={},
     )
     session.add(run)
-    session.flush()
+    await session.flush()
 
     monkeypatch.setattr(
         "brain.app.scheduler.executor._resolve_handler",
         lambda handler_ref: pytest.fail("invalid callable contract should not resolve handler"),
     )
 
-    executed = execute_scheduler_run(
+    executed = await async_execute_scheduler_run(
         session,
         run.id,
         owner_id="callable-worker",
         now=datetime(2026, 4, 21, 12, 5, tzinfo=timezone.utc),
     )
-    session.refresh(executed)
+    await session.refresh(executed)
 
     assert executed.status == "blocked"
     assert executed.lease_id is None
     assert executed.result_summary["reason"] == "contract_invalid"
     assert executed.result_summary["task_contract"] == executed.task_contract
     assert "memory_scope.user_id" in executed.error_text
-    step_count = session.scalar(
+    step_count = await session.scalar(
         select(func.count()).select_from(SchedulerRunStep).where(SchedulerRunStep.run_id == run.id)
     )
     assert step_count == 0
 
 
-def test_execute_scheduler_run_blocks_callable_action_outside_contract(session, monkeypatch):
+async def test_async_execute_scheduler_run_blocks_callable_action_outside_contract(session, monkeypatch):
     job = _make_scheduler_job(
         handler_kind="python_callable",
         handler_ref="tests.test_scheduler:should_not_run",
@@ -896,7 +897,7 @@ def test_execute_scheduler_run_blocks_callable_action_outside_contract(session, 
         },
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
     run = SchedulerRun(
         job_id=job.id,
@@ -909,33 +910,33 @@ def test_execute_scheduler_run_blocks_callable_action_outside_contract(session, 
         payload=job.default_payload,
     )
     session.add(run)
-    session.flush()
+    await session.flush()
 
     monkeypatch.setattr(
         "brain.app.scheduler.executor._resolve_handler",
         lambda handler_ref: pytest.fail("invalid callable contract should not resolve handler"),
     )
 
-    executed = execute_scheduler_run(
+    executed = await async_execute_scheduler_run(
         session,
         run.id,
         owner_id="callable-worker",
         now=datetime(2026, 4, 21, 12, 5, tzinfo=timezone.utc),
     )
-    session.refresh(executed)
+    await session.refresh(executed)
 
     assert executed.status == "blocked"
     assert executed.lease_id is None
     assert executed.result_summary["reason"] == "contract_invalid"
     assert executed.result_summary["task_contract"] == executed.task_contract
     assert "vault.delete_secret" in executed.error_text
-    step_count = session.scalar(
+    step_count = await session.scalar(
         select(func.count()).select_from(SchedulerRunStep).where(SchedulerRunStep.run_id == run.id)
     )
     assert step_count == 0
 
 
-def test_execute_scheduler_run_valid_callable_stores_normalized_contract(session, monkeypatch):
+async def test_async_execute_scheduler_run_valid_callable_stores_normalized_contract(session, monkeypatch):
     calls: list[dict] = []
 
     def handler(payload, *, now=None):
@@ -958,7 +959,7 @@ def test_execute_scheduler_run_valid_callable_stores_normalized_contract(session
         },
     )
     session.add(job)
-    session.flush()
+    await session.flush()
 
     run = SchedulerRun(
         job_id=job.id,
@@ -971,17 +972,17 @@ def test_execute_scheduler_run_valid_callable_stores_normalized_contract(session
         payload=job.default_payload,
     )
     session.add(run)
-    session.flush()
+    await session.flush()
 
     monkeypatch.setattr("brain.app.scheduler.executor._resolve_handler", lambda handler_ref: handler)
 
-    executed = execute_scheduler_run(
+    executed = await async_execute_scheduler_run(
         session,
         run.id,
         owner_id="callable-worker",
         now=datetime(2026, 4, 21, 12, 5, tzinfo=timezone.utc),
     )
-    session.refresh(executed)
+    await session.refresh(executed)
 
     assert executed.status == RUN_STATUS_SETTLED_SUCCESS
     assert calls == [job.default_payload]

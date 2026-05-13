@@ -19,6 +19,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock, AsyncMock
 
 import pytest
@@ -597,7 +598,9 @@ class TestAgentLoop:
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_supports_async_handlers_inside_running_loop(self):
-        from brain.systems.runs.direct_agent import _execute_tool_calls, _GateState
+        from brain.systems.runs.direct_agent import _GateState
+        from brain.systems.runs.direct_loop.gates import check_gate_violations
+        from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
 
         block = MagicMock()
         block.type = "tool_use"
@@ -612,7 +615,7 @@ class TestAgentLoop:
             await asyncio.sleep(0)
             return {"guardrails": ["stay grounded"]}
 
-        results = _execute_tool_calls(
+        results = await async_execute_tool_calls(
             response,
             {"brain_guardrails": handler},
             [],
@@ -621,12 +624,23 @@ class TestAgentLoop:
             None,
             None,
             "runner",
+            agent_context=SimpleNamespace(),
+            brain_tool_names=frozenset(),
+            gated_tool_names=frozenset(),
+            research_tool_names=frozenset(),
+            research_budget=0,
+            parallel_safe_tool_names=frozenset(),
+            max_parallel_tool_calls=1,
+            check_gate_violations=check_gate_violations,
         )
 
         assert json.loads(results[0]["content"]) == {"guardrails": ["stay grounded"]}
 
-    def test_parallel_safe_tool_batch_overlaps_and_preserves_order(self):
-        from brain.systems.runs.direct_agent import _execute_tool_calls, _GateState
+    @pytest.mark.asyncio
+    async def test_parallel_safe_tool_batch_overlaps_and_preserves_order(self):
+        from brain.systems.runs.direct_agent import _GateState
+        from brain.systems.runs.direct_loop.gates import check_gate_violations
+        from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
 
         block_a = MagicMock()
         block_a.type = "tool_use"
@@ -645,24 +659,21 @@ class TestAgentLoop:
 
         active = 0
         max_active = 0
-        lock = threading.Lock()
         callback_calls = []
 
         def make_handler(label: str, delay: float):
-            def handler(**kwargs):
+            async def handler(**kwargs):
                 nonlocal active, max_active
-                with lock:
-                    active += 1
-                    max_active = max(max_active, active)
+                active += 1
+                max_active = max(max_active, active)
                 try:
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     return {"label": label, "payload": kwargs}
                 finally:
-                    with lock:
-                        active -= 1
+                    active -= 1
             return handler
 
-        results = _execute_tool_calls(
+        results = await async_execute_tool_calls(
             response,
             {
                 "read_file": make_handler("read_file", 0.15),
@@ -674,6 +685,14 @@ class TestAgentLoop:
             None,
             None,
             "runner",
+            agent_context=SimpleNamespace(),
+            brain_tool_names=frozenset(),
+            gated_tool_names=frozenset(),
+            research_tool_names=frozenset(),
+            research_budget=0,
+            parallel_safe_tool_names=frozenset({"read_file", "search_files"}),
+            max_parallel_tool_calls=2,
+            check_gate_violations=check_gate_violations,
         )
 
         assert max_active == 2

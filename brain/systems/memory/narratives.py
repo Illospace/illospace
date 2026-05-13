@@ -10,6 +10,11 @@ import re
 from collections import Counter
 from typing import TYPE_CHECKING
 
+from sqlalchemy import select
+
+from brain.platform.db.models.narrative import NarrativeSession, ProjectNarrative
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
 if TYPE_CHECKING:
     from brain.systems.memory.harvest import HarvestItem
 
@@ -105,7 +110,7 @@ def _synthesize_arc(title: str, session_summaries: list[str], *, user_id: str | 
 # ---------------------------------------------------------------------------
 
 
-def link_session_to_narratives(
+async def link_session_to_narratives(
     session_id: str,
     session_date,
     session_summary: str,
@@ -119,37 +124,51 @@ def link_session_to_narratives(
 
     Returns list of narrative IDs that were created or updated.
     """
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
-
     narrative_ids: list[int] = []
 
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         for tag in topic_tags:
             slug = slugify_topic(tag)
-            narrative = uow.narratives.get_by_slug(
-                slug,
-                org_id=org_id,
-                user_id=user_id,
-                visibility=visibility,
+            stmt = (
+                select(ProjectNarrative)
+                .where(
+                    ProjectNarrative.topic_slug == slug,
+                    ProjectNarrative.user_id == user_id,
+                    ProjectNarrative.visibility == visibility,
+                    ProjectNarrative.stale_at.is_(None),
+                )
             )
+            if org_id is not None:
+                stmt = stmt.where(ProjectNarrative.org_id == org_id)
+            else:
+                stmt = stmt.where(ProjectNarrative.org_id.is_(None))
+
+            narrative = (await uow.session.scalars(stmt)).first()
 
             if narrative is not None:
                 # Append session entry
-                uow.narratives.add_session_entry(
+                uow.session.add(NarrativeSession(
                     narrative_id=narrative.id,
                     session_id=session_id,
                     session_date=session_date,
                     summary=session_summary,
-                )
+                ))
+                await uow.session.flush()
 
                 # Regenerate arc summary from all entries
-                entries = uow.narratives.get_session_entries(narrative.id)
+                entries = (
+                    await uow.session.scalars(
+                        select(NarrativeSession)
+                        .where(NarrativeSession.narrative_id == narrative.id)
+                        .order_by(NarrativeSession.session_date.asc())
+                    )
+                ).all()
                 summaries = [e.summary for e in entries]
                 narrative.arc_summary = _synthesize_arc(narrative.title, summaries, user_id=user_id)
                 narrative_ids.append(narrative.id)
             else:
                 # Create new narrative
-                new_narrative = uow.narratives.create(
+                new_narrative = ProjectNarrative(
                     topic_slug=slug,
                     title=tag.title(),
                     arc_summary=session_summary,
@@ -157,14 +176,15 @@ def link_session_to_narratives(
                     user_id=user_id,
                     visibility=visibility,
                 )
-                uow.session.flush()
+                uow.session.add(new_narrative)
+                await uow.session.flush()
 
-                uow.narratives.add_session_entry(
+                uow.session.add(NarrativeSession(
                     narrative_id=new_narrative.id,
                     session_id=session_id,
                     session_date=session_date,
                     summary=session_summary,
-                )
+                ))
                 narrative_ids.append(new_narrative.id)
 
     return narrative_ids

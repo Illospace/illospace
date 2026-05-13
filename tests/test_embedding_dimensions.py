@@ -76,20 +76,20 @@ class _FakeConnection:
     def __init__(self, vector_types: dict[tuple[str, str], str | None]):
         self._vector_types = vector_types
 
-    def execute(self, _statement, params):
+    async def execute(self, _statement, params):
         return _FakeResult((self._vector_types.get((params["table"], params["column"])),))
 
 
-def test_validate_embedding_vector_typmods_accepts_registry_matching_database():
+async def test_validate_embedding_vector_typmods_accepts_registry_matching_database():
     vector_types = {
         (spec.table, spec.column): f"vector({spec.dimensions})"
         for spec in config.embedding_database_vector_specs()
     }
 
-    config.validate_embedding_vector_typmods(_FakeConnection(vector_types))
+    await config.validate_embedding_vector_typmods(_FakeConnection(vector_types))
 
 
-def test_validate_embedding_vector_typmods_rejects_drift_with_clear_message():
+async def test_validate_embedding_vector_typmods_rejects_drift_with_clear_message():
     vector_types = {
         (spec.table, spec.column): f"vector({spec.dimensions})"
         for spec in config.embedding_database_vector_specs()
@@ -97,7 +97,7 @@ def test_validate_embedding_vector_typmods_rejects_drift_with_clear_message():
     vector_types[("memory_summaries", "semantic_embedding")] = "vector(1999)"
 
     with pytest.raises(config.EmbeddingDimensionError) as exc:
-        config.validate_embedding_vector_typmods(_FakeConnection(vector_types))
+        await config.validate_embedding_vector_typmods(_FakeConnection(vector_types))
 
     message = str(exc.value)
     assert "summary.semantic memory_summaries.semantic_embedding" in message

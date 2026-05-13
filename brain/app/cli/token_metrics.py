@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 from collections import defaultdict
 import json
 import os
@@ -22,14 +23,14 @@ from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
 from brain.kernel import config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
-from brain.systems.runs.token_usage import summarize_recent_run_usage
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.runs.token_usage import async_summarize_recent_run_usage
 
 
-def _runs_for_period(days: int, *, limit: int = 10_000) -> list[dict]:
+async def _runs_for_period(days: int, *, limit: int = 10_000) -> list[dict]:
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    with open_unit_of_work(UnitOfWork) as uow:
-        return summarize_recent_run_usage(uow.session, limit=limit, since=since)
+    async with UnitOfWork() as uow:
+        return await async_summarize_recent_run_usage(uow.session, limit=limit, since=since)
 
 
 def _avg(values: list[int | float]) -> float:
@@ -44,9 +45,9 @@ def _run_tokens(run: dict, key: str) -> int:
     return int(run.get(key) or 0)
 
 
-def report(days: int = 7) -> dict:
+async def report(days: int = 7) -> dict:
     """Comprehensive token usage report for cortex runs."""
-    runs = _runs_for_period(days)
+    runs = await _runs_for_period(days)
     runs_with_tokens = [run for run in runs if _run_tokens(run, "tokens_total") > 0]
 
     total = len(runs)
@@ -186,7 +187,7 @@ def report(days: int = 7) -> dict:
     }
 
 
-def daily_breakdown(days: int = 7) -> list[dict]:
+async def daily_breakdown(days: int = 7) -> list[dict]:
     """Day-by-day token usage and cost."""
     buckets: dict[str, dict] = defaultdict(
         lambda: {
@@ -199,7 +200,7 @@ def daily_breakdown(days: int = 7) -> list[dict]:
             "max_run_tokens": 0,
         }
     )
-    for run in _runs_for_period(days):
+    for run in await _runs_for_period(days):
         created_at = run.get("created_at")
         day = created_at.date().isoformat() if created_at else "unknown"
         bucket = buckets[day]
@@ -222,7 +223,7 @@ def daily_breakdown(days: int = 7) -> list[dict]:
     ]
 
 
-def find_wasteful(days: int = 7, threshold: int = 40000) -> list[dict]:
+async def find_wasteful(days: int = 7, threshold: int = 40000) -> list[dict]:
     """Find runs with unusually high token usage — optimization targets."""
     rows = [
         {
@@ -240,20 +241,20 @@ def find_wasteful(days: int = 7, threshold: int = 40000) -> list[dict]:
             "event": run.get("event"),
             "created_at": run.get("created_at"),
         }
-        for run in _runs_for_period(days)
+        for run in await _runs_for_period(days)
         if _run_tokens(run, "tokens_total") > threshold
     ]
     return sorted(rows, key=lambda row: row["tokens_total"], reverse=True)[:20]
 
 
-def baseline_snapshot() -> dict:
+async def baseline_snapshot() -> dict:
     """Capture a baseline snapshot for future comparison.
 
     Records current averages so we can measure the impact of optimizations.
     Saves to the runtime-private token baseline path.
     """
-    report_data = report(days=7)
-    daily_data = daily_breakdown(days=7)
+    report_data = await report(days=7)
+    daily_data = await daily_breakdown(days=7)
 
     baseline = {
         "captured_at": datetime.now(timezone.utc).isoformat(),
@@ -291,23 +292,23 @@ def baseline_snapshot() -> dict:
 
 # ── CLI ───────────────────────────────────────────────────────
 
-def cmd_report(args):
-    data = report(days=args.days)
+async def cmd_report(args):
+    data = await report(days=args.days)
     print(json.dumps(data, indent=2, default=str))
 
 
-def cmd_daily(args):
-    data = daily_breakdown(days=args.days)
+async def cmd_daily(args):
+    data = await daily_breakdown(days=args.days)
     print(json.dumps(data, indent=2, default=str))
 
 
-def cmd_wasteful(args):
-    data = find_wasteful(days=args.days, threshold=args.threshold)
+async def cmd_wasteful(args):
+    data = await find_wasteful(days=args.days, threshold=args.threshold)
     print(json.dumps(data, indent=2, default=str))
 
 
-def cmd_baseline(args):
-    data = baseline_snapshot()
+async def cmd_baseline(args):
+    data = await baseline_snapshot()
     print(json.dumps(data, indent=2, default=str))
     baseline_path = str(Path(config.BRAIN_DIR) / "brain" / "platform" / "data" / "token_baseline.json")
     print(f"\nBaseline saved to: {baseline_path}", file=sys.stderr)
@@ -330,12 +331,13 @@ def main():
     sub.add_parser("baseline", help="Capture baseline snapshot")
 
     args = parser.parse_args()
-    {
+    command = {
         "report": cmd_report,
         "daily": cmd_daily,
         "wasteful": cmd_wasteful,
         "baseline": cmd_baseline,
-    }[args.command](args)
+    }[args.command]
+    asyncio.run(command(args))
 
 
 if __name__ == "__main__":

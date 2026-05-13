@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-import asyncio
 import fnmatch
 import inspect
 import json
@@ -21,7 +19,7 @@ from brain.systems.runs.actions import (
 )
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType, EventVisibility
 from brain.systems.runs.events import activity_event, run_event
-from brain.systems.runs.store import AgentRunStore
+from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_catalog.metadata import ActionPolicyResult
 
 
@@ -31,6 +29,12 @@ FILE_OBSERVATION_TOOLS = frozenset({"file_summary", "list_files", "read_file", "
 FILE_EDIT_TOOLS = frozenset({"apply_patch", "edit_file", "write_file"})
 COMMAND_OUTPUT_TOOLS = frozenset({"exec_command", "run_script", "test_runner"})
 CHAT_MESSAGE_TOOLS = frozenset({"post_chat_message"})
+
+
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def _event_stream_payload(event, row) -> dict[str, Any]:
@@ -100,12 +104,12 @@ class ToolScopeViolation(PermissionError):
     """Raised when a worker tool call attempts work outside its declared scope."""
 
 
-class RunToolExecutor:
-    def __init__(self, store: AgentRunStore, *, stream: Any = None):
+class AsyncRunToolExecutor:
+    def __init__(self, store: AsyncAgentRunStore, *, stream: Any = None):
         self.store = store
         self.stream = stream
 
-    def execute(
+    async def execute(
         self,
         run_id: int,
         tool: ToolExecution,
@@ -117,7 +121,7 @@ class RunToolExecutor:
         safe_args = _safe_args(tool.args)
         artifact_type = artifact_type_for_tool(tool.name)
         side_effect = classify_side_effect(tool.name)
-        self._append_event(
+        await self._append_event(
             activity_event(
                 run_id,
                 tool_activity_label(tool.name, tool.args),
@@ -126,7 +130,7 @@ class RunToolExecutor:
                 side_effect=side_effect,
             )
         )
-        self._append_event(
+        await self._append_event(
             run_event(run_id, "run.tool_started", _event_payload(tool.name, safe_args), root_run_id=root_run_id)
         )
         manifest = None
@@ -137,17 +141,17 @@ class RunToolExecutor:
                 tool.name,
                 (),
                 tool.args,
-                context=self._action_context(run_id, root_run_id=root_run_id),
+                context=await self._action_context(run_id, root_run_id=root_run_id),
             )
-            manifest_id = record_action_manifest(manifest) if manifest else None
-            policy_result = self._apply_action_policy_gate(
+            manifest_id = await _maybe_await(record_action_manifest(manifest)) if manifest else None
+            policy_result = await self._apply_action_policy_gate(
                 run_id,
                 manifest,
                 manifest_id=manifest_id,
                 safe_args=safe_args,
             )
             if policy_result is not None:
-                return self._record_policy_blocked_result(
+                return await self._record_policy_blocked_result(
                     run_id,
                     tool,
                     safe_args,
@@ -157,16 +161,20 @@ class RunToolExecutor:
                     root_run_id=root_run_id,
                     collector=collector,
                 )
-            result = _resolve_awaitable(_runtime_policy_handler(tool.handler)(**tool.args))
+            result = _runtime_policy_handler(tool.handler)(**tool.args)
+            if inspect.isawaitable(result):
+                result = await result
         except Exception as exc:
             error_text = str(exc)
             if manifest_id:
-                complete_action_manifest(
-                    manifest_id,
-                    outcome_status="failed",
-                    outcome_error=error_text,
+                await _maybe_await(
+                    complete_action_manifest(
+                        manifest_id,
+                        outcome_status="failed",
+                        outcome_error=error_text,
+                    )
                 )
-            self._append_event(
+            await self._append_event(
                 run_event(
                     run_id,
                     "run.tool_failed",
@@ -184,7 +192,7 @@ class RunToolExecutor:
             )
             if collector is not None:
                 collector.append(record)
-            self._append_artifact(
+            await self._append_artifact(
                 run_id,
                 root_run_id=root_run_id,
                 artifact_type=artifact_type,
@@ -195,14 +203,16 @@ class RunToolExecutor:
             raise
         failure = result_failure_summary(result)
         if manifest_id:
-            complete_action_manifest(
-                manifest_id,
-                outcome_status="failed" if failure else "succeeded",
-                outcome_error=failure,
+            await _maybe_await(
+                complete_action_manifest(
+                    manifest_id,
+                    outcome_status="failed" if failure else "succeeded",
+                    outcome_error=failure,
+                )
             )
         policy_failure = _blocked_action_failure_summary(result)
         if policy_failure:
-            return self._record_policy_blocked_result(
+            return await self._record_policy_blocked_result(
                 run_id,
                 tool,
                 safe_args,
@@ -213,7 +223,7 @@ class RunToolExecutor:
                 collector=collector,
             )
         safe_result = redact_tool_result(tool.name, result)
-        self._append_event(
+        await self._append_event(
             run_event(
                 run_id,
                 "run.tool_completed",
@@ -231,7 +241,7 @@ class RunToolExecutor:
         )
         if collector is not None:
             collector.append(record)
-        self._append_artifact(
+        await self._append_artifact(
             run_id,
             root_run_id=root_run_id,
             artifact_type=artifact_type,
@@ -241,7 +251,7 @@ class RunToolExecutor:
         )
         return result
 
-    def _action_context(self, run_id: int, *, root_run_id: int | None = None) -> dict[str, Any]:
+    async def _action_context(self, run_id: int, *, root_run_id: int | None = None) -> dict[str, Any]:
         context: dict[str, Any] = {
             "actor": f"agent-run-{run_id}",
             "actor_id": None,
@@ -254,7 +264,7 @@ class RunToolExecutor:
         }
         try:
             require_run = getattr(self.store, "require_run", None)
-            run = require_run(run_id) if callable(require_run) else None
+            run = await require_run(run_id) if callable(require_run) else None
         except Exception:
             run = None
         if run is not None:
@@ -267,7 +277,7 @@ class RunToolExecutor:
             context["root_run_id"] = root_run_id
         return context
 
-    def _apply_action_policy_gate(
+    async def _apply_action_policy_gate(
         self,
         run_id: int,
         manifest,
@@ -280,15 +290,17 @@ class RunToolExecutor:
         if manifest.policy_result == ActionPolicyResult.DENY.value:
             result = blocked_action_result(manifest, manifest_id=manifest_id)
             if manifest_id:
-                complete_action_manifest(
-                    manifest_id,
-                    outcome_status="failed",
-                    outcome_error=result["error"],
+                await _maybe_await(
+                    complete_action_manifest(
+                        manifest_id,
+                        outcome_status="failed",
+                        outcome_error=result["error"],
+                    )
                 )
             return result
         return None
 
-    def _record_policy_blocked_result(
+    async def _record_policy_blocked_result(
         self,
         run_id: int,
         tool: ToolExecution,
@@ -301,7 +313,7 @@ class RunToolExecutor:
         collector: list[ToolRecord] | None,
     ) -> Any:
         policy_failure = _blocked_action_failure_summary(result) or "action blocked by policy"
-        self._append_event(
+        await self._append_event(
             run_event(
                 run_id,
                 "run.tool_failed",
@@ -320,7 +332,7 @@ class RunToolExecutor:
         )
         if collector is not None:
             collector.append(record)
-        self._append_artifact(
+        await self._append_artifact(
             run_id,
             root_run_id=root_run_id,
             artifact_type=artifact_type,
@@ -330,12 +342,12 @@ class RunToolExecutor:
         )
         return result
 
-    def _append_event(self, event) -> None:
-        row = self.store.append_event(event)
+    async def _append_event(self, event) -> None:
+        row = await self.store.append_event(event)
         if self.stream is not None:
             self.stream.publish(event.event_type, _event_stream_payload(event, row))
 
-    def _append_artifact(
+    async def _append_artifact(
         self,
         run_id: int,
         *,
@@ -345,7 +357,7 @@ class RunToolExecutor:
         payload: dict[str, Any],
         text: str,
     ) -> None:
-        self.store.append_artifact(
+        await self.store.append_artifact(
             AgentRunArtifact(
                 run_id=run_id,
                 root_run_id=root_run_id,
@@ -358,8 +370,8 @@ class RunToolExecutor:
         )
 
 
-def execute_tool(
-    store: AgentRunStore,
+async def execute_tool(
+    store: AsyncAgentRunStore,
     run_id: int,
     tool_name: str,
     args: dict[str, Any],
@@ -370,8 +382,8 @@ def execute_tool(
     collector: list[ToolRecord] | None = None,
     stream: Any = None,
 ) -> Any:
-    executor = RunToolExecutor(store, stream=stream)
-    return executor.execute(
+    executor = AsyncRunToolExecutor(store, stream=stream)
+    return await executor.execute(
         run_id,
         ToolExecution(name=tool_name, args=dict(args or {}), handler=handler),
         root_run_id=root_run_id,
@@ -383,7 +395,7 @@ def execute_tool(
 def wrap_tool_handlers(
     handlers: dict[str, Callable[..., Any]],
     *,
-    executor: RunToolExecutor,
+    executor: AsyncRunToolExecutor,
     run_id: int,
     root_run_id: int | None = None,
     scope: ToolScope | None = None,
@@ -397,8 +409,8 @@ def wrap_tool_handlers(
             wrapped[tool_name] = handler
             continue
 
-        def _handler(_tool_name=tool_name, _handler=handler, **kwargs):
-            return executor.execute(
+        async def _handler(_tool_name=tool_name, _handler=handler, **kwargs):
+            return await executor.execute(
                 run_id,
                 ToolExecution(name=_tool_name, args=dict(kwargs or {}), handler=_handler),
                 root_run_id=root_run_id,
@@ -520,17 +532,6 @@ def _runtime_policy_handler(handler: Callable[..., Any]) -> Callable[..., Any]:
     return handler
 
 
-def _resolve_awaitable(result: Any) -> Any:
-    if not inspect.isawaitable(result):
-        return result
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(result)
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="runtime-tool") as executor:
-        return executor.submit(asyncio.run, result).result()
-
-
 def _tool_target_path(tool_name: str, args: dict[str, Any]) -> str | None:
     if str(tool_name or "") not in FILE_OBSERVATION_TOOLS | FILE_EDIT_TOOLS:
         return None
@@ -560,7 +561,7 @@ def _matches_any(target: str, patterns: tuple[str, ...]) -> bool:
 
 
 __all__ = [
-    "RunToolExecutor",
+    "AsyncRunToolExecutor",
     "SECRET_TOOL_NAMES",
     "ToolExecution",
     "ToolRecord",

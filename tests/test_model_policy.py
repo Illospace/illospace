@@ -2,6 +2,31 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+class _AsyncMappingResult:
+    def __init__(self, *, first=None, all=None):
+        self._first = first
+        self._all = list(all or [])
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return self._first
+
+    def all(self):
+        return list(self._all)
+
+
+class _AsyncPolicySession:
+    def __init__(self, execute):
+        self._execute = execute
+
+    async def execute(self, stmt, params=None):
+        return self._execute(stmt, params or {})
+
 
 class TestModelPolicy:
     def test_default_model_tracks_active_provider(self):
@@ -18,32 +43,26 @@ class TestModelPolicy:
         assert model_map["medium"] == "gpt-5.4"
         assert model_map["low"] == "gpt-5-mini"
 
-    def test_org_provider_model_map_overrides_defaults(self):
-        from brain.platform.providers.model_policy import get_provider_model_map
+    @pytest.mark.asyncio
+    async def test_org_provider_model_map_overrides_defaults(self):
+        from brain.platform.providers.model_policy import async_get_provider_model_map
 
-        with patch("brain.platform.providers.model_policy.UnitOfWork") as mock_uow:
-            session = MagicMock()
+        def execute_side_effect(stmt, params=None):
+            sql = str(stmt)
+            if "SELECT org_id FROM users" in sql:
+                return _AsyncMappingResult(first={"org_id": "org-1"})
+            if "FROM org_provider_model_mappings" in sql:
+                return _AsyncMappingResult(all=[
+                    {"intelligence_level": "medium", "model_name": "gpt-5.5"},
+                    {"intelligence_level": "low", "model_name": "gpt-5.5-mini"},
+                ])
+            raise AssertionError(f"Unexpected SQL: {sql}")
 
-            def execute_side_effect(stmt, params=None):
-                sql = str(stmt)
-                result = MagicMock()
-                mappings = MagicMock()
-                result.mappings.return_value = mappings
-                if "SELECT org_id FROM users" in sql:
-                    mappings.first.return_value = {"org_id": "org-1"}
-                elif "FROM org_provider_model_mappings" in sql:
-                    mappings.all.return_value = [
-                        {"intelligence_level": "medium", "model_name": "gpt-5.5"},
-                        {"intelligence_level": "low", "model_name": "gpt-5.5-mini"},
-                    ]
-                else:
-                    raise AssertionError(f"Unexpected SQL: {sql}")
-                return result
-
-            session.execute.side_effect = execute_side_effect
-            mock_uow.return_value.__enter__.return_value.session = session
-
-            model_map = get_provider_model_map("openai", user_id="user-1")
+        model_map = await async_get_provider_model_map(
+            _AsyncPolicySession(execute_side_effect),
+            "openai",
+            user_id="user-1",
+        )
 
         assert model_map["medium"] == "gpt-5.5"
         assert model_map["low"] == "gpt-5.5-mini"
@@ -107,43 +126,34 @@ class TestModelPolicy:
         assert infer_provider_from_model("openai/gpt-4o-mini") == "openai"
         assert infer_provider_from_model("anthropic/claude-sonnet-4-6") == "anthropic"
 
-    def test_resolve_skill_runtime_uses_tiers_with_selected_provider(self):
-        from brain.platform.providers.model_policy import resolve_skill_model, resolve_skill_runtime
+    @pytest.mark.asyncio
+    async def test_resolve_skill_runtime_uses_tiers_with_selected_provider(self):
+        from brain.platform.providers.model_policy import async_resolve_skill_model, async_resolve_skill_runtime
 
         row = {
             "model_tier": "high",
             "thinking_tier": "xhigh",
         }
 
-        with patch("brain.platform.providers.model_policy.UnitOfWork") as mock_uow:
-            session = MagicMock()
+        def execute_side_effect(stmt, params=None):
+            sql = str(stmt)
+            if "FROM users u" in sql:
+                return _AsyncMappingResult(first={
+                    "org_id": "org-1",
+                    "default_provider": "openai",
+                    "key_provider": None,
+                })
+            if "SELECT model_tier, thinking_tier" in sql:
+                return _AsyncMappingResult(first=row)
+            if "SELECT org_id FROM users" in sql:
+                return _AsyncMappingResult(first={"org_id": "org-1"})
+            if "FROM org_provider_model_mappings" in sql:
+                return _AsyncMappingResult(all=[])
+            raise AssertionError(f"Unexpected SQL: {sql}")
 
-            def execute_side_effect(stmt, params=None):
-                sql = str(stmt)
-                result = MagicMock()
-                mappings = MagicMock()
-                result.mappings.return_value = mappings
-                if "FROM users u" in sql:
-                    mappings.first.return_value = {
-                        "org_id": "org-1",
-                        "default_provider": "openai",
-                        "key_provider": None,
-                    }
-                elif "SELECT model_tier, thinking_tier" in sql:
-                    mappings.first.return_value = row
-                elif "SELECT org_id FROM users" in sql:
-                    mappings.first.return_value = {"org_id": "org-1"}
-                elif "FROM org_provider_model_mappings" in sql:
-                    mappings.all.return_value = []
-                else:
-                    raise AssertionError(f"Unexpected SQL: {sql}")
-                return result
-
-            session.execute.side_effect = execute_side_effect
-            mock_uow.return_value.__enter__.return_value.session = session
-
-            runtime = resolve_skill_runtime("deploy", user_id="user-1")
-            model, thinking = resolve_skill_model("deploy", user_id="user-1")
+        session = _AsyncPolicySession(execute_side_effect)
+        runtime = await async_resolve_skill_runtime(session, "deploy", user_id="user-1")
+        model, thinking = await async_resolve_skill_model(session, "deploy", user_id="user-1")
 
         assert runtime.provider == "openai"
         assert runtime.model_name == "gpt-5.5"
@@ -161,128 +171,111 @@ class TestModelPolicy:
         assert model == "openai/gpt-5.4"
         assert thinking == "medium"
 
-    def test_resolve_default_provider_prefers_user_override_then_org(self):
-        from brain.platform.providers.model_policy import resolve_default_provider
+    @pytest.mark.asyncio
+    async def test_resolve_default_provider_prefers_user_override_then_org(self):
+        from brain.platform.providers.model_policy import async_resolve_default_provider
 
-        with patch("brain.platform.providers.model_policy.UnitOfWork") as mock_uow:
-            session = MagicMock()
-            session.execute.side_effect = [
-                MagicMock(mappings=MagicMock(return_value=MagicMock(first=MagicMock(return_value={
-                    "org_id": "org-1",
-                    "default_provider": "openai",
-                    "key_provider": "anthropic",
-                })))),
-            ]
-            mock_uow.return_value.__enter__.return_value.session = session
-            assert resolve_default_provider(user_id="user-1") == "openai"
+        session = _AsyncPolicySession(
+            lambda stmt, params=None: _AsyncMappingResult(first={
+                "org_id": "org-1",
+                "default_provider": "openai",
+                "key_provider": "anthropic",
+            })
+        )
+        assert await async_resolve_default_provider(session, user_id="user-1") == "openai"
 
-    def test_resolve_default_provider_coerces_legacy_org_anthropic_to_openai(self):
-        from brain.platform.providers.model_policy import resolve_default_provider
+    @pytest.mark.asyncio
+    async def test_resolve_default_provider_coerces_legacy_org_anthropic_to_openai(self):
+        from brain.platform.providers.model_policy import async_resolve_default_provider
 
-        with patch("brain.platform.providers.model_policy.UnitOfWork") as mock_uow:
-            session = MagicMock()
-            session.execute.side_effect = [
-                MagicMock(mappings=MagicMock(return_value=MagicMock(first=MagicMock(return_value={
-                    "org_id": "org-1",
-                    "default_provider": None,
-                    "key_provider": None,
-                })))),
-                MagicMock(mappings=MagicMock(return_value=MagicMock(first=MagicMock(return_value={
-                    "memory_model_config": {"default_provider": "anthropic"},
-                })))),
-            ]
-            mock_uow.return_value.__enter__.return_value.session = session
-            assert resolve_default_provider(user_id="user-1") == "openai"
+        results = [
+            _AsyncMappingResult(first={
+                "org_id": "org-1",
+                "default_provider": None,
+                "key_provider": None,
+            }),
+            _AsyncMappingResult(first={
+                "memory_model_config": {"default_provider": "anthropic"},
+            }),
+        ]
+        session = _AsyncPolicySession(lambda stmt, params=None: results.pop(0))
+        assert await async_resolve_default_provider(session, user_id="user-1") == "openai"
 
-    def test_resolve_default_provider_uses_preferred_provider_as_fallback(self):
-        from brain.platform.providers.model_policy import resolve_default_provider
+    @pytest.mark.asyncio
+    async def test_resolve_default_provider_uses_preferred_provider_as_fallback(self):
+        from brain.platform.providers.model_policy import async_resolve_default_provider
 
-        with patch("brain.platform.providers.model_policy.UnitOfWork") as mock_uow:
-            session = MagicMock()
-            session.execute.side_effect = [
-                MagicMock(mappings=MagicMock(return_value=MagicMock(first=MagicMock(return_value={
-                    "org_id": "org-1",
-                    "default_provider": None,
-                    "key_provider": None,
-                })))),
-                MagicMock(mappings=MagicMock(return_value=MagicMock(first=MagicMock(return_value={
-                    "memory_model_config": {},
-                })))),
-            ]
-            mock_uow.return_value.__enter__.return_value.session = session
-            assert resolve_default_provider(user_id="user-1", preferred_provider="openai") == "openai"
+        results = [
+            _AsyncMappingResult(first={
+                "org_id": "org-1",
+                "default_provider": None,
+                "key_provider": None,
+            }),
+            _AsyncMappingResult(first={"memory_model_config": {}}),
+        ]
+        session = _AsyncPolicySession(lambda stmt, params=None: results.pop(0))
+        assert await async_resolve_default_provider(
+            session,
+            user_id="user-1",
+            preferred_provider="openai",
+        ) == "openai"
 
     def test_resolve_default_provider_preserves_explicit_preferred_anthropic(self):
         from brain.platform.providers.model_policy import resolve_default_provider
 
-        with patch("brain.platform.providers.model_policy.UnitOfWork", side_effect=RuntimeError("db unavailable")):
-            assert resolve_default_provider(preferred_provider="anthropic") == "anthropic"
+        assert resolve_default_provider(preferred_provider="anthropic") == "anthropic"
 
     def test_resolve_default_provider_coerces_env_anthropic_to_openai(self):
         from brain.platform.providers.model_policy import resolve_default_provider
 
-        with patch("brain.platform.providers.model_policy.UnitOfWork", side_effect=RuntimeError("db unavailable")), \
-             patch("brain.platform.providers.model_policy.get_active_provider", return_value="anthropic"):
+        with patch("brain.platform.providers.model_policy.get_active_provider", return_value="anthropic"):
             assert resolve_default_provider() == "openai"
 
-    def test_get_provider_model_maps_returns_all_providers(self):
-        from brain.platform.providers.model_policy import get_provider_model_maps
+    @pytest.mark.asyncio
+    async def test_get_provider_model_maps_returns_all_providers(self):
+        from brain.platform.providers.model_policy import async_get_provider_model_maps
 
-        with patch("brain.platform.providers.model_policy.UnitOfWork") as mock_uow:
-            session = MagicMock()
+        def execute_side_effect(stmt, params=None):
+            sql = str(stmt)
+            params = params or {}
+            if "SELECT org_id FROM users" in sql:
+                return _AsyncMappingResult(first={"org_id": "org-1"})
+            if "FROM org_provider_model_mappings" in sql:
+                return _AsyncMappingResult(all=(
+                    [{"intelligence_level": "high", "model_name": "gpt-5.5-pro"}]
+                    if params.get("provider") == "openai"
+                    else []
+                ))
+            raise AssertionError(f"Unexpected SQL: {sql}")
 
-            def execute_side_effect(stmt, params=None):
-                sql = str(stmt)
-                result = MagicMock()
-                mappings = MagicMock()
-                result.mappings.return_value = mappings
-                if "SELECT org_id FROM users" in sql:
-                    mappings.first.return_value = {"org_id": "org-1"}
-                elif "FROM org_provider_model_mappings" in sql:
-                    provider = (params or {}).get("provider")
-                    mappings.all.return_value = (
-                        [{"intelligence_level": "high", "model_name": "gpt-5.5-pro"}]
-                        if provider == "openai"
-                        else []
-                    )
-                else:
-                    raise AssertionError(f"Unexpected SQL: {sql}")
-                return result
-
-            session.execute.side_effect = execute_side_effect
-            mock_uow.return_value.__enter__.return_value.session = session
-
-            mappings = get_provider_model_maps(user_id="user-1")
+        mappings = await async_get_provider_model_maps(
+            _AsyncPolicySession(execute_side_effect),
+            user_id="user-1",
+        )
 
         assert mappings["openai"]["high"] == "gpt-5.5-pro"
         assert mappings["anthropic"]["high"] == "claude-opus-4-6"
 
-    def test_org_provider_model_map_strips_legacy_provider_prefixes(self):
-        from brain.platform.providers.model_policy import get_provider_model_map
+    @pytest.mark.asyncio
+    async def test_org_provider_model_map_strips_legacy_provider_prefixes(self):
+        from brain.platform.providers.model_policy import async_get_provider_model_map
 
-        with patch("brain.platform.providers.model_policy.UnitOfWork") as mock_uow:
-            session = MagicMock()
+        def execute_side_effect(stmt, params=None):
+            sql = str(stmt)
+            if "SELECT org_id FROM users" in sql:
+                return _AsyncMappingResult(first={"org_id": "org-1"})
+            if "FROM org_provider_model_mappings" in sql:
+                return _AsyncMappingResult(all=[
+                    {"intelligence_level": "medium", "model_name": "openai:gpt-5.4"},
+                    {"intelligence_level": "low", "model_name": "openai/gpt-5.4-mini"},
+                ])
+            raise AssertionError(f"Unexpected SQL: {sql}")
 
-            def execute_side_effect(stmt, params=None):
-                sql = str(stmt)
-                result = MagicMock()
-                mappings = MagicMock()
-                result.mappings.return_value = mappings
-                if "SELECT org_id FROM users" in sql:
-                    mappings.first.return_value = {"org_id": "org-1"}
-                elif "FROM org_provider_model_mappings" in sql:
-                    mappings.all.return_value = [
-                        {"intelligence_level": "medium", "model_name": "openai:gpt-5.4"},
-                        {"intelligence_level": "low", "model_name": "openai/gpt-5.4-mini"},
-                    ]
-                else:
-                    raise AssertionError(f"Unexpected SQL: {sql}")
-                return result
-
-            session.execute.side_effect = execute_side_effect
-            mock_uow.return_value.__enter__.return_value.session = session
-
-            model_map = get_provider_model_map("openai", user_id="user-1")
+        model_map = await async_get_provider_model_map(
+            _AsyncPolicySession(execute_side_effect),
+            "openai",
+            user_id="user-1",
+        )
 
         assert model_map["medium"] == "gpt-5.4"
         assert model_map["low"] == "gpt-5.4-mini"

@@ -58,10 +58,10 @@ def _target_idea_id(idea_id: str | None, thread_id: str | None, context_idea_id:
     return str(idea_id or thread_id or context_idea_id).strip() or None
 
 
-def _serialize_idea(idea, session) -> dict[str, Any]:
+async def _serialize_idea(idea, session) -> dict[str, Any]:
     from brain.app.api.routers.cortex._ideas import _idea_read_with_author
 
-    return _idea_read_with_author(idea, session).model_dump(mode="json")
+    return (await _idea_read_with_author(idea, session)).model_dump(mode="json")
 
 
 def _current_tool_run_id() -> int | None:
@@ -109,7 +109,7 @@ def _optional_bool(value: Any) -> bool | None:
     return None
 
 
-def _seed_created_idea_thread(
+async def _seed_created_idea_thread(
     session,
     *,
     idea,
@@ -137,11 +137,11 @@ def _seed_created_idea_thread(
         },
     )
     session.add(thread_msg)
-    session.flush()
+    await session.flush()
     return thread_msg
 
 
-def _admit_created_idea_run(
+async def _admit_created_idea_run(
     session,
     *,
     idea,
@@ -151,10 +151,10 @@ def _admit_created_idea_run(
     origin_ref: str | None,
     thread_message_id: int | None,
 ):
-    from brain.systems.runs.cortex import RunAdmissionRequest, admit_run
+    from brain.systems.runs.cortex import RunAdmissionRequest, async_admit_run
 
     source_run_id = _current_tool_run_id()
-    result = admit_run(
+    result = await async_admit_run(
         RunAdmissionRequest(
             idea_id=str(idea.id),
             event="idea_created",
@@ -193,7 +193,7 @@ def _scoped_ideas_stmt(org_id: str | None, actor_user_id: str | None):
     raise ValueError("manage_idea requires an org-scoped or user-scoped run")
 
 
-def _list_ideas(
+async def _list_ideas(
     session,
     *,
     org_id: str | None,
@@ -223,10 +223,11 @@ def _list_ideas(
                 func.lower(Idea.description).like(pattern),
             )
         )
-    return [_serialize_idea(idea, session) for idea in session.scalars(stmt.limit(capped_limit)).all()]
+    ideas = (await session.scalars(stmt.limit(capped_limit))).all()
+    return [await _serialize_idea(idea, session) for idea in ideas]
 
 
-def _status_change(idea, next_status: str, *, trigger: str, session) -> tuple[str, str] | None:
+async def _status_change(idea, next_status: str, *, trigger: str, session) -> tuple[str, str] | None:
     from brain.platform.db.models.idea import IdeaStateLog
 
     if next_status not in _IDEA_STATUSES:
@@ -249,7 +250,7 @@ def _status_change(idea, next_status: str, *, trigger: str, session) -> tuple[st
     return old_status, next_status
 
 
-def _restore_idea(idea, *, session) -> tuple[str, str]:
+async def _restore_idea(idea, *, session) -> tuple[str, str]:
     from brain.platform.db.models.idea import IdeaStateLog
 
     old_status = str(idea.status or "")
@@ -268,13 +269,13 @@ def _restore_idea(idea, *, session) -> tuple[str, str]:
     return old_status, str(idea.status or "")
 
 
-def _apply_owner_handoff(idea, *, next_owner_id: str, actor: dict[str, Any], session) -> None:
+async def _apply_owner_handoff(idea, *, next_owner_id: str, actor: dict[str, Any], session) -> None:
     from brain.app.api.routers.cortex._helpers import _caller_is_service_principal
     from brain.app.api.routers.cortex._ideas import _freeze_display_author_for_handoff
     from brain.app.api.authorization import require_org_context
     from brain.platform.db.models.org import User
 
-    target_user = session.scalar(select(User).where(User.id == str(next_owner_id)))
+    target_user = await session.scalar(select(User).where(User.id == str(next_owner_id)))
     if target_user is None:
         raise HTTPException(status_code=404, detail="Target owner not found")
     if not _caller_is_service_principal(actor):
@@ -282,11 +283,11 @@ def _apply_owner_handoff(idea, *, next_owner_id: str, actor: dict[str, Any], ses
         if str(target_user.org_id) != str(org_id):
             raise HTTPException(status_code=403, detail="Target owner is outside this org")
     if str(next_owner_id) != str(getattr(idea, "user_id", "")):
-        _freeze_display_author_for_handoff(idea, session)
+            await _freeze_display_author_for_handoff(idea, session)
     idea.user_id = str(next_owner_id)
 
 
-def _apply_idea_updates(
+async def _apply_idea_updates(
     idea,
     *,
     actor: dict[str, Any],
@@ -320,12 +321,12 @@ def _apply_idea_updates(
             updates[key] = value
 
     if user_id is not None:
-        _apply_owner_handoff(idea, next_owner_id=user_id, actor=actor, session=session)
+        await _apply_owner_handoff(idea, next_owner_id=user_id, actor=actor, session=session)
         updates["user_id"] = str(user_id)
 
     if orbit_anchor_type is not None or orbit_anchor_id is not None:
         next_anchor_type = None if str(orbit_anchor_type or "").lower() == "none" else orbit_anchor_type
-        _apply_orbit_anchor(
+        await _apply_orbit_anchor(
             idea,
             anchor_type=next_anchor_type,
             anchor_id=orbit_anchor_id,
@@ -336,7 +337,7 @@ def _apply_idea_updates(
         updates["orbit_anchor_id"] = idea.orbit_anchor_id
 
     if status is not None:
-        _status_change(idea, status, trigger="agent_update", session=session)
+        await _status_change(idea, status, trigger="agent_update", session=session)
         updates["status"] = status
         if status == "archived":
             updates["archived_at"] = idea.archived_at.isoformat() if idea.archived_at else None
@@ -346,7 +347,7 @@ def _apply_idea_updates(
     return updates
 
 
-def _handle_manage_idea(
+async def _handle_manage_idea(
     action: str,
     operation: str | None = None,
     idea_id: str | None = None,
@@ -375,10 +376,10 @@ def _handle_manage_idea(
     if normalized_action in {"help", "schema"}:
         return _manage_tool_guide("manage_idea", operation)
 
-    from brain.app.api.routers.cortex._helpers import _require_idea_for_user
+    from brain.app.api.routers.cortex._helpers import _a_require_idea_for_user
     from brain.systems.cortex.events import publish_safe
     from brain.platform.db.models.idea import Idea
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
     org_id, actor_user_id, context_idea_id = _idea_tool_context()
     actor = _idea_actor(org_id=org_id, actor_user_id=actor_user_id)
@@ -386,9 +387,9 @@ def _handle_manage_idea(
     event: tuple[str, dict[str, Any]] | None = None
 
     try:
-        with open_unit_of_work(UnitOfWork) as uow:
+        async with UnitOfWork() as uow:
             if normalized_action == "list":
-                ideas = _list_ideas(
+                ideas = await _list_ideas(
                     uow.session,
                     org_id=org_id,
                     actor_user_id=actor_user_id,
@@ -428,22 +429,22 @@ def _handle_manage_idea(
                 if position_y is not None:
                     idea.position_y = position_y
                 uow.session.add(idea)
-                uow.session.flush()
+                await uow.session.flush()
                 if orbit_anchor_type is not None or orbit_anchor_id is not None:
-                    _apply_idea_updates(
+                    await _apply_idea_updates(
                         idea,
                         actor=actor,
                         session=uow.session,
                         orbit_anchor_type=orbit_anchor_type,
                         orbit_anchor_id=orbit_anchor_id,
                     )
-                    uow.session.flush()
+                    await uow.session.flush()
                 seed_content = _created_idea_seed_content(
                     title=title,
                     description=description,
                     thread_message=thread_message,
                 )
-                seed_thread = _seed_created_idea_thread(
+                seed_thread = await _seed_created_idea_thread(
                     uow.session,
                     idea=idea,
                     seed_content=seed_content,
@@ -453,7 +454,7 @@ def _handle_manage_idea(
                 )
                 run_result = None
                 if should_start_run:
-                    run_result = _admit_created_idea_run(
+                    run_result = await _admit_created_idea_run(
                         uow.session,
                         idea=idea,
                         seed_content=seed_content,
@@ -462,7 +463,7 @@ def _handle_manage_idea(
                         origin_ref=origin_ref,
                         thread_message_id=getattr(seed_thread, "id", None),
                     )
-                serialized = _serialize_idea(idea, uow.session)
+                serialized = await _serialize_idea(idea, uow.session)
                 event = ("idea_created", {"idea_id": str(idea.id), "title": idea.title})
                 result = {
                     "idea": serialized,
@@ -475,15 +476,15 @@ def _handle_manage_idea(
             else:
                 if not target_idea_id:
                     return json.dumps({"error": f"{normalized_action or 'action'} requires: idea_id when no current Cortex thread is bound"})
-                idea = _require_idea_for_user(uow.session, target_idea_id, actor)
+                idea = await _a_require_idea_for_user(uow.session, target_idea_id, actor)
 
                 if normalized_action == "get":
-                    return json.dumps({"idea": _serialize_idea(idea, uow.session)}, default=str)
+                    return json.dumps({"idea": await _serialize_idea(idea, uow.session)}, default=str)
 
                 if normalized_action == "archive":
-                    change = _status_change(idea, "archived", trigger="agent_archive", session=uow.session)
-                    uow.session.flush()
-                    serialized = _serialize_idea(idea, uow.session)
+                    change = await _status_change(idea, "archived", trigger="agent_archive", session=uow.session)
+                    await uow.session.flush()
+                    serialized = await _serialize_idea(idea, uow.session)
                     event = ("idea_archived", {"idea_id": str(idea.id), "idea": serialized})
                     result = {
                         "ok": True,
@@ -493,9 +494,9 @@ def _handle_manage_idea(
                     }
 
                 elif normalized_action == "restore":
-                    old_status, new_status = _restore_idea(idea, session=uow.session)
-                    uow.session.flush()
-                    serialized = _serialize_idea(idea, uow.session)
+                    old_status, new_status = await _restore_idea(idea, session=uow.session)
+                    await uow.session.flush()
+                    serialized = await _serialize_idea(idea, uow.session)
                     event = ("idea_restored", {"idea_id": str(idea.id), "idea": serialized})
                     result = {
                         "ok": True,
@@ -507,9 +508,9 @@ def _handle_manage_idea(
                 elif normalized_action == "set_status":
                     if not status:
                         return json.dumps({"error": "set_status requires: status"})
-                    change = _status_change(idea, status, trigger="agent_set_status", session=uow.session)
-                    uow.session.flush()
-                    serialized = _serialize_idea(idea, uow.session)
+                    change = await _status_change(idea, status, trigger="agent_set_status", session=uow.session)
+                    await uow.session.flush()
+                    serialized = await _serialize_idea(idea, uow.session)
                     if status == "archived":
                         event = ("idea_archived", {"idea_id": str(idea.id), "idea": serialized})
                     elif change:
@@ -526,12 +527,12 @@ def _handle_manage_idea(
                 elif normalized_action == "mark_read":
                     old_status = str(idea.status or "")
                     if old_status == "unread_reply":
-                        _status_change(idea, "needs_input", trigger="user_read", session=uow.session)
+                        await _status_change(idea, "needs_input", trigger="user_read", session=uow.session)
                     idea.read_at = datetime.now(timezone.utc)
                     if actor_user_id:
-                        uow.notifications.mark_read_for_idea(user_id=actor_user_id, idea_id=str(idea.id))
-                    uow.session.flush()
-                    serialized = _serialize_idea(idea, uow.session)
+                        await uow.notifications.mark_read_for_idea(user_id=actor_user_id, idea_id=str(idea.id))
+                    await uow.session.flush()
+                    serialized = await _serialize_idea(idea, uow.session)
                     if old_status == "unread_reply":
                         event = (
                             "status_change",
@@ -540,7 +541,7 @@ def _handle_manage_idea(
                     result = {"ok": True, "marked_read": True, "idea": serialized}
 
                 elif normalized_action == "update":
-                    updates = _apply_idea_updates(
+                    updates = await _apply_idea_updates(
                         idea,
                         actor=actor,
                         session=uow.session,
@@ -558,8 +559,8 @@ def _handle_manage_idea(
                     )
                     if not updates:
                         return json.dumps({"error": "update requires at least one field to change"})
-                    uow.session.flush()
-                    serialized = _serialize_idea(idea, uow.session)
+                    await uow.session.flush()
+                    serialized = await _serialize_idea(idea, uow.session)
                     if updates.get("status") == "archived":
                         event = ("idea_archived", {"idea_id": str(idea.id), "idea": serialized})
                     else:

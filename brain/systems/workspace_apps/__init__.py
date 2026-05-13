@@ -8,7 +8,6 @@ from brain.systems.workspace_apps.actions import (
     WorkspaceAppActionNotDeclared,
     async_run_workspace_app_action,
     register_workspace_app_action_executor,
-    run_workspace_app_action,
     unregister_workspace_app_action_executor,
 )
 
@@ -20,6 +19,5 @@ __all__ = [
     "WorkspaceAppActionNotDeclared",
     "async_run_workspace_app_action",
     "register_workspace_app_action_executor",
-    "run_workspace_app_action",
     "unregister_workspace_app_action_executor",
 ]

@@ -6,6 +6,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def test_sync_db_key_resolution_is_disabled_without_async_session():
+    from brain.platform.integrations.llm import _resolve_key_from_db
+
+    assert _resolve_key_from_db(user_id="user-1", provider="anthropic") == (None, "none")
+
+
 def test_resolve_llm_client_uses_db_key():
     """Explicit Anthropic requests still use Anthropic DB keys."""
     from brain.platform.integrations.llm import resolve_llm_client

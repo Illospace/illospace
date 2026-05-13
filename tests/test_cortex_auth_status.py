@@ -1,5 +1,8 @@
-import asyncio
 from unittest.mock import AsyncMock, patch
+
+import pytest
+
+pytestmark = pytest.mark.asyncio
 
 
 def _status_payload(**overrides):
@@ -25,7 +28,7 @@ def _status_payload(**overrides):
     return payload
 
 
-def test_auth_status_reports_runtime_db_key_state():
+async def test_auth_status_reports_runtime_db_key_state():
     from brain.app.api.routers.cortex import auth_status
 
     user = {"id": "user-1", "org_id": "org-1", "role": "owner"}
@@ -34,7 +37,7 @@ def test_auth_status_reports_runtime_db_key_state():
         "brain.app.api.routers.cortex._misc.async_get_provider_auth_status",
         AsyncMock(return_value=_status_payload()),
     ):
-        data = asyncio.run(auth_status(provider="anthropic", user=user, db=object()))
+        data = await auth_status(provider="anthropic", user=user, db=object())
 
     assert data["authenticated"] is True
     assert data["has_personal_db_key"] is True
@@ -47,7 +50,7 @@ def test_auth_status_reports_runtime_db_key_state():
     assert data["setup_required"] is False
 
 
-def test_auth_status_requires_db_key_even_if_env_key_exists():
+async def test_auth_status_requires_db_key_even_if_env_key_exists():
     from brain.app.api.routers.cortex import auth_status
 
     user = {"id": "user-1", "org_id": "org-1", "role": "owner"}
@@ -70,7 +73,7 @@ def test_auth_status_requires_db_key_even_if_env_key_exists():
             has_db_keys=False,
         )),
     ):
-        data = asyncio.run(auth_status(user=user, db=object()))
+        data = await auth_status(user=user, db=object())
 
     assert data["authenticated"] is False
     assert data["runtime_uses_db_key"] is False
@@ -79,7 +82,7 @@ def test_auth_status_requires_db_key_even_if_env_key_exists():
     assert data["setup_required"] is True
 
 
-def test_auth_status_reports_openai_codex_cache_runtime():
+async def test_auth_status_reports_openai_codex_cache_runtime():
     from brain.app.api.routers.cortex import auth_status
 
     user = {"id": "user-1", "org_id": "org-1", "role": "owner"}
@@ -102,7 +105,7 @@ def test_auth_status_reports_openai_codex_cache_runtime():
             runtime_uses_external_auth=True,
         )),
     ):
-        data = asyncio.run(auth_status(provider="openai", user=user, db=object()))
+        data = await auth_status(provider="openai", user=user, db=object())
 
     assert data["provider"] == "openai"
     assert data["authenticated"] is True

@@ -15,7 +15,7 @@ from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
 from brain.app.api.routers.cortex._helpers import _caller_is_service_principal
 from brain.app.api.routers.cortex._router import router
-from brain.systems.runs.cortex import queue_status
+from brain.systems.runs.cortex import queue_status_async
 from brain.systems.runs.cortex.permissions import RunReadScope, run_belongs_to_scope
 from brain.systems.runs.cortex.recording import (
     agent_trace_export_filename,
@@ -137,7 +137,7 @@ async def run_tools(run_id: int, user: dict[str, Any] = Depends(get_current_user
 @router.get("/run/status")
 async def run_status(user: dict[str, Any] = Depends(get_current_user)):
     scope = _run_read_scope(user)
-    status = queue_status(
+    status = await queue_status_async(
         consumer_running=_run_event_consumer_running(),
         org_id=None if scope is None or scope.unrestricted else scope.org_id,
     )

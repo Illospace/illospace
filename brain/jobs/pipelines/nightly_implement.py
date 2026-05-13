@@ -9,6 +9,7 @@ Usage:
     python3 -m brain.jobs.pipelines.nightly_implement [--date 2026-03-04] [--dry-run]
 """
 import argparse
+import asyncio
 import json
 import os
 import subprocess
@@ -20,7 +21,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 PROJECT_ROOT = str(config.BRAIN_DIR)
 REPO = os.environ.get("ILLO_GITHUB_REPO", "").strip()
@@ -87,10 +88,10 @@ def _save_processed_ids(ids: set):
     Path(PROCESSING_LOG).write_text(json.dumps(existing, indent=2))
 
 
-def gather_improvement_memories(target_date: date, processed_ids: set) -> list[dict]:
+async def gather_improvement_memories(target_date: date, processed_ids: set) -> list[dict]:
     """Query unprocessed improvement memories."""
-    with open_unit_of_work(UnitOfWork) as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             SELECT id, content, salience, tags, created_at
             FROM memories
             WHERE memory_type = 'improvement'
@@ -225,12 +226,7 @@ def fetch_nightly_issues(log_lines: list) -> list[dict]:
         return []
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Nightly self-improvement")
-    parser.add_argument("--date", help="Target date (YYYY-MM-DD)")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
-    args = parser.parse_args()
-
+async def _async_main(args) -> None:
     target_date = date.fromisoformat(args.date) if args.date else date.today()
     dry_run = args.dry_run
     log_lines = []
@@ -242,7 +238,7 @@ def main():
 
     # Gather items to process
     processed_ids = _get_processed_ids()
-    improvements = gather_improvement_memories(target_date, processed_ids)
+    improvements = await gather_improvement_memories(target_date, processed_ids)
     pending = load_pending_reflection()
 
     total = len(improvements) + len(pending)
@@ -334,6 +330,14 @@ def main():
     _log(f"{'='*60}", log_lines)
 
     _write_log(target_date, log_lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Nightly self-improvement")
+    parser.add_argument("--date", help="Target date (YYYY-MM-DD)")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    args = parser.parse_args()
+    asyncio.run(_async_main(args))
 
 
 def _write_log(target_date: date, log_lines: list):

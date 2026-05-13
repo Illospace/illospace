@@ -1,5 +1,5 @@
 """Tests for automatic retrieval feedback (memory-DAG additions)."""
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -31,7 +31,7 @@ def _make_memory(salience: float = 5.0):
 def _make_uow(memory=None):
     """Return a mock UnitOfWork whose session.get returns *memory*."""
     uow = MagicMock()
-    uow.session.get.return_value = memory
+    uow.session.get = AsyncMock(return_value=memory)
     return uow
 
 
@@ -41,33 +41,33 @@ def _make_uow(memory=None):
 
 
 class TestAdjustSalienceUow:
-    def test_boost(self):
+    async def test_boost(self):
         mem = _make_memory(5.0)
         uow = _make_uow(mem)
-        _adjust_salience_uow(uow, 1, 0.05)
+        await _adjust_salience_uow(uow, 1, 0.05)
         assert mem.salience == pytest.approx(5.05)
 
-    def test_penalty(self):
+    async def test_penalty(self):
         mem = _make_memory(5.0)
         uow = _make_uow(mem)
-        _adjust_salience_uow(uow, 1, -0.03)
+        await _adjust_salience_uow(uow, 1, -0.03)
         assert mem.salience == pytest.approx(4.97)
 
-    def test_clamps_to_cap(self):
+    async def test_clamps_to_cap(self):
         mem = _make_memory(9.98)
         uow = _make_uow(mem)
-        _adjust_salience_uow(uow, 1, 0.05)
+        await _adjust_salience_uow(uow, 1, 0.05)
         assert mem.salience == SALIENCE_CAP
 
-    def test_clamps_to_floor(self):
+    async def test_clamps_to_floor(self):
         mem = _make_memory(1.01)
         uow = _make_uow(mem)
-        _adjust_salience_uow(uow, 1, -0.05)
+        await _adjust_salience_uow(uow, 1, -0.05)
         assert mem.salience == SALIENCE_FLOOR
 
-    def test_missing_memory_no_error(self):
+    async def test_missing_memory_no_error(self):
         uow = _make_uow(None)
-        _adjust_salience_uow(uow, 999, 0.05)  # should not raise
+        await _adjust_salience_uow(uow, 999, 0.05)  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -77,17 +77,18 @@ class TestAdjustSalienceUow:
 
 class TestApplyAutoFeedback:
     @patch("brain.systems.memory.retrieval_feedback.UnitOfWork")
-    def test_success_boosts(self, MockUoW):
+    async def test_success_boosts(self, MockUoW):
         mem1 = _make_memory(5.0)
         mem2 = _make_memory(6.0)
 
         uow = MagicMock()
-        uow.__enter__ = MagicMock(return_value=uow)
-        uow.__exit__ = MagicMock(return_value=False)
-        uow.session.get.side_effect = [mem1, mem2]
+        uow.__aenter__ = AsyncMock(return_value=uow)
+        uow.__aexit__ = AsyncMock(return_value=False)
+        uow.session.get = AsyncMock(side_effect=[mem1, mem2])
+        uow.pool_stats.record_outcome = AsyncMock()
         MockUoW.return_value = uow
 
-        apply_auto_feedback([10, 20], ["recency"], success=True)
+        await apply_auto_feedback([10, 20], ["recency"], success=True)
 
         assert mem1.salience == pytest.approx(5.0 + BOOST_SUCCESS)
         assert mem2.salience == pytest.approx(6.0 + BOOST_SUCCESS)
@@ -96,16 +97,17 @@ class TestApplyAutoFeedback:
         )
 
     @patch("brain.systems.memory.retrieval_feedback.UnitOfWork")
-    def test_failure_penalizes(self, MockUoW):
+    async def test_failure_penalizes(self, MockUoW):
         mem = _make_memory(5.0)
 
         uow = MagicMock()
-        uow.__enter__ = MagicMock(return_value=uow)
-        uow.__exit__ = MagicMock(return_value=False)
-        uow.session.get.return_value = mem
+        uow.__aenter__ = AsyncMock(return_value=uow)
+        uow.__aexit__ = AsyncMock(return_value=False)
+        uow.session.get = AsyncMock(return_value=mem)
+        uow.pool_stats.record_outcome = AsyncMock()
         MockUoW.return_value = uow
 
-        apply_auto_feedback([10], ["semantic"], success=False)
+        await apply_auto_feedback([10], ["semantic"], success=False)
 
         assert mem.salience == pytest.approx(5.0 - PENALTY_FAILURE)
         uow.pool_stats.record_outcome.assert_called_once_with(
@@ -113,14 +115,15 @@ class TestApplyAutoFeedback:
         )
 
     @patch("brain.systems.memory.retrieval_feedback.UnitOfWork")
-    def test_pool_outcomes_recorded_per_tag(self, MockUoW):
+    async def test_pool_outcomes_recorded_per_tag(self, MockUoW):
         uow = MagicMock()
-        uow.__enter__ = MagicMock(return_value=uow)
-        uow.__exit__ = MagicMock(return_value=False)
-        uow.session.get.return_value = _make_memory(5.0)
+        uow.__aenter__ = AsyncMock(return_value=uow)
+        uow.__aexit__ = AsyncMock(return_value=False)
+        uow.session.get = AsyncMock(return_value=_make_memory(5.0))
+        uow.pool_stats.record_outcome = AsyncMock()
         MockUoW.return_value = uow
 
-        apply_auto_feedback([1], ["recency", "semantic"], success=True)
+        await apply_auto_feedback([1], ["recency", "semantic"], success=True)
 
         assert uow.pool_stats.record_outcome.call_count == 2
 
@@ -132,27 +135,27 @@ class TestApplyAutoFeedback:
 
 class TestApplyExplicitFeedback:
     @patch("brain.systems.memory.retrieval_feedback.UnitOfWork")
-    def test_positive(self, MockUoW):
+    async def test_positive(self, MockUoW):
         mem = _make_memory(5.0)
         uow = MagicMock()
-        uow.__enter__ = MagicMock(return_value=uow)
-        uow.__exit__ = MagicMock(return_value=False)
-        uow.session.get.return_value = mem
+        uow.__aenter__ = AsyncMock(return_value=uow)
+        uow.__aexit__ = AsyncMock(return_value=False)
+        uow.session.get = AsyncMock(return_value=mem)
         MockUoW.return_value = uow
 
-        apply_explicit_feedback([10], positive=True)
+        await apply_explicit_feedback([10], positive=True)
 
         assert mem.salience == pytest.approx(5.0 + BOOST_EXPLICIT)
 
     @patch("brain.systems.memory.retrieval_feedback.UnitOfWork")
-    def test_negative(self, MockUoW):
+    async def test_negative(self, MockUoW):
         mem = _make_memory(5.0)
         uow = MagicMock()
-        uow.__enter__ = MagicMock(return_value=uow)
-        uow.__exit__ = MagicMock(return_value=False)
-        uow.session.get.return_value = mem
+        uow.__aenter__ = AsyncMock(return_value=uow)
+        uow.__aexit__ = AsyncMock(return_value=False)
+        uow.session.get = AsyncMock(return_value=mem)
         MockUoW.return_value = uow
 
-        apply_explicit_feedback([10], positive=False)
+        await apply_explicit_feedback([10], positive=False)
 
         assert mem.salience == pytest.approx(5.0 - PENALTY_EXPLICIT)

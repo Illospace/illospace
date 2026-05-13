@@ -6,7 +6,7 @@ from fnmatch import fnmatchcase
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea
@@ -331,19 +331,19 @@ def build_execution_defaults(context: dict[str, Any] | None) -> dict[str, Any]:
     return defaults
 
 
-def load_run_target_context(session: Session, run_id: int) -> dict[str, Any] | None:
+async def load_run_target_context(session: AsyncSession, run_id: int) -> dict[str, Any] | None:
     """Load a resolved run target plus catalog details for read surfaces."""
-    binding = get_run_target_binding(session, run_id)
+    binding = await get_run_target_binding(session, run_id)
     if binding is None:
         return None
 
     try:
-        registry = session.get(TargetRegistry, binding.target_registry_id) if binding.target_registry_id is not None else None
+        registry = await session.get(TargetRegistry, binding.target_registry_id) if binding.target_registry_id is not None else None
     except Exception:
         registry = None
     try:
         environment_binding = (
-            session.get(EnvironmentBinding, binding.environment_binding_id)
+            await session.get(EnvironmentBinding, binding.environment_binding_id)
             if binding.environment_binding_id is not None
             else None
         )
@@ -354,14 +354,18 @@ def load_run_target_context(session: Session, run_id: int) -> dict[str, Any] | N
     service_rows = []
     if environment_binding is not None:
         try:
-            command_rows = session.scalars(
+            command_rows = (
+                await session.scalars(
                 select(EnvironmentCommand).where(EnvironmentCommand.binding_id == environment_binding.id)
+                )
             ).all()
         except Exception:
             command_rows = []
         try:
-            service_rows = session.scalars(
+            service_rows = (
+                await session.scalars(
                 select(EnvironmentService).where(EnvironmentService.binding_id == environment_binding.id)
+                )
             ).all()
         except Exception:
             service_rows = []
@@ -378,7 +382,7 @@ def load_run_target_context(session: Session, run_id: int) -> dict[str, Any] | N
         if service.test_command_id is not None and service.test_command_id in command_lookup
     ]
 
-    binding_payload = serialize_run_target_binding(binding, session=None) or {}
+    binding_payload = await serialize_run_target_binding(binding, session=None) or {}
     if registry is not None:
         binding_payload["target_registry"] = {
             "id": getattr(registry, "id", None),
@@ -868,36 +872,36 @@ def _build_target_resolution(
     )
 
 
-def _lookup_run_org_id(session: Session, run: AgentRun) -> str | None:
+async def _lookup_run_org_id(session: AsyncSession, run: AgentRun) -> str | None:
     if not run.idea_id:
         return None
-    idea = session.get(Idea, run.idea_id)
+    idea = await session.get(Idea, run.idea_id)
     return getattr(idea, "org_id", None) if idea else None
 
 
-def get_run_target_binding(session: Session, run_id: int) -> RunTargetBinding | None:
+async def get_run_target_binding(session: AsyncSession, run_id: int) -> RunTargetBinding | None:
     """Return the persisted binding row for a run, if any."""
     stmt = select(RunTargetBinding).where(RunTargetBinding.run_id == run_id)
-    return session.scalars(stmt).first()
+    return (await session.scalars(stmt)).first()
 
 
-def resolve_run_target_binding(
-    session: Session,
+async def resolve_run_target_binding(
+    session: AsyncSession,
     run_id: int,
     raw_target_metadata: dict[str, Any] | None = None,
 ) -> RunTargetBinding | None:
     """Resolve a run target conservatively and persist the binding row."""
-    run = session.get(AgentRun, run_id)
+    run = await session.get(AgentRun, run_id)
     if run is None:
         return None
 
     raw_target = raw_target_metadata if raw_target_metadata is not None else (run.target_metadata or {})
     target, validation_errors = _normalize_target_payload(raw_target)
 
-    registries = session.scalars(select(TargetRegistry).where(TargetRegistry.active.is_(True))).all()
-    bindings = session.scalars(select(EnvironmentBinding)).all()
-    services = session.scalars(select(EnvironmentService)).all()
-    org_id = _lookup_run_org_id(session, run)
+    registries = (await session.scalars(select(TargetRegistry).where(TargetRegistry.active.is_(True)))).all()
+    bindings = (await session.scalars(select(EnvironmentBinding))).all()
+    services = (await session.scalars(select(EnvironmentService))).all()
+    org_id = await _lookup_run_org_id(session, run)
 
     resolution = _build_target_resolution(
         target=target,
@@ -909,7 +913,7 @@ def resolve_run_target_binding(
         raw_target_metadata=raw_target if isinstance(raw_target, dict) else None,
     )
 
-    binding = get_run_target_binding(session, run_id)
+    binding = await get_run_target_binding(session, run_id)
     if binding is None:
         binding = RunTargetBinding(run_id=run_id)
         session.add(binding)
@@ -925,10 +929,10 @@ def resolve_run_target_binding(
     return binding
 
 
-def serialize_run_target_binding(
+async def serialize_run_target_binding(
     binding: RunTargetBinding | None,
     *,
-    session: Session | None = None,
+    session: AsyncSession | None = None,
 ) -> dict[str, Any] | None:
     """Serialize a binding row for debug/read surfaces."""
     if binding is None:
@@ -953,7 +957,7 @@ def serialize_run_target_binding(
 
     if binding.target_registry_id is not None:
         try:
-            registry = session.get(TargetRegistry, binding.target_registry_id)
+            registry = await session.get(TargetRegistry, binding.target_registry_id)
         except Exception:
             registry = None
         if registry is not None:
@@ -972,7 +976,7 @@ def serialize_run_target_binding(
 
     if binding.environment_binding_id is not None:
         try:
-            environment_binding = session.get(EnvironmentBinding, binding.environment_binding_id)
+            environment_binding = await session.get(EnvironmentBinding, binding.environment_binding_id)
         except Exception:
             environment_binding = None
         if environment_binding is not None:
@@ -987,14 +991,18 @@ def serialize_run_target_binding(
                 "metadata": getattr(environment_binding, "metadata_", None) or {},
             }
         try:
-            command_rows = session.scalars(
+            command_rows = (
+                await session.scalars(
                 select(EnvironmentCommand).where(EnvironmentCommand.binding_id == binding.environment_binding_id)
+                )
             ).all()
         except Exception:
             command_rows = []
         try:
-            service_rows = session.scalars(
+            service_rows = (
+                await session.scalars(
                 select(EnvironmentService).where(EnvironmentService.binding_id == binding.environment_binding_id)
+                )
             ).all()
         except Exception:
             service_rows = []

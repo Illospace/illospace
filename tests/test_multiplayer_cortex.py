@@ -2,7 +2,7 @@
 import json
 import pytest
 from fastapi import HTTPException
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 
 def _mock_cursor(rows=None, fetchone_result=None):
@@ -24,35 +24,35 @@ def _mock_cursor(rows=None, fetchone_result=None):
 class TestOrgValidation:
     """Org validation returns None for ideas not belonging to user's org."""
 
-    def test_validate_idea_org_returns_idea_for_valid_org(self):
+    async def test_validate_idea_org_returns_idea_for_valid_org(self):
         """Helper returns Idea when org matches."""
         from brain.app.api.routers.cortex import _validate_idea_org
         session = MagicMock()
         fake_idea = MagicMock()
         fake_idea.id = "idea-1"
         fake_idea.org_id = "org-1"
-        session.scalars.return_value.first.return_value = fake_idea
-        result = _validate_idea_org(session, "idea-1", "org-1")
+        session.scalars = AsyncMock(return_value=MagicMock(first=MagicMock(return_value=fake_idea)))
+        result = await _validate_idea_org(session, "idea-1", "org-1")
         assert result is not None
         assert result.id == "idea-1"
 
-    def test_validate_idea_org_returns_none_for_wrong_org(self):
+    async def test_validate_idea_org_returns_none_for_wrong_org(self):
         """Helper returns None when org doesn't match."""
         from brain.app.api.routers.cortex import _validate_idea_org
         session = MagicMock()
-        session.scalars.return_value.first.return_value = None
-        result = _validate_idea_org(session, "idea-1", "wrong-org")
+        session.scalars = AsyncMock(return_value=MagicMock(first=MagicMock(return_value=None)))
+        result = await _validate_idea_org(session, "idea-1", "wrong-org")
         assert result is None
 
-    def test_validate_idea_org_returns_none_for_missing_idea(self):
+    async def test_validate_idea_org_returns_none_for_missing_idea(self):
         """Helper returns None when idea doesn't exist."""
         from brain.app.api.routers.cortex import _validate_idea_org
         session = MagicMock()
-        session.scalars.return_value.first.return_value = None
-        result = _validate_idea_org(session, "nonexistent", "org-1")
+        session.scalars = AsyncMock(return_value=MagicMock(first=MagicMock(return_value=None)))
+        result = await _validate_idea_org(session, "nonexistent", "org-1")
         assert result is None
 
-    def test_require_idea_for_user_uses_org_scope(self):
+    async def test_require_idea_for_user_uses_org_scope(self):
         """Route helper returns the scoped idea only when caller org matches."""
         from brain.app.api.routers.cortex import _require_idea_for_user
 
@@ -61,9 +61,9 @@ class TestOrgValidation:
         fake_idea = MagicMock()
         fake_idea.id = "idea-1"
         fake_idea.org_id = org_id
-        session.scalars.return_value.first.return_value = fake_idea
+        session.scalars = AsyncMock(return_value=MagicMock(first=MagicMock(return_value=fake_idea)))
 
-        result = _require_idea_for_user(
+        result = await _require_idea_for_user(
             session,
             "idea-1",
             {"id": "user-1", "org_id": org_id, "principal_type": "human"},
@@ -77,15 +77,15 @@ class TestOrgValidation:
         assert "ideas.org_id IS NULL" in compiled
         assert f"users.org_id = '{compiled_org_id}'" in compiled
 
-    def test_require_idea_for_user_hides_cross_org_ideas(self):
+    async def test_require_idea_for_user_hides_cross_org_ideas(self):
         """Route helper raises 404 when repository-scoped lookup misses."""
         from brain.app.api.routers.cortex import _require_idea_for_user
 
         session = MagicMock()
-        session.scalars.return_value.first.return_value = None
+        session.scalars = AsyncMock(return_value=MagicMock(first=MagicMock(return_value=None)))
 
         with pytest.raises(HTTPException) as exc_info:
-            _require_idea_for_user(
+            await _require_idea_for_user(
                 session,
                 "idea-1",
                 {"id": "user-1", "org_id": "other-org", "principal_type": "human"},

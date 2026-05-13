@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.scratchpad import SessionScratchpad
 
@@ -12,10 +12,10 @@ from brain.platform.db.models.scratchpad import SessionScratchpad
 class ScratchpadRepository:
     """CRUD for session scratchpad entries."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    def write(
+    async def write(
         self,
         run_id: str,
         section: str,
@@ -31,10 +31,10 @@ class ScratchpadRepository:
             worker_name=worker_name,
         )
         self._session.add(entry)
-        self._session.flush()
+        await self._session.flush()
         return entry
 
-    def read(
+    async def read(
         self,
         run_id: str,
         section: str | None = None,
@@ -46,7 +46,7 @@ class ScratchpadRepository:
         if key:
             stmt = stmt.where(SessionScratchpad.key == key)
         stmt = stmt.order_by(SessionScratchpad.created_at)
-        rows = self._session.execute(stmt).scalars().all()
+        rows = (await self._session.execute(stmt)).scalars().all()
         return [
             {
                 "id": r.id,
@@ -59,12 +59,12 @@ class ScratchpadRepository:
             for r in rows
         ]
 
-    def list_sections(self, run_id: str) -> list[str]:
+    async def list_sections(self, run_id: str) -> list[str]:
         from sqlalchemy import distinct
         stmt = select(distinct(SessionScratchpad.section)).where(
             SessionScratchpad.run_id == run_id
         )
-        return [row[0] for row in self._session.execute(stmt).all()]
+        return [row[0] for row in (await self._session.execute(stmt)).all()]
 
     def promote(self, run_id: str) -> dict:
         """Gather all scratchpad entries for an AgentRun, formatted for review.
@@ -90,7 +90,7 @@ class ScratchpadRepository:
             "total_entries": len(entries),
         }
 
-    def close(self, run_id: str) -> int:
+    async def close(self, run_id: str) -> int:
         """Mark all entries for a run as closed (sets closed_at timestamp).
 
         Closed entries are kept for 24h for debugging, then eligible for cleanup.
@@ -103,11 +103,11 @@ class ScratchpadRepository:
             .where(SessionScratchpad.closed_at.is_(None))
             .values(closed_at=now)
         )
-        result = self._session.execute(stmt)
-        self._session.flush()
+        result = (await self._session.execute(stmt))
+        await self._session.flush()
         return result.rowcount
 
-    def cleanup_expired(self, hours: int = 24) -> int:
+    async def cleanup_expired(self, hours: int = 24) -> int:
         """Delete entries that have been closed for more than `hours` hours.
 
         Returns the number of entries deleted.
@@ -119,6 +119,6 @@ class ScratchpadRepository:
             .where(SessionScratchpad.closed_at.isnot(None))
             .where(SessionScratchpad.closed_at < cutoff)
         )
-        result = self._session.execute(stmt)
-        self._session.flush()
+        result = (await self._session.execute(stmt))
+        await self._session.flush()
         return result.rowcount

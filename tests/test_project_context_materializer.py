@@ -1,7 +1,8 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 
-def test_materialize_github_project_context_uses_vault_key_without_persisting_token(tmp_path, monkeypatch):
+async def test_materialize_github_project_context_uses_vault_key_without_persisting_token(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -33,16 +34,16 @@ def test_materialize_github_project_context_uses_vault_key_without_persisting_to
     )
 
     class FakeSession:
-        def get(self, _model, _id):
+        async def get(self, _model, _id):
             return run
 
     class FakeUow:
         session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, *_args):
+        async def __aexit__(self, *_args):
             return False
 
     clone_calls = []
@@ -63,7 +64,7 @@ def test_materialize_github_project_context_uses_vault_key_without_persisting_to
     monkeypatch.setattr(materializer, "get_secret", fake_get_secret)
     monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
 
-    result = materialize_project_context_workspaces(
+    result = await materialize_project_context_workspaces(
         42,
         workspace_root=str(tmp_path),
         user_id="user-1",
@@ -93,7 +94,7 @@ def test_materialize_github_project_context_uses_vault_key_without_persisting_to
     assert "test-private-token" not in str(run.target_metadata)
 
 
-def test_materialize_github_project_context_fails_closed_when_clone_unavailable(tmp_path, monkeypatch):
+async def test_materialize_github_project_context_fails_closed_when_clone_unavailable(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -119,16 +120,16 @@ def test_materialize_github_project_context_fails_closed_when_clone_unavailable(
     )
 
     class FakeSession:
-        def get(self, _model, _id):
+        async def get(self, _model, _id):
             return run
 
     class FakeUow:
         session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, *_args):
+        async def __aexit__(self, *_args):
             return False
 
     monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
@@ -139,7 +140,7 @@ def test_materialize_github_project_context_fails_closed_when_clone_unavailable(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("Repository not found")),
     )
 
-    result = materialize_project_context_workspaces(43, workspace_root=str(tmp_path), user_id="user-1")
+    result = await materialize_project_context_workspaces(43, workspace_root=str(tmp_path), user_id="user-1")
 
     assert not result.ok
     assert "Could not materialize GitHub repository example-org/private" in result.errors[0]
@@ -149,7 +150,7 @@ def test_materialize_github_project_context_fails_closed_when_clone_unavailable(
 
 
 
-def test_materialize_agent_run_workspace_ref_project_context_updates_workspace_root(tmp_path, monkeypatch):
+async def test_materialize_agent_run_workspace_ref_project_context_updates_workspace_root(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -173,16 +174,16 @@ def test_materialize_agent_run_workspace_ref_project_context_updates_workspace_r
     )
 
     class FakeSession:
-        def get(self, _model, _id):
+        async def get(self, _model, _id):
             return run
 
     class FakeUow:
         session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, *_args):
+        async def __aexit__(self, *_args):
             return False
 
     def fake_clone(slug, destination, *, token, branch):
@@ -193,7 +194,7 @@ def test_materialize_agent_run_workspace_ref_project_context_updates_workspace_r
     monkeypatch.setattr(materializer, "list_secrets", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
 
-    result = materialize_project_context_workspaces(44, workspace_root=str(tmp_path), user_id="user-1")
+    result = await materialize_project_context_workspaces(44, workspace_root=str(tmp_path), user_id="user-1")
 
     assert result.ok
     assert result.workspaces
@@ -203,7 +204,7 @@ def test_materialize_agent_run_workspace_ref_project_context_updates_workspace_r
     assert run.target_ref["project_context_snapshot"]["resources"][0]["path"] == result.workspaces[0]["path"]
 
 
-def test_materialize_reuses_existing_thread_checkout_without_reclone(tmp_path, monkeypatch):
+async def test_materialize_reuses_existing_thread_checkout_without_reclone(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -236,16 +237,16 @@ def test_materialize_reuses_existing_thread_checkout_without_reclone(tmp_path, m
     )
 
     class FakeSession:
-        def get(self, _model, _id):
+        async def get(self, _model, _id):
             return run
 
     class FakeUow:
         session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, *_args):
+        async def __aexit__(self, *_args):
             return False
 
     def fake_git_output(cwd, *args):
@@ -270,7 +271,7 @@ def test_materialize_reuses_existing_thread_checkout_without_reclone(tmp_path, m
     monkeypatch.setattr(materializer, "_git_output", fake_git_output)
     monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
 
-    result = materialize_project_context_workspaces(45, workspace_root=str(tmp_path), user_id="user-1")
+    result = await materialize_project_context_workspaces(45, workspace_root=str(tmp_path), user_id="user-1")
 
     assert result.ok
     assert clone_calls == []
@@ -289,7 +290,7 @@ def test_materialize_reuses_existing_thread_checkout_without_reclone(tmp_path, m
     }
 
 
-def test_materialize_ignores_stale_managed_run_path_and_uses_thread_root(tmp_path, monkeypatch):
+async def test_materialize_ignores_stale_managed_run_path_and_uses_thread_root(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -322,16 +323,16 @@ def test_materialize_ignores_stale_managed_run_path_and_uses_thread_root(tmp_pat
     )
 
     class FakeSession:
-        def get(self, _model, _id):
+        async def get(self, _model, _id):
             return run
 
     class FakeUow:
         session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, *_args):
+        async def __aexit__(self, *_args):
             return False
 
     clone_calls = []
@@ -345,7 +346,7 @@ def test_materialize_ignores_stale_managed_run_path_and_uses_thread_root(tmp_pat
     monkeypatch.setattr(materializer, "list_secrets", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
 
-    result = materialize_project_context_workspaces(46, workspace_root=str(thread_root), user_id="user-1")
+    result = await materialize_project_context_workspaces(46, workspace_root=str(thread_root), user_id="user-1")
 
     assert result.ok
     assert clone_calls == [expected_checkout]
@@ -354,7 +355,7 @@ def test_materialize_ignores_stale_managed_run_path_and_uses_thread_root(tmp_pat
     assert resource["path"] == str(expected_checkout)
 
 
-def test_materialize_refuses_to_overwrite_non_matching_thread_checkout(tmp_path, monkeypatch):
+async def test_materialize_refuses_to_overwrite_non_matching_thread_checkout(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -387,16 +388,16 @@ def test_materialize_refuses_to_overwrite_non_matching_thread_checkout(tmp_path,
     )
 
     class FakeSession:
-        def get(self, _model, _id):
+        async def get(self, _model, _id):
             return run
 
     class FakeUow:
         session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, *_args):
+        async def __aexit__(self, *_args):
             return False
 
     clone_calls = []
@@ -409,7 +410,7 @@ def test_materialize_refuses_to_overwrite_non_matching_thread_checkout(tmp_path,
     monkeypatch.setattr(materializer, "_git_output", lambda *_args: None)
     monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
 
-    result = materialize_project_context_workspaces(47, workspace_root=str(tmp_path), user_id="user-1")
+    result = await materialize_project_context_workspaces(47, workspace_root=str(tmp_path), user_id="user-1")
 
     assert not result.ok
     assert clone_calls == []
@@ -418,7 +419,7 @@ def test_materialize_refuses_to_overwrite_non_matching_thread_checkout(tmp_path,
     assert run.target_status == "invalid"
 
 
-def test_materialize_empty_project_context_is_not_ready(tmp_path, monkeypatch):
+async def test_materialize_empty_project_context_is_not_ready(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -438,21 +439,21 @@ def test_materialize_empty_project_context_is_not_ready(tmp_path, monkeypatch):
     )
 
     class FakeSession:
-        def get(self, _model, _id):
+        async def get(self, _model, _id):
             return run
 
     class FakeUow:
         session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, *_args):
+        async def __aexit__(self, *_args):
             return False
 
     monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
 
-    result = materialize_project_context_workspaces(48, workspace_root=str(tmp_path), user_id="user-1")
+    result = await materialize_project_context_workspaces(48, workspace_root=str(tmp_path), user_id="user-1")
 
     assert not result.ok
     assert result.workspaces == []
@@ -460,7 +461,7 @@ def test_materialize_empty_project_context_is_not_ready(tmp_path, monkeypatch):
     assert "workspace_root" not in run.workspace_ref
 
 
-def test_materialize_missing_project_context_snapshot_reports_error(tmp_path, monkeypatch):
+async def test_materialize_missing_project_context_snapshot_reports_error(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -474,21 +475,21 @@ def test_materialize_missing_project_context_snapshot_reports_error(tmp_path, mo
     )
 
     class FakeSession:
-        def get(self, _model, _id):
+        async def get(self, _model, _id):
             return run
 
     class FakeUow:
         session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, *_args):
+        async def __aexit__(self, *_args):
             return False
 
     monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
 
-    result = materialize_project_context_workspaces(50, workspace_root=str(tmp_path), user_id="user-1")
+    result = await materialize_project_context_workspaces(50, workspace_root=str(tmp_path), user_id="user-1")
 
     assert not result.ok
     assert result.errors == ["Project Context snapshot is missing."]
@@ -525,37 +526,37 @@ def test_runner_fails_fast_when_project_context_has_no_workspace(monkeypatch):
     )
 
     class FakeSession:
-        def get(self, _model, _id):
+        async def get(self, _model, _id):
             return run
 
     class FakeUow:
         session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, *_args):
+        async def __aexit__(self, *_args):
             return False
 
     captured = {}
 
     monkeypatch.setattr(runner, "UnitOfWork", lambda: FakeUow())
-    monkeypatch.setattr(runner, "_record_project_activity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_async_record_project_activity", AsyncMock())
     monkeypatch.setattr(
         runner,
         "materialize_project_context_workspaces",
-        lambda *_args, **_kwargs: SimpleNamespace(
+        AsyncMock(return_value=SimpleNamespace(
             ok=False,
             workspaces=[],
             errors=["Project Context has no resources to materialize."],
-        ),
+        )),
     )
 
-    def fake_mark_failed(run_id, error, *, final_answer=None):
+    async def fake_mark_failed(run_id, error, *, final_answer=None):
         captured.update({"run_id": run_id, "error": error, "final_answer": final_answer})
         return {"idea_id": "idea-3", "new_status": "failed"}
 
-    monkeypatch.setattr(runner, "_mark_run_failed_after_runner_error", fake_mark_failed)
+    monkeypatch.setattr(runner, "_mark_run_failed_after_runner_error_async", fake_mark_failed)
 
     context_ready, status_payload = runner._materialize_project_context(49)
 

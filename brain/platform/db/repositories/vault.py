@@ -12,15 +12,15 @@ from brain.platform.db.repositories.base import BaseRepository
 class VaultRepository(BaseRepository[Secret]):
     model = Secret
 
-    def list_by_user(self, user_id: str) -> Sequence[Secret]:
+    async def a_list_by_user(self, user_id: str) -> Sequence[Secret]:
         stmt = (
             select(Secret)
             .where(Secret.user_id == user_id)
             .order_by(Secret.category, Secret.key_name)
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def list_by_user_and_category(
+    async def a_list_by_user_and_category(
         self, user_id: str, category: str
     ) -> Sequence[Secret]:
         stmt = (
@@ -28,13 +28,7 @@ class VaultRepository(BaseRepository[Secret]):
             .where(Secret.user_id == user_id, Secret.category == category)
             .order_by(Secret.key_name)
         )
-        return self._session.scalars(stmt).all()
-
-    def get_by_key(self, user_id: str, key_name: str) -> Secret | None:
-        stmt = select(Secret).where(
-            Secret.user_id == user_id, Secret.key_name == key_name
-        )
-        return self._session.scalars(stmt).first()
+        return (await self._session.scalars(stmt)).all()
 
     async def a_get_by_key(self, user_id: str, key_name: str) -> Secret | None:
         stmt = select(Secret).where(
@@ -43,7 +37,7 @@ class VaultRepository(BaseRepository[Secret]):
         result = await self._session.scalars(stmt)
         return result.first()
 
-    def list_missing_requests(
+    async def list_missing_requests(
         self,
         *,
         user_id: str | None = None,
@@ -60,55 +54,55 @@ class VaultRepository(BaseRepository[Secret]):
         else:
             return []
         stmt = stmt.order_by(VaultMissingRequest.last_requested.desc())
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def revoke_share(self, share_id: int, user_id: str) -> bool:
+    async def revoke_share(self, share_id: int, user_id: str) -> bool:
         """Revoke a share by id, only if the current user owns the secret."""
         from datetime import datetime, timezone
 
         stmt = select(VaultShare).where(VaultShare.id == share_id)
-        share = self._session.scalars(stmt).first()
+        share = (await self._session.scalars(stmt)).first()
         if not share:
             return False
         # Verify the user owns the underlying secret
-        secret = self.get(share.secret_id)
+        secret = await self.a_get(share.secret_id)
         if not secret or secret.user_id != user_id:
             return False
         share.revoked_at = datetime.now(timezone.utc)
-        self._session.flush()
+        await self._session.flush()
         return True
 
 
 class VaultShareRepository(BaseRepository[VaultShare]):
     model = VaultShare
 
-    def list_by_secret(self, secret_id: int) -> Sequence[VaultShare]:
+    async def a_list_by_secret(self, secret_id: int) -> Sequence[VaultShare]:
         stmt = select(VaultShare).where(
             VaultShare.secret_id == secret_id,
             VaultShare.revoked_at.is_(None),
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def list_shared_with_user(self, user_id: str) -> Sequence[VaultShare]:
+    async def a_list_shared_with_user(self, user_id: str) -> Sequence[VaultShare]:
         stmt = select(VaultShare).where(
             VaultShare.shared_with_user_id == user_id,
             VaultShare.revoked_at.is_(None),
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
 
 class VaultAccessLogRepository(BaseRepository[VaultAccessLog]):
     model = VaultAccessLog
 
-    def list_recent(self, *, limit: int = 100) -> Sequence[VaultAccessLog]:
+    async def a_list_recent(self, *, limit: int = 100) -> Sequence[VaultAccessLog]:
         stmt = (
             select(VaultAccessLog)
             .order_by(VaultAccessLog.accessed_at.desc())
             .limit(limit)
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def list_recent_for_org(self, org_id: str, *, limit: int = 100) -> Sequence[VaultAccessLog]:
+    async def list_recent_for_org(self, org_id: str, *, limit: int = 100) -> Sequence[VaultAccessLog]:
         from brain.platform.db.models.org import User
 
         stmt = (
@@ -118,9 +112,9 @@ class VaultAccessLogRepository(BaseRepository[VaultAccessLog]):
             .order_by(VaultAccessLog.accessed_at.desc())
             .limit(limit)
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def log_access(
+    async def a_log_access(
         self,
         user_id: str,
         secret_id: int,

@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from brain.app.cli.memory import add_memory
 
 
-def create_experiment_memory(
+async def create_experiment_memory(
     description: str,
     hypothesis: str,
     what_changed: str,
@@ -54,7 +54,7 @@ def create_experiment_memory(
 
     content = f"EXPERIMENT: {description}\nEXPERIMENT_META:{json.dumps(meta)}"
 
-    return add_memory(
+    return await add_memory(
         content=content,
         memory_type="experiment",
         salience=6.0,

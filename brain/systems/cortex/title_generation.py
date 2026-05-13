@@ -195,7 +195,7 @@ def _blank(value: str | None) -> bool:
     return not str(value or "").strip()
 
 
-def _idea_title_source(
+async def _idea_title_source(
     idea_id: str,
     *,
     user_id: str | None,
@@ -203,10 +203,10 @@ def _idea_title_source(
     raw_title: str | None,
 ) -> tuple[str | None, str | None]:
     from brain.platform.db.models.idea import Idea
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
-    with open_unit_of_work(UnitOfWork) as uow:
-        idea = uow.session.get(Idea, str(idea_id))
+    async with UnitOfWork() as uow:
+        idea = await uow.session.get(Idea, str(idea_id))
         if idea is None:
             return None, "missing"
         if getattr(idea, "archived_at", None) is not None:
@@ -226,7 +226,7 @@ def _idea_title_source(
         return title, None
 
 
-def _store_generated_display_title(
+async def _store_generated_display_title(
     idea_id: str,
     *,
     source_title: str,
@@ -237,9 +237,9 @@ def _store_generated_display_title(
     from sqlalchemy import func, or_, update
 
     from brain.platform.db.models.idea import Idea
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         stmt = (
             update(Idea)
             .where(
@@ -255,7 +255,7 @@ def _store_generated_display_title(
         elif user_id:
             stmt = stmt.where(Idea.user_id == str(user_id))
 
-        result = uow.session.execute(stmt)
+        result = await uow.session.execute(stmt)
         return int(getattr(result, "rowcount", 0) or 0) == 1
 
 
@@ -273,7 +273,7 @@ def _publish_generated_display_title(
     publish("title_generated", payload)
 
 
-def generate_and_store_idea_display_title(
+async def generate_and_store_idea_display_title(
     idea_id: str,
     *,
     user_id: str | None = None,
@@ -282,7 +282,7 @@ def generate_and_store_idea_display_title(
     publish_update: bool = True,
 ) -> StoredDisplayTitle:
     """Generate, store, and publish a display title for an idea if it still needs one."""
-    source_title, skipped_reason = _idea_title_source(
+    source_title, skipped_reason = await _idea_title_source(
         idea_id,
         user_id=user_id,
         org_id=org_id,
@@ -295,7 +295,7 @@ def generate_and_store_idea_display_title(
     if not title:
         return StoredDisplayTitle(idea_id=str(idea_id), skipped_reason="generation_failed")
 
-    updated = _store_generated_display_title(
+    updated = await _store_generated_display_title(
         idea_id,
         source_title=source_title,
         display_title=title,

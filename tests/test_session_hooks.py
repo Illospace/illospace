@@ -40,9 +40,9 @@ def test_extract_tags_empty():
     assert tags == [] or isinstance(tags, list)
 
 
-def test_get_cross_channel_context_preserves_rich_fields():
+async def test_get_cross_channel_context_preserves_rich_fields():
     """Cross-channel recall should return the richer context shape."""
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
     from brain.app.cli.session_hooks import get_cross_channel_context
 
     rows = [{
@@ -58,12 +58,14 @@ def test_get_cross_channel_context_preserves_rich_fields():
     }]
 
     mock_uow = MagicMock()
-    mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-    mock_uow.__exit__ = MagicMock(return_value=False)
-    mock_uow.session.execute.return_value.mappings.return_value.all.return_value = rows
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    mock_result = MagicMock()
+    mock_result.mappings.return_value.all.return_value = rows
+    mock_uow.session.execute = AsyncMock(return_value=mock_result)
 
     with patch("brain.app.cli.session_hooks.UnitOfWork", return_value=mock_uow):
-        result = get_cross_channel_context("discord:current", hours=24, limit=5)
+        result = await get_cross_channel_context("discord:current", hours=24, limit=5)
 
     assert result == [{
         "id": 1,

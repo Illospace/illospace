@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-from brain.platform.async_bridge import run_async_from_sync
 from brain.systems.runs.tool_catalog.handlers.common import *
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 
-def _run_manage_cycle_awaitable(awaitable):
-    return run_async_from_sync(awaitable, thread_name="manage-cycle-tool")
-
-
-def _handle_manage_cycle(
+async def _handle_manage_cycle(
     action: str,
     operation: str | None = None,
     id: int | None = None,
@@ -27,7 +22,7 @@ def _handle_manage_cycle(
     target_idea_id: str | None = None,
     reopen_archived: bool | None = None,
 ):
-    return _run_manage_cycle_awaitable(_handle_manage_cycle_async(
+    return await _handle_manage_cycle_async(
         action=action,
         operation=operation,
         id=id,
@@ -42,7 +37,7 @@ def _handle_manage_cycle(
         execution_mode=execution_mode,
         target_idea_id=target_idea_id,
         reopen_archived=reopen_archived,
-    ))
+    )
 
 
 async def _handle_manage_cycle_async(

@@ -1386,6 +1386,10 @@ def run_agent(
         context_attrs["user_id"] = user_id
     if metadata.get("org_id"):
         context_attrs["org_id"] = metadata.get("org_id")
+    if isinstance(metadata.get("target_ref"), dict):
+        context_attrs["target_ref"] = dict(metadata["target_ref"])
+    if isinstance(metadata.get("workspace_ref"), dict):
+        context_attrs["workspace_ref"] = dict(metadata["workspace_ref"])
     chat_trigger = metadata.get("chat_trigger")
     if not isinstance(chat_trigger, dict) and isinstance(metadata.get("target_ref"), dict):
         chat_trigger = metadata["target_ref"].get("chat_trigger")

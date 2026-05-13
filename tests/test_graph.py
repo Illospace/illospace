@@ -412,7 +412,7 @@ class TestBrainRecallIntegration:
         mock_uow.memories.graph_augmented_recall.return_value = mock_graph.return_value
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
-             patch("brain.app.mcp.server.observe_retrieval", return_value={"retrieval_decision_id": 11, "stage": "brain_recall"}):
+             patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value={"retrieval_decision_id": 11, "stage": "brain_recall"})):
             result = mcp_server.tool_brain_recall("redis issues")
 
         assert result["count"] == 1
@@ -469,7 +469,7 @@ class TestBrainRecallIntegration:
         }
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
-             patch("brain.app.mcp.server.observe_retrieval", return_value=decision):
+             patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value=decision)):
             result = mcp_server.tool_brain_recall("redis issues", attention_debug=True)
 
         assert [mem["id"] for mem in result["memories"]] == [1, 2]
@@ -534,13 +534,13 @@ class TestBrainRecallIntegration:
         }]
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
-             patch("brain.app.mcp.server.observe_retrieval", return_value=decision), \
-             patch("brain.app.mcp.server.AttentionController.load_lazy_candidates", return_value=lazy_loaded) as mock_load:
+             patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value=decision)), \
+             patch("brain.app.mcp.server.AttentionController.load_lazy_candidates", new=AsyncMock(return_value=lazy_loaded)) as mock_load:
             result = mcp_server.tool_brain_recall("redis issues", attention_debug=True, expand_lazy_load=True)
 
         assert [mem["id"] for mem in result["memories"]] == [1, 2, 3]
         assert [mem["id"] for mem in result["lazy_loaded_memories"]] == [3]
-        mock_load.assert_called_once()
+        mock_load.assert_awaited_once()
 
     @patch("brain.systems.cognition.graph.graph_augmented_recall", side_effect=Exception("UndefinedColumn"))
     @patch("brain.systems.memory.embeddings.embed_query")
@@ -581,7 +581,7 @@ class TestBrainRecallIntegration:
         }]
 
         with patch("brain.app.mcp.server.UnitOfWork", side_effect=[mock_uow_graph, mock_uow_fallback]), \
-             patch("brain.app.mcp.server.observe_retrieval", return_value={"retrieval_decision_id": 12, "stage": "brain_recall"}):
+             patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value={"retrieval_decision_id": 12, "stage": "brain_recall"})):
             result = mcp_server.tool_brain_recall("redis issues")
 
         assert result["count"] == 1

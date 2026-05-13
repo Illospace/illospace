@@ -1,8 +1,10 @@
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi import BackgroundTasks
+
+pytestmark = pytest.mark.asyncio
 
 
 def _uow_with_session(session):
@@ -15,26 +17,26 @@ def _uow_with_session(session):
 
 class _AsyncSession:
     def __init__(self, session):
-        self._session = session
+        self._backend = session
 
     async def scalars(self, *args, **kwargs):
-        return self._session.scalars(*args, **kwargs)
+        return self._backend.scalars(*args, **kwargs)
 
     def add(self, *args, **kwargs):
-        return self._session.add(*args, **kwargs)
+        return self._backend.add(*args, **kwargs)
 
     async def flush(self):
-        return self._session.flush()
+        return self._backend.flush()
 
     async def commit(self):
-        return self._session.commit()
+        return self._backend.commit()
 
 
 def _personal_openai_status():
     return {"runtime_key_available": True, "runtime_key_source": "user_default"}
 
 
-def test_runtime_ready_intro_reuses_existing_thread():
+async def test_runtime_ready_intro_reuses_existing_thread():
     from brain.app.api.routers.onboarding import start_runtime_ready_intro
 
     background_tasks = BackgroundTasks()
@@ -47,11 +49,11 @@ def test_runtime_ready_intro_reuses_existing_thread():
         "brain.app.api.routers.onboarding.async_get_provider_auth_status",
         AsyncMock(return_value=_personal_openai_status()),
     ), patch("brain.app.api.routers.onboarding.async_route_trigger") as route_trigger:
-        result = asyncio.run(start_runtime_ready_intro(
+        result = await start_runtime_ready_intro(
             db=_AsyncSession(session),
             user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
             background_tasks=background_tasks,
-        ))
+        )
 
     assert result == {
         "ok": True,
@@ -63,7 +65,7 @@ def test_runtime_ready_intro_reuses_existing_thread():
     assert background_tasks.tasks == []
 
 
-def test_runtime_ready_intro_recovers_failed_existing_thread():
+async def test_runtime_ready_intro_recovers_failed_existing_thread():
     from brain.app.api.routers.onboarding import start_runtime_ready_intro
     from brain.app.triggers.contracts import TriggerRouteResult
 
@@ -80,11 +82,11 @@ def test_runtime_ready_intro_recovers_failed_existing_thread():
         "brain.app.api.routers.onboarding.async_route_trigger",
         AsyncMock(return_value=TriggerRouteResult(ok=True, route="run", run_id=77)),
     ) as route_trigger:
-        result = asyncio.run(start_runtime_ready_intro(
+        result = await start_runtime_ready_intro(
             db=_AsyncSession(session),
             user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
             background_tasks=background_tasks,
-        ))
+        )
 
     assert result["created"] is False
     assert result["idea_id"] == "idea-existing"
@@ -93,7 +95,7 @@ def test_runtime_ready_intro_recovers_failed_existing_thread():
     assert background_tasks.tasks == []
 
 
-def test_runtime_ready_intro_creates_thread_and_run():
+async def test_runtime_ready_intro_creates_thread_and_run():
     from brain.app.api.routers.onboarding import INTRO_ORIGIN, INTRO_PROMPT, start_runtime_ready_intro
     from brain.app.triggers.contracts import TriggerRouteResult
     from brain.platform.db.models.idea import Idea
@@ -121,11 +123,11 @@ def test_runtime_ready_intro_creates_thread_and_run():
         "brain.app.api.routers.onboarding.async_route_trigger",
         AsyncMock(return_value=TriggerRouteResult(ok=True, route="run", run_id=42)),
     ) as route_trigger:
-        result = asyncio.run(start_runtime_ready_intro(
+        result = await start_runtime_ready_intro(
             db=_AsyncSession(session),
             user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
             background_tasks=background_tasks,
-        ))
+        )
 
     idea = next(obj for obj in added if isinstance(obj, Idea))
 
@@ -154,8 +156,7 @@ def test_runtime_ready_intro_creates_thread_and_run():
     }
 
 
-def test_runtime_ready_intro_requires_openai_runtime():
-    import pytest
+async def test_runtime_ready_intro_requires_openai_runtime():
     from fastapi import HTTPException
 
     from brain.app.api.routers.onboarding import start_runtime_ready_intro
@@ -165,17 +166,16 @@ def test_runtime_ready_intro_requires_openai_runtime():
         AsyncMock(return_value={"runtime_key_available": False}),
     ):
         with pytest.raises(HTTPException) as exc:
-            asyncio.run(start_runtime_ready_intro(
+            await start_runtime_ready_intro(
                 db=_AsyncSession(MagicMock()),
                 user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
-            ))
+            )
 
     assert exc.value.status_code == 409
     assert "personal OpenAI account" in exc.value.detail
 
 
-def test_runtime_ready_intro_rejects_workspace_openai_runtime():
-    import pytest
+async def test_runtime_ready_intro_rejects_workspace_openai_runtime():
     from fastapi import HTTPException
 
     from brain.app.api.routers.onboarding import runtime_ready_intro_draft, start_runtime_ready_intro
@@ -186,11 +186,11 @@ def test_runtime_ready_intro_rejects_workspace_openai_runtime():
         AsyncMock(return_value={"runtime_key_available": True, "runtime_key_source": "org_main"}),
     ):
         with pytest.raises(HTTPException) as exc:
-            asyncio.run(runtime_ready_intro_draft(db=_AsyncSession(MagicMock()), user=user))
+            await runtime_ready_intro_draft(db=_AsyncSession(MagicMock()), user=user)
         assert exc.value.status_code == 409
         assert "personal OpenAI account" in exc.value.detail
 
         with pytest.raises(HTTPException) as exc:
-            asyncio.run(start_runtime_ready_intro(db=_AsyncSession(MagicMock()), user=user))
+            await start_runtime_ready_intro(db=_AsyncSession(MagicMock()), user=user)
         assert exc.value.status_code == 409
         assert "personal OpenAI account" in exc.value.detail

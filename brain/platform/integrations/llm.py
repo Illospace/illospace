@@ -16,7 +16,6 @@ To add another LLM provider, add ONE branch: in this file.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -156,13 +155,8 @@ def _resolve_key_from_db(
     org_id: str | None = None,
     provider: str = "anthropic",
 ) -> tuple[str | None, str]:
-    """Resolve API key from DB. Returns (key, source)."""
-    try:
-        from brain.systems.vault import resolve_api_key
-        return resolve_api_key(user_id=user_id, org_id=org_id, provider=provider)
-    except Exception as exc:
-        logger.warning("DB key resolution failed: %s", exc)
-        return None, "none"
+    """Sync client resolution does not perform DB I/O; use async_resolve_llm_client."""
+    return None, "none"
 
 
 async def _async_resolve_key_from_db(
@@ -563,8 +557,7 @@ async def _async_resolve_openai_auth(
         nonlocal refreshed_cred
         refreshed_cred = cred
 
-    db_auth = await asyncio.to_thread(
-        _coerce_openai_db_auth,
+    db_auth = _coerce_openai_db_auth(
         db_value,
         db_source,
         auth_mode,
@@ -582,7 +575,7 @@ async def _async_resolve_openai_auth(
         return db_auth
 
     if auth_mode != "api_key" and _allow_local_codex_auth_fallback():
-        codex_auth = await asyncio.to_thread(load_codex_auth_json)
+        codex_auth = load_codex_auth_json()
         if (
             isinstance(codex_auth, OpenAICodexCredential)
             and codex_auth.auth_mode == "chatgpt"

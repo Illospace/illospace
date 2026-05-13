@@ -1,6 +1,6 @@
 """Tests for per-user API key management with sharing and fallback chain."""
 import pytest
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import AsyncMock, patch, MagicMock, PropertyMock
 
 
 def _make_uow_mock(session_mock=None):
@@ -10,10 +10,14 @@ def _make_uow_mock(session_mock=None):
     session.scalars(...).first() return values.
     """
     sess = session_mock or MagicMock()
+    scalar_result = MagicMock()
+    sess.scalars = AsyncMock(return_value=scalar_result)
+    sess.get = AsyncMock()
+    sess.flush = AsyncMock()
     uow_instance = MagicMock()
     uow_instance.session = sess
-    uow_instance.__enter__ = MagicMock(return_value=uow_instance)
-    uow_instance.__exit__ = MagicMock(return_value=False)
+    uow_instance.__aenter__ = AsyncMock(return_value=uow_instance)
+    uow_instance.__aexit__ = AsyncMock(return_value=False)
 
     uow_class = MagicMock(return_value=uow_instance)
     return uow_class, sess, uow_instance
@@ -26,7 +30,7 @@ class TestResolveApiKey:
 
     @patch("brain.systems.vault._decrypt", return_value="sk-user-key")
     @patch("brain.systems.vault.UnitOfWork")
-    def test_returns_user_default_key_first(self, mock_uow_cls, mock_decrypt):
+    async def test_returns_user_default_key_first(self, mock_uow_cls, mock_decrypt):
         """User's chosen default key takes priority."""
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.side_effect = uow_cls.side_effect
@@ -39,13 +43,13 @@ class TestResolveApiKey:
         uow.session = sess
 
         from brain.systems.vault import resolve_api_key
-        key, source = resolve_api_key(user_id="user-1", provider="anthropic")
+        key, source = await resolve_api_key(user_id="user-1", provider="anthropic")
         assert key == "sk-user-key"
         assert source == "user_default"
 
     @patch("brain.systems.vault._decrypt", return_value="sk-org-main")
     @patch("brain.systems.vault.UnitOfWork")
-    def test_falls_back_to_org_main_key(self, mock_uow_cls, mock_decrypt):
+    async def test_falls_back_to_org_main_key(self, mock_uow_cls, mock_decrypt):
         """If user has no default, use org main key."""
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
@@ -65,13 +69,13 @@ class TestResolveApiKey:
         sess.get.return_value = user_obj
 
         from brain.systems.vault import resolve_api_key
-        key, source = resolve_api_key(user_id="user-2", provider="anthropic")
+        key, source = await resolve_api_key(user_id="user-2", provider="anthropic")
         assert key == "sk-org-main"
         assert source == "org_main"
 
     @patch("brain.systems.vault._decrypt", return_value="sk-openai-user-default")
     @patch("brain.systems.vault.UnitOfWork")
-    def test_falls_back_to_provider_specific_default_key(self, mock_uow_cls, mock_decrypt):
+    async def test_falls_back_to_provider_specific_default_key(self, mock_uow_cls, mock_decrypt):
         """A provider-scoped default label should resolve even if the global default slot points elsewhere."""
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
@@ -85,13 +89,13 @@ class TestResolveApiKey:
         sess.scalars.return_value.first.side_effect = [None, key_row]
 
         from brain.systems.vault import resolve_api_key
-        key, source = resolve_api_key(user_id="user-3", provider="openai")
+        key, source = await resolve_api_key(user_id="user-3", provider="openai")
         assert key == "sk-openai-user-default"
         assert source == "user_default"
 
     @patch("brain.systems.vault._decrypt", return_value="sk-anthropic-legacy")
     @patch("brain.systems.vault.UnitOfWork")
-    def test_falls_back_to_latest_active_provider_key_when_no_default_label(self, mock_uow_cls, mock_decrypt):
+    async def test_falls_back_to_latest_active_provider_key_when_no_default_label(self, mock_uow_cls, mock_decrypt):
         """Legacy labeled keys like 'Claude Code' should still resolve per provider."""
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
@@ -106,12 +110,12 @@ class TestResolveApiKey:
         sess.scalars.return_value.first.side_effect = [None, key_row]
 
         from brain.systems.vault import resolve_api_key
-        key, source = resolve_api_key(user_id="user-legacy", provider="anthropic")
+        key, source = await resolve_api_key(user_id="user-legacy", provider="anthropic")
         assert key == "sk-anthropic-legacy"
         assert source == "user_default"
 
     @patch("brain.systems.vault.UnitOfWork")
-    def test_falls_back_to_env(self, mock_uow_cls):
+    async def test_falls_back_to_env(self, mock_uow_cls):
         """If no user default or org main key, fall back to environment."""
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
@@ -126,13 +130,13 @@ class TestResolveApiKey:
 
         from brain.systems.vault import resolve_api_key
         with patch("os.environ.get", return_value="sk-env-key"):
-            key, source = resolve_api_key(user_id="user-4", provider="anthropic")
+            key, source = await resolve_api_key(user_id="user-4", provider="anthropic")
         assert key == "sk-env-key"
         assert source == "env"
 
     @patch("brain.systems.vault._decrypt", return_value="sk-org-main")
     @patch("brain.systems.vault.UnitOfWork")
-    def test_system_operations_use_org_main_key(self, mock_uow_cls, mock_decrypt):
+    async def test_system_operations_use_org_main_key(self, mock_uow_cls, mock_decrypt):
         """Without user_id (system ops like nightly), resolves org main key directly."""
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
@@ -143,7 +147,7 @@ class TestResolveApiKey:
         sess.scalars.return_value.first.return_value = org_key
 
         from brain.systems.vault import resolve_api_key
-        key, source = resolve_api_key(org_id="org-1", provider="anthropic")
+        key, source = await resolve_api_key(org_id="org-1", provider="anthropic")
         assert key == "sk-org-main"
         assert source == "org_main"
 
@@ -153,7 +157,7 @@ class TestSetApiKey:
 
     @patch("brain.systems.vault._encrypt", return_value=b"enc")
     @patch("brain.systems.vault.UnitOfWork")
-    def test_set_api_key_creates_new(self, mock_uow_cls, mock_encrypt):
+    async def test_set_api_key_creates_new(self, mock_uow_cls, mock_encrypt):
         """When no existing key, creates a new UserApiKey."""
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
@@ -170,7 +174,7 @@ class TestSetApiKey:
         sess.add.side_effect = capture_add
 
         from brain.systems.vault import set_api_key
-        key_id = set_api_key("user-1", "sk-test-key", provider="anthropic", label="default")
+        key_id = await set_api_key("user-1", "sk-test-key", provider="anthropic", label="default")
 
         assert key_id == 42
         assert len(added_objects) == 1
@@ -180,7 +184,7 @@ class TestSetApiKey:
 
     @patch("brain.systems.vault._encrypt", return_value=b"enc-updated")
     @patch("brain.systems.vault.UnitOfWork")
-    def test_set_api_key_updates_existing(self, mock_uow_cls, mock_encrypt):
+    async def test_set_api_key_updates_existing(self, mock_uow_cls, mock_encrypt):
         """When existing key found, updates it in place."""
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
@@ -191,7 +195,7 @@ class TestSetApiKey:
         sess.scalars.return_value.first.return_value = existing
 
         from brain.systems.vault import set_api_key
-        key_id = set_api_key("user-1", "sk-updated", provider="anthropic", label="default")
+        key_id = await set_api_key("user-1", "sk-updated", provider="anthropic", label="default")
 
         assert key_id == 99
         assert existing.encrypted_key == b"enc-updated"
@@ -203,7 +207,7 @@ class TestUpdateResolvedApiKey:
 
     @patch("brain.systems.vault._encrypt", return_value=b"enc-refreshed")
     @patch("brain.systems.vault.UnitOfWork")
-    def test_updates_provider_specific_user_default_fallback(self, mock_uow_cls, mock_encrypt):
+    async def test_updates_provider_specific_user_default_fallback(self, mock_uow_cls, mock_encrypt):
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
         uow.session = sess
@@ -215,7 +219,7 @@ class TestUpdateResolvedApiKey:
         sess.scalars.return_value.first.side_effect = [None, existing]
 
         from brain.systems.vault import update_resolved_api_key
-        updated = update_resolved_api_key(
+        updated = await update_resolved_api_key(
             user_id="user-1",
             provider="openai",
             source="user_default",
@@ -226,11 +230,11 @@ class TestUpdateResolvedApiKey:
         assert existing.encrypted_key == b"enc-refreshed"
         assert existing.is_active is True
         mock_encrypt.assert_called_once_with("refreshed-json")
-        sess.flush.assert_called_once()
+        sess.flush.assert_awaited_once()
 
     @patch("brain.systems.vault._encrypt", return_value=b"enc-org-refreshed")
     @patch("brain.systems.vault.UnitOfWork")
-    def test_updates_org_main_key_derived_from_user(self, mock_uow_cls, mock_encrypt):
+    async def test_updates_org_main_key_derived_from_user(self, mock_uow_cls, mock_encrypt):
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
         uow.session = sess
@@ -243,7 +247,7 @@ class TestUpdateResolvedApiKey:
         sess.scalars.return_value.first.return_value = org_key
 
         from brain.systems.vault import update_resolved_api_key
-        updated = update_resolved_api_key(
+        updated = await update_resolved_api_key(
             user_id="user-1",
             provider="openai",
             source="org_main",
@@ -253,17 +257,17 @@ class TestUpdateResolvedApiKey:
         assert updated is True
         assert org_key.encrypted_key == b"enc-org-refreshed"
         mock_encrypt.assert_called_once_with("refreshed-json")
-        sess.flush.assert_called_once()
+        sess.flush.assert_awaited_once()
 
     @patch("brain.systems.vault._encrypt", return_value=b"unused")
     @patch("brain.systems.vault.UnitOfWork")
-    def test_returns_false_for_non_db_sources(self, mock_uow_cls, mock_encrypt):
+    async def test_returns_false_for_non_db_sources(self, mock_uow_cls, mock_encrypt):
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
         uow.session = sess
 
         from brain.systems.vault import update_resolved_api_key
-        updated = update_resolved_api_key(
+        updated = await update_resolved_api_key(
             user_id="user-1",
             provider="openai",
             source="env",
@@ -280,7 +284,7 @@ class TestShareApiKey:
     """Sharing an API key with another user."""
 
     @patch("brain.systems.vault.UnitOfWork")
-    def test_share_validates_ownership(self, mock_uow_cls):
+    async def test_share_validates_ownership(self, mock_uow_cls):
         """Sharing a key you don't own raises ValueError."""
         uow_cls, sess, uow = _make_uow_mock()
         mock_uow_cls.return_value = uow
@@ -291,5 +295,5 @@ class TestShareApiKey:
 
         from brain.systems.vault import share_api_key
         with pytest.raises(ValueError, match="not found or not owned"):
-            share_api_key(api_key_id=1, shared_with_user_id="user-2",
-                         shared_by_user_id="wrong-user")
+            await share_api_key(api_key_id=1, shared_with_user_id="user-2",
+                                shared_by_user_id="wrong-user")

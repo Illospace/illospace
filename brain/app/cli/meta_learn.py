@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -22,7 +23,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from sqlalchemy import text
 
 from brain.kernel import config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.memory.embeddings import embed_document, embed_query, vec_to_pg
 
 _vec_to_pg = vec_to_pg
@@ -61,7 +62,7 @@ def _save_meta_state(state):
 # 1. author_skill — Quality gate for new skill creation
 # ---------------------------------------------------------------------------
 
-def author_skill(name, description, procedure, criteria):
+async def author_skill(name, description, procedure, criteria):
     """Validate and gate new skill creation.
 
     Returns dict with 'approved' (bool) and 'feedback' (list of strings).
@@ -109,7 +110,7 @@ def author_skill(name, description, procedure, criteria):
         approved = False
 
     # Check overlap with existing skills
-    overlap_name = _check_skill_overlap(name, description, vc["max_overlap_similarity"])
+    overlap_name = await _check_skill_overlap(name, description, vc["max_overlap_similarity"])
     if overlap_name:
         feedback.append(
             f"High overlap with existing skill '{overlap_name}'. "
@@ -128,7 +129,7 @@ def author_skill(name, description, procedure, criteria):
     # If approved, create the skill
     if approved:
         feedback.append("All validation checks passed.")
-        skill_id = _create_skill_via_db(name, description, procedure)
+        skill_id = await _create_skill_via_db(name, description, procedure)
         decision["skill_id"] = skill_id
         feedback.append(f"Skill created with id={skill_id}.")
 
@@ -140,16 +141,16 @@ def author_skill(name, description, procedure, criteria):
     return {"approved": approved, "feedback": feedback, "skill_id": decision["skill_id"]}
 
 
-def _check_skill_overlap(name, description, max_similarity):
+async def _check_skill_overlap(name, description, max_similarity):
     """Check if a skill with similar name/description already exists."""
     try:
         emb = embed_query(f"{name}: {description or ''}")
-        with open_unit_of_work(UnitOfWork) as uow:
-            row = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            row = (await uow.session.execute(text("""
                 SELECT name, 1 - (embedding <=> CAST(:emb AS vector)) AS similarity
                 FROM skills WHERE NOT archived
                 ORDER BY embedding <=> CAST(:emb AS vector) LIMIT 1
-            """), {"emb": _vec_to_pg(emb)}).mappings().first()
+            """), {"emb": _vec_to_pg(emb)})).mappings().first()
 
             if row and row["similarity"] >= max_similarity:
                 return row["name"]
@@ -158,7 +159,7 @@ def _check_skill_overlap(name, description, max_similarity):
     return None
 
 
-def _create_skill_via_db(name, description, procedure):
+async def _create_skill_via_db(name, description, procedure):
     """Create skill directly in DB (mirrors skills.py cmd_create).
 
     Enforces the centralized skill-creator gate before insertion.
@@ -168,15 +169,15 @@ def _create_skill_via_db(name, description, procedure):
 
     emb_text = f"{name}: {description or ''} {procedure[:500]}"
     embedding = embed_document(emb_text)
-    with open_unit_of_work(UnitOfWork) as uow:
-        row = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        row = (await uow.session.execute(text("""
             INSERT INTO skills (name, description, procedure, level, embedding)
             VALUES (:name, :description, :procedure, 'cognitive', CAST(:embedding AS vector))
             RETURNING id
         """), {
             "name": name, "description": description,
             "procedure": procedure, "embedding": _vec_to_pg(embedding),
-        }).mappings().first()
+        })).mappings().first()
         return row["id"]
 
 
@@ -184,24 +185,24 @@ def _create_skill_via_db(name, description, procedure):
 # 2. assess_skill — Deep health check
 # ---------------------------------------------------------------------------
 
-def assess_skill(skill_name):
+async def assess_skill(skill_name):
     """Assess skill health: usage stats, pitfalls, dormancy, suggestions."""
-    with open_unit_of_work(UnitOfWork) as uow:
-        skill = uow.session.execute(text(
+    async with UnitOfWork() as uow:
+        skill = (await uow.session.execute(text(
             "SELECT * FROM skills WHERE name = :name AND NOT archived"
-        ), {"name": skill_name}).mappings().first()
+        ), {"name": skill_name})).mappings().first()
         if not skill:
             return {"error": f"Skill '{skill_name}' not found"}
         skill = dict(skill)
 
         # Recent executions (last 30 days)
-        exec_rows = uow.session.execute(text("""
+        exec_rows = (await uow.session.execute(text("""
             SELECT outcome, COUNT(*) as cnt,
                    AVG(duration_sec) as avg_dur
             FROM skill_executions
             WHERE skill_id = :skill_id AND started_at >= NOW() - INTERVAL '30 days'
             GROUP BY outcome
-        """), {"skill_id": skill["id"]}).mappings().all()
+        """), {"skill_id": skill["id"]})).mappings().all()
         exec_stats = {row["outcome"]: {"count": row["cnt"], "avg_duration": row["avg_dur"]}
                       for row in exec_rows}
 
@@ -296,15 +297,15 @@ def assess_skill(skill_name):
 # 3. cross_pollinate — Find transfer opportunities between skills
 # ---------------------------------------------------------------------------
 
-def cross_pollinate():
+async def cross_pollinate():
     """Analyze skills for shared pitfalls and complementary patterns."""
-    with open_unit_of_work(UnitOfWork) as uow:
-        rows = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        rows = (await uow.session.execute(text("""
             SELECT id, name, description, procedure, pitfalls, refinements,
                    use_count, success_count, failure_count, maturity, confidence
             FROM skills WHERE NOT archived
             ORDER BY use_count DESC
-        """)).mappings().all()
+        """))).mappings().all()
         skills = [dict(r) for r in rows]
 
     if len(skills) < 2:
@@ -388,7 +389,7 @@ def cross_pollinate():
 # 4. evolve_meta — Recursive self-improvement of meta-learning criteria
 # ---------------------------------------------------------------------------
 
-def evolve_meta():
+async def evolve_meta():
     """Evolve meta-learning criteria based on outcomes of past decisions."""
     state = _load_meta_state()
     vc = state["validation_criteria"]
@@ -398,12 +399,12 @@ def evolve_meta():
     approved = [d for d in state["author_decisions"] if d["approved"] and d.get("skill_id")]
     if len(approved) >= 3:
         try:
-            with open_unit_of_work(UnitOfWork) as uow:
+            async with UnitOfWork() as uow:
                 skill_ids = [d["skill_id"] for d in approved[-20:]]
-                rows = uow.session.execute(text("""
+                rows = (await uow.session.execute(text("""
                     SELECT id, use_count, success_count, failure_count
                     FROM skills WHERE id = ANY(:skill_ids)
-                """), {"skill_ids": skill_ids}).mappings().all()
+                """), {"skill_ids": skill_ids})).mappings().all()
                 skill_perf = {r["id"]: dict(r) for r in rows}
 
             good = 0
@@ -477,7 +478,7 @@ def evolve_meta():
 # CLI
 # ---------------------------------------------------------------------------
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Illo Meta-Learning System")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -501,13 +502,13 @@ def main():
     args = parser.parse_args()
 
     if args.command == "author":
-        result = author_skill(args.name, args.description, args.procedure, args.criteria)
+        result = await author_skill(args.name, args.description, args.procedure, args.criteria)
     elif args.command == "assess":
-        result = assess_skill(args.skill)
+        result = await assess_skill(args.skill)
     elif args.command == "cross-pollinate":
-        result = cross_pollinate()
+        result = await cross_pollinate()
     elif args.command == "evolve":
-        result = evolve_meta()
+        result = await evolve_meta()
     else:
         parser.print_help()
         return
@@ -516,4 +517,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

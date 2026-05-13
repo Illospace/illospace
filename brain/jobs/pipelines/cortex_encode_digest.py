@@ -13,25 +13,25 @@ Usage:
 """
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
-import time
 
 from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [cortex_digest] %(message)s")
 log = logging.getLogger(__name__)
 
 
-def get_unencoded_ideas(days: int = 1) -> list[dict]:
+async def get_unencoded_ideas(days: int = 1) -> list[dict]:
     """Find ideas with thread activity that haven't been encoded to brain."""
-    with open_unit_of_work(UnitOfWork) as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             SELECT DISTINCT i.id, i.title, i.display_title, i.status,
                    COUNT(t.id) as thread_count
             FROM ideas i
@@ -47,9 +47,9 @@ def get_unencoded_ideas(days: int = 1) -> list[dict]:
         return [dict(r) for r in result.mappings().all()]
 
 
-def run_digest(days: int = 1, dry_run: bool = False) -> dict:
+async def run_digest(days: int = 1, dry_run: bool = False) -> dict:
     """Run the cortex encode digest."""
-    ideas = get_unencoded_ideas(days)
+    ideas = await get_unencoded_ideas(days)
     log.info(f"Found {len(ideas)} unencoded ideas with thread activity (last {days} days)")
 
     if not ideas:
@@ -73,10 +73,10 @@ def run_digest(days: int = 1, dry_run: bool = False) -> dict:
 
         log.info(f"  Encoding: {title[:50]} ({thread_count} messages)")
         try:
-            _encode_thought_to_brain(idea["id"])
+            await _encode_thought_to_brain(idea["id"])
             encoded += 1
             # Small delay to not hammer Ollama
-            time.sleep(1)
+            await asyncio.sleep(1)
         except Exception as e:
             log.warning(f"  Failed to encode {idea['id'][:8]}: {e}")
             skipped += 1
@@ -92,7 +92,7 @@ def main():
     parser.add_argument("--days", type=int, default=1, help="Look back N days (default: 1)")
     args = parser.parse_args()
 
-    result = run_digest(days=args.days, dry_run=args.dry_run)
+    result = asyncio.run(run_digest(days=args.days, dry_run=args.dry_run))
     print(f"\nResult: {result}")
 
 

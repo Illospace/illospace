@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.schemas.chat import ChatDmCreate, ChatMessageCreate
 from brain.app.api.services.chat import ChatService
@@ -18,7 +18,6 @@ from tests.test_chat_api_routes import (
     ORG_ID,
     USER_1_ID,
     USER_2_ID,
-    _AsyncSession,
     _user_context,
     chat_db_session,
 )
@@ -176,24 +175,24 @@ async def test_chat_mark_read_rejects_broadcast_only_unread_payload(monkeypatch:
 
 
 class _SessionUnitOfWork:
-    def __init__(self, session: Session):
-        self._sync_session = session
-        self.session = _AsyncSession(session)
+    def __init__(self, session: AsyncSession):
+        self._db_session = session
+        self.session = session
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if exc_type:
-            self._sync_session.rollback()
+            await self._db_session.rollback()
         else:
-            self._sync_session.commit()
+            await self._db_session.commit()
         return False
 
 
 @pytest.mark.requires_db
 async def test_chat_mark_read_persists_and_publishes_server_state_after_commit(
-    chat_db_session: Session,
+    chat_db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
     from brain.app.api.routers import ws as ws_router
@@ -204,9 +203,9 @@ async def test_chat_mark_read_persists_and_publishes_server_state_after_commit(
 
     original_commit = chat_db_session.commit
 
-    def commit_spy():
+    async def commit_spy():
         events.append("commit")
-        return original_commit()
+        return await original_commit()
 
     async def publish_read_updated(**kwargs):
         events.append("publish_read")
@@ -264,27 +263,27 @@ async def test_chat_mark_read_persists_and_publishes_server_state_after_commit(
     assert published["notification_summary"]["user_id"] == USER_2_ID
     assert published["notification_summary"]["summary"]["chat_unread_total"] == 0
 
-    read_state = chat_db_session.scalars(
+    read_state = (await chat_db_session.scalars(
         select(ChatConversationRead).where(
             ChatConversationRead.conversation_id == dm.id,
             ChatConversationRead.user_id == USER_2_ID,
         )
-    ).one()
+    )).one()
     assert read_state.last_read_conversation_seq == sent.conversation_seq
     assert read_state.last_read_message_id == sent.id
 
-    notification = chat_db_session.scalars(
+    notification = (await chat_db_session.scalars(
         select(ChatNotification).where(
             ChatNotification.user_id == USER_2_ID,
             ChatNotification.message_id == sent.id,
         )
-    ).one()
+    )).one()
     assert notification.read_at is not None
 
 
 @pytest.mark.requires_db
 async def test_chat_mark_read_does_not_publish_when_commit_fails(
-    chat_db_session: Session,
+    chat_db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
     from brain.app.api.routers import ws as ws_router
@@ -292,7 +291,7 @@ async def test_chat_mark_read_does_not_publish_when_commit_fails(
     dm, sent = await _create_unread_dm(chat_db_session)
     events: list[str] = []
 
-    def failing_commit():
+    async def failing_commit():
         events.append("commit")
         raise RuntimeError("boom")
 
@@ -326,18 +325,18 @@ async def test_chat_mark_read_does_not_publish_when_commit_fails(
     )
 
 
-async def _create_unread_dm(chat_db_session: Session):
+async def _create_unread_dm(chat_db_session: AsyncSession):
     dm = await ChatService(
-        _AsyncSession(chat_db_session),
-        _user_context(chat_db_session, USER_1_ID),
+        chat_db_session,
+        await _user_context(chat_db_session, USER_1_ID),
     ).create_or_fetch_dm(ChatDmCreate(user_id=USER_2_ID))
-    chat_db_session.commit()
+    await chat_db_session.commit()
     sent, _ = await ChatService(
-        _AsyncSession(chat_db_session),
-        _user_context(chat_db_session, USER_1_ID),
+        chat_db_session,
+        await _user_context(chat_db_session, USER_1_ID),
     ).post_conversation_message(
         dm.id,
         ChatMessageCreate(body="Persistent WS read state"),
     )
-    chat_db_session.commit()
+    await chat_db_session.commit()
     return dm, sent

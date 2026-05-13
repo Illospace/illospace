@@ -8,6 +8,7 @@ their idempotency keys.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from collections.abc import Sequence
 from datetime import date, datetime, timezone
@@ -16,14 +17,14 @@ from typing import Any
 from sqlalchemy import or_, select
 
 from brain.platform.db.models.memory import Memory, MemoryContradiction
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.learning.budget import LearningBudgetLedger, LearningBudgetPolicy
 from brain.systems.memory.conflict_resolver import resolve_memory_conflicts
 
 _OPEN_CONTRADICTION_STATUSES = ("open", "needs_review")
 
 
-def gather_memory_quality_inputs(
+async def gather_memory_quality_inputs(
     *,
     limit: int = 100,
     stale_threshold: float = 0.85,
@@ -32,22 +33,22 @@ def gather_memory_quality_inputs(
     """Load conflict rows and stale freshness signals for a nightly run."""
     clock = now or datetime.now(timezone.utc)
     limit = max(1, int(limit or 100))
-    with open_unit_of_work(UnitOfWork) as uow:
-        contradictions = _fetch_contradictions(uow.session, limit=limit)
+    async with UnitOfWork() as uow:
+        contradictions = await _fetch_contradictions(uow.session, limit=limit)
         memory_ids = {
             int(row[key])
             for row in contradictions
             for key in ("left_memory_id", "right_memory_id")
             if row.get(key) is not None
         }
-        stale_memories = _fetch_stale_memories(
+        stale_memories = await _fetch_stale_memories(
             uow.session,
             limit=limit,
             stale_threshold=stale_threshold,
             now=clock,
         )
         memory_ids.update(int(row["id"]) for row in stale_memories if row.get("id") is not None)
-        memories = _fetch_memories(uow.session, sorted(memory_ids)) if memory_ids else []
+        memories = await _fetch_memories(uow.session, sorted(memory_ids)) if memory_ids else []
 
     freshness_signals = [
         _freshness_signal_from_memory(row, stale_threshold=stale_threshold)
@@ -60,7 +61,7 @@ def gather_memory_quality_inputs(
     }
 
 
-def run_nightly_memory_quality(
+async def run_nightly_memory_quality(
     *,
     target_date: date | None = None,
     limit: int = 100,
@@ -72,7 +73,7 @@ def run_nightly_memory_quality(
 ) -> dict[str, Any]:
     """Return a JSON-safe memory conflict action plan for nightly work."""
     clock = now or datetime.now(timezone.utc)
-    inputs = gather_memory_quality_inputs(
+    inputs = await gather_memory_quality_inputs(
         limit=limit,
         stale_threshold=stale_threshold,
         now=clock,
@@ -98,17 +99,19 @@ def run_nightly_memory_quality(
     return payload
 
 
-def _fetch_contradictions(session, *, limit: int) -> list[dict[str, Any]]:
-    rows = session.scalars(
+async def _fetch_contradictions(session, *, limit: int) -> list[dict[str, Any]]:
+    rows = (
+        await session.scalars(
         select(MemoryContradiction)
         .where(MemoryContradiction.status.in_(_OPEN_CONTRADICTION_STATUSES))
         .order_by(MemoryContradiction.severity.desc(), MemoryContradiction.created_at.asc())
         .limit(limit)
+        )
     ).all()
     return [_model_to_dict(row) for row in rows]
 
 
-def _fetch_stale_memories(
+async def _fetch_stale_memories(
     session,
     *,
     limit: int,
@@ -116,7 +119,8 @@ def _fetch_stale_memories(
     now: datetime,
 ) -> list[dict[str, Any]]:
     freshness_floor = max(0.0, min(1.0, 1.0 - stale_threshold))
-    rows = session.scalars(
+    rows = (
+        await session.scalars(
         select(Memory)
         .where(or_(Memory.archived == False, Memory.archived.is_(None)))  # noqa: E712
         .where(Memory.superseded_by.is_(None))
@@ -129,14 +133,15 @@ def _fetch_stale_memories(
         )
         .order_by(Memory.staleness_score.desc().nullslast(), Memory.last_accessed.asc())
         .limit(limit)
+        )
     ).all()
     return [_model_to_dict(row) for row in rows]
 
 
-def _fetch_memories(session, memory_ids: Sequence[int]) -> list[dict[str, Any]]:
+async def _fetch_memories(session, memory_ids: Sequence[int]) -> list[dict[str, Any]]:
     if not memory_ids:
         return []
-    rows = session.scalars(select(Memory).where(Memory.id.in_(memory_ids))).all()
+    rows = (await session.scalars(select(Memory).where(Memory.id.in_(memory_ids)))).all()
     return [_model_to_dict(row) for row in rows]
 
 
@@ -216,13 +221,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     target_date = date.fromisoformat(args.target_date) if args.target_date else None
-    payload = run_nightly_memory_quality(
+    payload = asyncio.run(run_nightly_memory_quality(
         target_date=target_date,
         limit=args.limit,
         stale_threshold=args.stale_threshold,
         policy=LearningBudgetPolicy.from_env(),
         use_night_budget=not args.no_budget,
-    )
+    ))
     print(json.dumps(payload, indent=2, sort_keys=True, default=str))
     return 0
 

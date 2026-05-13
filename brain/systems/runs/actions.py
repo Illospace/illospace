@@ -6,9 +6,11 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from functools import wraps
 from hashlib import sha256
+import asyncio
 import json
 import logging
 import os
+import inspect
 from typing import Any, Callable
 
 from pydantic import (
@@ -514,26 +516,38 @@ def _coerce_manifest_create(
     return ActionManifestCreate.model_validate(manifest)
 
 
-def record_action_manifest(manifest: ActionManifestCreate | Mapping[str, Any] | None) -> int | None:
+def _run_action_manifest_coro(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    return coro
+
+
+async def _record_action_manifest_async(manifest: ActionManifestCreate | Mapping[str, Any] | None) -> int | None:
     """Persist a validated action manifest, returning its row id when recorded."""
     if not manifest:
         return None
     try:
         from brain.platform.db.models.run import ActionManifest
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
         create = _coerce_manifest_create(manifest)
-        with open_unit_of_work(UnitOfWork) as uow:
+        async with UnitOfWork() as uow:
             row = ActionManifest.from_create(create)
             uow.session.add(row)
-            uow.session.flush()
+            await uow.session.flush()
             return row.id
     except Exception:
         logger.debug("Failed to record action manifest", exc_info=True)
         return None
 
 
-def complete_action_manifest(
+def record_action_manifest(manifest: ActionManifestCreate | Mapping[str, Any] | None):
+    return _run_action_manifest_coro(_record_action_manifest_async(manifest))
+
+
+async def _complete_action_manifest_async(
     manifest_id: int | None,
     *,
     outcome_status: str,
@@ -544,10 +558,10 @@ def complete_action_manifest(
         return
     try:
         from brain.platform.db.models.run import ActionManifest
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
-        with open_unit_of_work(UnitOfWork) as uow:
-            row = uow.session.get(ActionManifest, manifest_id)
+        async with UnitOfWork() as uow:
+            row = await uow.session.get(ActionManifest, manifest_id)
             if not row:
                 return
             row.outcome_status = outcome_status
@@ -555,6 +569,21 @@ def complete_action_manifest(
             row.completed_at = datetime.now(timezone.utc)
     except Exception:
         logger.debug("Failed to complete action manifest", exc_info=True)
+
+
+def complete_action_manifest(
+    manifest_id: int | None,
+    *,
+    outcome_status: str,
+    outcome_error: str | None = None,
+):
+    return _run_action_manifest_coro(
+        _complete_action_manifest_async(
+            manifest_id,
+            outcome_status=outcome_status,
+            outcome_error=outcome_error,
+        )
+    )
 
 
 def result_failure_summary(result) -> str | None:
@@ -623,7 +652,7 @@ def wrap_action_manifest_audit(
         return handler
 
     @wraps(handler)
-    def wrapper(*args, **kwargs):
+    async def _invoke(*args, **kwargs):
         manifest_id = None
         try:
             manifest = build_action_manifest(
@@ -632,38 +661,58 @@ def wrap_action_manifest_audit(
                 kwargs,
                 context=context_factory(),
             )
-            manifest_id = record_action_manifest(manifest) if manifest else None
+            if manifest:
+                manifest_id = record_action_manifest(manifest)
+                if inspect.isawaitable(manifest_id):
+                    manifest_id = await manifest_id
             if action_manifest_blocks_handler(manifest):
                 blocked_result = blocked_action_result(manifest, manifest_id=manifest_id)
                 if manifest_id:
-                    complete_action_manifest(
+                    completion = complete_action_manifest(
                         manifest_id,
                         outcome_status="failed",
                         outcome_error=blocked_result["error"],
                     )
+                    if inspect.isawaitable(completion):
+                        await completion
                 return blocked_result
         except Exception:
             logger.debug("Failed to build action manifest", exc_info=True)
 
         try:
             result = handler(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = await result
         except Exception as exc:
             if manifest_id:
-                complete_action_manifest(
+                completion = complete_action_manifest(
                     manifest_id,
                     outcome_status="failed",
                     outcome_error=str(exc),
                 )
+                if inspect.isawaitable(completion):
+                    await completion
             raise
 
         failure = result_failure_summary(result)
         if manifest_id:
-            complete_action_manifest(
+            completion = complete_action_manifest(
                 manifest_id,
                 outcome_status="failed" if failure else "succeeded",
                 outcome_error=failure,
             )
+            if inspect.isawaitable(completion):
+                await completion
         return result
+
+    def wrapper(*args, **kwargs):
+        awaitable = _invoke(*args, **kwargs)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            with asyncio.Runner() as runner:
+                return runner.run(awaitable)
+        return awaitable
 
     wrapper._action_manifest_audited = True
     return wrapper

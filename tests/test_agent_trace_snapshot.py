@@ -47,9 +47,9 @@ def _run(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
-    from brain.systems.runs.cortex.recording import build_agent_trace_snapshot
-    from brain.platform.db.models.agent_run import AgentRunRow
+@pytest.mark.asyncio
+async def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
+    from brain.systems.runs.cortex.recording import build_agent_trace_snapshot_async
 
     run = _run()
     now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
@@ -87,8 +87,7 @@ def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
         created_at=now,
     )
 
-    session = MagicMock()
-    session.get.side_effect = lambda model, key: run if model is AgentRunRow and key == 42 else None
+    session = AsyncMock()
     session.scalars.side_effect = [
         _result([42]),
         _result([message]),
@@ -96,7 +95,7 @@ def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
         _result([artifact]),
     ]
 
-    snapshot = build_agent_trace_snapshot(session, run, saved_by="user-1")
+    snapshot = await build_agent_trace_snapshot_async(session, run, saved_by="user-1")
 
     assert snapshot["schema_version"] == 1
     assert snapshot["trace_id"] == "run:42"
@@ -176,12 +175,12 @@ async def test_agent_trace_snapshot_async_uses_same_bounded_payload_shape():
     assert "not copied" not in str(snapshot)
 
 
-def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
+@pytest.mark.asyncio
+async def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
     from brain.systems.runs.cortex.recording import (
         agent_trace_export_filename,
-        build_thread_trace_snapshot,
+        build_thread_trace_snapshot_async,
     )
-    from brain.platform.db.models.agent_run import AgentRunRow
 
     now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
     run = _run(id=42, trace_id="run:42", input_message="Start the thread")
@@ -236,8 +235,7 @@ def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
         created_at=now,
     )
 
-    session = MagicMock()
-    session.get.side_effect = lambda model, key: {42: run, 43: child}.get(key) if model is AgentRunRow else None
+    session = AsyncMock()
     session.scalars.side_effect = [
         _result([run, child]),
         _result([first_message, second_message]),
@@ -245,7 +243,7 @@ def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
         _result([artifact]),
     ]
 
-    snapshot = build_thread_trace_snapshot(session, "idea-1", saved_by="user-1")
+    snapshot = await build_thread_trace_snapshot_async(session, "idea-1", saved_by="user-1")
 
     assert snapshot["export_scope"] == "thread"
     assert snapshot["trace_id"] == "thread:idea-1"

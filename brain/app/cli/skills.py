@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -28,7 +29,7 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))  # repo root
 
 import brain.kernel.config as config
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.db.models.skill import Skill, SkillDependency, SkillExecution
 from brain.platform.db.models.memory import Memory
 from brain.systems.memory.embeddings import embed_batch, embed_document, embed_query, vec_to_pg
@@ -66,11 +67,11 @@ def compute_maturity(use_count: int, success_rate: float) -> tuple:
 # Commands
 # ============================================================
 
-def cmd_list(args):
+async def cmd_list(args):
     """List all skills with metrics."""
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         # skill_dashboard is a DB view — use raw SQL for it
-        rows = uow.session.execute(text("SELECT * FROM skill_dashboard")).mappings().all()
+        rows = (await uow.session.execute(text("SELECT * FROM skill_dashboard"))).mappings().all()
 
     output = [{
         "id": s["id"],
@@ -88,10 +89,10 @@ def cmd_list(args):
     print(json.dumps(output, indent=2, default=str))
 
 
-def cmd_get(args):
+async def cmd_get(args):
     """Get full skill details."""
-    with open_unit_of_work(UnitOfWork) as uow:
-        skill = uow.skills.get_by_name(args.name)
+    async with UnitOfWork() as uow:
+        skill = await uow.skills.get_by_name(args.name)
 
         if not skill:
             print(json.dumps({"error": f"Skill '{args.name}' not found"}))
@@ -109,7 +110,7 @@ def cmd_get(args):
             .where(SkillDependency.parent_id == skill.id)
             .order_by(SkillDependency.execution_order.nulls_last())
         )
-        sub_skills = uow.session.execute(stmt).mappings().all()
+        sub_skills = (await uow.session.execute(stmt)).mappings().all()
 
         # Get parent skills (skills that use this one)
         stmt = (
@@ -117,7 +118,7 @@ def cmd_get(args):
             .join(Skill, Skill.id == SkillDependency.parent_id)
             .where(SkillDependency.child_id == skill.id)
         )
-        parent_skills = uow.session.execute(stmt).mappings().all()
+        parent_skills = (await uow.session.execute(stmt)).mappings().all()
 
         # Get recent executions
         stmt = (
@@ -126,7 +127,7 @@ def cmd_get(args):
             .order_by(SkillExecution.started_at.desc())
             .limit(10)
         )
-        executions = uow.session.scalars(stmt).all()
+        executions = (await uow.session.scalars(stmt)).all()
 
         result = {
             "id": skill.id,
@@ -181,7 +182,7 @@ def _check_skill_creator_gate(args, action_name="create"):
     return True
 
 
-def cmd_create(args):
+async def cmd_create(args):
     """Create a new skill."""
     if not _check_skill_creator_gate(args, "create"):
         return
@@ -190,7 +191,7 @@ def cmd_create(args):
     emb_text = f"{args.name}: {args.desc or ''} {args.procedure[:500]}"
     embedding = embed_document(emb_text)
 
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         skill = Skill(
             name=args.name,
             description=args.desc,
@@ -198,10 +199,10 @@ def cmd_create(args):
             level=args.level or "cognitive",
         )
         uow.session.add(skill)
-        uow.session.flush()
+        await uow.session.flush()
 
         # Set embedding via raw SQL (pgvector cast)
-        uow.session.execute(
+        await uow.session.execute(
             text("UPDATE skills SET embedding = CAST(:emb AS vector) WHERE id = :id"),
             {"emb": _vec_to_pg(embedding), "id": skill.id},
         )
@@ -210,10 +211,10 @@ def cmd_create(args):
     print(json.dumps({"id": skill_id, "name": args.name, "maturity": "emerging"}))
 
 
-def cmd_use(args):
+async def cmd_use(args):
     """Record a skill execution."""
-    with open_unit_of_work(UnitOfWork) as uow:
-        skill = uow.skills.get_by_name(args.name)
+    async with UnitOfWork() as uow:
+        skill = await uow.skills.get_by_name(args.name)
         if not skill:
             print(json.dumps({"error": f"Skill '{args.name}' not found"}))
             return
@@ -229,7 +230,7 @@ def cmd_use(args):
             outcome_details=args.details,
         )
         uow.session.add(execution)
-        uow.session.flush()
+        await uow.session.flush()
         exec_id = execution.id
 
         # Update skill metrics
@@ -289,13 +290,13 @@ def cmd_use(args):
     print(json.dumps(result))
 
 
-def cmd_refine(args):
+async def cmd_refine(args):
     """Add a refinement to a skill's procedure."""
     if not _check_skill_creator_gate(args, "refine"):
         return
 
-    with open_unit_of_work(UnitOfWork) as uow:
-        skill = uow.skills.get_by_name(args.name)
+    async with UnitOfWork() as uow:
+        skill = await uow.skills.get_by_name(args.name)
         if not skill:
             print(json.dumps({"error": f"Skill '{args.name}' not found"}))
             return
@@ -320,10 +321,10 @@ def cmd_refine(args):
         skill.procedure = new_procedure
         skill.refinements = refinements
         skill.updated_at = datetime.now()
-        uow.session.flush()
+        await uow.session.flush()
 
         # Set embedding via raw SQL (pgvector cast)
-        uow.session.execute(
+        await uow.session.execute(
             text("UPDATE skills SET embedding = CAST(:emb AS vector) WHERE id = :id"),
             {"emb": _vec_to_pg(embedding), "id": skill.id},
         )
@@ -331,10 +332,10 @@ def cmd_refine(args):
     print(json.dumps({"skill": args.name, "new_version": new_version, "change": args.change}))
 
 
-def cmd_pitfall(args):
+async def cmd_pitfall(args):
     """Add a pitfall to a skill."""
-    with open_unit_of_work(UnitOfWork) as uow:
-        skill = uow.skills.get_by_name(args.name)
+    async with UnitOfWork() as uow:
+        skill = await uow.skills.get_by_name(args.name)
         if not skill:
             print(json.dumps({"error": f"Skill '{args.name}' not found"}))
             return
@@ -352,18 +353,18 @@ def cmd_pitfall(args):
     print(json.dumps({"skill": args.name, "pitfall_added": args.text, "total_pitfalls": len(pitfalls)}))
 
 
-def cmd_depend(args):
+async def cmd_depend(args):
     """Create a dependency between skills."""
-    with open_unit_of_work(UnitOfWork) as uow:
-        parent = uow.skills.get_by_name(args.parent)
-        child = uow.skills.get_by_name(args.child)
+    async with UnitOfWork() as uow:
+        parent = await uow.skills.get_by_name(args.parent)
+        child = await uow.skills.get_by_name(args.child)
 
         if not parent or not child:
             print(json.dumps({"error": "One or both skills not found"}))
             return
 
         # Use raw SQL for ON CONFLICT upsert
-        result = uow.session.execute(
+        result = await uow.session.execute(
             text("""
                 INSERT INTO skill_dependencies (parent_id, child_id, relationship, execution_order, strength)
                 VALUES (:parent_id, :child_id, :rel, :order, :strength)
@@ -383,7 +384,7 @@ def cmd_depend(args):
     print(json.dumps({"dependency_id": dep_id, "parent": args.parent, "child": args.child, "rel": args.rel}))
 
 
-def cmd_plan(args):
+async def cmd_plan(args):
     """Task router — analyze task and generate execution plan."""
     task_text = args.task
     task_emb = embed_query(task_text)
@@ -443,15 +444,15 @@ def cmd_plan(args):
         """
         similar_params = {}
 
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         # 1. Find similar past tasks from persisted agent runs.
-        similar_tasks = uow.session.execute(
+        similar_tasks = (await uow.session.execute(
             text(similar_sql),
             similar_params,
-        ).mappings().all()
+        )).mappings().all()
 
         # 2. Query memory for relevant context (pgvector)
-        relevant_memories = uow.session.execute(
+        relevant_memories = (await uow.session.execute(
             text("""
                 SELECT id, content, memory_type, salience,
                        1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity
@@ -461,10 +462,10 @@ def cmd_plan(args):
                 LIMIT 10
             """),
             {"emb": emb_str},
-        ).mappings().all()
+        )).mappings().all()
 
         # 3. Find matching skills by embedding similarity (pgvector)
-        matching_skills = uow.session.execute(
+        matching_skills = (await uow.session.execute(
             text("""
                 SELECT id, name, maturity, confidence, use_count,
                        success_count::float / GREATEST(use_count, 1) as success_rate,
@@ -475,7 +476,7 @@ def cmd_plan(args):
                 LIMIT 5
             """),
             {"emb": emb_str},
-        ).mappings().all()
+        )).mappings().all()
 
         # 4. Extract guardrails from lessons/patterns
         guardrails = []
@@ -546,7 +547,7 @@ def cmd_plan(args):
 
         # 7. Store the planning event in agent_runs so future planning can use
         # agent_runs.input_message as the task history.
-        row = uow.session.execute(text("""
+        row = (await uow.session.execute(text("""
             INSERT INTO agent_runs (
                 thread_id, profile, recipe, status, input_message,
                 target_ref, workspace_ref, model_policy, metadata,
@@ -575,15 +576,15 @@ def cmd_plan(args):
                     if s["skill_match"] and float(s["skill_match"]) > 0.3
                 ],
             }),
-        }).mappings().first()
+        })).mappings().first()
         plan_run_id = int(row["id"])
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             UPDATE agent_runs
             SET root_run_id = COALESCE(root_run_id, id),
                 trace_id = COALESCE(trace_id, 'skills-plan-' || id::text)
             WHERE id = :id
         """), {"id": plan_run_id})
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             INSERT INTO agent_run_artifacts (
                 run_id, root_run_id, artifact_type, title, payload, visibility
             ) VALUES (
@@ -620,8 +621,8 @@ def cmd_plan(args):
             plan["blocked"] = True
             plan["blocking_message"] = "Skill-authoring gate: must read skill-creator before proceeding"
 
-    with open_unit_of_work(UnitOfWork) as uow:
-        uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        await uow.session.execute(text("""
             UPDATE agent_run_artifacts
             SET payload = CAST(:payload AS jsonb)
             WHERE run_id = :run_id AND artifact_type = 'skill_plan'
@@ -630,14 +631,14 @@ def cmd_plan(args):
     print(json.dumps(plan, indent=2, default=str))
 
 
-def cmd_dashboard(args):
+async def cmd_dashboard(args):
     """Full performance dashboard."""
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         # Skill overview (DB view)
-        skills = uow.session.execute(text("SELECT * FROM skill_dashboard")).mappings().all()
+        skills = (await uow.session.execute(text("SELECT * FROM skill_dashboard"))).mappings().all()
 
         # Recent planning/run outcomes
-        task_outcomes = uow.session.execute(
+        task_outcomes = (await uow.session.execute(
             text("""
                 SELECT COALESCE(metadata->>'outcome', status) AS outcome, COUNT(*) as cnt
                 FROM agent_runs
@@ -645,10 +646,10 @@ def cmd_dashboard(args):
                   AND input_message IS NOT NULL
                 GROUP BY outcome
             """)
-        ).mappings().all()
+        )).mappings().all()
 
         # Skill execution trends (last 7 days)
-        exec_trends = uow.session.execute(
+        exec_trends = (await uow.session.execute(
             text("""
                 SELECT s.name, se.outcome, COUNT(*) as cnt
                 FROM skill_executions se
@@ -656,10 +657,10 @@ def cmd_dashboard(args):
                 WHERE se.started_at >= CURRENT_DATE - INTERVAL '7 days'
                 GROUP BY s.name, se.outcome
             """)
-        ).mappings().all()
+        )).mappings().all()
 
         # Recent failures for analysis
-        recent_failures = uow.session.execute(
+        recent_failures = (await uow.session.execute(
             text("""
                 SELECT se.id, s.name as skill_name, se.task_description,
                        se.error_analysis, se.started_at
@@ -668,7 +669,7 @@ def cmd_dashboard(args):
                 WHERE se.outcome = 'failure'
                 ORDER BY se.started_at DESC LIMIT 5
             """)
-        ).mappings().all()
+        )).mappings().all()
 
     result = {
         "skills": [dict(s) for s in skills],
@@ -680,15 +681,15 @@ def cmd_dashboard(args):
     print(json.dumps(result, indent=2, default=str))
 
 
-def cmd_evolve(args):
+async def cmd_evolve(args):
     """Nightly skill evolution — analyze executions and refine skills."""
     print("=" * 60)
     print("SKILL EVOLUTION — Nightly Analysis")
     print("=" * 60)
 
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         # 1. Analyze recent executions (last 24h)
-        recent_execs = uow.session.execute(
+        recent_execs = (await uow.session.execute(
             text("""
                 SELECT se.*, s.name as skill_name, s.pitfalls, s.refinements, s.version
                 FROM skill_executions se
@@ -696,7 +697,7 @@ def cmd_evolve(args):
                 WHERE se.started_at >= CURRENT_DATE - INTERVAL '1 day'
                 ORDER BY se.started_at
             """)
-        ).mappings().all()
+        )).mappings().all()
 
         if not recent_execs:
             print("[evolve] No skill executions in the last 24h")
@@ -705,7 +706,7 @@ def cmd_evolve(args):
 
         for ex in recent_execs:
             skill_id = ex["skill_id"]
-            skill = uow.skills.get(skill_id)
+            skill = await uow.skills.get(skill_id)
             if not skill:
                 continue
 
@@ -741,7 +742,7 @@ def cmd_evolve(args):
                 print(f"  [+refine] {ex['skill_name']} v{skill.version}: {ex['refinement_proposed'][:80]}")
 
         # 2. Recompute maturity for all skills
-        all_skills = uow.skills.list_active()
+        all_skills = await uow.skills.list_active()
 
         for s in all_skills:
             use = s.use_count
@@ -751,7 +752,7 @@ def cmd_evolve(args):
             s.confidence = confidence
 
         # 3. Detect potential new skills from recurring agent-run task prompts.
-        skill_gaps = uow.session.execute(
+        skill_gaps = (await uow.session.execute(
             text("""
                 SELECT input_message AS description,
                        COALESCE(metadata->>'task_type', recipe) AS task_type,
@@ -767,13 +768,13 @@ def cmd_evolve(args):
                 GROUP BY input_message, COALESCE(metadata->>'task_type', recipe)
                 HAVING COUNT(*) >= 2
             """)
-        ).mappings().all()
+        )).mappings().all()
 
         for gap in skill_gaps:
             print(f"  [!gap] Recurring task without skill: '{gap['description'][:60]}' (x{gap['cnt']})")
 
         # 4. Detect skills that should be connected (always used together)
-        co_occurrences = uow.session.execute(
+        co_occurrences = (await uow.session.execute(
             text("""
                 SELECT s1.name as skill1, s2.name as skill2, COUNT(*) as co_occurrence
                 FROM skill_executions se1
@@ -783,7 +784,7 @@ def cmd_evolve(args):
                 GROUP BY s1.name, s2.name
                 HAVING COUNT(*) >= 3
             """)
-        ).mappings().all()
+        )).mappings().all()
 
         for co in co_occurrences:
             print(f"  [~pair] {co['skill1']} + {co['skill2']} used together {co['co_occurrence']}x — consider dependency")
@@ -795,7 +796,7 @@ def cmd_evolve(args):
 # Argument Parser
 # ============================================================
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Illo Skill System")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -879,8 +880,8 @@ def main():
         "evolve": cmd_evolve,
     }
 
-    cmd_map[args.command](args)
+    await cmd_map[args.command](args)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

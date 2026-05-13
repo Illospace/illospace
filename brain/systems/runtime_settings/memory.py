@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.kernel import config as cfg
 from brain.platform.db.models.org import User
 from brain.platform.db.models.vault import VaultConfig
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 from .embedding_registry import (
     EMBEDDER_SPECS,
@@ -79,13 +78,8 @@ def _runtime_secret_config_key(provider: str | None) -> str:
 
 
 def _read_runtime_config_value(key: str) -> str | None:
-    try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            config = uow.session.scalars(select(VaultConfig).where(VaultConfig.key == key)).first()
-            return config.value if config else None
-    except Exception:
-        logger.debug("Could not read runtime memory config key %s", key, exc_info=True)
-        return None
+    logger.debug("Sync runtime memory config read skipped for key %s; use async runtime settings APIs.", key)
+    return None
 
 
 async def _async_read_runtime_config_value(session: AsyncSession, key: str) -> str | None:
@@ -98,18 +92,8 @@ async def _async_read_runtime_config_value(session: AsyncSession, key: str) -> s
 
 
 def _write_runtime_config_value(key: str, value: str) -> None:
-    try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            config = uow.session.scalars(select(VaultConfig).where(VaultConfig.key == key)).first()
-            if config:
-                config.value = value
-            else:
-                uow.session.add(VaultConfig(key=key, value=value))
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("Could not persist runtime memory config key %s: %s", key, exc)
-        raise HTTPException(status_code=503, detail=RUNTIME_SETTINGS_UNAVAILABLE_DETAIL) from exc
+    logger.warning("Sync runtime memory config write skipped for key %s; use async runtime settings APIs.", key)
+    raise HTTPException(status_code=503, detail=RUNTIME_SETTINGS_UNAVAILABLE_DETAIL)
 
 
 async def _async_write_runtime_config_value(session: AsyncSession, key: str, value: str) -> None:
@@ -259,11 +243,12 @@ def _default_runtime_config() -> EmbeddingRuntimeConfig:
 
 
 def get_embedding_runtime_config(*, include_secret: bool = True) -> EmbeddingRuntimeConfig:
-    """Return the installation memory runtime config.
+    """Return the process-default memory runtime config for legacy sync callers.
 
-    Persisted DB settings win. Process env/config only seed the initial
-    non-secret defaults before an admin saves runtime settings in Illospace.
-    Provider API keys are read only from the encrypted runtime store.
+    Persisted runtime settings are DB-backed and are loaded through
+    ``async_get_embedding_runtime_config``. This sync fallback is for older
+    local/CLI-style embedding calls that have not been threaded with an async
+    session yet.
     """
     defaults = _default_runtime_config()
     settings = _read_persisted_runtime_settings()
@@ -577,29 +562,8 @@ def _embedding_detail(info: dict[str, Any]) -> str | None:
 
 
 def _indexed_vector_count() -> int:
-    try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            return int(
-                uow.session.execute(
-                    text(
-                        """
-                        SELECT
-                          (SELECT count(*) FROM memories
-                           WHERE semantic_embedding IS NOT NULL) +
-                          (SELECT count(*) FROM memory_summaries
-                           WHERE semantic_embedding IS NOT NULL) +
-                          (SELECT count(*) FROM project_narratives
-                           WHERE semantic_embedding IS NOT NULL) +
-                          (SELECT count(*) FROM skills
-                           WHERE embedding IS NOT NULL)
-                        """
-                    ),
-                ).scalar()
-                or 0
-            )
-    except Exception:
-        logger.debug("Could not count indexed memory vectors", exc_info=True)
-        return 0
+    logger.debug("Sync indexed memory vector count skipped; use async runtime settings APIs.")
+    return 0
 
 
 async def _async_indexed_vector_count(session: AsyncSession) -> int:

@@ -110,7 +110,7 @@ class PoolRetriever:
     # Public API
     # ------------------------------------------------------------------
 
-    def retrieve(
+    async def retrieve(
         self,
         query_embedding: list[float],
         *,
@@ -138,19 +138,19 @@ class PoolRetriever:
         all_results: list[dict] = []
 
         # -- Exploit pool --
-        exploit_results = self._exploit_pool(query_embedding, slots[PoolName.EXPLOIT], session=session)
+        exploit_results = await self._exploit_pool(query_embedding, slots[PoolName.EXPLOIT], session=session)
         for r in exploit_results:
             r["_pool"] = PoolName.EXPLOIT
         all_results.extend(exploit_results)
 
         # -- Explore pool --
-        explore_results = self._explore_pool(query_embedding, slots[PoolName.EXPLORE], session=session)
+        explore_results = await self._explore_pool(query_embedding, slots[PoolName.EXPLORE], session=session)
         for r in explore_results:
             r["_pool"] = PoolName.EXPLORE
         all_results.extend(explore_results)
 
         # -- Narrative pool --
-        narrative_results = self._narrative_pool(query_embedding, slots[PoolName.NARRATIVE], session=session)
+        narrative_results = await self._narrative_pool(query_embedding, slots[PoolName.NARRATIVE], session=session)
         for r in narrative_results:
             r["_pool"] = PoolName.NARRATIVE
         all_results.extend(narrative_results)
@@ -204,7 +204,7 @@ class PoolRetriever:
     # Pool implementations (mockable for testing)
     # ------------------------------------------------------------------
 
-    def _exploit_pool(
+    async def _exploit_pool(
         self,
         query_embedding: list[float],
         limit: int,
@@ -225,10 +225,11 @@ class PoolRetriever:
         )
         stmt = self._apply_memory_visibility(stmt)
 
-        rows = session.scalars(stmt).all()
+        result = await session.scalars(stmt)
+        rows = result.all()
         return [self._memory_to_dict(m) for m in rows]
 
-    def _explore_pool(
+    async def _explore_pool(
         self,
         query_embedding: list[float],
         limit: int,
@@ -247,7 +248,7 @@ class PoolRetriever:
         over_fetch = limit * 3
 
         # Get median access_count for filtering
-        median_q = session.scalar(
+        median_q = await session.scalar(
             select(func.percentile_cont(0.5).within_group(Memory.access_count))
             .where(Memory.archived != True)  # noqa: E712
             .where(memory_visibility_predicate(Memory, self._memory_visibility_context()))
@@ -264,7 +265,8 @@ class PoolRetriever:
         )
         stmt = self._apply_memory_visibility(stmt)
 
-        rows = session.scalars(stmt).all()
+        result = await session.scalars(stmt)
+        rows = result.all()
 
         # Filter for cosine >= floor (distance <= 1 - floor)
         max_distance = 1.0 - self.config.explore_cosine_floor
@@ -277,7 +279,7 @@ class PoolRetriever:
 
         return results
 
-    def _narrative_pool(
+    async def _narrative_pool(
         self,
         query_embedding: list[float],
         limit: int,
@@ -314,7 +316,8 @@ class PoolRetriever:
                 return []
             stmt = stmt.where(or_(*visibility_clauses))
 
-        rows = session.scalars(stmt).all()
+        result = await session.scalars(stmt)
+        rows = result.all()
         return [self._narrative_to_dict(n) for n in rows if self._narrative_visible(n, context)]
 
     # ------------------------------------------------------------------

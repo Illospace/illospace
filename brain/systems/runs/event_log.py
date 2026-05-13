@@ -9,38 +9,11 @@ from sqlalchemy import false, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.systems.runs.events import run_event
-from brain.systems.runs.store import AgentRunStore, AsyncAgentRunStore
+from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.ui_events import run_event_to_ui_message
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
-
-def record_run_event(
-    run_id: int,
-    event_type: str,
-    payload: dict[str, Any] | None = None,
-    *,
-    producer: str = "agent_runtime",
-    session=None,
-    **_: Any,
-) -> AgentRunEventRow:
-    def _write(active_session):
-        store = AgentRunStore(active_session)
-        row = store.require_run(int(run_id))
-        return store.append_event(
-            run_event(
-                int(run_id),
-                str(event_type),
-                dict(payload or {}),
-                root_run_id=row.root_run_id,
-                producer=producer,
-            )
-        )
-
-    if session is not None:
-        return _write(session)
-    with open_unit_of_work(UnitOfWork) as uow:
-        return _write(uow.session)
 
 
 async def async_record_run_event(
@@ -73,31 +46,21 @@ async def async_record_run_event(
         return await _write(uow.session)
 
 
-def record_run_degraded_event(run_id: int, event_type: str, payload: dict[str, Any] | None = None, **kwargs: Any) -> AgentRunEventRow:
+
+async def async_record_run_degraded_event(
+    run_id: int,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> AgentRunEventRow:
     data = dict(payload or {})
     data.setdefault("degraded", True)
-    return record_run_event(run_id, event_type, data, **kwargs)
+    return await async_record_run_event(run_id, event_type, data, **kwargs)
 
 
 def run_event_to_message(event: AgentRunEventRow, *, replayed: bool = False) -> dict[str, Any] | None:
     return run_event_to_ui_message(event, replayed=replayed)
 
-
-def run_event_backbone_status(
-    session,
-    consumer_name: str = "api.websocket_fanout",
-    *,
-    consumer_running: bool | None = None,
-    stale_after_seconds: int = 120,
-) -> dict[str, Any]:
-    from brain.app.api.ws.run_events import run_event_backbone_status as _status
-
-    return _status(
-        session,
-        consumer_name,
-        consumer_running=consumer_running,
-        stale_after_seconds=stale_after_seconds,
-    )
 
 
 async def async_run_event_backbone_status(
@@ -156,16 +119,6 @@ def _project_replay_rows(rows) -> list[AgentRunEventRow]:
     return events
 
 
-def list_run_events_after_for_principal(
-    session,
-    principal: Mapping[str, Any],
-    *,
-    last_event_id: int = 0,
-    limit: int = 100,
-) -> list[AgentRunEventRow]:
-    stmt = _run_event_replay_stmt(principal, last_event_id=last_event_id, limit=limit)
-    return _project_replay_rows(session.execute(stmt).all())
-
 
 async def list_run_events_after_for_principal_async(
     session: AsyncSession,
@@ -181,11 +134,8 @@ async def list_run_events_after_for_principal_async(
 
 __all__ = [
     "async_record_run_event",
+    "async_record_run_degraded_event",
     "async_run_event_backbone_status",
     "list_run_events_after_for_principal_async",
-    "list_run_events_after_for_principal",
-    "record_run_degraded_event",
-    "record_run_event",
-    "run_event_backbone_status",
     "run_event_to_message",
 ]

@@ -15,6 +15,7 @@ from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.events import run_event
 from brain.systems.runs.graph import DeepPlan, RunNode
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent
+from brain.systems.runs.recipes.threaded_invocation import invoke_direct_agent_threaded
 from brain.systems.runs.recipes.shared import workspace_root_from_ref
 
 logger = logging.getLogger(__name__)
@@ -122,7 +123,12 @@ class PhaseBarrierDecision:
         }
 
 
-def review_completed_phase(runtime: Any, plan: DeepPlan, node: RunNode, node_results: Mapping[str, dict[str, Any]]) -> PhaseBarrierDecision:
+async def review_completed_phase(
+    runtime: Any,
+    plan: DeepPlan,
+    node: RunNode,
+    node_results: Mapping[str, dict[str, Any]],
+) -> PhaseBarrierDecision:
     """Ask the Deep coordinator to review a completed phase and revise pending work."""
     metadata = dict(getattr(runtime.request, "metadata", {}) or {})
     if metadata.get("disable_phase_barrier_review") is True:
@@ -140,7 +146,7 @@ def review_completed_phase(runtime: Any, plan: DeepPlan, node: RunNode, node_res
         )
     thinking = model_policy.get("coordinator_thinking") or model_policy.get("thinking") or "high"
 
-    runtime.store.append_event(
+    await runtime.store.append_event(
         run_event(
             runtime.run.id,
             "run.phase_review_started",
@@ -174,14 +180,14 @@ def review_completed_phase(runtime: Any, plan: DeepPlan, node: RunNode, node_res
                 "phase_node_id": node.id,
             },
         )
-        result = invoke_direct_agent(spec)
+        result = await invoke_direct_agent_threaded(invoke_direct_agent, spec)
         raw_output = str(getattr(result, "output", "") or "").strip()
         parsed = _parse_json_object(raw_output)
         decision = PhaseBarrierDecision.from_payload(parsed or {}, raw_output=raw_output)
     except Exception as exc:
         logger.warning("deep_phase_barrier_review_failed run_id=%s node_id=%s error=%s", runtime.run.id, node.id, exc)
         decision = PhaseBarrierDecision.no_change(f"Phase review failed open: {exc}")
-    runtime.store.append_event(
+    await runtime.store.append_event(
         run_event(
             runtime.run.id,
             "run.phase_review_completed",

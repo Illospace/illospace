@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 
 from starlette.testclient import TestClient
@@ -174,14 +173,14 @@ def test_ws_binds_authenticated_socket_to_token_claims():
     assert authenticated["session_id"] == "session-user-1"
 
 
-def test_chat_subscription_authorization_rejects_cross_org_conversation(monkeypatch):
+async def test_chat_subscription_authorization_rejects_cross_org_conversation(monkeypatch):
     from brain.app.api.routers import ws as ws_router
 
     class FakeConversationRepository:
         def __init__(self, session):
             self.session = session
 
-        def get_for_user(self, conversation_id: str, user_id: str):
+        async def a_get_for_user(self, conversation_id: str, user_id: str):
             assert conversation_id == "conversation-1"
             assert user_id == "user-1"
             return SimpleNamespace(id=conversation_id, org_id="org-2")
@@ -189,25 +188,18 @@ def test_chat_subscription_authorization_rejects_cross_org_conversation(monkeypa
     fake_session = SimpleNamespace(close=lambda: None)
 
     class FakeUnitOfWork:
-        def __enter__(self):
+        async def __aenter__(self):
             self.session = fake_session
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    async def run_sync_inline(fn, /, *args, **kwargs):
-        return fn(*args, **kwargs)
-
     monkeypatch.setattr(ws_router, "UnitOfWork", FakeUnitOfWork)
-    monkeypatch.setattr(ws_router, "run_unit_of_work_task", run_sync_inline)
     monkeypatch.setattr(ws_router, "ChatConversationRepository", FakeConversationRepository)
 
-    assert (
-        asyncio.run(ws_router._authorize_chat_subscription(
-            "user-1",
-            org_id="org-1",
-            conversation_id="conversation-1",
-        ))
-        == "CHAT_CONVERSATION_FORBIDDEN"
-    )
+    assert await ws_router._authorize_chat_subscription(
+        "user-1",
+        org_id="org-1",
+        conversation_id="conversation-1",
+    ) == "CHAT_CONVERSATION_FORBIDDEN"

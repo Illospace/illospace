@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.integrations.providers import get_active_provider
 
 
@@ -166,9 +165,16 @@ def _provider_defaults(provider: str | None = None) -> dict[str, str]:
 
 
 def _load_skill_routing_row(skill_name: str) -> dict[str, str | None] | None:
+    return None
+
+
+async def _async_load_skill_routing_row(
+    session: AsyncSession,
+    skill_name: str,
+) -> dict[str, str | None] | None:
     try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            row = uow.session.execute(
+        row = (
+            await session.execute(
                 text(
                     """
                     SELECT model_tier, thinking_tier
@@ -178,8 +184,9 @@ def _load_skill_routing_row(skill_name: str) -> dict[str, str | None] | None:
                     """
                 ),
                 {"name": skill_name},
-            ).mappings().first()
-            return dict(row) if row else None
+            )
+        ).mappings().first()
+        return dict(row) if row else None
     except Exception:
         return None
 
@@ -191,17 +198,7 @@ def _resolve_effective_org_id(
 ) -> str | None:
     if org_id:
         return org_id
-    if not user_id:
-        return None
-    try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            row = uow.session.execute(
-                text("SELECT org_id FROM users WHERE id = :user_id LIMIT 1"),
-                {"user_id": user_id},
-            ).mappings().first()
-            return row.get("org_id") if row else None
-    except Exception:
-        return None
+    return None
 
 
 async def async_resolve_effective_org_id(
@@ -238,30 +235,7 @@ def get_provider_model_map(
     so the system still works before any org configuration exists.
     """
     provider = provider or resolve_default_provider(user_id=user_id, org_id=org_id)
-    model_map = _provider_defaults(provider)
-    effective_org_id = _resolve_effective_org_id(user_id=user_id, org_id=org_id)
-    if not effective_org_id:
-        return model_map
-    try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            rows = uow.session.execute(
-                text(
-                    """
-                    SELECT intelligence_level, model_name
-                    FROM org_provider_model_mappings
-                    WHERE org_id = :org_id AND provider = :provider
-                    """
-                ),
-                {"org_id": effective_org_id, "provider": provider},
-            ).mappings().all()
-        for row in rows:
-            level = normalize_model_tier(row.get("intelligence_level"), default=None)
-            model_name = (_strip_provider_prefix(row.get("model_name")) or "").strip()
-            if level in model_map and model_name:
-                model_map[level] = model_name
-    except Exception:
-        pass
-    return model_map
+    return _provider_defaults(provider)
 
 
 async def async_get_provider_model_map(
@@ -348,42 +322,6 @@ def resolve_provider_selection(
     """Resolve the effective provider and preserve where it came from."""
     preferred = (preferred_provider or "").strip().lower()
     fallback_provider = normalize_default_provider(fallback or get_active_provider())
-    try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            effective_org_id = org_id
-            if user_id:
-                user_row = uow.session.execute(
-                    text(
-                        """
-                        SELECT u.org_id, u.default_provider, k.provider AS key_provider
-                        FROM users u
-                        LEFT JOIN user_api_keys k ON k.id = u.default_api_key_id
-                        WHERE u.id = :user_id
-                        LIMIT 1
-                        """
-                    ),
-                    {"user_id": user_id},
-                ).mappings().first()
-                if user_row:
-                    explicit_provider = (user_row.get("default_provider") or "").strip().lower()
-                    if explicit_provider in DEFAULT_PROVIDER_MODEL_MAPS:
-                        return ProviderResolution(provider=normalize_default_provider(explicit_provider), source="user_default", explicit=True)
-                    key_provider = (user_row.get("key_provider") or "").strip().lower()
-                    if key_provider in DEFAULT_PROVIDER_MODEL_MAPS:
-                        return ProviderResolution(provider=normalize_default_provider(key_provider), source="user_default_api_key", explicit=True)
-                    effective_org_id = effective_org_id or user_row.get("org_id")
-            if effective_org_id:
-                org_row = uow.session.execute(
-                    text("SELECT memory_model_config FROM orgs WHERE id = :org_id LIMIT 1"),
-                    {"org_id": effective_org_id},
-                ).mappings().first()
-                config = (org_row or {}).get("memory_model_config") or {}
-                org_provider = (config.get("default_provider") or "").strip().lower()
-                if org_provider in DEFAULT_PROVIDER_MODEL_MAPS:
-                    return ProviderResolution(provider=normalize_default_provider(org_provider), source="org_default_provider", explicit=True)
-    except Exception:
-        pass
-
     if preferred in DEFAULT_PROVIDER_MODEL_MAPS:
         return ProviderResolution(provider=normalize_runtime_provider(preferred), source="preferred_provider", explicit=False)
     return ProviderResolution(provider=fallback_provider, source="fallback", explicit=False)
@@ -622,6 +560,62 @@ def resolve_skill_runtime(
     )
 
 
+async def async_resolve_skill_runtime(
+    session: AsyncSession,
+    skill_name: str,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    preferred_provider: str | None = None,
+) -> SkillRuntimeConfig:
+    """Resolve the native runtime configuration for a skill using an async session."""
+    provider = await async_resolve_default_provider(
+        session,
+        user_id=user_id,
+        org_id=org_id,
+        fallback=preferred_provider,
+        preferred_provider=preferred_provider,
+    )
+    row = await _async_load_skill_routing_row(session, skill_name)
+
+    if not row:
+        default_model = await async_get_model_for_tier(
+            session,
+            DEFAULT_MODEL_TIER,
+            provider,
+            include_provider_prefix=False,
+            user_id=user_id,
+            org_id=org_id,
+        )
+        return SkillRuntimeConfig(
+            provider=provider,
+            model_name=default_model,
+            reasoning_effort="medium",
+            model_tier=DEFAULT_MODEL_TIER,
+            thinking_tier="medium",
+        )
+
+    model_tier = normalize_model_tier(row.get("model_tier")) or DEFAULT_MODEL_TIER
+    thinking_tier = row.get("thinking_tier") or "medium"
+    model_name = await async_get_model_for_tier(
+        session,
+        model_tier,
+        provider,
+        include_provider_prefix=False,
+        user_id=user_id,
+        org_id=org_id,
+    )
+    reasoning_effort = THINKING_MAP.get(thinking_tier, "medium")
+
+    return SkillRuntimeConfig(
+        provider=provider,
+        model_name=model_name,
+        reasoning_effort=reasoning_effort,
+        model_tier=model_tier,
+        thinking_tier=thinking_tier,
+    )
+
+
 def resolve_skill_routing_profile(
     skill_name: str,
     *,
@@ -646,6 +640,27 @@ def resolve_skill_routing_profile(
     )
 
 
+async def async_resolve_skill_routing_profile(
+    session: AsyncSession,
+    skill_name: str,
+) -> SkillRoutingProfile:
+    """Return the raw skill routing profile using an async session."""
+    row = await _async_load_skill_routing_row(session, skill_name)
+    if not row:
+        return SkillRoutingProfile(
+            skill_name=skill_name,
+            reasoning_effort=None,
+        )
+    thinking_tier = row.get("thinking_tier") or "medium"
+    model_tier = normalize_model_tier(row.get("model_tier")) or DEFAULT_MODEL_TIER
+    return SkillRoutingProfile(
+        skill_name=skill_name,
+        reasoning_effort=THINKING_MAP.get(thinking_tier, "medium"),
+        model_tier=model_tier,
+        thinking_tier=thinking_tier,
+    )
+
+
 def resolve_skill_model(
     skill_name: str,
     *,
@@ -655,6 +670,25 @@ def resolve_skill_model(
 ) -> tuple[str, str]:
     """Resolve (provider/model, thinking) from skill tier settings."""
     runtime = resolve_skill_runtime(
+        skill_name,
+        user_id=user_id,
+        org_id=org_id,
+        preferred_provider=preferred_provider,
+    )
+    return _prefix_model(runtime.provider, runtime.model_name), runtime.reasoning_effort
+
+
+async def async_resolve_skill_model(
+    session: AsyncSession,
+    skill_name: str,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    preferred_provider: str | None = None,
+) -> tuple[str, str]:
+    """Resolve (provider/model, thinking) from skill tier settings using an async session."""
+    runtime = await async_resolve_skill_runtime(
+        session,
         skill_name,
         user_id=user_id,
         org_id=org_id,

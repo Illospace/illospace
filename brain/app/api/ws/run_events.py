@@ -52,22 +52,6 @@ def _backbone_status_payload(
     }
 
 
-def run_event_backbone_status(
-    session,
-    consumer_name: str = DEFAULT_CONSUMER_NAME,
-    *,
-    consumer_running: bool | None = None,
-    stale_after_seconds: int = 120,
-) -> dict[str, Any]:
-    max_event_id = int(session.scalar(select(func.coalesce(func.max(AgentRunEventRow.id), 0))) or 0)
-    return _backbone_status_payload(
-        max_event_id,
-        consumer_name,
-        consumer_running=consumer_running,
-        stale_after_seconds=stale_after_seconds,
-    )
-
-
 async def async_run_event_backbone_status(
     session: AsyncSession,
     consumer_name: str = DEFAULT_CONSUMER_NAME,
@@ -167,5 +151,4 @@ __all__ = [
     "async_run_event_backbone_status",
     "fanout_run_events",
     "fanout_run_events_once",
-    "run_event_backbone_status",
 ]

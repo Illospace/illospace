@@ -3,11 +3,18 @@
 import json
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
+
+
+def _async_uow(mock_uow: MagicMock | None = None) -> MagicMock:
+    mock_uow = mock_uow or MagicMock()
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    return mock_uow
 
 
 # ============================================================
@@ -75,14 +82,12 @@ class TestBuildPayload:
     @patch("brain.app.cli.run.build_context_block", return_value=("## Context\n- test", {"memories": 1, "guardrails": 0, "similar_tasks": 0}))
     @patch("brain.app.cli.run.log_run", return_value=42)
     @patch("brain.app.cli.run.UnitOfWork")
-    def test_payload_has_required_fields(self, MockUoW, mock_log, mock_ctx):
-        mock_uow = MagicMock()
+    async def test_payload_has_required_fields(self, MockUoW, mock_log, mock_ctx):
+        mock_uow = _async_uow()
         MockUoW.return_value = mock_uow
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
 
         from brain.app.cli.run import build_payload
-        result = build_payload("implement rate limiting", "implement")
+        result = await build_payload("implement rate limiting", "implement")
 
         assert "run_id" in result
         assert "label" in result
@@ -99,68 +104,58 @@ class TestBuildPayload:
     @patch("brain.app.cli.run.build_context_block", return_value=("", {"memories": 0, "guardrails": 0, "similar_tasks": 0}))
     @patch("brain.app.cli.run.log_run", return_value=1)
     @patch("brain.app.cli.run.UnitOfWork")
-    def test_payload_model_defaults(self, MockUoW, mock_log, mock_ctx):
-        mock_uow = MagicMock()
+    async def test_payload_model_defaults(self, MockUoW, mock_log, mock_ctx):
+        mock_uow = _async_uow()
         MockUoW.return_value = mock_uow
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
 
         from brain.app.cli.run import build_payload
-        result = build_payload("encode a lesson", "encode")
+        result = await build_payload("encode a lesson", "encode")
         assert result["model"] == "low"
         assert result["thinking"] == "off"
 
     @patch("brain.app.cli.run.build_context_block", return_value=("", {"memories": 0, "guardrails": 0, "similar_tasks": 0}))
     @patch("brain.app.cli.run.log_run", return_value=1)
     @patch("brain.app.cli.run.UnitOfWork")
-    def test_payload_model_override(self, MockUoW, mock_log, mock_ctx):
-        mock_uow = MagicMock()
+    async def test_payload_model_override(self, MockUoW, mock_log, mock_ctx):
+        mock_uow = _async_uow()
         MockUoW.return_value = mock_uow
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
 
         from brain.app.cli.run import build_payload
-        result = build_payload("investigate something", "investigate", model="high", thinking="high")
+        result = await build_payload("investigate something", "investigate", model="high", thinking="high")
         assert result["model"] == "high"
         assert result["thinking"] == "high"
 
     @patch("brain.app.cli.run.build_context_block", return_value=("## Guardrails\n- watch out", {"memories": 0, "guardrails": 1, "similar_tasks": 0}))
     @patch("brain.app.cli.run.log_run", return_value=5)
     @patch("brain.app.cli.run.UnitOfWork")
-    def test_prompt_contains_task_and_context(self, MockUoW, mock_log, mock_ctx):
-        mock_uow = MagicMock()
+    async def test_prompt_contains_task_and_context(self, MockUoW, mock_log, mock_ctx):
+        mock_uow = _async_uow()
         MockUoW.return_value = mock_uow
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
 
         from brain.app.cli.run import build_payload
-        result = build_payload("investigate the bug", "investigate")
+        result = await build_payload("investigate the bug", "investigate")
         assert "investigate" in result["prompt"].lower() or "bug" in result["prompt"].lower()
 
     @patch("brain.app.cli.run.build_context_block", return_value=("", {"memories": 0, "guardrails": 0, "similar_tasks": 0}))
     @patch("brain.app.cli.run.log_run", return_value=1)
     @patch("brain.app.cli.run.UnitOfWork")
-    def test_label_format(self, MockUoW, mock_log, mock_ctx):
-        mock_uow = MagicMock()
+    async def test_label_format(self, MockUoW, mock_log, mock_ctx):
+        mock_uow = _async_uow()
         MockUoW.return_value = mock_uow
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
 
         from brain.app.cli.run import build_payload
-        result = build_payload("implement the auth flow", "implement")
+        result = await build_payload("implement the auth flow", "implement")
         assert result["label"].startswith("impl-")
 
     @patch("brain.app.cli.run.build_context_block", return_value=("", {"memories": 0, "guardrails": 0, "similar_tasks": 0}))
     @patch("brain.app.cli.run.log_run", return_value=1)
     @patch("brain.app.cli.run.UnitOfWork")
-    def test_payload_is_json_serializable(self, MockUoW, mock_log, mock_ctx):
-        mock_uow = MagicMock()
+    async def test_payload_is_json_serializable(self, MockUoW, mock_log, mock_ctx):
+        mock_uow = _async_uow()
         MockUoW.return_value = mock_uow
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
 
         from brain.app.cli.run import build_payload
-        result = build_payload("implement something", "implement")
+        result = await build_payload("implement something", "implement")
         # Should not raise
         json.dumps(result)
 
@@ -200,12 +195,14 @@ class TestInlineAllowlist:
 class TestRunPersistence:
     """CLI run persistence writes through agent_runs."""
 
-    def test_log_run_inserts(self):
+    async def test_log_run_inserts(self):
         mock_session = MagicMock()
-        mock_session.execute.return_value.mappings.return_value.first.return_value = {"id": 42}
+        mock_result = MagicMock()
+        mock_result.mappings.return_value.first.return_value = {"id": 42}
+        mock_session.execute = AsyncMock(return_value=mock_result)
 
         from brain.app.cli.run import log_run
-        run_id = log_run(
+        run_id = await log_run(
             session=mock_session,
             task_summary="implement rate limiting",
             task_type="implement",
@@ -218,12 +215,14 @@ class TestRunPersistence:
         assert run_id == 42
         assert mock_session.execute.call_count == 3
 
-    def test_log_run_with_context_metadata(self):
+    async def test_log_run_with_context_metadata(self):
         mock_session = MagicMock()
-        mock_session.execute.return_value.mappings.return_value.first.return_value = {"id": 10}
+        mock_result = MagicMock()
+        mock_result.mappings.return_value.first.return_value = {"id": 10}
+        mock_session.execute = AsyncMock(return_value=mock_result)
 
         from brain.app.cli.run import log_run
-        run_id = log_run(
+        run_id = await log_run(
             session=mock_session,
             task_summary="investigate bug",
             task_type="investigate",
@@ -245,25 +244,29 @@ class TestRunPersistence:
 class TestCompleteHook:
     """complete hook updates agent_runs correctly."""
 
-    def test_complete_updates_agent_run(self):
+    async def test_complete_updates_agent_run(self):
         mock_session = MagicMock()
-        mock_session.execute.return_value.mappings.return_value.first.return_value = {
+        mock_result = MagicMock()
+        mock_result.mappings.return_value.first.return_value = {
             "id": 42, "metadata": {"legacy_source": "cli.run"}
         }
+        mock_session.execute = AsyncMock(return_value=mock_result)
 
         from brain.app.cli.run import complete_run
-        result = complete_run(mock_session, run_id=42, outcome="success", notes="all good")
+        result = await complete_run(mock_session, run_id=42, outcome="success", notes="all good")
 
         # Should have called execute multiple times (SELECT + UPDATE)
         assert mock_session.execute.call_count >= 2
         assert result == {"run_id": 42, "outcome": "success"}
 
-    def test_complete_with_invalid_id(self):
+    async def test_complete_with_invalid_id(self):
         mock_session = MagicMock()
-        mock_session.execute.return_value.mappings.return_value.first.return_value = None
+        mock_result = MagicMock()
+        mock_result.mappings.return_value.first.return_value = None
+        mock_session.execute = AsyncMock(return_value=mock_result)
 
         from brain.app.cli.run import complete_run
-        result = complete_run(mock_session, run_id=999, outcome="success")
+        result = await complete_run(mock_session, run_id=999, outcome="success")
         assert "error" in result
 
 
@@ -276,16 +279,16 @@ class TestRunIntegration:
 
     @patch("brain.app.cli.run.build_context_block", return_value=("## Context\ntest", {"memories": 2, "guardrails": 1, "similar_tasks": 0}))
     @patch("brain.app.cli.run.UnitOfWork")
-    def test_full_run_flow(self, MockUoW, mock_ctx):
-        mock_uow = MagicMock()
+    async def test_full_run_flow(self, MockUoW, mock_ctx):
+        mock_uow = _async_uow()
         MockUoW.return_value = mock_uow
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
         mock_session = mock_uow.session
-        mock_session.execute.return_value.mappings.return_value.first.return_value = {"id": 100}
+        mock_result = MagicMock()
+        mock_result.mappings.return_value.first.return_value = {"id": 100}
+        mock_session.execute = AsyncMock(return_value=mock_result)
 
         from brain.app.cli.run import run
-        result = run("implement rate limiting")
+        result = await run("implement rate limiting")
 
         assert result["run_id"] == 100
         assert result["task_type"] == "implement"

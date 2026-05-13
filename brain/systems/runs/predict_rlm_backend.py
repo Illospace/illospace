@@ -11,6 +11,7 @@ import os
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -18,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.systems.runs.events import record_tool_call
 from brain.platform.db.models.org import Org, User
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.integrations.llm import _resolve_key_from_db, _resolve_key_from_env, resolve_llm_client
 from brain.platform.integrations.providers import LLMRequest, _merge_streamed_output_into_response, get_provider
 from brain.systems.runs.direct_agent import (
@@ -45,6 +46,13 @@ from brain.platform.providers.model_policy import (
 )
 
 logger = logging.getLogger("agent_runtime")
+
+
+@contextmanager
+def _predict_rlm_unit_of_work():
+    factory = UnitOfWork.blocking if getattr(UnitOfWork, "__name__", "") == "UnitOfWork" else UnitOfWork
+    with factory() as uow:
+        yield uow
 
 _SUPPORTED_BACKENDS = {"auto", "native", "predict_rlm"}
 _DEFAULT_BACKEND = os.environ.get("AGENT_WORKER_BACKEND", "auto").strip().lower() or "auto"
@@ -108,7 +116,7 @@ def _load_org_memory_model_config(
     org_id: str | None = None,
 ) -> dict[str, Any]:
     try:
-        with open_unit_of_work(UnitOfWork) as uow:
+        with _predict_rlm_unit_of_work() as uow:
             resolved_org_id = org_id
             if not resolved_org_id and user_id:
                 db_user = uow.session.get(User, user_id)

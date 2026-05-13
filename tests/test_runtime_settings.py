@@ -3,44 +3,61 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
-def test_provider_auth_status_reports_openai_codex_runtime():
-    from brain.systems.services.runtime_introspection import get_provider_auth_status
+@pytest.mark.asyncio
+async def test_provider_auth_status_reports_openai_codex_runtime():
+    from types import SimpleNamespace
+
+    from brain.platform.db.models.org import UserApiKey
+    from brain.systems.services.runtime_introspection import async_get_provider_auth_status
 
     mock_session = MagicMock()
-    mock_session.scalars.return_value.first.side_effect = [1, None]
-
-    mock_uow = MagicMock()
-    mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-    mock_uow.__exit__ = MagicMock(return_value=False)
-    mock_uow.session = mock_session
+    mock_session.get = AsyncMock(
+        side_effect=[
+            SimpleNamespace(default_api_key_id=123),
+            SimpleNamespace(id=123, provider="openai", is_active=True, label=None),
+        ]
+    )
+    mock_session.scalars = AsyncMock(
+        side_effect=[
+            SimpleNamespace(first=lambda: 1),
+            SimpleNamespace(first=lambda: None),
+        ]
+    )
 
     mock_llm = MagicMock(source="user_default", auth_mode="chatgpt", is_oauth=False)
 
-    with patch("brain.systems.services.runtime_introspection.UnitOfWork", return_value=mock_uow), \
-         patch("brain.systems.services.runtime_introspection.resolve_llm_client", return_value=mock_llm), \
-         patch("brain.systems.services.runtime_introspection.resolve_default_provider", return_value="openai"):
-        data = get_provider_auth_status(user_id="user-1", org_id="org-1", provider="openai")
+    with patch("brain.systems.services.runtime_introspection.async_resolve_llm_client", AsyncMock(return_value=mock_llm)), \
+         patch("brain.systems.services.runtime_introspection.async_resolve_default_provider", AsyncMock(return_value="openai")):
+        data = await async_get_provider_auth_status(mock_session, user_id="user-1", org_id="org-1", provider="openai")
 
     assert data["provider"] == "openai"
     assert data["effective_provider"] == "openai"
     assert data["status"] == "in_use"
     assert data["method"] == "chatgpt"
     assert data["runtime_key_source"] == "user_default"
+    assert mock_session.get.await_args_list[-1].args[0] is UserApiKey
 
 
-def test_runtime_settings_tool_returns_model_mappings_and_active_status():
+@pytest.mark.asyncio
+async def test_runtime_settings_tool_returns_model_mappings_and_active_status():
     import brain.systems.services.runtime_introspection as runtime_settings_service
     from brain.app.mcp.server import tool_runtime_settings
 
-    with patch.object(runtime_settings_service, "get_runtime_settings_snapshot", return_value={
+    mock_uow = MagicMock()
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    mock_uow.session = MagicMock()
+
+    with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
+         patch.object(runtime_settings_service, "async_get_runtime_settings_snapshot", AsyncMock(return_value={
             "selected_provider": "openai",
             "effective_provider": "openai",
             "providers": {"openai": {"status": "in_use"}},
             "provider_model_mappings": {"openai": {"medium": "gpt-5.4"}},
             "worker_backend": {"agent_effective_worker_backend": "predict_rlm"},
             "active": {"provider": "openai", "status": "in_use"},
-    }):
-        data = tool_runtime_settings(provider="openai", user_id="user-1", org_id="org-1")
+         })):
+        data = await tool_runtime_settings(provider="openai", user_id="user-1", org_id="org-1")
 
     assert data["selected_provider"] == "openai"
     assert data["active"]["status"] == "in_use"
@@ -170,7 +187,8 @@ async def test_owner_openai_api_key_is_stored_as_org_runtime_key(monkeypatch):
     }
 
 
-def test_runtime_settings_snapshot_includes_routing_marketplace(monkeypatch):
+@pytest.mark.asyncio
+async def test_runtime_settings_snapshot_includes_routing_marketplace(monkeypatch):
     from types import SimpleNamespace
 
     import brain.systems.services.runtime_introspection as runtime_settings_service
@@ -178,19 +196,20 @@ def test_runtime_settings_snapshot_includes_routing_marketplace(monkeypatch):
     monkeypatch.setattr(
         runtime_settings_service,
         "get_routing_marketplace_snapshot",
-        lambda **kwargs: {"flags": {"shadow": True}, "latest_decisions": []},
+        AsyncMock(return_value={"flags": {"shadow": True}, "latest_decisions": []}),
     )
-    monkeypatch.setattr(runtime_settings_service, "get_provider_auth_status", lambda **kwargs: {"status": "in_use"}, raising=False)
-    monkeypatch.setattr(runtime_settings_service, "get_provider_model_map", lambda *args, **kwargs: {"medium": "gpt-5.4"}, raising=False)
-    monkeypatch.setattr(runtime_settings_service, "get_agent_worker_backend_settings", lambda **kwargs: SimpleNamespace(to_dict=lambda: {}), raising=False)
-    monkeypatch.setattr(runtime_settings_service, "resolve_default_provider", lambda **kwargs: "openai", raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_provider_auth_status", AsyncMock(return_value={"status": "in_use"}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_provider_model_map", AsyncMock(return_value={"medium": "gpt-5.4"}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_agent_worker_backend_settings", AsyncMock(return_value=SimpleNamespace(to_dict=lambda: {})), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_resolve_default_provider", AsyncMock(return_value="openai"), raising=False)
 
-    snapshot = runtime_settings_service.get_runtime_settings_snapshot(user_id="user-1", org_id="org-1")
+    snapshot = await runtime_settings_service.async_get_runtime_settings_snapshot(MagicMock(), user_id="user-1", org_id="org-1")
 
     assert snapshot["routing_marketplace"]["flags"]["shadow"] is True
 
 
-def test_runtime_settings_snapshot_exposes_learning_policy(monkeypatch):
+@pytest.mark.asyncio
+async def test_runtime_settings_snapshot_exposes_learning_policy(monkeypatch):
     from types import SimpleNamespace
 
     import brain.systems.services.runtime_introspection as runtime_settings_service
@@ -198,20 +217,21 @@ def test_runtime_settings_snapshot_exposes_learning_policy(monkeypatch):
     monkeypatch.setenv("LEARNING_POLICY_DEPLOYMENT_MODE", "self_hosted")
     monkeypatch.setenv("LEARNING_POLICY_ALLOWED_MODEL_TIERS", "local,low")
     monkeypatch.setenv("LEARNING_POLICY_EXTERNAL_EVAL_EXPORT_ALLOWED", "false")
-    monkeypatch.setattr(runtime_settings_service, "get_routing_marketplace_snapshot", lambda **kwargs: {}, raising=False)
-    monkeypatch.setattr(runtime_settings_service, "get_provider_auth_status", lambda **kwargs: {"status": "in_use"}, raising=False)
-    monkeypatch.setattr(runtime_settings_service, "get_provider_model_map", lambda *args, **kwargs: {"medium": "gpt-5.4"}, raising=False)
-    monkeypatch.setattr(runtime_settings_service, "get_agent_worker_backend_settings", lambda **kwargs: SimpleNamespace(to_dict=lambda: {}), raising=False)
-    monkeypatch.setattr(runtime_settings_service, "resolve_default_provider", lambda **kwargs: "openai", raising=False)
+    monkeypatch.setattr(runtime_settings_service, "get_routing_marketplace_snapshot", AsyncMock(return_value={}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_provider_auth_status", AsyncMock(return_value={"status": "in_use"}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_provider_model_map", AsyncMock(return_value={"medium": "gpt-5.4"}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_agent_worker_backend_settings", AsyncMock(return_value=SimpleNamespace(to_dict=lambda: {})), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_resolve_default_provider", AsyncMock(return_value="openai"), raising=False)
 
-    snapshot = runtime_settings_service.get_runtime_settings_snapshot(user_id="user-1", org_id="org-1")
+    snapshot = await runtime_settings_service.async_get_runtime_settings_snapshot(MagicMock(), user_id="user-1", org_id="org-1")
 
     assert snapshot["learning_policy"]["deployment_mode"] == "self_hosted"
     assert snapshot["learning_policy"]["allowed_model_tiers"] == ["local", "low"]
     assert snapshot["learning_policy"]["external_eval_export_allowed"] is False
 
 
-def test_runtime_settings_snapshot_exposes_provider_health(monkeypatch):
+@pytest.mark.asyncio
+async def test_runtime_settings_snapshot_exposes_provider_health(monkeypatch):
     from types import SimpleNamespace
 
     import brain.systems.services.runtime_introspection as runtime_settings_service
@@ -225,13 +245,13 @@ def test_runtime_settings_snapshot_exposes_provider_health(monkeypatch):
         exc="provider timed out",
     )
 
-    monkeypatch.setattr(runtime_settings_service, "get_routing_marketplace_snapshot", lambda **kwargs: {}, raising=False)
-    monkeypatch.setattr(runtime_settings_service, "get_provider_auth_status", lambda **kwargs: {"status": "in_use"}, raising=False)
-    monkeypatch.setattr(runtime_settings_service, "get_provider_model_map", lambda *args, **kwargs: {"medium": "gpt-5.4"}, raising=False)
-    monkeypatch.setattr(runtime_settings_service, "get_agent_worker_backend_settings", lambda **kwargs: SimpleNamespace(to_dict=lambda: {}), raising=False)
-    monkeypatch.setattr(runtime_settings_service, "resolve_default_provider", lambda **kwargs: "openai", raising=False)
+    monkeypatch.setattr(runtime_settings_service, "get_routing_marketplace_snapshot", AsyncMock(return_value={}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_provider_auth_status", AsyncMock(return_value={"status": "in_use"}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_provider_model_map", AsyncMock(return_value={"medium": "gpt-5.4"}), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_get_agent_worker_backend_settings", AsyncMock(return_value=SimpleNamespace(to_dict=lambda: {})), raising=False)
+    monkeypatch.setattr(runtime_settings_service, "async_resolve_default_provider", AsyncMock(return_value="openai"), raising=False)
 
-    snapshot = runtime_settings_service.get_runtime_settings_snapshot(user_id="user-1", org_id="org-1")
+    snapshot = await runtime_settings_service.async_get_runtime_settings_snapshot(MagicMock(), user_id="user-1", org_id="org-1")
 
     entries = snapshot["provider_health"]["operations"]["scout"]
     assert entries[0]["provider"] == "openai"

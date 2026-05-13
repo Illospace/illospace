@@ -16,26 +16,26 @@ from sqlalchemy import text
 
 import brain.kernel.config as config
 from brain.app.cli.agent_cli import call_agent, extract_json
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.providers.model_policy import get_model_for_tier
 
 
-def audit_lessons(target_date: date) -> dict:
+async def audit_lessons(target_date: date) -> dict:
     """Analyze today's lessons for repeats, violations, and new rule candidates."""
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         # Get today's lessons
-        rows = uow.session.execute(text("""
+        rows = (await uow.session.execute(text("""
             SELECT id, content, salience, tags
             FROM memories WHERE memory_type = 'lesson'
             AND created_at::date = :target_date AND NOT archived
             ORDER BY salience DESC
-        """), {"target_date": target_date}).mappings().all()
+        """), {"target_date": target_date})).mappings().all()
         todays_lessons = [dict(r) for r in rows]
 
         # Get existing rules
-        rule_rows = uow.session.execute(text(
+        rule_rows = (await uow.session.execute(text(
             "SELECT id, name, source_lesson_ids FROM guardian_rules WHERE active = true"
-        )).mappings().all()
+        ))).mappings().all()
         existing_rules = [dict(r) for r in rule_rows]
 
         # Get all existing lesson IDs that are already compiled
@@ -88,8 +88,8 @@ def audit_lessons(target_date: date) -> dict:
 
     # Log violations to DB
     for v in report["violations"]:
-        with open_unit_of_work(UnitOfWork) as uow:
-            uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            await uow.session.execute(text("""
                 INSERT INTO violation_log (lesson_id, guardian_rule_id, detected_by, context, session_date)
                 VALUES (:lesson_id, :rule_id, 'nightly_audit', :context, :session_date)
             """), {
@@ -98,7 +98,7 @@ def audit_lessons(target_date: date) -> dict:
                 "session_date": target_date,
             })
             # Increment violation count on the rule
-            uow.session.execute(text("""
+            await uow.session.execute(text("""
                 UPDATE guardian_rules SET source_violation_count = source_violation_count + 1,
                        updated_at = NOW()
                 WHERE id = :rule_id
@@ -107,12 +107,12 @@ def audit_lessons(target_date: date) -> dict:
     return report
 
 
-def compile_lesson_to_rule(lesson_id: int) -> int | None:
+async def compile_lesson_to_rule(lesson_id: int) -> int | None:
     """Compile a lesson into a guardian rule using LLM analysis."""
-    with open_unit_of_work(UnitOfWork) as uow:
-        row = uow.session.execute(text(
+    async with UnitOfWork() as uow:
+        row = (await uow.session.execute(text(
             "SELECT id, content, salience, tags FROM memories WHERE id = :id"
-        ), {"id": lesson_id}).mappings().first()
+        ), {"id": lesson_id})).mappings().first()
         lesson = dict(row) if row else None
 
     if not lesson:
@@ -151,23 +151,23 @@ Return ONLY the JSON object, no other text."""
         return None
 
     # Insert the rule
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         # Check for duplicate name
-        existing = uow.session.execute(text(
+        existing = (await uow.session.execute(text(
             "SELECT id FROM guardian_rules WHERE name = :name"
-        ), {"name": parsed["name"]}).mappings().first()
+        ), {"name": parsed["name"]})).mappings().first()
         if existing:
             # Update existing rule's source lessons
-            row = uow.session.execute(text("""
+            row = (await uow.session.execute(text("""
                 UPDATE guardian_rules
                 SET source_lesson_ids = array_append(
                     COALESCE(source_lesson_ids, ARRAY[]::int[]), :lesson_id
                 ), updated_at = NOW()
                 WHERE name = :name RETURNING id
-            """), {"lesson_id": lesson_id, "name": parsed["name"]}).mappings().first()
+            """), {"lesson_id": lesson_id, "name": parsed["name"]})).mappings().first()
             return row["id"]
 
-        row = uow.session.execute(text("""
+        row = (await uow.session.execute(text("""
             INSERT INTO guardian_rules
                 (name, description, trigger_type, trigger_pattern,
                  required_evidence, check_description, source_lesson_ids,
@@ -185,11 +185,11 @@ Return ONLY the JSON object, no other text."""
             "check_description": parsed.get("check_description", ""),
             "source_lesson_ids": [lesson_id],
             "trust_level_required": 0,
-        }).mappings().first()
+        })).mappings().first()
         rule_id = row["id"]
 
         # Also create checklist item
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             INSERT INTO checklist_items (category, check_text, source_rule_id, priority)
             VALUES (:category, :check_text, :source_rule_id, :priority)
         """), {
@@ -202,38 +202,38 @@ Return ONLY the JSON object, no other text."""
     return rule_id
 
 
-def escalate_rule(rule_id: int):
+async def escalate_rule(rule_id: int):
     """Make a rule stricter when it keeps getting violated."""
-    with open_unit_of_work(UnitOfWork) as uow:
-        uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        await uow.session.execute(text("""
             UPDATE guardian_rules SET
                 trust_level_required = GREATEST(0, trust_level_required - 1),
                 updated_at = NOW()
             WHERE id = :rule_id
         """), {"rule_id": rule_id})
         # Bump checklist priority
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             UPDATE checklist_items SET
                 priority = GREATEST(1, priority - 1)
             WHERE source_rule_id = :rule_id
         """), {"rule_id": rule_id})
 
 
-def generate_checklist():
+async def generate_checklist():
     """Regenerate checklist_items and persist the public checklist markdown.
 
     The checklist is runtime-private operator context. It no longer edits root
     prompt files, which makes the repository safe to publish without shipping
     personalized agent prompts.
     """
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         # Clear old checklist items and regenerate from rules
-        uow.session.execute(text("DELETE FROM checklist_items"))
-        rows = uow.session.execute(text("""
+        await uow.session.execute(text("DELETE FROM checklist_items"))
+        rows = (await uow.session.execute(text("""
             SELECT id, name, check_description, trigger_type, trigger_pattern
             FROM guardian_rules WHERE active = true
             ORDER BY times_bounced DESC, source_violation_count DESC
-        """)).mappings().all()
+        """))).mappings().all()
         rules = [dict(r) for r in rows]
 
     for rule in rules:
@@ -251,14 +251,14 @@ def generate_checklist():
             category = "process"
 
         # Priority: more violations = higher priority
-        with open_unit_of_work(UnitOfWork) as uow:
-            stats = uow.session.execute(text(
+        async with UnitOfWork() as uow:
+            stats = (await uow.session.execute(text(
                 "SELECT source_violation_count, times_bounced FROM guardian_rules WHERE id = :id"
-            ), {"id": rule["id"]}).mappings().first()
+            ), {"id": rule["id"]})).mappings().first()
             violations = (stats["source_violation_count"] or 0) + (stats["times_bounced"] or 0)
             priority = max(1, 5 - violations)  # More violations -> lower number -> higher priority
 
-            uow.session.execute(text("""
+            await uow.session.execute(text("""
                 INSERT INTO checklist_items (category, check_text, source_rule_id, priority)
                 VALUES (:category, :check_text, :source_rule_id, :priority)
             """), {
@@ -269,7 +269,7 @@ def generate_checklist():
             })
 
     from brain.systems.quality.guardian import get_scout_checklist
-    checklist_md = get_scout_checklist()
+    checklist_md = await get_scout_checklist()
     _write_agent_checklist(checklist_md)
 
 
@@ -281,24 +281,24 @@ def _write_agent_checklist(checklist_md: str) -> Path:
     return checklist_path
 
 
-def compile_all_high_salience(min_salience: float = 7.0) -> dict:
+async def compile_all_high_salience(min_salience: float = 7.0) -> dict:
     """Compile all uncompiled high-salience lessons into rules."""
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         # Get already-compiled lesson IDs
-        rule_rows = uow.session.execute(text(
+        rule_rows = (await uow.session.execute(text(
             "SELECT source_lesson_ids FROM guardian_rules WHERE source_lesson_ids IS NOT NULL"
-        )).mappings().all()
+        ))).mappings().all()
         compiled_ids = set()
         for row in rule_rows:
             if row["source_lesson_ids"]:
                 compiled_ids.update(row["source_lesson_ids"])
 
         # Get uncompiled high-salience lessons
-        lesson_rows = uow.session.execute(text("""
+        lesson_rows = (await uow.session.execute(text("""
             SELECT id, content, salience FROM memories
             WHERE memory_type = 'lesson' AND salience >= :min_salience AND NOT archived
             ORDER BY salience DESC
-        """), {"min_salience": min_salience}).mappings().all()
+        """), {"min_salience": min_salience})).mappings().all()
         lessons = [dict(r) for r in lesson_rows]
 
     results = {"compiled": [], "skipped": [], "failed": []}
@@ -308,7 +308,7 @@ def compile_all_high_salience(min_salience: float = 7.0) -> dict:
             results["skipped"].append({"id": lesson["id"], "reason": "already compiled"})
             continue
 
-        rule_id = compile_lesson_to_rule(lesson["id"])
+        rule_id = await compile_lesson_to_rule(lesson["id"])
         if rule_id:
             results["compiled"].append({"lesson_id": lesson["id"], "rule_id": rule_id})
         else:
@@ -316,6 +316,6 @@ def compile_all_high_salience(min_salience: float = 7.0) -> dict:
 
     # Regenerate checklist after compilation
     if results["compiled"]:
-        generate_checklist()
+        await generate_checklist()
 
     return results

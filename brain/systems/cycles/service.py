@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -10,7 +11,6 @@ from croniter import croniter
 from sqlalchemy import and_, or_, select
 
 from brain.app.api.routers.cortex._helpers import _parse_message_type
-from brain.platform.async_bridge import run_async_from_sync
 from brain.systems.runs.cortex import RunAdmissionRequest, async_admit_run
 from brain.systems.cortex.events import publish
 from brain.platform.db.models.cycle import Cycle, CycleRun
@@ -288,18 +288,6 @@ def _cycle_idea_title(cycle: Cycle, scheduled_for: datetime, *, per_run: bool) -
     return f"{cycle.name} - {local_time.strftime('%b %d %I:%M %p')}"
 
 
-def _idea_has_active_run(session, idea_id: str) -> bool:
-    stmt = (
-        select(AgentRun.id)
-        .where(
-            AgentRun.thread_id == idea_id,
-            AgentRun.status.in_(ACTIVE_RUN_STATUSES),
-        )
-        .limit(1)
-    )
-    return session.execute(stmt).first() is not None
-
-
 async def _async_idea_has_active_run(session, idea_id: str) -> bool:
     stmt = (
         select(AgentRun.id)
@@ -410,71 +398,6 @@ def _cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
     return f"{header}{cycle.prompt[:2000]}"
 
 
-def _append_cycle_thread_message(
-    session,
-    idea: Idea,
-    cycle: Cycle,
-    cycle_run: CycleRun,
-    owner: User | None,
-) -> tuple[dict, dict | None]:
-    current_status = idea.status
-    metadata = {
-        "source": "cycle",
-        "cycle_id": cycle.id,
-        "cycle_run_id": cycle_run.id,
-        "launch_envelope": _cycle_launch_envelope(cycle, cycle_run),
-    }
-    thread_msg = IdeaThread(
-        idea_id=idea.id,
-        role="user",
-        content=cycle.prompt,
-        attachments=[],
-        metadata_=metadata,
-        user_id=cycle.user_id,
-        message_type=_parse_message_type(cycle.prompt, "user"),
-    )
-    session.add(thread_msg)
-    session.flush()
-
-    new_status = None
-    if current_status in ("needs_input", "unread_reply", "emerged"):
-        new_status = "active"
-
-    status_payload = None
-    if new_status and new_status != current_status:
-        idea.status = new_status
-        idea.updated_at = datetime.now(timezone.utc)
-        session.add(
-            IdeaStateLog(
-                idea_id=idea.id,
-                from_state=current_status,
-                to_state=new_status,
-                trigger="auto_cycle_message",
-            )
-        )
-        status_payload = {
-            "idea_id": idea.id,
-            "old_status": current_status,
-            "new_status": new_status,
-        }
-
-    message_payload = {
-        "id": thread_msg.id,
-        "idea_id": idea.id,
-        "role": thread_msg.role,
-        "content": thread_msg.content,
-        "attachments": [],
-        "metadata": thread_msg.metadata_,
-        "user_id": cycle.user_id,
-        "message_type": thread_msg.message_type,
-        "created_at": thread_msg.created_at.isoformat() if thread_msg.created_at else None,
-    }
-    if owner:
-        message_payload["user_name"] = owner.name
-        message_payload["user_color"] = owner.color
-    return message_payload, status_payload
-
-
 async def _async_append_cycle_thread_message(
     session,
     idea: Idea,
@@ -558,46 +481,6 @@ def _finalize_cycle_run(
     cycle.last_error = error
 
 
-async def async_create_cycle_run_record(cycle_id: int, *, scheduled_for: datetime, prompt_snapshot: str) -> int:
-    async with UnitOfWork() as uow:
-        run = CycleRun(
-            cycle_id=cycle_id,
-            scheduled_for=scheduled_for,
-            prompt_snapshot=prompt_snapshot,
-            status="queued",
-        )
-        uow.session.add(run)
-        await uow.session.flush()
-        return run.id
-
-
-def create_cycle_run_record(cycle_id: int, *, scheduled_for: datetime, prompt_snapshot: str) -> int:
-    return run_async_from_sync(
-        async_create_cycle_run_record(
-            cycle_id,
-            scheduled_for=scheduled_for,
-            prompt_snapshot=prompt_snapshot,
-        ),
-        thread_name="cycles-sync-async-bridge",
-    )
-
-
-async def _async_load_cycle_prompt(cycle_id: int) -> str:
-    async with UnitOfWork() as uow:
-        cycle = await uow.session.get(Cycle, cycle_id)
-        if not cycle or cycle.deleted_at is not None:
-            raise ValueError("Cycle not found")
-        return cycle.prompt
-
-
-def _load_cycle_prompt(cycle_id: int) -> str:
-    return run_async_from_sync(_async_load_cycle_prompt(cycle_id), thread_name="cycles-sync-async-bridge")
-
-
-def run_cycle_now(cycle_id: int) -> dict:
-    return run_async_from_sync(async_run_cycle_now(cycle_id), thread_name="cycles-sync-async-bridge")
-
-
 async def async_run_cycle_now(cycle_id: int) -> dict:
     scheduled_for = datetime.now(timezone.utc)
     async with UnitOfWork() as uow:
@@ -663,13 +546,6 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
         await async_execute_cycle_run(run_id)
 
     return claimed_run_ids
-
-
-def schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
-    return run_async_from_sync(
-        async_schedule_due_cycles_once(limit=limit),
-        thread_name="cycles-sync-async-bridge",
-    )
 
 
 async def async_execute_cycle_run(run_id: int) -> None:
@@ -813,10 +689,6 @@ async def async_execute_cycle_run(run_id: int) -> None:
         )
 
 
-def execute_cycle_run(run_id: int) -> None:
-    return run_async_from_sync(async_execute_cycle_run(run_id), thread_name="cycles-sync-async-bridge")
-
-
 async def async_finalize_cycle_run_from_run(
     run_id: int,
     *,
@@ -851,7 +723,5 @@ def finalize_cycle_run_from_run(
     status: str,
     error: str | None = None,
 ) -> None:
-    return run_async_from_sync(
-        async_finalize_cycle_run_from_run(run_id, status=status, error=error),
-        thread_name="cycles-sync-async-bridge",
-    )
+    with asyncio.Runner() as runner:
+        runner.run(async_finalize_cycle_run_from_run(run_id, status=status, error=error))

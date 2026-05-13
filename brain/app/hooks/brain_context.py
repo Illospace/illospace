@@ -11,6 +11,7 @@ Usage:
 Output: JSON with relevant_memories, guardrails, and warnings.
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -18,9 +19,6 @@ import inspect
 from typing import Any
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
-
-from brain.platform.async_bridge import run_async_from_sync
-
 
 async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
@@ -139,11 +137,9 @@ def get_context(
     user_id: str | None = None,
     org_id: str | None = None,
 ) -> dict:
-    """Sync wrapper for CLI/hooks that cannot await the async context lookup."""
-    return run_async_from_sync(
-        async_get_context(message, user_id=user_id, org_id=org_id),
-        thread_name="brain-context-sync-async-bridge",
-    )
+    """Sync facade for legacy hooks that cannot yet await the async lookup."""
+    with asyncio.Runner() as runner:
+        return runner.run(async_get_context(message, user_id=user_id, org_id=org_id))
 
 
 def format_system_message(ctx: dict) -> str:
@@ -192,7 +188,8 @@ if __name__ == "__main__":
         sys.exit(1)
 
     message = sys.argv[1]
-    ctx = get_context(message)
+    with asyncio.Runner() as runner:
+        ctx = runner.run(async_get_context(message))
     system_msg = format_system_message(ctx)
 
     # Output JSON for the hook to parse

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import time
 from typing import Callable
@@ -23,7 +24,7 @@ class RunCancelToken:
     _last_check: float = field(default=0.0, init=False)
     _canceled: bool = field(default=False, init=False)
 
-    def is_set(self) -> bool:
+    async def a_is_set(self) -> bool:
         if self._canceled:
             return True
         now = time.monotonic()
@@ -31,8 +32,8 @@ class RunCancelToken:
             return False
         self._last_check = now
         try:
-            with self.uow_factory() as uow:
-                status = uow.session.scalar(
+            async with self.uow_factory() as uow:
+                status = await uow.session.scalar(
                     select(AgentRunRow.status).where(AgentRunRow.id == int(self.run_id)).limit(1)
                 )
         except Exception:
@@ -43,6 +44,15 @@ class RunCancelToken:
             return False
         self._canceled = status_value in TERMINAL_RUN_STATUSES
         return self._canceled
+
+    def is_set(self) -> bool:
+        if self._canceled:
+            return True
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.a_is_set())
+        return False
 
 
 __all__ = ["RunCancelToken"]

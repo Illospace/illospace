@@ -56,10 +56,18 @@ def _allow_ws_browser_session(monkeypatch, ws_router, *, allowed_org_id: str = "
             return None
         return SimpleNamespace(id=session_id, idea_id="idea-123", active=True, _idea_org_id=org_id)
 
+    async def fake_get_session_record_for_org_async(session_id: str, *, org_id: str | None):
+        return fake_get_session_record_for_org(session_id, org_id=org_id)
+
     monkeypatch.setattr(
         ws_router.browser_sessions,
         "get_session_record_for_org",
         fake_get_session_record_for_org,
+    )
+    monkeypatch.setattr(
+        ws_router.browser_sessions,
+        "get_session_record_for_org_async",
+        fake_get_session_record_for_org_async,
     )
 
 
@@ -582,21 +590,21 @@ async def test_browser_service_records_browser_harness_resource_summary(monkeypa
         def add(self, obj):
             obj.id = "sess-harness"
 
-        def flush(self):
+        async def flush(self):
             return None
 
-        def refresh(self, obj):
+        async def refresh(self, obj):
             return None
 
-        def get(self, model, session_id):
+        async def get(self, model, session_id):
             return record
 
     class _UOW:
-        def __enter__(self):
+        async def __aenter__(self):
             self.session = _Session()
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type, exc, tb):
             return False
 
     monkeypatch.setattr("brain.platform.browser.service.UnitOfWork", lambda: _UOW())
@@ -654,18 +662,18 @@ async def test_browser_service_marks_start_failure_before_reraising(monkeypatch)
         def add(self, obj):
             obj.id = "sess-start-fail"
 
-        def flush(self):
+        async def flush(self):
             return None
 
-        def refresh(self, obj):
+        async def refresh(self, obj):
             return None
 
     class _UOW:
-        def __enter__(self):
+        async def __aenter__(self):
             self.session = _Session()
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type, exc, tb):
             return False
 
     monkeypatch.setattr("brain.platform.browser.service.UnitOfWork", lambda: _UOW())
@@ -723,21 +731,21 @@ async def test_browser_service_recycles_dirty_active_session_before_creating_new
         def add(self, obj):
             obj.id = "sess-new"
 
-        def flush(self):
+        async def flush(self):
             return None
 
-        def refresh(self, obj):
+        async def refresh(self, obj):
             return None
 
-        def get(self, model, session_id):
+        async def get(self, model, session_id):
             return dirty_record
 
     class _UOW:
-        def __enter__(self):
+        async def __aenter__(self):
             self.session = _Session()
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type, exc, tb):
             return False
 
     monkeypatch.setattr("brain.platform.browser.service.UnitOfWork", lambda: _UOW())
@@ -790,18 +798,18 @@ async def test_browser_service_captures_visible_frame_when_agent_opens_session(m
         def add(self, obj):
             obj.id = "sess-visible"
 
-        def flush(self):
+        async def flush(self):
             return None
 
-        def refresh(self, obj):
+        async def refresh(self, obj):
             return None
 
     class _UOW:
-        def __enter__(self):
+        async def __aenter__(self):
             self.session = _Session()
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type, exc, tb):
             return False
 
     monkeypatch.setattr("brain.platform.browser.service.UnitOfWork", lambda: _UOW())

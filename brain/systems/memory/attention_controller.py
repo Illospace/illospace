@@ -23,7 +23,7 @@ from brain.platform.db.models.memory import Memory
 from brain.platform.db.models.memory_dag import MemorySummary
 from brain.platform.db.repositories.memory_visibility import MemoryVisibilityContext, memory_is_visible
 from brain.platform.db.models.system import RetrievalDecision, RetrievalItemFeedback
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 logger = logging.getLogger(__name__)
 
@@ -744,7 +744,7 @@ class AttentionController:
             fallback_reason=fallback_reason,
         )
 
-    def observe(
+    async def observe(
         self,
         *,
         stage: str,
@@ -786,20 +786,20 @@ class AttentionController:
 
         if self.enabled:
             try:
-                decision = self._persist_decision(decision, ranked, run_id=run_id)
+                decision = await self._persist_decision(decision, ranked, run_id=run_id)
             except Exception as exc:  # pragma: no cover - defensive shadow logging
                 logger.debug("Attention decision logging failed: %s", exc)
 
         return decision
 
-    def _persist_decision(
+    async def _persist_decision(
         self,
         decision: AttentionDecision,
         ranked: Sequence[AttentionCandidate],
         *,
         run_id: int | None = None,
     ) -> AttentionDecision:
-        with open_unit_of_work(UnitOfWork) as uow:
+        async with UnitOfWork() as uow:
             decision_row = RetrievalDecision(
                 run_id=run_id,
                 stage=decision.stage,
@@ -819,7 +819,7 @@ class AttentionController:
                 decision_debug=decision.debug or {},
             )
             uow.session.add(decision_row)
-            uow.session.flush()
+            await uow.session.flush()
 
             if self.usefulness_write_enabled:
                 selected_keys = set(decision.selected_item_ids)
@@ -834,7 +834,7 @@ class AttentionController:
                     )
                     row = RetrievalItemFeedback(**payload)
                     uow.session.add(row)
-                uow.session.flush()
+                await uow.session.flush()
 
             return AttentionDecision(
                 **{
@@ -843,7 +843,7 @@ class AttentionController:
                 }
             )
 
-    def record_usefulness(
+    async def record_usefulness(
         self,
         *,
         retrieval_decision_id: int,
@@ -868,7 +868,7 @@ class AttentionController:
             service_retrieval=service_retrieval,
         )
 
-        with open_unit_of_work(UnitOfWork) as uow:
+        async with UnitOfWork() as uow:
             stmt = select(RetrievalItemFeedback).where(
                 RetrievalItemFeedback.retrieval_decision_id == retrieval_decision_id,
             )
@@ -883,7 +883,7 @@ class AttentionController:
             if summary_id is not None:
                 stmt = stmt.where(RetrievalItemFeedback.summary_id == summary_id)
 
-            row = uow.session.scalars(stmt.order_by(RetrievalItemFeedback.id.asc())).first()
+            row = (await uow.session.scalars(stmt.order_by(RetrievalItemFeedback.id.asc()))).first()
             if row is None:
                 return False
 
@@ -904,7 +904,7 @@ class AttentionController:
             row.feedback_at = datetime.now(timezone.utc)
             return True
 
-    def record_lazy_load(
+    async def record_lazy_load(
         self,
         *,
         retrieval_decision_id: int,
@@ -922,7 +922,7 @@ class AttentionController:
             service_retrieval=service_retrieval,
         )
 
-        with open_unit_of_work(UnitOfWork) as uow:
+        async with UnitOfWork() as uow:
             stmt = select(RetrievalItemFeedback).where(
                 RetrievalItemFeedback.retrieval_decision_id == retrieval_decision_id,
             )
@@ -936,14 +936,14 @@ class AttentionController:
                 stmt = stmt.where(RetrievalItemFeedback.memory_id == item_id)
             if summary_id is not None:
                 stmt = stmt.where(RetrievalItemFeedback.summary_id == summary_id)
-            row = uow.session.scalars(stmt.order_by(RetrievalItemFeedback.id.asc())).first()
+            row = (await uow.session.scalars(stmt.order_by(RetrievalItemFeedback.id.asc()))).first()
             if row is None:
                 return False
             row.lazy_loaded = True
             row.feedback_at = datetime.now(timezone.utc)
             return True
 
-    def load_lazy_candidates(
+    async def load_lazy_candidates(
         self,
         *,
         retrieval_decision_id: int,
@@ -961,7 +961,7 @@ class AttentionController:
             service_retrieval=service_retrieval,
         )
 
-        with open_unit_of_work(UnitOfWork) as uow:
+        async with UnitOfWork() as uow:
             stmt = select(RetrievalItemFeedback).where(
                 RetrievalItemFeedback.retrieval_decision_id == retrieval_decision_id,
                 RetrievalItemFeedback.lazy_load_eligible.is_(True),
@@ -973,7 +973,7 @@ class AttentionController:
                     stmt = stmt.where(RetrievalItemFeedback.org_id == visibility_context.org_id)
                 else:
                     stmt = stmt.where(RetrievalItemFeedback.org_id.is_(None))
-            feedback_rows = list(uow.session.scalars(stmt).all())
+            feedback_rows = list((await uow.session.scalars(stmt)).all())
             if limit is not None:
                 feedback_rows = feedback_rows[: max(0, int(limit))]
 
@@ -981,7 +981,7 @@ class AttentionController:
             for row in feedback_rows:
                 payload: dict[str, Any] | None = None
                 if row.memory_id is not None:
-                    mem = uow.session.get(Memory, row.memory_id)
+                    mem = await uow.session.get(Memory, row.memory_id)
                     if mem is not None and memory_is_visible(mem, visibility_context):
                         payload = {
                             "id": mem.id,
@@ -995,7 +995,7 @@ class AttentionController:
                             "tenant_context": _tenant_context_payload(visibility_context),
                         }
                 elif row.summary_id is not None:
-                    summary = uow.session.get(MemorySummary, row.summary_id)
+                    summary = await uow.session.get(MemorySummary, row.summary_id)
                     if summary is not None and memory_is_visible(summary, visibility_context):
                         payload = {
                             "id": summary.id,
@@ -1027,7 +1027,7 @@ class AttentionController:
         return selection.to_dict()
 
 
-def observe_retrieval(
+async def observe_retrieval(
     *,
     stage: str,
     query_text: str,
@@ -1051,7 +1051,7 @@ def observe_retrieval(
         preload_item_limit=preload_item_limit,
         usefulness_write_enabled=usefulness_write_enabled,
     )
-    decision = controller.observe(
+    decision = await controller.observe(
         stage=stage,
         query_text=query_text,
         candidates=candidates,

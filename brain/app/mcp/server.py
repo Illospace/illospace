@@ -26,6 +26,7 @@ Public release note: internal issue links were removed from source comments.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import inspect
 import json
 import logging
@@ -41,7 +42,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 
 from sqlalchemy import text
 
-from brain.platform.async_bridge import run_async_from_sync
 from brain.systems.memory.attention_controller import AttentionController, observe_retrieval
 from brain.platform.db.repositories.memories import MemoryRepository
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -52,6 +52,18 @@ from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_
 logger = logging.getLogger("mcp_brain")
 
 # ── Tool Implementations ─────────────────────────────────────
+
+
+def _run_mcp_sync(awaitable: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        with asyncio.Runner() as runner:
+            return runner.run(awaitable)
+    close = getattr(awaitable, "close", None)
+    if callable(close):
+        close()
+    raise RuntimeError("MCP sync facade cannot run inside an active event loop; await the async tool API")
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -216,11 +228,6 @@ async def _async_log_retrieval(query: str, results: list) -> None:
         logger.debug(f"retrieval_log insert failed (non-critical): {e}")
 
 
-def _log_retrieval(query: str, results: list) -> None:
-    """Sync MCP compatibility wrapper for retrieval logging."""
-    return run_async_from_sync(_async_log_retrieval(query, results), thread_name="mcp-sync-async-bridge")
-
-
 async def async_tool_brain_recall(
     query: str,
     limit: int = 3,
@@ -313,7 +320,7 @@ def tool_brain_recall(
     expand_lazy_load: bool | None = None,
     service_retrieval: bool = False,
 ) -> dict:
-    return run_async_from_sync(
+    return _run_mcp_sync(
         async_tool_brain_recall(
             query=query,
             limit=limit,
@@ -323,7 +330,6 @@ def tool_brain_recall(
             expand_lazy_load=expand_lazy_load,
             service_retrieval=service_retrieval,
         ),
-        thread_name="mcp-sync-async-bridge",
     )
 
 
@@ -360,7 +366,7 @@ async def _finalize_recall_response(
                 "fallback_reason": "missing_user_context",
             },
         }
-    attention_decision = observe_retrieval(
+    attention_decision = await observe_retrieval(
         stage="brain_recall",
         query_text=query,
         candidates=memories,
@@ -378,7 +384,7 @@ async def _finalize_recall_response(
         else os.getenv("ATTENTION_LAZY_LOAD_ENABLED", "0").strip().lower() not in {"0", "false", "no"}
     )
     if should_expand and selection.lazy_load_eligible and retrieval_decision_id is not None:
-        lazy_loaded_memories = AttentionController().load_lazy_candidates(
+        lazy_loaded_memories = await AttentionController().load_lazy_candidates(
             retrieval_decision_id=int(retrieval_decision_id),
             user_id=user_id,
             org_id=org_id,
@@ -451,7 +457,7 @@ async def async_tool_brain_guardrails(skill: str | None = None) -> dict:
 
 
 def tool_brain_guardrails(skill: str | None = None) -> dict:
-    return run_async_from_sync(async_tool_brain_guardrails(skill=skill), thread_name="mcp-sync-async-bridge")
+    return _run_mcp_sync(async_tool_brain_guardrails(skill=skill))
 
 
 async def async_tool_brain_skills(task: str) -> dict:
@@ -844,7 +850,7 @@ async def async_tool_brain_skills(task: str) -> dict:
 
 
 def tool_brain_skills(task: str) -> dict:
-    return run_async_from_sync(async_tool_brain_skills(task), thread_name="mcp-sync-async-bridge")
+    return _run_mcp_sync(async_tool_brain_skills(task))
 
 
 async def async_tool_skill_view(
@@ -924,9 +930,8 @@ def tool_skill_view(
     section: str = "procedure",
     max_chars: int = 12000,
 ) -> dict:
-    return run_async_from_sync(
+    return _run_mcp_sync(
         async_tool_skill_view(name=name, section=section, max_chars=max_chars),
-        thread_name="mcp-sync-async-bridge",
     )
 
 
@@ -989,9 +994,8 @@ def tool_skill_asset(
     path: str,
     max_chars: int = 12000,
 ) -> dict:
-    return run_async_from_sync(
+    return _run_mcp_sync(
         async_tool_skill_asset(name=name, path=path, max_chars=max_chars),
-        thread_name="mcp-sync-async-bridge",
     )
 
 
@@ -1082,7 +1086,7 @@ def tool_brain_encode(
     confidence: float | None = None,
     evidence: dict | None = None,
 ) -> dict:
-    return run_async_from_sync(
+    return _run_mcp_sync(
         async_tool_brain_encode(
             content=content,
             memory_type=memory_type,
@@ -1098,7 +1102,6 @@ def tool_brain_encode(
             confidence=confidence,
             evidence=evidence,
         ),
-        thread_name="mcp-sync-async-bridge",
     )
 
 
@@ -1274,19 +1277,21 @@ def tool_vault_secret_prompt(
     return response
 
 
-def tool_runtime_settings(
+async def tool_runtime_settings(
     provider: str | None = None,
     user_id: str | None = None,
     org_id: str | None = None,
 ) -> dict:
     """Inspect active runtime/provider/auth settings for the current user."""
-    from brain.systems.services.runtime_introspection import get_runtime_settings_snapshot
+    from brain.systems.services.runtime_introspection import async_get_runtime_settings_snapshot
 
-    return get_runtime_settings_snapshot(
-        user_id=user_id,
-        org_id=org_id,
-        provider=provider,
-    )
+    async with UnitOfWork() as uow:
+        return await async_get_runtime_settings_snapshot(
+            uow.session,
+            user_id=user_id,
+            org_id=org_id,
+            provider=provider,
+        )
 
 
 # ── MCP Protocol Layer ───────────────────────────────────────
@@ -1520,8 +1525,15 @@ async def async_handle_request(request: dict) -> dict:
 
 
 def handle_request(request: dict) -> dict:
-    """Sync MCP protocol wrapper around async request handling."""
-    return run_async_from_sync(async_handle_request(request), thread_name="mcp-sync-async-bridge")
+    """Sync MCP protocol boundary for stdio/stdlib HTTP transports."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("handle_request cannot run inside an active event loop; await async_handle_request")
+    with asyncio.Runner() as runner:
+        return runner.run(async_handle_request(request))
 
 
 def run_stdio():

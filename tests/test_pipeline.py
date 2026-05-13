@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, AsyncIterator
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.schema import CreateTable
 
 from brain.platform.db.models.agent_run import (
     AgentRunArtifactRow,
@@ -19,27 +20,29 @@ from brain.platform.db.models.agent_run import (
 
 
 @pytest.fixture
-def session_factory() -> Iterator[Callable[[], Session]]:
+async def session_factory() -> AsyncIterator[Callable[[], AsyncSession]]:
+    pytest.importorskip("aiosqlite")
     _patch_sqlite_for_agent_run_tables()
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    for table in [
-        AgentRunRow.__table__,
-        AgentRunEventRow.__table__,
-        AgentRunArtifactRow.__table__,
-    ]:
-        table.create(engine, checkfirst=True)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    engine = create_async_engine("sqlite+aiosqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    async with engine.begin() as connection:
+        for table in [
+            AgentRunRow.__table__,
+            AgentRunEventRow.__table__,
+            AgentRunArtifactRow.__table__,
+        ]:
+            await connection.execute(CreateTable(table, if_not_exists=True))
+    factory = async_sessionmaker(bind=engine, expire_on_commit=False)
     yield factory
-    engine.dispose()
+    await engine.dispose()
 
 
-def test_deep_graph_shape_is_agent_run_children_and_artifacts(session_factory):
+async def test_deep_graph_shape_is_agent_run_children_and_artifacts(session_factory):
     from brain.systems.runs.domain import AgentRunArtifact, AgentRunRequest, RunProfile, RunRecipe
-    from brain.systems.runs.store import AgentRunStore
+    from brain.systems.runs.store import AsyncAgentRunStore
 
     session = session_factory()
-    store = AgentRunStore(session)
-    parent = store.create_run(
+    store = AsyncAgentRunStore(session)
+    parent = await store.create_run(
         AgentRunRequest(
             thread_id="idea-1",
             message="Investigate, implement, and verify the cleanup.",
@@ -48,7 +51,7 @@ def test_deep_graph_shape_is_agent_run_children_and_artifacts(session_factory):
         )
     )
 
-    investigate = store.create_child_run(
+    investigate = await store.create_child_run(
         parent,
         recipe=RunRecipe.WORKER,
         profile=RunProfile.DEEP,
@@ -64,14 +67,14 @@ def test_deep_graph_shape_is_agent_run_children_and_artifacts(session_factory):
             },
         },
     )
-    same_investigate = store.create_child_run(
+    same_investigate = await store.create_child_run(
         parent,
         recipe=RunRecipe.WORKER,
         profile=RunProfile.DEEP,
         step_key="worker:1:investigate",
         message="Gather context and evidence.",
     )
-    execute = store.create_child_run(
+    execute = await store.create_child_run(
         parent,
         recipe=RunRecipe.WORKER,
         profile=RunProfile.DEEP,
@@ -88,7 +91,7 @@ def test_deep_graph_shape_is_agent_run_children_and_artifacts(session_factory):
         },
     )
 
-    store.append_artifact(
+    await store.append_artifact(
         AgentRunArtifact(
             run_id=parent.id,
             root_run_id=parent.root_run_id,
@@ -102,7 +105,7 @@ def test_deep_graph_shape_is_agent_run_children_and_artifacts(session_factory):
             },
         )
     )
-    store.append_artifact(
+    await store.append_artifact(
         AgentRunArtifact(
             run_id=investigate.id,
             root_run_id=parent.root_run_id,
@@ -112,10 +115,10 @@ def test_deep_graph_shape_is_agent_run_children_and_artifacts(session_factory):
             payload={"status": "completed", "evidence": {"artifact_types": ["file_observation"]}},
         )
     )
-    session.commit()
+    await session.commit()
 
     assert same_investigate.id == investigate.id
-    children = store.child_runs(parent.id)
+    children = await store.child_runs(parent.id)
     assert [child.id for child in children] == [investigate.id, execute.id]
     assert {child.parent_run_id for child in children} == {parent.id}
     assert {child.root_run_id for child in children} == {parent.id}
@@ -123,26 +126,26 @@ def test_deep_graph_shape_is_agent_run_children_and_artifacts(session_factory):
     assert children[0].metadata_["parent_step_key"] == "worker:1:investigate"
     assert children[0].metadata_["worker_scope"]["role"] == "investigate"
 
-    child_created_events = session.scalars(
+    child_created_events = (await session.scalars(
         select(AgentRunEventRow)
         .where(AgentRunEventRow.run_id == parent.id, AgentRunEventRow.event_type == "run.child_created")
         .order_by(AgentRunEventRow.sequence_no.asc())
-    ).all()
+    )).all()
     assert [event.payload["child_run_id"] for event in child_created_events] == [investigate.id, execute.id]
 
-    parent_artifacts = session.scalars(
+    parent_artifacts = (await session.scalars(
         select(AgentRunArtifactRow)
         .where(AgentRunArtifactRow.run_id == parent.id)
         .order_by(AgentRunArtifactRow.id.asc())
-    ).all()
+    )).all()
     assert [artifact.artifact_type for artifact in parent_artifacts] == ["deep_plan"]
     assert parent_artifacts[0].payload["workers"][0]["child_run_id"] == investigate.id
 
-    worker_artifacts = session.scalars(
+    worker_artifacts = (await session.scalars(
         select(AgentRunArtifactRow)
         .where(AgentRunArtifactRow.run_id == investigate.id)
         .order_by(AgentRunArtifactRow.id.asc())
-    ).all()
+    )).all()
     assert [artifact.artifact_type for artifact in worker_artifacts] == ["worker_result"]
     assert worker_artifacts[0].text == "Found the canonical AgentRun surface."
 

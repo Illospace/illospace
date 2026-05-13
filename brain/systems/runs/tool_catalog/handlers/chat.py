@@ -1,21 +1,10 @@
 """Native chat tool handlers for AgentRun."""
 from __future__ import annotations
 
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import json
 from typing import Any
 
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, logger
-
-
-def _run_coro_sync(coro):
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(asyncio.run, coro).result()
 
 
 def _current_chat_trigger() -> dict[str, Any]:
@@ -64,7 +53,7 @@ async def _publish_chat_events(publish, summaries: dict[str, dict[str, Any]]) ->
     await _publish_notification_summary_payloads(summaries)
 
 
-def _handle_post_chat_message(
+async def _handle_post_chat_message(
     body: str,
     conversation_id: str | None = None,
     thread_root_message_id: int | None = None,
@@ -89,35 +78,32 @@ def _handle_post_chat_message(
     if not actor_user_id or not org_id:
         return json.dumps({"error": "post_chat_message requires a user-scoped org run"})
 
-    async def _create_message():
-        async with UnitOfWork() as uow:
-            message, publish = await ChatService(
-                uow.session,
-                {
-                    "id": actor_user_id,
-                    "org_id": org_id,
-                    "role": "member",
-                },
-            ).post_agent_message(
-                conversation_id=target_conversation_id,
-                body=body,
-                thread_root_message_id=target_thread_root_message_id,
-                metadata={
-                    "created_by_run_id": _current_run_id(),
-                    "chat_trigger_message_id": trigger.get("message_id"),
-                },
-            )
-            summaries = await _notification_summary_payloads(
-                uow.session,
-                org_id=org_id,
-                user_ids=publish.member_ids,
-            )
-            return message.model_dump(mode="json"), publish, summaries
-
-    message_payload, publish, summaries = _run_coro_sync(_create_message())
+    async with UnitOfWork() as uow:
+        message, publish = await ChatService(
+            uow.session,
+            {
+                "id": actor_user_id,
+                "org_id": org_id,
+                "role": "member",
+            },
+        ).post_agent_message(
+            conversation_id=target_conversation_id,
+            body=body,
+            thread_root_message_id=target_thread_root_message_id,
+            metadata={
+                "created_by_run_id": _current_run_id(),
+                "chat_trigger_message_id": trigger.get("message_id"),
+            },
+        )
+        summaries = await _notification_summary_payloads(
+            uow.session,
+            org_id=org_id,
+            user_ids=publish.member_ids,
+        )
+        message_payload = message.model_dump(mode="json")
     if publish is not None:
         try:
-            _run_coro_sync(_publish_chat_events(publish, summaries))
+            await _publish_chat_events(publish, summaries)
         except Exception as exc:
             logger.warning("agent_chat_publish_failed: %s", exc)
     return json.dumps({"ok": True, "message": message_payload}, default=str)

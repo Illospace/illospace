@@ -1,50 +1,50 @@
 """Tests for memory quality gate."""
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 from brain.systems.quality.gate import check_quality, _adjust_salience, QualityResult
 
 
 class TestRejectsTooShort:
-    def test_rejects_very_short_default_salience(self):
-        result = check_quality("hi", salience=5.0, skip_duplicate_check=True)
+    async def test_rejects_very_short_default_salience(self):
+        result = await check_quality("hi", salience=5.0, skip_duplicate_check=True)
         assert not result.passed
         assert "too short" in result.reason
 
-    def test_rejects_empty(self):
-        result = check_quality("", salience=5.0, skip_duplicate_check=True)
+    async def test_rejects_empty(self):
+        result = await check_quality("", salience=5.0, skip_duplicate_check=True)
         assert not result.passed
 
-    def test_allows_short_with_high_salience(self):
-        result = check_quality("critical note", salience=9.0, skip_duplicate_check=True)
+    async def test_allows_short_with_high_salience(self):
+        result = await check_quality("critical note", salience=9.0, skip_duplicate_check=True)
         assert result.passed
 
-    def test_rejects_short_with_low_salience(self):
-        result = check_quality("some words", salience=3.0, skip_duplicate_check=True)
+    async def test_rejects_short_with_low_salience(self):
+        result = await check_quality("some words", salience=3.0, skip_duplicate_check=True)
         assert not result.passed
         assert "too short" in result.reason
 
 
 class TestRejectsTestArtifacts:
-    def test_rejects_cap_test(self):
-        result = check_quality("cap test", salience=10.0, skip_duplicate_check=True)
+    async def test_rejects_cap_test(self):
+        result = await check_quality("cap test", salience=10.0, skip_duplicate_check=True)
         assert not result.passed
         assert "test/debug artifact" in result.reason
 
-    def test_rejects_test_encode(self):
-        result = check_quality("test encode", salience=5.0, skip_duplicate_check=True)
+    async def test_rejects_test_encode(self):
+        result = await check_quality("test encode", salience=5.0, skip_duplicate_check=True)
         assert not result.passed
 
-    def test_rejects_hello_world(self):
-        result = check_quality("hello world", salience=5.0, skip_duplicate_check=True)
+    async def test_rejects_hello_world(self):
+        result = await check_quality("hello world", salience=5.0, skip_duplicate_check=True)
         assert not result.passed
 
 
 class TestRejectsNearDuplicate:
-    @patch("brain.systems.quality.gate._check_near_duplicate")
-    def test_rejects_when_duplicate_found(self, mock_dup):
+    @patch("brain.systems.quality.gate._check_near_duplicate", new_callable=AsyncMock)
+    async def test_rejects_when_duplicate_found(self, mock_dup):
         mock_dup.return_value = {"id": 42, "similarity": 0.95, "content": "existing memory"}
-        result = check_quality(
+        result = await check_quality(
             "This is a sufficiently long memory content for testing",
             salience=7.0,
         )
@@ -52,10 +52,10 @@ class TestRejectsNearDuplicate:
         assert "near-duplicate" in result.reason
         assert "#42" in result.reason
 
-    @patch("brain.systems.quality.gate._check_near_duplicate")
-    def test_passes_when_no_duplicate(self, mock_dup):
+    @patch("brain.systems.quality.gate._check_near_duplicate", new_callable=AsyncMock)
+    async def test_passes_when_no_duplicate(self, mock_dup):
         mock_dup.return_value = None
-        result = check_quality(
+        result = await check_quality(
             "This is a unique memory with enough content to pass length check",
             salience=7.0,
         )
@@ -63,16 +63,16 @@ class TestRejectsNearDuplicate:
 
 
 class TestAcceptsValidMemory:
-    def test_accepts_good_content(self):
-        result = check_quality(
+    async def test_accepts_good_content(self):
+        result = await check_quality(
             "Learned that the backend API should validate input before processing because Alex found a bug in production",
             salience=8.0,
             skip_duplicate_check=True,
         )
         assert result.passed
 
-    def test_accepts_medium_content(self):
-        result = check_quality(
+    async def test_accepts_medium_content(self):
+        result = await check_quality(
             "Refactored the database connection pool to use context managers",
             salience=6.0,
             skip_duplicate_check=True,
@@ -100,8 +100,8 @@ class TestAutoAdjustsSalience:
         adjusted = _adjust_salience(content, 10.0, "lesson")
         assert adjusted == 10.0
 
-    def test_quality_gate_returns_adjusted(self):
-        result = check_quality(
+    async def test_quality_gate_returns_adjusted(self):
+        result = await check_quality(
             "Short content here!!!!!!!!!!!", salience=9.0, skip_duplicate_check=True
         )
         assert result.passed

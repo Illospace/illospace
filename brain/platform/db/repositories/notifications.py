@@ -136,17 +136,6 @@ class NotificationEventRepository(BaseRepository[NotificationEvent]):
         existing.updated_at = datetime.now(timezone.utc)
         return existing
 
-    def list_for_user(
-        self,
-        user_id: str,
-        *,
-        unread_only: bool = True,
-        limit: int = 50,
-    ) -> Sequence[NotificationEvent]:
-        return self._session.scalars(
-            self._list_for_user_stmt(user_id, unread_only=unread_only, limit=limit)
-        ).all()
-
     async def a_list_for_user(
         self,
         user_id: str,
@@ -160,71 +149,12 @@ class NotificationEventRepository(BaseRepository[NotificationEvent]):
             )
         ).all()
 
-    def count_unread(self, user_id: str) -> int:
-        return int(self._session.scalar(self._count_unread_stmt(user_id)) or 0)
-
     async def a_count_unread(self, user_id: str) -> int:
         return int(await self._session.scalar(self._count_unread_stmt(user_id)) or 0)
-
-    def count_unread_by_source(self, user_id: str) -> dict[str, int]:
-        rows = self._session.execute(self._count_unread_by_source_stmt(user_id)).all()
-        return {str(source): int(count) for source, count in rows}
 
     async def a_count_unread_by_source(self, user_id: str) -> dict[str, int]:
         rows = (await self._session.execute(self._count_unread_by_source_stmt(user_id))).all()
         return {str(source): int(count) for source, count in rows}
-
-    def create_or_coalesce(
-        self,
-        *,
-        org_id: str,
-        user_id: str,
-        source: str,
-        kind: str,
-        actor_user_id: str | None,
-        title: str,
-        body: str | None,
-        coalesce_key: str,
-        payload: dict | None = None,
-        idea_id: str | None = None,
-        conversation_id: str | None = None,
-        thread_root_message_id: int | None = None,
-    ) -> NotificationEvent:
-        existing = self._session.scalars(
-            self._coalesced_unread_stmt(user_id, coalesce_key)
-        ).first()
-        if existing is not None:
-            return self._update_coalesced(
-                existing,
-                org_id=org_id,
-                source=source,
-                kind=kind,
-                actor_user_id=actor_user_id,
-                title=title,
-                body=body,
-                payload=payload,
-                idea_id=idea_id,
-                conversation_id=conversation_id,
-                thread_root_message_id=thread_root_message_id,
-            )
-
-        notification = self.create(
-            org_id=org_id,
-            user_id=user_id,
-            source=source,
-            kind=kind,
-            actor_user_id=actor_user_id,
-            idea_id=idea_id,
-            conversation_id=conversation_id,
-            thread_root_message_id=thread_root_message_id,
-            title=title,
-            body=body,
-            payload=payload,
-            coalesce_key=coalesce_key,
-            occurrence_count=1,
-            updated_at=datetime.now(timezone.utc),
-        )
-        return notification
 
     async def a_create_or_coalesce(
         self,
@@ -277,18 +207,6 @@ class NotificationEventRepository(BaseRepository[NotificationEvent]):
             updated_at=datetime.now(timezone.utc),
         )
 
-    def mark_read(self, notification_id: int, user_id: str) -> NotificationEvent | None:
-        notification = self._session.scalars(
-            self._notification_for_user_stmt(notification_id, user_id)
-        ).first()
-        if notification is None:
-            return None
-        if notification.read_at is None:
-            now = datetime.now(timezone.utc)
-            notification.read_at = now
-            notification.updated_at = now
-        return notification
-
     async def a_mark_read(self, notification_id: int, user_id: str) -> NotificationEvent | None:
         notification = (
             await self._session.scalars(
@@ -303,24 +221,8 @@ class NotificationEventRepository(BaseRepository[NotificationEvent]):
             notification.updated_at = now
         return notification
 
-    def mark_all_read(self, user_id: str) -> int:
-        notifications = self._session.scalars(self._unread_for_user_stmt(user_id)).all()
-        return self._touch_unread(notifications)
-
     async def a_mark_all_read(self, user_id: str) -> int:
         notifications = (await self._session.scalars(self._unread_for_user_stmt(user_id))).all()
-        return self._touch_unread(notifications)
-
-    def mark_read_for_idea(
-        self,
-        *,
-        user_id: str,
-        idea_id: str,
-        kinds: Sequence[str] | None = None,
-    ) -> int:
-        notifications = self._session.scalars(
-            self._unread_for_idea_stmt(user_id=user_id, idea_id=idea_id, kinds=kinds)
-        ).all()
         return self._touch_unread(notifications)
 
     async def a_mark_read_for_idea(
@@ -333,20 +235,6 @@ class NotificationEventRepository(BaseRepository[NotificationEvent]):
         notifications = (
             await self._session.scalars(
                 self._unread_for_idea_stmt(user_id=user_id, idea_id=idea_id, kinds=kinds)
-            )
-        ).all()
-        return self._touch_unread(notifications)
-
-    def mark_read_for_chat_conversation(
-        self,
-        *,
-        user_id: str,
-        conversation_id: str,
-    ) -> int:
-        notifications = self._session.scalars(
-            self._unread_for_chat_conversation_stmt(
-                user_id=user_id,
-                conversation_id=conversation_id,
             )
         ).all()
         return self._touch_unread(notifications)

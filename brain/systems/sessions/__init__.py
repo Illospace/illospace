@@ -7,11 +7,10 @@ normalization functions.
 from __future__ import annotations
 
 import inspect
+import asyncio
 import json
 import logging
 from typing import Any
-
-from brain.platform.async_bridge import run_async_from_sync
 
 logger = logging.getLogger("agent")
 
@@ -24,6 +23,18 @@ async def _maybe_await(value: Any) -> Any:
 
 async def _session_execute(session: Any, *args: Any, **kwargs: Any) -> Any:
     return await _maybe_await(session.execute(*args, **kwargs))
+
+
+def _run_session_sync(awaitable: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        with asyncio.Runner() as runner:
+            return runner.run(awaitable)
+    close = getattr(awaitable, "close", None)
+    if callable(close):
+        close()
+    raise RuntimeError("Session sync facade cannot run inside an active event loop; await the async session API")
 
 
 # ── Tool Pair Sanitization ────────────────────────────────────
@@ -207,10 +218,7 @@ async def async_load_session(session_id: str, user_id: str | None = None) -> tup
 
 def _load_session(session_id: str, user_id: str | None = None) -> tuple[list[dict], str | None]:
     """Sync agent-loop compatibility wrapper around async session load."""
-    return run_async_from_sync(
-        async_load_session(session_id, user_id=user_id),
-        thread_name="sessions-sync-async-bridge",
-    )
+    return _run_session_sync(async_load_session(session_id, user_id=user_id))
 
 
 async def async_save_session(
@@ -269,7 +277,7 @@ def _save_session(
     user_id: str | None = None,
 ):
     """Sync agent-loop compatibility wrapper around async session save."""
-    return run_async_from_sync(
+    return _run_session_sync(
         async_save_session(
             session_id,
             messages,
@@ -279,8 +287,7 @@ def _save_session(
             cache_read,
             cache_creation,
             user_id=user_id,
-        ),
-        thread_name="sessions-sync-async-bridge",
+        )
     )
 
 
@@ -315,10 +322,7 @@ async def async_load_session_handoff(session_id: str, user_id: str | None = None
 
 def _load_session_handoff(session_id: str, user_id: str | None = None) -> dict[str, Any] | None:
     """Sync agent-loop compatibility wrapper around async handoff load."""
-    return run_async_from_sync(
-        async_load_session_handoff(session_id, user_id=user_id),
-        thread_name="sessions-sync-async-bridge",
-    )
+    return _run_session_sync(async_load_session_handoff(session_id, user_id=user_id))
 
 
 async def async_save_session_handoff(
@@ -372,13 +376,12 @@ def _save_session_handoff(
     user_id: str | None = None,
 ) -> None:
     """Sync agent-loop compatibility wrapper around async handoff save."""
-    return run_async_from_sync(
+    return _run_session_sync(
         async_save_session_handoff(
             session_id,
             handoff_summary,
             user_id=user_id,
-        ),
-        thread_name="sessions-sync-async-bridge",
+        )
     )
 
 
@@ -444,33 +447,6 @@ async def async_read_thread_messages(
             for index, message in selected
         ],
     }
-
-
-def read_thread_messages(
-    session_id: str,
-    *,
-    user_id: str | None = None,
-    mode: str = "recent",
-    start_index: int | None = None,
-    end_index: int | None = None,
-    query: str | None = None,
-    limit: int = 20,
-    max_chars: int = 8_000,
-) -> dict[str, Any]:
-    """Sync tool compatibility wrapper around async thread-message reads."""
-    return run_async_from_sync(
-        async_read_thread_messages(
-            session_id,
-            user_id=user_id,
-            mode=mode,
-            start_index=start_index,
-            end_index=end_index,
-            query=query,
-            limit=limit,
-            max_chars=max_chars,
-        ),
-        thread_name="sessions-sync-async-bridge",
-    )
 
 
 # ── Message Processing ────────────────────────────────────────

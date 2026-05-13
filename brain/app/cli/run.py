@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -23,7 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 
 from sqlalchemy import text as sa_text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 # ============================================================
 # Inline Allowlist
 # ============================================================
@@ -156,7 +157,7 @@ Apply the pre-flight checklist. Report issues found.
 # Context Injection
 # ============================================================
 
-def build_context_block(task: str, skill_name: str = None) -> tuple:
+async def build_context_block(task: str, skill_name: str = None) -> tuple:
     """Query brain for context. Returns (context_text, metadata_dict)."""
     parts = []
     meta = {"memories": 0, "guardrails": 0, "similar_tasks": 0}
@@ -164,7 +165,7 @@ def build_context_block(task: str, skill_name: str = None) -> tuple:
     # 1. Relevant memories via memory.py query_memories
     try:
         from brain.app.cli.memory import query_memories
-        result = query_memories(task, limit=5)
+        result = await query_memories(task, limit=5)
         memories = result.get("results", [])
         if memories:
             parts.append("## Relevant Memories")
@@ -179,9 +180,9 @@ def build_context_block(task: str, skill_name: str = None) -> tuple:
         from brain.systems.memory.embeddings import embed_query, vec_to_pg
         task_emb = embed_query(task)
         emb_str = vec_to_pg(task_emb)
-        with open_unit_of_work(UnitOfWork) as uow:
+        async with UnitOfWork() as uow:
             # Get guardrails from relevant memories (lessons/patterns)
-            guardrail_rows = uow.session.execute(sa_text("""
+            guardrail_rows = (await uow.session.execute(sa_text("""
                 SELECT content, memory_type,
                        1 - (semantic_embedding <=> CAST(:emb AS vector)) as sim
                 FROM memories
@@ -189,7 +190,7 @@ def build_context_block(task: str, skill_name: str = None) -> tuple:
                   AND memory_type IN ('lesson', 'pattern')
                 ORDER BY semantic_embedding <=> CAST(:emb AS vector)
                 LIMIT 5
-            """), {"emb": emb_str}).mappings().all()
+            """), {"emb": emb_str})).mappings().all()
             guardrails = [r["content"][:200] for r in guardrail_rows if r["sim"] > 0.4]
             if guardrails:
                 parts.append("## Guardrails (from past lessons)")
@@ -201,7 +202,7 @@ def build_context_block(task: str, skill_name: str = None) -> tuple:
 
     # 3. Similar past runs
     try:
-        similar = find_similar_runs(task, limit=3)
+        similar = await find_similar_runs(task, limit=3)
         if similar:
             parts.append("## Similar Past Tasks")
             for s in similar:
@@ -213,9 +214,9 @@ def build_context_block(task: str, skill_name: str = None) -> tuple:
     return "\n".join(parts), meta
 
 
-def find_similar_runs(task: str, limit: int = 3) -> list:
+async def find_similar_runs(task: str, limit: int = 3) -> list:
     """Find similar past runs by text similarity (simple ILIKE for now)."""
-    with open_unit_of_work(UnitOfWork) as uow:
+    async with UnitOfWork() as uow:
         # Use first few significant words for matching
         words = [w for w in task.lower().split() if len(w) > 3][:5]
         if not words:
@@ -223,7 +224,7 @@ def find_similar_runs(task: str, limit: int = 3) -> list:
         conditions = " OR ".join([f"input_message ILIKE :word_{i}" for i in range(len(words))])
         params = {f"word_{i}": f"%{w}%" for i, w in enumerate(words)}
         params["limit"] = limit
-        rows = uow.session.execute(sa_text(f"""
+        rows = (await uow.session.execute(sa_text(f"""
             SELECT id,
                    input_message AS task_summary,
                    metadata->>'task_type' AS task_type,
@@ -234,7 +235,7 @@ def find_similar_runs(task: str, limit: int = 3) -> list:
               AND metadata->>'legacy_source' = 'cli.run'
             ORDER BY created_at DESC
             LIMIT :limit
-        """), params).mappings().all()
+        """), params)).mappings().all()
         return [dict(r) for r in rows]
 
 
@@ -242,7 +243,7 @@ def find_similar_runs(task: str, limit: int = 3) -> list:
 # Run Persistence
 # ============================================================
 
-def log_run(
+async def log_run(
     session,
     task_summary: str,
     task_type: str,
@@ -270,7 +271,7 @@ def log_run(
         "similar_past_ids": similar_past_ids or [],
         "session_key": session_key,
     }
-    row = session.execute(sa_text("""
+    row = (await session.execute(sa_text("""
         INSERT INTO agent_runs (
             thread_id, profile, recipe, status, input_message,
             target_ref, workspace_ref, model_policy, metadata
@@ -286,15 +287,15 @@ def log_run(
         "target_ref": json.dumps({"kind": "cli_task", "task_type": task_type}),
         "model_policy": json.dumps({"model": model, "thinking": thinking_level}),
         "metadata": json.dumps(metadata),
-    }).mappings().first()
+    })).mappings().first()
     run_id = int(row["id"])
-    session.execute(sa_text("""
+    await session.execute(sa_text("""
         UPDATE agent_runs
         SET root_run_id = COALESCE(root_run_id, id),
             trace_id = COALESCE(trace_id, 'cli-' || id::text)
         WHERE id = :id
     """), {"id": run_id})
-    session.execute(sa_text("""
+    await session.execute(sa_text("""
         INSERT INTO agent_run_artifacts (
             run_id, root_run_id, artifact_type, title, payload, text, visibility
         ) VALUES (
@@ -313,13 +314,13 @@ def log_run(
 # Complete Hook
 # ============================================================
 
-def complete_run(session, run_id: int, outcome: str, notes: str = None) -> dict:
+async def complete_run(session, run_id: int, outcome: str, notes: str = None) -> dict:
     """Mark a CLI agent_run row as complete."""
-    row = session.execute(sa_text("""
+    row = (await session.execute(sa_text("""
         SELECT id, metadata
         FROM agent_runs
         WHERE id = :id AND metadata->>'legacy_source' = 'cli.run'
-    """), {"id": run_id}).mappings().first()
+    """), {"id": run_id})).mappings().first()
     if not row:
         return {"error": f"Run {run_id} not found"}
 
@@ -329,7 +330,7 @@ def complete_run(session, run_id: int, outcome: str, notes: str = None) -> dict:
         "failure": "failed",
         "cancelled": "canceled",
     }.get(outcome, "completed")
-    session.execute(sa_text("""
+    await session.execute(sa_text("""
         UPDATE agent_runs
         SET status = :status,
             completed_at = CASE WHEN :status = 'completed' THEN NOW() ELSE completed_at END,
@@ -357,7 +358,7 @@ def _make_label(prefix: str, task: str) -> str:
     return f"{prefix}-{'-'.join(significant)}" if significant else f"{prefix}-task"
 
 
-def build_payload(
+async def build_payload(
     task: str,
     task_type: str,
     model: str = None,
@@ -371,7 +372,7 @@ def build_payload(
     effective_thinking = thinking or template["thinking"]
 
     # Context injection
-    context_text, context_meta = build_context_block(task, skill_name)
+    context_text, context_meta = await build_context_block(task, skill_name)
 
     # Render prompt
     prompt = template["prompt_template"].format(
@@ -393,8 +394,8 @@ def build_payload(
     }
 
     # Log to DB
-    with open_unit_of_work(UnitOfWork) as uow:
-        run_id = log_run(
+    async with UnitOfWork() as uow:
+        run_id = await log_run(
             session=uow.session,
             task_summary=task,
             task_type=task_type,
@@ -417,29 +418,29 @@ def build_payload(
 # Main run entry point
 # ============================================================
 
-def run(task: str, task_type: str = None, model: str = None, thinking: str = None) -> dict:
+async def run(task: str, task_type: str = None, model: str = None, thinking: str = None) -> dict:
     """Classify, template, inject context, log, return payload."""
     classified = classify_task(task, explicit_type=task_type)
-    return build_payload(task, classified, model=model, thinking=thinking)
+    return await build_payload(task, classified, model=model, thinking=thinking)
 
 
 # ============================================================
 # CLI Commands
 # ============================================================
 
-def cmd_run(args):
-    result = run(args.task, task_type=args.type, model=args.model, thinking=args.thinking)
+async def cmd_run(args):
+    result = await run(args.task, task_type=args.type, model=args.model, thinking=args.thinking)
     print(json.dumps(result, indent=2))
 
 
-def cmd_complete(args):
-    with open_unit_of_work(UnitOfWork) as uow:
-        result = complete_run(uow.session, args.run_id, args.outcome, args.notes)
+async def cmd_complete(args):
+    async with UnitOfWork() as uow:
+        result = await complete_run(uow.session, args.run_id, args.outcome, args.notes)
     print(json.dumps(result, indent=2, default=str))
 
 
-def cmd_history(args):
-    with open_unit_of_work(UnitOfWork) as uow:
+async def cmd_history(args):
+    async with UnitOfWork() as uow:
         sql = """
             SELECT id,
                    input_message AS task_summary,
@@ -458,13 +459,13 @@ def cmd_history(args):
             params["task_type"] = args.type
         sql += " ORDER BY runed_at DESC LIMIT :limit"
         params["limit"] = args.limit
-        rows = uow.session.execute(sa_text(sql), params).mappings().all()
+        rows = (await uow.session.execute(sa_text(sql), params)).mappings().all()
     print(json.dumps([dict(r) for r in rows], indent=2, default=str))
 
 
-def cmd_stats(args):
-    with open_unit_of_work(UnitOfWork) as uow:
-        overview = dict(uow.session.execute(sa_text("""
+async def cmd_stats(args):
+    async with UnitOfWork() as uow:
+        overview = dict((await uow.session.execute(sa_text("""
             SELECT
                 COUNT(*) as total,
                 COUNT(*) FILTER (WHERE metadata->>'outcome' = 'success') as successes,
@@ -475,9 +476,9 @@ def cmd_stats(args):
             FROM agent_runs
             WHERE metadata->>'legacy_source' = 'cli.run'
               AND created_at >= NOW() - INTERVAL '1 day' * :days
-        """), {"days": args.days}).mappings().first())
+        """), {"days": args.days})).mappings().first())
 
-        by_type_rows = uow.session.execute(sa_text("""
+        by_type_rows = (await uow.session.execute(sa_text("""
             SELECT metadata->>'task_type' AS task_type,
                    COUNT(*) as cnt,
                    COUNT(*) FILTER (WHERE metadata->>'outcome' = 'success') as ok
@@ -485,15 +486,15 @@ def cmd_stats(args):
             WHERE metadata->>'legacy_source' = 'cli.run'
               AND created_at >= NOW() - INTERVAL '1 day' * :days
             GROUP BY task_type ORDER BY cnt DESC
-        """), {"days": args.days}).mappings().all()
+        """), {"days": args.days})).mappings().all()
         by_type = [dict(r) for r in by_type_rows]
 
     print(json.dumps({"period_days": args.days, "overview": overview, "by_type": by_type}, indent=2, default=str))
 
 
-def cmd_replay(args):
-    with open_unit_of_work(UnitOfWork) as uow:
-        row = uow.session.execute(sa_text(
+async def cmd_replay(args):
+    async with UnitOfWork() as uow:
+        row = (await uow.session.execute(sa_text(
             """
             SELECT payload
             FROM agent_run_artifacts
@@ -501,7 +502,7 @@ def cmd_replay(args):
             ORDER BY created_at DESC, id DESC
             LIMIT 1
             """
-        ), {"id": args.run_id}).mappings().first()
+        ), {"id": args.run_id})).mappings().first()
     if not row or not row["payload"]:
         print(json.dumps({"error": f"Run {args.run_id} not found or has no payload"}))
         return
@@ -512,7 +513,7 @@ def cmd_replay(args):
 # Argument Parser
 # ============================================================
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Illo Brain — Run System")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -538,9 +539,9 @@ def main():
     p.add_argument("run_id", type=int)
 
     args = parser.parse_args()
-    {"run": cmd_run, "complete": cmd_complete, "history": cmd_history,
-     "stats": cmd_stats, "replay": cmd_replay}[args.command](args)
+    await {"run": cmd_run, "complete": cmd_complete, "history": cmd_history,
+           "stats": cmd_stats, "replay": cmd_replay}[args.command](args)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

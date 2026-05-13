@@ -10,30 +10,30 @@ import re
 
 from sqlalchemy import text
 
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 logger = logging.getLogger(__name__)
 
 
-def encode_thought_to_brain(idea_id: str, force: bool = False):
+async def encode_thought_to_brain(idea_id: str, force: bool = False):
     """Encode a thought to brain memory via Qwen extraction.
 
     Triggers: archive, agent-completed, resolved status, nightly digest.
     Skips if already encoded unless force=True.
     """
     try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            idea = uow.session.execute(text(
+        async with UnitOfWork() as uow:
+            idea = (await uow.session.execute(text(
                 "SELECT id, title, display_title, agent_details, encoded_at, user_id, org_id FROM ideas WHERE id = :id"
-            ), {"id": idea_id}).mappings().first()
+            ), {"id": idea_id})).mappings().first()
             if not idea:
                 return
             if idea.get("encoded_at") and not force:
                 logger.debug(f"Thought {idea_id[:8]} already encoded, skipping")
                 return
-            threads = uow.session.execute(text(
+            threads = (await uow.session.execute(text(
                 "SELECT role, content FROM idea_threads WHERE idea_id = :id ORDER BY created_at"
-            ), {"id": idea_id}).mappings().all()
+            ), {"id": idea_id})).mappings().all()
 
         title = (idea.get("display_title") or idea.get("title", ""))[:80]
         agent_details = idea.get("agent_details") or []
@@ -81,8 +81,8 @@ Thought:
             logger.info(f"Cortex encode SKIP for idea {idea_id[:8]}")
             # Mark as encoded even on SKIP to avoid re-processing
             try:
-                with open_unit_of_work(UnitOfWork) as uow2:
-                    uow2.session.execute(text(
+                async with UnitOfWork() as uow2:
+                    await uow2.session.execute(text(
                         "UPDATE ideas SET encoded_at = NOW() WHERE id = :id"
                     ), {"id": idea_id})
             except Exception:
@@ -134,7 +134,7 @@ Thought:
                 "force": force,
             },
         )
-        add_memory(
+        await add_memory(
             content=summary,
             memory_type=memory_type,
             salience=salience,
@@ -146,8 +146,8 @@ Thought:
 
         # Mark as encoded to prevent double-encoding
         try:
-            with open_unit_of_work(UnitOfWork) as uow2:
-                uow2.session.execute(text(
+            async with UnitOfWork() as uow2:
+                await uow2.session.execute(text(
                     "UPDATE ideas SET encoded_at = NOW() WHERE id = :id"
                 ), {"id": idea_id})
         except Exception:

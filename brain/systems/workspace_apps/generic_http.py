@@ -20,7 +20,7 @@ from brain.systems.workspace_apps.actions import (
     WorkspaceAppActionContractError,
     WorkspaceAppActionError,
 )
-from brain.systems.user_domains.service import DomainService
+from brain.systems.user_domains.service import AsyncDomainService
 
 
 GENERIC_HTTP_EXECUTOR_KEY = "generic.http"
@@ -29,7 +29,7 @@ _TEMPLATE_RE = re.compile(r"\{([a-zA-Z_][\w.-]*)\}")
 _MAX_ITEMS = 200
 
 
-def execute_generic_http_action(
+async def async_execute_generic_http_action(
     context: WorkspaceAppActionContext,
     payload: dict[str, Any],
 ) -> Mapping[str, Any]:
@@ -38,12 +38,12 @@ def execute_generic_http_action(
     kind = str(spec.get("kind") or spec.get("type") or "http_sync").strip()
     _validate_request_effects(context, request_spec)
 
-    response = _request_json(request_spec, spec=spec, context=context, payload=payload)
+    response = await _request_json(request_spec, spec=spec, context=context, payload=payload)
     raw_sync_spec = spec.get("sync") or spec.get("domain_sync")
     if raw_sync_spec is not None:
         sync_spec = _mapping(raw_sync_spec, "connector_spec.sync")
         items = _items_from_response(response, spec.get("response"))
-        return _sync_items_to_domain(context, sync_spec, items)
+        return await _sync_items_to_domain(context, sync_spec, items)
     if kind == "http_sync":
         raise WorkspaceAppActionContractError("connector_spec.sync is required when kind is 'http_sync'")
     return {"response": _compact_response(response)}
@@ -66,7 +66,7 @@ def _validate_request_effects(context: WorkspaceAppActionContext, request_spec: 
         raise WorkspaceAppActionContractError(f"connector_spec.request.method {method} requires effect '{needed}'")
 
 
-def _request_json(
+async def _request_json(
     request_spec: Mapping[str, Any],
     *,
     spec: Mapping[str, Any],
@@ -84,11 +84,11 @@ def _request_json(
     headers = _render_string_mapping(request_spec.get("headers"), payload)
     params = _render_string_mapping(request_spec.get("params"), payload)
     body = _render_json_value(request_spec.get("json"), payload)
-    _apply_auth(headers, spec.get("auth"), context=context, payload=payload)
+    await _apply_auth(headers, spec.get("auth"), context=context, payload=payload)
 
     try:
-        with httpx.Client(timeout=httpx.Timeout(20.0, connect=5.0), follow_redirects=False) as client:
-            response = client.request(
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0), follow_redirects=False) as client:
+            response = await client.request(
                 method,
                 url,
                 headers=headers or None,
@@ -108,7 +108,7 @@ def _request_json(
         raise WorkspaceAppActionError("External connector response was not valid JSON.") from exc
 
 
-def _apply_auth(
+async def _apply_auth(
     headers: dict[str, str],
     auth_spec: Any,
     *,
@@ -122,7 +122,7 @@ def _apply_auth(
     if auth_type == "none":
         return
 
-    token = _resolve_secret(auth, context=context, payload=payload)
+    token = await _resolve_secret(auth, context=context, payload=payload)
     if not token:
         raise WorkspaceAppActionContractError("Connector auth could not resolve an approved Vault credential.")
 
@@ -138,7 +138,7 @@ def _apply_auth(
     raise WorkspaceAppActionContractError("connector_spec.auth.type must be 'none', 'bearer', or 'header'")
 
 
-def _resolve_secret(
+async def _resolve_secret(
     auth: Mapping[str, Any],
     *,
     context: WorkspaceAppActionContext,
@@ -153,7 +153,7 @@ def _resolve_secret(
             raise WorkspaceAppActionContractError("Vault-backed connector auth requires a human user")
         from brain.systems.vault import get_secret
 
-        return get_secret(
+        return await get_secret(
             key,
             context.user_id,
             org_id=context.org_id,
@@ -174,7 +174,7 @@ def _resolve_secret(
             raise WorkspaceAppActionContractError("Project-bound connector auth requires a human user")
         from brain.systems.vault import resolve_project_bound_env_tokens
 
-        env = resolve_project_bound_env_tokens(
+        env = await resolve_project_bound_env_tokens(
             user_id=context.user_id,
             org_id=context.org_id,
             project_slug=project_slugs[0],
@@ -184,7 +184,7 @@ def _resolve_secret(
     raise WorkspaceAppActionContractError("connector_spec.auth.source must be 'vault_key' or 'project_env'")
 
 
-def _sync_items_to_domain(
+async def _sync_items_to_domain(
     context: WorkspaceAppActionContext,
     sync_spec: Mapping[str, Any],
     items: list[Any],
@@ -205,7 +205,7 @@ def _sync_items_to_domain(
     if not object_key:
         raise WorkspaceAppActionContractError(f"binding '{binding_alias}'.object_key is required")
 
-    service = DomainService(context.session)
+    service = AsyncDomainService(context.session)
     remote_id_expr = sync_spec.get("remote_id") or sync_spec.get("external_id") or "id"
     remote_id_field = str(sync_spec.get("remote_id_field") or sync_spec.get("external_id_field") or "").strip()
     fields_map = _mapping(sync_spec.get("fields"), "connector_spec.sync.fields")
@@ -214,7 +214,7 @@ def _sync_items_to_domain(
 
     existing_by_remote: dict[str, Any] = {}
     if remote_id_field:
-        for record in service.list_records(context.org_id, domain_id, object_key=object_key, limit=500):
+        for record in await service.list_records(context.org_id, domain_id, object_key=object_key, limit=500):
             value = (record.data or {}).get(remote_id_field)
             if value is not None:
                 existing_by_remote[str(value)] = record
@@ -242,7 +242,7 @@ def _sync_items_to_domain(
 
         existing = existing_by_remote.get(str(remote_id)) if remote_id is not None else None
         if existing is not None:
-            record = service.update_record(
+            record = await service.update_record(
                 context.org_id,
                 domain_id,
                 existing.id,
@@ -253,7 +253,7 @@ def _sync_items_to_domain(
             )
             updated += 1
         else:
-            record = service.create_record(
+            record = await service.create_record(
                 context.org_id,
                 domain_id,
                 object_key,
@@ -265,7 +265,7 @@ def _sync_items_to_domain(
             created += 1
             if remote_id_field and remote_id is not None:
                 existing_by_remote[str(remote_id)] = record
-        synced_records.append(service.serialize_record(record))
+        synced_records.append(await service.serialize_record(record))
 
     return {
         "synced": created + updated,
@@ -442,4 +442,4 @@ def _positive_int(value: Any, field: str) -> int:
     return number
 
 
-__all__ = ["GENERIC_HTTP_EXECUTOR_KEY", "execute_generic_http_action"]
+__all__ = ["GENERIC_HTTP_EXECUTOR_KEY", "async_execute_generic_http_action"]

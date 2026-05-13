@@ -4,9 +4,8 @@ from __future__ import annotations
 import re
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-from sqlalchemy.orm import Session
 
 from brain.platform.db.models.skill import Skill
 from brain.platform.db.models.skill_bundle import (
@@ -21,7 +20,7 @@ from brain.platform.db.repositories.skill_bundles import (
     SkillBundleVersionConflict,
 )
 from brain.platform.db.repositories.skills import SkillRepository
-from brain.platform.db.services.skill_bundle_io import SkillBundleIOService
+from brain.platform.db.services.skill_bundle_io import AsyncSkillBundleIOService
 from brain.systems.skills.bundles import SkillBundleError, load_skill_bundle
 
 ORG_ID = "11111111-1111-4111-8111-111111111111"
@@ -51,26 +50,39 @@ def _patch_sqlite_for_pg_types():
 
 
 @pytest.fixture
-def session():
+async def session(async_sqlite_session_factory):
     _patch_sqlite_for_pg_types()
-    engine = create_engine("sqlite://", echo=False)
-    SkillBundle.__table__.create(engine, checkfirst=True)
-    SkillBundleVersion.__table__.create(engine, checkfirst=True)
-    Skill.__table__.create(engine, checkfirst=True)
-    SkillAsset.__table__.create(engine, checkfirst=True)
-    SkillInstallation.__table__.create(engine, checkfirst=True)
-    SkillOverlay.__table__.create(engine, checkfirst=True)
-    session = Session(engine)
-    yield session
-    session.close()
+    return await async_sqlite_session_factory(
+        [
+            SkillBundle.__table__,
+            SkillBundleVersion.__table__,
+            Skill.__table__,
+            SkillAsset.__table__,
+            SkillInstallation.__table__,
+            SkillOverlay.__table__,
+        ]
+    )
 
 
 @pytest.fixture
 def service(session):
-    return SkillBundleIOService(
+    return AsyncSkillBundleIOService(
         SkillRepository(session),
         SkillBundleRepository(session),
     )
+
+
+async def _count(session, model) -> int:
+    return int(await session.scalar(select(func.count()).select_from(model)) or 0)
+
+
+async def _assets(session, *, bundle_version_id: int | None = None, order_by_path: bool = False):
+    stmt = select(SkillAsset)
+    if bundle_version_id is not None:
+        stmt = stmt.where(SkillAsset.bundle_version_id == bundle_version_id)
+    if order_by_path:
+        stmt = stmt.order_by(SkillAsset.path)
+    return (await session.scalars(stmt)).all()
 
 
 def _write_bundle(
@@ -112,10 +124,10 @@ examples = "examples/"
     (root / "examples" / "happy.md").write_text("Do the small thing.\n", encoding="utf-8")
 
 
-def test_import_bundle_materializes_skill_installation_and_assets(service, session, tmp_path):
+async def test_import_bundle_materializes_skill_installation_and_assets(service, session, tmp_path):
     _write_bundle(tmp_path)
 
-    result = service.import_bundle(
+    result = await service.import_bundle(
         tmp_path,
         namespace="illo_core",
         org_id=ORG_ID,
@@ -124,10 +136,10 @@ def test_import_bundle_materializes_skill_installation_and_assets(service, sessi
         trust_level="illo_core",
     )
 
-    skill = session.get(Skill, result["skill"]["id"])
-    installation = session.get(SkillInstallation, result["installation"]["id"])
-    version = session.get(SkillBundleVersion, result["version"]["id"])
-    assets = session.query(SkillAsset).order_by(SkillAsset.path).all()
+    skill = await session.get(Skill, result["skill"]["id"])
+    installation = await session.get(SkillInstallation, result["installation"]["id"])
+    version = await session.get(SkillBundleVersion, result["version"]["id"])
+    assets = await _assets(session, order_by_path=True)
 
     assert skill is not None
     assert skill.name == "develop"
@@ -146,7 +158,7 @@ def test_import_bundle_materializes_skill_installation_and_assets(service, sessi
     assert result["assets"] == 2
 
 
-def test_import_bundle_applies_provider_neutral_runtime_tiers(service, session, tmp_path):
+async def test_import_bundle_applies_provider_neutral_runtime_tiers(service, session, tmp_path):
     _write_bundle(
         tmp_path,
         runtime="""
@@ -156,24 +168,24 @@ default_thinking_tier = "xhigh"
 """,
     )
 
-    result = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
+    result = await service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
-    skill = session.get(Skill, result["skill"]["id"])
+    skill = await session.get(Skill, result["skill"]["id"])
     assert skill.model_tier == "high"
     assert skill.thinking_tier == "xhigh"
 
 
-def test_import_bundle_keeps_hosted_source_distinct_from_agent_draft(
+async def test_import_bundle_keeps_hosted_source_distinct_from_agent_draft(
     service,
     session,
     tmp_path,
 ):
     _write_bundle(tmp_path, source="self_hosted", visibility="private_local")
 
-    result = service.import_bundle(tmp_path, namespace="self_hosted", org_id=ORG_ID)
+    result = await service.import_bundle(tmp_path, namespace="self_hosted", org_id=ORG_ID)
 
-    skill = session.get(Skill, result["skill"]["id"])
-    bundle = session.get(SkillBundle, result["bundle"]["id"])
+    skill = await session.get(Skill, result["skill"]["id"])
+    bundle = await session.get(SkillBundle, result["bundle"]["id"])
 
     assert skill.source_kind == "self_hosted"
     assert skill.trust_level == "private_local"
@@ -181,19 +193,19 @@ def test_import_bundle_keeps_hosted_source_distinct_from_agent_draft(
     assert bundle.source_kind != "agent_draft"
 
 
-def test_import_bundle_is_idempotent_for_same_version(service, session, tmp_path):
+async def test_import_bundle_is_idempotent_for_same_version(service, session, tmp_path):
     _write_bundle(tmp_path)
 
-    first = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
-    second = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
+    first = await service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
+    second = await service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
     assert second["version"]["existing"] is True
     assert second["version"]["id"] == first["version"]["id"]
     assert second["installation"]["id"] == first["installation"]["id"]
-    assert session.query(SkillAsset).count() == 2
+    assert await _count(session, SkillAsset) == 2
 
 
-def test_import_bundle_rejects_bad_manifest_before_persistence(
+async def test_import_bundle_rejects_bad_manifest_before_persistence(
     service,
     session,
     tmp_path,
@@ -215,26 +227,26 @@ default_model_tier = "turbo"
     (tmp_path / "SKILL.md").write_text("# Develop\n", encoding="utf-8")
 
     with pytest.raises(SkillBundleError, match="default_model_tier"):
-        service.import_bundle(tmp_path, namespace="self_hosted", org_id=ORG_ID)
+        await service.import_bundle(tmp_path, namespace="self_hosted", org_id=ORG_ID)
 
-    assert session.query(SkillBundle).count() == 0
-    assert session.query(SkillBundleVersion).count() == 0
-    assert session.query(SkillInstallation).count() == 0
+    assert await _count(session, SkillBundle) == 0
+    assert await _count(session, SkillBundleVersion) == 0
+    assert await _count(session, SkillInstallation) == 0
 
 
-def test_import_bundle_updates_existing_install_with_rollback_pointer(
+async def test_import_bundle_updates_existing_install_with_rollback_pointer(
     service,
     session,
     tmp_path,
 ):
     _write_bundle(tmp_path, version="1.0.0", procedure="# Develop\nv1\n")
-    first = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
+    first = await service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
     _write_bundle(tmp_path, version="1.1.0", procedure="# Develop\nv2\n")
-    second = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
+    second = await service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
-    skill = session.get(Skill, second["skill"]["id"])
-    installation = session.get(SkillInstallation, second["installation"]["id"])
+    skill = await session.get(Skill, second["skill"]["id"])
+    installation = await session.get(SkillInstallation, second["installation"]["id"])
 
     assert second["version"]["id"] != first["version"]["id"]
     assert second["installation"]["rollback_bundle_version_id"] == first["version"]["id"]
@@ -243,31 +255,31 @@ def test_import_bundle_updates_existing_install_with_rollback_pointer(
     assert skill.version == 2
 
 
-def test_import_bundle_can_auto_bump_core_bundle_when_semver_stays_stale(
+async def test_import_bundle_can_auto_bump_core_bundle_when_semver_stays_stale(
     service,
     session,
     tmp_path,
 ):
     _write_bundle(tmp_path, version="1.0.0", procedure="# Develop\nv1\n")
-    first = service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
+    first = await service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
     _write_bundle(tmp_path, version="1.0.0", procedure="# Develop\nv2\n")
-    second = service.import_bundle(
+    second = await service.import_bundle(
         tmp_path,
         namespace="illo_core",
         org_id=ORG_ID,
         auto_bump_conflicting_semver=True,
     )
-    third = service.import_bundle(
+    third = await service.import_bundle(
         tmp_path,
         namespace="illo_core",
         org_id=ORG_ID,
         auto_bump_conflicting_semver=True,
     )
 
-    skill = session.get(Skill, second["skill"]["id"])
-    installation = session.get(SkillInstallation, second["installation"]["id"])
-    version = session.get(SkillBundleVersion, second["version"]["id"])
+    skill = await session.get(Skill, second["skill"]["id"])
+    installation = await session.get(SkillInstallation, second["installation"]["id"])
+    version = await session.get(SkillBundleVersion, second["version"]["id"])
 
     assert second["version"]["id"] != first["version"]["id"]
     assert second["version"]["semver"] == "1.0.1"
@@ -282,18 +294,18 @@ def test_import_bundle_can_auto_bump_core_bundle_when_semver_stays_stale(
     assert skill.version == 2
 
 
-def test_import_bundle_rejects_stale_semver_without_auto_bump(service, tmp_path):
+async def test_import_bundle_rejects_stale_semver_without_auto_bump(service, tmp_path):
     _write_bundle(tmp_path, version="1.0.0", procedure="# Develop\nv1\n")
-    service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
+    await service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
     _write_bundle(tmp_path, version="1.0.0", procedure="# Develop\nv2\n")
 
     with pytest.raises(SkillBundleVersionConflict, match="different digest"):
-        service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
+        await service.import_bundle(tmp_path, namespace="illo_core", org_id=ORG_ID)
 
 
-def test_export_skill_bundle_writes_loadable_files(service, session, tmp_path):
-    SkillRepository(session).create(
+async def test_export_skill_bundle_writes_loadable_files(service, session, tmp_path):
+    await SkillRepository(session).a_create(
         name="debug-skill",
         description="Debug carefully.",
         procedure="# Debug\n\n## Procedure\nInspect, test, fix.\n",
@@ -301,9 +313,9 @@ def test_export_skill_bundle_writes_loadable_files(service, session, tmp_path):
         model_tier="medium",
         thinking_tier="medium",
     )
-    session.flush()
+    await session.flush()
 
-    exported = service.export_skill_bundle(
+    exported = await service.export_skill_bundle(
         "debug-skill",
         tmp_path / "bundle",
         version="0.2.0",
@@ -319,8 +331,8 @@ def test_export_skill_bundle_writes_loadable_files(service, session, tmp_path):
     assert loaded.skill_markdown.startswith("# Debug")
 
 
-def test_upsert_skill_asset_converts_legacy_skill_and_publishes_script(service, session):
-    skill = SkillRepository(session).create(
+async def test_upsert_skill_asset_converts_legacy_skill_and_publishes_script(service, session):
+    skill = await SkillRepository(session).a_create(
         name="debug-skill",
         description="Debug carefully.",
         procedure="# Debug\n\n1. Inspect\n2. Test\n",
@@ -328,19 +340,19 @@ def test_upsert_skill_asset_converts_legacy_skill_and_publishes_script(service, 
         model_tier="medium",
         thinking_tier="medium",
     )
-    session.flush()
+    await session.flush()
 
-    asset = service.upsert_skill_asset(
+    asset = await service.upsert_skill_asset(
         skill.id,
         path="scripts/verify.py",
         content="print('ok')\n",
         asset_kind="script",
     )
 
-    session.flush()
-    session.refresh(skill)
-    assets = session.query(SkillAsset).filter_by(bundle_version_id=skill.bundle_version_id).order_by(SkillAsset.path).all()
-    version = session.get(SkillBundleVersion, skill.bundle_version_id)
+    await session.flush()
+    await session.refresh(skill)
+    assets = await _assets(session, bundle_version_id=skill.bundle_version_id, order_by_path=True)
+    version = await session.get(SkillBundleVersion, skill.bundle_version_id)
 
     assert asset.path == "scripts/verify.py"
     assert asset.asset_kind == "script"
@@ -352,24 +364,24 @@ def test_upsert_skill_asset_converts_legacy_skill_and_publishes_script(service, 
     assert [item.path for item in assets] == ["SKILL.md", "scripts/verify.py"]
 
 
-def test_upsert_skill_asset_revisions_are_immutable_and_delete_removes_asset(service, session):
-    skill = SkillRepository(session).create(
+async def test_upsert_skill_asset_revisions_are_immutable_and_delete_removes_asset(service, session):
+    skill = await SkillRepository(session).a_create(
         name="debug-skill",
         description="Debug carefully.",
         procedure="# Debug\n\n1. Inspect\n2. Test\n",
         model_tier="medium",
         thinking_tier="medium",
     )
-    session.flush()
+    await session.flush()
 
-    first_asset = service.upsert_skill_asset(
+    first_asset = await service.upsert_skill_asset(
         skill.id,
         path="references/context.md",
         content="first\n",
     )
     first_version_id = first_asset.bundle_version_id
 
-    second_asset = service.upsert_skill_asset(
+    second_asset = await service.upsert_skill_asset(
         skill.id,
         path="references/context.md",
         content="second\n",
@@ -377,11 +389,12 @@ def test_upsert_skill_asset_revisions_are_immutable_and_delete_removes_asset(ser
     second_version_id = second_asset.bundle_version_id
 
     assert second_version_id != first_version_id
-    assert session.get(SkillAsset, first_asset.id).content_text == "first\n"
+    first_asset_row = await session.get(SkillAsset, first_asset.id)
+    assert first_asset_row.content_text == "first\n"
     assert second_asset.content_text == "second\n"
 
-    service.delete_skill_asset(skill.id, path="references/context.md")
-    session.flush()
-    session.refresh(skill)
-    current_assets = session.query(SkillAsset).filter_by(bundle_version_id=skill.bundle_version_id).all()
+    await service.delete_skill_asset(skill.id, path="references/context.md")
+    await session.flush()
+    await session.refresh(skill)
+    current_assets = await _assets(session, bundle_version_id=skill.bundle_version_id)
     assert [asset.path for asset in current_assets] == ["SKILL.md"]

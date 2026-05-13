@@ -419,7 +419,8 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
     assert request.metadata["cycle_run_id"] == 12
 
 
-def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeypatch):
+@pytest.mark.asyncio
+async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeypatch):
     idea_id = uuid4()
 
     run = CycleRun()
@@ -477,7 +478,7 @@ def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeypatch):
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
     monkeypatch.setattr(service, "_capture_cycle_emotion", lambda *args, **kwargs: None, raising=False)
 
-    service.execute_cycle_run(run.id)
+    await service.async_execute_cycle_run(run.id)
 
     assert run.idea_id == idea_id
     assert run.run_id == 77
