@@ -948,7 +948,7 @@ def test_workspace_app_action_generic_http_rejects_invalid_mapping_at_save(sessi
                         "sync": {
                             "binding": "todos",
                             "remote_id": "id",
-                            "remote_id_field": "external_id",
+                            "remote_id_field": "notes",
                             "fields": {"notes": {"field": "title"}},
                         },
                     },
@@ -957,6 +957,154 @@ def test_workspace_app_action_generic_http_rejects_invalid_mapping_at_save(sessi
             visual_spec=VALID_VISUAL_SPEC,
             created_by_user_id=USER_ID,
         )
+
+
+def test_workspace_app_action_generic_http_rejects_unknown_sync_field_at_save(session):
+    domain = _todo_domain(session)
+
+    with pytest.raises(
+        WorkspaceAppContractError,
+        match=r"connector_spec\.sync\.fields\.sync_status must be a field on binding 'todos'",
+    ):
+        create_app(
+            session,
+            org_id=ORG_ID,
+            key="generic-http-unknown-sync-field",
+            name="Generic HTTP Unknown Sync Field",
+            renderer_key="generated-ui-app",
+            source_kind="json",
+            source_code=json.dumps(VALID_GENERATED_UI_SPEC),
+            manifest=_manifest_with_action(
+                domain.id,
+                {
+                    "kind": "connector",
+                    "effects": ["external.read", "domain.write"],
+                    "executor": {"type": "registered", "key": "generic.http"},
+                    "connector_spec": {
+                        "kind": "http_sync",
+                        "request": {"method": "GET", "url": "https://api.example.test/todos"},
+                        "response": {"items_path": "$"},
+                        "sync": {
+                            "binding": "todos",
+                            "remote_id": "id",
+                            "remote_id_field": "notes",
+                            "title": "title",
+                            "fields": {
+                                "notes": "id",
+                                "sync_status": {"const": "imported"},
+                            },
+                        },
+                    },
+                },
+            ),
+            visual_spec=VALID_VISUAL_SPEC,
+            created_by_user_id=USER_ID,
+        )
+
+
+def test_workspace_app_action_generic_http_wraps_domain_validation_errors(session):
+    domain = DomainService(session).create_domain(
+        ORG_ID,
+        name="Validated Tickets",
+        slug="validated-tickets",
+        objects=[
+            {
+                "key": "ticket",
+                "name": "Ticket",
+                "fields": [
+                    {"key": "external_id", "field_type": "text"},
+                    {"key": "status", "field_type": "enum", "options": ["Todo", "Done"]},
+                ],
+            }
+        ],
+        actor_id=USER_ID,
+    )
+    source = {
+        "schema_version": 1,
+        "title": "Validated Tickets",
+        "primary_binding": "tickets",
+        "views": [
+            {
+                "id": "tickets",
+                "type": "table",
+                "title": "Tickets",
+                "binding": "tickets",
+                "columns": [
+                    {"key": "title", "label": "Title"},
+                    {"key": "status", "label": "Status"},
+                ],
+            }
+        ],
+    }
+    manifest = {
+        "contract_version": 1,
+        "data_plan": {
+            "mode": "domain",
+            "bindings": {
+                "tickets": {
+                    "domain_id": domain.id,
+                    "object_key": "ticket",
+                    "fields": ["title", "external_id", "status"],
+                    "operations": ["schema", "list", "create", "update"],
+                }
+            },
+        },
+        "design_contract": {
+            "kit": "constellation-app-kit",
+            "theme_modes": ["dark", "light"],
+        },
+        "actions": {
+            "tickets.syncExternal": {
+                "kind": "connector",
+                "effects": ["external.read", "domain.write"],
+                "executor": {"type": "registered", "key": "generic.http"},
+                "connector_spec": {
+                    "kind": "http_sync",
+                    "request": {"method": "GET", "url": "https://api.example.test/tickets"},
+                    "response": {"items_path": "$"},
+                    "sync": {
+                        "binding": "tickets",
+                        "remote_id": "id",
+                        "remote_id_field": "external_id",
+                        "title": "title",
+                        "fields": {
+                            "external_id": "id",
+                            "status": "completed",
+                        },
+                    },
+                },
+            }
+        },
+    }
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="generic-http-invalid-domain-data",
+        name="Generic HTTP Invalid Domain Data",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(source),
+        manifest=manifest,
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    with patch(
+        "brain.systems.workspace_apps.generic_http._request_json",
+        return_value=[{"id": 1, "title": "Invalid status", "completed": True}],
+    ):
+        with pytest.raises(
+            WorkspaceAppActionContractError,
+            match="connector_spec.sync produced invalid Domain data: Field 'status' must be one of",
+        ):
+            run_workspace_app_action(
+                session,
+                org_id=ORG_ID,
+                app_id=app.id,
+                action_key="tickets.syncExternal",
+                payload={},
+                user_id=USER_ID,
+            )
 
 
 def test_workspace_app_action_boundaries_reject_raw_secrets(session):
