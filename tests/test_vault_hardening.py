@@ -95,6 +95,9 @@ def test_vault_secret_prompt_records_missing_and_broadcasts_thread_event():
     assert result["prompted"] is True
     assert result["status"] == "opened"
     assert result["key_name"] == "EXAMPLE_API_KEY"
+    assert result["prompt"]["id"].startswith("vault-secret-42-")
+    assert result["prompt"]["idea_id"] == "idea-1"
+    assert result["prompt"]["key_name"] == "EXAMPLE_API_KEY"
     assert "value" not in result
     assert "secret" not in result
     record_missing.assert_called_once_with(

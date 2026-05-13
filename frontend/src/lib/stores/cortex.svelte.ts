@@ -56,7 +56,11 @@ import {
   type CortexRunStreamItem,
 } from '$lib/utils/cortexRunStream';
 import { normalizeHexColor } from '$lib/utils/constellationPresence';
-import { normalizeVaultSecretPromptMessage } from '$lib/utils/vaultSecretPrompt';
+import {
+  normalizeVaultSecretPromptMessage,
+  vaultSecretPromptFromRunToolEvent,
+  vaultSecretPromptFromStream,
+} from '$lib/utils/vaultSecretPrompt';
 import type {
   AgentRunOptions,
   BrowserDiscoveryResult,
@@ -150,6 +154,7 @@ class CortexStore {
   }>();
   private _vaultPromptFocusLoads = new Set<string>();
   private _pendingVaultSecretPrompts = new Map<string, VaultSecretPrompt>();
+  private _dismissedVaultSecretPromptIds = new Set<string>();
   private _teamMembersPromise: Promise<TeamMember[]> | null = null;
   private _seenIdeaRevisions = new Map<string, string>();
   private _archivedIdeaIds = new Set<string>();
@@ -365,6 +370,11 @@ class CortexStore {
   }
 
   private _applyVaultSecretPrompt(prompt: VaultSecretPrompt) {
+    if (this._dismissedVaultSecretPromptIds.has(prompt.id)) return;
+    if (this.vaultSecretPrompt?.id === prompt.id) {
+      this.panelOpen = true;
+      return;
+    }
     this.vaultSecretPrompt = prompt;
     this.panelOpen = true;
   }
@@ -395,7 +405,31 @@ class CortexStore {
     this._applyVaultSecretPrompt(prompt);
   }
 
+  private _handleVaultSecretPromptFromRunEvent(msg: any) {
+    const prompt = vaultSecretPromptFromRunToolEvent(msg) as VaultSecretPrompt | null;
+    const ideaId = prompt?.idea_id ?? null;
+    if (!prompt || !ideaId) return;
+
+    if (ideaId !== this.selectedIdeaId) {
+      this._focusThreadForVaultSecretPrompt(ideaId, prompt);
+      return;
+    }
+
+    this._applyVaultSecretPrompt(prompt);
+  }
+
+  private _maybeApplyVaultSecretPromptFromStream(ideaId: string, stream: StreamItem[]) {
+    if (this.vaultSecretPrompt?.idea_id === ideaId) return;
+    const prompt = vaultSecretPromptFromStream(
+      stream,
+      ideaId,
+      this._dismissedVaultSecretPromptIds,
+    ) as VaultSecretPrompt | null;
+    if (prompt) this._applyVaultSecretPrompt(prompt);
+  }
+
   clearVaultSecretPrompt(promptId?: string | null) {
+    if (promptId) this._dismissedVaultSecretPromptIds.add(promptId);
     if (!promptId || this.vaultSecretPrompt?.id === promptId) {
       this.vaultSecretPrompt = null;
     }
@@ -675,6 +709,9 @@ class CortexStore {
       this._markIdeaWorkingForRootRun(msg.idea_id);
     }
     this._maybeTriggerCyclePanelFromRunUiEvent(msg);
+    if (msg.type === 'tool_finished' && isRootRunEvent) {
+      this._handleVaultSecretPromptFromRunEvent(msg);
+    }
     if (msg.idea_id !== this.selectedIdeaId || !isRootRunEvent) return;
     const eventKey = runUiEventKey(msg);
     if (eventKey) {
@@ -1001,6 +1038,7 @@ class CortexStore {
     if (this.selectedIdeaId !== id || this._streamVersion !== version) return false;
     const mergedItems = this._mergeLiveStreamState(items, id);
     this.stream = mergedItems;
+    this._maybeApplyVaultSecretPromptFromStream(id, mergedItems);
     this._reconcileIdeaStatusFromStream(id, mergedItems);
     this.browserFrame = null;
     this.browserDiscovery = null;
