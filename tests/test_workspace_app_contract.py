@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from brain.systems.workspace_apps.contracts import build_contract_validation_report
+from brain.systems.workspace_apps.actions import WorkspaceAppActionExecutorMissing
 from brain.systems.workspace_apps.service import WorkspaceAppContractError, _validate_contract_state_payload_or_raise
 
 
@@ -314,6 +315,14 @@ class _FakeUow:
         return None
 
 
+class _FakeAsyncDb:
+    def __init__(self):
+        self.sync_session = MagicMock()
+
+    async def run_sync(self, fn):
+        return fn(self.sync_session)
+
+
 def test_manage_workspace_app_surfaces_contract_errors():
     from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
 
@@ -330,6 +339,60 @@ def test_manage_workspace_app_surfaces_contract_errors():
 
     assert result["contract_validation"]["status"] == "failed"
     assert "Workspace app contract validation failed" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_app_action_route_uses_sync_session_bridge():
+    from fastapi import HTTPException
+
+    from brain.app.api.routers.workspace_apps import run_workspace_app_declared_action
+    from brain.app.api.schemas.workspace_apps import WorkspaceAppActionRun
+
+    db = _FakeAsyncDb()
+
+    with patch(
+        "brain.app.api.routers.workspace_apps.run_workspace_app_action",
+        side_effect=WorkspaceAppActionExecutorMissing("missing executor"),
+    ) as run_action:
+        with pytest.raises(HTTPException) as exc:
+            await run_workspace_app_declared_action(
+                "app-1",
+                WorkspaceAppActionRun(action_key="tickets.syncExternal", payload={}),
+                db=db,
+                user={"id": "user-1", "org_id": "org-1"},
+            )
+
+    assert exc.value.status_code == 501
+    assert exc.value.detail == "missing executor"
+    assert run_action.call_args.args[0] is db.sync_session
+
+
+def test_manage_workspace_app_schema_ignores_extra_tool_args():
+    from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
+
+    result = json.loads(
+        _handle_manage_workspace_app(
+            action="schema",
+            operation="create",
+            limit=10,
+        )
+    )
+
+    assert result["tool"] == "manage_workspace_app"
+    assert result["operation"] == "create"
+
+
+def test_manage_workspace_app_archived_lookup_requires_confirmation():
+    from brain.systems.runs.tool_catalog.handlers.workspace_apps import _handle_manage_workspace_app
+
+    with patch(
+        "brain.systems.runs.tool_catalog.handlers.workspace_apps._workspace_app_context",
+        return_value=("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"),
+    ), patch("brain.platform.db.repositories.unit_of_work.UnitOfWork") as uow:
+        result = json.loads(_handle_manage_workspace_app(action="get", app_id="app-1", include_archived=True))
+
+    assert "confirm_include_archived=true" in result["error"]
+    uow.assert_not_called()
 
 
 def test_manage_workspace_app_extracts_embedded_contract_fields_from_source_code():

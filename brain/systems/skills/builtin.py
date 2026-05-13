@@ -452,10 +452,11 @@ Constellation design contract.
      view/control surface over that data.
    - Use app-local state through `manage_workspace_app` only for UI
      preferences, filters, draft input, view settings, and ephemeral state.
-   - Archived apps are not candidates for new build/create requests. Only
-     restore an archived app when the user explicitly asks to restore or
-     reopen that archived app; otherwise create a fresh app or update an
-     active app.
+   - Archived apps are not candidates for new build/create requests. Do not
+     inspect archived apps while building a new app unless the user explicitly
+     asks about archived/restorable apps. Only restore an archived app when the
+     user explicitly asks to restore or reopen that archived app; otherwise
+     create a fresh app or update an active app.
 3. Prefer a host-rendered structured UI spec for common app patterns:
    `renderer_key="generated-ui-app"`, `source_kind="json"`, and
    `source_code` as JSON with `schema_version: 1`, `title`, optional
@@ -514,6 +515,17 @@ Constellation design contract.
      product connector has not been registered yet. Use
      `executor: { "type": "registered", "key": "..." }` only for approved
      server-owned executors.
+   - For ordinary REST/JSON APIs described by user-provided docs, prefer the
+     built-in `generic.http` executor over provider-specific code. Declare
+     `executor: { "type": "registered", "key": "generic.http" }` plus a
+     `connector_spec` with `request`, optional Vault/project-bound `auth`,
+     optional `response.items_path`, and optional `sync` mapping into a Domain
+     binding. Use `kind: "http_sync"` when the response should upsert Domain
+     records, and `kind: "http_request"` for create/update/delete calls that
+     only need to return the external response. Pair GET with `external.read`,
+     non-GET methods with `external.write`, and add `domain.write` only when
+     `sync` mutates the Domain. Use `deferred` only when the API cannot fit the
+     generic spec yet.
    - Missing external credentials are not blockers for creating the app when
      the external action can be deferred. Do not call `vault_secret_prompt`
      before producing the requested app. Declare the deferred action, deliver
@@ -600,6 +612,9 @@ Constellation design contract.
 - The persisted manifest must end with `contract_version: 1`, `data_plan`, and
   `design_contract`. The compiler supplies simple app-local UI-state defaults;
   provide explicit Domain bindings for recordful apps.
+- Domain records have a virtual top-level `title` separate from object data
+  fields. You may use `title` in generated UI columns, board cards, and binding
+  `fields` even when the Domain object's field list has no `title` data field.
 - The design contract shape is strict. Use exactly
   `design_contract: { "kit": "constellation-app-kit", "theme_modes": ["dark", "light"] }`.
   Do not replace `kit` with `system`, `design_system`, or
@@ -624,7 +639,33 @@ Constellation design contract.
         "mode": "upsert",
         "external_id_field": "external_id"
       },
-      "executor": {"type": "deferred"}
+      "executor": {"type": "registered", "key": "generic.http"},
+      "connector_spec": {
+        "kind": "http_sync",
+        "request": {
+          "method": "GET",
+          "url": "https://api.example.com/repos/{owner}/{repo}/issues"
+        },
+        "auth": {
+          "type": "bearer",
+          "source": "project_env",
+          "env": "GITHUB_TOKEN",
+          "project_slug": "{owner}/{repo}"
+        },
+        "response": {"items_path": "$"},
+        "sync": {
+          "binding": "tickets",
+          "remote_id": "id",
+          "remote_id_field": "external_id",
+          "title": "title",
+          "fields": {
+            "external_id": "id",
+            "number": "number",
+            "url": "html_url",
+            "status": {"const": "Todo"}
+          }
+        }
+      }
     }
   }
 }

@@ -762,6 +762,14 @@ class CortexStore {
     }
   }
 
+  async emptyArchivedIdeas() {
+    const result = await api.emptyArchivedIdeas();
+    this.archivedIdeas = [];
+    this.archivedIdeaCountsByUser = {};
+    this._archivedIdeaIds = new Set<string>();
+    return result;
+  }
+
   applyUserProfileUpdate(update: {
     userId: string;
     name?: string | null;

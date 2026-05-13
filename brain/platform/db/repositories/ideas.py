@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 from typing import Sequence
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased, load_only
 
@@ -117,6 +117,47 @@ class IdeaRepository(BaseRepository[Idea]):
         if limit:
             stmt = stmt.limit(limit)
         return self._session.scalars(stmt).all()
+
+    def hard_delete_archived(self) -> int:
+        idea_ids = list(
+            self._session.scalars(
+                select(Idea.id).where(Idea.archived_at.is_not(None))
+            ).all()
+        )
+        return self._hard_delete_by_ids(idea_ids)
+
+    def hard_delete_archived_for_org(self, org_id: str) -> int:
+        org_user_ids = select(User.id).where(User.org_id == str(org_id))
+        idea_ids = list(
+            self._session.scalars(
+                select(Idea.id).where(
+                    Idea.archived_at.is_not(None),
+                    or_(
+                        Idea.org_id == org_id,
+                        and_(Idea.org_id.is_(None), Idea.user_id.in_(org_user_ids)),
+                    ),
+                )
+            ).all()
+        )
+        return self._hard_delete_by_ids(idea_ids)
+
+    def _hard_delete_by_ids(self, idea_ids: Sequence[str]) -> int:
+        ids = [str(idea_id) for idea_id in idea_ids if idea_id]
+        if not ids:
+            return 0
+        self._session.execute(
+            update(Idea)
+            .where(Idea.parent_id.in_(ids))
+            .values(parent_id=None)
+            .execution_options(synchronize_session=False)
+        )
+        self._session.execute(
+            delete(Idea)
+            .where(Idea.id.in_(ids))
+            .execution_options(synchronize_session=False)
+        )
+        self._session.flush()
+        return len(ids)
 
     def list_by_status(self, status: str) -> Sequence[Idea]:
         stmt = (

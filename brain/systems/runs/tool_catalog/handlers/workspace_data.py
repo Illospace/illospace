@@ -2060,8 +2060,20 @@ def _handle_read_workspace_apps(
     end_at: str | None = None,
     limit: int = 20,
     include_archived: bool = False,
+    confirm_include_archived: bool = False,
     include_state: bool = True,
 ) -> str:
+    if include_archived and not confirm_include_archived:
+        return json.dumps(
+            {
+                "error": (
+                    "include_archived=true requires confirm_include_archived=true. "
+                    "Archived apps are only for explicit archived-app inspection; "
+                    "new app builds should search active apps or create a fresh app."
+                )
+            },
+            default=str,
+        )
     payload = _query_workspace_data_for_agent(
         sources=["apps"] if include_state else ["workspace_apps"],
         query=query or "workspace apps",

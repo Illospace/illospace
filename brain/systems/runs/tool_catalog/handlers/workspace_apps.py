@@ -92,7 +92,9 @@ def _handle_manage_workspace_app(
     data_patch: dict | None = None,
     include_archived: bool = False,
     include_prototypes: bool = False,
+    confirm_include_archived: bool = False,
     confirm_restore_archived: bool = False,
+    **_ignored: Any,
 ) -> str:
     action = str(action or "").strip().lower()
     if action in {"help", "schema"}:
@@ -107,10 +109,22 @@ def _handle_manage_workspace_app(
     state_key = _optional_text(state_key) or "default"
     include_archived = _optional_bool(include_archived)
     include_prototypes = _optional_bool(include_prototypes)
+    confirm_include_archived = _optional_bool(confirm_include_archived)
     confirm_restore_archived = _optional_bool(confirm_restore_archived)
     anchor_user_id, uuid_error = _optional_uuid(anchor_user_id, "anchor_user_id")
     if uuid_error:
         return json.dumps(uuid_error)
+
+    if action in {"list", "get"} and include_archived and not confirm_include_archived:
+        return json.dumps(
+            {
+                "error": (
+                    "include_archived=true for list/get requires confirm_include_archived=true. "
+                    "Use archived reads only when the user explicitly asks to inspect archived apps; "
+                    "for build/create requests, look at active apps or create a fresh app instead."
+                )
+            }
+        )
 
     manifest, mapping_error = _optional_mapping(manifest, "manifest")
     if mapping_error:

@@ -473,8 +473,9 @@ BRAIN_TOOLS = [
         "description": (
             "Read generated workspace apps/dashboards and optional app-local state. Use this for questions about "
             "what apps exist, what dashboards are available, or what UI state an app currently stores. "
-            "For build/create requests, leave include_archived=false unless the user explicitly asks to inspect "
-            "archived apps; archived apps should not be reused or restored by default. "
+            "For build/create requests, leave include_archived=false; archived apps are not candidates for "
+            "new app discovery. Only inspect archived apps when the user explicitly asks about archived or "
+            "restorable apps, and then set confirm_include_archived=true. "
             "Use manage_workspace_app only when creating, updating, archiving, restoring, or changing app state."
         ),
         "input_schema": {
@@ -490,6 +491,11 @@ BRAIN_TOOLS = [
                     "type": "boolean",
                     "default": False,
                     "description": "Include archived apps only when the user explicitly asks about archived/restorable apps.",
+                },
+                "confirm_include_archived": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Required with include_archived=true; confirms the user explicitly asked to inspect archived apps.",
                 },
                 "include_state": {"type": "boolean", "description": "Include app-local state rows.", "default": True},
             },
@@ -911,6 +917,8 @@ WORKSPACE_APP_TOOLS = [
             "host-rendered structured UIs, including tables, lists, cards, metrics, charts, forms, details, "
             "board/kanban views, and manifest action buttons. Use renderer_key='sandboxed-html-app' and source_kind='html' "
             "only for bespoke interactions or custom blocks that cannot be represented by structured views. "
+            "For list/get discovery, keep include_archived=false unless the user explicitly asks to inspect archived apps; "
+            "archived apps are not candidates for new build/create requests. "
             "Use action='restore' only when the user explicitly asks to restore an archived app; for build/create "
             "requests, create a new app or update an active app instead of resurrecting archived drafts. "
             "Recordful apps must use manage_domain first; app-local "
@@ -983,6 +991,9 @@ WORKSPACE_APP_TOOLS = [
                         "\"theme_modes\":[\"dark\",\"light\"]}}. Do not use alternate keys like "
                         "system, design_system, uses_app_kit_classes, or supports_color_scheme in "
                         "manifest.design_contract; put descriptive labels in metadata instead. "
+                        "Domain records expose a virtual top-level title; bindings may include \"title\" "
+                        "for display/card labels even when the object's field definitions do not contain "
+                        "a data field named title. "
                         "Use bindings such as {\"data_plan\":{\"mode\":\"domain\","
                         "\"bindings\":{\"todos\":{\"domain_id\":1,\"domain_slug\":\"todo-notes\","
                         "\"object_key\":\"todo_item\",\"fields\":[\"title\",\"notes\",\"completed\"],"
@@ -1025,6 +1036,14 @@ WORKSPACE_APP_TOOLS = [
                 "data_patch": {"type": "object", "description": "Shallow state patch for update_state."},
                 "include_archived": {"type": "boolean", "default": False},
                 "include_prototypes": {"type": "boolean", "default": False},
+                "confirm_include_archived": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Required with action='list' or action='get' and include_archived=true. "
+                        "Set true only when the user explicitly asked to inspect archived apps."
+                    ),
+                },
                 "confirm_restore_archived": {
                     "type": "boolean",
                     "default": False,

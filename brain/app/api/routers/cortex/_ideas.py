@@ -408,6 +408,33 @@ async def list_archived_ideas(
     return await _run_db(db, _list)
 
 
+@router.delete("/ideas/archived")
+async def empty_archived_ideas(
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    def _delete(sync_db: Session) -> tuple[int, str | None]:
+        repo = IdeaRepository(sync_db)
+        if _caller_is_service_principal(user):
+            deleted = repo.hard_delete_archived()
+            sync_db.commit()
+            return deleted, None
+
+        org_id = require_org_context(user)
+        deleted = repo.hard_delete_archived_for_org(org_id)
+        sync_db.commit()
+        return deleted, str(org_id)
+
+    deleted, event_org_id = await _run_db(db, _delete)
+    if deleted:
+        await ws_manager.broadcast_product_event(
+            "idea_archive_emptied",
+            {"deleted": deleted},
+            org_id=event_org_id,
+        )
+    return {"deleted": deleted}
+
+
 @router.post("/ideas", response_model=IdeaRead, status_code=201)
 async def create_idea(
     body: IdeaCreate,

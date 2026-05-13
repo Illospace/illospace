@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import json
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -27,6 +28,7 @@ from brain.systems.workspace_apps.service import (
     active_version,
     archive_app,
     create_app,
+    delete_archived_apps,
     list_archived_apps,
     restore_app,
     update_app,
@@ -338,6 +340,75 @@ def test_invalid_domain_bindings_block_save(session, overrides, message):
         )
 
 
+def test_domain_binding_allows_virtual_record_title_field(session):
+    domain = DomainService(session).create_domain(
+        ORG_ID,
+        name="Ticket Board",
+        slug="ticket-board",
+        objects=[
+            {
+                "key": "ticket",
+                "name": "Ticket",
+                "fields": [
+                    {"key": "status", "field_type": "enum", "options": ["Backlog", "Done"], "required": True},
+                    {"key": "priority", "field_type": "text"},
+                ],
+            }
+        ],
+        actor_id=USER_ID,
+    )
+
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="ticket-board",
+        name="Ticket Board",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(
+            {
+                "schema_version": 1,
+                "title": "Ticket Board",
+                "primary_binding": "tickets",
+                "views": [
+                    {
+                        "id": "tickets",
+                        "type": "table",
+                        "title": "Tickets",
+                        "binding": "tickets",
+                        "columns": [
+                            {"key": "title", "label": "Title"},
+                            {"key": "status", "label": "Status"},
+                            {"key": "priority", "label": "Priority"},
+                        ],
+                    }
+                ],
+            }
+        ),
+        manifest={
+            "contract_version": 1,
+            "data_plan": {
+                "mode": "domain",
+                "bindings": {
+                    "tickets": {
+                        "domain_id": domain.id,
+                        "object_key": "ticket",
+                        "fields": ["title", "status", "priority"],
+                        "operations": ["schema", "list", "create", "update"],
+                    }
+                },
+            },
+            "design_contract": {
+                "kit": "constellation-app-kit",
+                "theme_modes": ["dark", "light"],
+            },
+        },
+        visual_spec=VALID_VISUAL_SPEC,
+    )
+
+    assert active_version(session, app.id) is not None
+
+
 def test_domain_binding_blocks_archived_or_cross_org_domain(session):
     domain = _todo_domain(session)
     domain.archived_at = datetime.now(timezone.utc)
@@ -469,6 +540,44 @@ def test_archive_and_restore_app_leave_domain_records_intact(session):
     assert restored.archived_at is None
 
 
+def test_delete_archived_apps_permanently_removes_app_versions_and_state(session):
+    domain = _todo_domain(session)
+    archived = create_app(
+        session,
+        org_id=ORG_ID,
+        key="trash-me",
+        name="Trash Me",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(VALID_GENERATED_UI_SPEC),
+        manifest=_manifest(domain.id),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+        initial_state={"view": "table"},
+    )
+    active = create_app(
+        session,
+        org_id=ORG_ID,
+        key="keep-me",
+        name="Keep Me",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(VALID_GENERATED_UI_SPEC),
+        manifest=_manifest(domain.id),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+    archive_app(session, org_id=ORG_ID, app_id=archived.id)
+
+    deleted = delete_archived_apps(session, org_id=ORG_ID)
+
+    assert deleted == 1
+    assert session.query(WorkspaceApp).filter_by(id=archived.id).count() == 0
+    assert session.query(WorkspaceAppVersion).filter_by(app_id=archived.id).count() == 0
+    assert session.query(WorkspaceAppState).filter_by(app_id=archived.id).count() == 0
+    assert session.query(WorkspaceApp).filter_by(id=active.id).count() == 1
+
+
 def test_workspace_app_action_requires_registered_executor(session):
     domain = _todo_domain(session)
     app = create_app(
@@ -542,6 +651,159 @@ def test_workspace_app_action_registered_executor_runs(session):
     assert result["effects"] == ["domain.read", "domain.write", "external.read", "external.write"]
     assert result["connector_keys"] == ["ticketing"]
     assert result["result"] == {"synced": True, "ticketId": 42}
+
+
+def test_workspace_app_action_generic_http_syncs_domain_records(session):
+    domain = DomainService(session).create_domain(
+        ORG_ID,
+        name="Tickets",
+        slug="tickets",
+        objects=[
+            {
+                "key": "ticket",
+                "name": "Ticket",
+                "fields": [
+                    {"key": "external_id", "field_type": "text"},
+                    {"key": "number", "field_type": "number"},
+                    {"key": "status", "field_type": "enum", "options": ["Todo", "Done"]},
+                    {"key": "url", "field_type": "url"},
+                ],
+            }
+        ],
+        actor_id=USER_ID,
+    )
+    service = DomainService(session)
+    existing = service.create_record(
+        ORG_ID,
+        domain.id,
+        "ticket",
+        title="Old issue",
+        data={"external_id": "123", "number": 123, "status": "Todo", "url": "https://example.test/old"},
+        actor_id=USER_ID,
+    )
+    manifest = {
+        "contract_version": 1,
+        "data_plan": {
+            "mode": "domain",
+            "bindings": {
+                "tickets": {
+                    "domain_id": domain.id,
+                    "object_key": "ticket",
+                    "fields": ["title", "external_id", "number", "status", "url"],
+                    "operations": ["schema", "list", "create", "update"],
+                }
+            },
+        },
+        "design_contract": {
+            "kit": "constellation-app-kit",
+            "theme_modes": ["dark", "light"],
+        },
+        "actions": {
+            "tickets.syncExternal": {
+                "kind": "connector",
+                "effects": ["external.read", "domain.write"],
+                "executor": {"type": "registered", "key": "generic.http"},
+                "connector_spec": {
+                    "kind": "http_sync",
+                    "request": {"method": "GET", "url": "https://api.example.test/issues"},
+                    "response": {"items_path": "$"},
+                    "sync": {
+                        "binding": "tickets",
+                        "remote_id": "id",
+                        "remote_id_field": "external_id",
+                        "title": "title",
+                        "fields": {
+                            "number": "number",
+                            "status": {"const": "Done"},
+                            "url": "html_url",
+                        },
+                    },
+                },
+            }
+        },
+    }
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="generic-http-ticket-sync",
+        name="Generic HTTP Ticket Sync",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(VALID_GENERATED_UI_SPEC),
+        manifest=manifest,
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    with patch(
+        "brain.systems.workspace_apps.generic_http._request_json",
+        return_value=[
+            {"id": 123, "number": 123, "title": "Updated issue", "html_url": "https://example.test/123"},
+            {"id": 456, "number": 456, "title": "New issue", "html_url": "https://example.test/456"},
+        ],
+    ):
+        result = run_workspace_app_action(
+            session,
+            org_id=ORG_ID,
+            app_id=app.id,
+            action_key="tickets.syncExternal",
+            payload={},
+            user_id=USER_ID,
+        )
+
+    assert result["ok"] is True
+    assert result["result"]["created"] == 1
+    assert result["result"]["updated"] == 1
+    session.refresh(existing)
+    assert existing.title == "Updated issue"
+    assert existing.data["status"] == "Done"
+    records = service.list_records(ORG_ID, domain.id, object_key="ticket", limit=10)
+    assert {record.title for record in records} == {"Updated issue", "New issue"}
+
+
+def test_workspace_app_action_generic_http_request_returns_compact_response(session):
+    domain = _todo_domain(session)
+    manifest = _manifest_with_action(
+        domain.id,
+        {
+            "kind": "connector",
+            "effects": ["external.write"],
+            "executor": {"type": "registered", "key": "generic.http"},
+            "connector_spec": {
+                "kind": "http_request",
+                "request": {
+                    "method": "POST",
+                    "url": "https://api.example.test/issues",
+                    "json": {"title": "{title}"},
+                },
+            },
+        },
+    )
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="generic-http-create-issue",
+        name="Generic HTTP Create Issue",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(VALID_GENERATED_UI_SPEC),
+        manifest=manifest,
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    with patch("brain.systems.workspace_apps.generic_http._request_json", return_value={"id": "abc", "ok": True}):
+        result = run_workspace_app_action(
+            session,
+            org_id=ORG_ID,
+            app_id=app.id,
+            action_key="tickets.syncExternal",
+            payload={"title": "Ship it"},
+            user_id=USER_ID,
+        )
+
+    assert result["ok"] is True
+    assert result["result"] == {"response": {"id": "abc", "ok": True}}
 
 
 def test_workspace_app_action_boundaries_reject_raw_secrets(session):

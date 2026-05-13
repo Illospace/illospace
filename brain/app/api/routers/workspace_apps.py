@@ -34,6 +34,7 @@ from brain.systems.workspace_apps.service import (
     WorkspaceAppNotFound,
     archive_app,
     create_app,
+    delete_archived_apps,
     get_app,
     get_state,
     list_archived_apps,
@@ -99,6 +100,23 @@ async def list_archived_workspace_apps(
 ):
     org_id = require_org_context(user)
     return await run_db(db, lambda sync_db: serialize_apps(sync_db, list_archived_apps(sync_db, org_id, limit=limit)))
+
+
+@router.delete("/archived")
+async def empty_archived_workspace_apps(
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    org_id = require_org_context(user)
+
+    def _delete(sync_db: Session):
+        deleted = delete_archived_apps(sync_db, org_id=org_id)
+        sync_db.commit()
+        if deleted:
+            publish_workspace_app_change(org_id=org_id, action="empty_archive")
+        return {"deleted": deleted}
+
+    return await run_db(db, _delete)
 
 
 @router.post("", response_model=WorkspaceAppRead, status_code=201, include_in_schema=False)
@@ -277,25 +295,28 @@ async def update_workspace_app_state(
 
 
 @router.post("/{app_id}/actions/run", response_model=WorkspaceAppActionRunRead)
-def run_workspace_app_declared_action(
+async def run_workspace_app_declared_action(
     app_id: str,
     body: WorkspaceAppActionRun,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-    try:
-        result = run_workspace_app_action(
-            db,
-            org_id=org_id,
-            app_id=app_id,
-            action_key=body.action_key,
-            payload=body.payload,
-            user_id=_user_id(user),
-        )
-        db.commit()
-        return result
-    except WorkspaceAppActionError as exc:
-        _raise_action_http(exc)
-    except WorkspaceAppError as exc:
-        _raise_http(exc)
+    def _run(sync_db: Session):
+        try:
+            result = run_workspace_app_action(
+                sync_db,
+                org_id=org_id,
+                app_id=app_id,
+                action_key=body.action_key,
+                payload=body.payload,
+                user_id=_user_id(user),
+            )
+            sync_db.commit()
+            return result
+        except WorkspaceAppActionError as exc:
+            _raise_action_http(exc)
+        except WorkspaceAppError as exc:
+            _raise_http(exc)
+
+    return await run_db(db, _run)
