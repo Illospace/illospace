@@ -95,7 +95,7 @@ async def test_list_skills(client, mock_session_factory):
         archived=False,
     )
     with patch("brain.app.api.routers.skills.SkillRepository") as MockRepo:
-        MockRepo.return_value.list_active_with_executions.return_value = [skill]
+        MockRepo.return_value.a_list_active_with_executions = AsyncMock(return_value=[skill])
         resp = await client.get("/api/skills/")
     assert resp.status_code == 200
     data = resp.json()

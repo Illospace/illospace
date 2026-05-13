@@ -215,6 +215,30 @@ def test_workspace_apps_router_stays_on_native_async_db_path():
     assert "from sqlalchemy.orm import Session" not in text
 
 
+def test_domains_router_stays_on_native_async_db_path():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "brain/app/api/routers/domains.py"
+    text = path.read_text(encoding="utf-8")
+
+    assert "run_db" not in text
+    assert "run_session_task" not in text
+    assert "run_unit_of_work_task" not in text
+    assert "open_unit_of_work" not in text
+    assert "from sqlalchemy.orm import Session" not in text
+
+
+def test_skills_router_stays_on_native_async_db_path():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "brain/app/api/routers/skills.py"
+    text = path.read_text(encoding="utf-8")
+
+    assert "run_db" not in text
+    assert "run_session_task" not in text
+    assert "run_unit_of_work_task" not in text
+    assert "open_unit_of_work" not in text
+    assert "from sqlalchemy.orm import Session" not in text
+
+
 def test_cortex_project_context_routes_use_native_async_db_path():
     root = Path(__file__).resolve().parents[1]
     path = root / "brain/app/api/routers/cortex/_project_context.py"
