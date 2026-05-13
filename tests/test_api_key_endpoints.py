@@ -21,20 +21,27 @@ def _user(**overrides):
     return data
 
 
-def _uow(session: MagicMock | None = None):
-    uow = MagicMock()
-    uow.session = session or MagicMock()
-    uow.__enter__ = MagicMock(return_value=uow)
-    uow.__exit__ = MagicMock(return_value=False)
-    return uow
+class _AsyncSession:
+    def __init__(self, session: MagicMock | None = None):
+        self.session = session or MagicMock()
 
+    def add(self, *args, **kwargs):
+        return self.session.add(*args, **kwargs)
 
-@pytest.fixture(autouse=True)
-def run_sync_inline(monkeypatch: pytest.MonkeyPatch):
-    async def _run(fn, /, *args, **kwargs):
-        return fn(*args, **kwargs)
+    async def scalars(self, *args, **kwargs):
+        return self.session.scalars(*args, **kwargs)
 
-    monkeypatch.setattr("brain.app.api.routers.cortex._auth_keys.run_unit_of_work_task", _run)
+    async def execute(self, *args, **kwargs):
+        return self.session.execute(*args, **kwargs)
+
+    async def scalar(self, *args, **kwargs):
+        return self.session.scalar(*args, **kwargs)
+
+    async def get(self, *args, **kwargs):
+        return self.session.get(*args, **kwargs)
+
+    async def flush(self, *args, **kwargs):
+        return self.session.flush(*args, **kwargs)
 
 
 def test_list_api_keys_returns_own_shared_and_org_keys():
@@ -76,9 +83,8 @@ def test_list_api_keys_returns_own_shared_and_org_keys():
         })
     ]
 
-    with patch("brain.app.api.routers.cortex._auth_keys.UnitOfWork", return_value=_uow(session)), \
-         patch("brain.systems.vault._decrypt", return_value="sk-org-key"):
-        result = asyncio.run(list_api_keys(MagicMock(), _user()))
+    with patch("brain.systems.vault._decrypt", return_value="sk-org-key"):
+        result = asyncio.run(list_api_keys(MagicMock(), _user(), db=_AsyncSession(session)))
 
     assert result["own"][0]["id"] == 1
     assert result["shared"][0]["shared_by_name"] == "Alice"
@@ -88,12 +94,20 @@ def test_list_api_keys_returns_own_shared_and_org_keys():
 def test_add_api_key_stores_verified_key():
     from brain.app.api.routers.cortex._auth_keys import add_api_key
 
+    session = MagicMock()
+    session.scalars.return_value.first.return_value = None
+
+    def add_key(key):
+        key.id = 99
+
+    session.add.side_effect = add_key
     with patch("brain.app.api.routers.cortex._auth_keys._verify_provider_api_key") as verify, \
-         patch("brain.systems.vault.set_api_key", return_value=99) as set_key:
+         patch("brain.systems.vault._encrypt", return_value=b"enc") as encrypt:
         result = asyncio.run(
             add_api_key(
                 _request({"api_key": "sk-live-key", "provider": "anthropic", "label": "main"}),
                 _user(),
+                db=_AsyncSession(session),
             )
         )
 
@@ -101,14 +115,21 @@ def test_add_api_key_stores_verified_key():
     assert result["status"] == "stored"
     assert result["verified"] is True
     verify.assert_called_once_with("sk-live-key", "anthropic")
-    set_key.assert_called_once_with("user-1", "sk-live-key", provider="anthropic", label="main")
+    encrypt.assert_called_once_with("sk-live-key")
+    session.add.assert_called_once()
 
 
 def test_add_api_key_rejects_invalid_provider():
     from brain.app.api.routers.cortex._auth_keys import add_api_key
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(add_api_key(_request({"api_key": "sk-x", "provider": "unknown"}), _user()))
+        asyncio.run(
+            add_api_key(
+                _request({"api_key": "sk-x", "provider": "unknown"}),
+                _user(),
+                db=_AsyncSession(),
+            )
+        )
 
     assert exc.value.status_code == 400
 
@@ -121,8 +142,7 @@ def test_set_default_key_updates_user_default():
     db_user = SimpleNamespace(default_api_key_id=None)
     session.get.return_value = db_user
 
-    with patch("brain.app.api.routers.cortex._auth_keys.UnitOfWork", return_value=_uow(session)):
-        result = asyncio.run(set_default_key(_request({"api_key_id": 5}), _user()))
+    result = asyncio.run(set_default_key(_request({"api_key_id": 5}), _user(), db=_AsyncSession(session)))
 
     assert result == {"status": "default_updated", "api_key_id": 5}
     assert db_user.default_api_key_id == 5
@@ -134,9 +154,14 @@ def test_set_default_key_rejects_inaccessible_key():
     session = MagicMock()
     session.scalars.return_value.first.return_value = None
 
-    with patch("brain.app.api.routers.cortex._auth_keys.UnitOfWork", return_value=_uow(session)), \
-         pytest.raises(HTTPException) as exc:
-        asyncio.run(set_default_key(_request({"api_key_id": 999}), _user()))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            set_default_key(
+                _request({"api_key_id": 999}),
+                _user(),
+                db=_AsyncSession(session),
+            )
+        )
 
     assert exc.value.status_code == 404
 
@@ -144,39 +169,60 @@ def test_set_default_key_rejects_inaccessible_key():
 def test_owner_can_store_org_main_key():
     from brain.app.api.routers.cortex._auth_keys import set_org_main_key
 
+    session = MagicMock()
     with patch("brain.app.api.routers.cortex._auth_keys._verify_provider_api_key"), \
-         patch("brain.systems.vault._encrypt", return_value=b"enc"), \
-         patch("brain.app.api.routers.cortex._auth_keys.store_org_api_key") as store:
+         patch("brain.systems.vault._encrypt", return_value=b"enc"):
         result = asyncio.run(
             set_org_main_key(
                 _request({"api_key": "sk-org-key", "provider": "anthropic"}),
                 _user(role="owner"),
+                db=_AsyncSession(session),
             )
         )
 
     assert result["status"] == "org_key_stored"
-    store.assert_called_once()
+    session.execute.assert_called_once()
 
 
 def test_member_cannot_store_org_main_key():
     from brain.app.api.routers.cortex._auth_keys import set_org_main_key
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(set_org_main_key(_request({"api_key": "sk-x"}), _user(role="member")))
+        asyncio.run(
+            set_org_main_key(
+                _request({"api_key": "sk-x"}),
+                _user(role="member"),
+                db=_AsyncSession(),
+            )
+        )
 
     assert exc.value.status_code == 403
 
 
-def test_share_key_uses_vault_service():
+def test_share_key_upserts_share_for_same_org_users():
     from brain.app.api.routers.cortex._auth_keys import share_key
 
-    with patch("brain.systems.vault.share_api_key", return_value=77) as share:
-        result = asyncio.run(
-            share_key(5, _request({"shared_with_user_id": "user-2"}), _user())
-        )
+    session = MagicMock()
+    session.scalars.return_value.first.side_effect = [SimpleNamespace(id=5), None]
+    session.get.side_effect = [
+        SimpleNamespace(org_id="org-1"),
+        SimpleNamespace(org_id="org-1"),
+    ]
 
+    def add_share(share):
+        share.id = 77
+
+    session.add.side_effect = add_share
+    result = asyncio.run(
+        share_key(
+            5,
+            _request({"shared_with_user_id": "user-2"}),
+            _user(),
+            db=_AsyncSession(session),
+        )
+    )
     assert result == {"share_id": 77, "status": "shared"}
-    share.assert_called_once_with(5, "user-2", "user-1")
+    session.add.assert_called_once()
 
 
 def test_deactivate_key_marks_owned_key_inactive():
@@ -186,8 +232,7 @@ def test_deactivate_key_marks_owned_key_inactive():
     session = MagicMock()
     session.scalars.return_value.first.return_value = key
 
-    with patch("brain.app.api.routers.cortex._auth_keys.UnitOfWork", return_value=_uow(session)):
-        result = asyncio.run(deactivate_key(5, _user()))
+    result = asyncio.run(deactivate_key(5, _user(), db=_AsyncSession(session)))
 
     assert result == {"status": "deactivated"}
     assert key.is_active is False

@@ -2,6 +2,8 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.test_api_key_endpoints import _AsyncSession
+
 
 def _mock_request(payload: dict):
     req = MagicMock()
@@ -17,14 +19,17 @@ def test_add_api_key_trusts_failed_setup_token_verification():
 
     with patch("brain.app.api.routers.cortex._auth_keys._verify_provider_api_key", side_effect=RuntimeError("401 invalid x-api-key")), \
          patch("brain.app.api.routers.cortex._auth_keys._should_trust_failed_key_verification", return_value=True), \
-         patch("brain.systems.vault.set_api_key", return_value=42) as mock_set:
-        resp = asyncio.run(add_api_key(request, user))
+         patch("brain.systems.vault._encrypt", return_value=b"enc"):
+        session = MagicMock()
+        session.scalars.return_value.first.return_value = None
+        session.add.side_effect = lambda key: setattr(key, "id", 42)
+        resp = asyncio.run(add_api_key(request, user, db=_AsyncSession(session)))
 
     assert resp["id"] == 42
     assert resp["status"] == "stored"
     assert resp["verified"] is False
     assert "401 invalid x-api-key" in resp["verify_error"]
-    mock_set.assert_called_once()
+    session.add.assert_called_once()
 
 
 def test_set_org_main_key_trusts_failed_setup_token_verification():
@@ -34,16 +39,11 @@ def test_set_org_main_key_trusts_failed_setup_token_verification():
     user = {"id": "user-1", "org_id": "org-1", "role": "owner"}
 
     mock_session = MagicMock()
-    mock_uow = MagicMock()
-    mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-    mock_uow.__exit__ = MagicMock(return_value=False)
-    mock_uow.session = mock_session
 
     with patch("brain.app.api.routers.cortex._auth_keys._verify_provider_api_key", side_effect=RuntimeError("401 invalid x-api-key")), \
          patch("brain.app.api.routers.cortex._auth_keys._should_trust_failed_key_verification", return_value=True), \
-         patch("brain.systems.vault._encrypt", return_value=b"enc"), \
-         patch("brain.app.api.routers.cortex._auth_keys.UnitOfWork", return_value=mock_uow):
-        resp = asyncio.run(set_org_main_key(request, user))
+         patch("brain.systems.vault._encrypt", return_value=b"enc"):
+        resp = asyncio.run(set_org_main_key(request, user, db=_AsyncSession(mock_session)))
 
     assert resp["status"] == "org_key_stored"
     assert resp["verified"] is False
