@@ -575,6 +575,50 @@ class UserMentionRepository(BaseRepository[UserMention]):
             raise LookupError("Existing user mention could not be loaded after conflict")
         return mention, False
 
+    async def a_create_if_missing(
+        self,
+        *,
+        user_id: str,
+        idea_id: str,
+        mentioned_by: str,
+        thread_message_id: int | None = None,
+    ) -> tuple[UserMention, bool]:
+        mention_id = await self._session.scalar(
+            insert(UserMention)
+            .values(
+                user_id=user_id,
+                idea_id=idea_id,
+                mentioned_by=mentioned_by,
+                thread_message_id=thread_message_id,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    UserMention.user_id,
+                    UserMention.idea_id,
+                    UserMention.thread_message_id,
+                ]
+            )
+            .returning(UserMention.id)
+        )
+        if mention_id is not None:
+            mention = await self.a_get(int(mention_id))
+            if mention is None:
+                raise LookupError(f"UserMention {mention_id} was inserted but not found")
+            return mention, True
+
+        mention = (
+            await self._session.scalars(
+                select(UserMention).where(
+                    UserMention.user_id == user_id,
+                    UserMention.idea_id == idea_id,
+                    UserMention.thread_message_id == thread_message_id,
+                )
+            )
+        ).first()
+        if mention is None:
+            raise LookupError("Existing user mention could not be loaded after conflict")
+        return mention, False
+
     def mark_seen_for_idea(self, *, user_id: str, idea_id: str) -> int:
         result = self._session.execute(
             self._mark_seen_for_idea_stmt(user_id=user_id, idea_id=idea_id)
@@ -634,5 +678,25 @@ class UserMentionRepository(BaseRepository[UserMention]):
                 UserMention.seen_at.is_(None),
             )
             .order_by(UserMention.created_at.desc())
+        ).mappings().all()
+        return [dict(row) for row in rows]
+
+    async def a_list_unread_for_user(self, *, user_id: str) -> list[dict[str, Any]]:
+        rows = (
+            await self._session.execute(
+                select(
+                    UserMention.idea_id,
+                    UserMention.created_at,
+                    UserMention.mentioned_by,
+                    User.name.label("mentioner_name"),
+                    User.color.label("mentioner_color"),
+                )
+                .join(User, UserMention.mentioned_by == User.id)
+                .where(
+                    UserMention.user_id == user_id,
+                    UserMention.seen_at.is_(None),
+                )
+                .order_by(UserMention.created_at.desc())
+            )
         ).mappings().all()
         return [dict(row) for row in rows]

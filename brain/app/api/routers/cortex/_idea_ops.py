@@ -12,11 +12,12 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import aliased
 
-from brain.systems.runs.status import TERMINAL_RUN_STATUSES, coerce_run_status
-from brain.systems.runs.store import AgentRunStore
+from brain.systems.runs.events import run_event
+from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
+from brain.systems.runs.store import AsyncAgentRunStore
 from brain.app.api.auth import get_current_user
 from brain.app.api.services.notifications import (
-    build_notification_summary,
+    async_build_notification_summary,
     compact_notification_text,
 )
 from brain.systems.runs.cortex.read_models import run_stream_payload
@@ -29,7 +30,7 @@ from brain.app.api.routers.cortex._helpers import (
     _presence_join,
     _presence_leave,
     _record_implicit_feedback,
-    _require_idea_for_user,
+    _a_require_idea_for_user as _require_idea_for_user,
 )
 from brain.app.api.routers.cortex._router import router
 from brain.app.api.routers.ws import ws_manager
@@ -50,8 +51,7 @@ from brain.platform.db.models.notification import (
     NOTIFICATION_SOURCE_WORKSPACE,
 )
 from brain.platform.db.models.org import User
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_unit_of_work_task, open_unit_of_work
-from brain.platform.db.session_tasks import run_session_task
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ def _metadata_target_run_id(metadata: dict[str, Any]) -> int:
     return run_id
 
 
-def _append_live_guidance_from_thread_message(
+async def _append_live_guidance_from_thread_message(
     *,
     session,
     idea_id: str,
@@ -93,13 +93,13 @@ def _append_live_guidance_from_thread_message(
         raise HTTPException(status_code=400, detail="Live guidance metadata must be an object")
 
     run_id = _metadata_target_run_id(metadata)
-    run = session.get(AgentRun, run_id)
+    run = await session.get(AgentRun, run_id)
     if run is None or str(run.thread_id) != str(idea_id):
         raise HTTPException(status_code=404, detail=f"Run #{run_id} not found")
     if coerce_run_status(run.status) in TERMINAL_RUN_STATUSES:
         raise HTTPException(status_code=409, detail="Run is no longer active")
 
-    event = AgentRunStore(session).append_steering(
+    event = await AsyncAgentRunStore(session).append_steering(
         run_id,
         content,
         user_id=str(user_id) if user_id else None,
@@ -112,7 +112,7 @@ def _append_live_guidance_from_thread_message(
         "target_run_id": run_id,
         "steering_event_id": event.id,
     }
-    session.flush()
+    await session.flush()
     return int(event.id)
 
 
@@ -448,14 +448,11 @@ async def _publish_notification_summary_updates(
     if not org_id or not user_ids:
         return
 
-    def _summaries():
-        with open_unit_of_work(UnitOfWork) as uow:
-            return {
-                user_id: build_notification_summary(uow.session, user_id=user_id, org_id=org_id)
-                for user_id in sorted(user_ids)
-            }
-
-    summaries = await run_unit_of_work_task(_summaries)
+    async with UnitOfWork() as uow:
+        summaries = {
+            user_id: await async_build_notification_summary(uow.session, user_id=user_id, org_id=org_id)
+            for user_id in sorted(user_ids)
+        }
     for user_id, summary in summaries.items():
         await ws_manager.publish_notification_summary_updated(
             user_id=user_id,
@@ -467,36 +464,47 @@ async def _publish_notification_summary_updates(
 
 @router.post("/ideas/{idea_id}/cancel-all")
 async def idea_cancel_all(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
-    from brain.systems.runs.cortex import cancel_runs_for_idea
-
-    def _cancel():
-        with open_unit_of_work(UnitOfWork) as uow:
-            _require_idea_for_user(uow.session, idea_id, user)
-        count = cancel_runs_for_idea(idea_id)
-        return {"ok": True, "canceled": count, "cancelled": count}
-
-    return await run_unit_of_work_task(_cancel)
+    active_statuses = ["queued", "starting", "running", "paused", "verifying"]
+    async with UnitOfWork() as uow:
+        await _require_idea_for_user(uow.session, idea_id, user)
+        result = await uow.session.scalars(
+            select(AgentRun).where(
+                AgentRun.thread_id == idea_id,
+                AgentRun.status.in_(active_statuses),
+            )
+        )
+        store = AsyncAgentRunStore(uow.session)
+        count = 0
+        for row in result.all():
+            await store.append_event(
+                run_event(
+                    int(row.id),
+                    "run.canceled",
+                    {"reason": "canceled_for_thread"},
+                    root_run_id=row.root_run_id,
+                )
+            )
+            await store.set_status(row.id, RunStatus.CANCELED, reason="canceled_for_thread")
+            count += 1
+    return {"ok": True, "canceled": count, "cancelled": count}
 
 
 @router.post("/ideas/{idea_id}/mark-read")
 async def mark_read(idea_id: str, request: Request, user: dict[str, Any] = Depends(get_current_user)):
     user_id = str(user.get("id"))
     org_id = str(user.get("org_id")) if user.get("org_id") else None
-    def _mark():
-        with open_unit_of_work(UnitOfWork) as uow:
-            idea = _require_idea_for_user(uow.session, idea_id, user)
-            if idea.status == "unread_reply":
-                idea.status = "needs_input"
-                idea.read_at = datetime.now(timezone.utc)
-                uow.session.add(IdeaStateLog(
-                    idea_id=idea_id,
-                    from_state="unread_reply",
-                    to_state="needs_input",
-                    trigger="user_read",
-                ))
-            uow.notifications.mark_read_for_idea(user_id=user_id, idea_id=idea_id)
-
-    await run_unit_of_work_task(_mark)
+    async with UnitOfWork() as uow:
+        idea = await _require_idea_for_user(uow.session, idea_id, user)
+        if idea.status == "unread_reply":
+            idea.status = "needs_input"
+            idea.read_at = datetime.now(timezone.utc)
+            uow.session.add(IdeaStateLog(
+                idea_id=idea_id,
+                from_state="unread_reply",
+                to_state="needs_input",
+                trigger="user_read",
+            ))
+        await uow.notifications.mark_read_for_idea(user_id=user_id, idea_id=idea_id)
     try:
         await _publish_notification_summary_updates(org_id=org_id, user_ids={user_id})
     except Exception as exc:
@@ -507,14 +515,11 @@ async def mark_read(idea_id: str, request: Request, user: dict[str, Any] = Depen
 @router.patch("/ideas/{idea_id}/position")
 async def update_position(idea_id: str, request: Request, user: dict[str, Any] = Depends(get_current_user)):
     data = await request.json()
-    def _update():
-        with open_unit_of_work(UnitOfWork) as uow:
-            idea = _require_idea_for_user(uow.session, idea_id, user)
-            if idea and idea.archived_at is None:
-                idea.position_x = data.get("x")
-                idea.position_y = data.get("y")
-
-    await run_unit_of_work_task(_update)
+    async with UnitOfWork() as uow:
+        idea = await _require_idea_for_user(uow.session, idea_id, user)
+        if idea and idea.archived_at is None:
+            idea.position_x = data.get("x")
+            idea.position_y = data.get("y")
     return {"ok": True}
 
 
@@ -539,10 +544,7 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
     notification_user_ids: set[str] = set()
     notification_org_id: str | None = str(org_id) if org_id else None
     async with UnitOfWork() as uow:
-        idea = await run_session_task(
-            uow.session,
-            lambda sync_db: _require_idea_for_user(sync_db, idea_id, user)
-        )
+        idea = await _require_idea_for_user(uow.session, idea_id, user)
         current_status = idea.status
         if idea.org_id:
             notification_org_id = str(idea.org_id)
@@ -579,17 +581,14 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
         uow.session.add(thread_msg)
         await uow.session.flush()
 
-        await run_session_task(
-            uow.session,
-            lambda sync_db: _append_live_guidance_from_thread_message(
-                session=sync_db,
-                idea_id=idea_id,
-                role=role,
-                content=content,
-                metadata=metadata,
-                thread_msg=thread_msg,
-                user_id=user_id,
-            )
+        await _append_live_guidance_from_thread_message(
+            session=uow.session,
+            idea_id=idea_id,
+            role=role,
+            content=content,
+            metadata=metadata,
+            thread_msg=thread_msg,
+            user_id=user_id,
         )
 
         msg = {
@@ -718,7 +717,8 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
     if role == "user":
         feedback_tags = _infer_feedback_tags(content)
         if feedback_tags:
-            await run_unit_of_work_task(_record_implicit_feedback, idea_id, content, feedback_tags)
+            async with UnitOfWork() as uow:
+                await _record_implicit_feedback(uow.session, idea_id, content, feedback_tags)
 
     await ws_manager.broadcast_product_event(
         "thread_message",
@@ -744,28 +744,22 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
 @router.post("/ideas/{idea_id}/mentions/seen")
 async def mark_mentions_seen(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
     user_id = user.get("id")
-    def _seen():
-        with open_unit_of_work(UnitOfWork) as uow:
-            _require_idea_for_user(uow.session, idea_id, user)
-            count = uow.user_mentions.mark_seen_for_idea(
-                user_id=str(user_id),
-                idea_id=idea_id,
-            )
+    async with UnitOfWork() as uow:
+        await _require_idea_for_user(uow.session, idea_id, user)
+        count = await uow.user_mentions.mark_seen_for_idea(
+            user_id=str(user_id),
+            idea_id=idea_id,
+        )
         return {"cleared": count}
-
-    return await run_unit_of_work_task(_seen)
 
 
 @router.get("/mentions/unread")
 async def get_unread_mentions(user: dict[str, Any] = Depends(get_current_user)):
     user_id = user.get("id")
-    def _list():
-        with open_unit_of_work(UnitOfWork) as uow:
-            return uow.user_mentions.list_unread_for_user(
-                user_id=str(user_id),
-            )
-
-    return await run_unit_of_work_task(_list)
+    async with UnitOfWork() as uow:
+        return await uow.user_mentions.list_unread_for_user(
+            user_id=str(user_id),
+        )
 
 
 # ── Presence ───────────────────────────────────────────────────
@@ -782,11 +776,8 @@ async def update_presence(request: Request, user: dict[str, Any] = Depends(get_c
     if not idea_id or action not in ("join", "leave"):
         raise HTTPException(status_code=400, detail="idea_id and action (join/leave) required")
 
-    def _validate():
-        with open_unit_of_work(UnitOfWork) as uow:
-            _require_idea_for_user(uow.session, idea_id, user)
-
-    await run_unit_of_work_task(_validate)
+    async with UnitOfWork() as uow:
+        await _require_idea_for_user(uow.session, idea_id, user)
 
     _presence_cleanup()
     if action == "join":
@@ -813,7 +804,7 @@ async def update_agent_status(idea_id: str, request: Request, user: dict[str, An
 
 # ── Unified stream ─────────────────────────────────────────────
 
-def unified_stream_payload(
+async def unified_stream_payload(
     idea_id: str,
     include_debug: bool = False,
     user: dict[str, Any] | None = None,
@@ -822,15 +813,15 @@ def unified_stream_payload(
         raise HTTPException(status_code=401, detail="Not authenticated")
     items = []
 
-    with open_unit_of_work(UnitOfWork) as uow:
-        _require_idea_for_user(uow.session, idea_id, user)
+    async with UnitOfWork() as uow:
+        await _require_idea_for_user(uow.session, idea_id, user)
         stmt = (
             select(IdeaThread, User.name.label("user_name"), User.color.label("user_color"))
             .outerjoin(User, IdeaThread.user_id == User.id)
             .where(IdeaThread.idea_id == idea_id)
             .order_by(IdeaThread.created_at)
         )
-        for row in uow.session.execute(stmt).all():
+        for row in (await uow.session.execute(stmt)).all():
             t = row[0]
             items.append({
                 "type": "message",
@@ -845,93 +836,88 @@ def unified_stream_payload(
                 "user_color": row.user_color,
             })
 
-    if include_debug:
-        from brain.systems.runs.cortex import idea_run_history
-        for dp in idea_run_history(idea_id):
-            ts = dp.get("started_at") or dp.get("created_at")
-            items.append({
-                "type": "run",
-                "timestamp": ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
-                **dp,
-            })
-    else:
-        with open_unit_of_work(UnitOfWork) as uow:
+        if include_debug:
+            from brain.systems.runs.cortex.read_models import serialize_run_history_async
+
+            for dp in await serialize_run_history_async(idea_id, include_debug=True, uow_factory=UnitOfWork):
+                ts = dp.get("started_at") or dp.get("created_at")
+                items.append({
+                    "type": "run",
+                    "timestamp": ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                    **dp,
+                })
+        else:
             stmt = (
                 select(AgentRun)
                 .where(AgentRun.thread_id == idea_id)
                 .order_by(AgentRun.created_at.desc())
                 .limit(20)
             )
-            for run in uow.session.scalars(stmt).all():
+            for run in (await uow.session.scalars(stmt)).all():
                 items.append(run_stream_payload(run))
 
-    run_ids = [int(item["id"]) for item in items if item.get("type") == "run"]
-    for item in items:
-        if item["type"] == "run":
-            item["tool_calls"] = []
+        run_ids = [int(item["id"]) for item in items if item.get("type") == "run"]
+        for item in items:
+            if item["type"] == "run":
+                item["tool_calls"] = []
 
-    child_runs: dict[int, list[dict[str, Any]]] = {}
-    run_artifacts: dict[int, list[dict[str, Any]]] = {}
-    run_events: dict[int, list[Any]] = {}
-    if run_ids:
-        try:
-            with open_unit_of_work(UnitOfWork) as uow:
-                children_stmt = (
-                    select(AgentRun)
-                    .where(AgentRun.parent_run_id.in_(run_ids))
-                    .order_by(AgentRun.created_at.asc(), AgentRun.id.asc())
-                )
-                for child in uow.session.scalars(children_stmt).all():
-                    if child.parent_run_id is None:
-                        continue
-                    child_runs.setdefault(int(child.parent_run_id), []).append(run_stream_payload(child))
+        child_runs: dict[int, list[dict[str, Any]]] = {}
+        run_artifacts: dict[int, list[dict[str, Any]]] = {}
+        run_events: dict[int, list[Any]] = {}
+        if run_ids:
+            children_stmt = (
+                select(AgentRun)
+                .where(AgentRun.parent_run_id.in_(run_ids))
+                .order_by(AgentRun.created_at.asc(), AgentRun.id.asc())
+            )
+            for child in (await uow.session.scalars(children_stmt)).all():
+                if child.parent_run_id is None:
+                    continue
+                child_runs.setdefault(int(child.parent_run_id), []).append(run_stream_payload(child))
 
-                artifact_stmt = (
-                    select(AgentRunArtifactRow)
-                    .where(AgentRunArtifactRow.run_id.in_(run_ids))
-                    .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
-                )
-                for artifact in uow.session.scalars(artifact_stmt).all():
-                    run_artifacts.setdefault(int(artifact.run_id), []).append({
-                        "id": artifact.id,
-                        "artifact_type": artifact.artifact_type,
-                        "title": artifact.title,
-                        "payload": artifact.payload or {},
-                        "text": artifact.text,
-                        "uri": artifact.uri,
-                        "visibility": artifact.visibility,
-                        "created_at": artifact.created_at.isoformat() if artifact.created_at else None,
-                    })
+            artifact_stmt = (
+                select(AgentRunArtifactRow)
+                .where(AgentRunArtifactRow.run_id.in_(run_ids))
+                .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
+            )
+            for artifact in (await uow.session.scalars(artifact_stmt)).all():
+                run_artifacts.setdefault(int(artifact.run_id), []).append({
+                    "id": artifact.id,
+                    "artifact_type": artifact.artifact_type,
+                    "title": artifact.title,
+                    "payload": artifact.payload or {},
+                    "text": artifact.text,
+                    "uri": artifact.uri,
+                    "visibility": artifact.visibility,
+                    "created_at": artifact.created_at.isoformat() if artifact.created_at else None,
+                })
 
-                event_stmt = _run_work_events_stmt(run_ids)
-                for event in uow.session.scalars(event_stmt).all():
-                    run_events.setdefault(int(event.run_id), []).append(event)
-        except Exception:
-            pass
+            event_stmt = _run_work_events_stmt(run_ids)
+            for event in (await uow.session.scalars(event_stmt)).all():
+                run_events.setdefault(int(event.run_id), []).append(event)
 
-    for item in items:
-        if item["type"] == "run":
-            run_id = int(item.get("id", 0))
-            children = child_runs.get(run_id, [])
-            artifacts = run_artifacts.get(run_id, [])
-            events = run_events.get(run_id, [])
-            if children:
-                item["child_runs"] = children
-            if artifacts:
-                item["artifacts"] = artifacts
-            _apply_run_events_to_item(item, events)
+        for item in items:
+            if item["type"] == "run":
+                run_id = int(item.get("id", 0))
+                children = child_runs.get(run_id, [])
+                artifacts = run_artifacts.get(run_id, [])
+                events = run_events.get(run_id, [])
+                if children:
+                    item["child_runs"] = children
+                if artifacts:
+                    item["artifacts"] = artifacts
+                _apply_run_events_to_item(item, events)
 
-    _append_final_answer_messages(items)
+        _append_final_answer_messages(items)
 
-    # Include visual blocks in the stream
-    from brain.platform.db.models.idea import VisualBlock
-    with open_unit_of_work(UnitOfWork) as uow:
+        # Include visual blocks in the stream
+        from brain.platform.db.models.idea import VisualBlock
         vb_stmt = (
             select(VisualBlock)
             .where(VisualBlock.idea_id == idea_id)
             .order_by(VisualBlock.created_at)
         )
-        for vb in uow.session.scalars(vb_stmt).all():
+        for vb in (await uow.session.scalars(vb_stmt)).all():
             items.append({
                 "type": "visual_block",
                 "timestamp": vb.created_at.isoformat() if vb.created_at else "",
@@ -954,8 +940,7 @@ async def idea_unified_stream(
     include_debug: bool = False,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_unit_of_work_task(
-        unified_stream_payload,
+    return await unified_stream_payload(
         idea_id=idea_id,
         include_debug=include_debug,
         user=user,

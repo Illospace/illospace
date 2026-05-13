@@ -126,7 +126,6 @@ def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cortex_stream_includes_persisted_visual_block(monkeypatch):
-    import sys
     import brain.app.api.routers.cortex._idea_ops as idea_ops
 
     created = datetime(2026, 4, 27, 12, 30, tzinfo=timezone.utc)
@@ -154,40 +153,33 @@ async def test_cortex_stream_includes_persisted_visual_block(monkeypatch):
             return self._values
 
     class FakeSession:
-        def __init__(self, scalar_values):
-            self._scalar_values = scalar_values
+        def __init__(self):
+            self._scalar_calls = 0
 
-        def execute(self, *_args, **_kwargs):
+        async def execute(self, *_args, **_kwargs):
             return FakeExecuteResult()
 
-        def scalars(self, *_args, **_kwargs):
-            return FakeScalarResult(self._scalar_values)
+        async def scalars(self, *_args, **_kwargs):
+            self._scalar_calls += 1
+            values = [visual_block] if self._scalar_calls == 2 else []
+            return FakeScalarResult(values)
 
     class FakeUnitOfWork:
-        calls = 0
-
         def __init__(self):
-            # idea_unified_stream opens UnitOfWork for messages, runs,
-            # then visual blocks in the AgentRun stream path.
-            FakeUnitOfWork.calls += 1
-            values = [visual_block] if FakeUnitOfWork.calls == 3 else []
-            self.session = FakeSession(values)
+            self.session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type, exc, tb):
             return False
 
     monkeypatch.setattr(idea_ops, "UnitOfWork", FakeUnitOfWork)
-    monkeypatch.setattr(idea_ops, "_require_idea_for_user", lambda *_args, **_kwargs: None)
 
-    async def fake_run_sync(fn, /, *args, **kwargs):
-        return fn(*args, **kwargs)
+    async def fake_require_idea(*_args, **_kwargs):
+        return None
 
-    monkeypatch.setattr(idea_ops, "run_unit_of_work_task", fake_run_sync)
-    fake_run = SimpleNamespace(idea_run_history=lambda _idea_id: [])
-    monkeypatch.setitem(sys.modules, "brain.systems.runs.cortex", fake_run)
+    monkeypatch.setattr(idea_ops, "_require_idea_for_user", fake_require_idea)
 
     items = await idea_ops.idea_unified_stream("idea-1", user={"id": "user-1"})
 

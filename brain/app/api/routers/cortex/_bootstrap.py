@@ -115,7 +115,7 @@ async def cortex_bootstrap(
             raise HTTPException(status_code=400, detail="idea_id is required when include contains direct_thread")
         payload["direct_thread"] = {
             "idea_id": idea_id,
-            "stream": unified_stream_payload(
+            "stream": await unified_stream_payload(
                 idea_id=idea_id,
                 include_debug=include_debug,
                 user=user,

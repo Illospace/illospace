@@ -18,7 +18,7 @@ from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.ideas import IdeaRepository
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+from brain.platform.db.repositories.skills import SkillRepository
 
 logger = logging.getLogger(__name__)
 
@@ -196,62 +196,63 @@ def _infer_feedback_tags(content: str) -> list[str]:
     return tags
 
 
-def _record_implicit_feedback(idea_id: str, content: str, tags: list[str]) -> None:
+async def _record_implicit_feedback(session, idea_id: str, content: str, tags: list[str]) -> None:
     if not tags:
         return
     try:
-        with open_unit_of_work(UnitOfWork) as uow:
-            stmt = (
-                select(AgentRun)
-                .where(AgentRun.thread_id == idea_id)
-                .order_by(
-                    func.coalesce(
-                        AgentRun.completed_at,
-                        AgentRun.started_at,
-                        AgentRun.created_at,
-                    ).desc()
-                )
-                .limit(1)
+        stmt = (
+            select(AgentRun)
+            .where(AgentRun.thread_id == idea_id)
+            .order_by(
+                func.coalesce(
+                    AgentRun.completed_at,
+                    AgentRun.started_at,
+                    AgentRun.created_at,
+                ).desc()
             )
-            run = uow.session.scalars(stmt).first()
-            if run:
-                metadata = dict(run.metadata_ or {})
-                existing_tags = list(metadata.get("implicit_feedback_tags") or [])
-                metadata["implicit_feedback_tags"] = list(dict.fromkeys([*existing_tags, *tags]))
-                metadata["implicit_feedback_summary"] = content[:500]
-                run.metadata_ = metadata
+            .limit(1)
+        )
+        run = (await session.scalars(stmt)).first()
+        if run:
+            metadata = dict(run.metadata_ or {})
+            existing_tags = list(metadata.get("implicit_feedback_tags") or [])
+            metadata["implicit_feedback_tags"] = list(dict.fromkeys([*existing_tags, *tags]))
+            metadata["implicit_feedback_summary"] = content[:500]
+            run.metadata_ = metadata
     except Exception:
         logger.exception("Failed to persist implicit feedback for idea %s", idea_id)
 
-def _create_feedback_triggers(skill_used: str, task_summary: str, note: str):
-    from datetime import datetime as dt
-    with open_unit_of_work(UnitOfWork) as uow:
-        skill = uow.skills.get_by_name(skill_used)
-        if skill:
-            triggers = list(skill.triggers or [])
-            triggers.append({
-                "direction": "negative",
-                "pattern": task_summary[:200],
-                "confidence": 0.85,
-                "source": "user_correction",
-                "created_at": dt.now().isoformat(),
-            })
-            skill.triggers = triggers
 
-        if note:
-            all_skills = uow.skills.list_active()
-            for s in all_skills:
-                if s.name.lower() in note.lower():
-                    s_triggers = list(s.triggers or [])
-                    s_triggers.append({
-                        "direction": "positive",
-                        "pattern": task_summary[:200],
-                        "confidence": 0.85,
-                        "source": "user_correction",
-                        "created_at": dt.now().isoformat(),
-                    })
-                    s.triggers = s_triggers
-                    break
+async def _create_feedback_triggers(session, skill_used: str, task_summary: str, note: str):
+    from datetime import datetime as dt
+
+    repo = SkillRepository(session)
+    skill = await repo.a_get_by_name(skill_used)
+    if skill:
+        triggers = list(skill.triggers or [])
+        triggers.append({
+            "direction": "negative",
+            "pattern": task_summary[:200],
+            "confidence": 0.85,
+            "source": "user_correction",
+            "created_at": dt.now().isoformat(),
+        })
+        skill.triggers = triggers
+
+    if note:
+        all_skills = await repo.a_list_active()
+        for s in all_skills:
+            if s.name.lower() in note.lower():
+                s_triggers = list(s.triggers or [])
+                s_triggers.append({
+                    "direction": "positive",
+                    "pattern": task_summary[:200],
+                    "confidence": 0.85,
+                    "source": "user_correction",
+                    "created_at": dt.now().isoformat(),
+                })
+                s.triggers = s_triggers
+                break
 
 
 # ── Presence tracking (in-memory) ──────────────────────────────

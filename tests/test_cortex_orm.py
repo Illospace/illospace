@@ -7,7 +7,7 @@ import asyncio
 import json
 import pytest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 from brain.platform.db.models.idea import Idea, IdeaConnection, IdeaStateLog, IdeaThread
 from brain.platform.db.models.run import AgentRun, CortexEvent
@@ -125,45 +125,52 @@ class TestInferFeedbackTags:
 # ── Implicit feedback ──────────────────────────────────────────
 
 class TestRecordImplicitFeedback:
-    def test_no_tags_does_nothing(self):
+    @pytest.mark.asyncio
+    async def test_no_tags_does_nothing(self):
         from brain.app.api.routers.cortex import _record_implicit_feedback
         # Should not raise
-        _record_implicit_feedback("idea-1", "clean message", [])
+        await _record_implicit_feedback(AsyncMock(), "idea-1", "clean message", [])
 
-    @patch("brain.app.api.routers.cortex._helpers.UnitOfWork")
+    @pytest.mark.asyncio
     @patch("brain.app.api.routers.cortex._helpers.logger")
-    def test_records_feedback_with_tags(self, mock_logger, mock_uow_cls):
+    async def test_records_feedback_with_tags(self, mock_logger):
         from brain.app.api.routers.cortex import _record_implicit_feedback
 
-        run = _make_run()
-        mock_uow = MagicMock()
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
-        mock_uow.session.execute.return_value.scalars.return_value.first.return_value = run
-        mock_uow_cls.return_value = mock_uow
+        run = _make_run(metadata_={})
+        result = MagicMock()
+        result.first.return_value = run
+        session = AsyncMock()
+        session.scalars.return_value = result
 
         with patch("brain.app.cli.memory.add_memory"):
-            _record_implicit_feedback("idea-1", "does not remember", ["memory_failure"])
+            await _record_implicit_feedback(session, "idea-1", "does not remember", ["memory_failure"])
+
+        assert run.metadata_["implicit_feedback_tags"] == ["memory_failure"]
+        assert run.metadata_["implicit_feedback_summary"] == "does not remember"
 
 
 # ── Feedback triggers ──────────────────────────────────────────
 
 class TestCreateFeedbackTriggers:
-    @patch("brain.app.api.routers.cortex._helpers.UnitOfWork")
-    def test_appends_negative_trigger(self, mock_uow_cls):
+    @pytest.mark.asyncio
+    async def test_appends_negative_trigger(self, monkeypatch):
         from brain.app.api.routers.cortex import _create_feedback_triggers
+        import brain.app.api.routers.cortex._helpers as helpers
 
         skill = _make_skill(triggers=[])
-        mock_uow = MagicMock()
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
 
-        # get_by_name returns the skill for the first call
-        mock_uow.skills.get_by_name.return_value = skill
-        mock_uow.skills.list_active.return_value = [skill]
-        mock_uow_cls.return_value = mock_uow
+        class FakeSkillRepository:
+            def __init__(self, _session):
+                pass
 
-        _create_feedback_triggers("test_skill", "task summary", "")
+            async def a_get_by_name(self, _name):
+                return skill
+
+            async def a_list_active(self):
+                return [skill]
+
+        monkeypatch.setattr(helpers, "SkillRepository", FakeSkillRepository)
+        await _create_feedback_triggers(AsyncMock(), "test_skill", "task summary", "")
 
         # Trigger should have been appended
         assert len(skill.triggers) == 1
