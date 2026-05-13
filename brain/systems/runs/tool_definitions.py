@@ -1082,6 +1082,11 @@ EXEC_TOOLS = [
                 },
                 "working_dir": {"type": "string", "description": "Working directory (optional, defaults to workspace)"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 60, max 300)", "default": 60},
+                "include_project_credentials": {
+                    "type": "boolean",
+                    "description": "Inject project-linked credentials into this command env when needed; values are redacted.",
+                    "default": False,
+                },
             },
             "required": ["command"],
         },

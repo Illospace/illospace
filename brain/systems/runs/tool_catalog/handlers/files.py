@@ -47,6 +47,7 @@ def _handle_exec_command(
     working_dir: str | None = None,
     timeout: int = 60,
     _workspace: str | None = None,
+    include_project_credentials: bool = False,
 ) -> dict:
     """Execute a shell command with safety limits."""
     import subprocess
@@ -72,7 +73,7 @@ def _handle_exec_command(
     # Otherwise split into a list for safer execution.
     _SHELL_CHARS = {'|', '>', '<', '&&', '||', ';', '`', '$(' }
     needs_shell = any(ch in command for ch in _SHELL_CHARS)
-    project_execution = _prepare_project_execution_env()
+    project_execution = _prepare_project_execution_env(include_project_credentials=include_project_credentials)
 
     try:
         if needs_shell:

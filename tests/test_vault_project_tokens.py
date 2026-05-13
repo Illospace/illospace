@@ -344,6 +344,17 @@ def test_project_bound_env_uses_materialized_project_context_without_run_binding
     assert env == {"GH_TOKEN": "ghp-test"}
 
 
+def test_prepare_project_execution_env_skips_project_credentials_by_default(monkeypatch):
+    from brain.systems.runs import project_execution_env
+
+    def fail_fetch():
+        pytest.fail("project credentials should be opt-in for command execution")
+
+    monkeypatch.setattr(project_execution_env, "current_project_bound_env", fail_fetch)
+
+    assert project_execution_env.prepare_project_execution_env().env is None
+
+
 def test_exec_command_injects_project_bound_env_names_without_returning_values(monkeypatch, tmp_path):
     from brain.systems.runs.tool_catalog.handlers.files import _handle_exec_command
 
@@ -355,7 +366,7 @@ def test_exec_command_injects_project_bound_env_names_without_returning_values(m
     proc = SimpleNamespace(returncode=0, stdout="", stderr="")
 
     with patch("subprocess.run", return_value=proc) as run:
-        result = _handle_exec_command("gh auth status", working_dir=str(tmp_path))
+        result = _handle_exec_command("gh auth status", working_dir=str(tmp_path), include_project_credentials=True)
 
     assert result["injected_env"] == ["GITHUB_TOKEN"]
     assert result["git_auth_configured"] == ["github.com"]
@@ -387,7 +398,7 @@ def test_exec_command_redacts_project_bound_git_auth_from_output(monkeypatch, tm
     )
 
     with patch("subprocess.run", return_value=proc):
-        result = _handle_exec_command("git push origin HEAD:test", working_dir=str(tmp_path))
+        result = _handle_exec_command("git push origin HEAD:test", working_dir=str(tmp_path), include_project_credentials=True)
 
     assert token not in result["stdout"]
     assert encoded not in result["stdout"]
@@ -395,32 +406,6 @@ def test_exec_command_redacts_project_bound_git_auth_from_output(monkeypatch, tm
     assert encoded not in result["stderr"]
     assert result["stdout"].count("[secret redacted]") == 3
     assert result["stderr"].count("[secret redacted]") == 1
-
-
-def test_run_script_uses_project_bound_env_and_redacts_values(monkeypatch, tmp_path):
-    from brain.systems.runs.tool_catalog.handlers.files import _handle_run_script
-
-    monkeypatch.setattr(
-        "brain.systems.runs.project_execution_env.current_project_bound_env",
-        lambda: {"GH_TOKEN": "ghp-secret-value", "STRIPE_API_KEY": "sk-live-secret"},
-    )
-    proc = SimpleNamespace(
-        returncode=0,
-        stdout="github=ghp-secret-value\nstripe=sk-live-secret\n",
-        stderr="",
-    )
-
-    with patch("subprocess.run", return_value=proc) as run:
-        result = _handle_run_script("print('ok')", _workspace=str(tmp_path))
-
-    run_env = run.call_args.kwargs["env"]
-    assert run_env["GH_TOKEN"] == "ghp-secret-value"
-    assert run_env["STRIPE_API_KEY"] == "sk-live-secret"
-    assert result["injected_env"] == ["GH_TOKEN", "STRIPE_API_KEY"]
-    assert result["git_auth_configured"] == ["github.com"]
-    assert "ghp-secret-value" not in result["stdout"]
-    assert "sk-live-secret" not in result["stdout"]
-    assert result["stdout"].count("[secret redacted]") == 2
 
 
 def test_run_script_keeps_temp_script_outside_workspace(tmp_path):
@@ -466,7 +451,7 @@ def test_parallel_exec_commands_keep_project_bound_env_isolated(monkeypatch, tmp
             "user_id": USER_ID,
             "org_id": ORG_ID,
         }):
-            return files._handle_exec_command("git status", working_dir=str(project_root))
+            return files._handle_exec_command("git status", working_dir=str(project_root), include_project_credentials=True)
 
     monkeypatch.setattr(project_execution_env, "current_project_bound_env", project_env)
     with patch("subprocess.run", side_effect=fake_run):
@@ -479,37 +464,3 @@ def test_parallel_exec_commands_keep_project_bound_env_isolated(monkeypatch, tmp
     assert all(result["injected_env"] == ["GH_TOKEN"] for result in results)
     assert "token-for-project-a" not in str(results)
     assert "token-for-project-b" not in str(results)
-
-
-def test_test_runner_uses_project_bound_env_and_redacts_values(monkeypatch, tmp_path):
-    from brain.systems.runs import project_execution_env
-    from brain.systems.tools.handlers import handle_test_runner
-
-    token = "ghp-secret-value"
-    encoded = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
-    monkeypatch.setattr(
-        project_execution_env,
-        "current_project_bound_env",
-        lambda: {"GH_TOKEN": token, "SERVICE_TOKEN": "service-secret"},
-    )
-    proc = SimpleNamespace(
-        returncode=1,
-        stdout=(
-            f"FAILED tests/test_example.py::test_token - {token}\n"
-            f"=========================== FAILURES ===========================\n"
-            f"service-secret\n"
-        ),
-        stderr=f"encoded={encoded}\n",
-    )
-
-    with patch("subprocess.run", return_value=proc) as run:
-        result = handle_test_runner("tests/test_example.py", workspace_root=str(tmp_path))
-
-    run_env = run.call_args.kwargs["env"]
-    assert run_env["GH_TOKEN"] == token
-    assert run_env["SERVICE_TOKEN"] == "service-secret"
-    assert result["injected_env"] == ["GH_TOKEN", "SERVICE_TOKEN"]
-    assert result["git_auth_configured"] == ["github.com"]
-    assert token not in str(result)
-    assert encoded not in str(result)
-    assert "service-secret" not in str(result)

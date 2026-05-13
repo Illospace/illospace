@@ -280,12 +280,13 @@ def _get_tool_handlers(
 
     ws = workspace_root  # capture for closures
     handlers.update({
-        "exec_command": lambda command, working_dir=None, timeout=60, workspace=None: (
+        "exec_command": lambda command, working_dir=None, timeout=60, workspace=None, include_project_credentials=False: (
             _handle_exec_command(
                 command,
                 working_dir=working_dir,
                 timeout=timeout,
                 _workspace=_select_workspace(workspace, ws, allowed_workspaces),
+                include_project_credentials=include_project_credentials,
             )
         ),
         "read_file": lambda path, workspace=None, start_line=None, end_line=None: (

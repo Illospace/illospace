@@ -207,8 +207,8 @@ def current_project_bound_env() -> dict[str, str]:
         return {}
 
 
-def prepare_project_execution_env() -> ProjectExecutionEnv:
-    project_env = current_project_bound_env()
+def prepare_project_execution_env(*, include_project_credentials: bool = False) -> ProjectExecutionEnv:
+    project_env = current_project_bound_env() if include_project_credentials else {}
     if not project_env:
         return ProjectExecutionEnv(
             env=None,
