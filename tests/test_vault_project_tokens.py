@@ -288,6 +288,62 @@ def test_project_token_context_includes_github_repo_from_project_context_snapsho
     assert context["target_registry_id"] == 7
 
 
+def test_project_bound_env_uses_materialized_project_context_without_run_binding(
+    patch_uow,
+    session,
+    monkeypatch,
+    tmp_path,
+):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs import project_execution_env
+
+    github = _secret(session, "GITHUB_TOKEN", "ghp-test", access_level="ask")
+    _binding(session, github, project_slug="example-org/example-repo", env_name="GH_TOKEN")
+
+    workspace_root = tmp_path / "example-repo"
+    run = SimpleNamespace(
+        target_ref={"kind": "cortex_idea"},
+        workspace_ref={
+            "workspace_root": str(workspace_root),
+            "project_context_snapshot": {
+                "resources": [
+                    {
+                        "kind": "repo",
+                        "repo": "example-org/example-repo",
+                        "uri": "https://github.com/example-org/example-repo",
+                    }
+                ]
+            },
+        },
+    )
+
+    class FakeSession:
+        def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("brain.systems.environment.load_run_target_context", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", lambda: FakeUow())
+
+    with bind_agent_context({
+        "run_id": 123,
+        "user_id": USER_ID,
+        "org_id": ORG_ID,
+        "workspace_root": str(workspace_root),
+    }):
+        env = project_execution_env.current_project_bound_env()
+
+    assert env == {"GH_TOKEN": "ghp-test"}
+
+
 def test_exec_command_injects_project_bound_env_names_without_returning_values(monkeypatch, tmp_path):
     from brain.systems.runs.tool_catalog.handlers.files import _handle_exec_command
 
