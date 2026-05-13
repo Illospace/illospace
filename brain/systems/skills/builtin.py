@@ -561,6 +561,9 @@ Constellation design contract.
 6. When using Domains, save a manifest with `data_plan.mode="domain"` and
    one binding per SDK alias. Each binding must include `domain_id` and
    `object_key`; include `domain_slug`, `fields`, and `operations` when known.
+   Domain binding `operations` are method names, not capability labels: use
+   exact values like `schema`, `list`, `get`, `query`, `create`, `update`, and
+   `archive`. Do not write `read`, `write`, or `crud` in the manifest.
 7. Save with `manage_workspace_app(action="create" | "update")`.
 8. Verify contract validation, rendered behavior, persistence, dark/light theme
    fit, and thumbnail facade before telling the user the app is done.
