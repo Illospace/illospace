@@ -56,6 +56,7 @@
     createAttractors, buildLookup, getAttractionTarget, clearAttractionCache,
     multiSunRepulsion, multiSunOrbit, ATTRACTOR_CFG, estimateClusterExtent, computeAttractorViewportTransform,
     orbitAnchorKey, orbitAnchorRefForAttractor, orbitAnchorTargetWithinRadius, orbitPhysicsProfileForAttractor,
+    sortTeamMembersForSharedAttractorLayout,
     type Attractor, type AttractorLookup, type AttractorLayoutOptions, type OrbitAnchorRef, type TeamMember,
   } from '$lib/utils/attractors';
   import {
@@ -3496,15 +3497,7 @@
   }
 
   function refreshAttractors(w: number, h: number): boolean {
-    const authId = auth.user?.id;
-    const sourceMembers = workspaceAttractorMembers();
-    const members = authId
-      ? [...sourceMembers].sort((left: any, right: any) => {
-          if (left?.id === authId) return -1;
-          if (right?.id === authId) return 1;
-          return 0;
-        })
-      : sourceMembers;
+    const members = sortTeamMembersForSharedAttractorLayout(workspaceAttractorMembers());
     const options = fixedSunLayoutOptions();
     const nextLayoutKey = buildSunLayoutKey(members);
     const changed = nextLayoutKey !== sunLayoutKey;
