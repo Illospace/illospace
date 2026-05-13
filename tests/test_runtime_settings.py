@@ -220,7 +220,8 @@ def test_runtime_settings_snapshot_exposes_provider_health(monkeypatch):
     assert snapshot["provider_health"]["policies"]["scout"]["fail_open"] is True
 
 
-def test_get_llm_info_uses_low_tier_for_background_models(monkeypatch):
+@pytest.mark.asyncio
+async def test_get_llm_info_uses_low_tier_for_background_models(monkeypatch):
     from types import SimpleNamespace
 
     from brain.app.api.routers.system import _get_llm_info
@@ -233,7 +234,7 @@ def test_get_llm_info_uses_low_tier_for_background_models(monkeypatch):
     user_obj = SimpleNamespace(default_provider="openai")
 
     class FakeSession:
-        def get(self, model, identifier):
+        async def get(self, model, identifier):
             name = getattr(model, "__name__", "")
             if name == "Org":
                 return org if identifier == "org-1" else None
@@ -249,19 +250,24 @@ def test_get_llm_info_uses_low_tier_for_background_models(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    monkeypatch.setattr(
-        "brain.platform.providers.model_policy.get_provider_model_maps",
-        lambda **kwargs: {"openai": {"low": "gpt-5-mini", "medium": "gpt-5.4"}},
-    )
-    monkeypatch.setattr("brain.platform.providers.model_policy.resolve_default_provider", lambda **kwargs: "openai")
-    monkeypatch.setattr("brain.platform.providers.model_policy.get_model_for_tier", lambda *args, **kwargs: "gpt-5-mini")
-    monkeypatch.setattr(
-        "brain.app.api.routers.system.get_agent_worker_backend_settings",
-        lambda **kwargs: SimpleNamespace(to_dict=lambda: {}),
-        raising=False,
-    )
+    async def _model_maps(*args, **kwargs):
+        return {"openai": {"low": "gpt-5-mini", "medium": "gpt-5.4"}}
 
-    info = _get_llm_info({"id": "user-1", "org_id": "org-1"}, db=FakeSession())
+    async def _default_provider(*args, **kwargs):
+        return "openai"
+
+    async def _model_for_tier(*args, **kwargs):
+        return "gpt-5-mini"
+
+    async def _backend_settings(*args, **kwargs):
+        return SimpleNamespace(to_dict=lambda: {})
+
+    monkeypatch.setattr("brain.app.api.routers.system.async_get_provider_model_maps", _model_maps)
+    monkeypatch.setattr("brain.app.api.routers.system.async_resolve_default_provider", _default_provider)
+    monkeypatch.setattr("brain.app.api.routers.system.async_get_model_for_tier", _model_for_tier)
+    monkeypatch.setattr("brain.app.api.routers.system.async_get_agent_worker_backend_settings", _backend_settings)
+
+    info = await _get_llm_info({"id": "user-1", "org_id": "org-1"}, db=FakeSession())
 
     assert info is not None
     assert info["harvest_model"] == "gpt-5-mini"
@@ -269,7 +275,8 @@ def test_get_llm_info_uses_low_tier_for_background_models(monkeypatch):
     assert "cortex_default_concurrency" not in info
 
 
-def test_get_llm_info_exposes_provider_health(monkeypatch):
+@pytest.mark.asyncio
+async def test_get_llm_info_exposes_provider_health(monkeypatch):
     from types import SimpleNamespace
 
     from brain.app.api.routers.system import _get_llm_info
@@ -287,7 +294,7 @@ def test_get_llm_info_exposes_provider_health(monkeypatch):
     user_obj = SimpleNamespace(default_provider="openai")
 
     class FakeSession:
-        def get(self, model, identifier):
+        async def get(self, model, identifier):
             name = getattr(model, "__name__", "")
             if name == "Org":
                 return org if identifier == "org-1" else None
@@ -303,16 +310,24 @@ def test_get_llm_info_exposes_provider_health(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    monkeypatch.setattr("brain.platform.providers.model_policy.get_provider_model_maps", lambda **kwargs: {"openai": {"medium": "gpt-5.4"}})
-    monkeypatch.setattr("brain.platform.providers.model_policy.resolve_default_provider", lambda **kwargs: "openai")
-    monkeypatch.setattr("brain.platform.providers.model_policy.get_model_for_tier", lambda *args, **kwargs: "gpt-5-mini")
-    monkeypatch.setattr(
-        "brain.app.api.routers.system.get_agent_worker_backend_settings",
-        lambda **kwargs: SimpleNamespace(to_dict=lambda: {}),
-        raising=False,
-    )
+    async def _model_maps(*args, **kwargs):
+        return {"openai": {"medium": "gpt-5.4"}}
 
-    info = _get_llm_info({"id": "user-1", "org_id": "org-1"}, db=FakeSession())
+    async def _default_provider(*args, **kwargs):
+        return "openai"
+
+    async def _model_for_tier(*args, **kwargs):
+        return "gpt-5-mini"
+
+    async def _backend_settings(*args, **kwargs):
+        return SimpleNamespace(to_dict=lambda: {})
+
+    monkeypatch.setattr("brain.app.api.routers.system.async_get_provider_model_maps", _model_maps)
+    monkeypatch.setattr("brain.app.api.routers.system.async_resolve_default_provider", _default_provider)
+    monkeypatch.setattr("brain.app.api.routers.system.async_get_model_for_tier", _model_for_tier)
+    monkeypatch.setattr("brain.app.api.routers.system.async_get_agent_worker_backend_settings", _backend_settings)
+
+    info = await _get_llm_info({"id": "user-1", "org_id": "org-1"}, db=FakeSession())
 
     assert info is not None
     assert info["provider_health"]["operations"]["verifier"][0]["status"] == "unavailable"

@@ -44,8 +44,8 @@ def test_runtime_ready_intro_reuses_existing_thread():
     session.scalars.return_value.first.side_effect = [existing, completed_run]
 
     with patch(
-        "brain.app.api.routers.onboarding.get_provider_auth_status",
-        return_value=_personal_openai_status(),
+        "brain.app.api.routers.onboarding.async_get_provider_auth_status",
+        AsyncMock(return_value=_personal_openai_status()),
     ), patch("brain.app.api.routers.onboarding.async_route_trigger") as route_trigger:
         result = asyncio.run(start_runtime_ready_intro(
             db=_AsyncSession(session),
@@ -74,8 +74,8 @@ def test_runtime_ready_intro_recovers_failed_existing_thread():
     session.scalars.return_value.first.side_effect = [existing, failed_run]
 
     with patch(
-        "brain.app.api.routers.onboarding.get_provider_auth_status",
-        return_value=_personal_openai_status(),
+        "brain.app.api.routers.onboarding.async_get_provider_auth_status",
+        AsyncMock(return_value=_personal_openai_status()),
     ), patch(
         "brain.app.api.routers.onboarding.async_route_trigger",
         AsyncMock(return_value=TriggerRouteResult(ok=True, route="run", run_id=77)),
@@ -115,8 +115,8 @@ def test_runtime_ready_intro_creates_thread_and_run():
     session.flush.side_effect = flush
 
     with patch(
-        "brain.app.api.routers.onboarding.get_provider_auth_status",
-        return_value=_personal_openai_status(),
+        "brain.app.api.routers.onboarding.async_get_provider_auth_status",
+        AsyncMock(return_value=_personal_openai_status()),
     ), patch(
         "brain.app.api.routers.onboarding.async_route_trigger",
         AsyncMock(return_value=TriggerRouteResult(ok=True, route="run", run_id=42)),
@@ -161,8 +161,8 @@ def test_runtime_ready_intro_requires_openai_runtime():
     from brain.app.api.routers.onboarding import start_runtime_ready_intro
 
     with patch(
-        "brain.app.api.routers.onboarding.get_provider_auth_status",
-        return_value={"runtime_key_available": False},
+        "brain.app.api.routers.onboarding.async_get_provider_auth_status",
+        AsyncMock(return_value={"runtime_key_available": False}),
     ):
         with pytest.raises(HTTPException) as exc:
             asyncio.run(start_runtime_ready_intro(
@@ -182,8 +182,8 @@ def test_runtime_ready_intro_rejects_workspace_openai_runtime():
 
     user = {"id": "user-1", "org_id": "org-1", "role": "member", "name": "Alice"}
     with patch(
-        "brain.app.api.routers.onboarding.get_provider_auth_status",
-        return_value={"runtime_key_available": True, "runtime_key_source": "org_main"},
+        "brain.app.api.routers.onboarding.async_get_provider_auth_status",
+        AsyncMock(return_value={"runtime_key_available": True, "runtime_key_source": "org_main"}),
     ):
         with pytest.raises(HTTPException) as exc:
             asyncio.run(runtime_ready_intro_draft(db=_AsyncSession(MagicMock()), user=user))

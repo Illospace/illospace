@@ -233,10 +233,10 @@ async def test_list_costs(client, mock_session_factory):
 
 @pytest.mark.asyncio
 async def test_system_info_omits_cortex_concurrency_settings(client, mock_session_factory):
-    with patch("brain.app.api.routers.system._get_llm_info", return_value={
+    with patch("brain.app.api.routers.system._get_llm_info", new=AsyncMock(return_value={
         "harvest_model": "gpt-5-mini",
         "consolidation_model": "gpt-5-mini",
-    }):
+    })):
         resp = await client.get("/api/system")
     assert resp.status_code == 200
     data = resp.json()
@@ -282,14 +282,14 @@ async def test_scheduler_drain_control_surface(client, mock_session_factory):
 
     app.dependency_overrides[system_router.get_current_user] = lambda: {"role": "owner"}
     try:
-        with patch("brain.app.api.routers.system.scheduler_daemon_tick", return_value={
+        with patch("brain.app.api.routers.system.async_scheduler_daemon_tick", new=AsyncMock(return_value={
             "ok": True,
             "owner_mode": "scheduler",
             "reclaimed": 0,
             "reclaimed_run_ids": [],
             "drain": {"ok": True, "executed": 1, "results": []},
             "snapshot": {"health": {"status": "healthy", "reasons": []}},
-        }) as mock_tick:
+        })) as mock_tick:
             resp = await client.post(
                 "/api/system/scheduler/drain",
                 json={"owner_mode": "scheduler", "job_key": "nightly_sleep", "max_runs": 2, "resume": True},
@@ -300,7 +300,7 @@ async def test_scheduler_drain_control_surface(client, mock_session_factory):
     assert resp.status_code == 200
     data = resp.json()
     assert data["drain"]["executed"] == 1
-    mock_tick.assert_called_once()
+    mock_tick.assert_awaited_once()
 
 
 @pytest.mark.asyncio

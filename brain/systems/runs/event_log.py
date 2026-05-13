@@ -56,7 +56,7 @@ async def async_record_run_event(
 
     async def _write(active_session: AsyncSession) -> AgentRunEventRow:
         store = AsyncAgentRunStore(active_session)
-        run = await store._run(lambda sync_store: sync_store.require_run(int(run_id)))
+        run = await store.require_run(int(run_id))
         return await store.append_event(
             run_event(
                 int(run_id),

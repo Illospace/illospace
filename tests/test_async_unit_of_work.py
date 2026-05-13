@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from brain.platform.db.repositories import unit_of_work as uow_module
@@ -227,56 +229,32 @@ async def test_cortex_runner_db_bridge_rejects_calls_inside_async_runtime():
         cortex_runner._run_db(lambda: None)
 
 
-@pytest.mark.asyncio
-async def test_async_agent_run_store_delegates_through_run_sync(monkeypatch):
-    calls: list[tuple[str, object]] = []
+def test_async_agent_run_store_uses_native_async_db_path():
+    source = inspect.getsource(run_store_module.AsyncAgentRunStore)
 
-    class _Store:
-        def __init__(self, sync_session, *, auto_commit: bool = False) -> None:
-            calls.append(("init", sync_session))
-            self.auto_commit = auto_commit
-
-        def create_run(self, request):
-            calls.append(("create_run", request))
-            return {"request": request, "auto_commit": self.auto_commit}
-
-    session = _AsyncSession()
-    monkeypatch.setattr(run_store_module, "AgentRunStore", _Store)
-
-    result = await AsyncAgentRunStore(session, auto_commit=True).create_run("request")
-
-    assert result == {"request": "request", "auto_commit": True}
-    assert calls == [("init", session.sync_session), ("create_run", "request")]
+    assert "run_session_task" not in source
+    assert ".run_sync(" not in source
 
 
-@pytest.mark.asyncio
-async def test_scheduler_async_claim_wrapper_uses_run_sync(monkeypatch):
-    session = _AsyncSession()
+def test_async_event_log_uses_native_async_store():
+    source = inspect.getsource(event_log_module.async_record_run_event)
 
-    def fake_claim(sync_session, run_id, **kwargs):
-        assert sync_session is session.sync_session
-        return ("run", run_id, kwargs["owner_id"])
-
-    monkeypatch.setattr(scheduler_runtime, "claim_run", fake_claim)
-
-    result = await scheduler_runtime.async_claim_run(session, 42, owner_id="worker-1")
-
-    assert result == ("run", 42, "worker-1")
+    assert "._run(" not in source
+    assert "run_session_task" not in source
+    assert ".run_sync(" not in source
 
 
-@pytest.mark.asyncio
-async def test_scheduler_async_executor_wrapper_uses_run_sync(monkeypatch):
-    session = _AsyncSession()
+def test_scheduler_async_helpers_are_native_async():
+    sources = [
+        inspect.getsource(scheduler_runtime.async_claim_run),
+        inspect.getsource(scheduler_runtime.async_claim_next_due_run),
+        inspect.getsource(scheduler_executor.async_execute_scheduler_run),
+        inspect.getsource(scheduler_executor.async_drain_scheduler),
+    ]
 
-    def fake_execute(sync_session, run_id, **kwargs):
-        assert sync_session is session.sync_session
-        return {"run_id": run_id, "owner_id": kwargs["owner_id"]}
-
-    monkeypatch.setattr(scheduler_executor, "execute_scheduler_run", fake_execute)
-
-    result = await scheduler_executor.async_execute_scheduler_run(session, 99, owner_id="worker-2")
-
-    assert result == {"run_id": 99, "owner_id": "worker-2"}
+    for source in sources:
+        assert "run_session_task" not in source
+        assert ".run_sync(" not in source
 
 
 @pytest.mark.asyncio
@@ -288,13 +266,9 @@ async def test_async_record_run_event_uses_short_lived_async_store(monkeypatch):
         def __init__(self, active_session):
             assert active_session is session
 
-        async def _run(self, fn):
-            class _SyncStore:
-                def require_run(self, run_id: int):
-                    assert run_id == 7
-                    return type("Run", (), {"root_run_id": 3})()
-
-            return fn(_SyncStore())
+        async def require_run(self, run_id: int):
+            assert run_id == 7
+            return type("Run", (), {"root_run_id": 3})()
 
         async def append_event(self, event):
             appended.append(event)

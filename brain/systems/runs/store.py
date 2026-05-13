@@ -29,7 +29,6 @@ from brain.platform.db.models.agent_run import (
     AgentRunEventRow,
     AgentRunRow,
 )
-from brain.platform.db.session_tasks import run_session_task
 
 _STEERING_SUBMITTED_EVENT = "run.steering_submitted"
 _STEERING_CURSOR_METADATA_KEY = "steering_cursor_sequence_no"
@@ -640,12 +639,6 @@ class AsyncAgentRunStore:
         self.session = session
         self.auto_commit = bool(auto_commit)
 
-    async def _run(self, fn):
-        def _invoke(sync_session: Session):
-            return fn(AgentRunStore(sync_session, auto_commit=self.auto_commit))
-
-        return await run_session_task(self.session, _invoke)
-
     async def create_run(self, request: AgentRunRequest) -> AgentRun:
         profile = request.normalized_profile
         recipe = request.normalized_recipe
@@ -681,13 +674,96 @@ class AsyncAgentRunStore:
         return AgentRunStore.to_domain(row)
 
     async def create_child_run(self, parent: AgentRun | AgentRunRow, **kwargs: Any) -> AgentRun:
-        return await self._run(lambda store: store.create_child_run(parent, **kwargs))
+        parent_run = parent if isinstance(parent, AgentRunRow) else await self.require_run(parent.id)
+        recipe = kwargs["recipe"]
+        recipe_value = recipe.value if isinstance(recipe, RunRecipe) else str(recipe)
+        step_key = kwargs.get("step_key")
+        metadata_payload = dict(kwargs.get("metadata") or {})
+        if step_key:
+            metadata_payload["parent_step_key"] = step_key
+            existing = await self.child_run_for_step(parent_run.id, step_key)
+            if existing is not None:
+                return AgentRunStore.to_domain(existing)
+        child = await self.create_run(
+            AgentRunRequest(
+                org_id=parent_run.org_id,
+                user_id=parent_run.user_id,
+                thread_id=parent_run.thread_id,
+                parent_run_id=parent_run.id,
+                root_run_id=parent_run.root_run_id or parent_run.id,
+                profile=kwargs.get("profile") or parent_run.profile,
+                recipe=recipe_value,
+                message=kwargs["message"],
+                target_ref=dict(
+                    kwargs["target_ref"]
+                    if kwargs.get("target_ref") is not None
+                    else parent_run.target_ref or {}
+                ),
+                workspace_ref=dict(
+                    kwargs["workspace_ref"]
+                    if kwargs.get("workspace_ref") is not None
+                    else parent_run.workspace_ref or {}
+                ),
+                model_policy=dict(
+                    kwargs["model_policy"]
+                    if kwargs.get("model_policy") is not None
+                    else parent_run.model_policy or {}
+                ),
+                metadata=metadata_payload,
+            )
+        )
+        await self.append_event(
+            run_event(
+                parent_run.id,
+                "run.child_created",
+                {"child_run_id": child.id, "recipe": child.recipe.value, "step_key": step_key},
+                root_run_id=parent_run.root_run_id or parent_run.id,
+            )
+        )
+        return child
+
+    async def child_run_for_step(self, parent_run_id: int, step_key: str) -> AgentRunRow | None:
+        rows = (
+            await self.session.scalars(
+                select(AgentRunRow)
+                .where(AgentRunRow.parent_run_id == int(parent_run_id))
+                .order_by(AgentRunRow.id.asc())
+            )
+        ).all()
+        for row in rows:
+            metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
+            if str(metadata.get("parent_step_key") or "") == str(step_key):
+                return row
+        return None
 
     async def claim_next(self) -> AgentRun | None:
-        return await self._run(lambda store: store.claim_next())
+        batch_size = 25
+        seen_ids: list[int] = []
+        while True:
+            stmt = (
+                select(AgentRunRow)
+                .where(AgentRunRow.status == RunStatus.QUEUED.value)
+                .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
+                .limit(batch_size)
+            )
+            if seen_ids:
+                stmt = stmt.where(~AgentRunRow.id.in_(seen_ids))
+            if self._dialect_name() == "postgresql":
+                stmt = stmt.with_for_update(skip_locked=True)
+            rows = (await self.session.scalars(stmt)).all()
+            if not rows:
+                return None
+            for row in rows:
+                if await self._deferred_run_dependency_active(row):
+                    seen_ids.append(int(row.id))
+                    continue
+                return await self.set_status(row.id, RunStatus.STARTING, reason="claimed")
 
     async def claim_run(self, run_id: int) -> AgentRun | None:
-        return await self._run(lambda store: store.claim_run(run_id))
+        row = await self._locked_run(run_id)
+        if row.status != RunStatus.QUEUED.value:
+            return None
+        return await self.set_status(row.id, RunStatus.STARTING, reason="claimed")
 
     async def get_run(self, run_id: int) -> AgentRunRow | None:
         return await self.session.get(AgentRunRow, int(run_id))
@@ -786,7 +862,71 @@ class AsyncAgentRunStore:
             return row
 
     async def append_artifact(self, artifact: AgentRunArtifact) -> AgentRunArtifactRow:
-        return await self._run(lambda store: store.append_artifact(artifact))
+        artifact_type = (
+            artifact.artifact_type.value
+            if isinstance(artifact.artifact_type, ArtifactType)
+            else str(artifact.artifact_type)
+        )
+        row = AgentRunArtifactRow(
+            run_id=artifact.run_id,
+            root_run_id=artifact.root_run_id or artifact.run_id,
+            artifact_type=artifact_type,
+            title=artifact.title,
+            payload=dict(artifact.payload or {}),
+            text=artifact.text,
+            uri=artifact.uri,
+            visibility=(
+                artifact.visibility.value
+                if isinstance(artifact.visibility, EventVisibility)
+                else str(artifact.visibility)
+            ),
+        )
+        self.session.add(row)
+        await self.session.flush()
+        await self.append_event(
+            run_event(
+                artifact.run_id,
+                "run.artifact_created",
+                {"artifact_id": row.id, "artifact_type": row.artifact_type, "title": row.title},
+                root_run_id=row.root_run_id,
+            )
+        )
+        return row
+
+    async def _deferred_run_dependency_active(self, row: AgentRunRow) -> bool:
+        target_id = AgentRunStore._deferred_run_target_id(row)
+        if target_id is None:
+            return False
+
+        target_status = await self.session.scalar(
+            select(AgentRunRow.status).where(AgentRunRow.id == int(target_id)).limit(1)
+        )
+        if str(target_status or "").lower() in _DEFERRED_RUN_ACTIVE_STATUS_VALUES:
+            return True
+
+        if not row.thread_id:
+            return False
+        older_active = await self.session.scalar(
+            select(AgentRunRow.id)
+            .where(
+                AgentRunRow.thread_id == row.thread_id,
+                AgentRunRow.parent_run_id.is_(None),
+                AgentRunRow.id < int(row.id),
+                AgentRunRow.status.in_(sorted(_DEFERRED_RUN_ACTIVE_STATUS_VALUES)),
+            )
+            .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
+            .limit(1)
+        )
+        return older_active is not None
+
+    async def _locked_run(self, run_id: int) -> AgentRunRow:
+        stmt = select(AgentRunRow).where(AgentRunRow.id == int(run_id)).limit(1)
+        if self._dialect_name() == "postgresql":
+            stmt = stmt.with_for_update()
+        row = (await self.session.scalars(stmt)).first()
+        if row is None:
+            raise LookupError(f"Run {run_id} not found")
+        return row
 
     def _dialect_name(self) -> str:
         bind = self.session.get_bind()

@@ -15,6 +15,7 @@ import bcrypt
 from cryptography.fernet import Fernet
 from sqlalchemy import case, inspect, or_, select
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel import config
 from brain.platform.db.models.org import OrgApiKey, User, UserApiKey, ApiKeyShare
@@ -1064,6 +1065,73 @@ def resolve_api_key(
     return None, "none"
 
 
+async def async_resolve_api_key(
+    user_id: str | None = None,
+    org_id: str | None = None,
+    provider: str = "anthropic",
+    *,
+    session: AsyncSession | None = None,
+) -> tuple[str | None, str]:
+    """Resolve API key using the async DB path."""
+
+    async def _resolve(active_session: AsyncSession) -> tuple[str | None, str]:
+        if user_id:
+            stmt = (
+                select(UserApiKey)
+                .join(User, User.default_api_key_id == UserApiKey.id)
+                .where(
+                    User.id == user_id,
+                    UserApiKey.provider == provider,
+                    UserApiKey.is_active == True,  # noqa: E712
+                )
+            )
+            key_row = (await active_session.scalars(stmt)).first()
+            if key_row:
+                return _decrypt(bytes(key_row.encrypted_key)), "user_default"
+
+            stmt = (
+                select(UserApiKey)
+                .where(
+                    UserApiKey.user_id == user_id,
+                    UserApiKey.provider == provider,
+                    UserApiKey.is_active == True,  # noqa: E712
+                )
+                .order_by(
+                    case((UserApiKey.label == "default", 0), else_=1),
+                    UserApiKey.id.desc(),
+                )
+                .limit(1)
+            )
+            key_row = (await active_session.scalars(stmt)).first()
+            if key_row:
+                return _decrypt(bytes(key_row.encrypted_key)), "user_default"
+
+        effective_org_id = org_id
+        if not effective_org_id and user_id:
+            user = await active_session.get(User, user_id)
+            if user:
+                effective_org_id = str(user.org_id)
+
+        if effective_org_id:
+            stmt = select(OrgApiKey).where(
+                OrgApiKey.org_id == effective_org_id,
+                OrgApiKey.provider == provider,
+            )
+            org_key = (await active_session.scalars(stmt)).first()
+            if org_key:
+                return _decrypt(bytes(org_key.encrypted_key)), "org_main"
+
+        env_key = os.environ.get(f"{provider.upper()}_API_KEY")
+        if env_key:
+            return env_key, "env"
+        return None, "none"
+
+    if session is not None:
+        return await _resolve(session)
+    async with UnitOfWork() as uow:
+        return await _resolve(uow.session)  # type: ignore[arg-type]
+
+
 def update_resolved_api_key(
     *,
     user_id: str | None = None,
@@ -1136,6 +1204,82 @@ def update_resolved_api_key(
                     return True
 
     return False
+
+
+async def async_update_resolved_api_key(
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    provider: str = "anthropic",
+    source: str,
+    api_key: str,
+    session: AsyncSession | None = None,
+) -> bool:
+    """Update the key row selected by ``async_resolve_api_key``."""
+    if source not in {"user_default", "org_main"}:
+        return False
+
+    encrypted = _encrypt(api_key)
+
+    async def _update(active_session: AsyncSession) -> bool:
+        if source == "user_default" and user_id:
+            stmt = (
+                select(UserApiKey)
+                .join(User, User.default_api_key_id == UserApiKey.id)
+                .where(
+                    User.id == user_id,
+                    UserApiKey.provider == provider,
+                    UserApiKey.is_active == True,  # noqa: E712
+                )
+            )
+            key_row = (await active_session.scalars(stmt)).first()
+
+            if not key_row:
+                stmt = (
+                    select(UserApiKey)
+                    .where(
+                        UserApiKey.user_id == user_id,
+                        UserApiKey.provider == provider,
+                        UserApiKey.is_active == True,  # noqa: E712
+                    )
+                    .order_by(
+                        case((UserApiKey.label == "default", 0), else_=1),
+                        UserApiKey.id.desc(),
+                    )
+                    .limit(1)
+                )
+                key_row = (await active_session.scalars(stmt)).first()
+
+            if key_row:
+                key_row.encrypted_key = encrypted
+                key_row.is_active = True
+                await active_session.flush()
+                return True
+
+        if source == "org_main":
+            effective_org_id = org_id
+            if not effective_org_id and user_id:
+                user = await active_session.get(User, user_id)
+                if user:
+                    effective_org_id = str(user.org_id)
+
+            if effective_org_id:
+                stmt = select(OrgApiKey).where(
+                    OrgApiKey.org_id == effective_org_id,
+                    OrgApiKey.provider == provider,
+                )
+                org_key = (await active_session.scalars(stmt)).first()
+                if org_key:
+                    org_key.encrypted_key = encrypted
+                    await active_session.flush()
+                    return True
+
+        return False
+
+    if session is not None:
+        return await _update(session)
+    async with UnitOfWork() as uow:
+        return await _update(uow.session)  # type: ignore[arg-type]
 
 
 def set_api_key(

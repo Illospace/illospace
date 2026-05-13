@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 from brain.platform.integrations.providers import get_active_provider
@@ -203,6 +204,28 @@ def _resolve_effective_org_id(
         return None
 
 
+async def async_resolve_effective_org_id(
+    session: AsyncSession,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> str | None:
+    if org_id:
+        return org_id
+    if not user_id:
+        return None
+    try:
+        row = (
+            await session.execute(
+                text("SELECT org_id FROM users WHERE id = :user_id LIMIT 1"),
+                {"user_id": user_id},
+            )
+        ).mappings().first()
+        return row.get("org_id") if row else None
+    except Exception:
+        return None
+
+
 def get_provider_model_map(
     provider: str | None = None,
     *,
@@ -241,6 +264,42 @@ def get_provider_model_map(
     return model_map
 
 
+async def async_get_provider_model_map(
+    session: AsyncSession,
+    provider: str | None = None,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict[str, str]:
+    """Return the intelligence-tier model map using an async session."""
+    provider = provider or await async_resolve_default_provider(session, user_id=user_id, org_id=org_id)
+    model_map = _provider_defaults(provider)
+    effective_org_id = await async_resolve_effective_org_id(session, user_id=user_id, org_id=org_id)
+    if not effective_org_id:
+        return model_map
+    try:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT intelligence_level, model_name
+                    FROM org_provider_model_mappings
+                    WHERE org_id = :org_id AND provider = :provider
+                    """
+                ),
+                {"org_id": effective_org_id, "provider": provider},
+            )
+        ).mappings().all()
+        for row in rows:
+            level = normalize_model_tier(row.get("intelligence_level"), default=None)
+            model_name = (_strip_provider_prefix(row.get("model_name")) or "").strip()
+            if level in model_map and model_name:
+                model_map[level] = model_name
+    except Exception:
+        pass
+    return model_map
+
+
 def model_tier_from_name(model_name: str, *, provider: str | None = None) -> str | None:
     """Return the configured intelligence tier for a provider model name."""
     target = _strip_provider_prefix(str(model_name or "").strip())
@@ -262,6 +321,19 @@ def get_provider_model_maps(
     """Return all provider model maps for UI and policy inspection."""
     return {
         provider: get_provider_model_map(provider, user_id=user_id, org_id=org_id)
+        for provider in DEFAULT_PROVIDER_MODEL_MAPS
+    }
+
+
+async def async_get_provider_model_maps(
+    session: AsyncSession,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict[str, dict[str, str]]:
+    """Return all provider model maps using an async session."""
+    return {
+        provider: await async_get_provider_model_map(session, provider, user_id=user_id, org_id=org_id)
         for provider in DEFAULT_PROVIDER_MODEL_MAPS
     }
 
@@ -317,6 +389,61 @@ def resolve_provider_selection(
     return ProviderResolution(provider=fallback_provider, source="fallback", explicit=False)
 
 
+async def async_resolve_provider_selection(
+    session: AsyncSession,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    *,
+    fallback: str | None = None,
+    preferred_provider: str | None = None,
+) -> ProviderResolution:
+    """Resolve the effective provider using an async session."""
+    preferred = (preferred_provider or "").strip().lower()
+    fallback_provider = normalize_default_provider(fallback or get_active_provider())
+    try:
+        effective_org_id = org_id
+        if user_id:
+            user_row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT u.org_id, u.default_provider, k.provider AS key_provider
+                        FROM users u
+                        LEFT JOIN user_api_keys k ON k.id = u.default_api_key_id
+                        WHERE u.id = :user_id
+                        LIMIT 1
+                        """
+                    ),
+                    {"user_id": user_id},
+                )
+            ).mappings().first()
+            if user_row:
+                explicit_provider = (user_row.get("default_provider") or "").strip().lower()
+                if explicit_provider in DEFAULT_PROVIDER_MODEL_MAPS:
+                    return ProviderResolution(provider=normalize_default_provider(explicit_provider), source="user_default", explicit=True)
+                key_provider = (user_row.get("key_provider") or "").strip().lower()
+                if key_provider in DEFAULT_PROVIDER_MODEL_MAPS:
+                    return ProviderResolution(provider=normalize_default_provider(key_provider), source="user_default_api_key", explicit=True)
+                effective_org_id = effective_org_id or user_row.get("org_id")
+        if effective_org_id:
+            org_row = (
+                await session.execute(
+                    text("SELECT memory_model_config FROM orgs WHERE id = :org_id LIMIT 1"),
+                    {"org_id": effective_org_id},
+                )
+            ).mappings().first()
+            config = (org_row or {}).get("memory_model_config") or {}
+            org_provider = (config.get("default_provider") or "").strip().lower()
+            if org_provider in DEFAULT_PROVIDER_MODEL_MAPS:
+                return ProviderResolution(provider=normalize_default_provider(org_provider), source="org_default_provider", explicit=True)
+    except Exception:
+        pass
+
+    if preferred in DEFAULT_PROVIDER_MODEL_MAPS:
+        return ProviderResolution(provider=normalize_runtime_provider(preferred), source="preferred_provider", explicit=False)
+    return ProviderResolution(provider=fallback_provider, source="fallback", explicit=False)
+
+
 def resolve_default_provider(
     user_id: str | None = None,
     org_id: str | None = None,
@@ -337,6 +464,26 @@ def resolve_default_provider(
         org_id=org_id,
         fallback=fallback,
         preferred_provider=preferred_provider,
+    ).provider
+
+
+async def async_resolve_default_provider(
+    session: AsyncSession,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    *,
+    fallback: str | None = None,
+    preferred_provider: str | None = None,
+) -> str:
+    """Resolve the effective provider for a user/org context using an async session."""
+    return (
+        await async_resolve_provider_selection(
+            session,
+            user_id=user_id,
+            org_id=org_id,
+            fallback=fallback,
+            preferred_provider=preferred_provider,
+        )
     ).provider
 
 
@@ -393,6 +540,27 @@ def get_model_for_tier(
     provider = normalize_runtime_provider(provider or resolve_default_provider(user_id=user_id, org_id=org_id))
     tier = normalize_model_tier(tier) or DEFAULT_MODEL_TIER
     provider_map = get_provider_model_map(provider, user_id=user_id, org_id=org_id)
+    model = provider_map.get(tier, provider_map.get(DEFAULT_MODEL_TIER))
+    if not model:
+        model = DEFAULT_PROVIDER_MODEL_MAPS.get(provider, DEFAULT_PROVIDER_MODEL_MAPS["openai"])[DEFAULT_MODEL_TIER]
+    return f"{provider}/{model}" if include_provider_prefix else model
+
+
+async def async_get_model_for_tier(
+    session: AsyncSession,
+    tier: str,
+    provider: str | None = None,
+    *,
+    include_provider_prefix: bool = False,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> str:
+    """Return the concrete model string for a tier using an async session."""
+    provider = normalize_runtime_provider(
+        provider or await async_resolve_default_provider(session, user_id=user_id, org_id=org_id)
+    )
+    tier = normalize_model_tier(tier) or DEFAULT_MODEL_TIER
+    provider_map = await async_get_provider_model_map(session, provider, user_id=user_id, org_id=org_id)
     model = provider_map.get(tier, provider_map.get(DEFAULT_MODEL_TIER))
     if not model:
         model = DEFAULT_PROVIDER_MODEL_MAPS.get(provider, DEFAULT_PROVIDER_MODEL_MAPS["openai"])[DEFAULT_MODEL_TIER]

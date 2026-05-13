@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
 from brain.app.api.auth import get_current_user
+from brain.app.api.deps import get_db
 from brain.app.api.routers.cortex._helpers import (
     ALLOWED_EXTENSIONS,
     MAX_VIDEO_UPLOAD_SIZE,
@@ -48,7 +49,7 @@ from brain.systems.cortex.upload_preview import (
     public_static_upload_url,
     static_upload_url_for,
 )
-from brain.systems.services.runtime_introspection import get_provider_auth_status
+from brain.systems.services.runtime_introspection import async_get_provider_auth_status
 
 logger = logging.getLogger(__name__)
 
@@ -527,21 +528,23 @@ async def timeline_data(
 @router.get("/auth/status")
 async def auth_status(
     user: dict[str, Any] = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
     provider: str | None = None,
 ):
     """Provider-specific auth status for the active runtime."""
-    from brain.platform.providers.model_policy import resolve_default_provider
+    from brain.platform.providers.model_policy import async_resolve_default_provider
 
     provider = (
         provider
-        or resolve_default_provider(user_id=user.get("id"), org_id=user.get("org_id"))
+        or await async_resolve_default_provider(db, user_id=user.get("id"), org_id=user.get("org_id"))
     ).strip().lower()
     if provider not in {"anthropic", "openai"}:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
     user_id = user.get("id")
     org_id = user.get("org_id")
-    return get_provider_auth_status(
+    return await async_get_provider_auth_status(
+        db,
         user_id=user_id,
         org_id=org_id,
         provider=provider,

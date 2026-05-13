@@ -23,7 +23,7 @@ from brain.app.api.routers.team import async_list_members_payload as list_member
 from brain.app.api.routers.workspace_pins import _serialize_pin
 from brain.app.api.schemas.team import TeamMemberRead
 from brain.platform.db.models.workspace_pin import WorkspacePin
-from brain.systems.services.runtime_introspection import get_provider_auth_status
+from brain.systems.services.runtime_introspection import async_get_provider_auth_status
 from brain.systems.workspace_apps.service import a_list_apps as list_apps, a_serialize_apps as serialize_apps
 
 
@@ -123,7 +123,8 @@ async def cortex_bootstrap(
         }
     if "auth_status" in include_set:
         try:
-            payload["auth_status"] = get_provider_auth_status(
+            payload["auth_status"] = await async_get_provider_auth_status(
+                db,
                 user_id=user.get("id"),
                 org_id=user.get("org_id"),
                 provider=provider,

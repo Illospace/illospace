@@ -1,5 +1,10 @@
 """Scheduler control-plane helpers."""
 from brain.app.scheduler.catalog import (
+    async_list_scheduler_jobs,
+    async_list_scheduler_runs,
+    async_retire_scheduler_job,
+    async_sync_scheduler_catalog,
+    async_upsert_scheduler_job,
     list_scheduler_jobs,
     list_scheduler_runs,
     normalize_owner_mode,
@@ -7,11 +12,18 @@ from brain.app.scheduler.catalog import (
     sync_scheduler_catalog,
     upsert_scheduler_job,
 )
-from brain.app.scheduler.daemon import scheduler_daemon_tick, scheduler_health_snapshot
+from brain.app.scheduler.daemon import async_scheduler_daemon_tick, async_scheduler_health_snapshot, scheduler_daemon_tick, scheduler_health_snapshot
 from brain.app.scheduler.executor import (
     async_claim_scheduler_run,
     async_drain_scheduler,
     async_execute_scheduler_run,
+    async_retry_scheduler_run,
+    async_resume_scheduler_run,
+    async_run_scheduler_job,
+    async_run_scheduler_run,
+    async_set_scheduler_job_load_shed,
+    async_set_scheduler_job_owner_mode,
+    async_set_scheduler_job_paused,
     claim_scheduler_run,
     drain_scheduler,
     execute_scheduler_run,
@@ -21,12 +33,15 @@ from brain.app.scheduler.executor import (
     run_scheduler_job,
     run_scheduler_run,
 )
-from brain.app.scheduler.planner import materialize_due_runs, next_run_after
+from brain.app.scheduler.planner import async_materialize_due_runs, materialize_due_runs, next_run_after
 from brain.app.scheduler.runtime import (
     async_claim_next_due_run,
     async_claim_run,
     async_finish_run,
+    async_reclaim_expired_leases,
     async_heartbeat_lease,
+    async_release_lease,
+    async_retry_run,
     async_update_run_step,
     claim_next_due_run,
     claim_run,
@@ -48,7 +63,25 @@ __all__ = [
     "async_execute_scheduler_run",
     "async_finish_run",
     "async_heartbeat_lease",
+    "async_list_scheduler_jobs",
+    "async_list_scheduler_runs",
+    "async_materialize_due_runs",
+    "async_reclaim_expired_leases",
+    "async_release_lease",
+    "async_retire_scheduler_job",
+    "async_retry_run",
+    "async_retry_scheduler_run",
+    "async_resume_scheduler_run",
+    "async_run_scheduler_job",
+    "async_run_scheduler_run",
+    "async_scheduler_daemon_tick",
+    "async_scheduler_health_snapshot",
+    "async_set_scheduler_job_load_shed",
+    "async_set_scheduler_job_owner_mode",
+    "async_set_scheduler_job_paused",
+    "async_sync_scheduler_catalog",
     "async_update_run_step",
+    "async_upsert_scheduler_job",
     "claim_scheduler_run",
     "claim_next_due_run",
     "claim_run",

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 
 def _result(rows):
@@ -23,7 +25,8 @@ def _mapping_first(row):
     return result
 
 
-def test_trace_summary_returns_privacy_filtered_skeleton():
+@pytest.mark.asyncio
+async def test_trace_summary_returns_privacy_filtered_skeleton():
     from brain.app.api.routers.system import _build_trace_summary
     from brain.platform.db.models.run import AgentRun
 
@@ -64,8 +67,8 @@ def test_trace_summary_returns_privacy_filtered_skeleton():
         finished_at=now,
     )
     db = MagicMock()
-    db.get.side_effect = lambda model, key, **_: agent_run if model is AgentRun and key == 42 else None
-    db.execute.side_effect = [
+    db.get = AsyncMock(side_effect=lambda model, key, **_: agent_run if model is AgentRun and key == 42 else None)
+    db.execute = AsyncMock(side_effect=[
         _mapping_all([
             {
                 "model": "openai:gpt-5.4",
@@ -79,24 +82,18 @@ def test_trace_summary_returns_privacy_filtered_skeleton():
         ]),
         _result([SimpleNamespace(tool_name="run_script", source="worker:develop", calls=1)]),
         _result([SimpleNamespace(status="passed", count=1)]),
-        _mapping_first({
-            "execution_artifact_count": 2,
-            "execution_artifact_types": {"branch": 1, "pr": 1},
-            "has_output_artifact": True,
-            "output_type": "reply",
-        }),
-    ]
-    db.scalars.side_effect = [
+    ])
+    db.scalars = AsyncMock(side_effect=[
         _result([scheduler_run]),
         _result([step]),
         _result(["branch", "pr"]),
-    ]
-    db.scalar.side_effect = [
+    ])
+    db.scalar = AsyncMock(side_effect=[
         3,
         4,
-    ]
+    ])
 
-    summary = _build_trace_summary(
+    summary = await _build_trace_summary(
         db,
         user={"id": "user-1", "role": "member"},
         run_id=42,

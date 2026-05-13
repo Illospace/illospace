@@ -1147,6 +1147,11 @@ class MemoryRepository(BaseRepository[Memory]):
         stmt = select(func.count(Memory.id)).where(Memory.archived == True)  # noqa: E712
         return self._session.scalar(stmt) or 0
 
+    async def a_count_archived(self) -> int:
+        """Count archived memories using an async session."""
+        stmt = select(func.count(Memory.id)).where(Memory.archived == True)  # noqa: E712
+        return await self._session.scalar(stmt) or 0
+
     def count_by_type(self) -> dict[str, int]:
         """Count memories grouped by memory_type."""
         if not quarantine_filter_enabled():
@@ -1160,6 +1165,22 @@ class MemoryRepository(BaseRepository[Memory]):
 
         counts: dict[str, int] = {}
         for memory in self.list_active(limit=None):
+            counts[memory.memory_type] = counts.get(memory.memory_type, 0) + 1
+        return counts
+
+    async def a_count_by_type(self) -> dict[str, int]:
+        """Count memories grouped by memory_type using an async session."""
+        if not quarantine_filter_enabled():
+            stmt = (
+                select(Memory.memory_type, func.count(Memory.id))
+                .where(or_(Memory.archived == False, Memory.archived.is_(None)))  # noqa: E712
+                .group_by(Memory.memory_type)
+            )
+            rows = (await self._session.execute(stmt)).all()
+            return {row[0]: row[1] for row in rows}
+
+        counts: dict[str, int] = {}
+        for memory in await self.a_list_active(limit=None):
             counts[memory.memory_type] = counts.get(memory.memory_type, 0) + 1
         return counts
 
@@ -1351,12 +1372,58 @@ class MemoryRepository(BaseRepository[Memory]):
             for m in memories
         ]
 
+    async def a_recent_activity(self, *, limit: int = 20) -> list[dict]:
+        """Return recent memories as activity feed items using an async session."""
+        stmt = (
+            select(Memory)
+            .options(
+                load_only(
+                    Memory.id,
+                    Memory.content,
+                    Memory.memory_type,
+                    Memory.created_at,
+                    Memory.archived,
+                    Memory.memory_tier,
+                    Memory.truth_status,
+                    Memory.review_status,
+                    Memory.confidence,
+                    Memory.freshness_score,
+                    Memory.superseded_by,
+                    Memory.valid_until,
+                    Memory.policy_kind,
+                    Memory.policy_scope,
+                    Memory.demoted_at,
+                )
+            )
+            .where(or_(Memory.archived == False, Memory.archived.is_(None)))  # noqa: E712
+            .order_by(Memory.created_at.desc())
+        )
+        result = await self._session.scalars(stmt.limit(limit * 2))
+        memories = self._filter_truth_safe(result.all())[:limit]
+        return [
+            {
+                "type": "memory",
+                "subtype": m.memory_type,
+                "detail": ((m.content or "")[:120] + "...") if len(m.content or "") > 120 else (m.content or ""),
+                "ts": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in memories
+        ]
+
     def retrieval_accuracy(self) -> float | None:
         """Average retrieval accuracy from retrieval_log (where was_relevant is set)."""
         stmt = select(func.avg(
             func.cast(RetrievalLog.was_relevant, Integer)
         )).where(RetrievalLog.was_relevant.isnot(None))
         result = self._session.scalar(stmt)
+        return float(result) if result is not None else None
+
+    async def a_retrieval_accuracy(self) -> float | None:
+        """Average retrieval accuracy using an async session."""
+        stmt = select(func.avg(
+            func.cast(RetrievalLog.was_relevant, Integer)
+        )).where(RetrievalLog.was_relevant.isnot(None))
+        result = await self._session.scalar(stmt)
         return float(result) if result is not None else None
 
     def get_graph_data(self, *, limit: int = 500, context: MemoryVisibilityContext | None = None) -> dict:
@@ -1569,6 +1636,11 @@ class EdgeRepository(BaseRepository[Edge]):
         """Count all edges."""
         stmt = select(func.count(Edge.id))
         return self._session.scalar(stmt) or 0
+
+    async def a_count_all(self) -> int:
+        """Count all edges using an async session."""
+        stmt = select(func.count(Edge.id))
+        return await self._session.scalar(stmt) or 0
 
     def upsert_edge(
         self,

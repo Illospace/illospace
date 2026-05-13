@@ -15,7 +15,7 @@ from brain.app.triggers.router import async_route_trigger
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.idea import Idea
 from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
-from brain.systems.services.runtime_introspection import get_provider_auth_status
+from brain.systems.services.runtime_introspection import async_get_provider_auth_status
 from brain.systems.runs.status import RunStatus
 
 router = APIRouter(
@@ -50,8 +50,8 @@ def _has_personal_openai_connection(status: dict[str, Any]) -> bool:
     )
 
 
-def _require_personal_openai_connection(*, user_id: str, org_id: str) -> None:
-    status = get_provider_auth_status(user_id=user_id, org_id=org_id, provider="openai")
+async def _require_personal_openai_connection(db: AsyncSession, *, user_id: str, org_id: str) -> None:
+    status = await async_get_provider_auth_status(db, user_id=user_id, org_id=org_id, provider="openai")
     if not _has_personal_openai_connection(status):
         raise HTTPException(
             status_code=409,
@@ -141,7 +141,7 @@ async def runtime_ready_intro_draft(
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
     org_id = require_org_context(user)
-    _require_personal_openai_connection(user_id=user_id, org_id=org_id)
+    await _require_personal_openai_connection(db, user_id=user_id, org_id=org_id)
 
     existing = await _find_existing_intro(db, org_id=org_id, user_id=user_id)
     return {
@@ -166,7 +166,7 @@ async def start_runtime_ready_intro(
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
     org_id = require_org_context(user)
-    _require_personal_openai_connection(user_id=user_id, org_id=org_id)
+    await _require_personal_openai_connection(db, user_id=user_id, org_id=org_id)
 
     existing = await _find_existing_intro(db, org_id=org_id, user_id=user_id)
     if existing is not None:

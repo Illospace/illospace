@@ -1,5 +1,28 @@
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
+
+
+def _status_payload(**overrides):
+    payload = {
+        "provider": "anthropic",
+        "effective_provider": "openai",
+        "is_selected_provider": False,
+        "status": "available",
+        "authenticated": True,
+        "method": "api_key",
+        "auth_mode": "api_key",
+        "has_personal_db_key": True,
+        "has_org_db_key": True,
+        "has_db_keys": True,
+        "runtime_key_available": True,
+        "runtime_key_source": "org_main",
+        "runtime_key_scope": "org",
+        "runtime_uses_db_key": True,
+        "runtime_uses_external_auth": False,
+        "setup_required": False,
+    }
+    payload.update(overrides)
+    return payload
 
 
 def test_auth_status_reports_runtime_db_key_state():
@@ -7,22 +30,11 @@ def test_auth_status_reports_runtime_db_key_state():
 
     user = {"id": "user-1", "org_id": "org-1", "role": "owner"}
 
-    mock_session = MagicMock()
-    # scalars().first() called twice: once for personal key, once for org key
-    # Return truthy values to indicate keys exist
-    mock_session.scalars.return_value.first.side_effect = [1, 1]
-
-    mock_uow = MagicMock()
-    mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-    mock_uow.__exit__ = MagicMock(return_value=False)
-    mock_uow.session = mock_session
-
-    mock_llm = MagicMock(source="org_main", auth_mode="api_key", is_oauth=False)
-
-    with patch("brain.systems.services.runtime_introspection.resolve_llm_client", return_value=mock_llm), \
-         patch("brain.systems.services.runtime_introspection.resolve_default_provider", return_value="anthropic"), \
-         patch("brain.systems.services.runtime_introspection.UnitOfWork", return_value=mock_uow):
-        data = asyncio.run(auth_status(provider="anthropic", user=user))
+    with patch(
+        "brain.app.api.routers.cortex._misc.async_get_provider_auth_status",
+        AsyncMock(return_value=_status_payload()),
+    ):
+        data = asyncio.run(auth_status(provider="anthropic", user=user, db=object()))
 
     assert data["authenticated"] is True
     assert data["has_personal_db_key"] is True
@@ -40,18 +52,25 @@ def test_auth_status_requires_db_key_even_if_env_key_exists():
 
     user = {"id": "user-1", "org_id": "org-1", "role": "owner"}
 
-    mock_session = MagicMock()
-    # scalars().first() called twice: both return None (no keys)
-    mock_session.scalars.return_value.first.side_effect = [None, None]
-
-    mock_uow = MagicMock()
-    mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-    mock_uow.__exit__ = MagicMock(return_value=False)
-    mock_uow.session = mock_session
-
-    with patch("brain.systems.services.runtime_introspection.resolve_llm_client", side_effect=RuntimeError("missing")), \
-         patch("brain.systems.services.runtime_introspection.UnitOfWork", return_value=mock_uow):
-        data = asyncio.run(auth_status(user=user))
+    with patch(
+        "brain.platform.providers.model_policy.async_resolve_default_provider",
+        AsyncMock(return_value="anthropic"),
+    ), patch(
+        "brain.app.api.routers.cortex._misc.async_get_provider_auth_status",
+        AsyncMock(return_value=_status_payload(
+            authenticated=False,
+            runtime_key_available=False,
+            runtime_uses_db_key=False,
+            runtime_key_source="none",
+            runtime_key_scope="none",
+            status="not_configured",
+            setup_required=True,
+            has_personal_db_key=False,
+            has_org_db_key=False,
+            has_db_keys=False,
+        )),
+    ):
+        data = asyncio.run(auth_status(user=user, db=object()))
 
     assert data["authenticated"] is False
     assert data["runtime_uses_db_key"] is False
@@ -65,20 +84,25 @@ def test_auth_status_reports_openai_codex_cache_runtime():
 
     user = {"id": "user-1", "org_id": "org-1", "role": "owner"}
 
-    mock_session = MagicMock()
-    mock_session.scalars.return_value.first.side_effect = [None, None]
-
-    mock_uow = MagicMock()
-    mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-    mock_uow.__exit__ = MagicMock(return_value=False)
-    mock_uow.session = mock_session
-
-    mock_llm = MagicMock(source="codex_cache", auth_mode="chatgpt", is_oauth=True)
-
-    with patch("brain.systems.services.runtime_introspection.resolve_llm_client", return_value=mock_llm), \
-         patch("brain.systems.services.runtime_introspection.resolve_default_provider", return_value="anthropic"), \
-         patch("brain.systems.services.runtime_introspection.UnitOfWork", return_value=mock_uow):
-        data = asyncio.run(auth_status(provider="openai", user=user))
+    with patch(
+        "brain.app.api.routers.cortex._misc.async_get_provider_auth_status",
+        AsyncMock(return_value=_status_payload(
+            provider="openai",
+            effective_provider="openai",
+            is_selected_provider=True,
+            status="in_use",
+            method="chatgpt",
+            auth_mode="chatgpt",
+            has_personal_db_key=False,
+            has_org_db_key=False,
+            has_db_keys=False,
+            runtime_key_source="codex_cache",
+            runtime_key_scope="external",
+            runtime_uses_db_key=False,
+            runtime_uses_external_auth=True,
+        )),
+    ):
+        data = asyncio.run(auth_status(provider="openai", user=user, db=object()))
 
     assert data["provider"] == "openai"
     assert data["authenticated"] is True

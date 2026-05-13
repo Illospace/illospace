@@ -22,8 +22,13 @@ from brain.app.scheduler.catalog import (
     list_scheduler_runs,
     normalize_owner_mode,
 )
-from brain.app.scheduler.executor import drain_scheduler
-from brain.app.scheduler.runtime import RUN_STATUS_SHELVED, normalize_run_status, reclaim_expired_leases
+from brain.app.scheduler.executor import async_drain_scheduler, drain_scheduler
+from brain.app.scheduler.runtime import (
+    RUN_STATUS_SHELVED,
+    async_reclaim_expired_leases,
+    normalize_run_status,
+    reclaim_expired_leases,
+)
 
 
 def _utc_now() -> datetime:
@@ -322,6 +327,42 @@ def scheduler_daemon_tick(
     )
     snapshot = scheduler_health_snapshot(session, owner_mode=owner_mode, now=now)
     session.flush()
+    return {
+        "ok": True,
+        "owner_mode": owner_mode,
+        "reclaimed": len(reclaimed),
+        "reclaimed_run_ids": [run.id for run in reclaimed],
+        "drain": drain,
+        "snapshot": snapshot,
+    }
+
+
+async def async_scheduler_daemon_tick(
+    session: AsyncSession,
+    *,
+    owner_mode: str = OWNER_MODE_SCHEDULER,
+    job_key: str | None = None,
+    max_runs: int = 10,
+    resume: bool = True,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Run one always-on scheduler tick using native async database operations."""
+    now = now or _utc_now()
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+
+    owner_mode = normalize_owner_mode(owner_mode)
+    reclaimed = await async_reclaim_expired_leases(session, now=now)
+    drain = await async_drain_scheduler(
+        session,
+        owner_mode=owner_mode,
+        job_key=job_key,
+        max_runs=max_runs,
+        resume=resume,
+        now=now,
+    )
+    snapshot = await async_scheduler_health_snapshot(session, owner_mode=owner_mode, now=now)
+    await session.flush()
     return {
         "ok": True,
         "owner_mode": owner_mode,

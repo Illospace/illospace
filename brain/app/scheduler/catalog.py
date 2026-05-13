@@ -243,6 +243,88 @@ def _upsert_scheduler_job(
     return job
 
 
+async def _async_upsert_scheduler_job_row(
+    session: AsyncSession,
+    *,
+    job_key: str,
+    family: str,
+    program_key: str,
+    handler_kind: str,
+    handler_ref: str,
+    cron_expr: str,
+    timezone_name: str,
+    enabled: bool,
+    owner_mode: str,
+    default_payload: dict[str, Any],
+    pause_reason: str | None = None,
+    priority: int = 100,
+    max_concurrency: int = 1,
+    timeout_seconds: int | None = None,
+    retry_policy: dict[str, Any] | None = None,
+    misfire_policy: str = "record",
+    load_shed_policy: dict[str, Any] | None = None,
+    target_binding_selector: dict[str, Any] | None = None,
+    task_contract: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> SchedulerJob:
+    now = now or datetime.now(timezone.utc)
+    next_fire = None
+    if enabled:
+        try:
+            next_fire = next_run_after(cron_expr, timezone_name, now)
+        except Exception:
+            next_fire = None
+    job = await session.scalar(select(SchedulerJob).where(SchedulerJob.job_key == job_key))
+    if job is None:
+        job = SchedulerJob(
+            job_key=job_key,
+            family=family,
+            program_key=program_key,
+            handler_kind=handler_kind,
+            handler_ref=handler_ref,
+            cron_expr=cron_expr,
+            timezone=timezone_name,
+            enabled=enabled,
+            owner_mode=owner_mode,
+            priority=priority,
+            max_concurrency=max_concurrency,
+            timeout_seconds=timeout_seconds,
+            retry_policy=retry_policy or {"max_attempts": 2, "backoff_seconds": 0},
+            misfire_policy=misfire_policy,
+            load_shed_policy=load_shed_policy or {},
+            default_payload=default_payload,
+            target_binding_selector=target_binding_selector or {},
+            task_contract=task_contract or {},
+            next_run_at=next_fire,
+            pause_reason=pause_reason,
+        )
+        session.add(job)
+        await session.flush()
+        return job
+
+    job.family = family
+    job.program_key = program_key
+    job.handler_kind = handler_kind
+    job.handler_ref = handler_ref
+    job.cron_expr = cron_expr
+    job.timezone = timezone_name
+    job.enabled = enabled
+    job.owner_mode = owner_mode
+    job.priority = priority
+    job.max_concurrency = max_concurrency
+    job.timeout_seconds = timeout_seconds
+    job.retry_policy = retry_policy or {"max_attempts": 2, "backoff_seconds": 0}
+    job.misfire_policy = misfire_policy
+    job.load_shed_policy = load_shed_policy or {}
+    job.default_payload = default_payload
+    job.target_binding_selector = target_binding_selector or {}
+    job.task_contract = task_contract or {}
+    job.next_run_at = next_fire
+    job.pause_reason = pause_reason
+    await session.flush()
+    return job
+
+
 def upsert_scheduler_job(
     session: Session,
     *,
@@ -300,6 +382,63 @@ def upsert_scheduler_job(
     )
 
 
+async def async_upsert_scheduler_job(
+    session: AsyncSession,
+    *,
+    job_key: str,
+    cron_expr: str,
+    handler_ref: str,
+    family: str | None = None,
+    program_key: str | None = None,
+    handler_kind: str = "command",
+    enabled: bool = True,
+    owner_mode: str = OWNER_MODE_SCHEDULER,
+    timezone_name: str = DEFAULT_SCHEDULER_TIMEZONE,
+    default_payload: dict[str, Any] | None = None,
+    task_contract: dict[str, Any] | None = None,
+    pause_reason: str | None = None,
+    priority: int = 100,
+    max_concurrency: int = 1,
+    timeout_seconds: int | None = None,
+    retry_policy: dict[str, Any] | None = None,
+    misfire_policy: str = "record",
+    load_shed_policy: dict[str, Any] | None = None,
+    target_binding_selector: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> SchedulerJob:
+    """Create or update a scheduler-owned recurring job using an async session."""
+    normalized_key = _slugify(job_key)
+    payload = dict(default_payload or {})
+    payload.setdefault("name", job_key)
+    contract = dict(task_contract or {})
+    if not contract:
+        contract = _default_task_contract(normalized_key)
+    resolved_program_key = program_key or _program_key_from_job(job_key, None, handler_ref)
+    return await _async_upsert_scheduler_job_row(
+        session,
+        job_key=normalized_key,
+        family=_slugify(family or normalized_key),
+        program_key=_slugify(resolved_program_key),
+        handler_kind=handler_kind,
+        handler_ref=str(handler_ref),
+        cron_expr=str(cron_expr),
+        timezone_name=timezone_name,
+        enabled=enabled,
+        owner_mode=normalize_owner_mode(owner_mode),
+        default_payload=payload,
+        pause_reason=pause_reason if not enabled else None,
+        priority=priority,
+        max_concurrency=max_concurrency,
+        timeout_seconds=timeout_seconds,
+        retry_policy=retry_policy,
+        misfire_policy=misfire_policy,
+        load_shed_policy=load_shed_policy,
+        target_binding_selector=target_binding_selector,
+        task_contract=contract,
+        now=now,
+    )
+
+
 def retire_scheduler_job(
     session: Session,
     identifier: str,
@@ -315,6 +454,24 @@ def retire_scheduler_job(
     job.enabled = False
     job.pause_reason = reason
     session.flush()
+    return job
+
+
+async def async_retire_scheduler_job(
+    session: AsyncSession,
+    identifier: str,
+    *,
+    reason: str,
+) -> SchedulerJob | None:
+    """Soft-disable a scheduler job while preserving history using an async session."""
+    from brain.app.scheduler.runtime import async_find_scheduler_job
+
+    job = await async_find_scheduler_job(session, identifier)
+    if job is None:
+        return None
+    job.enabled = False
+    job.pause_reason = reason
+    await session.flush()
     return job
 
 
@@ -365,6 +522,56 @@ def sync_scheduler_catalog(
         )
         upserted += 1
     session.flush()
+    return {"upserted": upserted}
+
+
+async def async_sync_scheduler_catalog(
+    session: AsyncSession,
+    *,
+    owner_mode: str = OWNER_MODE_SCHEDULER,
+    timezone_name: str = DEFAULT_SCHEDULER_TIMEZONE,
+    now: datetime | None = None,
+    job_keys: tuple[str, ...] | None = None,
+) -> dict[str, int]:
+    """Ensure built-in scheduler jobs exist without touching legacy cron tables."""
+    now = now or datetime.now(timezone.utc)
+    owner_mode = normalize_owner_mode(owner_mode)
+    if owner_mode != OWNER_MODE_SCHEDULER:
+        raise ValueError("Legacy cron/mirror owner modes are retired; use owner_mode='scheduler'.")
+
+    selected_keys = {_slugify(key) for key in job_keys or ()}
+    upserted = 0
+    for definition in SCHEDULER_CATALOG:
+        aliases = {
+            _slugify(str(definition["job_key"])),
+            _slugify(str(definition["family"])),
+            _slugify(str(definition["program_key"])),
+        }
+        if selected_keys and not (aliases & selected_keys):
+            continue
+        await async_upsert_scheduler_job(
+            session,
+            job_key=str(definition["job_key"]),
+            family=str(definition["family"]),
+            program_key=str(definition["program_key"]),
+            handler_kind=str(definition["handler_kind"]),
+            handler_ref=str(definition["handler_ref"]),
+            cron_expr=str(definition["cron_expr"]),
+            owner_mode=owner_mode,
+            timezone_name=timezone_name,
+            default_payload=dict(definition.get("default_payload") or {}),
+            task_contract=dict(definition.get("task_contract") or {}),
+            priority=int(definition.get("priority") or 100),
+            max_concurrency=int(definition.get("max_concurrency") or 1),
+            timeout_seconds=definition.get("timeout_seconds"),
+            retry_policy=dict(definition.get("retry_policy") or {}),
+            misfire_policy=str(definition.get("misfire_policy") or "record"),
+            load_shed_policy=dict(definition.get("load_shed_policy") or {}),
+            target_binding_selector=dict(definition.get("target_binding_selector") or {}),
+            now=now,
+        )
+        upserted += 1
+    await session.flush()
     return {"upserted": upserted}
 
 
