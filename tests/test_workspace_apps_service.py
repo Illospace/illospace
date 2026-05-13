@@ -761,6 +761,123 @@ def test_workspace_app_action_generic_http_syncs_domain_records(session):
     assert {record.title for record in records} == {"Updated issue", "New issue"}
 
 
+def test_workspace_app_action_generic_http_supports_templates_and_conditionals(session):
+    domain = DomainService(session).create_domain(
+        ORG_ID,
+        name="Imported Tickets",
+        slug="imported-tickets",
+        objects=[
+            {
+                "key": "ticket",
+                "name": "Ticket",
+                "fields": [
+                    {"key": "external_id", "field_type": "text"},
+                    {"key": "identifier", "field_type": "text"},
+                    {"key": "description", "field_type": "text"},
+                    {"key": "assignee", "field_type": "text"},
+                    {"key": "status", "field_type": "enum", "options": ["Todo", "Done"]},
+                    {"key": "url", "field_type": "url"},
+                ],
+            }
+        ],
+        actor_id=USER_ID,
+    )
+    service = DomainService(session)
+    manifest = {
+        "contract_version": 1,
+        "data_plan": {
+            "mode": "domain",
+            "bindings": {
+                "tickets": {
+                    "domain_id": domain.id,
+                    "object_key": "ticket",
+                    "fields": ["title", "external_id", "identifier", "description", "assignee", "status", "url"],
+                    "operations": ["schema", "list", "create", "update"],
+                }
+            },
+        },
+        "design_contract": {
+            "kit": "constellation-app-kit",
+            "theme_modes": ["dark", "light"],
+        },
+        "actions": {
+            "tickets.syncExternal": {
+                "kind": "connector",
+                "effects": ["external.read", "domain.write"],
+                "executor": {"type": "registered", "key": "generic.http"},
+                "connector_spec": {
+                    "kind": "http_sync",
+                    "request": {
+                        "method": "GET",
+                        "url": "https://jsonplaceholder.typicode.com/todos",
+                    },
+                    "response": {"items_path": "$"},
+                    "sync": {
+                        "binding": "tickets",
+                        "remote_id": "id",
+                        "remote_id_field": "external_id",
+                        "title": "title",
+                        "fields": {
+                            "external_id": "id",
+                            "description": "title",
+                            "identifier": {"template": "TODO-{id}"},
+                            "assignee": {"template": "User {userId}"},
+                            "url": {"template": "https://jsonplaceholder.typicode.com/todos/{id}"},
+                            "status": {
+                                "if": {"field": "completed", "equals": True},
+                                "then": "Done",
+                                "else": "Todo",
+                            },
+                        },
+                    },
+                },
+            }
+        },
+    }
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="generic-http-ticket-template-sync",
+        name="Generic HTTP Ticket Template Sync",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(VALID_GENERATED_UI_SPEC),
+        manifest=manifest,
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    with patch(
+        "brain.systems.workspace_apps.generic_http._request_json",
+        return_value=[
+            {"id": 1, "userId": 7, "title": "Buy milk", "completed": False},
+            {"id": 2, "userId": 8, "title": "Ship fix", "completed": True},
+        ],
+    ):
+        result = run_workspace_app_action(
+            session,
+            org_id=ORG_ID,
+            app_id=app.id,
+            action_key="tickets.syncExternal",
+            payload={},
+            user_id=USER_ID,
+        )
+
+    assert result["ok"] is True
+    assert result["result"]["created"] == 2
+    records = service.list_records(ORG_ID, domain.id, object_key="ticket", limit=10)
+    by_external_id = {record.data["external_id"]: record for record in records}
+    first = by_external_id["1"]
+    assert first.title == "Buy milk"
+    assert first.data["identifier"] == "TODO-1"
+    assert first.data["assignee"] == "User 7"
+    assert first.data["status"] == "Todo"
+    assert first.data["url"] == "https://jsonplaceholder.typicode.com/todos/1"
+    second = by_external_id["2"]
+    assert second.data["identifier"] == "TODO-2"
+    assert second.data["status"] == "Done"
+
+
 def test_workspace_app_action_generic_http_request_returns_compact_response(session):
     domain = _todo_domain(session)
     manifest = _manifest_with_action(
@@ -804,6 +921,42 @@ def test_workspace_app_action_generic_http_request_returns_compact_response(sess
 
     assert result["ok"] is True
     assert result["result"] == {"response": {"id": "abc", "ok": True}}
+
+
+def test_workspace_app_action_generic_http_rejects_invalid_mapping_at_save(session):
+    domain = _todo_domain(session)
+
+    with pytest.raises(WorkspaceAppContractError, match="mapping expressions must use const, path, template, or if/then/else"):
+        create_app(
+            session,
+            org_id=ORG_ID,
+            key="generic-http-bad-mapping",
+            name="Generic HTTP Bad Mapping",
+            renderer_key="generated-ui-app",
+            source_kind="json",
+            source_code=json.dumps(VALID_GENERATED_UI_SPEC),
+            manifest=_manifest_with_action(
+                domain.id,
+                {
+                    "kind": "connector",
+                    "effects": ["external.read", "domain.write"],
+                    "executor": {"type": "registered", "key": "generic.http"},
+                    "connector_spec": {
+                        "kind": "http_sync",
+                        "request": {"method": "GET", "url": "https://api.example.test/todos"},
+                        "response": {"items_path": "$"},
+                        "sync": {
+                            "binding": "todos",
+                            "remote_id": "id",
+                            "remote_id_field": "external_id",
+                            "fields": {"notes": {"field": "title"}},
+                        },
+                    },
+                },
+            ),
+            visual_spec=VALID_VISUAL_SPEC,
+            created_by_user_id=USER_ID,
+        )
 
 
 def test_workspace_app_action_boundaries_reject_raw_secrets(session):

@@ -524,7 +524,11 @@ Constellation design contract.
      records, and `kind: "http_request"` for create/update/delete calls that
      only need to return the external response. Pair GET with `external.read`,
      non-GET methods with `external.write`, and add `domain.write` only when
-     `sync` mutates the Domain. Use `deferred` only when the API cannot fit the
+     `sync` mutates the Domain. Sync mappings may use plain string paths
+     (`"title"`), `{ "path": "nested.id" }`, `{ "const": "Todo" }`,
+     `{ "template": "ISSUE-{number}" }`, or
+     `{ "if": { "field": "completed", "equals": true }, "then": "Done",
+     "else": "Todo" }`. Use `deferred` only when the API cannot fit the
      generic spec yet.
    - Missing external credentials are not blockers for creating the app when
      the external action can be deferred. Do not call `vault_secret_prompt`
@@ -661,8 +665,13 @@ Constellation design contract.
           "fields": {
             "external_id": "id",
             "number": "number",
+            "identifier": {"template": "ISSUE-{number}"},
             "url": "html_url",
-            "status": {"const": "Todo"}
+            "status": {
+              "if": {"field": "state", "equals": "closed"},
+              "then": "Done",
+              "else": "Todo"
+            }
           }
         }
       }
