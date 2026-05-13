@@ -184,6 +184,33 @@ class TestIdeaRepository:
         repo.archive(idea.id)
         assert idea.archived_at is not None
 
+    def test_hard_delete_archived_for_org_removes_only_org_archive(self, repo, session):
+        _seed_org_user(session)
+        archived = _make_idea(session, org_id=ORG_1, archived_at=datetime.now(timezone.utc))
+        child = _make_idea(session, org_id=ORG_1, parent_id=archived.id)
+        active = _make_idea(session, org_id=ORG_1)
+        other_org_archived = _make_idea(
+            session,
+            id=str(uuid.uuid4()),
+            user_id=USER_2,
+            org_id=ORG_2,
+            archived_at=datetime.now(timezone.utc),
+        )
+        archived_id = archived.id
+        child_id = child.id
+        active_id = active.id
+        other_org_archived_id = other_org_archived.id
+
+        deleted = repo.hard_delete_archived_for_org(ORG_1)
+        session.flush()
+        session.expire_all()
+
+        assert deleted == 1
+        assert session.get(Idea, archived_id) is None
+        assert session.get(Idea, child_id).parent_id is None
+        assert session.get(Idea, active_id) is not None
+        assert session.get(Idea, other_org_archived_id) is not None
+
 
 # ---------------------------------------------------------------------------
 # IdeaThreadRepository

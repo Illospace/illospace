@@ -52,6 +52,7 @@ class WorkspaceAppActionContext:
 WorkspaceAppActionExecutor = Callable[[WorkspaceAppActionContext, dict[str, Any]], Mapping[str, Any] | None]
 
 _EXECUTORS: dict[str, WorkspaceAppActionExecutor] = {}
+_BUILTIN_EXECUTOR_KEYS = {"generic.http"}
 _SECRET_KEY_RE = re.compile(
     r"(?:^|[_-])(?:token|secret|password|api[_-]?key|authorization|bearer|client[_-]?secret|private[_-]?key)(?:$|[_-])",
     re.IGNORECASE,
@@ -165,7 +166,7 @@ def run_workspace_app_action(
     if executor_type != "registered" or not executor_key:
         raise WorkspaceAppActionExecutorMissing(_missing_executor_message(normalized_key))
 
-    registered = _EXECUTORS.get(executor_key)
+    registered = _EXECUTORS.get(executor_key) or _builtin_executor(executor_key)
     if registered is None:
         raise WorkspaceAppActionExecutorMissing(
             f"Workspace action '{normalized_key}' uses executor '{executor_key}', but no approved executor is registered."
@@ -196,6 +197,14 @@ def _missing_executor_message(action_key: str) -> str:
         f"Workspace action '{action_key}' is declared, but no server-side action executor is registered yet. "
         "Use Domain APIs in-app, or add an approved connector/action executor for external systems."
     )
+
+
+def _builtin_executor(key: str) -> WorkspaceAppActionExecutor | None:
+    if key not in _BUILTIN_EXECUTOR_KEYS:
+        return None
+    from brain.systems.workspace_apps.generic_http import execute_generic_http_action
+
+    return execute_generic_http_action
 
 
 def _connector_keys(declaration: Mapping[str, Any]) -> list[str]:

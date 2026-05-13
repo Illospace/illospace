@@ -713,6 +713,8 @@ export const api = {
     fetchJson<any[]>(status ? `/api/cortex/ideas?status=${encodeURIComponent(status)}` : '/api/cortex/ideas'),
   listArchivedIdeas: (limit = 12) =>
     fetchJson<any[]>(withQuery('/api/cortex/ideas/archived', { limit })),
+  emptyArchivedIdeas: () =>
+    fetchJson<{ deleted: number }>('/api/cortex/ideas/archived', { method: 'DELETE' }),
   getIdea: (id: string) => fetchJson<any>(`/api/cortex/ideas/${id}`),
   createIdea: (data: any) =>
     fetchJson<any>('/api/cortex/ideas', { method: 'POST', body: JSON.stringify(data) }),
@@ -1027,6 +1029,8 @@ export const api = {
   getWorkspaceApp: (appId: string) => fetchJson<WorkspaceAppRead>(`/api/workspace-apps/${appId}`),
   listArchivedWorkspaceApps: (limit = 12) =>
     fetchJson<WorkspaceAppRead[]>(withQuery('/api/workspace-apps/archived', { limit })),
+  emptyArchivedWorkspaceApps: () =>
+    fetchJson<{ deleted: number }>('/api/workspace-apps/archived', { method: 'DELETE' }),
   updateWorkspaceApp: (appId: string, data: WorkspaceAppUpdateInput) =>
     fetchJson<WorkspaceAppRead>(`/api/workspace-apps/${appId}`, { method: 'PATCH', body: JSON.stringify(data) }),
   archiveWorkspaceApp: (appId: string) =>

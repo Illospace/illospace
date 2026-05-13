@@ -34,6 +34,7 @@ from brain.systems.workspace_apps.service import (
     WorkspaceAppNotFound,
     archive_app,
     create_app,
+    delete_archived_apps,
     get_app,
     get_state,
     list_archived_apps,
@@ -99,6 +100,23 @@ async def list_archived_workspace_apps(
 ):
     org_id = require_org_context(user)
     return await run_db(db, lambda sync_db: serialize_apps(sync_db, list_archived_apps(sync_db, org_id, limit=limit)))
+
+
+@router.delete("/archived")
+async def empty_archived_workspace_apps(
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    org_id = require_org_context(user)
+
+    def _delete(sync_db: Session):
+        deleted = delete_archived_apps(sync_db, org_id=org_id)
+        sync_db.commit()
+        if deleted:
+            publish_workspace_app_change(org_id=org_id, action="empty_archive")
+        return {"deleted": deleted}
+
+    return await run_db(db, _delete)
 
 
 @router.post("", response_model=WorkspaceAppRead, status_code=201, include_in_schema=False)

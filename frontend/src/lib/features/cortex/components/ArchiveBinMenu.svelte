@@ -4,6 +4,7 @@
   import type { WorkspaceAppRead } from '$lib/api/client';
   import { ConstellationIcon, ConstellationIconButton } from '$lib/components/constellation';
   import { cortex, type Idea } from '$lib/stores/cortex.svelte';
+  import { ui } from '$lib/stores/ui.svelte';
   import { workspaceApps } from '$lib/stores/workspaceApps.svelte';
   import { relativeTimeAgo } from '$lib/utils/datetime';
 
@@ -20,10 +21,12 @@
   } = $props();
 
   let open = $state(false);
+  let emptying = $state(false);
   let rootEl: HTMLDivElement | undefined = $state();
 
   const recentArchived = $derived(cortex.archivedIdeas.slice(0, 12));
   const recentArchivedApps = $derived(workspaceApps.archivedApps.slice(0, 12));
+  const visibleArchivedCount = $derived(recentArchived.length + recentArchivedApps.length);
 
   function timeAgo(value: string | null | undefined): string {
     return relativeTimeAgo(value) || 'recently';
@@ -56,6 +59,35 @@
     event.stopPropagation();
     open = false;
     await onrestoreapp?.(app, event);
+  }
+
+  async function handleEmptyBin(event: MouseEvent) {
+    event.stopPropagation();
+    if (emptying || visibleArchivedCount === 0) return;
+
+    const confirmed = typeof window !== 'undefined' && window.confirm(
+      'Permanently delete all archived threads and apps in the trash bin? This cannot be undone.',
+    );
+    if (!confirmed) return;
+
+    emptying = true;
+    try {
+      const [threadResult, appResult] = await Promise.all([
+        cortex.emptyArchivedIdeas(),
+        workspaceApps.emptyArchived(),
+      ]);
+      const deleted = Number(threadResult?.deleted || 0) + Number(appResult?.deleted || 0);
+      const suffix = deleted === 1 ? 'item' : 'items';
+      ui.toast(
+        deleted > 0 ? `Trash bin emptied. ${deleted} ${suffix} deleted.` : 'Trash bin is already empty.',
+        'success',
+      );
+      open = false;
+    } catch (err: any) {
+      ui.toast(err?.detail || 'Failed to empty trash bin', 'error');
+    } finally {
+      emptying = false;
+    }
   }
 
   function handleDocumentClick(event: MouseEvent) {
@@ -102,6 +134,18 @@
           <strong>Archived</strong>
           <span>Recent threads and apps</span>
         </div>
+        <button
+          type="button"
+          class="cortex-archive-empty-action"
+          disabled={visibleArchivedCount === 0 || emptying}
+          title="Empty trash bin"
+          aria-label="Empty trash bin"
+          role="menuitem"
+          onclick={handleEmptyBin}
+        >
+          <ConstellationIcon name="trash" size={12} stroke={2} />
+          <span>{emptying ? 'Emptying' : 'Empty'}</span>
+        </button>
       </div>
 
       {#if (cortex.archivedIdeasLoading || workspaceApps.archivedLoading) && recentArchived.length === 0 && recentArchivedApps.length === 0}
@@ -334,6 +378,45 @@
   .cortex-archive-copy span {
     color: var(--constellation-notification-subtitle);
     font-size: 12px;
+  }
+
+  .cortex-archive-empty-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 78px;
+    min-height: 30px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--constellation-button-destructive-border) 82%, transparent);
+    background: color-mix(in srgb, var(--constellation-button-destructive-background) 74%, transparent);
+    color: var(--constellation-button-destructive-text);
+    font-family: var(--constellation-font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      transform 160ms ease,
+      border-color 160ms ease,
+      background-color 160ms ease,
+      opacity 160ms ease;
+  }
+
+  .cortex-archive-empty-action:hover:not(:disabled),
+  .cortex-archive-empty-action:focus-visible {
+    transform: translateY(-1px);
+    border-color: var(--constellation-button-destructive-border-hover);
+    background: var(--constellation-button-destructive-background-hover);
+    outline: none;
+  }
+
+  .cortex-archive-empty-action:disabled {
+    opacity: 0.44;
+    cursor: not-allowed;
   }
 
   .cortex-archive-empty {

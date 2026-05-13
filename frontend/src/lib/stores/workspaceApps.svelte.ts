@@ -140,6 +140,21 @@ class WorkspaceAppsStore {
     }
   }
 
+  async emptyArchived() {
+    const archivedIds = new Set(this.archivedApps.map((app) => app.id));
+    const result = await api.emptyArchivedWorkspaceApps();
+    this.archivedApps = [];
+    if (archivedIds.size > 0) {
+      this.stateCache = Object.fromEntries(
+        Object.entries(this.stateCache).filter(([cacheKey]) => {
+          const [appId] = cacheKey.split(':', 1);
+          return !archivedIds.has(appId);
+        }),
+      );
+    }
+    return result;
+  }
+
   async restore(appId: string | null | undefined) {
     if (!appId) return null;
     const restored = await api.restoreWorkspaceApp(appId);
@@ -377,6 +392,11 @@ class WorkspaceAppsStore {
     const action = String(msg?.action || '').toLowerCase();
     const appId = msg?.app_id || msg?.app?.id;
     const key = msg?.key || msg?.app?.key;
+    if (action === 'empty_archive') {
+      this.archivedApps = [];
+      this.scheduleRefresh(650);
+      return;
+    }
     if (action === 'archive' || action === 'delete' || action === 'remove') {
       this._removeApp(appId, key);
     } else if (msg?.app) {

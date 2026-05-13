@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from brain.platform.db.models.workspace_app import WorkspaceApp, WorkspaceAppState, WorkspaceAppVersion
@@ -642,6 +642,44 @@ def archive_app(
     app.archived_at = datetime.now(timezone.utc)
     session.flush()
     return {"archived": {"id": app.id, "key": app.key}}
+
+
+def delete_archived_apps(
+    session: Session,
+    org_id: str,
+    *,
+    include_prototypes: bool = False,
+) -> int:
+    stmt = (
+        select(WorkspaceApp)
+        .where(WorkspaceApp.org_id == org_id, WorkspaceApp.archived_at.is_not(None))
+    )
+    apps = list(session.scalars(stmt).all())
+    app_ids = [
+        str(app.id)
+        for app in apps
+        if include_prototypes or not _is_prototype_app(app)
+    ]
+    if not app_ids:
+        return 0
+
+    session.execute(
+        delete(WorkspaceAppState)
+        .where(WorkspaceAppState.app_id.in_(app_ids))
+        .execution_options(synchronize_session=False)
+    )
+    session.execute(
+        delete(WorkspaceAppVersion)
+        .where(WorkspaceAppVersion.app_id.in_(app_ids))
+        .execution_options(synchronize_session=False)
+    )
+    session.execute(
+        delete(WorkspaceApp)
+        .where(WorkspaceApp.id.in_(app_ids))
+        .execution_options(synchronize_session=False)
+    )
+    session.flush()
+    return len(app_ids)
 
 
 def restore_app(

@@ -96,6 +96,17 @@ Constellation design contract.
      product connector has not been registered yet. Use
      `executor: { "type": "registered", "key": "..." }` only for approved
      server-owned executors.
+   - For ordinary REST/JSON APIs described by user-provided docs, prefer the
+     built-in `generic.http` executor over provider-specific code. Declare
+     `executor: { "type": "registered", "key": "generic.http" }` plus a
+     `connector_spec` with `request`, optional Vault/project-bound `auth`,
+     optional `response.items_path`, and optional `sync` mapping into a Domain
+     binding. Use `kind: "http_sync"` when the response should upsert Domain
+     records, and `kind: "http_request"` for create/update/delete calls that
+     only need to return the external response. Pair GET with `external.read`,
+     non-GET methods with `external.write`, and add `domain.write` only when
+     `sync` mutates the Domain. Use `deferred` only when the API cannot fit the
+     generic spec yet.
    - Missing external credentials are not blockers for creating the app when
      the external action can be deferred. Do not call `vault_secret_prompt`
      before producing the requested app. Declare the deferred action, deliver
@@ -209,7 +220,33 @@ Constellation design contract.
         "mode": "upsert",
         "external_id_field": "external_id"
       },
-      "executor": {"type": "deferred"}
+      "executor": {"type": "registered", "key": "generic.http"},
+      "connector_spec": {
+        "kind": "http_sync",
+        "request": {
+          "method": "GET",
+          "url": "https://api.example.com/repos/{owner}/{repo}/issues"
+        },
+        "auth": {
+          "type": "bearer",
+          "source": "project_env",
+          "env": "GITHUB_TOKEN",
+          "project_slug": "{owner}/{repo}"
+        },
+        "response": {"items_path": "$"},
+        "sync": {
+          "binding": "tickets",
+          "remote_id": "id",
+          "remote_id_field": "external_id",
+          "title": "title",
+          "fields": {
+            "external_id": "id",
+            "number": "number",
+            "url": "html_url",
+            "status": {"const": "Todo"}
+          }
+        }
+      }
     }
   }
 }

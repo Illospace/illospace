@@ -968,6 +968,31 @@ async def test_list_archived_ideas(client, mock_session_factory):
 
 
 @pytest.mark.asyncio
+async def test_empty_archived_ideas(client, mock_session_factory):
+    broadcasts = []
+
+    async def _broadcast(event_type, data, **kwargs):
+        broadcasts.append((event_type, data, kwargs))
+
+    with patch(
+        "brain.app.api.routers.cortex._ideas.IdeaRepository"
+    ) as MockRepo, patch(
+        "brain.app.api.routers.cortex._ideas.ws_manager.broadcast_product_event",
+        side_effect=_broadcast,
+    ):
+        MockRepo.return_value.hard_delete_archived_for_org.return_value = 3
+        resp = await client.delete("/api/cortex/ideas/archived")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"deleted": 3}
+    MockRepo.return_value.hard_delete_archived_for_org.assert_called_once_with("test-org")
+    mock_session_factory.commit.assert_called()
+    assert broadcasts == [
+        ("idea_archive_emptied", {"deleted": 3}, {"org_id": "test-org"}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_create_idea(client, mock_session_factory):
     idea = _make_idea(title="New Idea")
     broadcasts = []
