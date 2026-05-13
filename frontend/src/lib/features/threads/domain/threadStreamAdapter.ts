@@ -19,6 +19,7 @@ import { streamItemRunId } from '$lib/utils/cortexRunStream';
 import { parseServerDate, parseServerTimeMs, relativeTimeAgo } from '$lib/utils/datetime';
 import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
 import { buildRunEvidenceDebug } from '$lib/utils/runEvidenceDebug';
+import { orderQueuedThreadStreamItems } from '$lib/utils/threadStreamOrdering';
 import type { Idea, StreamItem } from '$lib/types/cortex';
 import type {
   CortexThreadStageAttachmentItem,
@@ -345,7 +346,7 @@ export function buildThreadTranscriptItems({
   onDenyRun,
 }: BuildThreadTranscriptOptions): CortexThreadStageTranscriptItem[] {
   const items: CortexThreadStageTranscriptItem[] = [];
-  const visibleItems = visibleThreadStreamItems(stream);
+  const visibleItems = orderQueuedThreadStreamItems(visibleThreadStreamItems(stream));
   const activeRunIds = new Set(
     visibleItems
       .filter((streamItem) => streamItem.type === 'run' && isActiveRun(streamItem))

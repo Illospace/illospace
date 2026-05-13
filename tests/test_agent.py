@@ -1374,6 +1374,16 @@ class TestExecToolHandlers:
         assert result["exit_code"] == -1
         assert "escapes workspace" in result["stderr"]
 
+    def test_exec_command_ignores_file_workspace_root(self, tmp_path):
+        from brain.systems.runs.direct_agent import _handle_exec_command
+
+        attachment = tmp_path / "agent.md"
+        attachment.write_text("# Sales agent\n")
+
+        result = _handle_exec_command("echo ok", _workspace=str(attachment))
+        assert result["exit_code"] == 0
+        assert result["stdout"].strip() == "ok"
+
 
 class TestFinalReplyReview:
     @patch("brain.systems.runs.direct_agent.get_provider")

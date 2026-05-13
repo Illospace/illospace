@@ -45,11 +45,70 @@ def _run(**overrides):
     return SimpleNamespace(**values)
 
 
+def _cycle(**overrides):
+    now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+    values = {
+        "id": 7,
+        "user_id": "user-1",
+        "org_id": "org-1",
+        "name": "Weekly sales cycle",
+        "prompt": "Run the weekly report",
+        "schedule_expr": "0 9 * * 1",
+        "timezone": "America/Toronto",
+        "enabled": True,
+        "model_override": None,
+        "thinking_override": "none",
+        "execution_mode": "reuse_same_idea",
+        "target_idea_id": "idea-1",
+        "reopen_archived": True,
+        "next_run_at": now,
+        "last_run_at": now,
+        "last_status": "completed",
+        "last_error": None,
+        "deleted_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _cycle_run(**overrides):
+    now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+    values = {
+        "id": 8,
+        "cycle_id": 7,
+        "scheduled_for": now,
+        "started_at": now,
+        "completed_at": now,
+        "status": "completed",
+        "error": None,
+        "skip_reason": None,
+        "idea_id": "idea-1",
+        "run_id": 42,
+        "prompt_snapshot": "Run the weekly report",
+        "created_at": now,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
     from brain.systems.runs.cortex.recording import build_agent_trace_snapshot
     from brain.platform.db.models.agent_run import AgentRunRow
 
-    run = _run()
+    run = _run(
+        workspace_ref={
+            "workspace_root": "/app/brain/uploads/agent.md",
+            "resources": [{"id": "attachment-1", "kind": "file", "path": "/app/brain/uploads/agent.md"}],
+        },
+        metadata_={
+            "source": "cycle",
+            "cycle_id": 7,
+            "cycle_run_id": 8,
+            "launch_envelope": {"cycle_id": 7, "cycle_run_id": 8},
+        },
+    )
     now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
     message = SimpleNamespace(
         id=9,
@@ -89,9 +148,12 @@ def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
     session.get.side_effect = lambda model, key: run if model is AgentRunRow and key == 42 else None
     session.scalars.side_effect = [
         _result([42]),
+        _result([run]),
         _result([message]),
         _result([event]),
         _result([artifact]),
+        _result([_cycle()]),
+        _result([_cycle_run()]),
     ]
 
     snapshot = build_agent_trace_snapshot(session, run, saved_by="user-1")
@@ -106,6 +168,8 @@ def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
     }
     assert snapshot["tools"][0]["tool_name"] == "read_file"
     assert snapshot["artifacts"][0]["artifact_type"] == "reply"
+    assert snapshot["cycles"]["cycle_runs"][0]["run_id"] == 42
+    assert snapshot["diagnostics"]["workspace"][0]["suspicious_file_roots"][0]["path"] == "/app/brain/uploads/agent.md"
     assert snapshot["storage_estimate"]["truncated"] is True
     assert "not copied" not in str(snapshot)
 
@@ -175,8 +239,12 @@ def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
     session.scalars.side_effect = [
         _result([run, child]),
         _result([first_message, second_message]),
+        _result([]),
         _result([event]),
+        _result([]),
         _result([artifact]),
+        _result([_cycle()]),
+        _result([_cycle_run(run_id=43)]),
     ]
 
     snapshot = build_thread_trace_snapshot(session, "idea-1", saved_by="user-1")
@@ -191,6 +259,9 @@ def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
     assert snapshot["related_run_ids"] == [42, 43]
     assert snapshot["tools"][0]["tool_name"] == "read_thread_messages"
     assert snapshot["artifacts"][0]["artifact_type"] == "reply"
+    assert snapshot["cycles"]["cycle_count"] == 1
+    assert snapshot["cycles"]["cycle_run_count"] == 1
+    assert snapshot["diagnostics"]["cycle_summary"]["cycle_run_ids"] == [8]
     assert agent_trace_export_filename(snapshot) == "illo-thread-trace-idea-1.zip"
     assert "not copied" not in str(snapshot)
 
@@ -233,6 +304,15 @@ def test_agent_trace_export_zip_contains_shareable_trace_files():
             }
         ],
         "artifacts": [],
+        "cycles": {
+            "cycles": [{"id": 7, "name": "Weekly sales cycle", "last_status": "completed"}],
+            "cycle_runs": [{"id": 8, "cycle_id": 7, "run_id": 42, "status": "completed"}],
+            "cycle_count": 1,
+            "cycle_run_count": 1,
+        },
+        "diagnostics": {
+            "delivery_signals": [{"source": "artifact", "run_id": 42, "title": "webhook failed"}],
+        },
         "storage_estimate": {"json_bytes": 512, "truncated": False},
     }
 
@@ -248,7 +328,10 @@ def test_agent_trace_export_zip_contains_shareable_trace_files():
 
     assert "artifact_id" not in manifest
     assert manifest["trace_id"] == "run:42"
+    assert manifest["diagnostics"]["cycle_run_count"] == 1
     assert trace["run"]["input_message"] == "Why did Illo answer that?"
-    assert activity["item_count"] == 3
+    assert activity["item_count"] == 6
+    assert any(item["kind"] == "cycle_run" for item in activity["items"])
     assert "trace.json" in readme
+    assert "CycleRun" in readme
     assert "not saved as a database artifact" in readme

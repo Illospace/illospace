@@ -1,6 +1,69 @@
 from types import SimpleNamespace
 
 
+def test_thread_attachment_file_is_not_materialized_as_github_workspace():
+    from brain.systems.cortex.project_context.materializer import _github_slug_from_resource
+
+    assert _github_slug_from_resource({
+        "kind": "file",
+        "name": "agent.md",
+        "path": "/app/brain/uploads/94fe1c1fe9134e6aaa7b4f9844c7a6a6.md",
+        "source": "thread_attachment",
+        "uri": "/static/uploads/94fe1c1fe9134e6aaa7b4f9844c7a6a6.md",
+    }) is None
+
+
+def test_runner_skips_materialization_for_thread_attachment_files(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    run = SimpleNamespace(
+        id=51,
+        user_id="user-1",
+        org_id="org-1",
+        thread_id="idea-4",
+        target_ref={
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "id": "attachment-1",
+                        "kind": "file",
+                        "name": "agent.md",
+                        "path": "/app/brain/uploads/agent.md",
+                        "source": "thread_attachment",
+                        "uri": "/static/uploads/agent.md",
+                    }
+                ],
+            }
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fail_materialize(*_args, **_kwargs):
+        raise AssertionError("file-only attachments should not be materialized as workspaces")
+
+    monkeypatch.setattr(runner, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(runner, "materialize_project_context_workspaces", fail_materialize)
+
+    context_ready, status_payload = runner._materialize_project_context(51)
+
+    assert context_ready is True
+    assert status_payload is None
+
+
 def test_materialize_github_project_context_uses_vault_key_without_persisting_token(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
@@ -520,7 +583,17 @@ def test_runner_fails_fast_when_project_context_has_no_workspace(monkeypatch):
         user_id="user-1",
         org_id="org-1",
         thread_id="idea-3",
-        target_ref={"project_context_snapshot": {"resources": []}},
+        target_ref={
+            "project_context_snapshot": {
+                "resources": [
+                    {
+                        "kind": "repo",
+                        "repo": "example-org/missing-repo",
+                        "uri": "https://github.com/example-org/missing-repo",
+                    }
+                ]
+            }
+        },
         workspace_ref={},
     )
 
