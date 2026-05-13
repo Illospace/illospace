@@ -1,11 +1,11 @@
 """Tests for cortex color schemas and team color API."""
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
 
-from brain.app.api.routers.team import _normalize_profile_color, async_update_profile, update_profile
+from brain.app.api.routers.team import _normalize_profile_color, async_update_profile
 from brain.app.api.schemas.team import CortexColorRead, TeamMemberRead, UserProfileUpdate
 
 
@@ -60,50 +60,72 @@ class TestUpdateProfile:
     def test_normalizes_short_hex_color(self):
         assert _normalize_profile_color("#AbC") == "#aabbcc"
 
-    def test_rejects_duplicate_workspace_color(self):
-        db = MagicMock()
-        db.scalar.return_value = "user-2"
+    @pytest.mark.asyncio
+    async def test_rejects_duplicate_workspace_color(self):
+        class _Db:
+            async def scalar(self, stmt):
+                return "user-2"
+
+            async def flush(self):
+                pass
+
         current_user = SimpleNamespace(id="user-1", org_id="org-1", name="Alex", color="#5ea898")
 
         with patch("brain.app.api.routers.team.TeamRepository") as MockRepo:
-            MockRepo.return_value.get.return_value = current_user
+            MockRepo.return_value.a_get = AsyncMock(return_value=current_user)
 
             with pytest.raises(HTTPException) as exc:
-                update_profile(
+                await async_update_profile(
                     body=UserProfileUpdate(color="#63abc4"),
-                    db=db,
+                    db=_Db(),
                     user={"id": "user-1"},
                 )
 
         assert exc.value.status_code == 409
         assert "color is already taken" in exc.value.detail
 
-    def test_rejects_duplicate_workspace_name(self):
-        db = MagicMock()
-        db.scalar.return_value = "user-2"
+    @pytest.mark.asyncio
+    async def test_rejects_duplicate_workspace_name(self):
+        class _Db:
+            async def scalar(self, stmt):
+                return "user-2"
+
+            async def flush(self):
+                pass
+
         current_user = SimpleNamespace(id="user-1", org_id="org-1", name="Alex", color="#5ea898")
 
         with patch("brain.app.api.routers.team.TeamRepository") as MockRepo:
-            MockRepo.return_value.get.return_value = current_user
+            MockRepo.return_value.a_get = AsyncMock(return_value=current_user)
 
             with pytest.raises(HTTPException) as exc:
-                update_profile(
+                await async_update_profile(
                     body=UserProfileUpdate(name="Maya"),
-                    db=db,
+                    db=_Db(),
                     user={"id": "user-1"},
                 )
 
         assert exc.value.status_code == 409
         assert "name is already taken" in exc.value.detail
 
-    def test_updates_unique_name_and_color(self):
-        db = MagicMock()
-        db.scalar.return_value = None
+    @pytest.mark.asyncio
+    async def test_updates_unique_name_and_color(self):
+        class _Db:
+            def __init__(self):
+                self.flushed = False
+
+            async def scalar(self, stmt):
+                return None
+
+            async def flush(self):
+                self.flushed = True
+
         current_user = SimpleNamespace(id="user-1", org_id="org-1", name="Alex", color="#5ea898")
+        db = _Db()
 
         with patch("brain.app.api.routers.team.TeamRepository") as MockRepo:
-            MockRepo.return_value.get.return_value = current_user
-            result = update_profile(
+            MockRepo.return_value.a_get = AsyncMock(return_value=current_user)
+            result = await async_update_profile(
                 body=UserProfileUpdate(name="Alex E", color="#ABC"),
                 db=db,
                 user={"id": "user-1"},
@@ -112,7 +134,7 @@ class TestUpdateProfile:
         assert result == {"updated": True}
         assert current_user.name == "Alex E"
         assert current_user.color == "#aabbcc"
-        db.flush.assert_called_once()
+        assert db.flushed is True
 
     @pytest.mark.asyncio
     async def test_async_updates_unique_name_and_color(self):

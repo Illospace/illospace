@@ -8,7 +8,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
@@ -21,7 +20,7 @@ from brain.app.api.schemas.team import (
 )
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.team import TeamRepository
-from brain.systems.runs.token_usage import async_summarize_member_token_usage, summarize_member_token_usage
+from brain.systems.runs.token_usage import async_summarize_member_token_usage
 
 router = APIRouter(
     prefix="/api",
@@ -34,17 +33,6 @@ _PROFILE_COLOR_RE = re.compile(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
 def _should_skip_org_lookup(user: dict[str, Any]) -> bool:
     return bool(user.get("internal") or user.get("principal_type") == "service")
-
-
-def _org_id_for_user(db: Session, user: dict[str, Any]) -> str | None:
-    org_id = user.get("org_id") or None
-    if not org_id and _should_skip_org_lookup(user):
-        return None
-    if not org_id and user.get("id") != "system":
-        from brain.systems.auth.users import get_user_by_id
-        db_user = get_user_by_id(user["id"])
-        org_id = db_user.get("org_id") if db_user else None
-    return org_id
 
 
 async def _async_org_id_for_user(db: AsyncSession, user: dict[str, Any]) -> str | None:
@@ -68,26 +56,6 @@ def _normalize_profile_color(value: str | None) -> str | None:
     return color.lower()
 
 
-def _profile_value_taken(
-    db: Session,
-    *,
-    org_id: str,
-    current_user_id: str,
-    column: Any,
-    value: str,
-) -> bool:
-    stmt = (
-        select(User.id)
-        .where(
-            User.org_id == org_id,
-            User.id != current_user_id,
-            func.lower(column) == value.lower(),
-        )
-        .limit(1)
-    )
-    return db.scalar(stmt) is not None
-
-
 async def _async_profile_value_taken(
     db: AsyncSession,
     *,
@@ -107,17 +75,6 @@ async def _async_profile_value_taken(
     )
     value = await db.scalar(stmt)
     return value is not None
-
-
-def list_members_payload(
-    db: Session,
-    user: dict[str, Any],
-) -> list[TeamMemberRead]:
-    org_id = _org_id_for_user(db, user)
-    if not org_id:
-        return []
-    repo = TeamRepository(db)
-    return repo.list_by_org(org_id)
 
 
 async def async_list_members_payload(
@@ -207,57 +164,6 @@ def _add_token_usage(target: dict[str, Any], source: dict[str, Any]) -> None:
         target["last_used_at"] = last_used_at
 
 
-def token_analytics_payload(
-    *,
-    days: int,
-    db: Session,
-    user: dict[str, Any],
-) -> dict[str, Any]:
-    """Token usage by workspace member, derived from run-linked API-call telemetry."""
-    generated_at = datetime.now(timezone.utc)
-    org_id = _org_id_for_user(db, user)
-    if not org_id:
-        empty = _empty_token_usage()
-        return {
-            "window_days": days,
-            "generated_at": generated_at,
-            "members": [],
-            "unattributed": empty,
-            "totals": empty,
-        }
-
-    cutoff = generated_at - timedelta(days=days)
-    members = TeamRepository(db).list_by_org(org_id)
-    usage_by_user = {str(member.id): _empty_token_usage(str(member.id)) for member in members}
-    unattributed = _empty_token_usage(None)
-    raw_usage = summarize_member_token_usage(db, org_id=org_id, since=cutoff)
-    for raw_user_id, summary in raw_usage.items():
-        user_id = str(raw_user_id) if raw_user_id else None
-        item = _token_usage_from_summary(user_id, summary)
-        if user_id:
-            usage_by_user[user_id] = item
-        else:
-            unattributed = item
-
-    member_rows = sorted(
-        usage_by_user.values(),
-        key=lambda item: (int(item.get("total_tokens") or 0), int(item.get("api_calls") or 0)),
-        reverse=True,
-    )
-    totals = _empty_token_usage(None)
-    for item in member_rows:
-        _add_token_usage(totals, item)
-    _add_token_usage(totals, unattributed)
-
-    return {
-        "window_days": days,
-        "generated_at": generated_at,
-        "members": [TeamTokenUsageRead(**item) for item in member_rows],
-        "unattributed": TeamTokenUsageRead(**unattributed),
-        "totals": TeamTokenUsageRead(**totals),
-    }
-
-
 async def async_token_analytics_payload(
     *,
     days: int,
@@ -325,54 +231,6 @@ async def update_profile_route(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     return await async_update_profile(body=body, db=db, user=user)
-
-
-def update_profile(
-    body: UserProfileUpdate,
-    db: Session,
-    user: dict[str, Any],
-):
-    repo = TeamRepository(db)
-    u = repo.get(user["id"])
-    if not u:
-        raise HTTPException(status_code=404, detail="User not found")
-    updates = body.model_dump(exclude_unset=True)
-    if "name" in updates:
-        name = (updates.get("name") or "").strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="name cannot be empty")
-        if _profile_value_taken(
-            db,
-            org_id=u.org_id,
-            current_user_id=str(u.id),
-            column=User.name,
-            value=name,
-        ):
-            raise HTTPException(status_code=409, detail="name is already taken in this workspace")
-        updates["name"] = name
-    if "color" in updates:
-        color = _normalize_profile_color(updates.get("color"))
-        if not color:
-            raise HTTPException(status_code=400, detail="color must be a hex color")
-        if _profile_value_taken(
-            db,
-            org_id=u.org_id,
-            current_user_id=str(u.id),
-            column=User.color,
-            value=color,
-        ):
-            raise HTTPException(status_code=409, detail="color is already taken in this workspace")
-        updates["color"] = color
-    provider = updates.get("default_provider")
-    if provider is not None:
-        provider = provider.strip().lower() or None
-        if provider not in (None, "anthropic", "openai"):
-            raise HTTPException(status_code=400, detail="default_provider must be anthropic or openai")
-        updates["default_provider"] = provider
-    for key, value in updates.items():
-        setattr(u, key, value)
-    db.flush()
-    return {"updated": True}
 
 
 async def async_update_profile(

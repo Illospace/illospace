@@ -5,7 +5,6 @@ from typing import Any
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.app.api.schemas.notifications import (
     NotificationPreferencesRead,
@@ -96,26 +95,6 @@ def _notification_summary_read(
         unread_notification_total=unread_notification_total,
         unread_chat_notification_total=int(unread_by_source.get("chat", 0)),
         unread_workspace_notification_total=int(unread_by_source.get("workspace", 0)),
-    )
-
-
-def build_notification_summary(
-    db: Session,
-    *,
-    user_id: str,
-    org_id: str,
-) -> NotificationSummaryRead:
-    unread_notification_total = NotificationEventRepository(db).count_unread(user_id)
-    unread_by_source = NotificationEventRepository(db).count_unread_by_source(user_id)
-    chat_unread_total = int(db.scalar(_chat_unread_total_stmt(user_id=user_id, org_id=org_id)) or 0)
-    workspace_attention_total = int(
-        db.scalar(_workspace_attention_total_stmt(user_id=user_id, org_id=org_id)) or 0
-    )
-    return _notification_summary_read(
-        unread_notification_total=unread_notification_total,
-        unread_by_source=unread_by_source,
-        chat_unread_total=chat_unread_total,
-        workspace_attention_total=workspace_attention_total,
     )
 
 
