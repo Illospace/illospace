@@ -4,15 +4,20 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.auth import get_current_user
-from brain.app.api.routers.cortex._helpers import _validate_idea_org_orm
 from brain.app.api.routers.cortex._router import router
 from brain.app.api.schemas.ideas import BrowserSessionCreate, BrowserSessionRead
 from brain.platform.browser import BrowserCapabilityError, browser_sessions
 from brain.platform.db.models.browser import BrowserSession
+from brain.platform.db.models.idea import Idea
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.db.session_tasks import run_session_task
+
+
+async def _validate_idea_org(session: AsyncSession, idea_id: str, org_id: str) -> bool:
+    return bool(await session.scalar(select(Idea.id).where(Idea.id == idea_id, Idea.org_id == org_id)))
 
 
 async def _get_browser_session_or_404(session_id: str) -> BrowserSession:
@@ -41,10 +46,7 @@ async def create_browser_session(
 ):
     if user.get("org_id"):
         async with UnitOfWork() as uow:
-            valid = await run_session_task(
-                uow.session,
-                lambda sync_db: _validate_idea_org_orm(sync_db, idea_id, user.get("org_id"))
-            )
+            valid = await _validate_idea_org(uow.session, idea_id, str(user.get("org_id")))
             if not valid:
                 raise HTTPException(status_code=404, detail="Not found")
 
@@ -87,10 +89,7 @@ async def create_browser_session(
 async def get_browser_session(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
     if user.get("org_id"):
         async with UnitOfWork() as uow:
-            valid = await run_session_task(
-                uow.session,
-                lambda sync_db: _validate_idea_org_orm(sync_db, idea_id, user.get("org_id"))
-            )
+            valid = await _validate_idea_org(uow.session, idea_id, str(user.get("org_id")))
             if not valid:
                 raise HTTPException(status_code=404, detail="Not found")
     record = await browser_sessions.get_active_session_record_async(idea_id)

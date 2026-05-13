@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 import pytest
@@ -91,7 +92,7 @@ def test_create_browser_session_endpoint(monkeypatch):
         return runtime
 
     monkeypatch.setattr(_browser, "UnitOfWork", _FakeUOW)
-    monkeypatch.setattr(_browser, "_validate_idea_org_orm", lambda session, idea_id, org_id: True)
+    monkeypatch.setattr(_browser, "_validate_idea_org", AsyncMock(return_value=True))
     monkeypatch.setattr(_browser.browser_sessions, "create_or_get_session", fake_create_or_get_session)
     async def fake_get_browser_session_or_404(session_id: str):
         return SimpleNamespace(created_at=created_at)
@@ -308,8 +309,8 @@ def test_get_browser_session_endpoint(monkeypatch):
     )
 
     monkeypatch.setattr(_browser, "UnitOfWork", _FakeUOW)
-    monkeypatch.setattr(_browser, "_validate_idea_org_orm", lambda session, idea_id, org_id: True)
-    monkeypatch.setattr(_browser.browser_sessions, "get_active_session_record", lambda idea_id: record)
+    monkeypatch.setattr(_browser, "_validate_idea_org", AsyncMock(return_value=True))
+    monkeypatch.setattr(_browser.browser_sessions, "get_active_session_record_async", AsyncMock(return_value=record))
     app.dependency_overrides[get_current_user] = _auth_user
 
     client = TestClient(app)
@@ -339,9 +340,9 @@ def test_snapshot_and_close_browser_session_endpoints(monkeypatch):
 
     record = SimpleNamespace(idea_id="idea-3")
     monkeypatch.setattr(_browser, "UnitOfWork", _FakeUOW)
-    monkeypatch.setattr(_browser, "_validate_idea_org_orm", lambda session, idea_id, org_id: True)
-    monkeypatch.setattr(_browser, "_get_browser_session_or_404", lambda session_id: record)
-    monkeypatch.setattr(_browser.browser_sessions, "get_session_record_for_org", lambda session_id, *, org_id: record)
+    monkeypatch.setattr(_browser, "_validate_idea_org", AsyncMock(return_value=True))
+    monkeypatch.setattr(_browser, "_get_browser_session_or_404", AsyncMock(return_value=record))
+    monkeypatch.setattr(_browser.browser_sessions, "get_session_record_for_org_async", AsyncMock(return_value=record))
     monkeypatch.setattr(_browser.browser_sessions, "command", fake_command)
     app.dependency_overrides[get_current_user] = _auth_user
 

@@ -117,6 +117,21 @@ def test_cortex_run_event_status_uses_native_async_db_path():
     assert "open_unit_of_work" not in source
 
 
+def test_cortex_browser_routes_use_native_async_db_path():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "brain/app/api/routers/cortex/_browser.py"
+    route_sources = [
+        _function_source(path, "create_browser_session"),
+        _function_source(path, "get_browser_session"),
+    ]
+
+    for source in route_sources:
+        assert "run_db" not in source
+        assert "run_session_task" not in source
+        assert "run_unit_of_work_task" not in source
+        assert "open_unit_of_work" not in source
+
+
 def test_workspace_pins_router_stays_on_native_async_db_path():
     root = Path(__file__).resolve().parents[1]
     path = root / "brain/app/api/routers/workspace_pins.py"
