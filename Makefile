@@ -1,4 +1,4 @@
-.PHONY: dev build start test test-all install install-browser
+.PHONY: dev build start test test-all architecture-check install install-browser
 
 ## Install all dependencies
 install:
@@ -30,6 +30,10 @@ start:
 ## Run fast tests only (no Docker, no DB)
 test:
 	python3 -m pytest tests/ -m "not requires_db" -q
+
+## Run backend architecture boundary guardrails
+architecture-check:
+	python3 -m pytest tests/test_architecture_boundaries.py -q
 
 ## Run full test suite with Docker test DB
 test-all:
