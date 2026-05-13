@@ -13,9 +13,6 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-from brain.platform.db.session_tasks import run_session_task
-
-
 logger = logging.getLogger("builtin_skills")
 
 ILLO_CORE_SOURCE_KIND = "illo-core"
@@ -1121,7 +1118,7 @@ async def _ensure_builtin_skill_bundles() -> None:
         from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
         from brain.platform.db.repositories.skills import SkillRepository
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        from brain.platform.db.services.skill_bundle_io import SkillBundleIOService
+        from brain.platform.db.services.skill_bundle_io import AsyncSkillBundleIOService
     except Exception as exc:
         logger.warning("ensure_builtin_skill_bundles unavailable: %s", exc)
         return
@@ -1134,22 +1131,20 @@ async def _ensure_builtin_skill_bundles() -> None:
 
         try:
             async with UnitOfWork() as uow:
-                def _import_bundle(sync_db) -> None:
-                    skill_repo = SkillRepository(sync_db)
-                    bundle_repo = SkillBundleRepository(sync_db)
-                    service = SkillBundleIOService(skill_repo, bundle_repo)
-                    service.import_bundle(
-                        bundle_dir,
-                        namespace="illo_core",
-                        enabled_scope="system",
-                        update_policy="pinned",
-                        review_status="approved",
-                        trust_level=ILLO_CORE_TRUST_LEVEL,
-                        source_kind=ILLO_CORE_SOURCE_KIND,
-                        auto_bump_conflicting_semver=True,
-                    )
-
-                await run_session_task(uow.session, _import_bundle)
+                service = AsyncSkillBundleIOService(
+                    SkillRepository(uow.session),
+                    SkillBundleRepository(uow.session),
+                )
+                await service.import_bundle(
+                    bundle_dir,
+                    namespace="illo_core",
+                    enabled_scope="system",
+                    update_policy="pinned",
+                    review_status="approved",
+                    trust_level=ILLO_CORE_TRUST_LEVEL,
+                    source_kind=ILLO_CORE_SOURCE_KIND,
+                    auto_bump_conflicting_semver=True,
+                )
         except Exception as exc:
             logger.warning(
                 "ensure_builtin_skill_bundle_failed skill=%s error=%s",

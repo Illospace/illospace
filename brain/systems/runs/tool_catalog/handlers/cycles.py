@@ -2,9 +2,50 @@
 
 from __future__ import annotations
 
+from brain.platform.async_bridge import run_async_from_sync
 from brain.systems.runs.tool_catalog.handlers.common import *
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+
+def _run_manage_cycle_awaitable(awaitable):
+    return run_async_from_sync(awaitable, thread_name="manage-cycle-tool")
+
 
 def _handle_manage_cycle(
+    action: str,
+    operation: str | None = None,
+    id: int | None = None,
+    name: str | None = None,
+    prompt: str | None = None,
+    schedule_expr: str | None = None,
+    run_at: str | None = None,
+    timezone: str | None = None,
+    enabled: bool | None = None,
+    model_override: str | None = None,
+    thinking_override: str | None = None,
+    execution_mode: str | None = None,
+    target_idea_id: str | None = None,
+    reopen_archived: bool | None = None,
+):
+    return _run_manage_cycle_awaitable(_handle_manage_cycle_async(
+        action=action,
+        operation=operation,
+        id=id,
+        name=name,
+        prompt=prompt,
+        schedule_expr=schedule_expr,
+        run_at=run_at,
+        timezone=timezone,
+        enabled=enabled,
+        model_override=model_override,
+        thinking_override=thinking_override,
+        execution_mode=execution_mode,
+        target_idea_id=target_idea_id,
+        reopen_archived=reopen_archived,
+    ))
+
+
+async def _handle_manage_cycle_async(
     action: str,
     operation: str | None = None,
     id: int | None = None,
@@ -31,7 +72,7 @@ def _handle_manage_cycle(
         compute_next_run_at,
         cycle_defaults,
         REUSABLE_THREAD_EXECUTION_MODE,
-        run_cycle_now,
+        async_run_cycle_now,
         serialize_cycle,
         validate_nonempty_trimmed,
         validate_execution_mode,
@@ -43,7 +84,6 @@ def _handle_manage_cycle(
     from brain.platform.db.models.cycle import Cycle
     from brain.platform.db.models.idea import Idea
     from brain.platform.db.models.org import User
-    from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
     from datetime import timezone as dt_timezone
 
     user_id = getattr(_agent_context, "user_id", None)
@@ -81,13 +121,14 @@ def _handle_manage_cycle(
 
     try:
         if action == "list":
-            with open_unit_of_work(UnitOfWork) as uow:
+            async with UnitOfWork() as uow:
                 stmt = (
                     select(Cycle)
                     .where(*_cycle_scope())
                     .order_by(Cycle.created_at.desc())
                 )
-                cycles = [serialize_cycle(cycle) for cycle in uow.session.scalars(stmt).all()]
+                result = await uow.session.scalars(stmt)
+                cycles = [serialize_cycle(cycle) for cycle in result.all()]
             return json.dumps({"cycles": cycles}, default=str)
         elif action == "create":
             if not name or not prompt or not timezone or (not schedule_expr and not run_at):
@@ -102,10 +143,11 @@ def _handle_manage_cycle(
             thinking = validate_thinking_override(thinking_override)
             normalized_name = validate_nonempty_trimmed(name, "name")
             normalized_prompt = validate_nonempty_trimmed(prompt, "prompt")
-            with open_unit_of_work(UnitOfWork) as uow:
+            async with UnitOfWork() as uow:
                 if target_idea_id:
                     stmt = select(Idea.id).where(*_idea_scope(target_idea_id))
-                    if not uow.session.execute(stmt).first():
+                    result = await uow.session.execute(stmt)
+                    if not result.first():
                         return json.dumps({"error": "target_idea_id must belong to the current workspace"})
                 cycle = Cycle(
                     user_id=user_id,
@@ -126,7 +168,7 @@ def _handle_manage_cycle(
                     next_run_at=compute_next_run_at(expr, tz_name),
                 )
                 uow.session.add(cycle)
-                uow.session.flush()
+                await uow.session.flush()
                 payload = serialize_cycle(cycle)
             publish_cycle_change(
                 action="create",
@@ -139,17 +181,19 @@ def _handle_manage_cycle(
         elif action == "update":
             if not id:
                 return json.dumps({"error": "update requires: id"})
-            with open_unit_of_work(UnitOfWork) as uow:
+            async with UnitOfWork() as uow:
                 stmt = select(Cycle).where(
                     Cycle.id == id,
                     *_cycle_scope(),
                 )
-                cycle = uow.session.scalars(stmt).first()
+                result = await uow.session.scalars(stmt)
+                cycle = result.first()
                 if not cycle:
                     return json.dumps({"error": f"Cycle {id} not found"})
                 if target_idea_id:
                     idea_stmt = select(Idea.id).where(*_idea_scope(target_idea_id))
-                    if not uow.session.execute(idea_stmt).first():
+                    result = await uow.session.execute(idea_stmt)
+                    if not result.first():
                         return json.dumps({"error": "target_idea_id must belong to the current workspace"})
                 if name is not None:
                     cycle.name = validate_nonempty_trimmed(name, "name")
@@ -194,12 +238,13 @@ def _handle_manage_cycle(
         elif action == "delete":
             if not id:
                 return json.dumps({"error": "delete requires: id"})
-            with open_unit_of_work(UnitOfWork) as uow:
+            async with UnitOfWork() as uow:
                 stmt = select(Cycle).where(
                     Cycle.id == id,
                     *_cycle_scope(),
                 )
-                cycle = uow.session.scalars(stmt).first()
+                result = await uow.session.scalars(stmt)
+                cycle = result.first()
                 if not cycle:
                     return json.dumps({"error": f"Cycle {id} not found"})
                 cycle_org_id = cycle.org_id
@@ -218,18 +263,19 @@ def _handle_manage_cycle(
         elif action == "run":
             if not id:
                 return json.dumps({"error": "run requires: id"})
-            with open_unit_of_work(UnitOfWork) as uow:
+            async with UnitOfWork() as uow:
                 stmt = select(Cycle).where(
                     Cycle.id == id,
                     *_cycle_scope(),
                 )
-                cycle = uow.session.scalars(stmt).first()
+                result = await uow.session.scalars(stmt)
+                cycle = result.first()
                 if not cycle:
                     return json.dumps({"error": f"Cycle {id} not found"})
                 cycle_org_id = cycle.org_id
                 cycle_user_id = cycle.user_id
                 cycle_target_id = cycle.target_idea_id
-            payload = run_cycle_now(id)
+            payload = await async_run_cycle_now(id)
             publish_cycle_change(
                 action="run",
                 org_id=cycle_org_id,

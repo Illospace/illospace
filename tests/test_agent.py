@@ -19,7 +19,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch, PropertyMock, AsyncMock
 
 import pytest
 
@@ -432,6 +432,8 @@ class TestSessionPersistence:
             MockUoW.return_value = mock_uow
             mock_uow.__enter__ = MagicMock(return_value=mock_uow)
             mock_uow.__exit__ = MagicMock(return_value=False)
+            mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+            mock_uow.__aexit__ = AsyncMock(return_value=False)
             mock_uow.session.execute.return_value.mappings.return_value.first.return_value = None
 
             messages, system = _load_session("nonexistent-session")
@@ -445,6 +447,8 @@ class TestSessionPersistence:
             MockUoW.return_value = mock_uow
             mock_uow.__enter__ = MagicMock(return_value=mock_uow)
             mock_uow.__exit__ = MagicMock(return_value=False)
+            mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+            mock_uow.__aexit__ = AsyncMock(return_value=False)
             mock_uow.session.execute.return_value.mappings.return_value.first.return_value = {
                 "messages": [{"role": "user", "content": "hello"}],
                 "system_prompt": "You are helpful.",
@@ -461,6 +465,8 @@ class TestSessionPersistence:
             MockUoW.return_value = mock_uow
             mock_uow.__enter__ = MagicMock(return_value=mock_uow)
             mock_uow.__exit__ = MagicMock(return_value=False)
+            mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+            mock_uow.__aexit__ = AsyncMock(return_value=False)
 
             _save_session(
                 "test-session",

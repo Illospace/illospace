@@ -13,7 +13,7 @@ from pathlib import Path
 
 import bcrypt
 from cryptography.fernet import Fernet
-from sqlalchemy import case, inspect, or_, select
+from sqlalchemy import case, inspect, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,7 +29,7 @@ from brain.platform.db.models.vault import (
     VaultSession,
     VaultShare,
 )
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_unit_of_work_task, open_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +156,27 @@ def _table_exists(uow: UnitOfWork, table_name: str) -> bool:
         if hasattr(uow.session, "table_exists"):
             return bool(uow.session.table_exists(table_name))
         return inspect(uow.session.connection()).has_table(table_name)
+    except Exception:
+        return True
+
+
+async def _async_table_exists(uow: UnitOfWork, table_name: str) -> bool:
+    try:
+        if hasattr(uow.session, "table_exists"):
+            result = uow.session.table_exists(table_name)
+            if hasattr(result, "__await__"):
+                result = await result
+            return bool(result)
+        bind = getattr(uow.session, "bind", None)
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+        if dialect_name == "sqlite":
+            result = await uow.session.execute(
+                text("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :table_name"),
+                {"table_name": table_name},
+            )
+            return result.first() is not None
+        result = await uow.session.scalar(text("SELECT to_regclass(:table_name) IS NOT NULL"), {"table_name": table_name})
+        return bool(result)
     except Exception:
         return True
 
@@ -302,6 +323,7 @@ async def async_get_secret(
 
     if allow_env_fallback and (env_val := os.environ.get(key_name)):
         return env_val
+    await _async_record_missing(key_name, user_id=user_id, org_id=org_id)
     return None
 
 
@@ -399,6 +421,7 @@ async def async_set_secret(
             uow.session.add(secret)
             await uow.session.flush()
             await _async_log_access(user_id, secret.id, key_name, "write", uow=uow)
+    await async_resolve_missing(key_name, user_id=user_id, org_id=org_id)
 
 
 def delete_secret(key_name: str, user_id: str) -> bool:
@@ -659,6 +682,29 @@ def _project_binding_rows(
         return []
 
 
+async def _async_project_binding_rows(
+    uow: UnitOfWork,
+    *,
+    user_id: str,
+    org_id: str | None = None,
+    secret_id: int | None = None,
+) -> list[tuple[VaultProjectBinding, Secret]]:
+    if not await _async_table_exists(uow, "vault_project_bindings"):
+        return []
+    try:
+        result = await uow.session.execute(
+            _project_binding_rows_stmt(
+                user_id=user_id,
+                org_id=org_id,
+                secret_id=secret_id,
+            )
+        )
+        return list(result.all())
+    except SQLAlchemyError:
+        await uow.session.rollback()
+        return []
+
+
 def _matching_project_binding_rows(
     uow: UnitOfWork,
     *,
@@ -748,6 +794,49 @@ def _upsert_project_binding(
         VaultProjectBinding.env_name == clean_env_name,
     )
     existing = uow.session.scalars(stmt.limit(1)).first()
+    if existing:
+        existing.secret_id = secret.id
+        existing.org_id = org_id
+        existing.target_registry_id = target_registry_id
+        existing.active = True
+        existing.updated_at = now
+        return existing
+    binding = VaultProjectBinding(
+        secret_id=secret.id,
+        user_id=user_id,
+        org_id=org_id,
+        target_registry_id=target_registry_id,
+        project_slug=clean_project_slug,
+        env_name=clean_env_name,
+        active=True,
+        created_at=now,
+        updated_at=now,
+    )
+    uow.session.add(binding)
+    return binding
+
+
+async def _async_upsert_project_binding(
+    uow: UnitOfWork,
+    secret: Secret,
+    *,
+    user_id: str,
+    org_id: str | None = None,
+    project_slug: str,
+    env_name: str,
+    target_registry_id: int | None = None,
+) -> VaultProjectBinding:
+    clean_project_slug = _normalize_project_slug(project_slug)
+    if not clean_project_slug:
+        raise ValueError("project_slug is required")
+    clean_env_name = _normalize_env_name(env_name)
+    now = datetime.now(timezone.utc)
+    stmt = select(VaultProjectBinding).where(
+        VaultProjectBinding.user_id == user_id,
+        VaultProjectBinding.project_slug == clean_project_slug,
+        VaultProjectBinding.env_name == clean_env_name,
+    )
+    existing = (await uow.session.scalars(stmt.limit(1))).first()
     if existing:
         existing.secret_id = secret.id
         existing.org_id = org_id
@@ -1590,6 +1679,42 @@ def _record_missing(
         pass
 
 
+async def _async_record_missing(
+    key_name: str,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> None:
+    """Async variant of missing-secret tracking. Fail-silent."""
+    now = datetime.now(timezone.utc)
+    try:
+        async with UnitOfWork() as uow:
+            stmt = select(VaultMissingRequest).where(VaultMissingRequest.key_name == key_name)
+            if org_id:
+                stmt = stmt.where(VaultMissingRequest.org_id == org_id)
+            elif user_id:
+                stmt = stmt.where(VaultMissingRequest.user_id == user_id)
+            else:
+                return
+            existing = (await uow.session.scalars(stmt)).first()
+            if existing:
+                existing.request_count = (existing.request_count or 0) + 1
+                existing.last_requested = now
+                existing.resolved = False
+            else:
+                uow.session.add(VaultMissingRequest(
+                    key_name=key_name,
+                    user_id=user_id,
+                    org_id=org_id,
+                    request_count=1,
+                    first_requested=now,
+                    last_requested=now,
+                    resolved=False,
+                ))
+    except Exception:
+        pass
+
+
 def record_missing_request(
     key_name: str,
     *,
@@ -1598,6 +1723,16 @@ def record_missing_request(
 ) -> None:
     """Record a missing secret request from a non-read workflow."""
     _record_missing(key_name, user_id=user_id, org_id=org_id)
+
+
+async def async_record_missing_request(
+    key_name: str,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> None:
+    """Record a missing secret request from an async workflow."""
+    await _async_record_missing(key_name, user_id=user_id, org_id=org_id)
 
 
 def get_missing_requests(
@@ -1645,6 +1780,26 @@ def resolve_missing(
             elif user_id:
                 stmt = stmt.where(VaultMissingRequest.user_id == user_id)
             for existing in uow.session.scalars(stmt).all():
+                existing.resolved = True
+    except Exception:
+        logger.debug("vault_resolve_missing_failed", exc_info=True)
+
+
+async def async_resolve_missing(
+    key_name: str,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> None:
+    try:
+        async with UnitOfWork() as uow:
+            stmt = select(VaultMissingRequest).where(VaultMissingRequest.key_name == key_name)
+            if org_id:
+                stmt = stmt.where(VaultMissingRequest.org_id == org_id)
+            elif user_id:
+                stmt = stmt.where(VaultMissingRequest.user_id == user_id)
+            rows = (await uow.session.scalars(stmt)).all()
+            for existing in rows:
                 existing.resolved = True
     except Exception:
         logger.debug("vault_resolve_missing_failed", exc_info=True)
@@ -1874,33 +2029,98 @@ def authorize_agent_secret_read(
 
 
 async def async_delete_secret(key_name: str, user_id: str) -> bool:
-    return await run_unit_of_work_task(delete_secret, key_name, user_id)
+    """Delete a secret through the native async DB path."""
+    if not user_id:
+        raise ValueError("user_id is required to delete a vault secret")
+    async with UnitOfWork() as uow:
+        secret = await uow.vault.get_by_key(user_id, key_name)
+        if not secret:
+            return False
+        await _async_log_access(user_id, secret.id, key_name, "delete", "user", uow=uow)
+        await uow.session.delete(secret)
+        return True
 
 
 async def async_revoke_share(share_id: int, user_id: str) -> bool:
-    return await run_unit_of_work_task(revoke_share, share_id, user_id)
+    """Revoke a share through the native async DB path."""
+    async with UnitOfWork() as uow:
+        stmt = select(VaultShare).where(
+            VaultShare.id == share_id,
+            VaultShare.shared_by_user_id == user_id,
+            VaultShare.revoked_at.is_(None),
+        )
+        share = (await uow.session.scalars(stmt)).first()
+        if share:
+            share.revoked_at = datetime.now(timezone.utc)
+            await _async_log_access(user_id, share.secret_id, "", "revoke", "user", uow=uow)
+            return True
+        return False
 
 
 async def async_get_missing_requests(
-    user_id: str,
+    user_id: str | None = None,
     *,
     org_id: str | None = None,
     include_resolved: bool = False,
 ) -> list[dict]:
-    return await run_unit_of_work_task(
-        get_missing_requests,
-        user_id,
-        org_id=org_id,
-        include_resolved=include_resolved,
-    )
+    if not user_id and not org_id:
+        return []
+    async with UnitOfWork() as uow:
+        stmt = select(VaultMissingRequest)
+        if not include_resolved:
+            stmt = stmt.where(VaultMissingRequest.resolved == False)  # noqa: E712
+        if org_id:
+            stmt = stmt.where(VaultMissingRequest.org_id == org_id)
+        elif user_id:
+            stmt = stmt.where(VaultMissingRequest.user_id == user_id)
+        stmt = stmt.order_by(VaultMissingRequest.last_requested.desc()).limit(20)
+        rows = (await uow.session.scalars(stmt)).all()
+        return [
+            {
+                "key_name": r.key_name,
+                "request_count": r.request_count,
+                "first_requested": r.first_requested,
+                "last_requested": r.last_requested,
+                "user_id": r.user_id,
+                "org_id": r.org_id,
+            }
+            for r in rows
+        ]
 
 
 async def async_get_vault_access_log(user_id: str, *, org_id: str | None = None, limit: int = 100) -> list[dict]:
-    return await run_unit_of_work_task(get_vault_access_log, user_id, org_id=org_id, limit=limit)
+    async with UnitOfWork() as uow:
+        stmt = select(VaultAccessLog, User.name.label("actor_name")).join(
+            User,
+            User.id == VaultAccessLog.user_id,
+        )
+        if org_id:
+            stmt = stmt.where(User.org_id == org_id)
+        else:
+            subq = select(Secret.id).where(Secret.user_id == user_id).scalar_subquery()
+            stmt = stmt.where(
+                (VaultAccessLog.secret_id.in_(subq)) | (VaultAccessLog.user_id == user_id)
+            )
+        stmt = stmt.order_by(VaultAccessLog.accessed_at.desc()).limit(limit)
+        rows = (await uow.session.execute(stmt)).all()
+        return [
+            {
+                "id": log.id,
+                "key_name": log.key_name,
+                "action": log.action,
+                "accessed_by": log.accessed_by,
+                "accessed_at": log.accessed_at,
+                "actor_name": actor_name,
+            }
+            for log, actor_name in rows
+        ]
 
 
 async def async_get_org_users(org_id: str) -> list[dict]:
-    return await run_unit_of_work_task(get_org_users, org_id)
+    """Return users in the org for share pickers using native async DB access."""
+    async with UnitOfWork() as uow:
+        users = await uow.team.list_by_org(org_id)
+        return [{"id": str(u.id), "name": u.name, "email": u.email, "color": u.color} for u in users]
 
 
 async def async_list_agent_grants(
@@ -1908,8 +2128,17 @@ async def async_list_agent_grants(
     *,
     org_id: str | None = None,
     statuses: list[str] | None = None,
+    limit: int = 50,
 ) -> list[dict]:
-    return await run_unit_of_work_task(list_agent_grants, user_id, org_id=org_id, statuses=statuses)
+    """List vault access grants through the native async DB path."""
+    async with UnitOfWork() as uow:
+        stmt = select(VaultAgentGrant).where(VaultAgentGrant.user_id == user_id)
+        if org_id:
+            stmt = stmt.where(VaultAgentGrant.org_id == org_id)
+        if statuses:
+            stmt = stmt.where(VaultAgentGrant.status.in_(tuple(statuses)))
+        stmt = stmt.order_by(VaultAgentGrant.requested_at.desc()).limit(limit)
+        return [_grant_to_dict(grant) for grant in (await uow.session.scalars(stmt)).all()]
 
 
 async def async_approve_agent_grant(
@@ -1920,14 +2149,27 @@ async def async_approve_agent_grant(
     ttl_minutes: int = 15,
     max_reads: int = 1,
 ) -> dict | None:
-    return await run_unit_of_work_task(
-        approve_agent_grant,
-        grant_id,
-        approved_by_user_id=approved_by_user_id,
-        org_id=org_id,
-        ttl_minutes=ttl_minutes,
-        max_reads=max_reads,
-    )
+    """Approve a pending agent grant through the native async DB path."""
+    now = datetime.now(timezone.utc)
+    async with UnitOfWork() as uow:
+        grant = await uow.session.get(VaultAgentGrant, grant_id)
+        if not grant or str(grant.user_id) != str(approved_by_user_id):
+            return None
+        if grant.status != "pending":
+            return None
+        if org_id and str(grant.org_id) != str(org_id):
+            return None
+        if org_id is None and grant.org_id is not None:
+            return None
+        grant.status = "approved"
+        grant.approved_by_user_id = approved_by_user_id
+        grant.decided_at = now
+        grant.expires_at = now + timedelta(minutes=max(1, min(int(ttl_minutes or 15), 60)))
+        grant.max_reads = max(1, min(int(max_reads or grant.max_reads or 1), 25))
+        grant.read_count = 0
+        grant.last_used_at = None
+        await uow.session.flush()
+        return _grant_to_dict(grant)
 
 
 async def async_deny_agent_grant(
@@ -1936,16 +2178,43 @@ async def async_deny_agent_grant(
     denied_by_user_id: str,
     org_id: str | None = None,
 ) -> dict | None:
-    return await run_unit_of_work_task(
-        deny_agent_grant,
-        grant_id,
-        denied_by_user_id=denied_by_user_id,
-        org_id=org_id,
-    )
+    """Deny/revoke an agent grant through the native async DB path."""
+    now = datetime.now(timezone.utc)
+    async with UnitOfWork() as uow:
+        grant = await uow.session.get(VaultAgentGrant, grant_id)
+        if not grant or str(grant.user_id) != str(denied_by_user_id):
+            return None
+        if org_id and str(grant.org_id) != str(org_id):
+            return None
+        if org_id is None and grant.org_id is not None:
+            return None
+        grant.status = "denied"
+        grant.approved_by_user_id = denied_by_user_id
+        grant.decided_at = now
+        grant.expires_at = now
+        await uow.session.flush()
+        return _grant_to_dict(grant)
 
 
-async def async_list_project_bindings(user_id: str, *, org_id: str | None = None) -> list[dict]:
-    return await run_unit_of_work_task(list_project_bindings, user_id=user_id, org_id=org_id)
+async def async_list_project_bindings(
+    user_id: str,
+    *,
+    org_id: str | None = None,
+    secret_id: int | None = None,
+) -> list[dict]:
+    """List project token bindings through the native async DB path."""
+    if not user_id:
+        raise ValueError("user_id is required to list project vault bindings")
+    async with UnitOfWork() as uow:
+        return [
+            _binding_to_dict(binding, secret)
+            for binding, secret in await _async_project_binding_rows(
+                uow,
+                user_id=user_id,
+                org_id=org_id,
+                secret_id=secret_id,
+            )
+        ]
 
 
 async def async_bind_project_secret(
@@ -1955,21 +2224,40 @@ async def async_bind_project_secret(
     org_id: str | None,
     project_slug: str,
     env_name: str,
-    target_registry_id: str | None = None,
+    target_registry_id: int | None = None,
 ) -> dict | None:
-    return await run_unit_of_work_task(
-        bind_project_secret,
-        secret_id,
-        user_id=user_id,
-        org_id=org_id,
-        project_slug=project_slug,
-        env_name=env_name,
-        target_registry_id=target_registry_id,
-    )
+    """Bind a user's own secret to a project/env name using native async DB access."""
+    if not user_id:
+        raise ValueError("user_id is required to bind a vault secret")
+    async with UnitOfWork() as uow:
+        secret = await uow.session.get(Secret, secret_id)
+        if not secret or str(secret.user_id) != str(user_id):
+            return None
+        binding = await _async_upsert_project_binding(
+            uow,
+            secret,
+            user_id=user_id,
+            org_id=org_id,
+            project_slug=project_slug,
+            env_name=env_name,
+            target_registry_id=target_registry_id,
+        )
+        await uow.session.flush()
+        return _binding_to_dict(binding, secret)
 
 
 async def async_delete_project_binding(binding_id: int, *, user_id: str, org_id: str | None = None) -> bool:
-    return await run_unit_of_work_task(delete_project_binding, binding_id, user_id=user_id, org_id=org_id)
+    """Deactivate a project binding through the native async DB path."""
+    async with UnitOfWork() as uow:
+        binding = await uow.session.get(VaultProjectBinding, binding_id)
+        if not binding or str(binding.user_id) != str(user_id):
+            return False
+        if not _binding_org_matches(binding, org_id):
+            return False
+        binding.active = False
+        binding.updated_at = datetime.now(timezone.utc)
+        await uow.session.flush()
+        return True
 
 
 async def async_share_secret(
@@ -1979,13 +2267,52 @@ async def async_share_secret(
     *,
     org_id: str | None = None,
 ) -> dict | None:
-    return await run_unit_of_work_task(
-        share_secret,
-        secret_id,
-        shared_with_user_id,
-        owner_user_id,
-        org_id=org_id,
-    )
+    """Share a secret with another user through the native async DB path."""
+    async with UnitOfWork() as uow:
+        secret = await uow.vault.get(secret_id)
+        if not secret or secret.user_id != owner_user_id:
+            return None
+
+        sharer = await uow.session.get(User, owner_user_id)
+        recipient = await uow.session.get(User, shared_with_user_id)
+        if (
+            not sharer
+            or not recipient
+            or not getattr(sharer, "org_id", None)
+            or str(sharer.org_id) != str(recipient.org_id)
+        ):
+            return None
+        if org_id and str(sharer.org_id) != str(org_id):
+            return None
+        if shared_with_user_id == owner_user_id:
+            return None
+
+        stmt = select(VaultShare).where(
+            VaultShare.secret_id == secret_id,
+            VaultShare.shared_with_user_id == shared_with_user_id,
+        )
+        existing_share = (await uow.session.scalars(stmt)).first()
+        now = datetime.now(timezone.utc)
+        if existing_share:
+            existing_share.revoked_at = None
+            existing_share.shared_at = now
+            await uow.session.flush()
+            share_id = existing_share.id
+            shared_at = existing_share.shared_at
+        else:
+            share = VaultShare(
+                secret_id=secret_id,
+                shared_with_user_id=shared_with_user_id,
+                shared_by_user_id=owner_user_id,
+                shared_at=now,
+            )
+            uow.session.add(share)
+            await uow.session.flush()
+            share_id = share.id
+            shared_at = share.shared_at
+
+        await _async_log_access(owner_user_id, secret_id, secret.key_name, "share", "user", uow=uow)
+        return {"id": share_id, "secret_id": secret_id, "shared_at": shared_at}
 
 
 # ---------------------------------------------------------------------------

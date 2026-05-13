@@ -5,7 +5,7 @@ Tests mock at the session level using session.execute().mappings().all() etc.
 
 import os
 import sys
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch, call, AsyncMock
 
 import pytest
 
@@ -406,7 +406,10 @@ class TestBrainRecallIntegration:
         mock_session = MagicMock()
         mock_uow.__enter__ = MagicMock(return_value=mock_uow)
         mock_uow.__exit__ = MagicMock(return_value=False)
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
         mock_uow.session = mock_session
+        mock_uow.memories.graph_augmented_recall.return_value = mock_graph.return_value
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
              patch("brain.app.mcp.server.observe_retrieval", return_value={"retrieval_decision_id": 11, "stage": "brain_recall"}):
@@ -416,10 +419,8 @@ class TestBrainRecallIntegration:
         assert result["memories"][0]["tier"] == "semantic"
         assert "graph_context" in result["memories"][0]
         assert result["attention_decision"]["stage"] == "brain_recall"
-        # graph_augmented_recall should be called with session, not raw cursor
-        mock_graph.assert_called_once()
-        call_args = mock_graph.call_args
-        assert call_args[0][0] is mock_session
+        mock_uow.memories.graph_augmented_recall.assert_called_once()
+        assert mock_uow.memories.graph_augmented_recall.call_args.kwargs["query_embedding"] == mock_emb.return_value
 
     @patch("brain.systems.cognition.graph.graph_augmented_recall")
     @patch("brain.systems.memory.embeddings.embed_query")
@@ -445,7 +446,10 @@ class TestBrainRecallIntegration:
         mock_session = MagicMock()
         mock_uow.__enter__ = MagicMock(return_value=mock_uow)
         mock_uow.__exit__ = MagicMock(return_value=False)
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
         mock_uow.session = mock_session
+        mock_uow.memories.graph_augmented_recall.return_value = mock_graph.return_value
 
         decision = {
             "retrieval_decision_id": 13,
@@ -497,7 +501,10 @@ class TestBrainRecallIntegration:
         mock_session = MagicMock()
         mock_uow.__enter__ = MagicMock(return_value=mock_uow)
         mock_uow.__exit__ = MagicMock(return_value=False)
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
         mock_uow.session = mock_session
+        mock_uow.memories.graph_augmented_recall.return_value = mock_graph.return_value
 
         decision = {
             "retrieval_decision_id": 14,
@@ -551,27 +558,27 @@ class TestBrainRecallIntegration:
         mock_uow_graph = MagicMock()
         mock_uow_graph.__enter__ = MagicMock(return_value=mock_uow_graph)
         mock_uow_graph.__exit__ = MagicMock(return_value=False)
+        mock_uow_graph.__aenter__ = AsyncMock(return_value=mock_uow_graph)
+        mock_uow_graph.__aexit__ = AsyncMock(return_value=False)
         mock_uow_graph.session = MagicMock()
+        mock_uow_graph.memories.graph_augmented_recall.side_effect = Exception("UndefinedColumn")
 
         mock_uow_fallback = MagicMock()
         mock_uow_fallback.__enter__ = MagicMock(return_value=mock_uow_fallback)
         mock_uow_fallback.__exit__ = MagicMock(return_value=False)
+        mock_uow_fallback.__aenter__ = AsyncMock(return_value=mock_uow_fallback)
+        mock_uow_fallback.__aexit__ = AsyncMock(return_value=False)
         fallback_session = MagicMock()
         mock_uow_fallback.session = fallback_session
 
         # Fallback vector search returns results
-        fallback_result = MagicMock()
-        fallback_mappings = MagicMock()
-        fallback_mappings.all.return_value = [{
+        mock_uow_fallback.memories.recall_vector.return_value = [{
             "id": 7,
             "content": "Fallback result",
-            "memory_type": "lesson",
+            "type": "lesson",
             "salience": 8.0,
-            "emotion_label": "neutral",
             "similarity": 0.88,
         }]
-        fallback_result.mappings.return_value = fallback_mappings
-        fallback_session.execute.return_value = fallback_result
 
         with patch("brain.app.mcp.server.UnitOfWork", side_effect=[mock_uow_graph, mock_uow_fallback]), \
              patch("brain.app.mcp.server.observe_retrieval", return_value={"retrieval_decision_id": 12, "stage": "brain_recall"}):

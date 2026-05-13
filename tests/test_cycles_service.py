@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -30,15 +31,9 @@ class _FakeSession:
         return None
 
 
-class _FakeUoW:
-    def __init__(self, agent_run=None, run=None, cycle=None):
-        self.session = _FakeSession(agent_run=agent_run, run=run, cycle=cycle)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
+class _AsyncFakeSession(_FakeSession):
+    async def get(self, model, value):
+        return super().get(model, value)
 
 
 class _ScalarResult:
@@ -55,6 +50,14 @@ class _FirstResult:
 
     def first(self):
         return self._value
+
+
+class _AllResult:
+    def __init__(self, values):
+        self._values = list(values)
+
+    def all(self):
+        return list(self._values)
 
 
 class _ExecuteCycleSession:
@@ -88,15 +91,97 @@ class _ExecuteCycleSession:
                 value.id = 123
 
 
-class _ExecuteCycleUoW:
+class _AsyncUnitOfWorkFactory:
+    def __init__(self, sessions):
+        self._sessions = list(sessions)
+        self.uows = []
+
+    def __call__(self):
+        if not self._sessions:
+            raise AssertionError("unexpected async UnitOfWork")
+        uow = _AsyncUoW(self._sessions.pop(0))
+        self.uows.append(uow)
+        return uow
+
+    def blocking(self):
+        raise AssertionError("sync UnitOfWork bridge should not be used")
+
+
+class _AsyncUoW:
     def __init__(self, session):
         self.session = session
+        self.entered = False
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
     def __enter__(self):
-        return self
+        raise AssertionError("sync UnitOfWork bridge should not be used")
 
     def __exit__(self, exc_type, exc, tb):
         return False
+
+
+class _AsyncExecuteCycleSession(_ExecuteCycleSession):
+    async def scalars(self, statement):
+        return super().scalars(statement)
+
+    async def execute(self, statement):
+        return super().execute(statement)
+
+    async def get(self, model, value):
+        return super().get(model, value)
+
+    async def flush(self):
+        super().flush()
+
+
+class _AsyncRunNowCreateSession:
+    def __init__(self, cycle, created_runs):
+        self._cycle = cycle
+        self._created_runs = created_runs
+
+    async def get(self, model, value):
+        if model is Cycle:
+            return self._cycle
+        return None
+
+    def add(self, value):
+        self._created_runs.append(value)
+
+    async def flush(self):
+        for value in self._created_runs:
+            if isinstance(value, CycleRun) and getattr(value, "id", None) is None:
+                value.id = 99
+                value.created_at = value.scheduled_for
+
+
+class _AsyncRunNowLoadSession:
+    def __init__(self, run_or_runs):
+        self._run_or_runs = run_or_runs
+
+    async def get(self, model, value):
+        if model is CycleRun:
+            if isinstance(self._run_or_runs, list):
+                return self._run_or_runs[0]
+            return self._run_or_runs
+        return None
+
+
+class _AsyncCycleListSession:
+    def __init__(self, cycles):
+        self._cycles = cycles
+
+    async def scalars(self, statement):
+        return _AllResult(self._cycles)
+
+
+def _fail_sync_bridge(*args, **kwargs):
+    raise AssertionError("sync DB bridge should not be used")
 
 
 def test_compute_next_run_at_uses_timezone():
@@ -268,19 +353,53 @@ def test_serialize_cycle_run_normalizes_uuid_columns_for_api_schema():
     CycleRunRead.model_validate(serialized)
 
 
-def test_cycle_run_creation_uses_typed_admission(monkeypatch):
+@pytest.mark.asyncio
+async def test_async_run_cycle_now_uses_native_uow_without_sync_bridges(monkeypatch):
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.prompt = "Run the smoke test"
+    cycle.deleted_at = None
+
+    created_runs = []
+    factory = _AsyncUnitOfWorkFactory([
+        _AsyncRunNowCreateSession(cycle, created_runs),
+        _AsyncRunNowLoadSession(created_runs),
+    ])
+    executed_run_ids = []
+
+    async def fake_async_execute_cycle_run(run_id):
+        executed_run_ids.append(run_id)
+        created_runs[0].status = "completed"
+
+    monkeypatch.setattr(service, "UnitOfWork", factory)
+    monkeypatch.setattr(service, "async_execute_cycle_run", fake_async_execute_cycle_run)
+    monkeypatch.setattr(service, "open_unit_of_work", _fail_sync_bridge, raising=False)
+    monkeypatch.setattr(service, "run_unit_of_work_task", _fail_sync_bridge, raising=False)
+
+    payload = await service.async_run_cycle_now(cycle.id)
+
+    assert executed_run_ids == [99]
+    assert payload["id"] == 99
+    assert payload["cycle_id"] == cycle.id
+    assert payload["prompt_snapshot"] == cycle.prompt
+    assert payload["status"] == "completed"
+    assert all(uow.entered for uow in factory.uows)
+
+
+@pytest.mark.asyncio
+async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
     from brain.systems.runs.cortex import RunAdmissionResult
 
     calls = []
 
-    def fake_admit(request, *, session=None):
+    async def fake_admit(request, *, session=None):
         calls.append((request, session))
         return RunAdmissionResult(ok=True, run_id=77)
 
-    monkeypatch.setattr(service, "admit_run", fake_admit)
+    monkeypatch.setattr(service, "async_admit_run", fake_admit)
     session = object()
 
-    run_id = service._admit_cycle_run(
+    run_id = await service._async_admit_cycle_run(
         session,
         idea_id="idea-1",
         message="cycle prompt",
@@ -342,15 +461,19 @@ def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeypatch):
     idea.active_agents = []
     idea.attachments = []
 
-    session = _ExecuteCycleSession(run=run, cycle=cycle, idea=idea, expected_run_id=run.id)
-    monkeypatch.setattr(service, "UnitOfWork", lambda: _ExecuteCycleUoW(session))
+    session = _AsyncExecuteCycleSession(run=run, cycle=cycle, idea=idea, expected_run_id=run.id)
+    monkeypatch.setattr(
+        service,
+        "UnitOfWork",
+        _AsyncUnitOfWorkFactory([session]),
+    )
     admissions = []
 
-    def fake_admit(*args, **kwargs):
+    async def fake_admit(*args, **kwargs):
         admissions.append(kwargs)
         return 77
 
-    monkeypatch.setattr(service, "_admit_cycle_run", fake_admit)
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fake_admit)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
     monkeypatch.setattr(service, "_capture_cycle_emotion", lambda *args, **kwargs: None, raising=False)
 
@@ -367,6 +490,97 @@ def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeypatch):
     assert admissions[0]["metadata"]["tool_policy"]["disabled_tools"] == ["manage_cycle"]
     assert "Scheduled Prompt Launch" in admissions[0]["message"]
     assert "Prior thread messages are background context only" in admissions[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_async_execute_cycle_run_uses_native_uow_without_sync_bridges(monkeypatch):
+    idea_id = uuid4()
+
+    run = CycleRun()
+    run.id = 12
+    run.cycle_id = 5
+    run.status = "queued"
+    run.scheduled_for = datetime(2026, 4, 28, 20, 20, tzinfo=timezone.utc)
+    run.prompt_snapshot = "Summarize the newest news"
+
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.user_id = "user-1"
+    cycle.org_id = "org-1"
+    cycle.name = "Daily Anthropic news summary"
+    cycle.prompt = "Summarize the newest news"
+    cycle.schedule_expr = "20 16 * * *"
+    cycle.timezone = "America/Toronto"
+    cycle.target_idea_id = idea_id
+    cycle.deleted_at = None
+    cycle.model_override = None
+    cycle.thinking_override = None
+
+    idea = Idea()
+    idea.id = idea_id
+    idea.title = "Daily Anthropic news summary"
+    idea.display_title = None
+    idea.description = "Summarize the newest news"
+    idea.status = "needs_input"
+    idea.origin = "cycle"
+    idea.origin_ref = "cycle:5"
+    idea.salience_score = None
+    idea.position_x = None
+    idea.position_y = None
+    idea.created_at = None
+    idea.updated_at = None
+    idea.user_id = "user-1"
+    idea.org_id = "org-1"
+    idea.archived_at = None
+    idea.active_agents = []
+    idea.attachments = []
+
+    session = _AsyncExecuteCycleSession(run=run, cycle=cycle, idea=idea, expected_run_id=run.id)
+    factory = _AsyncUnitOfWorkFactory([session])
+    admissions = []
+
+    async def fake_async_admit(*args, **kwargs):
+        admissions.append(kwargs)
+        return 77
+
+    monkeypatch.setattr(service, "UnitOfWork", factory)
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fake_async_admit)
+    monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "open_unit_of_work", _fail_sync_bridge, raising=False)
+    monkeypatch.setattr(service, "run_unit_of_work_task", _fail_sync_bridge, raising=False)
+
+    await service.async_execute_cycle_run(run.id)
+
+    assert factory.uows[0].entered is True
+    assert run.idea_id == idea_id
+    assert run.run_id == 77
+    assert run.status == "running"
+    assert cycle.last_status == "running"
+    assert admissions[0]["metadata"]["origin"] == "cycle"
+    assert admissions[0]["metadata"]["tool_policy"]["disabled_tools"] == ["manage_cycle"]
+
+
+@pytest.mark.asyncio
+async def test_manage_cycle_list_uses_native_uow_without_sync_bridges(monkeypatch):
+    from brain.systems.runs.tool_catalog.handlers import cycles as cycle_handlers
+
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="America/Toronto",
+    )
+    factory = _AsyncUnitOfWorkFactory([_AsyncCycleListSession([cycle])])
+
+    monkeypatch.setattr(cycle_handlers, "UnitOfWork", factory)
+    monkeypatch.setattr(cycle_handlers, "open_unit_of_work", _fail_sync_bridge, raising=False)
+    monkeypatch.setattr(cycle_handlers, "run_unit_of_work_task", _fail_sync_bridge, raising=False)
+    monkeypatch.setattr(cycle_handlers._agent_context, "user_id", "user-1", raising=False)
+    monkeypatch.setattr(cycle_handlers._agent_context, "org_id", None, raising=False)
+
+    payload = json.loads(await cycle_handlers._handle_manage_cycle_async(action="list"))
+
+    assert factory.uows[0].entered is True
+    assert payload["cycles"][0]["id"] == cycle.id
+    assert payload["cycles"][0]["name"] == cycle.name
 
 
 def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
@@ -390,7 +604,9 @@ def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
     monkeypatch.setattr(
         service,
         "UnitOfWork",
-        lambda: _FakeUoW(agent_run=agent_run, run=cycle_run, cycle=cycle),
+        _AsyncUnitOfWorkFactory([
+            _AsyncFakeSession(agent_run=agent_run, run=cycle_run, cycle=cycle)
+        ]),
     )
 
     service.finalize_cycle_run_from_run(44, status="completed")
@@ -414,7 +630,9 @@ def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch):
     monkeypatch.setattr(
         service,
         "UnitOfWork",
-        lambda: _FakeUoW(agent_run=agent_run, run=cycle_run, cycle=cycle),
+        _AsyncUnitOfWorkFactory([
+            _AsyncFakeSession(agent_run=agent_run, run=cycle_run, cycle=cycle)
+        ]),
     )
 
     service.finalize_cycle_run_from_run(44, status="failed", error="boom")
@@ -485,7 +703,9 @@ def test_finalize_cycle_run_from_run_skips_terminal_runs(monkeypatch):
     monkeypatch.setattr(
         service,
         "UnitOfWork",
-        lambda: _FakeUoW(agent_run=agent_run, run=cycle_run, cycle=cycle),
+        _AsyncUnitOfWorkFactory([
+            _AsyncFakeSession(agent_run=agent_run, run=cycle_run, cycle=cycle)
+        ]),
     )
 
     service.finalize_cycle_run_from_run(44, status="failed", error="boom")

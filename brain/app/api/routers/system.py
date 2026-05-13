@@ -67,6 +67,7 @@ from brain.app.scheduler.executor import (
     async_set_scheduler_job_paused,
 )
 from brain.app.scheduler.planner import async_materialize_due_runs
+from brain.systems.runtime_settings.memory import async_get_embedding_info
 
 logger = logging.getLogger(__name__)
 
@@ -760,22 +761,10 @@ def _get_gpu_info() -> dict | None:
         return None
 
 
-def _get_embedding_info() -> dict:
+async def _get_embedding_info(db: AsyncSession) -> dict:
     """Return embedding backend status and config."""
-    from brain.kernel.config import EMBEDDING_BACKEND, EMBEDDING_DIM, EMBEDDING_API_PROVIDER, EMBEDDING_API_MODEL, EMBEDDING_CPU_MODEL
-    from brain.systems.memory.embeddings import server_health
-
-    try:
-        health = server_health()
-    except Exception:
-        health = None
-    result = {
-        "backend": EMBEDDING_BACKEND,
-        "dimensions": EMBEDDING_DIM,
-        "status": (health.get("status", "unknown") if isinstance(health, dict) else "not_running"),
-        "server_health": health if isinstance(health, dict) else None,
-    }
-    if EMBEDDING_BACKEND == "gpu":
+    result = await async_get_embedding_info(db)
+    if result.get("backend") == "gpu":
         try:
             from brain.platform.gpu.config import build_worker_manifests
             emb_worker = next((w for w in build_worker_manifests() if w.name == "embedding"), None)
@@ -783,14 +772,8 @@ def _get_embedding_info() -> dict:
         except Exception:
             result["model"] = "unknown"
         result["device"] = "cuda" if _get_gpu_info() is not None else "cpu"
-    elif EMBEDDING_BACKEND == "cpu":
-        result["model"] = EMBEDDING_CPU_MODEL
+    elif result.get("backend") == "cpu":
         result["device"] = "cpu"
-    elif EMBEDDING_BACKEND == "api":
-        result["provider"] = EMBEDDING_API_PROVIDER
-        result["model"] = EMBEDDING_API_MODEL
-        from brain.kernel.config import EMBEDDING_API_KEY
-        result["api_key_set"] = bool(EMBEDDING_API_KEY)
     return result
 
 
@@ -870,7 +853,7 @@ async def system_info(
         "disk": _safe(_get_disk_info),
         "database": await _safe_async(_get_database_info, db),
         "gpu": _safe(_get_gpu_info),
-        "embedding": _safe(_get_embedding_info),
+        "embedding": await _safe_async(_get_embedding_info, db),
         "llm": await _safe_async(_get_llm_info, user, db),
         "config": _safe(_get_config_info),
     }

@@ -6,11 +6,24 @@ normalization functions.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from typing import Any
 
+from brain.platform.async_bridge import run_async_from_sync
+
 logger = logging.getLogger("agent")
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _session_execute(session: Any, *args: Any, **kwargs: Any) -> Any:
+    return await _maybe_await(session.execute(*args, **kwargs))
 
 
 # ── Tool Pair Sanitization ────────────────────────────────────
@@ -161,23 +174,24 @@ def _sanitize_tool_pairs(messages: list[dict], session_id: str = "") -> list[dic
 # ── Session Load/Save ─────────────────────────────────────────
 
 
-def _load_session(session_id: str, user_id: str | None = None) -> tuple[list[dict], str | None]:
+async def async_load_session(session_id: str, user_id: str | None = None) -> tuple[list[dict], str | None]:
     """Load conversation messages from DB. Returns (messages, system_prompt).
     If user_id is provided, validates ownership — returns empty if mismatch.
     """
     try:
         from sqlalchemy import text as sa_text
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
-        with open_unit_of_work(UnitOfWork) as uow:
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        async with UnitOfWork() as uow:
             if user_id:
-                row = uow.session.execute(sa_text(
+                row_result = await _session_execute(uow.session, sa_text(
                     "SELECT messages, system_prompt FROM agent_sessions "
                     "WHERE session_id = :sid AND user_id = :uid"
-                ), {"sid": session_id, "uid": user_id}).mappings().first()
+                ), {"sid": session_id, "uid": user_id})
             else:
-                row = uow.session.execute(sa_text(
+                row_result = await _session_execute(uow.session, sa_text(
                     "SELECT messages, system_prompt FROM agent_sessions WHERE session_id = :sid"
-                ), {"sid": session_id}).mappings().first()
+                ), {"sid": session_id})
+            row = row_result.mappings().first()
             if row:
                 messages = row["messages"] if isinstance(row["messages"], list) else json.loads(row["messages"])
                 # Sanitize: strip orphaned tool pairs from corrupted sessions
@@ -191,7 +205,15 @@ def _load_session(session_id: str, user_id: str | None = None) -> tuple[list[dic
     return [], None
 
 
-def _save_session(
+def _load_session(session_id: str, user_id: str | None = None) -> tuple[list[dict], str | None]:
+    """Sync agent-loop compatibility wrapper around async session load."""
+    return run_async_from_sync(
+        async_load_session(session_id, user_id=user_id),
+        thread_name="sessions-sync-async-bridge",
+    )
+
+
+async def async_save_session(
     session_id: str,
     messages: list[dict],
     system_prompt: str | None,
@@ -204,14 +226,14 @@ def _save_session(
     """Save conversation messages to DB (upsert)."""
     try:
         from sqlalchemy import text as sa_text
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
         # NOTE: Do NOT strip thinking blocks before persisting.
         # The API requires thinking/redacted_thinking in all assistant turns
         # when thinking is enabled. Stripping them causes 500 on session reload.
         clean_messages = messages
 
-        with open_unit_of_work(UnitOfWork) as uow:
-            uow.session.execute(sa_text("""
+        async with UnitOfWork() as uow:
+            await _session_execute(uow.session, sa_text("""
                 INSERT INTO agent_sessions (session_id, messages, system_prompt,
                     total_input_tokens, total_output_tokens,
                     total_cache_read, total_cache_creation, user_id)
@@ -236,21 +258,48 @@ def _save_session(
         logger.warning(f"Session save failed for {session_id}: {e}")
 
 
-def _load_session_handoff(session_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+def _save_session(
+    session_id: str,
+    messages: list[dict],
+    system_prompt: str | None,
+    tokens_input: int,
+    tokens_output: int,
+    cache_read: int,
+    cache_creation: int,
+    user_id: str | None = None,
+):
+    """Sync agent-loop compatibility wrapper around async session save."""
+    return run_async_from_sync(
+        async_save_session(
+            session_id,
+            messages,
+            system_prompt,
+            tokens_input,
+            tokens_output,
+            cache_read,
+            cache_creation,
+            user_id=user_id,
+        ),
+        thread_name="sessions-sync-async-bridge",
+    )
+
+
+async def async_load_session_handoff(session_id: str, user_id: str | None = None) -> dict[str, Any] | None:
     """Load the durable handoff summary for a persistent agent session."""
     try:
         from sqlalchemy import text as sa_text
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
-        with open_unit_of_work(UnitOfWork) as uow:
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        async with UnitOfWork() as uow:
             if user_id:
-                row = uow.session.execute(sa_text(
+                row_result = await _session_execute(uow.session, sa_text(
                     "SELECT handoff_summary FROM agent_sessions "
                     "WHERE session_id = :sid AND user_id = :uid"
-                ), {"sid": session_id, "uid": user_id}).mappings().first()
+                ), {"sid": session_id, "uid": user_id})
             else:
-                row = uow.session.execute(sa_text(
+                row_result = await _session_execute(uow.session, sa_text(
                     "SELECT handoff_summary FROM agent_sessions WHERE session_id = :sid"
-                ), {"sid": session_id}).mappings().first()
+                ), {"sid": session_id})
+            row = row_result.mappings().first()
             if not row:
                 return None
             value = row.get("handoff_summary")
@@ -264,7 +313,15 @@ def _load_session_handoff(session_id: str, user_id: str | None = None) -> dict[s
     return None
 
 
-def _save_session_handoff(
+def _load_session_handoff(session_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+    """Sync agent-loop compatibility wrapper around async handoff load."""
+    return run_async_from_sync(
+        async_load_session_handoff(session_id, user_id=user_id),
+        thread_name="sessions-sync-async-bridge",
+    )
+
+
+async def async_save_session_handoff(
     session_id: str,
     handoff_summary: dict[str, Any] | None,
     *,
@@ -275,10 +332,10 @@ def _save_session_handoff(
         return
     try:
         from sqlalchemy import text as sa_text
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
-        with open_unit_of_work(UnitOfWork) as uow:
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        async with UnitOfWork() as uow:
             if user_id:
-                uow.session.execute(sa_text("""
+                await _session_execute(uow.session, sa_text("""
                     UPDATE agent_sessions
                     SET handoff_summary = :handoff,
                         handoff_message_count = :message_count,
@@ -292,7 +349,7 @@ def _save_session_handoff(
                     "message_count": int(handoff_summary.get("message_count") or 0),
                 })
             else:
-                uow.session.execute(sa_text("""
+                await _session_execute(uow.session, sa_text("""
                     UPDATE agent_sessions
                     SET handoff_summary = :handoff,
                         handoff_message_count = :message_count,
@@ -306,6 +363,23 @@ def _save_session_handoff(
                 })
     except Exception as e:
         logger.debug(f"Session handoff save failed for {session_id}: {e}")
+
+
+def _save_session_handoff(
+    session_id: str,
+    handoff_summary: dict[str, Any] | None,
+    *,
+    user_id: str | None = None,
+) -> None:
+    """Sync agent-loop compatibility wrapper around async handoff save."""
+    return run_async_from_sync(
+        async_save_session_handoff(
+            session_id,
+            handoff_summary,
+            user_id=user_id,
+        ),
+        thread_name="sessions-sync-async-bridge",
+    )
 
 
 def _compact_message_for_read(index: int, message: dict, *, max_chars: int) -> dict[str, Any]:
@@ -324,7 +398,7 @@ def _compact_message_for_read(index: int, message: dict, *, max_chars: int) -> d
     }
 
 
-def read_thread_messages(
+async def async_read_thread_messages(
     session_id: str,
     *,
     user_id: str | None = None,
@@ -336,7 +410,7 @@ def read_thread_messages(
     max_chars: int = 8_000,
 ) -> dict[str, Any]:
     """Read/search stored raw messages for a persistent thread."""
-    messages, _ = _load_session(session_id, user_id=user_id)
+    messages, _ = await async_load_session(session_id, user_id=user_id)
     total = len(messages)
     limit = max(1, min(int(limit or 20), 100))
     per_message_chars = max(200, min(int(max_chars or 8_000), 20_000))
@@ -370,6 +444,33 @@ def read_thread_messages(
             for index, message in selected
         ],
     }
+
+
+def read_thread_messages(
+    session_id: str,
+    *,
+    user_id: str | None = None,
+    mode: str = "recent",
+    start_index: int | None = None,
+    end_index: int | None = None,
+    query: str | None = None,
+    limit: int = 20,
+    max_chars: int = 8_000,
+) -> dict[str, Any]:
+    """Sync tool compatibility wrapper around async thread-message reads."""
+    return run_async_from_sync(
+        async_read_thread_messages(
+            session_id,
+            user_id=user_id,
+            mode=mode,
+            start_index=start_index,
+            end_index=end_index,
+            query=query,
+            limit=limit,
+            max_chars=max_chars,
+        ),
+        thread_name="sessions-sync-async-bridge",
+    )
 
 
 # ── Message Processing ────────────────────────────────────────
