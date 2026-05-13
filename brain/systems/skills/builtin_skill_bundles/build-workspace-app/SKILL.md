@@ -107,7 +107,8 @@ Constellation design contract.
      non-GET methods with `external.write`, and add `domain.write` only when
      `sync` mutates the Domain. Sync mappings may use plain string paths
      (`"title"`), `{ "path": "nested.id" }`, `{ "const": "Todo" }`,
-     `{ "template": "ISSUE-{number}" }`, or
+     `{ "template": "ISSUE-{number}" }`, `{ "now": true }` for the current
+     UTC ISO timestamp, or
      `{ "if": { "field": "completed", "equals": true }, "then": "Done",
      "else": "Todo" }`. Put only real Domain data fields in `sync.fields`;
      use `sync.title` for the record title, and do not invent helper fields

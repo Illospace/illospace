@@ -878,6 +878,96 @@ def test_workspace_app_action_generic_http_supports_templates_and_conditionals(s
     assert second.data["status"] == "Done"
 
 
+def test_workspace_app_action_generic_http_supports_now_mapping(session):
+    domain = DomainService(session).create_domain(
+        ORG_ID,
+        name="Timestamped Tickets",
+        slug="timestamped-tickets",
+        objects=[
+            {
+                "key": "ticket",
+                "name": "Ticket",
+                "fields": [
+                    {"key": "external_id", "field_type": "text"},
+                    {"key": "synced_at", "field_type": "datetime"},
+                ],
+            }
+        ],
+        actor_id=USER_ID,
+    )
+    manifest = {
+        "contract_version": 1,
+        "data_plan": {
+            "mode": "domain",
+            "bindings": {
+                "tickets": {
+                    "domain_id": domain.id,
+                    "object_key": "ticket",
+                    "fields": ["title", "external_id", "synced_at"],
+                    "operations": ["schema", "list", "create", "update"],
+                }
+            },
+        },
+        "design_contract": {
+            "kit": "constellation-app-kit",
+            "theme_modes": ["dark", "light"],
+        },
+        "actions": {
+            "tickets.syncExternal": {
+                "kind": "connector",
+                "effects": ["external.read", "domain.write"],
+                "executor": {"type": "registered", "key": "generic.http"},
+                "connector_spec": {
+                    "kind": "http_sync",
+                    "request": {"method": "GET", "url": "https://jsonplaceholder.typicode.com/todos"},
+                    "response": {"items_path": "$"},
+                    "sync": {
+                        "binding": "tickets",
+                        "remote_id": "id",
+                        "remote_id_field": "external_id",
+                        "title": "title",
+                        "fields": {
+                            "synced_at": {"now": True},
+                        },
+                    },
+                },
+            }
+        },
+    }
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="generic-http-now-sync",
+        name="Generic HTTP Now Sync",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(VALID_GENERATED_UI_SPEC),
+        manifest=manifest,
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    with patch(
+        "brain.systems.workspace_apps.generic_http._request_json",
+        return_value=[{"id": "todo-1", "title": "Synced todo"}],
+    ), patch("brain.systems.workspace_apps.generic_http._utc_now_iso", return_value="2026-05-13T21:20:05Z"):
+        result = run_workspace_app_action(
+            session,
+            org_id=ORG_ID,
+            app_id=app.id,
+            action_key="tickets.syncExternal",
+            payload={},
+            user_id=USER_ID,
+        )
+
+    assert result["ok"] is True
+    assert result["result"]["created"] == 1
+    record = DomainService(session).list_records(ORG_ID, domain.id, object_key="ticket", limit=1)[0]
+    assert record.title == "Synced todo"
+    assert record.data["external_id"] == "todo-1"
+    assert record.data["synced_at"] == "2026-05-13T21:20:05Z"
+
+
 def test_workspace_app_action_generic_http_request_returns_compact_response(session):
     domain = _todo_domain(session)
     manifest = _manifest_with_action(
@@ -926,7 +1016,7 @@ def test_workspace_app_action_generic_http_request_returns_compact_response(sess
 def test_workspace_app_action_generic_http_rejects_invalid_mapping_at_save(session):
     domain = _todo_domain(session)
 
-    with pytest.raises(WorkspaceAppContractError, match="mapping expressions must use const, path, template, or if/then/else"):
+    with pytest.raises(WorkspaceAppContractError, match="mapping expressions must use const, path, template, now, or if/then/else"):
         create_app(
             session,
             org_id=ORG_ID,
