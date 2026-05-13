@@ -902,8 +902,21 @@ class MemoryRepository(BaseRepository[Memory]):
         )
         return self._session.scalars(stmt).first()
 
+    async def a_get_visible(self, memory_id: int, context: MemoryVisibilityContext) -> Memory | None:
+        stmt = select(Memory).where(
+            Memory.id == memory_id,
+            memory_visibility_predicate(Memory, context),
+        )
+        return (await self._session.scalars(stmt)).first()
+
     def get_or_raise_visible(self, memory_id: int, context: MemoryVisibilityContext) -> Memory:
         memory = self.get_visible(memory_id, context)
+        if memory is None:
+            raise LookupError(f"Memory {memory_id} not found")
+        return memory
+
+    async def a_get_or_raise_visible(self, memory_id: int, context: MemoryVisibilityContext) -> Memory:
+        memory = await self.a_get_visible(memory_id, context)
         if memory is None:
             raise LookupError(f"Memory {memory_id} not found")
         return memory
@@ -1377,6 +1390,23 @@ class MemoryRepository(BaseRepository[Memory]):
         stmt = stmt.limit(limit)
         return self._session.scalars(stmt).all()
 
+    async def a_list_contradictions(
+        self,
+        memory_id: int | None = None,
+        *,
+        limit: int = 50,
+    ) -> Sequence[MemoryContradiction]:
+        stmt = select(MemoryContradiction).order_by(MemoryContradiction.created_at.desc())
+        if memory_id is not None:
+            stmt = stmt.where(
+                or_(
+                    MemoryContradiction.left_memory_id == memory_id,
+                    MemoryContradiction.right_memory_id == memory_id,
+                )
+            )
+        stmt = stmt.limit(limit)
+        return (await self._session.scalars(stmt)).all()
+
     def list_reviews(
         self,
         memory_id: int | None = None,
@@ -1389,6 +1419,18 @@ class MemoryRepository(BaseRepository[Memory]):
         stmt = stmt.limit(limit)
         return self._session.scalars(stmt).all()
 
+    async def a_list_reviews(
+        self,
+        memory_id: int | None = None,
+        *,
+        limit: int = 50,
+    ) -> Sequence[MemoryReview]:
+        stmt = select(MemoryReview).order_by(MemoryReview.created_at.desc())
+        if memory_id is not None:
+            stmt = stmt.where(MemoryReview.memory_id == memory_id)
+        stmt = stmt.limit(limit)
+        return (await self._session.scalars(stmt)).all()
+
     def get_truth_snapshot(
         self,
         memory_id: int,
@@ -1399,6 +1441,42 @@ class MemoryRepository(BaseRepository[Memory]):
         memory = self.get_or_raise_visible(memory_id, context) if context else self.get_or_raise(memory_id)
         contradictions = self.list_contradictions(memory_id) if include_records else []
         reviews = self.list_reviews(memory_id) if include_records else []
+        open_contradictions = [
+            contradiction
+            for contradiction in contradictions
+            if str(getattr(contradiction, "status", "open")).lower() not in {"resolved", "closed", "dismissed", "accepted"}
+        ]
+        resolved_contradictions = [c for c in contradictions if c not in open_contradictions]
+        state = build_truth_state(
+            {
+                **getattr(memory, "__dict__", {}),
+                "open_contradiction_count": len(open_contradictions),
+                "resolved_contradiction_count": len(resolved_contradictions),
+                "contradiction_status": "open"
+                if open_contradictions
+                else "resolved"
+                if resolved_contradictions
+                else "none",
+            }
+        )
+        return {
+            "memory": memory,
+            "state": state,
+            "contradictions": contradictions,
+            "reviews": reviews,
+            "conservative_filter_enabled": quarantine_filter_enabled(),
+        }
+
+    async def a_get_truth_snapshot(
+        self,
+        memory_id: int,
+        *,
+        include_records: bool = False,
+        context: MemoryVisibilityContext | None = None,
+    ) -> dict:
+        memory = await self.a_get_or_raise_visible(memory_id, context) if context else await self.a_get_or_raise(memory_id)
+        contradictions = await self.a_list_contradictions(memory_id) if include_records else []
+        reviews = await self.a_list_reviews(memory_id) if include_records else []
         open_contradictions = [
             contradiction
             for contradiction in contradictions

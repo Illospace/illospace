@@ -1669,6 +1669,55 @@ def record_memory_review(
     return dict(row)
 
 
+async def async_record_memory_review(
+    session,
+    *,
+    memory_id: int,
+    action: str,
+    from_tier: str,
+    to_tier: str,
+    reviewer_id: str | None = None,
+    rationale: str | None = None,
+    evidence: dict[str, Any] | None = None,
+    confidence: float | None = None,
+) -> dict[str, Any]:
+    """Insert a structured memory review row with an async session."""
+    action_context = validate_truth_action_context(
+        action=action,
+        evidence=evidence,
+        confidence=confidence,
+    )
+    payload = {
+        "memory_id": memory_id,
+        "action": action_context["action"],
+        "from_tier": from_tier,
+        "to_tier": to_tier,
+        "reviewer_id": reviewer_id,
+        "rationale": rationale,
+        "evidence": json.dumps(action_context["evidence"], default=str),
+    }
+    result = await session.execute(
+        text(
+            """
+            INSERT INTO memory_reviews (
+                memory_id, action, from_tier, to_tier, reviewer_id, rationale, evidence
+            ) VALUES (
+                :memory_id, :action, :from_tier, :to_tier, :reviewer_id, :rationale, :evidence
+            )
+            RETURNING id, memory_id, action, from_tier, to_tier, reviewer_id, rationale, evidence, created_at
+            """
+        ),
+        payload,
+    )
+    row = result.mappings().first()
+    if row is None:
+        row_id = getattr(result, "lastrowid", None)
+        if row_id is None:
+            return {"id": None, **payload}
+        row = {"id": row_id, **payload}
+    return dict(row)
+
+
 def build_consolidation_truth_fields(
     *,
     source_kind: str,

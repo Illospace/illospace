@@ -123,6 +123,16 @@ class MemorySummaryRepository(BaseRepository[MemorySummary]):
         """Mark every active summary depending on ``memory_id`` as stale."""
         return self.mark_stale_for_memories([memory_id], reason, stale_at=stale_at)
 
+    async def a_mark_stale_for_memory(
+        self,
+        memory_id: int,
+        reason: str,
+        *,
+        stale_at: datetime | None = None,
+    ) -> int:
+        """Mark every active summary depending on ``memory_id`` as stale."""
+        return await self.a_mark_stale_for_memories([memory_id], reason, stale_at=stale_at)
+
     def mark_stale_for_memories(
         self,
         memory_ids: Sequence[int],
@@ -147,6 +157,32 @@ class MemorySummaryRepository(BaseRepository[MemorySummary]):
             .values(stale_at=now, stale_reason=str(reason or "source memory changed"))
         )
         self._session.flush()
+        return int(result.rowcount or 0)
+
+    async def a_mark_stale_for_memories(
+        self,
+        memory_ids: Sequence[int],
+        reason: str,
+        *,
+        stale_at: datetime | None = None,
+    ) -> int:
+        """Mark direct and transitive parent summaries for source memories stale."""
+        source_ids = [int(memory_id) for memory_id in memory_ids if memory_id is not None]
+        if not source_ids:
+            return 0
+
+        summary_ids = await self._a_dependent_summary_ids(source_ids)
+        if not summary_ids:
+            return 0
+
+        now = stale_at or datetime.now(timezone.utc)
+        result = await self._session.execute(
+            update(MemorySummary)
+            .where(MemorySummary.id.in_(summary_ids))
+            .where(MemorySummary.stale_at.is_(None))
+            .values(stale_at=now, stale_reason=str(reason or "source memory changed"))
+        )
+        await self._session.flush()
         return int(result.rowcount or 0)
 
     def mark_stale_for_contradiction(
@@ -213,6 +249,26 @@ class MemorySummaryRepository(BaseRepository[MemorySummary]):
                 SummaryLineage.child_summary_id.in_(frontier)
             )
             parents = set(self._session.scalars(parent_stmt).all())
+            new_parents = parents - affected
+            if not new_parents:
+                break
+            affected.update(new_parents)
+            frontier = new_parents
+
+        return affected
+
+    async def _a_dependent_summary_ids(self, memory_ids: Sequence[int]) -> set[int]:
+        direct_stmt = select(SummaryLineage.summary_id).where(
+            SummaryLineage.child_memory_id.in_(memory_ids)
+        )
+        affected = set((await self._session.scalars(direct_stmt)).all())
+        frontier = set(affected)
+
+        while frontier:
+            parent_stmt = select(SummaryLineage.summary_id).where(
+                SummaryLineage.child_summary_id.in_(frontier)
+            )
+            parents = set((await self._session.scalars(parent_stmt)).all())
             new_parents = parents - affected
             if not new_parents:
                 break

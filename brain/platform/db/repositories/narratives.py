@@ -119,6 +119,16 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
         """Mark narratives stale when a source session contains ``memory_id``."""
         return self.mark_stale_for_memories([memory_id], reason, stale_at=stale_at)
 
+    async def a_mark_stale_for_memory(
+        self,
+        memory_id: int,
+        reason: str,
+        *,
+        stale_at: datetime | None = None,
+    ) -> int:
+        """Mark narratives stale when a source session contains ``memory_id``."""
+        return await self.a_mark_stale_for_memories([memory_id], reason, stale_at=stale_at)
+
     def mark_stale_for_memories(
         self,
         memory_ids: Sequence[int],
@@ -150,6 +160,39 @@ class NarrativeRepository(BaseRepository[ProjectNarrative]):
             )
         )
         self._session.flush()
+        return int(result.rowcount or 0)
+
+    async def a_mark_stale_for_memories(
+        self,
+        memory_ids: Sequence[int],
+        reason: str,
+        *,
+        stale_at: datetime | None = None,
+    ) -> int:
+        """Mark narratives stale through memory.source_session -> narrative session."""
+        source_ids = [int(memory_id) for memory_id in memory_ids if memory_id is not None]
+        if not source_ids:
+            return 0
+
+        narrative_stmt = (
+            select(NarrativeSession.narrative_id)
+            .join(Memory, Memory.source_session == NarrativeSession.session_id)
+            .where(Memory.id.in_(source_ids))
+        )
+        narrative_ids = set((await self._session.scalars(narrative_stmt)).all())
+        if not narrative_ids:
+            return 0
+
+        result = await self._session.execute(
+            update(ProjectNarrative)
+            .where(ProjectNarrative.id.in_(narrative_ids))
+            .where(ProjectNarrative.stale_at.is_(None))
+            .values(
+                stale_at=stale_at or datetime.now(timezone.utc),
+                stale_reason=str(reason or "narrative source memory changed"),
+            )
+        )
+        await self._session.flush()
         return int(result.rowcount or 0)
 
     # ------------------------------------------------------------------
