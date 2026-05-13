@@ -1002,12 +1002,12 @@ async def test_empty_archived_ideas(client, mock_session_factory):
         "brain.app.api.routers.cortex._ideas.ws_manager.broadcast_product_event",
         side_effect=_broadcast,
     ):
-        MockRepo.return_value.hard_delete_archived_for_org.return_value = 3
+        MockRepo.return_value.a_hard_delete_archived_for_org = AsyncMock(return_value=3)
         resp = await client.delete("/api/cortex/ideas/archived")
 
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"deleted": 3}
-    MockRepo.return_value.hard_delete_archived_for_org.assert_called_once_with("test-org")
+    MockRepo.return_value.a_hard_delete_archived_for_org.assert_awaited_once_with("test-org")
     mock_session_factory.commit.assert_called()
     assert broadcasts == [
         ("idea_archive_emptied", {"deleted": 3}, {"org_id": "test-org"}),
@@ -1476,8 +1476,8 @@ async def test_create_project_profile_rejects_invalid_context(client, mock_sessi
 @pytest.mark.asyncio
 async def test_project_context_github_connect_uses_server_side_vault_token(client):
     with (
-        patch("brain.systems.cortex.project_context.vault.github_token_from_vault", return_value="ghp_secret") as token_from_vault,
-        patch("brain.app.api.routers.cortex._project_context.connect_with_token", return_value={
+        patch("brain.systems.cortex.project_context.vault.async_github_token_from_vault", AsyncMock(return_value="ghp_secret")) as token_from_vault,
+        patch("brain.app.api.routers.cortex._project_context.async_connect_with_token", AsyncMock(return_value={
             "login": "alex",
             "repos": [
                 {
@@ -1487,7 +1487,7 @@ async def test_project_context_github_connect_uses_server_side_vault_token(clien
                     "permissions": {"push": True},
                 }
             ],
-        }) as connect,
+        })) as connect,
     ):
         resp = await client.post(
             "/api/cortex/project-context/github/connect",
@@ -1499,19 +1499,19 @@ async def test_project_context_github_connect_uses_server_side_vault_token(clien
     assert payload["login"] == "alex"
     assert payload["repos"][0]["full_name"] == "example-org/example-repo"
     assert "ghp_secret" not in str(payload)
-    token_from_vault.assert_called_once()
-    connect.assert_called_once_with("ghp_secret")
+    token_from_vault.assert_awaited_once()
+    connect.assert_awaited_once_with("ghp_secret")
 
 
 @pytest.mark.asyncio
 async def test_project_context_github_connect_logs_vault_read_as_api_actor(client):
     with (
-        patch("brain.systems.cortex.project_context.vault.has_pin", return_value=False),
-        patch("brain.systems.cortex.project_context.vault.get_secret", return_value="ghp_secret") as get_secret,
-        patch("brain.app.api.routers.cortex._project_context.connect_with_token", return_value={
+        patch("brain.systems.cortex.project_context.vault.async_has_pin", AsyncMock(return_value=False)),
+        patch("brain.systems.cortex.project_context.vault.async_get_secret", AsyncMock(return_value="ghp_secret")) as get_secret,
+        patch("brain.app.api.routers.cortex._project_context.async_connect_with_token", AsyncMock(return_value={
             "login": "alex",
             "repos": [],
-        }),
+        })),
     ):
         resp = await client.post(
             "/api/cortex/project-context/github/connect",
@@ -1519,7 +1519,7 @@ async def test_project_context_github_connect_logs_vault_read_as_api_actor(clien
         )
 
     assert resp.status_code == 200
-    get_secret.assert_called_once_with(
+    get_secret.assert_awaited_once_with(
         "GITHUB_TOKEN",
         user_id="user-1",
         org_id="test-org",
@@ -1529,7 +1529,7 @@ async def test_project_context_github_connect_logs_vault_read_as_api_actor(clien
 
 @pytest.mark.asyncio
 async def test_project_context_github_search_supports_public_without_vault(client):
-    with patch("brain.app.api.routers.cortex._project_context.search_repos", return_value={
+    with patch("brain.app.api.routers.cortex._project_context.async_search_repos", AsyncMock(return_value={
         "matched_exact": True,
         "repos": [
             {
@@ -1539,7 +1539,7 @@ async def test_project_context_github_search_supports_public_without_vault(clien
                 "permissions": {},
             }
         ],
-    }) as search:
+    })) as search:
         resp = await client.post(
             "/api/cortex/project-context/github/search",
             json={"query": "rtk-ai/rtk"},
@@ -1547,7 +1547,7 @@ async def test_project_context_github_search_supports_public_without_vault(clien
 
     assert resp.status_code == 200
     assert resp.json()["matched_exact"] is True
-    search.assert_called_once_with("rtk-ai/rtk", token=None)
+    search.assert_awaited_once_with("rtk-ai/rtk", token=None)
 
 
 @pytest.mark.asyncio
@@ -1569,9 +1569,9 @@ async def test_project_context_github_bind_token_verifies_repo_and_binds_owned_v
         "permissions": {"push": True},
     }
     with (
-        patch("brain.systems.cortex.project_context.vault.github_token_from_vault", return_value="ghp_secret") as token_from_vault,
-        patch("brain.app.api.routers.cortex._project_context.get_repo_by_slug", return_value=repo) as get_repo,
-        patch("brain.systems.vault.bind_project_secret_by_key", return_value=binding) as bind,
+        patch("brain.systems.cortex.project_context.vault.async_github_token_from_vault", AsyncMock(return_value="ghp_secret")) as token_from_vault,
+        patch("brain.app.api.routers.cortex._project_context.async_get_repo_by_slug", AsyncMock(return_value=repo)) as get_repo,
+        patch("brain.systems.vault.async_bind_project_secret_by_key", AsyncMock(return_value=binding)) as bind,
     ):
         resp = await client.post(
             "/api/cortex/project-context/github/bind-token",
@@ -1584,14 +1584,14 @@ async def test_project_context_github_bind_token_verifies_repo_and_binds_owned_v
     assert payload["env_name"] == "GH_TOKEN"
     assert payload["write_access"] is True
     assert "ghp_secret" not in str(payload)
-    token_from_vault.assert_called_once_with(
+    token_from_vault.assert_awaited_once_with(
         "GITHUB_TOKEN",
         user=ANY,
         unlock_token=None,
         allow_shared=False,
     )
-    get_repo.assert_called_once_with("example-org/example-repo", token="ghp_secret")
-    bind.assert_called_once_with(
+    get_repo.assert_awaited_once_with("example-org/example-repo", token="ghp_secret")
+    bind.assert_awaited_once_with(
         "GITHUB_TOKEN",
         user_id="user-1",
         org_id="test-org",
@@ -1603,9 +1603,9 @@ async def test_project_context_github_bind_token_verifies_repo_and_binds_owned_v
 @pytest.mark.asyncio
 async def test_project_context_github_bind_token_rejects_repos_not_visible_to_token(client):
     with (
-        patch("brain.systems.cortex.project_context.vault.github_token_from_vault", return_value="ghp_secret"),
-        patch("brain.app.api.routers.cortex._project_context.get_repo_by_slug", return_value=None),
-        patch("brain.systems.vault.bind_project_secret_by_key") as bind,
+        patch("brain.systems.cortex.project_context.vault.async_github_token_from_vault", AsyncMock(return_value="ghp_secret")),
+        patch("brain.app.api.routers.cortex._project_context.async_get_repo_by_slug", AsyncMock(return_value=None)),
+        patch("brain.systems.vault.async_bind_project_secret_by_key", AsyncMock()) as bind,
     ):
         resp = await client.post(
             "/api/cortex/project-context/github/bind-token",
@@ -1613,7 +1613,7 @@ async def test_project_context_github_bind_token_rejects_repos_not_visible_to_to
         )
 
     assert resp.status_code == 404
-    bind.assert_not_called()
+    bind.assert_not_awaited()
 
 
 @pytest.mark.asyncio

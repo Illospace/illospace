@@ -400,10 +400,10 @@ def _handle_manage_skill(
         return json.dumps({"ok": bool(result.get("created")), "action": normalized, **result}, default=str)
 
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
         from brain.platform.db.services.skill_bundle_io import SkillBundleIOService
 
-        with UnitOfWork() as uow:
+        with open_unit_of_work(UnitOfWork) as uow:
             if normalized == "list":
                 list_limit = _coerce_limit(limit)
                 rows = uow.skills.list_all(limit=list_limit) if include_archived else uow.skills.list_active()
