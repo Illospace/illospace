@@ -24,6 +24,7 @@
     options?: Array<string | { label?: string; value?: any }>;
     width?: string;
   };
+  type GeneratedUiColumnInput = GeneratedUiColumn | string;
 
   type GeneratedUiBoardGroup = string | { label?: string; value?: any };
   type GeneratedUiBoardCard = {
@@ -63,8 +64,8 @@
     binding?: string;
     data_binding?: string;
     object_key?: string;
-    columns?: GeneratedUiColumn[];
-    fields?: GeneratedUiColumn[];
+    columns?: GeneratedUiColumnInput[];
+    fields?: GeneratedUiColumnInput[];
     groups?: GeneratedUiBoardGroup[];
     board_columns?: GeneratedUiBoardGroup[];
     boardColumns?: GeneratedUiBoardGroup[];
@@ -77,7 +78,7 @@
     group_by?: string;
     card?: GeneratedUiBoardCard;
     allow_create?: boolean;
-    create?: boolean | { fields?: GeneratedUiColumn[] };
+    create?: boolean | { fields?: GeneratedUiColumnInput[] };
     empty_state?: string;
   };
 
@@ -368,7 +369,9 @@
 
   function columnsForView(view: GeneratedUiView, rows: Record<string, any>[]): GeneratedUiColumn[] {
     const configured = view.columns || view.fields;
-    if (Array.isArray(configured) && configured.length) return configured.filter((column) => !!column?.key);
+    if (Array.isArray(configured) && configured.length) {
+      return configured.map(normalizeColumn).filter((column): column is GeneratedUiColumn => !!column?.key);
+    }
     const bindingFields = bindingForView(view)?.fields;
     if (Array.isArray(bindingFields) && bindingFields.length) {
       return bindingFields
@@ -386,7 +389,9 @@
   function createFieldsForView(view: GeneratedUiView, rows: Record<string, any>[]): GeneratedUiColumn[] {
     const binding = bindingForView(view);
     if (view.create && typeof view.create === 'object' && Array.isArray(view.create.fields)) {
-      return view.create.fields.filter((field) => !!field?.key && bindingAllowsField(binding, field.key));
+      return view.create.fields
+        .map(normalizeColumn)
+        .filter((field): field is GeneratedUiColumn => !!field?.key && bindingAllowsField(binding, field.key));
     }
     return columnsForView(view, rows).filter((field) => (
       !['id', 'version'].includes(field.key)
@@ -399,6 +404,16 @@
       .replace(/^_+/, '')
       .replace(/[_-]+/g, ' ')
       .replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+
+  function normalizeColumn(raw: GeneratedUiColumnInput): GeneratedUiColumn | null {
+    if (typeof raw === 'string') {
+      const key = raw.trim();
+      return key ? { key, label: labelFromKey(key) } : null;
+    }
+    if (!raw || typeof raw !== 'object') return null;
+    const key = String(raw.key || '').trim();
+    return key ? { ...raw, key, label: raw.label || labelFromKey(key) } : null;
   }
 
   function cellValue(row: Record<string, any>, column: GeneratedUiColumn): any {
@@ -457,10 +472,10 @@
     busyCell = { ...busyCell, [cacheKey]: true };
     try {
       const value = coerceOptionValue(rawValue, column);
-      const updated = await updateDomainRecord(domainId, record.id, {
-        data_patch: { [column.key]: value },
-        expected_version: record.version,
-      });
+      const payload = column.key === 'title'
+        ? { title: String(value ?? ''), expected_version: record.version }
+        : { data_patch: { [column.key]: value }, expected_version: record.version };
+      const updated = await updateDomainRecord(domainId, record.id, payload);
       recordsByAlias = {
         ...recordsByAlias,
         [alias]: (recordsByAlias[alias] || []).map((candidate) => (
@@ -604,9 +619,10 @@
     const draft = draftByView[id] || {};
     busyCreate = { ...busyCreate, [id]: true };
     try {
+      const { title, ...data } = draft;
       const created = await createDomainRecord(domainId, objectKey, {
-        data: draft,
-        title: draft.title || undefined,
+        data,
+        title: title || undefined,
       });
       recordsByAlias = {
         ...recordsByAlias,

@@ -338,6 +338,75 @@ def test_invalid_domain_bindings_block_save(session, overrides, message):
         )
 
 
+def test_domain_binding_allows_virtual_record_title_field(session):
+    domain = DomainService(session).create_domain(
+        ORG_ID,
+        name="Ticket Board",
+        slug="ticket-board",
+        objects=[
+            {
+                "key": "ticket",
+                "name": "Ticket",
+                "fields": [
+                    {"key": "status", "field_type": "enum", "options": ["Backlog", "Done"], "required": True},
+                    {"key": "priority", "field_type": "text"},
+                ],
+            }
+        ],
+        actor_id=USER_ID,
+    )
+
+    app = create_app(
+        session,
+        org_id=ORG_ID,
+        key="ticket-board",
+        name="Ticket Board",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(
+            {
+                "schema_version": 1,
+                "title": "Ticket Board",
+                "primary_binding": "tickets",
+                "views": [
+                    {
+                        "id": "tickets",
+                        "type": "table",
+                        "title": "Tickets",
+                        "binding": "tickets",
+                        "columns": [
+                            {"key": "title", "label": "Title"},
+                            {"key": "status", "label": "Status"},
+                            {"key": "priority", "label": "Priority"},
+                        ],
+                    }
+                ],
+            }
+        ),
+        manifest={
+            "contract_version": 1,
+            "data_plan": {
+                "mode": "domain",
+                "bindings": {
+                    "tickets": {
+                        "domain_id": domain.id,
+                        "object_key": "ticket",
+                        "fields": ["title", "status", "priority"],
+                        "operations": ["schema", "list", "create", "update"],
+                    }
+                },
+            },
+            "design_contract": {
+                "kit": "constellation-app-kit",
+                "theme_modes": ["dark", "light"],
+            },
+        },
+        visual_spec=VALID_VISUAL_SPEC,
+    )
+
+    assert active_version(session, app.id) is not None
+
+
 def test_domain_binding_blocks_archived_or_cross_org_domain(session):
     domain = _todo_domain(session)
     domain.archived_at = datetime.now(timezone.utc)

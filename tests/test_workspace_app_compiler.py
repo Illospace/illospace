@@ -184,6 +184,36 @@ def test_compiler_accepts_domain_backed_board_view():
     assert _validation_report(compiled)["status"] == "passed"
 
 
+def test_compiler_normalizes_generated_ui_string_columns():
+    compiled = compile_workspace_app_input(
+        action="create",
+        name="Ticket Board",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(
+            {
+                "schema_version": 1,
+                "title": "Ticket Board",
+                "views": [
+                    {
+                        "type": "table",
+                        "title": "Tickets",
+                        "columns": ["title", "status", {"field": "assignee"}],
+                    }
+                ],
+            }
+        ),
+    )
+
+    source = json.loads(compiled.source_code)
+    assert source["views"][0]["columns"] == [
+        {"key": "title", "label": "Title"},
+        {"key": "status", "label": "Status"},
+        {"field": "assignee", "key": "assignee", "label": "Assignee"},
+    ]
+    assert _validation_report(compiled)["status"] == "passed"
+
+
 def test_compiler_does_not_silently_repair_recordful_app_local_state():
     compiled = compile_workspace_app_input(
         action="create",

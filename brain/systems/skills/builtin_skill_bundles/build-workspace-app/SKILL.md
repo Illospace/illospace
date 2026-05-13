@@ -33,10 +33,11 @@ Constellation design contract.
      view/control surface over that data.
    - Use app-local state through `manage_workspace_app` only for UI
      preferences, filters, draft input, view settings, and ephemeral state.
-   - Archived apps are not candidates for new build/create requests. Only
-     restore an archived app when the user explicitly asks to restore or
-     reopen that archived app; otherwise create a fresh app or update an
-     active app.
+   - Archived apps are not candidates for new build/create requests. Do not
+     inspect archived apps while building a new app unless the user explicitly
+     asks about archived/restorable apps. Only restore an archived app when the
+     user explicitly asks to restore or reopen that archived app; otherwise
+     create a fresh app or update an active app.
 3. Prefer a host-rendered structured UI spec for common app patterns:
    `renderer_key="generated-ui-app"`, `source_kind="json"`, and
    `source_code` as JSON with `schema_version: 1`, `title`, optional
@@ -181,6 +182,9 @@ Constellation design contract.
 - The persisted manifest must end with `contract_version: 1`, `data_plan`, and
   `design_contract`. The compiler supplies simple app-local UI-state defaults;
   provide explicit Domain bindings for recordful apps.
+- Domain records have a virtual top-level `title` separate from object data
+  fields. You may use `title` in generated UI columns, board cards, and binding
+  `fields` even when the Domain object's field list has no `title` data field.
 - The design contract shape is strict. Use exactly
   `design_contract: { "kit": "constellation-app-kit", "theme_modes": ["dark", "light"] }`.
   Do not replace `kit` with `system`, `design_system`, or

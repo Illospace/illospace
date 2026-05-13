@@ -195,8 +195,16 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         },
     },
     "manage_workspace_app": {
-        "list": {"required": [], "optional": ["include_archived", "include_prototypes"], "effect": "read workspace apps"},
-        "get": {"required": ["app_id or key"], "optional": ["include_archived"], "effect": "read one workspace app"},
+        "list": {
+            "required": [],
+            "optional": ["include_archived", "confirm_include_archived", "include_prototypes"],
+            "effect": "read active workspace apps; archived reads require explicit user intent",
+        },
+        "get": {
+            "required": ["app_id or key"],
+            "optional": ["include_archived", "confirm_include_archived"],
+            "effect": "read one active workspace app; archived reads require explicit user intent",
+        },
         "create": {
             "required": ["name"],
             "optional": ["key", "description", "renderer_key", "source_kind", "source_code", "manifest", "visual_spec", "initial_state"],

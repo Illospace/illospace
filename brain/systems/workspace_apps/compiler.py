@@ -438,13 +438,19 @@ def _normalize_views(
         if not str(view.get("title") or "").strip():
             view["title"] = app_name if index == 0 else f"View {index + 1}"
             changed = True
-        if view.get("type") in {"table", "list", "cards", "detail", "form"} and not (
-            isinstance(view.get("columns"), list) or isinstance(view.get("fields"), list)
-        ):
-            columns = _infer_columns(view=view, spec=spec, manifest=manifest)
-            if columns:
-                view["columns"] = columns
-                changed = True
+        if view.get("type") in {"table", "list", "cards", "detail", "form"}:
+            columns_key = "columns" if "columns" in view or "fields" not in view else "fields"
+            raw_columns = view.get(columns_key)
+            if isinstance(raw_columns, list):
+                columns, columns_changed = _normalize_columns(raw_columns)
+                if columns_changed:
+                    view[columns_key] = columns
+                    changed = True
+            elif not isinstance(view.get("columns"), list) and not isinstance(view.get("fields"), list):
+                columns = _infer_columns(view=view, spec=spec, manifest=manifest)
+                if columns:
+                    view["columns"] = columns
+                    changed = True
         if view.get("type") == "board" and not (view.get("group_by") or view.get("groupBy")):
             group_by = _infer_board_group_by(view=view, spec=spec, manifest=manifest)
             if group_by:
@@ -457,6 +463,40 @@ def _normalize_views(
                 changed = True
         next_views.append(view)
     return next_views, changed
+
+
+def _normalize_columns(raw_columns: list[Any]) -> tuple[list[Any], bool]:
+    changed = False
+    columns: list[Any] = []
+    for raw_column in raw_columns:
+        normalized = _normalize_column(raw_column)
+        if normalized != raw_column:
+            changed = True
+        columns.append(normalized)
+    return columns, changed
+
+
+def _normalize_column(raw_column: Any) -> Any:
+    if isinstance(raw_column, str):
+        key = raw_column.strip()
+        return {"key": key, "label": _label(key)} if key else raw_column
+    if not isinstance(raw_column, Mapping):
+        return raw_column
+
+    column = dict(raw_column)
+    key = str(
+        column.get("key")
+        or column.get("field")
+        or column.get("field_key")
+        or column.get("fieldKey")
+        or column.get("id")
+        or ""
+    ).strip()
+    if key and not str(column.get("key") or "").strip():
+        column["key"] = key
+    if key and not str(column.get("label") or "").strip():
+        column["label"] = _label(key)
+    return column
 
 
 def _infer_view(

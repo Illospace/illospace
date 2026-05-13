@@ -47,6 +47,7 @@ export function bindingAllowsField(
 ): boolean {
   const key = String(fieldKey || '').trim();
   if (!key) return false;
+  if (key === 'title') return true;
   const fields = Array.isArray(binding?.fields) ? binding.fields.map(String) : [];
   return fields.length === 0 || fields.includes(key);
 }

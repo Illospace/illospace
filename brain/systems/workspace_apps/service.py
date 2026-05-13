@@ -198,9 +198,11 @@ def validate_domain_bindings(
 
         fields = service.list_fields(obj.id)
         field_keys = {field.key for field in fields}
+        bindable_field_keys = set(field_keys)
+        bindable_field_keys.add("title")
         declared_fields = _string_list(alias_text, binding.get("fields"), "fields")
         if declared_fields is not None:
-            unknown = sorted(set(declared_fields) - field_keys)
+            unknown = sorted(set(declared_fields) - bindable_field_keys)
             if unknown:
                 raise _binding_error(alias_text, f"declares missing field(s): {', '.join(unknown)}")
             required = sorted(

@@ -277,25 +277,28 @@ async def update_workspace_app_state(
 
 
 @router.post("/{app_id}/actions/run", response_model=WorkspaceAppActionRunRead)
-def run_workspace_app_declared_action(
+async def run_workspace_app_declared_action(
     app_id: str,
     body: WorkspaceAppActionRun,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-    try:
-        result = run_workspace_app_action(
-            db,
-            org_id=org_id,
-            app_id=app_id,
-            action_key=body.action_key,
-            payload=body.payload,
-            user_id=_user_id(user),
-        )
-        db.commit()
-        return result
-    except WorkspaceAppActionError as exc:
-        _raise_action_http(exc)
-    except WorkspaceAppError as exc:
-        _raise_http(exc)
+    def _run(sync_db: Session):
+        try:
+            result = run_workspace_app_action(
+                sync_db,
+                org_id=org_id,
+                app_id=app_id,
+                action_key=body.action_key,
+                payload=body.payload,
+                user_id=_user_id(user),
+            )
+            sync_db.commit()
+            return result
+        except WorkspaceAppActionError as exc:
+            _raise_action_http(exc)
+        except WorkspaceAppError as exc:
+            _raise_http(exc)
+
+    return await run_db(db, _run)
