@@ -320,51 +320,60 @@ class TestTitleRoutes:
     @patch("brain.app.api.routers.cortex._misc.UnitOfWork")
     def test_backfill_titles_threads_authenticated_user_context(self, mock_uow_cls):
         from brain.app.api.routers.cortex._misc import backfill_titles
-        from brain.systems.cortex.title_generation import StoredDisplayTitle
 
         idea_without_title = _make_idea(id="idea-1", title="Raw idea", display_title=None, archived_at=None)
 
-        list_uow = MagicMock()
-        list_uow.__enter__.return_value = list_uow
-        list_uow.session.scalars.return_value.all.return_value = [idea_without_title]
+        class FakeUow:
+            def __init__(self, result):
+                self.session = MagicMock()
+                self.session.execute = AsyncMock(return_value=result)
 
-        mock_uow_cls.return_value = list_uow
+            async def __aenter__(self):
+                return self
 
-        with patch(
-            "brain.app.api.routers.cortex._misc.generate_and_store_idea_display_title",
-            return_value=StoredDisplayTitle(idea_id="idea-1", title="Generated Title", updated=True),
-        ) as mock_generate_title:
-            async def run_sync_inline(fn, /, *args, **kwargs):
-                return fn(*args, **kwargs)
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
 
-            with patch("brain.app.api.routers.cortex._misc.run_unit_of_work_task", run_sync_inline):
-                result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": "org-1"}))
+        list_result = MagicMock()
+        list_result.all.return_value = [idea_without_title]
+        update_result = MagicMock(rowcount=1)
+        mock_uow_cls.side_effect = [FakeUow(list_result), FakeUow(update_result)]
+
+        with patch("brain.app.api.routers.cortex._misc.generate_display_title", return_value="Generated Title") as mock_generate_title, \
+             patch("brain.app.api.routers.cortex._misc._publish_generated_display_title") as mock_publish:
+            result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": "org-1"}))
 
         assert result == {"ok": True, "generated": 1, "total": 1}
         mock_generate_title.assert_called_once_with(
-            "idea-1",
-            raw_title="Raw idea",
+            "Raw idea",
             user_id="user-1",
             org_id="org-1",
         )
+        mock_publish.assert_called_once_with("idea-1", "Generated Title", org_id="org-1")
 
     @patch("brain.app.api.routers.cortex._misc.UnitOfWork")
     def test_backfill_titles_scopes_query_to_org(self, mock_uow_cls):
         from brain.app.api.routers.cortex._misc import backfill_titles
 
-        list_uow = MagicMock()
-        list_uow.__enter__.return_value = list_uow
-        list_uow.session.scalars.return_value.all.return_value = []
+        class FakeUow:
+            def __init__(self):
+                result = MagicMock()
+                result.all.return_value = []
+                self.session = MagicMock()
+                self.session.execute = AsyncMock(return_value=result)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        list_uow = FakeUow()
         mock_uow_cls.return_value = list_uow
-
-        async def run_sync_inline(fn, /, *args, **kwargs):
-            return fn(*args, **kwargs)
-
-        with patch("brain.app.api.routers.cortex._misc.run_unit_of_work_task", run_sync_inline):
-            result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": "org-1"}))
+        result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": "org-1"}))
 
         assert result == {"ok": True, "generated": 0, "total": 0}
-        stmt = list_uow.session.scalars.call_args.args[0]
+        stmt = list_uow.session.execute.call_args.args[0]
         compiled = str(stmt)
         assert "ideas.org_id" in compiled
 
@@ -372,19 +381,25 @@ class TestTitleRoutes:
     def test_backfill_titles_scopes_query_to_user_without_org(self, mock_uow_cls):
         from brain.app.api.routers.cortex._misc import backfill_titles
 
-        list_uow = MagicMock()
-        list_uow.__enter__.return_value = list_uow
-        list_uow.session.scalars.return_value.all.return_value = []
+        class FakeUow:
+            def __init__(self):
+                result = MagicMock()
+                result.all.return_value = []
+                self.session = MagicMock()
+                self.session.execute = AsyncMock(return_value=result)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        list_uow = FakeUow()
         mock_uow_cls.return_value = list_uow
-
-        async def run_sync_inline(fn, /, *args, **kwargs):
-            return fn(*args, **kwargs)
-
-        with patch("brain.app.api.routers.cortex._misc.run_unit_of_work_task", run_sync_inline):
-            result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": None}))
+        result = asyncio.run(backfill_titles(user={"id": "user-1", "org_id": None}))
 
         assert result == {"ok": True, "generated": 0, "total": 0}
-        stmt = list_uow.session.scalars.call_args.args[0]
+        stmt = list_uow.session.execute.call_args.args[0]
         compiled = str(stmt)
         assert "ideas.user_id" in compiled
 

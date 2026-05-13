@@ -66,6 +66,35 @@ def build_idea_audit_summary(session: Session, idea_id: str) -> dict[str, Any]:
         .where(AgentRunEventRow.run_id.in_(run_ids))
         .order_by(AgentRunEventRow.id.asc())
     ).all()
+    return _idea_audit_summary_payload(idea_id, list(runs), list(events))
+
+
+async def async_build_idea_audit_summary(session, idea_id: str) -> dict[str, Any]:
+    runs = (
+        await session.scalars(
+            select(AgentRunRow)
+            .where(AgentRunRow.thread_id == idea_id)
+            .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
+        )
+    ).all()
+    if not runs:
+        raise RunAuditNotFound(f"No runs for idea {idea_id}")
+    run_ids = [int(run.id) for run in runs]
+    events = (
+        await session.scalars(
+            select(AgentRunEventRow)
+            .where(AgentRunEventRow.run_id.in_(run_ids))
+            .order_by(AgentRunEventRow.id.asc())
+        )
+    ).all()
+    return _idea_audit_summary_payload(idea_id, list(runs), list(events))
+
+
+def _idea_audit_summary_payload(
+    idea_id: str,
+    runs: list[AgentRunRow],
+    events: list[AgentRunEventRow],
+) -> dict[str, Any]:
     return {
         "idea_id": idea_id,
         "run_count": len(runs),
@@ -92,4 +121,9 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-__all__ = ["RunAuditNotFound", "build_idea_audit_summary", "build_tool_summary"]
+__all__ = [
+    "RunAuditNotFound",
+    "async_build_idea_audit_summary",
+    "build_idea_audit_summary",
+    "build_tool_summary",
+]

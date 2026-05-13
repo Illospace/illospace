@@ -406,6 +406,18 @@ def test_cortex_idea_ops_router_stays_on_native_async_db_path():
     assert "unified_stream_payload" in async_functions
 
 
+def test_cortex_misc_router_stays_on_native_async_db_path():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "brain/app/api/routers/cortex/_misc.py"
+    text = path.read_text(encoding="utf-8")
+
+    assert "run_db" not in text
+    assert "run_session_task" not in text
+    assert "run_unit_of_work_task" not in text
+    assert "open_unit_of_work" not in text
+    assert "from sqlalchemy.orm import Session" not in text
+
+
 def test_cortex_helpers_do_not_open_sync_db_boundaries():
     root = Path(__file__).resolve().parents[1]
     path = root / "brain/app/api/routers/cortex/_helpers.py"
