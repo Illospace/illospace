@@ -17,6 +17,21 @@ class _AsyncSession:
     def __init__(self, sync_session):
         self.sync_session = sync_session
 
+    def add(self, *args, **kwargs):
+        return self.sync_session.add(*args, **kwargs)
+
+    async def get(self, *args, **kwargs):
+        return self.sync_session.get(*args, **kwargs)
+
+    async def refresh(self, *args, **kwargs):
+        return self.sync_session.refresh(*args, **kwargs)
+
+    async def scalar(self, *args, **kwargs):
+        return self.sync_session.scalar(*args, **kwargs)
+
+    async def scalars(self, *args, **kwargs):
+        return self.sync_session.scalars(*args, **kwargs)
+
     async def run_sync(self, fn):
         return fn(self.sync_session)
 
