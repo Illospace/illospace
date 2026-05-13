@@ -222,6 +222,35 @@ def _metadata_int(metadata: dict, key: str, default: int) -> int:
         return default
 
 
+def _disabled_tool_names(metadata: dict) -> set[str]:
+    policy = metadata.get("tool_policy")
+    if not isinstance(policy, dict):
+        return set()
+    raw_names = policy.get("disabled_tools") or policy.get("blocked_tools") or []
+    if isinstance(raw_names, str):
+        raw_names = [raw_names]
+    if not isinstance(raw_names, list):
+        return set()
+    return {str(name).strip() for name in raw_names if str(name or "").strip()}
+
+
+def _apply_tool_policy(tools: list[dict] | None, tool_handlers: dict | None, metadata: dict) -> tuple[list[dict] | None, dict | None]:
+    disabled = _disabled_tool_names(metadata)
+    if not disabled:
+        return tools, tool_handlers
+    filtered_tools = [
+        tool
+        for tool in tools or []
+        if str(tool.get("name") or "").strip() not in disabled
+    ]
+    filtered_handlers = (
+        {name: handler for name, handler in (tool_handlers or {}).items() if name not in disabled}
+        if tool_handlers is not None
+        else None
+    )
+    return filtered_tools, filtered_handlers
+
+
 def _initial_user_content(message: str, metadata: dict) -> str | list[dict]:
     """Attach immediate thread files/images to the first user turn."""
 
@@ -1315,6 +1344,7 @@ def run_agent(
         tools = BRAIN_TOOLS
     if tool_handlers is None:
         tool_handlers = _get_tool_handlers(workspace_root=workspace_root)
+    tools, tool_handlers = _apply_tool_policy(tools, tool_handlers, metadata)
 
     state = AgentLoopState(
         gates=_GateState(

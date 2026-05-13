@@ -109,6 +109,10 @@ def test_compute_next_run_at_uses_timezone():
     assert next_run == datetime(2026, 4, 22, 13, 0, tzinfo=timezone.utc)
 
 
+def test_humanize_schedule_names_single_monday_not_weekdays():
+    assert service.humanize_schedule("0 9 * * 1", "America/Toronto") == "Mondays at 9:00 AM (America/Toronto)"
+
+
 def test_one_time_schedule_uses_timezone_and_expires_after_run():
     expr = service.validate_schedule_expr(
         "at:2026-05-08T09:30:00",
@@ -340,7 +344,13 @@ def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeypatch):
 
     session = _ExecuteCycleSession(run=run, cycle=cycle, idea=idea, expected_run_id=run.id)
     monkeypatch.setattr(service, "UnitOfWork", lambda: _ExecuteCycleUoW(session))
-    monkeypatch.setattr(service, "_admit_cycle_run", lambda *args, **kwargs: 77)
+    admissions = []
+
+    def fake_admit(*args, **kwargs):
+        admissions.append(kwargs)
+        return 77
+
+    monkeypatch.setattr(service, "_admit_cycle_run", fake_admit)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
 
     service.execute_cycle_run(run.id)
@@ -349,6 +359,13 @@ def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeypatch):
     assert run.run_id == 77
     assert run.status == "running"
     assert cycle.last_status == "running"
+    assert admissions[0]["metadata"]["origin"] == "cycle"
+    assert admissions[0]["metadata"]["launch_envelope"]["origin"] == "scheduled_cycle"
+    assert admissions[0]["metadata"]["launch_envelope"]["active_instruction_source"] == "cycle.prompt"
+    assert admissions[0]["metadata"]["context_policy"]["prior_thread_role"] == "context_only"
+    assert admissions[0]["metadata"]["tool_policy"]["disabled_tools"] == ["manage_cycle"]
+    assert "Scheduled Prompt Launch" in admissions[0]["message"]
+    assert "Prior thread messages are background context only" in admissions[0]["message"]
 
 
 def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):

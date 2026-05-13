@@ -442,6 +442,18 @@ def test_workspace_root_from_ref_uses_thread_project_context_snapshot():
             }
         }
     ) == "/tmp/ideas/idea-1/project/repo"
+    assert (
+        workspace_root_from_ref(
+            {
+                "project_context_snapshot": {
+                    "resources": [{"kind": "file", "path": "/tmp/ideas/idea-1/uploads/agent.md"}],
+                    "permission_scope": {"allowed_paths": ["/tmp/ideas/idea-1/uploads/agent.md"]},
+                },
+                "project_context_permission_scope": {"allowed_paths": ["/tmp/ideas/idea-1/uploads/agent.md"]},
+            }
+        )
+        is None
+    )
     assert workspace_root_from_ref(
         {
             "project_context_permission_scope": {
@@ -479,6 +491,56 @@ def test_fast_recipe_infers_workspace_root_from_project_context_snapshot(monkeyp
 
     assert result.status.value == "completed"
     assert captured["spec"].workspace_root == "/tmp/ideas/idea-1/project/repo"
+
+
+def test_fast_recipe_applies_runtime_tool_policy(monkeypatch):
+    from brain.systems.runs.recipes.fast import FastRecipe
+
+    captured = {}
+
+    def fake_invoke(spec):
+        captured["spec"] = spec
+        return SimpleNamespace(output="ok", success=True, error=None)
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.fast.build_agent_tools",
+        lambda role: [{"name": "manage_cycle"}, {"name": "web_search"}],
+    )
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.fast.build_tool_handlers",
+        lambda **kwargs: {"manage_cycle": object(), "web_search": object()},
+    )
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent", fake_invoke)
+
+    runtime = _runtime("fast")
+    runtime.request = replace(
+        runtime.request,
+        metadata={"tool_policy": {"disabled_tools": ["manage_cycle"]}},
+    )
+
+    result = FastRecipe().execute(runtime)
+
+    assert result.status.value == "completed"
+    assert [tool["name"] for tool in captured["spec"].tools] == ["web_search"]
+    assert sorted(captured["spec"].tool_handlers) == ["web_search"]
+
+
+def test_runner_delegates_cycle_settlement_for_terminal_run(monkeypatch):
+    from brain.systems.runs.cortex import runner
+    from brain.systems.cycles import service as cycle_service
+
+    calls = []
+    monkeypatch.setattr(
+        cycle_service,
+        "finalize_cycle_run_from_run",
+        lambda run_id, *, status, error=None: calls.append((run_id, status, error)),
+    )
+
+    runner._finalize_cycle_run_if_needed(99, status="completed")
+    runner._finalize_cycle_run_if_needed(100, status="running")
+    runner._finalize_cycle_run_if_needed(101, status="failed", error="boom")
+
+    assert calls == [(99, "completed", None), (101, "failed", "boom")]
 
 
 def test_deep_recipe_uses_native_child_runs(monkeypatch):

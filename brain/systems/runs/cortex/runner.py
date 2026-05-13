@@ -214,6 +214,17 @@ def _settle_idea_for_terminal_root_run(session, run_id: int) -> dict[str, Any] |
     }
 
 
+def _finalize_cycle_run_if_needed(run_id: int, *, status: str, error: str | None = None) -> None:
+    if status not in {"completed", "failed"}:
+        return
+    try:
+        from brain.systems.cycles.service import finalize_cycle_run_from_run
+
+        finalize_cycle_run_from_run(int(run_id), status=status, error=error)
+    except Exception:
+        logger.exception("cycle_run_settlement_failed", extra={"run_id": run_id, "status": status})
+
+
 def _run_has_project_context(run: AgentRunRow | None) -> bool:
     if run is None:
         return False
@@ -569,14 +580,21 @@ def run_queued_once(*, limit: int = 1) -> int:
             with _run_heartbeat(int(run_id)):
                 context_ready, status_payload = _materialize_project_context(int(run_id))
                 if not context_ready:
+                    _finalize_cycle_run_if_needed(
+                        int(run_id),
+                        status="failed",
+                        error="Project Context unavailable",
+                    )
                     if status_payload:
                         publish_safe("status_change", status_payload)
                     processed += 1
                     continue
                 status_payload = None
                 with UnitOfWork() as uow:
-                    _engine_for_session(uow.session).run_existing(int(run_id))
+                    completed_run = _engine_for_session(uow.session).run_existing(int(run_id))
+                    completed_status = str(getattr(completed_run.status, "value", completed_run.status) or "")
                     status_payload = _settle_idea_for_terminal_root_run(uow.session, int(run_id))
+                _finalize_cycle_run_if_needed(int(run_id), status=completed_status)
             if status_payload:
                 publish_safe("status_change", status_payload)
             processed += 1
@@ -584,6 +602,7 @@ def run_queued_once(*, limit: int = 1) -> int:
             logger.exception("agent_run_failed", extra={"run_id": run_id})
             try:
                 status_payload = _mark_run_failed_after_runner_error(int(run_id), "runner_failed")
+                _finalize_cycle_run_if_needed(int(run_id), status="failed", error="runner_failed")
                 if status_payload:
                     publish_safe("status_change", status_payload)
             except Exception:
