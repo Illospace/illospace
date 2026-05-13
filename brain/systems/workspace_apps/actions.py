@@ -11,12 +11,15 @@ from dataclasses import dataclass
 import re
 from typing import Any, Callable, Mapping
 
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.platform.db.models.workspace_app import WorkspaceApp, WorkspaceAppVersion
 from brain.systems.workspace_apps.contracts import ACTION_EFFECTS, ACTION_EXECUTOR_TYPES, ACTION_KINDS
 from brain.systems.workspace_apps.service import (
     WorkspaceAppError,
+    a_active_version,
+    a_get_app,
     active_version,
     get_app,
 )
@@ -40,7 +43,7 @@ class WorkspaceAppActionContractError(WorkspaceAppActionError):
 
 @dataclass(frozen=True)
 class WorkspaceAppActionContext:
-    session: Session
+    session: Session | AsyncSession
     org_id: str
     user_id: str | None
     app: WorkspaceApp
@@ -192,6 +195,73 @@ def run_workspace_app_action(
     }
 
 
+async def async_run_workspace_app_action(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    app_id: str,
+    action_key: str,
+    payload: Mapping[str, Any] | None = None,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    """Validate and execute one manifest-declared workspace app action."""
+
+    normalized_key = str(action_key or "").strip()
+    if not normalized_key:
+        raise WorkspaceAppActionContractError("actions.run(actionKey) requires an action key")
+
+    app = await a_get_app(session, org_id=org_id, app_id=app_id)
+    version = await a_active_version(session, app.id)
+    if version is None:
+        raise WorkspaceAppActionContractError("Workspace app has no active version")
+
+    actions = action_declarations(version.manifest or {})
+    raw_declaration = actions.get(normalized_key)
+    if raw_declaration is None:
+        raise WorkspaceAppActionNotDeclared(f"Workspace action '{normalized_key}' is not declared in this app manifest")
+
+    declaration = validate_action_declaration(normalized_key, raw_declaration)
+    payload_dict = dict(payload) if isinstance(payload, Mapping) else {}
+    forbidden_payload_paths = _forbidden_secret_paths(payload_dict)
+    if forbidden_payload_paths:
+        raise WorkspaceAppActionContractError(
+            f"Workspace action '{normalized_key}' payload must not contain raw credentials: "
+            + ", ".join(forbidden_payload_paths)
+        )
+
+    executor = declaration.get("executor")
+    executor_obj = dict(executor) if isinstance(executor, Mapping) else {}
+    executor_type = str(executor_obj.get("type") or "deferred").strip()
+    executor_key = str(executor_obj.get("key") or "").strip()
+    if executor_type != "registered" or not executor_key:
+        raise WorkspaceAppActionExecutorMissing(_missing_executor_message(normalized_key))
+
+    registered = _EXECUTORS.get(executor_key)
+    if registered is None:
+        raise WorkspaceAppActionExecutorMissing(
+            f"Workspace action '{normalized_key}' uses executor '{executor_key}', but no approved executor is registered."
+        )
+
+    context = WorkspaceAppActionContext(
+        session=session,
+        org_id=org_id,
+        user_id=user_id,
+        app=app,
+        version=version,
+        action_key=normalized_key,
+        declaration=declaration,
+    )
+    result = registered(context, payload_dict) or {}
+    return {
+        "ok": True,
+        "action_key": normalized_key,
+        "status": "completed",
+        "effects": [str(effect) for effect in declaration.get("effects", [])],
+        "connector_keys": _connector_keys(declaration),
+        "result": dict(result) if isinstance(result, Mapping) else {"value": result},
+    }
+
+
 def _missing_executor_message(action_key: str) -> str:
     return (
         f"Workspace action '{action_key}' is declared, but no server-side action executor is registered yet. "
@@ -245,6 +315,7 @@ __all__ = [
     "WorkspaceAppActionError",
     "WorkspaceAppActionExecutorMissing",
     "WorkspaceAppActionNotDeclared",
+    "async_run_workspace_app_action",
     "register_workspace_app_action_executor",
     "run_workspace_app_action",
     "unregister_workspace_app_action_executor",
