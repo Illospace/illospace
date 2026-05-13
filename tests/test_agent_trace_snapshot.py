@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 from io import BytesIO
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 import zipfile
+
+import pytest
 
 
 def _result(rows):
@@ -95,6 +97,70 @@ def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
     ]
 
     snapshot = build_agent_trace_snapshot(session, run, saved_by="user-1")
+
+    assert snapshot["schema_version"] == 1
+    assert snapshot["trace_id"] == "run:42"
+    assert snapshot["thread"]["messages"][0]["metadata"] == {
+        "run_id": 42,
+        "trace_id": "run:42",
+        "execution_profile": None,
+        "live_agent_text": None,
+    }
+    assert snapshot["tools"][0]["tool_name"] == "read_file"
+    assert snapshot["artifacts"][0]["artifact_type"] == "reply"
+    assert snapshot["storage_estimate"]["truncated"] is True
+    assert "not copied" not in str(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_agent_trace_snapshot_async_uses_same_bounded_payload_shape():
+    from brain.systems.runs.cortex.recording import build_agent_trace_snapshot_async
+
+    run = _run()
+    now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+    message = SimpleNamespace(
+        id=9,
+        idea_id="idea-1",
+        role="illo",
+        content="Final answer " + ("x" * 5000),
+        attachments=[],
+        metadata_={"run_id": 42, "trace_id": "run:42", "private": "not copied"},
+        message_type="message",
+        created_at=now,
+    )
+    event = SimpleNamespace(
+        id=99,
+        run_id=42,
+        root_run_id=42,
+        sequence_no=3,
+        event_type="run.tool_completed",
+        payload={"tool_name": "read_file", "args": {"path": "README.md"}, "result": "y" * 5000},
+        producer="agent_runtime",
+        visibility="public",
+        created_at=now,
+    )
+    artifact = SimpleNamespace(
+        id=100,
+        run_id=42,
+        root_run_id=42,
+        artifact_type="reply",
+        title="Final reply",
+        payload={"large": "z" * 5000},
+        text="artifact text",
+        uri=None,
+        visibility="public",
+        created_at=now,
+    )
+
+    session = AsyncMock()
+    session.scalars.side_effect = [
+        _result([42]),
+        _result([message]),
+        _result([event]),
+        _result([artifact]),
+    ]
+
+    snapshot = await build_agent_trace_snapshot_async(session, run, saved_by="user-1")
 
     assert snapshot["schema_version"] == 1
     assert snapshot["trace_id"] == "run:42"

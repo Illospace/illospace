@@ -689,8 +689,67 @@ class AsyncAgentRunStore:
     async def claim_run(self, run_id: int) -> AgentRun | None:
         return await self._run(lambda store: store.claim_run(run_id))
 
+    async def get_run(self, run_id: int) -> AgentRunRow | None:
+        return await self.session.get(AgentRunRow, int(run_id))
+
+    async def require_run(self, run_id: int) -> AgentRunRow:
+        row = await self.get_run(run_id)
+        if row is None:
+            raise LookupError(f"Run {run_id} not found")
+        return row
+
     async def set_status(self, run_id: int, status: RunStatus | str, *, reason: str | None = None) -> AgentRun:
-        return await self._run(lambda store: store.set_status(run_id, status, reason=reason))
+        row = await self.require_run(run_id)
+        current, target = ensure_run_transition(row.status, status)
+        if current == target:
+            return AgentRunStore.to_domain(row)
+        now = datetime.now(timezone.utc)
+        row.status = target.value
+        if target == RunStatus.STARTING:
+            row.started_at = row.started_at or now
+        elif target == RunStatus.PAUSED:
+            row.paused_at = now
+        elif target == RunStatus.COMPLETED:
+            row.completed_at = now
+        elif target == RunStatus.FAILED:
+            row.failed_at = now
+        elif target == RunStatus.CANCELED:
+            row.canceled_at = now
+        await self.append_event(
+            status_changed_event(
+                row.id,
+                from_status=current.value,
+                to_status=target.value,
+                root_run_id=row.root_run_id,
+                reason=reason,
+            )
+        )
+        return AgentRunStore.to_domain(row)
+
+    async def append_steering(
+        self,
+        run_id: int,
+        content: str,
+        *,
+        user_id: str | None = None,
+        thread_message_id: int | None = None,
+    ) -> AgentRunEventRow:
+        run = await self.require_run(run_id)
+        message = SteeringMessage(run_id=run.id, content=content, user_id=user_id).normalized()
+        if not message.content:
+            raise ValueError("Steering content is required")
+        payload: dict[str, Any] = {"content": message.content, "user_id": message.user_id}
+        if thread_message_id is not None:
+            payload["thread_message_id"] = int(thread_message_id)
+        return await self.append_event(
+            run_event(
+                run.id,
+                _STEERING_SUBMITTED_EVENT,
+                payload,
+                root_run_id=run.root_run_id,
+                producer="user",
+            )
+        )
 
     async def append_event(self, event: AgentRunEvent) -> AgentRunEventRow:
         with _event_lock(int(event.run_id)):
