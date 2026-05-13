@@ -106,9 +106,55 @@ def test_vault_secret_prompt_records_missing_and_broadcasts_thread_event():
     event_type, payload = published[0]
     assert event_type == "vault_secret_prompt"
     assert payload["idea_id"] == "idea-1"
+    assert payload["prompt"]["idea_id"] == "idea-1"
+    assert payload["prompt"]["org_id"] == USER["org_id"]
+    assert payload["prompt"]["run_id"] == 42
     assert payload["prompt"]["key_name"] == "EXAMPLE_API_KEY"
     assert payload["prompt"]["category"] == "api"
     assert "value" not in payload["prompt"]
+
+
+def test_vault_secret_prompt_handler_uses_execution_metadata_context(monkeypatch):
+    from brain.systems.runs.execution_context import _agent_context
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+
+    captured = {}
+
+    def fake_prompt(key_name, **kwargs):
+        captured["key_name"] = key_name
+        captured.update(kwargs)
+        return {"status": "opened"}
+
+    monkeypatch.setattr("brain.app.mcp.server.tool_vault_secret_prompt", fake_prompt)
+
+    previous = vars(_agent_context).copy()
+    for key in list(vars(_agent_context).keys()):
+        delattr(_agent_context, key)
+    try:
+        with bind_agent_context({
+            "execution_metadata": {
+                "user_id": "user-from-metadata",
+                "org_id": "org-from-metadata",
+                "run_id": 123,
+                "target_ref": {"thread_id": "idea-from-target-ref"},
+            },
+            "worker_name": "codex-worker",
+        }):
+            result = _get_tool_handlers()["vault_secret_prompt"]("github_token")
+    finally:
+        for key in list(vars(_agent_context).keys()):
+            delattr(_agent_context, key)
+        for key, value in previous.items():
+            setattr(_agent_context, key, value)
+
+    assert result == {"status": "opened"}
+    assert captured["key_name"] == "github_token"
+    assert captured["user_id"] == "user-from-metadata"
+    assert captured["org_id"] == "org-from-metadata"
+    assert captured["run_id"] == 123
+    assert captured["idea_id"] == "idea-from-target-ref"
+    assert captured["requested_by"] == "codex-worker"
 
 
 def test_brain_vault_requests_grant_before_reading():

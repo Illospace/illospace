@@ -1098,6 +1098,12 @@ def tool_vault_secret_prompt(
     if not user_id:
         return {"error": "Vault secret prompts require an authenticated user context"}
 
+    normalized_user_id = str(user_id).strip()
+    if not normalized_user_id:
+        return {"error": "Vault secret prompts require an authenticated user context"}
+    normalized_org_id = (str(org_id).strip() if org_id else "") or None
+    normalized_idea_id = (str(idea_id).strip() if idea_id else "") or None
+
     try:
         normalized_key = _normalize_vault_key_name(key_name)
     except ValueError as exc:
@@ -1113,6 +1119,9 @@ def tool_vault_secret_prompt(
     clean_requested_by = _clean_vault_prompt_text(requested_by or "agent", max_chars=80) or "agent"
     prompt = {
         "id": f"vault-secret-{run_id or 'thread'}-{uuid.uuid4().hex[:10]}",
+        "idea_id": normalized_idea_id,
+        "org_id": normalized_org_id,
+        "run_id": run_id,
         "key_name": normalized_key,
         "description": clean_description,
         "category": normalized_category,
@@ -1121,12 +1130,12 @@ def tool_vault_secret_prompt(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    record_missing_request(normalized_key, user_id=user_id, org_id=org_id)
+    record_missing_request(normalized_key, user_id=normalized_user_id, org_id=normalized_org_id)
 
-    if idea_id:
+    if normalized_idea_id:
         publish_safe("vault_secret_prompt", {
-            "idea_id": idea_id,
-            "org_id": org_id,
+            "idea_id": normalized_idea_id,
+            "org_id": normalized_org_id,
             "run_id": run_id,
             "prompt": prompt,
             "key_name": normalized_key,
@@ -1137,8 +1146,8 @@ def tool_vault_secret_prompt(
         })
 
     response = {
-        "prompted": bool(idea_id),
-        "status": "opened" if idea_id else "recorded",
+        "prompted": bool(normalized_idea_id),
+        "status": "opened" if normalized_idea_id else "recorded",
         "key_name": normalized_key,
         "description": clean_description,
         "category": normalized_category,
@@ -1148,7 +1157,7 @@ def tool_vault_secret_prompt(
             category=normalized_category,
         ),
     }
-    if not idea_id:
+    if not normalized_idea_id:
         response["warning"] = (
             "No current Cortex thread was bound, so the missing key was recorded for Vault."
         )
