@@ -316,10 +316,21 @@ function workEntryTool(entry: any): string {
   return 'tool';
 }
 
-function isDuplicateToolActivity(entry: any, kind: string, text: string): boolean {
+function toolNameFromActivityText(text: string): string {
+  const match = text.match(/^Using\s+([^:\s]+)(?::|\s|$)/i);
+  return match?.[1]?.trim() ?? '';
+}
+
+function isDuplicateToolActivity(
+  entry: any,
+  kind: string,
+  text: string,
+  structuredToolNames: ReadonlySet<string>,
+): boolean {
   if (kind !== 'run.activity' && kind !== 'step_started') return false;
-  if (!entry?.tool_name) return false;
-  return /^Using\s+/i.test(text);
+  if (!/^Using\s+/i.test(text)) return false;
+  const toolName = String(entry?.tool_name || toolNameFromActivityText(text)).trim();
+  return Boolean(toolName && (entry?.tool_name || structuredToolNames.has(toolName)));
 }
 
 function workTimelineTimeMs(at: string | undefined): number | null {
@@ -338,6 +349,73 @@ function timelineToolKey(tool: string, at: string | undefined): string {
   return `${tool}:${at ?? ''}`;
 }
 
+function normalizedTimelineText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[`*_#>\[\]()]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function volatileThoughtKey(text: string): string {
+  const normalized = normalizedTimelineText(text);
+  if (normalized.startsWith('thinking through the request')) return 'thinking';
+  if (normalized.startsWith('writing response')) return 'writing';
+  if (normalized.startsWith('streaming')) return 'streaming';
+  return '';
+}
+
+function thoughtsAreProgressive(left: AgentRunWorkThoughtItem, right: AgentRunWorkThoughtItem): boolean {
+  const leftText = normalizedTimelineText(left.text).replace(/[.…]+$/g, '');
+  const rightText = normalizedTimelineText(right.text).replace(/[.…]+$/g, '');
+  if (!leftText || !rightText) return false;
+  const volatileLeft = volatileThoughtKey(left.text);
+  if (volatileLeft && volatileLeft === volatileThoughtKey(right.text)) return true;
+  const shortest = Math.min(leftText.length, rightText.length);
+  return shortest >= 24 && (leftText.startsWith(rightText) || rightText.startsWith(leftText));
+}
+
+function toolDisplayKey(item: AgentRunWorkToolItem): string {
+  return [
+    item.tool.toLowerCase(),
+    item.args || '',
+  ].join(':');
+}
+
+function timelineItemsAreRedundant(
+  left: AgentRunWorkTimelineItem,
+  right: AgentRunWorkTimelineItem,
+): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === 'tool' && right.kind === 'tool') {
+    return toolDisplayKey(left) === toolDisplayKey(right);
+  }
+  if (left.kind === 'thought' && right.kind === 'thought') {
+    return thoughtsAreProgressive(left, right);
+  }
+  return false;
+}
+
+function mergeRedundantTimelineItems<T extends AgentRunWorkTimelineItem & { order: number; key: string }>(
+  records: T[],
+): T[] {
+  const compacted: T[] = [];
+  for (const record of records) {
+    const previous = compacted[compacted.length - 1];
+    if (previous && timelineItemsAreRedundant(previous, record)) {
+      compacted[compacted.length - 1] =
+        previous.kind === 'thought'
+          && record.kind === 'thought'
+          && previous.text.length > record.text.length
+          ? previous
+          : record;
+      continue;
+    }
+    compacted.push(record);
+  }
+  return compacted;
+}
+
 export function runWorkTimelineItems(
   source: any,
   {
@@ -353,6 +431,11 @@ export function runWorkTimelineItems(
   const workEntries = runWorkLogEntries(source);
   const toolStartOrder = new Map<string, number>();
   const toolCallKeys = new Set<string>();
+  const structuredToolNames = new Set<string>(
+    (source?.tool_calls || [])
+      .map((call: any) => String(call?.tool || call?.tool_name || '').trim())
+      .filter(Boolean),
+  );
 
   workEntries.forEach((entry, index) => {
     const kind = workEntryKind(entry);
@@ -375,7 +458,7 @@ export function runWorkTimelineItems(
 
     const text = workEntryText(entry);
     if (!text) continue;
-    if (isDuplicateToolActivity(entry, kind, text)) continue;
+    if (isDuplicateToolActivity(entry, kind, text, structuredToolNames)) continue;
     const at = workEntryTime(entry);
     pushRecord({
       kind: 'thought',
@@ -437,7 +520,7 @@ export function runWorkTimelineItems(
     }
   }
 
-  return records
+  const orderedRecords = records
     .sort((left, right) => {
       const leftMs = workTimelineTimeMs(left.at);
       const rightMs = workTimelineTimeMs(right.at);
@@ -445,7 +528,9 @@ export function runWorkTimelineItems(
       if (leftMs !== null && rightMs === null) return -1;
       if (leftMs === null && rightMs !== null) return 1;
       return left.order - right.order;
-    })
+    });
+
+  return mergeRedundantTimelineItems(orderedRecords)
     .slice(-limit)
     .map(({ order: _order, key: _key, ...item }) => item);
 }

@@ -235,6 +235,32 @@
     return item.status === 'running' ? `Using ${tool}` : `Used ${tool}`;
   }
 
+  function getRunLiveCueWorkIndex(item: CortexThreadStageRunItem) {
+    const workItems = item.workItems ?? [];
+    for (let index = workItems.length - 1; index >= 0; index -= 1) {
+      const workItem = workItems[index];
+      if (workItem.kind === 'tool' && workItem.status === 'running') return index;
+    }
+    return -1;
+  }
+
+  function getRunLiveCueLabel(item: CortexThreadStageRunItem, cueIndex = getRunLiveCueWorkIndex(item)) {
+    if (cueIndex >= 0) {
+      const workItem = item.workItems?.[cueIndex];
+      if (workItem?.kind === 'tool') return getTimelineToolLabel(workItem);
+    }
+
+    return THINKING_STATUS_LABEL;
+  }
+
+  function shouldRenderLiveWorkItem(workIndex: number, cueIndex: number) {
+    return workIndex !== cueIndex;
+  }
+
+  function hasVisibleLiveWorkItems(item: CortexThreadStageRunItem, cueIndex: number) {
+    return Boolean(item.workItems?.some((_workItem, workIndex) => shouldRenderLiveWorkItem(workIndex, cueIndex)));
+  }
+
   function getTimelineToolTitle(item: Extract<CortexThreadStageWorkTimelineItem, { kind: 'tool' }>) {
     const parts = [item.tool, item.status, item.time].filter(Boolean);
     return parts.join(' · ');
@@ -262,6 +288,20 @@
       'run-work-thought',
       /^Reflecting:/i.test(text.trim()) ? 'run-work-reflection' : '',
     ].filter(Boolean).join(' ');
+  }
+
+  function getThinkingStatusLabel(item: CortexThreadStageThinkingItem) {
+    const latestStep = item.steps?.at(-1)?.label?.trim();
+    return latestStep || item.label || THINKING_STATUS_LABEL;
+  }
+
+  function getThinkingSteps(item: CortexThreadStageThinkingItem) {
+    const steps = [...(item.steps ?? [])];
+    const latestStep = steps.at(-1);
+    if (latestStep?.label?.trim() && latestStep.label.trim() === getThinkingStatusLabel(item)) {
+      return steps.slice(0, -1);
+    }
+    return steps;
   }
 
   function getMessageClass(item: CortexThreadStageMessageItem) {
@@ -654,28 +694,34 @@
             {@const runKey = getRunKey(item, index)}
             {@const liveWorkStream = isRunLiveWorkStream(item)}
             {#if liveWorkStream}
+              {@const liveCueWorkIndex = getRunLiveCueWorkIndex(item)}
+              {@const liveCueLabel = getRunLiveCueLabel(item, liveCueWorkIndex)}
               <section class="run-live-work-stream" aria-label="Live run work">
                 {#if item.workItems && item.workItems.length > 0}
-                  <div class="run-work-timeline" aria-label="Run work timeline">
-                    {#each item.workItems as workItem, workIndex (`live-${workItem.kind}-${workItem.at ?? workItem.time ?? 'work'}-${workIndex}`)}
-                      {#if workItem.kind === 'tool'}
-                        <div class={`run-work-item run-work-tool run-work-tool-${workItem.status ?? 'used'}`} title={getTimelineToolTitle(workItem)}>
-                          <span class="run-work-tool-icon" aria-hidden="true">
-                            <ConstellationIcon name="tool" size={13} stroke={1.7} />
-                          </span>
+                  {#if hasVisibleLiveWorkItems(item, liveCueWorkIndex)}
+                    <div class="run-work-timeline" aria-label="Run work timeline">
+                      {#each item.workItems as workItem, workIndex (`live-${workItem.kind}-${workItem.at ?? workItem.time ?? 'work'}-${workIndex}`)}
+                        {#if shouldRenderLiveWorkItem(workIndex, liveCueWorkIndex)}
+                          {#if workItem.kind === 'tool'}
+                            <div class={`run-work-item run-work-tool run-work-tool-${workItem.status ?? 'used'}`} title={getTimelineToolTitle(workItem)}>
+                              <span class="run-work-tool-icon" aria-hidden="true">
+                                <ConstellationIcon name="tool" size={13} stroke={1.7} />
+                              </span>
 
-                          <span class="run-work-tool-copy">
-                            <span class="run-work-tool-label">{getTimelineToolLabel(workItem)}</span>
-                            {#if shouldShowTimelineToolArgs(workItem)}
-                              <code class="run-work-tool-args">{workItem.args}</code>
-                            {/if}
-                          </span>
-                        </div>
-                      {:else}
-                        <div class={getWorkThoughtClass(workItem.text)}>{@html getWorkThoughtHtml(workItem.text)}</div>
-                      {/if}
-                    {/each}
-                  </div>
+                              <span class="run-work-tool-copy">
+                                <span class="run-work-tool-label">{getTimelineToolLabel(workItem)}</span>
+                                {#if shouldShowTimelineToolArgs(workItem)}
+                                  <code class="run-work-tool-args">{workItem.args}</code>
+                                {/if}
+                              </span>
+                            </div>
+                          {:else}
+                            <div class={getWorkThoughtClass(workItem.text)}>{@html getWorkThoughtHtml(workItem.text)}</div>
+                          {/if}
+                        {/if}
+                      {/each}
+                    </div>
+                  {/if}
                 {:else if item.liveLines && item.liveLines.length > 0}
                   <div class="run-work-timeline" aria-label="Run work timeline">
                     {#each item.liveLines as line, lineIndex (`live-line-${typeof line === 'string' ? line : line.text}-${lineIndex}`)}
@@ -685,8 +731,8 @@
                   </div>
                 {/if}
 
-                <div class="run-live-work-cue" aria-live="polite" aria-label={THINKING_STATUS_LABEL}>
-                  <span class="thinking-status-label">{THINKING_STATUS_LABEL}</span>
+                <div class="run-live-work-cue" aria-live="polite" aria-label={liveCueLabel}>
+                  <span class="thinking-status-label">{liveCueLabel}</span>
                   <span class="thinking-status-dots" aria-hidden="true">
                     <span>.</span>
                     <span>.</span>
@@ -1032,9 +1078,11 @@
             </details>
             {/if}
           {:else if item.kind === 'thinking'}
-            <section class="thread-thinking-state" aria-live="polite" aria-label={item.label ?? THINKING_STATUS_LABEL}>
+            {@const thinkingStatusLabel = getThinkingStatusLabel(item)}
+            {@const thinkingSteps = getThinkingSteps(item)}
+            <section class="thread-thinking-state" aria-live="polite" aria-label={thinkingStatusLabel}>
               <div class="thread-thinking-header">
-                <span class="thinking-status-label">{THINKING_STATUS_LABEL}</span>
+                <span class="thinking-status-label">{thinkingStatusLabel}</span>
                 <span class="thinking-status-dots" aria-hidden="true">
                   <span>.</span>
                   <span>.</span>
@@ -1046,9 +1094,9 @@
                 {/if}
               </div>
 
-              {#if item.steps && item.steps.length > 0}
+              {#if thinkingSteps.length > 0}
                 <div class="thread-thinking-steps">
-                  {#each item.steps as step, stepIndex (`${step.time ?? 'step'}-${stepIndex}`)}
+                  {#each thinkingSteps as step, stepIndex (`${step.time ?? 'step'}-${stepIndex}`)}
                     <div class="thread-thinking-step">
                       {#if step.time}
                         <span class="thread-thinking-step-time">{step.time}</span>
