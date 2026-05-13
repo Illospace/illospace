@@ -36,3 +36,14 @@ def test_production_db_references_are_async_shaped():
         f"Found {len(offenders)} production sync-shaped DB references:\n"
         + "\n".join(offenders[:120])
     )
+
+
+def test_notification_routes_stay_on_native_async_db_path():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "brain/app/api/routers/notifications.py"
+    text = path.read_text(encoding="utf-8")
+
+    assert "run_db" not in text
+    assert "run_session_task" not in text
+    assert "run_unit_of_work_task" not in text
+    assert "open_unit_of_work" not in text

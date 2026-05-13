@@ -299,6 +299,36 @@ class IdeaConnectionRepository(BaseRepository[IdeaConnection]):
 class UserMentionRepository(BaseRepository[UserMention]):
     model = UserMention
 
+    @staticmethod
+    def _mark_seen_for_idea_stmt(*, user_id: str, idea_id: str):
+        return (
+            update(UserMention)
+            .where(
+                UserMention.user_id == user_id,
+                UserMention.idea_id == idea_id,
+                UserMention.seen_at.is_(None),
+            )
+            .values(seen_at=datetime.now(timezone.utc))
+        )
+
+    @staticmethod
+    def _mark_seen_for_thread_message_stmt(
+        *,
+        user_id: str,
+        idea_id: str,
+        thread_message_id: int,
+    ):
+        return (
+            update(UserMention)
+            .where(
+                UserMention.user_id == user_id,
+                UserMention.idea_id == idea_id,
+                UserMention.thread_message_id == thread_message_id,
+                UserMention.seen_at.is_(None),
+            )
+            .values(seen_at=datetime.now(timezone.utc))
+        )
+
     def create_if_missing(
         self,
         *,
@@ -343,13 +373,13 @@ class UserMentionRepository(BaseRepository[UserMention]):
 
     def mark_seen_for_idea(self, *, user_id: str, idea_id: str) -> int:
         result = self._session.execute(
-            update(UserMention)
-            .where(
-                UserMention.user_id == user_id,
-                UserMention.idea_id == idea_id,
-                UserMention.seen_at.is_(None),
-            )
-            .values(seen_at=datetime.now(timezone.utc))
+            self._mark_seen_for_idea_stmt(user_id=user_id, idea_id=idea_id)
+        )
+        return int(result.rowcount or 0)
+
+    async def a_mark_seen_for_idea(self, *, user_id: str, idea_id: str) -> int:
+        result = await self._session.execute(
+            self._mark_seen_for_idea_stmt(user_id=user_id, idea_id=idea_id)
         )
         return int(result.rowcount or 0)
 
@@ -361,14 +391,27 @@ class UserMentionRepository(BaseRepository[UserMention]):
         thread_message_id: int,
     ) -> int:
         result = self._session.execute(
-            update(UserMention)
-            .where(
-                UserMention.user_id == user_id,
-                UserMention.idea_id == idea_id,
-                UserMention.thread_message_id == thread_message_id,
-                UserMention.seen_at.is_(None),
+            self._mark_seen_for_thread_message_stmt(
+                user_id=user_id,
+                idea_id=idea_id,
+                thread_message_id=thread_message_id,
             )
-            .values(seen_at=datetime.now(timezone.utc))
+        )
+        return int(result.rowcount or 0)
+
+    async def a_mark_seen_for_thread_message(
+        self,
+        *,
+        user_id: str,
+        idea_id: str,
+        thread_message_id: int,
+    ) -> int:
+        result = await self._session.execute(
+            self._mark_seen_for_thread_message_stmt(
+                user_id=user_id,
+                idea_id=idea_id,
+                thread_message_id=thread_message_id,
+            )
         )
         return int(result.rowcount or 0)
 

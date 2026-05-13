@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import and_, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from brain.app.api.schemas.notifications import (
@@ -29,7 +30,6 @@ from brain.platform.db.repositories.chat import (
 )
 from brain.platform.db.repositories.ideas import UserMentionRepository
 from brain.platform.db.repositories.notifications import NotificationEventRepository
-from brain.platform.db.repositories.team import TeamRepository
 
 
 def compact_notification_text(text: str | None, limit: int = 160) -> str | None:
@@ -41,61 +41,55 @@ def compact_notification_text(text: str | None, limit: int = 160) -> str | None:
     return f"{normalized[: max(limit - 3, 0)].rstrip()}..."
 
 
-def build_notification_summary(
-    db: Session,
+def _chat_unread_total_stmt(*, user_id: str, org_id: str):
+    return (
+        select(
+            func.coalesce(
+                func.sum(
+                    ChatConversation.last_message_seq
+                    - func.coalesce(ChatConversationRead.last_read_conversation_seq, 0)
+                ),
+                0,
+            )
+        )
+        .select_from(ChatConversation)
+        .join(
+            ChatConversationMember,
+            and_(
+                ChatConversationMember.conversation_id == ChatConversation.id,
+                ChatConversationMember.user_id == user_id,
+            ),
+        )
+        .outerjoin(
+            ChatConversationRead,
+            and_(
+                ChatConversationRead.conversation_id == ChatConversation.id,
+                ChatConversationRead.user_id == user_id,
+            ),
+        )
+        .where(
+            ChatConversation.org_id == org_id,
+            ChatConversation.is_archived.is_(False),
+        )
+    )
+
+
+def _workspace_attention_total_stmt(*, user_id: str, org_id: str):
+    return select(func.count(Idea.id)).where(
+        Idea.org_id == org_id,
+        Idea.user_id == user_id,
+        Idea.archived_at.is_(None),
+        Idea.status == "unread_reply",
+    )
+
+
+def _notification_summary_read(
     *,
-    user_id: str,
-    org_id: str,
+    unread_notification_total: int,
+    unread_by_source: dict[str, int],
+    chat_unread_total: int,
+    workspace_attention_total: int,
 ) -> NotificationSummaryRead:
-    unread_notification_total = NotificationEventRepository(db).count_unread(user_id)
-    unread_by_source = NotificationEventRepository(db).count_unread_by_source(user_id)
-
-    chat_unread_total = int(
-        db.scalar(
-            select(
-                func.coalesce(
-                    func.sum(
-                        ChatConversation.last_message_seq
-                        - func.coalesce(ChatConversationRead.last_read_conversation_seq, 0)
-                    ),
-                    0,
-                )
-            )
-            .select_from(ChatConversation)
-            .join(
-                ChatConversationMember,
-                and_(
-                    ChatConversationMember.conversation_id == ChatConversation.id,
-                    ChatConversationMember.user_id == user_id,
-                ),
-            )
-            .outerjoin(
-                ChatConversationRead,
-                and_(
-                    ChatConversationRead.conversation_id == ChatConversation.id,
-                    ChatConversationRead.user_id == user_id,
-                ),
-            )
-            .where(
-                ChatConversation.org_id == org_id,
-                ChatConversation.is_archived.is_(False),
-            )
-        )
-        or 0
-    )
-
-    workspace_attention_total = int(
-        db.scalar(
-            select(func.count(Idea.id)).where(
-                Idea.org_id == org_id,
-                Idea.user_id == user_id,
-                Idea.archived_at.is_(None),
-                Idea.status == "unread_reply",
-            )
-        )
-        or 0
-    )
-
     return NotificationSummaryRead(
         chat_unread_total=chat_unread_total,
         workspace_attention_total=workspace_attention_total,
@@ -105,27 +99,69 @@ def build_notification_summary(
     )
 
 
+def build_notification_summary(
+    db: Session,
+    *,
+    user_id: str,
+    org_id: str,
+) -> NotificationSummaryRead:
+    unread_notification_total = NotificationEventRepository(db).count_unread(user_id)
+    unread_by_source = NotificationEventRepository(db).count_unread_by_source(user_id)
+    chat_unread_total = int(db.scalar(_chat_unread_total_stmt(user_id=user_id, org_id=org_id)) or 0)
+    workspace_attention_total = int(
+        db.scalar(_workspace_attention_total_stmt(user_id=user_id, org_id=org_id)) or 0
+    )
+    return _notification_summary_read(
+        unread_notification_total=unread_notification_total,
+        unread_by_source=unread_by_source,
+        chat_unread_total=chat_unread_total,
+        workspace_attention_total=workspace_attention_total,
+    )
+
+
+async def async_build_notification_summary(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    org_id: str,
+) -> NotificationSummaryRead:
+    repo = NotificationEventRepository(db)
+    unread_notification_total = await repo.a_count_unread(user_id)
+    unread_by_source = await repo.a_count_unread_by_source(user_id)
+    chat_unread_total = int(
+        await db.scalar(_chat_unread_total_stmt(user_id=user_id, org_id=org_id)) or 0
+    )
+    workspace_attention_total = int(
+        await db.scalar(_workspace_attention_total_stmt(user_id=user_id, org_id=org_id)) or 0
+    )
+    return _notification_summary_read(
+        unread_notification_total=unread_notification_total,
+        unread_by_source=unread_by_source,
+        chat_unread_total=chat_unread_total,
+        workspace_attention_total=workspace_attention_total,
+    )
+
+
 class NotificationService:
-    def __init__(self, db: Session, user: dict[str, Any]):
+    def __init__(self, db: AsyncSession, user: dict[str, Any]):
         self.db = db
         self.user = user
         self.viewer_user_id = str(user["id"])
         self.org_id = self._require_org_id(user)
         self.notification_repo = NotificationEventRepository(db)
-        self.team_repo = TeamRepository(db)
         self.chat_notification_repo = ChatNotificationRepository(db)
         self.chat_mention_repo = ChatMessageMentionRepository(db)
         self.user_mention_repo = UserMentionRepository(db)
 
-    def summary(self) -> NotificationSummaryRead:
-        return build_notification_summary(
+    async def summary(self) -> NotificationSummaryRead:
+        return await async_build_notification_summary(
             self.db,
             user_id=self.viewer_user_id,
             org_id=self.org_id,
         )
 
-    def preferences(self) -> NotificationPreferencesRead:
-        user = self.db.get(User, self.viewer_user_id)
+    async def preferences(self) -> NotificationPreferencesRead:
+        user = await self.db.get(User, self.viewer_user_id)
         return NotificationPreferencesRead(
             sound_enabled=bool(getattr(user, "notification_sound_enabled", True)) if user else True,
             message_notifications_enabled=(
@@ -133,11 +169,11 @@ class NotificationService:
             ),
         )
 
-    def update_preferences(
+    async def update_preferences(
         self,
         update: NotificationPreferencesUpdate,
     ) -> NotificationPreferencesRead:
-        user = self.db.get(User, self.viewer_user_id)
+        user = await self.db.get(User, self.viewer_user_id)
         if user is None:
             from fastapi import HTTPException
 
@@ -146,52 +182,62 @@ class NotificationService:
             user.notification_sound_enabled = update.sound_enabled
         if update.message_notifications_enabled is not None:
             user.message_notifications_enabled = update.message_notifications_enabled
-        self.db.flush()
-        return self.preferences()
+        await self.db.flush()
+        return await self.preferences()
 
-    def list_notifications(
+    async def list_notifications(
         self,
         *,
         unread_only: bool = True,
         limit: int = 50,
     ) -> list[NotificationRead]:
-        notifications = self.notification_repo.list_for_user(
-            self.viewer_user_id,
-            unread_only=unread_only,
-            limit=max(1, min(limit, 100)),
+        notifications = list(
+            await self.notification_repo.a_list_for_user(
+                self.viewer_user_id,
+                unread_only=unread_only,
+                limit=max(1, min(limit, 100)),
+            )
         )
-        return [self._serialize(notification) for notification in notifications]
+        actors = await self._actors_by_id(notifications)
+        return [self._serialize(notification, actors) for notification in notifications]
 
-    def mark_read(self, notification_id: int) -> NotificationSummaryRead:
-        notification = self.notification_repo.mark_read(notification_id, self.viewer_user_id)
+    async def mark_read(self, notification_id: int) -> NotificationSummaryRead:
+        notification = await self.notification_repo.a_mark_read(notification_id, self.viewer_user_id)
         if notification is None:
             from fastapi import HTTPException
 
             raise HTTPException(status_code=404, detail="Notification not found")
-        self._sync_source_read_state(notification)
-        self.db.flush()
-        return self.summary()
+        await self._sync_source_read_state(notification)
+        await self.db.flush()
+        return await self.summary()
 
-    def mark_all_read(self) -> NotificationSummaryRead:
+    async def mark_all_read(self) -> NotificationSummaryRead:
         notifications = list(
-            self.notification_repo.list_for_user(
+            await self.notification_repo.a_list_for_user(
                 self.viewer_user_id,
                 unread_only=True,
                 limit=500,
             )
         )
-        self.notification_repo.mark_all_read(self.viewer_user_id)
+        await self.notification_repo.a_mark_all_read(self.viewer_user_id)
         for notification in notifications:
-            self._sync_source_read_state(notification)
-        self.db.flush()
-        return self.summary()
+            await self._sync_source_read_state(notification)
+        await self.db.flush()
+        return await self.summary()
 
-    def _serialize(self, notification: NotificationEvent) -> NotificationRead:
-        actor = (
-            self.team_repo.get_by_id(str(notification.actor_user_id))
-            if notification.actor_user_id
-            else None
-        )
+    async def _actors_by_id(self, notifications: list[NotificationEvent]) -> dict[str, User]:
+        actor_ids = sorted({str(item.actor_user_id) for item in notifications if item.actor_user_id})
+        if not actor_ids:
+            return {}
+        users = (await self.db.scalars(select(User).where(User.id.in_(actor_ids)))).all()
+        return {str(user.id): user for user in users}
+
+    def _serialize(
+        self,
+        notification: NotificationEvent,
+        actors_by_id: dict[str, User],
+    ) -> NotificationRead:
+        actor = actors_by_id.get(str(notification.actor_user_id)) if notification.actor_user_id else None
         return NotificationRead(
             id=notification.id,
             source=notification.source,
@@ -211,13 +257,13 @@ class NotificationService:
             read_at=notification.read_at,
         )
 
-    def _sync_source_read_state(self, notification: NotificationEvent) -> None:
+    async def _sync_source_read_state(self, notification: NotificationEvent) -> None:
         if notification.kind in {
             NOTIFICATION_KIND_CHAT_DM_MESSAGE,
             NOTIFICATION_KIND_CHAT_ROOM_MESSAGE,
         }:
             if notification.conversation_id:
-                self.chat_notification_repo.mark_read_for_conversation(
+                await self.chat_notification_repo.a_mark_read_for_conversation(
                     user_id=self.viewer_user_id,
                     conversation_id=str(notification.conversation_id),
                 )
@@ -225,18 +271,18 @@ class NotificationService:
 
         if notification.kind == NOTIFICATION_KIND_CHAT_MENTION:
             if notification.conversation_id and notification.thread_root_message_id is not None:
-                self.chat_notification_repo.mark_read_for_thread(
+                await self.chat_notification_repo.a_mark_read_for_thread(
                     user_id=self.viewer_user_id,
                     conversation_id=str(notification.conversation_id),
                     thread_root_message_id=notification.thread_root_message_id,
                 )
-                self.chat_mention_repo.mark_seen_for_thread(
+                await self.chat_mention_repo.a_mark_seen_for_thread(
                     user_id=self.viewer_user_id,
                     conversation_id=str(notification.conversation_id),
                     thread_root_message_id=notification.thread_root_message_id,
                 )
             elif notification.conversation_id:
-                self.chat_notification_repo.mark_read_for_conversation(
+                await self.chat_notification_repo.a_mark_read_for_conversation(
                     user_id=self.viewer_user_id,
                     conversation_id=str(notification.conversation_id),
                 )
@@ -246,13 +292,13 @@ class NotificationService:
             if notification.idea_id:
                 thread_message_id = (notification.payload or {}).get("thread_message_id")
                 if thread_message_id is not None:
-                    self.user_mention_repo.mark_seen_for_thread_message(
+                    await self.user_mention_repo.a_mark_seen_for_thread_message(
                         user_id=self.viewer_user_id,
                         idea_id=str(notification.idea_id),
                         thread_message_id=int(thread_message_id),
                     )
                 else:
-                    self.user_mention_repo.mark_seen_for_idea(
+                    await self.user_mention_repo.a_mark_seen_for_idea(
                         user_id=self.viewer_user_id,
                         idea_id=str(notification.idea_id),
                     )

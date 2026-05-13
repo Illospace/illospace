@@ -528,6 +528,38 @@ class ChatMessageRepository(BaseRepository[ChatMessage]):
 class ChatMessageMentionRepository(BaseRepository[ChatMessageMention]):
     model = ChatMessageMention
 
+    @staticmethod
+    def _thread_mentions_stmt(
+        *,
+        user_id: str,
+        conversation_id: str,
+        thread_root_message_id: int,
+    ):
+        return (
+            select(ChatMessageMention)
+            .join(ChatMessage, ChatMessage.id == ChatMessageMention.message_id)
+            .where(
+                ChatMessageMention.mentioned_user_id == user_id,
+                ChatMessageMention.seen_at.is_(None),
+                ChatMessage.conversation_id == conversation_id,
+                case(
+                    (
+                        ChatMessage.thread_root_message_id.is_not(None),
+                        ChatMessage.thread_root_message_id,
+                    ),
+                    else_=ChatMessage.id,
+                )
+                == thread_root_message_id,
+            )
+        )
+
+    @staticmethod
+    def _touch_seen(mentions: Sequence[ChatMessageMention]) -> int:
+        now = datetime.now(timezone.utc)
+        for mention in mentions:
+            mention.seen_at = now
+        return len(mentions)
+
     def mark_seen_through_conversation_seq(
         self,
         *,
@@ -557,14 +589,51 @@ class ChatMessageMentionRepository(BaseRepository[ChatMessageMention]):
         conversation_id: str,
         thread_root_message_id: int,
     ) -> int:
-        now = datetime.now(timezone.utc)
         mentions = self._session.scalars(
-            select(ChatMessageMention)
-            .join(ChatMessage, ChatMessage.id == ChatMessageMention.message_id)
+            self._thread_mentions_stmt(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                thread_root_message_id=thread_root_message_id,
+            )
+        ).all()
+        return self._touch_seen(mentions)
+
+    async def a_mark_seen_for_thread(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        thread_root_message_id: int,
+    ) -> int:
+        mentions = (
+            await self._session.scalars(
+                self._thread_mentions_stmt(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    thread_root_message_id=thread_root_message_id,
+                )
+            )
+        ).all()
+        return self._touch_seen(mentions)
+
+
+class ChatNotificationRepository(BaseRepository[ChatNotification]):
+    model = ChatNotification
+
+    @staticmethod
+    def _unread_for_thread_stmt(
+        *,
+        user_id: str,
+        conversation_id: str,
+        thread_root_message_id: int,
+    ):
+        return (
+            select(ChatNotification)
+            .join(ChatMessage, ChatMessage.id == ChatNotification.message_id)
             .where(
-                ChatMessageMention.mentioned_user_id == user_id,
-                ChatMessageMention.seen_at.is_(None),
-                ChatMessage.conversation_id == conversation_id,
+                ChatNotification.user_id == user_id,
+                ChatNotification.read_at.is_(None),
+                ChatNotification.conversation_id == conversation_id,
                 case(
                     (
                         ChatMessage.thread_root_message_id.is_not(None),
@@ -574,14 +643,22 @@ class ChatMessageMentionRepository(BaseRepository[ChatMessageMention]):
                 )
                 == thread_root_message_id,
             )
-        ).all()
-        for mention in mentions:
-            mention.seen_at = now
-        return len(mentions)
+        )
 
+    @staticmethod
+    def _unread_for_conversation_stmt(*, user_id: str, conversation_id: str):
+        return select(ChatNotification).where(
+            ChatNotification.user_id == user_id,
+            ChatNotification.read_at.is_(None),
+            ChatNotification.conversation_id == conversation_id,
+        )
 
-class ChatNotificationRepository(BaseRepository[ChatNotification]):
-    model = ChatNotification
+    @staticmethod
+    def _touch_read(notifications: Sequence[ChatNotification]) -> int:
+        now = datetime.now(timezone.utc)
+        for notification in notifications:
+            notification.read_at = now
+        return len(notifications)
 
     def list_for_user(self, user_id: str, *, limit: int = 50) -> Sequence[ChatNotification]:
         stmt = (
@@ -645,27 +722,32 @@ class ChatNotificationRepository(BaseRepository[ChatNotification]):
         conversation_id: str,
         thread_root_message_id: int,
     ) -> int:
-        now = datetime.now(timezone.utc)
         notifications = self._session.scalars(
-            select(ChatNotification)
-            .join(ChatMessage, ChatMessage.id == ChatNotification.message_id)
-            .where(
-                ChatNotification.user_id == user_id,
-                ChatNotification.read_at.is_(None),
-                ChatNotification.conversation_id == conversation_id,
-                case(
-                    (
-                        ChatMessage.thread_root_message_id.is_not(None),
-                        ChatMessage.thread_root_message_id,
-                    ),
-                    else_=ChatMessage.id,
-                )
-                == thread_root_message_id,
+            self._unread_for_thread_stmt(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                thread_root_message_id=thread_root_message_id,
             )
         ).all()
-        for notification in notifications:
-            notification.read_at = now
-        return len(notifications)
+        return self._touch_read(notifications)
+
+    async def a_mark_read_for_thread(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        thread_root_message_id: int,
+    ) -> int:
+        notifications = (
+            await self._session.scalars(
+                self._unread_for_thread_stmt(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    thread_root_message_id=thread_root_message_id,
+                )
+            )
+        ).all()
+        return self._touch_read(notifications)
 
     def mark_read_for_conversation(
         self,
@@ -673,17 +755,29 @@ class ChatNotificationRepository(BaseRepository[ChatNotification]):
         user_id: str,
         conversation_id: str,
     ) -> int:
-        now = datetime.now(timezone.utc)
         notifications = self._session.scalars(
-            select(ChatNotification).where(
-                ChatNotification.user_id == user_id,
-                ChatNotification.read_at.is_(None),
-                ChatNotification.conversation_id == conversation_id,
+            self._unread_for_conversation_stmt(
+                user_id=user_id,
+                conversation_id=conversation_id,
             )
         ).all()
-        for notification in notifications:
-            notification.read_at = now
-        return len(notifications)
+        return self._touch_read(notifications)
+
+    async def a_mark_read_for_conversation(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+    ) -> int:
+        notifications = (
+            await self._session.scalars(
+                self._unread_for_conversation_stmt(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                )
+            )
+        ).all()
+        return self._touch_read(notifications)
 
 
 class ChatConversationReadRepository(BaseRepository[ChatConversationRead]):
