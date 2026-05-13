@@ -317,10 +317,41 @@ def _mapped_value(expr: Any, item: Mapping[str, Any]) -> Any:
             return expr.get("const")
         if "path" in expr:
             return _extract_path(item, str(expr.get("path") or ""))
-        raise WorkspaceAppActionContractError("mapping expressions must use const or path")
+        if "template" in expr:
+            return _render_template(str(expr.get("template") or ""), item)
+        if "if" in expr:
+            condition = _mapping(expr.get("if"), "mapping expression.if")
+            branch = expr.get("then") if _condition_matches(condition, item) else expr.get("else")
+            return _literal_or_mapped_value(branch, item)
+        raise WorkspaceAppActionContractError("mapping expressions must use const, path, template, or if/then/else")
     if expr is None:
         return None
     return _extract_path(item, str(expr))
+
+
+def _literal_or_mapped_value(expr: Any, item: Mapping[str, Any]) -> Any:
+    if isinstance(expr, Mapping):
+        return _mapped_value(expr, item)
+    return expr
+
+
+def _condition_matches(condition: Mapping[str, Any], item: Mapping[str, Any]) -> bool:
+    path = condition.get("path") if "path" in condition else condition.get("field")
+    if path is None:
+        raise WorkspaceAppActionContractError("mapping condition requires field or path")
+    value = _extract_path(item, str(path))
+    if "exists" in condition:
+        return (value is not None) is bool(condition.get("exists"))
+    if "equals" in condition:
+        return value == condition.get("equals")
+    if "not_equals" in condition:
+        return value != condition.get("not_equals")
+    if "in" in condition:
+        options = condition.get("in")
+        if not isinstance(options, list):
+            raise WorkspaceAppActionContractError("mapping condition.in must be a list")
+        return value in options
+    return bool(value)
 
 
 def _extract_path(source: Any, path: str) -> Any:

@@ -41,6 +41,10 @@ ACTION_EXECUTOR_TYPES = {"registered", "deferred"}
 APP_LOCAL_SCOPES = {"ui_state", "preferences", "filters", "draft", "ephemeral"}
 GENERATED_UI_VIEW_TYPES = {"table", "list", "cards", "board", "chart", "metrics", "detail", "form"}
 GENERATED_UI_CHART_TYPES = {"bar", "line", "pie", "scatter"}
+GENERIC_HTTP_EXECUTOR_KEY = "generic.http"
+GENERIC_HTTP_KINDS = {"http_request", "http_sync"}
+GENERIC_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+GENERIC_HTTP_MAPPING_KEYS = ("const", "path", "template", "if")
 RECORD_LIKE_STATE_KEYS = {
     "records",
     "items",
@@ -232,17 +236,178 @@ def _validate_actions(manifest: Mapping[str, Any], errors: list[str]) -> None:
             if invalid_effects:
                 errors.append(f"{prefix}.effects contains unsupported effect(s): {', '.join(invalid_effects)}")
         executor = raw_action.get("executor")
+        executor_type = ""
+        executor_key = ""
         if executor is not None:
             executor_obj = _as_mapping(executor)
             executor_type = str(executor_obj.get("type") or "").strip()
+            executor_key = str(executor_obj.get("key") or "").strip()
             if executor_type not in ACTION_EXECUTOR_TYPES:
                 errors.append(
                     f"{prefix}.executor.type must be one of: {', '.join(sorted(ACTION_EXECUTOR_TYPES))}"
                 )
-            if executor_type == "registered" and not str(executor_obj.get("key") or "").strip():
+            if executor_type == "registered" and not executor_key:
                 errors.append(f"{prefix}.executor.key is required for registered executors")
         if _forbidden_secret_paths(raw_action):
             errors.append(f"{prefix} must not contain raw credentials or secret values")
+        if executor_type == "registered" and executor_key == GENERIC_HTTP_EXECUTOR_KEY:
+            _validate_generic_http_action(prefix, raw_action, manifest, errors)
+
+
+def _validate_generic_http_action(
+    prefix: str,
+    action: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    errors: list[str],
+) -> None:
+    spec = action.get("connector_spec") or action.get("connector") or action.get("http")
+    if not isinstance(spec, Mapping):
+        errors.append(f"{prefix}.connector_spec is required for generic.http actions")
+        return
+
+    kind = str(spec.get("kind") or spec.get("type") or "http_sync").strip()
+    if kind not in GENERIC_HTTP_KINDS:
+        errors.append(f"{prefix}.connector_spec.kind must be one of: {', '.join(sorted(GENERIC_HTTP_KINDS))}")
+
+    request = spec.get("request")
+    method = "GET"
+    if not isinstance(request, Mapping):
+        errors.append(f"{prefix}.connector_spec.request must be an object")
+    else:
+        method = str(request.get("method") or "GET").strip().upper()
+        if method not in GENERIC_HTTP_METHODS:
+            errors.append(
+                f"{prefix}.connector_spec.request.method must be one of: {', '.join(sorted(GENERIC_HTTP_METHODS))}"
+            )
+        url = request.get("url")
+        if not isinstance(url, str) or not url.strip():
+            errors.append(f"{prefix}.connector_spec.request.url must be an https URL")
+        elif not url.strip().startswith("https://"):
+            errors.append(f"{prefix}.connector_spec.request.url must be an https URL")
+
+    effects = {str(effect).strip() for effect in action.get("effects", [])}
+    needed_effect = "external.read" if method == "GET" else "external.write"
+    if needed_effect not in effects:
+        errors.append(f"{prefix}.connector_spec.request.method {method} requires effect '{needed_effect}'")
+
+    auth = spec.get("auth")
+    if auth not in (None, {}, "none"):
+        if not isinstance(auth, Mapping):
+            errors.append(f"{prefix}.connector_spec.auth must be an object or 'none'")
+        else:
+            auth_type = str(auth.get("type") or "bearer").strip()
+            if auth_type not in {"none", "bearer", "header"}:
+                errors.append(f"{prefix}.connector_spec.auth.type must be 'none', 'bearer', or 'header'")
+
+    sync = spec.get("sync") or spec.get("domain_sync")
+    if kind == "http_sync" and sync is None:
+        errors.append(f"{prefix}.connector_spec.sync is required when kind is 'http_sync'")
+    if sync is not None:
+        _validate_generic_http_sync(prefix, sync, manifest, effects, errors)
+
+
+def _validate_generic_http_sync(
+    prefix: str,
+    sync: Any,
+    manifest: Mapping[str, Any],
+    effects: set[str],
+    errors: list[str],
+) -> None:
+    sync_prefix = f"{prefix}.connector_spec.sync"
+    if "domain.write" not in effects:
+        errors.append(f"{sync_prefix} requires effect 'domain.write'")
+    if not isinstance(sync, Mapping):
+        errors.append(f"{sync_prefix} must be an object")
+        return
+
+    binding_alias = str(sync.get("binding") or sync.get("domain_binding") or "").strip()
+    if not binding_alias:
+        errors.append(f"{sync_prefix}.binding is required")
+    else:
+        data_plan = _as_mapping(manifest.get("data_plan"))
+        bindings = _as_mapping(data_plan.get("bindings"))
+        if binding_alias not in bindings:
+            errors.append(f"{sync_prefix}.binding must reference a manifest.data_plan binding")
+
+    remote_id = sync.get("remote_id") or sync.get("external_id") or "id"
+    _validate_generic_http_mapping_expr(f"{sync_prefix}.remote_id", remote_id, errors)
+    if "title" in sync:
+        _validate_generic_http_mapping_expr(f"{sync_prefix}.title", sync.get("title"), errors)
+    elif "title_path" in sync:
+        _validate_generic_http_mapping_expr(f"{sync_prefix}.title_path", sync.get("title_path"), errors)
+
+    fields = sync.get("fields")
+    if not isinstance(fields, Mapping):
+        errors.append(f"{sync_prefix}.fields must be an object")
+        return
+    for field_key, expr in fields.items():
+        field_name = str(field_key or "").strip()
+        if not field_name:
+            errors.append(f"{sync_prefix}.fields keys must be non-empty")
+            continue
+        _validate_generic_http_mapping_expr(f"{sync_prefix}.fields.{field_name}", expr, errors)
+
+
+def _validate_generic_http_mapping_expr(
+    field_path: str,
+    expr: Any,
+    errors: list[str],
+    *,
+    branch_literal: bool = False,
+) -> None:
+    if isinstance(expr, Mapping):
+        present = [key for key in GENERIC_HTTP_MAPPING_KEYS if key in expr]
+        if not present:
+            errors.append(f"{field_path} mapping expressions must use const, path, template, or if/then/else")
+            return
+        if len(present) > 1:
+            errors.append(f"{field_path} mapping expression must use only one of const, path, template, or if")
+            return
+        key = present[0]
+        if key == "path" and not isinstance(expr.get("path"), str):
+            errors.append(f"{field_path}.path must be a string")
+        elif key == "template" and not isinstance(expr.get("template"), str):
+            errors.append(f"{field_path}.template must be a string")
+        elif key == "if":
+            _validate_generic_http_condition(f"{field_path}.if", expr.get("if"), errors)
+            if "then" not in expr:
+                errors.append(f"{field_path}.then is required for conditional mapping expressions")
+            else:
+                _validate_generic_http_mapping_expr(
+                    f"{field_path}.then",
+                    expr.get("then"),
+                    errors,
+                    branch_literal=True,
+                )
+            if "else" in expr:
+                _validate_generic_http_mapping_expr(
+                    f"{field_path}.else",
+                    expr.get("else"),
+                    errors,
+                    branch_literal=True,
+                )
+        return
+    if expr is None:
+        return
+    if isinstance(expr, str):
+        if not branch_literal and not expr.strip():
+            errors.append(f"{field_path} mapping path must not be empty")
+        return
+    if not branch_literal:
+        errors.append(f"{field_path} mapping expression must be a string path or object")
+
+
+def _validate_generic_http_condition(field_path: str, condition: Any, errors: list[str]) -> None:
+    if not isinstance(condition, Mapping):
+        errors.append(f"{field_path} must be an object")
+        return
+    path = condition.get("path") if "path" in condition else condition.get("field")
+    if not isinstance(path, str) or not path.strip():
+        errors.append(f"{field_path} requires field or path")
+    if "in" in condition and not isinstance(condition.get("in"), list):
+        errors.append(f"{field_path}.in must be a list")
+    if "exists" in condition and not isinstance(condition.get("exists"), bool):
+        errors.append(f"{field_path}.exists must be a boolean")
 
 
 def _validate_design_contract(value: Any, errors: list[str]) -> None:

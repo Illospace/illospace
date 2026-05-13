@@ -53,6 +53,7 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_manage_domain",
     "_handle_manage_idea",
     "_handle_manage_project",
+    "_handle_manage_skill",
     "_handle_manage_workspace_app",
     "_handle_edit_file",
     "_handle_exec_command",

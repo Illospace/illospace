@@ -35,6 +35,7 @@ from brain.systems.runs.tool_catalog.handlers.cycles import _handle_manage_cycle
 from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
 from brain.systems.runs.tool_catalog.handlers.ideas import _handle_manage_idea
 from brain.systems.runs.tool_catalog.handlers.projects import _handle_manage_project
+from brain.systems.runs.tool_catalog.handlers.skills import _handle_manage_skill
 from brain.systems.runs.tool_catalog.handlers.files import (
     _handle_edit_file,
     _handle_exec_command,
@@ -195,6 +196,7 @@ def _get_tool_handlers(
         "manage_domain": lambda **kw: _patched_private("_handle_manage_domain", _handle_manage_domain)(**kw),
         "manage_idea": lambda **kw: _patched_private("_handle_manage_idea", _handle_manage_idea)(**kw),
         "manage_project": lambda **kw: _patched_private("_handle_manage_project", _handle_manage_project)(**kw),
+        "manage_skill": lambda **kw: _patched_private("_handle_manage_skill", _handle_manage_skill)(**kw),
         "manage_workspace_app": lambda **kw: _patched_private(
             "_handle_manage_workspace_app",
             _handle_manage_workspace_app,

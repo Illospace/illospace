@@ -55,6 +55,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
     "brain_skills": {"permission": "read_skills", "output_budget_chars": 6_000},
     "skill_view": {"permission": "read_skills", "output_budget_chars": 12_000},
     "skill_asset": {"permission": "read_skills", "output_budget_chars": 12_000},
+    "manage_skill": {
+        "permission": "write_skill",
+        "risk_class": "high",
+        "side_effect_class": "skill_write",
+        "reversibility": "variable",
+        "action_manifest": True,
+        "expected_effect": "read or mutate installed Illo skills and skill bundle assets",
+        "output_budget_chars": 14_000,
+    },
     "brain_encode": {
         "permission": "write_memory",
         "risk_class": "low",
@@ -648,6 +657,25 @@ def action_policy_for_tool(
         return None
     if tool_name == "manage_domain" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "query_records", "get_record", "events"}:
         return None
+    if tool_name == "manage_skill" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get", "list_assets", "get_asset"}:
+        return None
+    if tool_name == "manage_skill":
+        skill_action = str(_arg_at(args_tuple, kwargs_dict, "action", 0, "") or "").strip().lower()
+        effect_by_action = {
+            "create": "create a durable slash-routable skill",
+            "update": "update an installed skill",
+            "edit": "update an installed skill",
+            "archive": "archive an installed skill",
+            "delete": "archive an installed skill",
+            "convert_to_bundle": "convert a skill to a local bundle-backed skill",
+            "upsert_asset": "add or replace a skill bundle asset",
+            "delete_asset": "delete a skill bundle asset",
+        }
+        return {
+            "risk": "high",
+            "reversibility": "variable",
+            "expected_effect": effect_by_action.get(skill_action, "mutate an installed Illo skill"),
+        }
     if tool_name == "manage_idea" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get"}:
         return None
     if tool_name == "manage_project" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get"}:

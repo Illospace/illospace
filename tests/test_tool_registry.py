@@ -52,14 +52,18 @@ def test_handler_covered_runtime_tools_are_registered():
             assert name in handlers, f"Registered runtime tool lacks handler: {name}"
 
 
-def test_dormant_skill_authoring_tools_are_not_registered_for_runtime():
+def test_skill_authoring_umbrella_tool_is_registered_for_runtime():
     from brain.systems.runs.tool_handlers import _get_tool_handlers
     from brain.systems.runs.tool_catalog.registry import all_tool_registrations
 
     dormant = {"create_skill", "manage_skill_asset", "flag_skill_gap"}
+    registrations = all_tool_registrations()
+    handlers = _get_tool_handlers()
 
-    assert dormant.isdisjoint(all_tool_registrations())
-    assert dormant.isdisjoint(_get_tool_handlers())
+    assert dormant.isdisjoint(registrations)
+    assert dormant.isdisjoint(handlers)
+    assert "manage_skill" in registrations
+    assert "manage_skill" in handlers
 
 
 def test_workspace_data_tool_is_read_only_agent_run_surface():
@@ -202,12 +206,18 @@ def test_action_policy_comes_from_registry_metadata():
     assert "manage_cycle" in action_manifest_tool_names()
     assert "manage_cron_job" not in action_manifest_tool_names()
     assert action_policy_for_tool("manage_cycle", kwargs={"action": "list"}) is None
+    assert action_policy_for_tool("manage_skill", kwargs={"action": "get"}) is None
 
     policy = action_policy_for_tool("manage_cycle", kwargs={"action": "create"})
     assert policy == {
         "risk": "high",
         "reversibility": "reversible",
         "expected_effect": "mutate a scheduled cycle",
+    }
+    assert action_policy_for_tool("manage_skill", kwargs={"action": "create"}) == {
+        "risk": "high",
+        "reversibility": "variable",
+        "expected_effect": "create a durable slash-routable skill",
     }
 
     assert action_policy_for_tool(

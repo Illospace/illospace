@@ -28,7 +28,18 @@ private DB skill, user/team skill, or portable public bundle.
 4. Add pitfalls, refinements, examples, and eval ideas for silent regressions.
 5. Choose versioning and storage: core Python built-in, hosted DB row, tenant
    overlay, portable bundle, or agent draft.
-6. Preserve tenant-specific/private workflow knowledge outside OSS built-ins.
+6. Use `manage_skill` for durable skill changes: `create`, `update`/`edit`,
+   `archive`/`delete`, `convert_to_bundle`, `upsert_asset`, and `delete_asset`.
+   Use `manage_skill` with `help` or `schema` if the exact arguments are unclear.
+7. Preserve tenant-specific/private workflow knowledge outside OSS built-ins.
+
+## Tool Contract
+
+When the user asks to create or change a reusable slash-routable skill, call
+`manage_skill`. Do not emulate a skill by writing a thread attachment, adding a
+memory pattern, or only returning markdown. If `manage_skill` is unavailable or
+blocked by policy, say that the durable skill write is blocked and return the
+proposed skill content as a draft.
 
 ## Output Contract
 
