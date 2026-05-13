@@ -3,7 +3,7 @@ import threading
 import time
 from types import SimpleNamespace
 from urllib.request import urlopen
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -189,8 +189,9 @@ def test_start_openai_oauth_can_force_localhost_fallback_for_public_base_url():
     register_target.assert_not_called()
 
 
-def test_exchange_openai_oauth_stores_chatgpt_session_payload():
-    from brain.systems.runtime_settings.auth import OPENAI_OAUTH_SESSION_KEY, exchange_openai_oauth
+@pytest.mark.asyncio
+async def test_exchange_openai_oauth_stores_chatgpt_session_payload():
+    from brain.systems.runtime_settings.auth import OPENAI_OAUTH_SESSION_KEY, async_exchange_openai_oauth
 
     request = _RequestStub(
         session={
@@ -213,20 +214,22 @@ def test_exchange_openai_oauth_stores_chatgpt_session_payload():
         auth_mode="chatgpt",
     )
 
+    store_connection = AsyncMock(return_value=RuntimeConnectionRead(
+        status="connected",
+        setup_required=False,
+        method="chatgpt",
+        source="user_default",
+        label="Codex / ChatGPT",
+    ))
+
     with patch(
         "brain.systems.runtime_settings.auth.exchange_codex_authorization_code",
         return_value=cred,
     ) as mock_exchange, patch(
-        "brain.systems.runtime_settings.auth.store_openai_connection",
-        return_value=RuntimeConnectionRead(
-            status="connected",
-            setup_required=False,
-            method="chatgpt",
-            source="user_default",
-            label="Codex / ChatGPT",
-        ),
-    ) as mock_store:
-        result = exchange_openai_oauth(request=request, user=user, callback=callback)
+        "brain.systems.runtime_settings.auth.async_store_openai_connection",
+        store_connection,
+    ):
+        result = await async_exchange_openai_oauth(MagicMock(), request=request, user=user, callback=callback)
 
     assert result.status == "connected"
     assert result.method == "chatgpt"
@@ -237,16 +240,17 @@ def test_exchange_openai_oauth_stores_chatgpt_session_payload():
         redirect_uri="http://localhost:1455/auth/callback",
     )
 
-    stored_payload = json.loads(mock_store.call_args.args[1])
+    stored_payload = json.loads(store_connection.await_args.args[2])
     assert stored_payload["auth_mode"] == "chatgpt"
     assert stored_payload["tokens"]["account_id"] == "acct_123"
     assert stored_payload["tokens"]["refresh_token"] == "refresh-token-123"
-    assert mock_store.call_args.args[0] is user
-    assert mock_store.call_args.kwargs["label"] == "Codex / ChatGPT"
+    assert store_connection.await_args.args[1] is user
+    assert store_connection.await_args.kwargs["label"] == "Codex / ChatGPT"
 
 
-def test_exchange_openai_oauth_uses_session_redirect_uri_for_server_callback():
-    from brain.systems.runtime_settings.auth import OPENAI_OAUTH_SESSION_KEY, exchange_openai_oauth
+@pytest.mark.asyncio
+async def test_exchange_openai_oauth_uses_session_redirect_uri_for_server_callback():
+    from brain.systems.runtime_settings.auth import OPENAI_OAUTH_SESSION_KEY, async_exchange_openai_oauth
 
     request = _RequestStub(
         session={
@@ -273,16 +277,16 @@ def test_exchange_openai_oauth_uses_session_redirect_uri_for_server_callback():
         "brain.systems.runtime_settings.auth.exchange_codex_authorization_code",
         return_value=cred,
     ) as mock_exchange, patch(
-        "brain.systems.runtime_settings.auth.store_openai_connection",
-        return_value=RuntimeConnectionRead(
+        "brain.systems.runtime_settings.auth.async_store_openai_connection",
+        AsyncMock(return_value=RuntimeConnectionRead(
             status="connected",
             setup_required=False,
             method="chatgpt",
             source="user_default",
             label="Codex / ChatGPT",
-        ),
+        )),
     ):
-        result = exchange_openai_oauth(request=request, user=user, callback=callback)
+        result = await async_exchange_openai_oauth(MagicMock(), request=request, user=user, callback=callback)
 
     assert result.status == "connected"
     mock_exchange.assert_called_once_with(
@@ -292,8 +296,9 @@ def test_exchange_openai_oauth_uses_session_redirect_uri_for_server_callback():
     )
 
 
-def test_exchange_openai_oauth_rejects_state_mismatch():
-    from brain.systems.runtime_settings.auth import OPENAI_OAUTH_SESSION_KEY, exchange_openai_oauth
+@pytest.mark.asyncio
+async def test_exchange_openai_oauth_rejects_state_mismatch():
+    from brain.systems.runtime_settings.auth import OPENAI_OAUTH_SESSION_KEY, async_exchange_openai_oauth
 
     request = _RequestStub(
         session={
@@ -308,7 +313,7 @@ def test_exchange_openai_oauth_rejects_state_mismatch():
     callback = "http://localhost:1455/auth/callback?code=auth-code-123&state=wrong-state"
 
     with pytest.raises(HTTPException) as excinfo:
-        exchange_openai_oauth(request=request, user=user, callback=callback)
+        await async_exchange_openai_oauth(MagicMock(), request=request, user=user, callback=callback)
 
     assert excinfo.value.status_code == 400
     assert "state mismatch" in excinfo.value.detail.lower()

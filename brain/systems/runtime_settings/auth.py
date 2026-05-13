@@ -7,11 +7,11 @@ import time
 from urllib.parse import urlparse, urlunparse
 
 from fastapi import HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.routers.cortex._key_utils import (
     parse_provider_connect_token,
-    store_org_api_key,
     verify_provider_api_key,
 )
 from brain.platform.integrations.openai_codex_auth import (
@@ -21,9 +21,8 @@ from brain.platform.integrations.openai_codex_auth import (
     parse_codex_oauth_callback,
 )
 from brain.platform.db.models.org import User
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, open_unit_of_work
-from brain.systems.services.runtime_introspection import get_provider_auth_status
-from brain.systems.vault import set_api_key
+from brain.systems.services.runtime_introspection import async_get_provider_auth_status
+from brain.systems.vault import async_set_api_key
 
 from .oauth_callback_server import (
     CALLBACK_REDIRECT_URI,
@@ -69,20 +68,34 @@ def _raise_if_vault_not_configured(exc: RuntimeError) -> None:
     raise HTTPException(status_code=503, detail=VAULT_NOT_CONFIGURED_DETAIL) from exc
 
 
-def _store_org_openai_api_key(user: User, api_token: str, *, required: bool = True) -> bool:
-    """Store a standard OpenAI key as the workspace credential for owner/admin setup."""
+async def _async_store_org_openai_api_key(
+    session: AsyncSession,
+    user: User,
+    api_token: str,
+    *,
+    required: bool = True,
+) -> bool:
+    """Store a standard OpenAI key as the workspace credential using an async session."""
     org_id = getattr(user, "org_id", None)
     if not org_id or not _can_manage_installation_memory(user):
         return False
     try:
         from brain.systems.vault import _encrypt
 
-        store_org_api_key(
-            str(org_id),
-            OPENAI_PROVIDER,
-            _encrypt(api_token),
-            label=OPENAI_ORG_KEY_LABEL,
-            uow_factory=UnitOfWork,
+        await session.execute(
+            text("""
+                INSERT INTO org_api_keys (org_id, provider, encrypted_key, label)
+                VALUES (:org_id, :provider, :encrypted, :label)
+                ON CONFLICT (org_id, provider) DO UPDATE SET
+                    encrypted_key = EXCLUDED.encrypted_key,
+                    label = EXCLUDED.label
+            """),
+            {
+                "org_id": str(org_id),
+                "provider": OPENAI_PROVIDER,
+                "encrypted": _encrypt(api_token),
+                "label": OPENAI_ORG_KEY_LABEL,
+            },
         )
         return True
     except RuntimeError as exc:
@@ -93,8 +106,9 @@ def _store_org_openai_api_key(user: User, api_token: str, *, required: bool = Tr
         raise
 
 
-def get_openai_connection(user: User) -> RuntimeConnectionRead:
-    status = get_provider_auth_status(
+async def async_get_openai_connection(session: AsyncSession, user: User) -> RuntimeConnectionRead:
+    status = await async_get_provider_auth_status(
+        session,
         user_id=user.id,
         org_id=user.org_id,
         provider=OPENAI_PROVIDER,
@@ -112,7 +126,13 @@ def get_openai_connection(user: User) -> RuntimeConnectionRead:
     )
 
 
-def store_openai_connection(user: User, token: str, *, label: str | None = None) -> RuntimeConnectionRead:
+async def async_store_openai_connection(
+    session: AsyncSession,
+    user: User,
+    token: str,
+    *,
+    label: str | None = None,
+) -> RuntimeConnectionRead:
     try:
         api_token, method = parse_provider_connect_token(token, OPENAI_PROVIDER)
     except ValueError as exc:
@@ -124,24 +144,30 @@ def store_openai_connection(user: User, token: str, *, label: str | None = None)
         raise HTTPException(status_code=400, detail=f"OpenAI credential verification failed: {exc}") from exc
 
     try:
-        key_id = set_api_key(str(user.id), api_token, provider=OPENAI_PROVIDER, label=label or _connection_label(method))
+        key_id = await async_set_api_key(
+            str(user.id),
+            api_token,
+            provider=OPENAI_PROVIDER,
+            label=label or _connection_label(method),
+            session=session,
+        )
     except RuntimeError as exc:
         _raise_if_vault_not_configured(exc)
         raise
-    with open_unit_of_work(UnitOfWork) as uow:
-        refreshed = uow.session.get(User, user.id)
-        if not refreshed:
-            raise HTTPException(status_code=404, detail="User not found")
-        refreshed.default_provider = OPENAI_PROVIDER
-        refreshed.default_api_key_id = key_id
-        uow.commit()
-        uow.session.refresh(refreshed)
-        if method == "api_key" and _can_manage_installation_memory(refreshed):
-            _store_org_openai_api_key(refreshed, api_token)
-            from .memory import configure_openai_embedding_api_key
 
-            configure_openai_embedding_api_key(api_token)
-        return get_openai_connection(refreshed)
+    refreshed = await session.get(User, user.id)
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="User not found")
+    refreshed.default_provider = OPENAI_PROVIDER
+    refreshed.default_api_key_id = key_id
+    await session.flush()
+    await session.refresh(refreshed)
+    if method == "api_key" and _can_manage_installation_memory(refreshed):
+        await _async_store_org_openai_api_key(session, refreshed, api_token)
+        from .memory import async_configure_openai_embedding_api_key
+
+        await async_configure_openai_embedding_api_key(session, api_token)
+    return await async_get_openai_connection(session, refreshed)
 
 
 def _origin_from_header(raw: str | None) -> str | None:
@@ -255,7 +281,12 @@ def start_openai_oauth(request: Request, *, callback_mode: str = "auto") -> dict
     }
 
 
-def exchange_openai_oauth(request: Request, user: User, callback: str) -> RuntimeConnectionRead:
+async def async_exchange_openai_oauth(
+    session: AsyncSession,
+    request: Request,
+    user: User,
+    callback: str,
+) -> RuntimeConnectionRead:
     pending = request.session.get(OPENAI_OAUTH_SESSION_KEY)
     if not isinstance(pending, dict):
         raise HTTPException(status_code=400, detail="Start the Codex sign-in flow first")
@@ -295,14 +326,22 @@ def exchange_openai_oauth(request: Request, user: User, callback: str) -> Runtim
     token_payload = json.dumps(encode_codex_auth_payload(cred))
     request.session.pop(OPENAI_OAUTH_SESSION_KEY, None)
     clear_callback_target(expected_state)
-    return store_openai_connection(user, token_payload, label="Codex / ChatGPT")
+    return await async_store_openai_connection(session, user, token_payload, label="Codex / ChatGPT")
 
 
-def connect_openai_api_key(user: User, api_key: str) -> RuntimeConnectionRead:
-    return store_openai_connection(user, api_key.strip(), label="OpenAI API key")
+async def async_connect_openai_api_key(
+    session: AsyncSession,
+    user: User,
+    api_key: str,
+) -> RuntimeConnectionRead:
+    return await async_store_openai_connection(session, user, api_key.strip(), label="OpenAI API key")
 
 
-def connect_openai_embedding_api_key(user: User, api_key: str) -> RuntimeMemoryRead:
+async def async_connect_openai_embedding_api_key(
+    session: AsyncSession,
+    user: User,
+    api_key: str,
+) -> RuntimeMemoryRead:
     if not _can_manage_installation_memory(user):
         raise HTTPException(status_code=403, detail="You need owner or admin access to manage installation memory")
     token = (api_key or "").strip()
@@ -320,30 +359,25 @@ def connect_openai_embedding_api_key(user: User, api_key: str) -> RuntimeMemoryR
         logger.warning("OpenAI embedding credential verification failed: %s", exc)
         raise HTTPException(status_code=400, detail=f"OpenAI credential verification failed: {exc}") from exc
 
-    from .memory import configure_openai_embedding_api_key, get_runtime_memory
+    from .memory import async_configure_openai_embedding_api_key, async_get_runtime_memory
 
-    configure_openai_embedding_api_key(api_token)
-    _store_org_openai_api_key(user, api_token, required=False)
-    return get_runtime_memory(user)
+    await async_configure_openai_embedding_api_key(session, api_token)
+    await _async_store_org_openai_api_key(session, user, api_token, required=False)
+    return await async_get_runtime_memory(session, user)
 
 
-def connect_gemini_api_key(user: User, api_key: str) -> RuntimeMemoryRead:
+async def async_connect_gemini_api_key(
+    session: AsyncSession,
+    user: User,
+    api_key: str,
+) -> RuntimeMemoryRead:
     if not _can_manage_installation_memory(user):
         raise HTTPException(status_code=403, detail="You need owner or admin access to manage installation memory")
     token = (api_key or "").strip()
     if not token:
         raise HTTPException(status_code=400, detail="Paste a Gemini API key")
 
-    from .memory import configure_gemini_embedding_api_key, get_runtime_memory
+    from .memory import async_configure_gemini_embedding_api_key, async_get_runtime_memory
 
-    configure_gemini_embedding_api_key(token)
-    return get_runtime_memory(user)
-
-
-def refresh_user(user_id: str) -> User:
-    with open_unit_of_work(UnitOfWork) as uow:
-        user = uow.session.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        uow.session.expunge(user)
-        return user
+    await async_configure_gemini_embedding_api_key(session, token)
+    return await async_get_runtime_memory(session, user)

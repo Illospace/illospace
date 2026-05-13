@@ -831,6 +831,80 @@ def bind_project_secret_by_key(
         return _binding_to_dict(binding, secret)
 
 
+async def async_bind_project_secret_by_key(
+    key_name: str,
+    *,
+    user_id: str,
+    org_id: str | None = None,
+    project_slug: str,
+    env_name: str,
+    target_registry_id: int | None = None,
+) -> dict | None:
+    """Async bind one of the current user's own secrets to a project/env name."""
+    if not user_id:
+        raise ValueError("user_id is required to bind a vault secret")
+    clean_key_name = (key_name or "").strip()
+    if not clean_key_name:
+        raise ValueError("key_name is required")
+
+    async with UnitOfWork() as uow:
+        try:
+            secret = (
+                await uow.session.scalars(
+                    select(Secret)
+                    .where(
+                        Secret.user_id == user_id,
+                        Secret.key_name == clean_key_name,
+                    )
+                    .limit(1)
+                )
+            ).first()
+        except SQLAlchemyError:
+            await uow.session.rollback()
+            return None
+        if secret is None:
+            return None
+
+        clean_project_slug = _normalize_project_slug(project_slug)
+        if not clean_project_slug:
+            raise ValueError("project_slug is required")
+        clean_env_name = _normalize_env_name(env_name)
+        now = datetime.now(timezone.utc)
+        existing = (
+            await uow.session.scalars(
+                select(VaultProjectBinding)
+                .where(
+                    VaultProjectBinding.user_id == user_id,
+                    VaultProjectBinding.project_slug == clean_project_slug,
+                    VaultProjectBinding.env_name == clean_env_name,
+                )
+                .limit(1)
+            )
+        ).first()
+        if existing:
+            existing.secret_id = secret.id
+            existing.org_id = org_id
+            existing.target_registry_id = target_registry_id
+            existing.active = True
+            existing.updated_at = now
+            binding = existing
+        else:
+            binding = VaultProjectBinding(
+                secret_id=secret.id,
+                user_id=user_id,
+                org_id=org_id,
+                target_registry_id=target_registry_id,
+                project_slug=clean_project_slug,
+                env_name=clean_env_name,
+                active=True,
+                created_at=now,
+                updated_at=now,
+            )
+            uow.session.add(binding)
+        await uow.session.flush()
+        return _binding_to_dict(binding, secret)
+
+
 def list_project_bindings(
     *,
     user_id: str,
@@ -1313,6 +1387,46 @@ def set_api_key(
             uow.session.add(key_obj)
             uow.session.flush()
             return key_obj.id
+
+
+async def async_set_api_key(
+    user_id: str,
+    api_key: str,
+    provider: str = "anthropic",
+    label: str = "default",
+    *,
+    session: AsyncSession | None = None,
+) -> int:
+    """Store an encrypted user API key using the async DB path."""
+    encrypted = _encrypt(api_key)
+
+    async def _set(active_session: AsyncSession) -> int:
+        stmt = select(UserApiKey).where(
+            UserApiKey.user_id == user_id,
+            UserApiKey.provider == provider,
+            UserApiKey.label == label,
+        )
+        existing = (await active_session.scalars(stmt)).first()
+        if existing:
+            existing.encrypted_key = encrypted
+            existing.is_active = True
+            await active_session.flush()
+            return int(existing.id)
+
+        key_obj = UserApiKey(
+            user_id=user_id,
+            provider=provider,
+            encrypted_key=encrypted,
+            label=label,
+        )
+        active_session.add(key_obj)
+        await active_session.flush()
+        return int(key_obj.id)
+
+    if session is not None:
+        return await _set(session)
+    async with UnitOfWork() as uow:
+        return await _set(uow.session)  # type: ignore[arg-type]
 
 
 def share_api_key(

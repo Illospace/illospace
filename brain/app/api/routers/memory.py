@@ -124,7 +124,7 @@ async def list_org_memories(
 
 
 @router.get("/duplicate-candidates")
-def list_duplicate_candidates(
+async def list_duplicate_candidates(
     since_hours: int = Query(48, ge=1, le=720),
     user: dict[str, Any] = Depends(get_current_user),
 ):

@@ -9,7 +9,8 @@ from typing import Any
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel import config as cfg
 from brain.platform.db.models.org import User
@@ -87,6 +88,15 @@ def _read_runtime_config_value(key: str) -> str | None:
         return None
 
 
+async def _async_read_runtime_config_value(session: AsyncSession, key: str) -> str | None:
+    try:
+        config = (await session.scalars(select(VaultConfig).where(VaultConfig.key == key))).first()
+        return config.value if config else None
+    except Exception:
+        logger.debug("Could not read runtime memory config key %s", key, exc_info=True)
+        return None
+
+
 def _write_runtime_config_value(key: str, value: str) -> None:
     try:
         with open_unit_of_work(UnitOfWork) as uow:
@@ -95,6 +105,21 @@ def _write_runtime_config_value(key: str, value: str) -> None:
                 config.value = value
             else:
                 uow.session.add(VaultConfig(key=key, value=value))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Could not persist runtime memory config key %s: %s", key, exc)
+        raise HTTPException(status_code=503, detail=RUNTIME_SETTINGS_UNAVAILABLE_DETAIL) from exc
+
+
+async def _async_write_runtime_config_value(session: AsyncSession, key: str, value: str) -> None:
+    try:
+        config = (await session.scalars(select(VaultConfig).where(VaultConfig.key == key))).first()
+        if config:
+            config.value = value
+        else:
+            session.add(VaultConfig(key=key, value=value))
+        await session.flush()
     except HTTPException:
         raise
     except Exception as exc:
@@ -116,8 +141,30 @@ def _read_persisted_runtime_settings() -> dict[str, Any]:
     return {str(key): value for key, value in data.items() if value is not None}
 
 
+async def _async_read_persisted_runtime_settings(session: AsyncSession) -> dict[str, Any]:
+    raw = await _async_read_runtime_config_value(session, RUNTIME_MEMORY_SETTINGS_KEY)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Ignoring invalid runtime memory settings JSON")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): value for key, value in data.items() if value is not None}
+
+
 def _persist_runtime_settings(config: EmbeddingRuntimeConfig) -> None:
     _write_runtime_config_value(RUNTIME_MEMORY_SETTINGS_KEY, json.dumps(config.stored_settings(), sort_keys=True))
+
+
+async def _async_persist_runtime_settings(session: AsyncSession, config: EmbeddingRuntimeConfig) -> None:
+    await _async_write_runtime_config_value(
+        session,
+        RUNTIME_MEMORY_SETTINGS_KEY,
+        json.dumps(config.stored_settings(), sort_keys=True),
+    )
 
 
 def _persist_embedding_api_key(provider: str, api_key: str) -> None:
@@ -134,8 +181,40 @@ def _persist_embedding_api_key(provider: str, api_key: str) -> None:
     _write_runtime_config_value(_runtime_secret_config_key(provider), encrypted)
 
 
+async def _async_persist_embedding_api_key(session: AsyncSession, provider: str, api_key: str) -> None:
+    if not api_key:
+        return
+    try:
+        from brain.systems.vault import _encrypt
+
+        encrypted = base64.b64encode(_encrypt(api_key)).decode("ascii")
+    except RuntimeError as exc:
+        if "VAULT_MASTER_KEY is required" in str(exc):
+            raise HTTPException(status_code=503, detail=VAULT_NOT_CONFIGURED_DETAIL) from exc
+        raise
+    await _async_write_runtime_config_value(session, _runtime_secret_config_key(provider), encrypted)
+
+
 def _read_persisted_embedding_api_key(provider: str) -> str | None:
     raw = _read_runtime_config_value(_runtime_secret_config_key(provider))
+    if not raw:
+        return None
+    try:
+        from brain.systems.vault import _decrypt
+
+        return _decrypt(base64.b64decode(raw.encode("ascii"))).strip() or None
+    except RuntimeError as exc:
+        if "VAULT_MASTER_KEY is required" in str(exc):
+            logger.warning("Memory API key is encrypted, but VAULT_MASTER_KEY is not configured")
+            return None
+        raise
+    except Exception:
+        logger.warning("Could not decrypt persisted %s memory API key", provider, exc_info=True)
+        return None
+
+
+async def _async_read_persisted_embedding_api_key(session: AsyncSession, provider: str) -> str | None:
+    raw = await _async_read_runtime_config_value(session, _runtime_secret_config_key(provider))
     if not raw:
         return None
     try:
@@ -201,6 +280,26 @@ def get_embedding_runtime_config(*, include_secret: bool = True) -> EmbeddingRun
     return config
 
 
+async def async_get_embedding_runtime_config(
+    session: AsyncSession,
+    *,
+    include_secret: bool = True,
+) -> EmbeddingRuntimeConfig:
+    """Return installation memory runtime config using async DB access."""
+    defaults = _default_runtime_config()
+    settings = await _async_read_persisted_runtime_settings(session)
+    provider = _provider_key(_stored_str(settings, "provider", defaults.provider))
+    return EmbeddingRuntimeConfig(
+        backend=_stored_str(settings, "backend", defaults.backend).lower(),
+        provider=provider,
+        api_model=_stored_str(settings, "api_model", defaults.api_model),
+        cpu_model=_stored_str(settings, "cpu_model", defaults.cpu_model),
+        dimensions=_stored_int(settings, "dimensions", defaults.dimensions),
+        reranker=_stored_str(settings, "reranker", defaults.reranker) or "weighted",
+        api_key=await _async_read_persisted_embedding_api_key(session, provider) if include_secret else "",
+    )
+
+
 def _sync_gpu_embedding_worker(backend: str) -> None:
     if backend not in {"gpu", "cpu", "api"}:
         return
@@ -238,6 +337,21 @@ def _save_embedding_runtime_config(
         _sync_gpu_embedding_worker(config.backend)
 
 
+async def _async_save_embedding_runtime_config(
+    session: AsyncSession,
+    config: EmbeddingRuntimeConfig,
+    *,
+    api_key: str | None = None,
+    sync_worker: bool = True,
+) -> None:
+    if api_key:
+        await _async_persist_embedding_api_key(session, config.provider, api_key)
+    await _async_persist_runtime_settings(session, config)
+    _clear_embedding_runtime_caches()
+    if sync_worker:
+        _sync_gpu_embedding_worker(config.backend)
+
+
 def _standard_openai_api_key(token: str | None) -> str | None:
     value = (token or "").strip()
     if not value:
@@ -259,8 +373,22 @@ def _current_api_provider() -> str:
     return get_embedding_runtime_config(include_secret=False).provider
 
 
+async def _async_current_api_provider(session: AsyncSession) -> str:
+    return (await async_get_embedding_runtime_config(session, include_secret=False)).provider
+
+
 def _installation_embedding_api_key(provider: str) -> str | None:
     key = _read_persisted_embedding_api_key(_provider_key(provider)) or ""
+    key = (key or "").strip()
+    if not key:
+        return None
+    if _provider_key(provider) == "openai":
+        return _standard_openai_api_key(key)
+    return key
+
+
+async def _async_installation_embedding_api_key(session: AsyncSession, provider: str) -> str | None:
+    key = await _async_read_persisted_embedding_api_key(session, _provider_key(provider)) or ""
     key = (key or "").strip()
     if not key:
         return None
@@ -288,6 +416,26 @@ def configure_openai_embedding_api_key(api_key: str) -> None:
     )
 
 
+async def async_configure_openai_embedding_api_key(session: AsyncSession, api_key: str) -> None:
+    """Make a verified OpenAI API key available via async DB access."""
+    key = _standard_openai_api_key(api_key)
+    if not key:
+        return
+    current = await async_get_embedding_runtime_config(session, include_secret=False)
+    await _async_save_embedding_runtime_config(
+        session,
+        EmbeddingRuntimeConfig(
+            backend="api",
+            provider="openai",
+            api_model="text-embedding-3-small",
+            cpu_model=current.cpu_model,
+            dimensions=embedding_dimensions("openai", "text-embedding-3-small"),
+            reranker=current.reranker,
+        ),
+        api_key=key,
+    )
+
+
 def configure_gemini_embedding_api_key(api_key: str) -> None:
     """Make a Gemini API key available to the installation memory embedder."""
     key = (api_key or "").strip()
@@ -296,6 +444,27 @@ def configure_gemini_embedding_api_key(api_key: str) -> None:
     model = default_embedding_model("gemini") or "gemini-embedding-2"
     current = get_embedding_runtime_config(include_secret=False)
     _save_embedding_runtime_config(
+        EmbeddingRuntimeConfig(
+            backend="api",
+            provider="gemini",
+            api_model=model,
+            cpu_model=current.cpu_model,
+            dimensions=embedding_dimensions("gemini", model),
+            reranker=current.reranker,
+        ),
+        api_key=key,
+    )
+
+
+async def async_configure_gemini_embedding_api_key(session: AsyncSession, api_key: str) -> None:
+    """Make a Gemini API key available via async DB access."""
+    key = (api_key or "").strip()
+    if not key:
+        return
+    model = default_embedding_model("gemini") or "gemini-embedding-2"
+    current = await async_get_embedding_runtime_config(session, include_secret=False)
+    await _async_save_embedding_runtime_config(
+        session,
         EmbeddingRuntimeConfig(
             backend="api",
             provider="gemini",
@@ -353,6 +522,41 @@ def get_embedding_info(user: User | None = None) -> dict[str, Any]:
     return info
 
 
+async def async_get_embedding_info(session: AsyncSession, user: User | None = None) -> dict[str, Any]:
+    runtime = await async_get_embedding_runtime_config(session)
+    backend = runtime.backend.lower()
+    provider = runtime.provider.lower()
+    api_key_set = bool(runtime.api_key)
+    info: dict[str, Any] = {
+        "backend": backend,
+        "provider": provider,
+        "model": runtime.api_model if backend == "api" else runtime.cpu_model if backend == "cpu" else "local-gpu",
+        "dimensions": runtime.dimensions,
+        "api_key_set": api_key_set,
+    }
+    if backend == "gpu":
+        try:
+            from brain.platform.gpu_client import get_client
+
+            health = get_client().health()
+            info.update(
+                {
+                    "status": "ready" if health.get("ready") or health.get("status") == "ok" else "initializing",
+                    "model": health.get("model") or info["model"],
+                    "loaded": bool(health.get("loaded", health.get("ready", False))),
+                }
+            )
+        except Exception:
+            info.update({"status": "unavailable", "loaded": False})
+    elif backend == "api":
+        info["status"] = "ready" if info["api_key_set"] else "missing_key"
+        info["loaded"] = info["api_key_set"]
+    else:
+        info["status"] = "ready"
+        info["loaded"] = True
+    return info
+
+
 def _embedder_from_info(info: dict[str, Any]) -> str:
     return _embedder_from_backend_provider(
         str(info.get("backend") or "gpu"),
@@ -374,8 +578,6 @@ def _embedding_detail(info: dict[str, Any]) -> str | None:
 
 def _indexed_vector_count() -> int:
     try:
-        from sqlalchemy import text
-
         with open_unit_of_work(UnitOfWork) as uow:
             return int(
                 uow.session.execute(
@@ -395,6 +597,33 @@ def _indexed_vector_count() -> int:
                 ).scalar()
                 or 0
             )
+    except Exception:
+        logger.debug("Could not count indexed memory vectors", exc_info=True)
+        return 0
+
+
+async def _async_indexed_vector_count(session: AsyncSession) -> int:
+    try:
+        return int(
+            (
+                await session.execute(
+                    text(
+                        """
+                        SELECT
+                          (SELECT count(*) FROM memories
+                           WHERE semantic_embedding IS NOT NULL) +
+                          (SELECT count(*) FROM memory_summaries
+                           WHERE semantic_embedding IS NOT NULL) +
+                          (SELECT count(*) FROM project_narratives
+                           WHERE semantic_embedding IS NOT NULL) +
+                          (SELECT count(*) FROM skills
+                           WHERE embedding IS NOT NULL)
+                        """
+                    ),
+                )
+            ).scalar()
+            or 0
+        )
     except Exception:
         logger.debug("Could not count indexed memory vectors", exc_info=True)
         return 0
@@ -422,6 +651,36 @@ def get_runtime_memory(user: User) -> RuntimeMemoryRead:
         api_key_statuses={
             "openai": bool(_installation_embedding_api_key("openai")),
             "gemini": bool(_installation_embedding_api_key("gemini")),
+        },
+        reranker=reranker,
+        embedder_options=EMBEDDER_OPTIONS,
+        embedding_model_options=EMBEDDING_MODEL_OPTIONS,
+        reranker_options=RERANKER_OPTIONS,
+    )
+
+
+async def async_get_runtime_memory(session: AsyncSession, user: User) -> RuntimeMemoryRead:
+    info = await async_get_embedding_info(session, user)
+    runtime = await async_get_embedding_runtime_config(session, include_secret=False)
+    reranker = runtime.reranker or "weighted"
+    if reranker != "weighted":
+        reranker = "weighted"
+    embedder = _embedder_from_info(info)
+    embedding_model = info.get("model")
+    if not embedding_model_supported(embedder, str(embedding_model or "")):
+        embedding_model = default_embedding_model(embedder)
+
+    return RuntimeMemoryRead(
+        scope="installation",
+        embedder=embedder,
+        embedding_model=embedding_model,
+        embedding_dimensions=info.get("dimensions"),
+        embedding_status=str(info.get("status") or "unknown"),
+        embedding_detail=_embedding_detail(info),
+        indexed_vectors=await _async_indexed_vector_count(session),
+        api_key_statuses={
+            "openai": bool(await _async_installation_embedding_api_key(session, "openai")),
+            "gemini": bool(await _async_installation_embedding_api_key(session, "gemini")),
         },
         reranker=reranker,
         embedder_options=EMBEDDER_OPTIONS,
@@ -491,6 +750,71 @@ def update_runtime_memory(user: User, update: RuntimeMemoryUpdate) -> RuntimeMem
     return get_runtime_memory(user)
 
 
+async def async_update_runtime_memory(
+    session: AsyncSession,
+    user: User,
+    update: RuntimeMemoryUpdate,
+) -> RuntimeMemoryRead:
+    embedder = update.embedder
+    embedder_spec = EMBEDDER_SPECS.get(embedder)
+    if not embedder_spec:
+        raise HTTPException(status_code=400, detail="Unsupported memory embedder")
+    api_model = update.embedding_model or default_embedding_model(embedder)
+
+    if not embedding_model_supported(embedder, api_model):
+        provider_label = "Gemini" if embedder == "gemini" else "OpenAI"
+        raise HTTPException(status_code=400, detail=f"Unsupported {provider_label} embedding model")
+
+    current_info = await async_get_embedding_info(session)
+    current_embedder = _embedder_from_info(current_info)
+    current_model = current_info.get("model")
+    if not embedding_model_supported(current_embedder, str(current_model or "")):
+        current_model = default_embedding_model(current_embedder)
+    proposed_model = api_model if embedder_spec.backend == "api" else default_embedding_model(embedder)
+    indexed_vectors = await _async_indexed_vector_count(session)
+    if indexed_vectors > 0 and (embedder != current_embedder or proposed_model != current_model):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{indexed_vectors} installation memory vectors already exist. "
+                "Rebuild the memory index before changing embedder or embedding model."
+            ),
+        )
+
+    runtime = await async_get_embedding_runtime_config(session, include_secret=False)
+    if embedder_spec.backend == "api":
+        backend = "api"
+        provider = embedder_spec.provider or "openai"
+        cpu_model = runtime.cpu_model
+        model = api_model or embedder_spec.default_model
+    elif embedder == "local_cpu":
+        backend = "cpu"
+        provider = runtime.provider
+        model = runtime.api_model
+        cpu_model = runtime.cpu_model
+    else:
+        backend = "gpu"
+        provider = runtime.provider
+        model = runtime.api_model
+        cpu_model = runtime.cpu_model
+
+    dimensions = embedding_dimensions(embedder, model)
+    next_config = EmbeddingRuntimeConfig(
+        backend=backend,
+        provider=_provider_key(provider or "openai"),
+        api_model=model or "text-embedding-3-small",
+        cpu_model=cpu_model or "all-MiniLM-L6-v2",
+        dimensions=dimensions,
+        reranker=update.reranker,
+    )
+    api_key = None
+    if embedder_spec.backend == "api":
+        api_key = await _async_installation_embedding_api_key(session, provider)
+    await _async_save_embedding_runtime_config(session, next_config, api_key=api_key)
+
+    return await async_get_runtime_memory(session, user)
+
+
 def check_runtime_memory(user: User) -> RuntimeMemoryCheckRead:
     started = time.perf_counter()
     try:
@@ -517,6 +841,48 @@ def check_runtime_memory(user: User) -> RuntimeMemoryCheckRead:
     except Exception as exc:
         detail = str(exc)
         provider = get_embedding_runtime_config(include_secret=False).provider.lower()
+        if "EMBEDDING_API_KEY" in detail:
+            if provider in {"gemini", "google"}:
+                detail = "Gemini memory needs a Google AI Studio API key. Add a Gemini key in Access or choose Local CPU."
+            elif provider == "openai":
+                detail = "OpenAI memory needs an OpenAI API key. Connect an API key in Access or choose Local CPU."
+        return RuntimeMemoryCheckRead(
+            status="error",
+            detail=detail,
+            duration_ms=int(round((time.perf_counter() - started) * 1000)),
+        )
+
+
+async def async_check_runtime_memory(
+    session: AsyncSession,
+    user: User,
+) -> RuntimeMemoryCheckRead:
+    started = time.perf_counter()
+    runtime = await async_get_embedding_runtime_config(session, include_secret=True)
+    try:
+        from brain.systems.memory.embeddings import embed_query
+
+        vector = embed_query("illo brain memory setup check", runtime_config=runtime)
+        shape = getattr(vector, "shape", None)
+        dimensions = int(shape[0] if shape else len(vector))
+        expected = runtime.dimensions
+        duration_ms = int(round((time.perf_counter() - started) * 1000))
+        if dimensions != expected:
+            return RuntimeMemoryCheckRead(
+                status="error",
+                detail=f"Embedding returned {dimensions} dimensions, expected {expected}.",
+                dimensions=dimensions,
+                duration_ms=duration_ms,
+            )
+        return RuntimeMemoryCheckRead(
+            status="ok",
+            detail=f"Embedding check returned {dimensions} dimensions.",
+            dimensions=dimensions,
+            duration_ms=duration_ms,
+        )
+    except Exception as exc:
+        detail = str(exc)
+        provider = runtime.provider.lower()
         if "EMBEDDING_API_KEY" in detail:
             if provider in {"gemini", "google"}:
                 detail = "Gemini memory needs a Google AI Studio API key. Add a Gemini key in Access or choose Local CPU."

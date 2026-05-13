@@ -240,8 +240,12 @@ async def test_member_cannot_mutate_installation_memory(client, method, url, bod
     _act_as(app, MEMBER)
     member = SimpleNamespace(id="user-1", org_id="org-1", role="member")
 
-    with patch("brain.systems.runtime_settings.router.refresh_user", return_value=member):
-        response = await c.request(method, url, json=body)
+    class RuntimeSettingsDb:
+        async def get(self, model, identifier):
+            return member if identifier == "user-1" else None
+
+    app.dependency_overrides[get_db] = lambda: RuntimeSettingsDb()
+    response = await c.request(method, url, json=body)
 
     assert response.status_code == 403
 

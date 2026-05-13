@@ -135,7 +135,7 @@ async def run_tools(run_id: int, user: dict[str, Any] = Depends(get_current_user
 
 
 @router.get("/run/status")
-def run_status(user: dict[str, Any] = Depends(get_current_user)):
+async def run_status(user: dict[str, Any] = Depends(get_current_user)):
     scope = _run_read_scope(user)
     status = queue_status(
         consumer_running=_run_event_consumer_running(),

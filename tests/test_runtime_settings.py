@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -48,31 +48,38 @@ def test_runtime_settings_tool_returns_model_mappings_and_active_status():
     assert data["worker_backend"]["agent_effective_worker_backend"] == "predict_rlm"
 
 
-def test_store_openai_connection_reports_invalid_format():
+@pytest.mark.asyncio
+async def test_store_openai_connection_reports_invalid_format():
     from types import SimpleNamespace
 
-    from brain.systems.runtime_settings.auth import store_openai_connection
+    from brain.systems.runtime_settings.auth import async_store_openai_connection
 
     with pytest.raises(Exception) as exc:
-        store_openai_connection(SimpleNamespace(id="user-1", org_id="org-1", role="owner"), "not-a-key")
+        await async_store_openai_connection(
+            MagicMock(),
+            SimpleNamespace(id="user-1", org_id="org-1", role="owner"),
+            "not-a-key",
+        )
 
     assert getattr(exc.value, "status_code", None) == 400
     assert "OpenAI API key or Codex auth JSON" in exc.value.detail
 
 
-def test_store_openai_connection_reports_missing_vault_master_key(monkeypatch):
+@pytest.mark.asyncio
+async def test_store_openai_connection_reports_missing_vault_master_key(monkeypatch):
     from types import SimpleNamespace
 
     import brain.systems.runtime_settings.auth as auth_settings
 
-    def raise_missing_vault_key(*args, **kwargs):
+    async def raise_missing_vault_key(*args, **kwargs):
         raise RuntimeError("VAULT_MASTER_KEY is required. Refusing to auto-generate a vault key.")
 
     monkeypatch.setattr(auth_settings, "verify_provider_api_key", lambda *args, **kwargs: None)
-    monkeypatch.setattr(auth_settings, "set_api_key", raise_missing_vault_key)
+    monkeypatch.setattr(auth_settings, "async_set_api_key", raise_missing_vault_key)
 
     with pytest.raises(Exception) as exc:
-        auth_settings.store_openai_connection(
+        await auth_settings.async_store_openai_connection(
+            MagicMock(),
             SimpleNamespace(id="user-1", org_id="org-1", role="owner"),
             "sk-test",
         )
@@ -81,74 +88,86 @@ def test_store_openai_connection_reports_missing_vault_master_key(monkeypatch):
     assert "VAULT_MASTER_KEY" in exc.value.detail
 
 
-def test_runtime_models_default_high_uses_gpt_5_5(monkeypatch):
+@pytest.mark.asyncio
+async def test_runtime_models_default_high_uses_gpt_5_5(monkeypatch):
     from types import SimpleNamespace
 
     import brain.systems.runtime_settings.models as runtime_models
 
-    monkeypatch.setattr(runtime_models, "get_provider_model_map", lambda *args, **kwargs: {}, raising=False)
+    async def provider_model_map(*args, **kwargs):
+        return {}
 
-    data = runtime_models.get_runtime_models(SimpleNamespace(id="user-1", org_id="org-1"))
+    monkeypatch.setattr(runtime_models, "async_get_provider_model_map", provider_model_map, raising=False)
+
+    data = await runtime_models.async_get_runtime_models(MagicMock(), SimpleNamespace(id="user-1", org_id="org-1"))
 
     assert data.high == "gpt-5.5"
     assert any(option.key == "gpt-5.5" for option in data.options)
 
 
-def test_connect_openai_embedding_key_updates_memory_and_org_runtime(monkeypatch):
+@pytest.mark.asyncio
+async def test_connect_openai_embedding_key_updates_memory_and_org_runtime(monkeypatch):
     from types import SimpleNamespace
 
     import brain.systems.runtime_settings.auth as auth_settings
     import brain.systems.runtime_settings.memory as memory_settings
 
     memory_read = SimpleNamespace(embedder="openai", embedding_status="ready")
-    configure = MagicMock()
-    store_org_key = MagicMock()
+    configure = AsyncMock()
+    store_org_key = AsyncMock()
 
     monkeypatch.setattr(auth_settings, "parse_provider_connect_token", lambda token, provider: (token, "api_key"))
     monkeypatch.setattr(auth_settings, "verify_provider_api_key", lambda *args, **kwargs: None)
-    monkeypatch.setattr(auth_settings, "set_api_key", MagicMock(side_effect=AssertionError("runtime key should not be stored")))
-    monkeypatch.setattr(auth_settings, "_store_org_openai_api_key", store_org_key)
-    monkeypatch.setattr(memory_settings, "configure_openai_embedding_api_key", configure)
-    monkeypatch.setattr(memory_settings, "get_runtime_memory", lambda user: memory_read)
+    monkeypatch.setattr(auth_settings, "async_set_api_key", AsyncMock(side_effect=AssertionError("runtime key should not be stored")))
+    monkeypatch.setattr(auth_settings, "_async_store_org_openai_api_key", store_org_key)
+    monkeypatch.setattr(memory_settings, "async_configure_openai_embedding_api_key", configure)
+    monkeypatch.setattr(memory_settings, "async_get_runtime_memory", AsyncMock(return_value=memory_read))
 
-    result = auth_settings.connect_openai_embedding_api_key(
+    result = await auth_settings.async_connect_openai_embedding_api_key(
+        MagicMock(),
         SimpleNamespace(id="user-1", org_id="org-1", role="owner"),
         "sk-test",
     )
 
     assert result is memory_read
-    configure.assert_called_once_with("sk-test")
-    store_org_key.assert_called_once()
+    configure.assert_awaited_once()
+    assert configure.await_args.args[1] == "sk-test"
+    store_org_key.assert_awaited_once()
     store_args, store_kwargs = store_org_key.call_args
-    assert store_args[0].id == "user-1"
-    assert store_args[0].org_id == "org-1"
-    assert store_args[0].role == "owner"
-    assert store_args[1] == "sk-test"
+    assert store_args[1].id == "user-1"
+    assert store_args[1].org_id == "org-1"
+    assert store_args[1].role == "owner"
+    assert store_args[2] == "sk-test"
     assert store_kwargs == {"required": False}
 
 
-def test_owner_openai_api_key_is_stored_as_org_runtime_key(monkeypatch):
+@pytest.mark.asyncio
+async def test_owner_openai_api_key_is_stored_as_org_runtime_key(monkeypatch):
     from types import SimpleNamespace
 
     import brain.systems.runtime_settings.auth as auth_settings
 
-    store_org = MagicMock()
-    monkeypatch.setattr("brain.systems.vault._encrypt", lambda token: b"encrypted-openai")
-    monkeypatch.setattr(auth_settings, "store_org_api_key", store_org)
+    captured = {}
 
-    stored = auth_settings._store_org_openai_api_key(
+    class FakeSession:
+        async def execute(self, statement, params):
+            captured["params"] = params
+
+    monkeypatch.setattr("brain.systems.vault._encrypt", lambda token: b"encrypted-openai")
+
+    stored = await auth_settings._async_store_org_openai_api_key(
+        FakeSession(),
         SimpleNamespace(id="user-1", org_id="org-1", role="owner"),
         "sk-test",
     )
 
     assert stored is True
-    store_org.assert_called_once_with(
-        "org-1",
-        "openai",
-        b"encrypted-openai",
-        label="Workspace OpenAI key",
-        uow_factory=auth_settings.UnitOfWork,
-    )
+    assert captured["params"] == {
+        "org_id": "org-1",
+        "provider": "openai",
+        "encrypted": b"encrypted-openai",
+        "label": "Workspace OpenAI key",
+    }
 
 
 def test_runtime_settings_snapshot_includes_routing_marketplace(monkeypatch):
@@ -500,7 +519,7 @@ def test_embedding_api_reads_persisted_runtime_config(monkeypatch):
     monkeypatch.setattr(
         embeddings,
         "_runtime_embedding_config",
-        lambda: EmbeddingRuntimeConfig(
+        lambda *args, **kwargs: EmbeddingRuntimeConfig(
             backend="api",
             provider="openai",
             api_model="text-embedding-3-small",
@@ -518,18 +537,24 @@ def test_embedding_api_reads_persisted_runtime_config(monkeypatch):
     assert captured["json"]["dimensions"] == 768
 
 
-def test_connect_gemini_api_key_requires_installation_admin(monkeypatch):
+@pytest.mark.asyncio
+async def test_connect_gemini_api_key_requires_installation_admin(monkeypatch):
     from types import SimpleNamespace
 
-    from brain.systems.runtime_settings.auth import connect_gemini_api_key
+    from brain.systems.runtime_settings.auth import async_connect_gemini_api_key
 
     with pytest.raises(Exception) as exc:
-        connect_gemini_api_key(SimpleNamespace(id="user-1", org_id="org-1", role="member"), "gemini-key")
+        await async_connect_gemini_api_key(
+            MagicMock(),
+            SimpleNamespace(id="user-1", org_id="org-1", role="member"),
+            "gemini-key",
+        )
 
     assert getattr(exc.value, "status_code", None) == 403
 
 
-def test_start_runtime_update_launches_detached_safe_deploy(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_start_runtime_update_launches_detached_safe_deploy(monkeypatch, tmp_path):
     import brain.systems.runtime_settings.self_update as self_update
 
     root = tmp_path / "repo"
@@ -550,11 +575,11 @@ def test_start_runtime_update_launches_detached_safe_deploy(monkeypatch, tmp_pat
     monkeypatch.setenv("ILLO_SELF_UPDATE_STATE_DIR", str(state_dir))
     monkeypatch.delenv("ILLO_SELF_UPDATE_COMMAND", raising=False)
     monkeypatch.delenv("ILLO_SELF_UPDATE_REQUEST_FILE", raising=False)
-    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 2)
+    monkeypatch.setattr(self_update, "_async_active_agent_run_count", AsyncMock(return_value=2))
     monkeypatch.setattr(self_update, "_pid_running", lambda _pid: False)
     monkeypatch.setattr(self_update.subprocess, "Popen", fake_popen)
 
-    status = self_update.start_runtime_update(requested_by="owner-1")
+    status = await self_update.async_start_runtime_update(MagicMock(), requested_by="owner-1")
 
     assert status.status == "running"
     assert status.available is True
@@ -571,7 +596,8 @@ def test_start_runtime_update_launches_detached_safe_deploy(monkeypatch, tmp_pat
     assert (state_dir / "illo-self-update.pid").read_text(encoding="utf-8").strip() == "4242"
 
 
-def test_start_runtime_update_reuses_running_update(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_start_runtime_update_reuses_running_update(monkeypatch, tmp_path):
     import brain.systems.runtime_settings.self_update as self_update
 
     root = tmp_path / "repo"
@@ -588,7 +614,7 @@ def test_start_runtime_update_reuses_running_update(monkeypatch, tmp_path):
     monkeypatch.setenv("ILLO_SELF_UPDATE_STATE_DIR", str(state_dir))
     monkeypatch.delenv("ILLO_SELF_UPDATE_COMMAND", raising=False)
     monkeypatch.delenv("ILLO_SELF_UPDATE_REQUEST_FILE", raising=False)
-    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 1)
+    monkeypatch.setattr(self_update, "_async_active_agent_run_count", AsyncMock(return_value=1))
     monkeypatch.setattr(self_update, "_pid_running", lambda pid: pid == 5150)
     monkeypatch.setattr(
         self_update.subprocess,
@@ -596,14 +622,15 @@ def test_start_runtime_update_reuses_running_update(monkeypatch, tmp_path):
         MagicMock(side_effect=AssertionError("should not launch a duplicate update")),
     )
 
-    status = self_update.start_runtime_update(requested_by="owner-1")
+    status = await self_update.async_start_runtime_update(MagicMock(), requested_by="owner-1")
 
     assert status.status == "running"
     assert status.pid == 5150
     assert status.detail == "Illospace update is already running."
 
 
-def test_start_runtime_update_rejects_non_checkout_without_override(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_start_runtime_update_rejects_non_checkout_without_override(monkeypatch, tmp_path):
     import brain.systems.runtime_settings.self_update as self_update
 
     root = tmp_path / "repo"
@@ -617,13 +644,14 @@ def test_start_runtime_update_rejects_non_checkout_without_override(monkeypatch,
     monkeypatch.delenv("ILLO_SELF_UPDATE_REQUEST_FILE", raising=False)
 
     with pytest.raises(Exception) as exc:
-        self_update.start_runtime_update(requested_by="owner-1")
+        await self_update.async_start_runtime_update(MagicMock(), requested_by="owner-1")
 
     assert getattr(exc.value, "status_code", None) == 409
     assert "not running from a git checkout" in exc.value.detail
 
 
-def test_start_runtime_update_queues_compose_sidecar_request(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_start_runtime_update_queues_compose_sidecar_request(monkeypatch, tmp_path):
     import json
 
     import brain.systems.runtime_settings.self_update as self_update
@@ -635,9 +663,9 @@ def test_start_runtime_update_queues_compose_sidecar_request(monkeypatch, tmp_pa
     monkeypatch.setenv("ILLO_SELF_UPDATE_REQUEST_FILE", str(request_file))
     monkeypatch.setenv("ILLO_SELF_UPDATE_STATUS_FILE", str(status_file))
     monkeypatch.setenv("ILLO_SELF_UPDATE_LOG_PATH", str(log_path))
-    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 3)
+    monkeypatch.setattr(self_update, "_async_active_agent_run_count", AsyncMock(return_value=3))
 
-    status = self_update.start_runtime_update(requested_by="owner-1")
+    status = await self_update.async_start_runtime_update(MagicMock(), requested_by="owner-1")
 
     assert status.status == "running"
     assert status.available is True
@@ -651,7 +679,8 @@ def test_start_runtime_update_queues_compose_sidecar_request(monkeypatch, tmp_pa
     assert status_payload["status"] == "queued"
 
 
-def test_runtime_update_status_reports_compose_sidecar_available(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_runtime_update_status_reports_compose_sidecar_available(monkeypatch, tmp_path):
     import brain.systems.runtime_settings.self_update as self_update
 
     request_file = tmp_path / "self-update" / "request.json"
@@ -664,16 +693,17 @@ def test_runtime_update_status_reports_compose_sidecar_available(monkeypatch, tm
 
     monkeypatch.setenv("ILLO_SELF_UPDATE_REQUEST_FILE", str(request_file))
     monkeypatch.setenv("ILLO_SELF_UPDATE_STATUS_FILE", str(status_file))
-    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 0)
+    monkeypatch.setattr(self_update, "_async_active_agent_run_count", AsyncMock(return_value=0))
 
-    status = self_update.get_runtime_update_status()
+    status = await self_update.async_get_runtime_update_status(MagicMock())
 
     assert status.status == "idle"
     assert status.available is True
     assert status.detail == "Compose updater sidecar is ready."
 
 
-def test_runtime_update_status_waits_for_compose_sidecar_heartbeat(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_runtime_update_status_waits_for_compose_sidecar_heartbeat(monkeypatch, tmp_path):
     import brain.systems.runtime_settings.self_update as self_update
 
     request_file = tmp_path / "self-update" / "request.json"
@@ -681,9 +711,9 @@ def test_runtime_update_status_waits_for_compose_sidecar_heartbeat(monkeypatch, 
 
     monkeypatch.setenv("ILLO_SELF_UPDATE_REQUEST_FILE", str(request_file))
     monkeypatch.setenv("ILLO_SELF_UPDATE_HEARTBEAT_FILE", str(heartbeat_file))
-    monkeypatch.setattr(self_update, "_active_agent_run_count", lambda: 0)
+    monkeypatch.setattr(self_update, "_async_active_agent_run_count", AsyncMock(return_value=0))
 
-    status = self_update.get_runtime_update_status()
+    status = await self_update.async_get_runtime_update_status(MagicMock())
 
     assert status.status == "idle"
     assert status.available is False

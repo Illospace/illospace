@@ -14,10 +14,10 @@ from brain.app.api.routers.cortex._helpers import UPLOAD_DIR, _caller_is_service
 from brain.app.api.routers.cortex._router import router
 from brain.systems.cortex.project_context.github import (
     GitHubConnectorError,
-    connect_with_token,
-    get_repo_by_slug,
+    async_connect_with_token,
+    async_get_repo_by_slug,
+    async_search_repos,
     parse_github_repo_slug,
-    search_repos,
 )
 from brain.systems.cortex.project_context.profiles import attachment_to_read, profile_to_read
 from brain.systems.cortex.project_context.resources import normalize_project_resource
@@ -371,13 +371,13 @@ async def reorder_project_resources(
 
 
 @router.post("/project-context/github/connect", response_model=GitHubConnectRead)
-def connect_github_project_context(
+async def connect_github_project_context(
     body: GitHubVaultTokenRequest,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
 ):
     try:
-        token = project_context_vault.github_token_from_vault(
+        token = await project_context_vault.async_github_token_from_vault(
             body.vault_key,
             user=user,
             unlock_token=request.headers.get(project_context_vault.VAULT_UNLOCK_HEADER),
@@ -385,19 +385,19 @@ def connect_github_project_context(
     except project_context_vault.ProjectContextVaultError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
-        return connect_with_token(token)
+        return await async_connect_with_token(token)
     except GitHubConnectorError as exc:
         raise _github_error_to_http(exc) from exc
 
 
 @router.post("/project-context/github/search", response_model=GitHubRepoSearchRead)
-def search_github_project_context(
+async def search_github_project_context(
     body: GitHubRepoSearchRequest,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
 ):
     try:
-        token = project_context_vault.github_token_from_vault(
+        token = await project_context_vault.async_github_token_from_vault(
             body.vault_key,
             user=user,
             unlock_token=request.headers.get(project_context_vault.VAULT_UNLOCK_HEADER),
@@ -405,13 +405,13 @@ def search_github_project_context(
     except project_context_vault.ProjectContextVaultError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
-        return search_repos(body.query, token=token)
+        return await async_search_repos(body.query, token=token)
     except GitHubConnectorError as exc:
         raise _github_error_to_http(exc) from exc
 
 
 @router.post("/project-context/github/bind-token", response_model=GitHubProjectTokenBindRead, status_code=201)
-def bind_github_project_token(
+async def bind_github_project_token(
     body: GitHubProjectTokenBindRequest,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
@@ -424,7 +424,7 @@ def bind_github_project_token(
         raise HTTPException(status_code=400, detail="GitHub repository must be owner/repo or a GitHub URL")
 
     try:
-        token = project_context_vault.github_token_from_vault(
+        token = await project_context_vault.async_github_token_from_vault(
             body.vault_key,
             user=user,
             unlock_token=request.headers.get(project_context_vault.VAULT_UNLOCK_HEADER),
@@ -434,16 +434,16 @@ def bind_github_project_token(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
     try:
-        repo = get_repo_by_slug(repo_slug, token=token)
+        repo = await async_get_repo_by_slug(repo_slug, token=token)
     except GitHubConnectorError as exc:
         raise _github_error_to_http(exc) from exc
     if repo is None:
         raise HTTPException(status_code=404, detail="Repository not visible to this token")
 
-    from brain.systems.vault import bind_project_secret_by_key
+    from brain.systems.vault import async_bind_project_secret_by_key
 
     try:
-        binding = bind_project_secret_by_key(
+        binding = await async_bind_project_secret_by_key(
             body.vault_key,
             user_id=user_id,
             org_id=str(user.get("org_id")) if user.get("org_id") else None,

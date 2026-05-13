@@ -700,7 +700,7 @@ def _run_event_consumer_running() -> bool | None:
 
 
 @router.get("/health/live")
-def health_live():
+async def health_live():
     """Cheap liveness probe: process is up, no dependency checks."""
     return liveness_health_snapshot()
 
@@ -1241,7 +1241,7 @@ def _tail_text_lines(path: Path, line_count: int) -> list[str]:
 
 
 @router.get("/system/cron-logs")
-def cron_logs(
+async def cron_logs(
     job: str = Query("", description="Job name to filter logs for"),
     lines: int = Query(100, ge=1, le=500, description="Number of tail lines per file"),
     files: int = Query(5, ge=1, le=25, description="Maximum files per log directory"),

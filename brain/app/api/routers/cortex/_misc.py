@@ -276,7 +276,7 @@ async def webhook_reply(request: Request):
 # ── GPU health ─────────────────────────────────────────────────
 
 @router.get("/system/gpu-server/health")
-def gpu_server_health(user: dict[str, Any] = Depends(get_current_user)):
+async def gpu_server_health(user: dict[str, Any] = Depends(get_current_user)):
     from brain.platform.gpu_client import get_client
     try:
         health = get_client().health()
@@ -286,7 +286,7 @@ def gpu_server_health(user: dict[str, Any] = Depends(get_current_user)):
 
 
 @router.post("/system/gpu-server/workers/{worker_name}/restart")
-def restart_gpu_worker(worker_name: str, user: dict[str, Any] = Depends(get_current_user)):
+async def restart_gpu_worker(worker_name: str, user: dict[str, Any] = Depends(get_current_user)):
     """Restart a GPU server worker (embedding or llm)."""
     import httpx
     try:
@@ -584,7 +584,7 @@ async def upload_file(
 
 
 @router.get("/uploads/preview")
-def preview_upload(
+async def preview_upload(
     request: Request,
     url: Annotated[str, Query(min_length=1)],
     user: dict[str, Any] = Depends(get_current_user),
