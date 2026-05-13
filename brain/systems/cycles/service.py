@@ -494,7 +494,7 @@ def execute_cycle_run(run_id: int) -> None:
     run_metadata = None
     cycle_name = ""
     cycle_user_id = None
-    run_id = None
+    agent_run_id = None
 
     with UnitOfWork() as uow:
         run = uow.session.scalars(
@@ -585,7 +585,7 @@ def execute_cycle_run(run_id: int) -> None:
             "thinking_override": cycle.thinking_override,
         }
         run_message = f"[Idea: \"{idea.title}\" | {idea.id}]\n\n{cycle.prompt[:2000]}"
-        run_id = _admit_cycle_run(
+        agent_run_id = _admit_cycle_run(
             uow.session,
             idea_id=idea.id,
             message=run_message,
@@ -594,7 +594,7 @@ def execute_cycle_run(run_id: int) -> None:
             metadata=run_metadata,
             cycle_run_id=run.id,
         )
-        if run_id is None:
+        if agent_run_id is None:
             _finalize_cycle_run(
                 run,
                 cycle,
@@ -610,7 +610,7 @@ def execute_cycle_run(run_id: int) -> None:
             owner,
         )
         idea_snapshot = _serialize_idea(idea)
-        run.run_id = run_id
+        run.run_id = agent_run_id
         cycle.last_status = "running"
         cycle.last_error = None
     if should_publish_idea and idea_snapshot:
@@ -619,10 +619,10 @@ def execute_cycle_run(run_id: int) -> None:
         publish("thread_message", {"idea_id": idea_id, "message": message_payload})
     if status_payload:
         publish("status_change", status_payload)
-    if run_id is not None:
+    if agent_run_id is not None:
         logger.info(
             "Enqueued cycle run #%s for idea %s... (cycle=%s)",
-            run_id,
+            agent_run_id,
             _short_identifier(idea_id),
             cycle_name,
         )

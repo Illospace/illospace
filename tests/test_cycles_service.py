@@ -58,12 +58,19 @@ class _FirstResult:
 
 
 class _ExecuteCycleSession:
-    def __init__(self, *, run, cycle, idea, owner=None):
+    def __init__(self, *, run, cycle, idea, owner=None, expected_run_id=None):
         self._scalar_values = [run, cycle, idea]
         self._owner = owner
         self.added = []
+        self.statements = []
+        self.expected_run_id = expected_run_id
 
     def scalars(self, statement):
+        self.statements.append(statement)
+        if self.expected_run_id is not None and len(self.statements) == 1:
+            params = statement.compile().params
+            if self.expected_run_id not in params.values():
+                return _ScalarResult(None)
         return _ScalarResult(self._scalar_values.pop(0))
 
     def execute(self, statement):
@@ -331,11 +338,10 @@ def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeypatch):
     idea.active_agents = []
     idea.attachments = []
 
-    session = _ExecuteCycleSession(run=run, cycle=cycle, idea=idea)
+    session = _ExecuteCycleSession(run=run, cycle=cycle, idea=idea, expected_run_id=run.id)
     monkeypatch.setattr(service, "UnitOfWork", lambda: _ExecuteCycleUoW(session))
     monkeypatch.setattr(service, "_admit_cycle_run", lambda *args, **kwargs: 77)
     monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
-    monkeypatch.setattr(service, "_capture_cycle_emotion", lambda *args, **kwargs: None)
 
     service.execute_cycle_run(run.id)
 
