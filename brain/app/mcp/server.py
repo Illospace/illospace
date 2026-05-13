@@ -1151,6 +1151,7 @@ def tool_vault_secret_prompt(
         "key_name": normalized_key,
         "description": clean_description,
         "category": normalized_category,
+        "prompt": prompt,
         "vault_url": _vault_prompt_url(
             key_name=normalized_key,
             description=clean_description,
