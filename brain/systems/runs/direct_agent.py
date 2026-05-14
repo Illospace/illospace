@@ -173,7 +173,7 @@ from brain.systems.sessions.harvest import (  # noqa: F401
 
 
 # ── Client ───────────────────────────────────────────────────
-# All client creation goes through brain.platform.integrations.llm.resolve_llm_client().
+# LLM clients are normally resolved before this blocking loop enters.
 # No singleton, no ALLOW_* flags, no filesystem credential files.
 
 def _normalize_model(model: str) -> str:

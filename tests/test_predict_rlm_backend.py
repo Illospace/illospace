@@ -670,8 +670,8 @@ def test_build_predict_rlm_lm_uses_anthropic_api_key_auth(monkeypatch):
                 captured["cache"] = cache
 
     monkeypatch.setattr(
-        "brain.systems.runs.predict_rlm_backend._resolve_key_from_db",
-        lambda **kwargs: ("sk-ant-test", "user_default"),
+        "brain.systems.runs.predict_rlm_backend._resolve_key_from_env",
+        lambda **kwargs: ("sk-ant-test", "env"),
     )
     monkeypatch.setitem(sys.modules, "dspy", FakeDSPY)
 

@@ -1,4 +1,4 @@
-"""Helpers for running the legacy direct-agent loop from async recipes."""
+"""Helpers for running the blocking direct-agent loop from async recipes."""
 
 from __future__ import annotations
 
