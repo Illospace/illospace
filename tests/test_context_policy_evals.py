@@ -161,3 +161,19 @@ def test_nightly_context_eval_pipeline_is_shadow_only_for_provided_sources():
     assert result["active_policy_changed"] is False
     assert result["runtime_flags_mutated"] is False
     assert result["evaluation"]["replayable_case_count"] == 1
+
+
+def test_nightly_context_eval_reports_unavailable_candidate_persistence():
+    from brain.jobs.pipelines.nightly_context_eval import run_nightly_context_policy_eval
+
+    result = run_nightly_context_policy_eval(
+        target_date=NOW.date(),
+        sources=[_case()],
+        load_recent=False,
+        persist_candidates=True,
+        now=NOW,
+    )
+
+    assert result["persist_candidates"] is True
+    assert result["persisted_candidates"] == []
+    assert result["persist_error"] == "candidate persistence is unavailable"

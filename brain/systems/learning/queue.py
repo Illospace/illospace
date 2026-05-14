@@ -575,17 +575,6 @@ class AfterRunLearningQueueService:
         )
 
 
-def queue_after_run_learning_for_run(
-    run_id: int,
-    *,
-    policy: LearningBudgetPolicy | None = None,
-    ledger: LearningBudgetLedger | None = None,
-) -> AfterRunLearningQueueResult | None:
-    """Legacy no-op: after-run learning persistence has been removed."""
-    logger.debug("after-run learning queue disabled for run %s", run_id)
-    return None
-
-
 def build_eval_case_from_trajectory(trajectory: Mapping[str, Any]) -> dict[str, Any]:
     """Build the compact eval-case payload from an already-built trajectory."""
     trajectory = _mapping(trajectory)
@@ -960,5 +949,4 @@ __all__ = [
     "AfterRunLearningSource",
     "AfterRunSkillReference",
     "build_eval_case_from_trajectory",
-    "queue_after_run_learning_for_run",
 ]

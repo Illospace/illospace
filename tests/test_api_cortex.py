@@ -810,14 +810,13 @@ async def client():
 
 
 @pytest.mark.asyncio
-async def test_legacy_agent_status_endpoint_is_retired(client):
+async def test_agent_status_endpoint_is_removed(client):
     resp = await client.post(
         "/api/cortex/ideas/idea-1/agent-status",
         json={"action": "started", "label": "legacy-worker"},
     )
 
-    assert resp.status_code == 410
-    assert "AgentRun events" in resp.json()["detail"]
+    assert resp.status_code == 404
 
 
 @pytest.mark.asyncio

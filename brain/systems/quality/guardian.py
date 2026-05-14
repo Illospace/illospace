@@ -215,30 +215,3 @@ async def get_scout_checklist() -> str:
         md += "\n"
 
     return md
-
-def list_policy_promotions(
-    status: str | None = None,
-    promotion_type: str | None = None,
-) -> list[dict]:
-    """Legacy no-op: policy promotion persistence has been removed."""
-    return []
-
-
-def policy_promotion_activation_report(promotion_id: int) -> dict | None:
-    """Legacy no-op: policy promotion persistence has been removed."""
-    return None
-
-
-def activate_policy_promotion(promotion_id: int, *, reviewer_id: str | None = None) -> dict | None:
-    """Legacy no-op: policy promotion persistence has been removed."""
-    return None
-
-
-def rollback_policy_promotion(
-    promotion_id: int,
-    *,
-    reason: str,
-    reviewer_id: str | None = None,
-) -> dict | None:
-    """Legacy no-op: policy promotion persistence has been removed."""
-    return None

@@ -60,12 +60,6 @@ def reply_to_cortex(idea_id: str, content: str, attachments: list | None = None,
         raise RuntimeError(f"Failed to post reply to cortex thread {idea_id}: {e}") from e
 
 
-def update_agent_status(idea_id: str, action: str, label: str, **kwargs) -> dict:
-    """Retired compatibility stub for the pre-AgentRun status endpoint."""
-    _ = (idea_id, action, label, kwargs)
-    raise RuntimeError("Legacy agent-status updates are retired; use AgentRun events and projections.")
-
-
 def main():
     global DASHBOARD_URL
     parser = argparse.ArgumentParser(description="Post Illo's response to a Cortex idea thread")
@@ -74,10 +68,6 @@ def main():
     parser.add_argument("--dashboard-url", default=None, help=f"Dashboard URL (default: {DASHBOARD_URL})")
     parser.add_argument("--restart-dashboard", action="store_true",
                         help="Restart illo-dashboard service after posting reply")
-    parser.add_argument("--agent-started", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--agent-completed", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--label", default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--skill", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.dashboard_url:
@@ -86,16 +76,11 @@ def main():
     metadata = None  # reserved for future use via CLI args
 
     try:
-        if args.agent_started:
-            update_agent_status(args.idea_id, "started", args.label or "", skill=args.skill or "")
-        elif args.agent_completed:
-            update_agent_status(args.idea_id, "completed", args.label or "", result=args.content or "")
-        else:
-            if not args.content:
-                print("Error: --content is required", file=sys.stderr)
-                sys.exit(1)
-            result = reply_to_cortex(args.idea_id, args.content, metadata=metadata)
-            print(json.dumps(result, indent=2))
+        if not args.content:
+            print("Error: --content is required", file=sys.stderr)
+            sys.exit(1)
+        result = reply_to_cortex(args.idea_id, args.content, metadata=metadata)
+        print(json.dumps(result, indent=2))
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

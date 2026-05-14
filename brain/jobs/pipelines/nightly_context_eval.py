@@ -30,17 +30,6 @@ def gather_recent_context_policy_eval_sources(
     return []
 
 
-def persist_context_policy_candidate_decisions(
-    evaluation_payload: Mapping[str, Any],
-    *,
-    user_id: str | None = None,
-    org_id: str | None = None,
-    visibility: str = "private",
-) -> list[dict[str, Any]]:
-    """Legacy no-op: policy-update candidate storage was removed."""
-    return []
-
-
 def run_nightly_context_policy_eval(
     *,
     target_date: date | None = None,
@@ -81,14 +70,7 @@ def run_nightly_context_policy_eval(
     persisted: list[dict[str, Any]] = []
     persist_error = None
     if persist_candidates:
-        try:
-            persisted = persist_context_policy_candidate_decisions(
-                evaluation,
-                user_id=user_id,
-                org_id=org_id,
-            )
-        except Exception as exc:
-            persist_error = str(exc)
+        persist_error = "candidate persistence is unavailable"
 
     payload = {
         "pipeline": "nightly_context_eval",

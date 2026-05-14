@@ -786,17 +786,6 @@ async def update_presence(request: Request, user: dict[str, Any] = Depends(get_c
     return {"viewers": viewers}
 
 
-# ── Retired legacy agent status ────────────────────────────────
-
-@router.post("/ideas/{idea_id}/agent-status")
-async def update_agent_status(idea_id: str, request: Request, user: dict[str, Any] = Depends(get_current_user)):
-    _ = (idea_id, request, user)
-    raise HTTPException(
-        status_code=410,
-        detail="Legacy agent-status updates are retired; use AgentRun events and projections.",
-    )
-
-
 # ── Unified stream ─────────────────────────────────────────────
 
 async def unified_stream_payload(
