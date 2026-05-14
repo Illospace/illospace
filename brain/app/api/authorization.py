@@ -272,7 +272,7 @@ def can_manage_memory(user: Mapping[str, Any] | None) -> bool:
 
 
 def can_manage_skills(user: Mapping[str, Any] | None) -> bool:
-    return has_permission(user, PERMISSION_SKILLS_MANAGE)
+    return bool(user and user.get("org_id")) or has_permission(user, PERMISSION_SKILLS_MANAGE)
 
 
 def can_manage_system(user: Mapping[str, Any] | None) -> bool:

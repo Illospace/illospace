@@ -11,7 +11,6 @@ from httpx import ASGITransport, AsyncClient
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import (
     PERMISSION_SCHEDULER_MANAGE,
-    PERMISSION_SKILLS_MANAGE,
     PERMISSION_VAULT_SHARE,
 )
 from brain.app.api.deps import get_db
@@ -80,35 +79,6 @@ def _skill_obj(**overrides):
 @pytest.mark.parametrize(
     ("method", "url", "body"),
     [
-        ("POST", "/api/skills/new", {"name": "demo", "procedure": "Do the thing"}),
-        ("POST", "/api/skills/import", [{"name": "demo", "procedure": "Do the thing"}]),
-        ("PATCH", "/api/skills/1", {"procedure": "Updated"}),
-        ("POST", "/api/skills/1/archive", None),
-        ("DELETE", "/api/skills/1", None),
-        ("PUT", "/api/skills/1/edit", {"procedure": "Updated"}),
-        ("POST", "/api/skills/1/assets", {"path": "references/context.md", "content": "context"}),
-        ("PUT", "/api/skills/1/assets/references/context.md", {"content": "updated"}),
-        ("DELETE", "/api/skills/1/assets/references/context.md", None),
-        ("POST", "/api/skills/demo/versions/1/restore", None),
-        ("POST", "/api/skills/demo/guardrail", {"text": "Do not leak secrets"}),
-        ("POST", "/api/skills/demo/procedure-step", {"text": "Check inputs"}),
-        ("POST", "/api/skills/demo/trigger", {"direction": "for", "pattern": "demo"}),
-        ("DELETE", "/api/skills/demo/trigger/0", None),
-    ],
-)
-async def test_member_cannot_mutate_skills(client, method, url, body):
-    c, app = client
-    _act_as(app, MEMBER)
-
-    response = await c.request(method, url, json=body)
-
-    assert response.status_code == 403
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("method", "url", "body"),
-    [
         ("POST", "/api/system/scheduler/sync", {}),
         ("POST", "/api/system/scheduler/materialize", {}),
         ("POST", "/api/system/scheduler/drain", {}),
@@ -167,9 +137,9 @@ async def test_personal_vault_crud_remains_user_owned(client):
 
 
 @pytest.mark.asyncio
-async def test_explicit_skill_permission_can_mutate_skill(client):
+async def test_team_member_can_mutate_skill(client):
     c, app = client
-    _act_as(app, {**MEMBER, "permissions": [PERMISSION_SKILLS_MANAGE]})
+    _act_as(app, MEMBER)
 
     with patch("brain.app.api.routers.skills.SkillRepository") as repo:
         repo.return_value.add_guardrail.return_value = _skill_obj()

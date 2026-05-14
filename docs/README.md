@@ -10,6 +10,7 @@ Start here when you want to understand, run, or extend Illo Brain.
 - [Deployment](deployment.md) - deployment overview and advanced native notes.
 - [Cycles](cycles.md) - scheduler-owned recurring jobs.
 - [Security Model](security-model.md) - secrets, tool execution, browser sessions, and data boundaries.
+- [Personal Agent Connections MVP](personal-agent-connections-mvp.md) - implementation plan for connecting Illo with Hermes and OpenClaw.
 - [Dependency Licensing](dependency-licensing.md) - Apache 2.0 project policy and third-party review notes.
 
 Planning notes, runtime journals, memory exports, logs, and operator notes belong
