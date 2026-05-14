@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 
 from brain.kernel import config
 from brain.platform.async_io import (
+    async_http_client,
     ensure_dir,
     run_subprocess,
     write_text as write_text_async,
@@ -196,7 +197,7 @@ def pick_source(state):
 async def async_fetch_content(url):
     """Fetch and extract readable content from a URL."""
     try:
-        async with httpx.AsyncClient(
+        async with async_http_client(
             follow_redirects=True,
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=45.0,

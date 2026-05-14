@@ -17,10 +17,10 @@ import logging
 import os
 import re
 from typing import Any, Literal
-import urllib.request
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from brain.platform.async_io import http_post
 from brain.platform.integrations.llm import resolve_llm_client
 from brain.platform.integrations.providers import LLMRequest, get_provider
 from brain.platform.providers.model_policy import infer_provider_from_model, resolve_default_provider
@@ -371,7 +371,7 @@ def _normalize_model_name(model: str) -> str:
 def _call_ollama(prompt: str, model: str) -> str | None:
     """Call Ollama using its schema-format hint when supported."""
     try:
-        payload = json.dumps({
+        payload = {
             "model": model,
             "prompt": f"{HARVEST_SYSTEM_PROMPT}\n\n{prompt}",
             "stream": False,
@@ -379,15 +379,16 @@ def _call_ollama(prompt: str, model: str) -> str | None:
             "options": {"temperature": 0.0, "num_predict": 1200},
             "think": False,
             "keep_alive": "5m",
-        })
-        req = urllib.request.Request(
+        }
+        resp = http_post(
             f"{OLLAMA_URL}/api/generate",
-            data=payload.encode(),
+            json=payload,
             headers={"Content-Type": "application/json"},
+            timeout=30,
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read())
-            return str(result.get("response", "")).strip() or None
+        resp.raise_for_status()
+        result = resp.json()
+        return str(result.get("response", "")).strip() or None
     except Exception as e:
         logger.warning("Ollama harvest call failed: %s", e)
         return None

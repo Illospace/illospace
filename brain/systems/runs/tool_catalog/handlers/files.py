@@ -8,6 +8,7 @@ from brain.systems.runs.project_execution_env import (
     prepare_project_execution_env as _prepare_project_execution_env,
     redact_sensitive_output as _redact_sensitive_output,
 )
+from brain.platform.async_io import run_subprocess_sync
 
 
 def _resolve_path(path: str, working_dir: str | None = None) -> str:
@@ -78,7 +79,7 @@ def _handle_exec_command(
 
     try:
         if needs_shell:
-            proc = subprocess.run(
+            proc = run_subprocess_sync(
                 command,
                 shell=True,
                 capture_output=True,
@@ -88,7 +89,7 @@ def _handle_exec_command(
                 env=project_execution.env,
             )
         else:
-            proc = subprocess.run(
+            proc = run_subprocess_sync(
                 _shlex.split(command),
                 capture_output=True,
                 text=True,
@@ -146,7 +147,7 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
             script_path = f.name
 
         try:
-            proc = subprocess.run(
+            proc = run_subprocess_sync(
                 [sys.executable, script_path],
                 capture_output=True,
                 text=True,
@@ -504,7 +505,7 @@ def _handle_search_files(pattern: str, path: str | None = None, glob: str | None
     cmd = ["grep", "-rn", "--include", glob or "*", "-E", pattern, search_path]
 
     try:
-        proc = subprocess.run(
+        proc = run_subprocess_sync(
             cmd, capture_output=True, text=True, timeout=30,
         )
         output = proc.stdout[:_MAX_RESULT_CHARS]

@@ -28,7 +28,7 @@ from brain.kernel.common.time import utcnow as _shared_utcnow
 from brain.systems.cortex.events import publish_safe
 from brain.systems.cortex.resources.telemetry import build_browser_resource_summary
 from brain.systems.cortex.upload_preview import public_static_upload_url, static_upload_url_for
-from brain.platform.async_io import copy_file, ensure_dir, glob_paths, iter_dir, path_exists, path_is_file, path_stat
+from brain.platform.async_io import async_http_client, copy_file, ensure_dir, glob_paths, iter_dir, path_exists, path_is_file, path_stat
 from brain.platform.db.models.browser import BrowserSession
 from brain.platform.db.models.idea import Idea, VisualBlock
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -1140,7 +1140,7 @@ result = {"image": base64.b64encode(data).decode("ascii"), "info": page_info()}
         deadline = asyncio.get_running_loop().time() + 20
         last_error: Exception | None = None
         timeout = httpx.Timeout(1.0, connect=1.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with async_http_client(timeout=timeout) as client:
             while asyncio.get_running_loop().time() < deadline:
                 if self._chrome_process and self._chrome_process.returncode is not None:
                     stderr = ""

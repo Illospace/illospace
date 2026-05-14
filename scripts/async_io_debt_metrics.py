@@ -97,6 +97,7 @@ ISOLATION_BOUNDARIES = {
 }
 OUTER_RUNNER_FUNCTIONS = {
     "_heartbeat_run_once",
+    "_supervisor_loop",
     "cli",
     "_mark_run_failed_after_runner_error",
     "_materialize_project_context",

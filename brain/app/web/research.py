@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
-from brain.platform.async_io import run_blocking
+from brain.platform.async_io import async_http_client, run_blocking
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def _assert_safe_url(url: str) -> str:
 
 
 def _http_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
+    return async_http_client(
         timeout=httpx.Timeout(_DEFAULT_TIMEOUT, connect=_DEFAULT_TIMEOUT),
         headers={
             "User-Agent": "illo-brain/1.0",

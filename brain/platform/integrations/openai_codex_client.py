@@ -9,6 +9,8 @@ from typing import Any, Iterator
 
 import httpx
 
+from brain.platform.async_io import sync_http_client
+
 from brain.platform.integrations.openai_cache import normalize_openai_request_kwargs
 
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
@@ -197,7 +199,7 @@ class OpenAICodexClient:
             or os.environ.get("OPENAI_CODEX_BASE_URL")
             or DEFAULT_CODEX_BASE_URL
         ).rstrip("/")
-        self._client = httpx.Client(
+        self._client = sync_http_client(
             base_url=resolved_base_url,
             timeout=timeout,
             headers={

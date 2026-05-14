@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -742,7 +742,23 @@ async def _supervisor_async_loop() -> None:
             stop_event.set()
         live_tasks = [task for task, _stop_event in slots if not task.done()]
         if live_tasks:
-            await asyncio.gather(*live_tasks, return_exceptions=True)
+            done, pending = await asyncio.wait(
+                live_tasks,
+                timeout=max(1.0, _runner_reconcile_interval_sec),
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                cancelled, still_pending = await asyncio.wait(pending, timeout=1.0)
+                for task in still_pending:
+                    logger.warning(
+                        "agent_run_runner_slot_shutdown_timeout",
+                        extra={"task": task.get_name()},
+                    )
+                done.update(cancelled)
+            for task in done:
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
         with _runner_lock:
             _runner_slots.clear()
 

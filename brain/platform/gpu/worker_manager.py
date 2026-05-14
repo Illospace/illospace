@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+from brain.platform.async_io import popen_sync, run_subprocess_sync
 from brain.platform.gpu.config import WorkerManifest
 from brain.platform.gpu.vram import VRAMBookkeeper
 
@@ -220,7 +221,7 @@ class WorkerManager:
             log_path = os.path.join(log_dir, f"gpu_worker_{name}.log")
             log_file = open(log_path, "a")
 
-            popen = subprocess.Popen(
+            popen = popen_sync(
                 [sys.executable, "-m", manifest.worker_module,
                  "--name", manifest.name,
                  "--model-path", manifest.model_path,
@@ -338,7 +339,7 @@ class WorkerManager:
     def _find_matching_worker_pids(self, w: dict) -> list[int]:
         """Find worker processes by module name and socket path."""
         try:
-            result = subprocess.run(
+            result = run_subprocess_sync(
                 ["ps", "-axo", "pid=,command="],
                 capture_output=True,
                 text=True,
@@ -370,7 +371,7 @@ class WorkerManager:
     def _find_conflicting_gpu_processes(self) -> list[tuple[int, str]]:
         """Find known model-serving processes outside this manager."""
         try:
-            result = subprocess.run(
+            result = run_subprocess_sync(
                 ["ps", "-axo", "pid=,command="],
                 capture_output=True,
                 text=True,

@@ -73,6 +73,9 @@ def bad_runner(coro):
 
 def main(coro):
     return asyncio.run(coro)
+
+def _supervisor_loop():
+    return asyncio.run(asyncio.sleep(0))
 ''',
         encoding="utf-8",
     )
@@ -82,7 +85,7 @@ def main(coro):
 
     assert categories.count("sync_io_edge_refs") == 3
     assert categories.count("asyncio_run_inner_refs") == 1
-    assert categories.count("outer_async_runner_refs") == 1
+    assert categories.count("outer_async_runner_refs") == 2
 
 
 def test_metric_keeps_cancel_token_sync_boundary_narrow(tmp_path):

@@ -41,7 +41,7 @@ from brain.app.api.routers.ws import ws_manager
 from brain.app.api.authorization import require_org_context
 from brain.platform.db.repositories.ideas import IdeaConnectionRepository
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.async_io import ensure_dir, run_subprocess, write_bytes
+from brain.platform.async_io import async_http_post, ensure_dir, run_subprocess, write_bytes
 from brain.systems.cortex.title_generation import (
     generate_display_title,
 )
@@ -289,12 +289,11 @@ async def gpu_server_health(user: dict[str, Any] = Depends(get_current_user)):
 @router.post("/system/gpu-server/workers/{worker_name}/restart")
 async def restart_gpu_worker(worker_name: str, user: dict[str, Any] = Depends(get_current_user)):
     """Restart a GPU server worker (embedding or llm)."""
-    import httpx
     try:
         from brain.kernel.config import GPU_SERVER_URL
         # Unload then load
-        httpx.post(f"{GPU_SERVER_URL}/models/{worker_name}/unload", timeout=15)
-        resp = httpx.post(f"{GPU_SERVER_URL}/models/{worker_name}/load", timeout=120)
+        await async_http_post(f"{GPU_SERVER_URL}/models/{worker_name}/unload", timeout=15)
+        resp = await async_http_post(f"{GPU_SERVER_URL}/models/{worker_name}/load", timeout=120)
         return resp.json()
     except Exception as e:
         return JSONResponse(status_code=503, content={"error": str(e)})

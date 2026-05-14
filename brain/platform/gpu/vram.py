@@ -3,12 +3,14 @@
 import logging
 import subprocess
 
+from brain.platform.async_io import run_subprocess_sync
+
 logger = logging.getLogger("brain.platform.gpu.vram")
 
 
 def query_gpu_total_mb() -> int | None:
     try:
-        result = subprocess.run(
+        result = run_subprocess_sync(
             ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
         )
@@ -21,7 +23,7 @@ def query_gpu_total_mb() -> int | None:
 
 def query_gpu_used_mb() -> int | None:
     try:
-        result = subprocess.run(
+        result = run_subprocess_sync(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
         )

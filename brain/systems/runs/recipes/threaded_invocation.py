@@ -6,6 +6,8 @@ import asyncio
 import inspect
 from typing import Any
 
+from brain.platform.async_io import run_blocking
+
 
 def sync_on_loop(loop: asyncio.AbstractEventLoop, async_fn):
     def _call(*args, **kwargs):
@@ -29,7 +31,7 @@ def thread_sync_tool_handlers(loop: asyncio.AbstractEventLoop, handlers: dict[st
 
 
 async def invoke_direct_agent_threaded(invoke_direct_agent, spec):
-    result = await asyncio.to_thread(invoke_direct_agent, spec)
+    result = await run_blocking(invoke_direct_agent, spec)
     if inspect.isawaitable(result):
         result = await result
     return result

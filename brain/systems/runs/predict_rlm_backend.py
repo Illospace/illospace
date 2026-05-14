@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.platform.async_io import run_blocking
 from brain.systems.runs.events import async_record_tool_call
 from brain.platform.db.models.org import Org, User
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -823,7 +824,7 @@ def _build_openai_illo_dspy_lm(
             messages: list[dict[str, Any]] | None = None,
             **kwargs: Any,
         ):
-            return await asyncio.to_thread(
+            return await run_blocking(
                 self.forward,
                 prompt,
                 messages,
@@ -911,7 +912,7 @@ def _make_async_tool_wrapper(
 
     async def _run(**kwargs):
         try:
-            result = await asyncio.to_thread(
+            result = await run_blocking(
                 _invoke_tool_handler,
                 handler,
                 kwargs,

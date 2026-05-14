@@ -16,6 +16,8 @@ import time
 
 import numpy as np
 
+from brain.platform.async_io import http_post
+
 logger = logging.getLogger("brain.systems.memory.embeddings")
 
 # ---------------------------------------------------------------------------
@@ -221,7 +223,6 @@ def _prepare_gemini_text(text: str, mode: str, model: str) -> str:
 
 
 def _embed_api_gemini(texts: list[str], mode: str, runtime_config=None) -> np.ndarray:
-    import httpx
     runtime = _runtime_embedding_config(runtime_config)
     api_key = runtime.api_key
     embedding_dim = runtime.dimensions
@@ -244,7 +245,7 @@ def _embed_api_gemini(texts: list[str], mode: str, runtime_config=None) -> np.nd
         }
         if model != "gemini-embedding-2":
             payload["taskType"] = task_type
-        resp = httpx.post(
+        resp = http_post(
             url,
             headers={
                 "Content-Type": "application/json",
@@ -265,7 +266,6 @@ def _embed_api_gemini(texts: list[str], mode: str, runtime_config=None) -> np.nd
 
 
 def _embed_api_openai(texts: list[str], mode: str, runtime_config=None) -> np.ndarray:
-    import httpx
     runtime = _runtime_embedding_config(runtime_config)
 
     api_key = runtime.api_key or ""
@@ -276,7 +276,7 @@ def _embed_api_openai(texts: list[str], mode: str, runtime_config=None) -> np.nd
         )
 
     model = runtime.api_model or "text-embedding-3-small"
-    resp = httpx.post(
+    resp = http_post(
         "https://api.openai.com/v1/embeddings",
         headers={
             "Content-Type": "application/json",
