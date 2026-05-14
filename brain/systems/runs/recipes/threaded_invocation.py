@@ -15,6 +15,12 @@ from brain.platform.providers.model_policy import (
     infer_provider_from_model,
     normalize_model_tier,
 )
+from brain.systems.sessions import (
+    async_load_session,
+    async_load_session_handoff,
+    async_save_session,
+    async_save_session_handoff,
+)
 
 
 def _required_openai_auth_mode(model: str | None) -> str | None:
@@ -51,8 +57,15 @@ def thread_sync_tool_handlers(loop: asyncio.AbstractEventLoop, handlers: dict[st
 
 async def invoke_direct_agent_threaded(invoke_direct_agent, spec):
     if _is_default_direct_agent_invocation(invoke_direct_agent):
+        loop = asyncio.get_running_loop()
         spec, resolved_model, resolved_llm = await _resolve_direct_agent_runtime(spec)
-        result = await run_blocking(_invoke_direct_agent_with_resolved_llm, spec, resolved_model, resolved_llm)
+        result = await run_blocking(
+            _invoke_direct_agent_with_resolved_llm,
+            spec,
+            resolved_model,
+            resolved_llm,
+            _direct_agent_loop_overrides(loop, spec),
+        )
     else:
         result = await run_blocking(invoke_direct_agent, spec)
     if inspect.isawaitable(result):
@@ -96,10 +109,43 @@ async def _resolve_direct_agent_runtime(spec):
     return spec, str(model), llm
 
 
-def _invoke_direct_agent_with_resolved_llm(spec, resolved_model, resolved_llm):
+class _LoopBoundCancelEvent:
+    def __init__(self, loop: asyncio.AbstractEventLoop, cancel_event: Any):
+        self._loop = loop
+        self._cancel_event = cancel_event
+
+    async def a_is_set(self) -> bool:
+        checker = getattr(self._cancel_event, "a_is_set", None)
+        if checker is None:
+            checker = getattr(self._cancel_event, "is_set", None)
+        if checker is None:
+            return False
+        result = checker()
+        if inspect.isawaitable(result):
+            result = await result
+        return bool(result)
+
+    def is_set(self) -> bool:
+        return bool(sync_on_loop(self._loop, self.a_is_set)())
+
+
+def _direct_agent_loop_overrides(loop: asyncio.AbstractEventLoop, spec) -> dict[str, Any]:
+    overrides: dict[str, Any] = {
+        "load_session": sync_on_loop(loop, async_load_session),
+        "load_session_handoff": sync_on_loop(loop, async_load_session_handoff),
+        "save_session": sync_on_loop(loop, async_save_session),
+        "save_session_handoff": sync_on_loop(loop, async_save_session_handoff),
+    }
+    cancel_event = getattr(spec, "cancel_event", None)
+    if cancel_event is not None:
+        overrides["cancel_event"] = _LoopBoundCancelEvent(loop, cancel_event)
+    return overrides
+
+
+def _invoke_direct_agent_with_resolved_llm(spec, resolved_model, resolved_llm, run_agent_overrides=None):
     from brain.kernel.runtime.kernel import invoke_run_envelope
 
-    overrides = {}
+    overrides = dict(run_agent_overrides or {})
     if resolved_model:
         overrides["model"] = resolved_model
     if resolved_llm is not None:

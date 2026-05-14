@@ -676,7 +676,11 @@ async def _sleep_or_stop(delay: float, slot_stop_event: asyncio.Event | None = N
 
 async def _loop(slot_stop_event: asyncio.Event | None = None) -> None:
     while not _stop_event.is_set() and not (slot_stop_event and slot_stop_event.is_set()):
-        processed = await _run_queued_once_async()
+        try:
+            processed = await _run_queued_once_async()
+        except Exception:
+            logger.exception("agent_run_runner_slot_failed")
+            processed = 0
         if not processed:
             await _sleep_or_stop(_poll_interval_sec, slot_stop_event)
 
@@ -699,6 +703,15 @@ def reconcile_runner_pool(*, allow_start: bool = False) -> int:
     ):
         return desired
     with _runner_lock:
+        for task, stop_event in _runner_slots:
+            if task.done() and not task.cancelled() and not stop_event.is_set():
+                exc = task.exception()
+                if exc is not None:
+                    logger.error(
+                        "agent_run_runner_slot_crashed",
+                        extra={"task": task.get_name()},
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
         active_slots = [
             (task, stop_event)
             for task, stop_event in _runner_slots
@@ -729,9 +742,9 @@ async def _supervisor_async_loop() -> None:
     try:
         while not _stop_event.is_set():
             try:
+                reconcile_runner_pool(allow_start=True)
                 await _reap_stale_runs_if_due_async(force=first_reconcile)
                 first_reconcile = False
-                reconcile_runner_pool(allow_start=True)
             except Exception:
                 logger.exception("agent_run_runner_reconcile_failed")
             await _sleep_or_stop(_runner_reconcile_interval_sec)

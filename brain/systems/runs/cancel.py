@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 import time
 from typing import Callable
@@ -46,13 +45,7 @@ class RunCancelToken:
         return self._canceled
 
     def is_set(self) -> bool:
-        if self._canceled:
-            return True
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(self.a_is_set())
-        return False
+        return self._canceled
 
 
 __all__ = ["RunCancelToken"]
