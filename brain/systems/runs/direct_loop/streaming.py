@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import time
 from typing import Callable
+
+from brain.platform.async_io import run_blocking
 
 
 def _public_reflection_excerpt(text: str, *, limit: int = 140) -> str:
@@ -103,3 +107,69 @@ def streaming_call(
                     last_activity_label = label
                     on_stream_activity(label)
         return stream.get_final_message()
+
+
+class _LoopCancelProxy:
+    def __init__(self, loop: asyncio.AbstractEventLoop, cancel_event):
+        self._loop = loop
+        self._cancel_event = cancel_event
+
+    async def _check(self) -> bool:
+        checker = getattr(self._cancel_event, "a_is_set", None)
+        if checker is None:
+            checker = getattr(self._cancel_event, "is_set", None)
+        if checker is None:
+            return False
+        result = checker()
+        if inspect.isawaitable(result):
+            result = await result
+        return bool(result)
+
+    def is_set(self) -> bool:
+        future = asyncio.run_coroutine_threadsafe(self._check(), self._loop)
+        return bool(future.result())
+
+
+def _loop_callback(loop: asyncio.AbstractEventLoop, callback):
+    if callback is None:
+        return None
+
+    def _call(*args, **kwargs):
+        result = callback(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return asyncio.run_coroutine_threadsafe(result, loop).result()
+        return result
+
+    return _call
+
+
+async def async_streaming_call(
+    provider,
+    request,
+    cancel_event,
+    on_stream_activity,
+    on_stream_delta=None,
+    *,
+    session_id: str,
+    tokens,
+    start_time: float,
+    tool_calls_made: list[str],
+    call_start: float,
+    make_cancelled_result: Callable,
+):
+    """Run the provider's sync streaming SDK at an explicit async boundary."""
+    loop = asyncio.get_running_loop()
+    return await run_blocking(
+        streaming_call,
+        provider,
+        request,
+        _LoopCancelProxy(loop, cancel_event),
+        _loop_callback(loop, on_stream_activity),
+        _loop_callback(loop, on_stream_delta),
+        session_id=session_id,
+        tokens=tokens,
+        start_time=start_time,
+        tool_calls_made=tool_calls_made,
+        call_start=call_start,
+        make_cancelled_result=make_cancelled_result,
+    )

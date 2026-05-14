@@ -38,6 +38,7 @@ def test_direct_agent_async_migration_baseline_names_core_rewrite_goals():
         "recipe_thread_bridge_calls",
         "threaded_direct_agent_run_blocking_calls",
         "direct_agent_sync_session_refs",
+        "sync_run_agent_auth_resolver_refs",
         "direct_retry_blocking_sleep_calls",
         "cancel_token_asyncio_run_calls",
     }

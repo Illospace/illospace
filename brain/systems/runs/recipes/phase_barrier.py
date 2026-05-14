@@ -14,8 +14,7 @@ from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.events import run_event
 from brain.systems.runs.graph import DeepPlan, RunNode
-from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent
-from brain.systems.runs.recipes.threaded_invocation import invoke_direct_agent_threaded
+from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
 from brain.systems.runs.recipes.shared import workspace_root_from_ref
 
 logger = logging.getLogger(__name__)
@@ -180,7 +179,7 @@ async def review_completed_phase(
                 "phase_node_id": node.id,
             },
         )
-        result = await invoke_direct_agent_threaded(invoke_direct_agent, spec)
+        result = await invoke_direct_agent_async(spec)
         raw_output = str(getattr(result, "output", "") or "").strip()
         parsed = _parse_json_object(raw_output)
         decision = PhaseBarrierDecision.from_payload(parsed or {}, raw_output=raw_output)

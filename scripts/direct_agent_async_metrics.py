@@ -39,6 +39,7 @@ BASELINES = {
     "recipe_thread_bridge_calls": 4,
     "threaded_direct_agent_run_blocking_calls": 2,
     "direct_agent_sync_session_refs": 6,
+    "sync_run_agent_auth_resolver_refs": 1,
     "direct_retry_blocking_sleep_calls": 1,
     "cancel_token_asyncio_run_calls": 0,
 }
@@ -98,11 +99,15 @@ def _ref(metric: str, rel_path: str, node: ast.AST) -> MetricRef:
 
 
 def _has_async_function(rel_path: str, name: str) -> bool:
+    if not (ROOT / rel_path).exists():
+        return False
     tree = _parse(rel_path)
     return any(isinstance(node, ast.AsyncFunctionDef) and node.name == name for node in ast.walk(tree))
 
 
 def _call_refs(rel_path: str, metric: str, names: set[str]) -> list[MetricRef]:
+    if not (ROOT / rel_path).exists():
+        return []
     tree = _parse(rel_path)
     aliases = _aliases(tree)
     refs: list[MetricRef] = []
@@ -113,11 +118,27 @@ def _call_refs(rel_path: str, metric: str, names: set[str]) -> list[MetricRef]:
 
 
 def _name_refs(rel_path: str, metric: str, names: set[str]) -> list[MetricRef]:
+    if not (ROOT / rel_path).exists():
+        return []
     tree = _parse(rel_path)
     refs: list[MetricRef] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in names:
             refs.append(_ref(metric, rel_path, node))
+    return refs
+
+
+def _function_call_refs(rel_path: str, function_name: str, metric: str, names: set[str]) -> list[MetricRef]:
+    if not (ROOT / rel_path).exists():
+        return []
+    tree = _parse(rel_path)
+    aliases = _aliases(tree)
+    refs: list[MetricRef] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call) and (_call_name(child, aliases) or "").rsplit(".", 1)[-1] in names:
+                    refs.append(_ref(metric, rel_path, child))
     return refs
 
 
@@ -144,6 +165,12 @@ def refs() -> list[MetricRef]:
         {"run_blocking"},
     ))
     found.extend(_name_refs(direct_agent, "direct_agent_sync_session_refs", SYNC_SESSION_NAMES))
+    found.extend(_function_call_refs(
+        direct_agent,
+        "run_agent",
+        "sync_run_agent_auth_resolver_refs",
+        {"_run_agent_sync_resolved_llm", "resolve_llm_client", "get_default_model", "get_model_for_tier"},
+    ))
     found.extend(_call_refs(retry, "direct_retry_blocking_sleep_calls", {"sleep"}))
     found.extend(_call_refs(cancel, "cancel_token_asyncio_run_calls", {"run"}))
     return found

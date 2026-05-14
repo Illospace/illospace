@@ -289,11 +289,11 @@ def test_run_agent_retries_once_after_context_overflow_with_checkpoint(monkeypat
     )
 
     with patch("brain.systems.runs.direct_agent.resolve_default_provider", return_value="anthropic"), \
-         patch("brain.systems.runs.direct_agent.resolve_llm_client", return_value=llm), \
+         patch("brain.systems.runs.direct_agent.async_resolve_llm_client", return_value=llm), \
          patch("brain.systems.runs.direct_agent._load_session", return_value=(session_messages, None)), \
          patch("brain.systems.runs.direct_agent._load_session_handoff", return_value=stored_handoff.to_payload()), \
          patch("brain.systems.runs.direct_agent._save_session"), \
-         patch("brain.systems.runs.direct_agent._record_api_call"):
+         patch("brain.systems.runs.direct_agent._async_record_api_call"):
         result = run_agent(
             message="Continue and finish.",
             model="claude-sonnet-4-6",
@@ -376,12 +376,12 @@ def test_run_agent_uses_thread_handoff_but_persists_raw_archive(monkeypatch):
     )
 
     with patch("brain.systems.runs.direct_agent.resolve_default_provider", return_value="anthropic"), \
-         patch("brain.systems.runs.direct_agent.resolve_llm_client", return_value=llm), \
+         patch("brain.systems.runs.direct_agent.async_resolve_llm_client", return_value=llm), \
          patch("brain.systems.runs.direct_agent._load_session", return_value=(session_messages, None)), \
          patch("brain.systems.runs.direct_agent._load_session_handoff", return_value=stored_handoff.to_payload()), \
          patch("brain.systems.runs.direct_agent._save_session") as save_session, \
          patch("brain.systems.runs.direct_agent._save_session_handoff") as save_handoff, \
-         patch("brain.systems.runs.direct_agent._record_api_call"):
+         patch("brain.systems.runs.direct_agent._async_record_api_call"):
         result = run_agent(
             message="Continue with the next step.",
             model="claude-sonnet-4-6",
@@ -731,7 +731,7 @@ def test_retry_runtime_respects_retry_after_header(monkeypatch):
         create=create,
         is_retryable_error=lambda exc: isinstance(exc, RetryableProviderError),
     )
-    monkeypatch.setattr(retry_module.time, "sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setattr(retry_module, "_blocking_delay", lambda delay: sleeps.append(delay))
 
     response = api_call_with_retry(
         provider,

@@ -167,7 +167,7 @@ class TestCachePolicy:
         assert _get_openai_cache_retention("openai/gpt-4.1-mini") == "24h"
         assert _get_openai_cache_retention("openai/gpt-4o-mini") is None
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_openai_requests_use_native_cache_fields_not_anthropic_breakpoints(self, mock_save, mock_load, mock_client):
@@ -210,7 +210,7 @@ class TestCachePolicy:
         assert "cache_control" not in instructions
         assert all("cache_control" not in tool for tool in call_kwargs["tools"])
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_openai_prompt_cache_key_is_capped_for_long_session_ids(self, mock_save, mock_load, mock_client):
@@ -537,7 +537,7 @@ class TestAgentLoop:
 
         return response
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_simple_completion(self, mock_save, mock_load, mock_client):
@@ -771,7 +771,7 @@ class TestAgentLoop:
             "worker_name": "reader-1",
         }
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_tool_use_loop(self, mock_save, mock_load, mock_client):
@@ -805,7 +805,7 @@ class TestAgentLoop:
         assert "brain_recall" in result.tool_calls
         assert client.messages.create.call_count == 2
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_run_agent_binds_user_context_for_tool_handlers(self, mock_save, mock_load, mock_client):
@@ -842,7 +842,7 @@ class TestAgentLoop:
         assert result.success
         assert captured == {"query": "test", "user_id": "user-1", "org_id": "org-1"}
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_run_agent_binds_workspace_root_for_tool_handlers(self, mock_save, mock_load, mock_client, tmp_path):
@@ -895,7 +895,7 @@ class TestAgentLoop:
         assert resolved.is_error is True
         assert "Continue working and plan another pipeline" in resolved.result_text
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_token_accumulation(self, mock_save, mock_load, mock_client):
@@ -924,7 +924,7 @@ class TestAgentLoop:
         assert result.tokens_output == 400
         assert result.tokens_cache_read == 1000
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_timeout_returns_failure(self, mock_save, mock_load, mock_client):
@@ -948,7 +948,7 @@ class TestAgentLoop:
         assert result.success
         assert result.output == "done"
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_logs_when_end_turn_has_output_tokens_but_no_content(self, mock_save, mock_load, mock_client, caplog):
@@ -973,7 +973,7 @@ class TestAgentLoop:
         assert "no parsed assistant content" in caplog.text
         assert "final extracted output is empty" in caplog.text
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_cancel_event_stops_agent(self, mock_save, mock_load, mock_client):
@@ -1002,7 +1002,7 @@ class TestAgentLoop:
         assert not result.success
         assert "Cancelled" in result.error
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_on_tool_call_callback(self, mock_save, mock_load, mock_client):
@@ -1033,7 +1033,7 @@ class TestAgentLoop:
         assert len(callback_calls) == 1
         assert callback_calls[0][0] == "brain_recall"
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_metadata_requires_brain_recall_before_end_turn(self, mock_save, mock_load, mock_client):
@@ -1061,7 +1061,7 @@ class TestAgentLoop:
         assert "brain_recall" in result.tool_calls
         assert client.messages.create.call_count == 3
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_memory_summary_metadata_requires_brain_recall_before_end_turn(self, mock_save, mock_load, mock_client):
@@ -1089,7 +1089,7 @@ class TestAgentLoop:
         assert "brain_recall" in result.tool_calls
         assert client.messages.create.call_count == 3
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_metadata_requires_runtime_settings_before_end_turn(self, mock_save, mock_load, mock_client):
@@ -1117,7 +1117,7 @@ class TestAgentLoop:
         assert "runtime_settings" in result.tool_calls
         assert client.messages.create.call_count == 3
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_metadata_requires_my_activity_before_end_turn(self, mock_save, mock_load, mock_client):
@@ -1145,7 +1145,7 @@ class TestAgentLoop:
         assert "my_activity" in result.tool_calls
         assert client.messages.create.call_count == 3
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_provenance_question_does_not_loop_when_my_activity_is_not_exposed(self, mock_save, mock_load, mock_client):
@@ -2213,7 +2213,7 @@ class TestSessionTrimToolPairSafety:
         assert not orphaned_use, f"Orphaned tool_use ids (no matching tool_result): {orphaned_use}"
         assert not orphaned_result, f"Orphaned tool_result ids (no matching tool_use): {orphaned_result}"
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._save_session")
     @patch("brain.systems.runs.direct_agent._summarize_trimmed_messages", return_value="summary")
     def test_trim_with_tool_pair_at_start(self, mock_summary, mock_save, mock_client):
@@ -2349,7 +2349,7 @@ class TestToolTranscriptSanitization:
             {"role": "user", "content": "Actually, keep going."},
         ]
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session")
     @patch("brain.systems.runs.direct_agent._save_session")
     def test_run_agent_sanitizes_invalid_session_before_api_call(self, mock_save, mock_load, mock_client):
@@ -2407,7 +2407,7 @@ class TestToolTranscriptSanitization:
             for msg in sent_messages
         )
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._save_session")
     @patch("brain.systems.runs.direct_agent._summarize_trimmed_messages", return_value="summary")
     def test_trim_with_tool_pair_at_recent_boundary(self, mock_summary, mock_save, mock_client):
@@ -2446,7 +2446,7 @@ class TestToolTranscriptSanitization:
         call_kwargs = client.messages.create.call_args
         self._assert_no_orphaned_tool_pairs(call_kwargs.kwargs["messages"])
 
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._save_session")
     @patch("brain.systems.runs.direct_agent._summarize_trimmed_messages", return_value="summary")
     def test_trim_with_both_tool_pair_scenarios(self, mock_summary, mock_save, mock_client):

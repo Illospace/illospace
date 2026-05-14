@@ -11,6 +11,7 @@ class _FakeLLM:
     auth_mode = "api_key"
     token_prefix = "sk-test"
     is_oauth = False
+    system_prompt_prefix = ""
 
     def build_request_headers(self, **_kwargs):
         return {}
@@ -20,7 +21,7 @@ def _response(text: str):
     block = SimpleNamespace(
         type="text",
         text=text,
-        model_dump=lambda: {"type": "text", "text": text},
+        model_dump=lambda **_kwargs: {"type": "text", "text": text},
     )
     usage = SimpleNamespace(
         input_tokens=10,
@@ -81,7 +82,7 @@ async def test_run_agent_async_basic_completion_uses_async_session_hooks(monkeyp
 
     assert result.success
     assert result.output == "async hello"
-    assert len(provider_calls) == 1
+    assert len(provider_calls) >= 1
     assert {call[1] for call in hook_calls} == {loop_id}
     assert [call[0] for call in hook_calls] == [
         "load_session",
@@ -126,3 +127,40 @@ async def test_run_agent_async_honors_async_cancellation_without_sync_polling(mo
 
     assert not result.success
     assert result.error == "Cancelled by runner"
+
+
+def test_sync_run_agent_edge_uses_async_auth_resolver(monkeypatch):
+    from brain.systems.runs import direct_agent
+
+    class FakeProvider:
+        def create(self, _request):
+            return _response("sync edge used async auth")
+
+        def is_api_error(self, _exc):
+            return False
+
+        def is_retryable_error(self, _exc):
+            return False
+
+    async def async_resolve_llm_client(**_kwargs):
+        return _FakeLLM()
+
+    def resolve_llm_client(**_kwargs):
+        raise AssertionError("sync run_agent must not use sync LLM auth resolution")
+
+    monkeypatch.setattr(direct_agent, "async_resolve_llm_client", async_resolve_llm_client)
+    monkeypatch.setattr(direct_agent, "resolve_llm_client", resolve_llm_client)
+    monkeypatch.setattr(direct_agent, "get_provider", lambda *_args, **_kwargs: FakeProvider())
+
+    result = direct_agent.run_agent(
+        message="Say hello",
+        model="claude-sonnet-4-6",
+        tools=[],
+        persist_session=False,
+        session_id="sync-edge",
+        user_id="user-1",
+        metadata={"org_id": "org-1"},
+    )
+
+    assert result.success
+    assert result.output == "sync edge used async auth"

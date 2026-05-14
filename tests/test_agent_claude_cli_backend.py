@@ -34,7 +34,7 @@ def test_setup_token_uses_native_sdk_not_cli_backend():
 
     llm = _make_llm_mock(is_oauth=True, client=fake_client)
 
-    with patch("brain.systems.runs.direct_agent.resolve_llm_client", return_value=llm), \
+    with patch("brain.systems.runs.direct_agent.async_resolve_llm_client", return_value=llm), \
          patch("brain.systems.runs.direct_agent._harvest_session"):
         result = agent.run_agent(
             message="hello",
@@ -67,7 +67,7 @@ def test_api_key_uses_native_sdk():
 
     llm = _make_llm_mock(is_oauth=False, client=fake_client)
 
-    with patch("brain.systems.runs.direct_agent.resolve_llm_client", return_value=llm), \
+    with patch("brain.systems.runs.direct_agent.async_resolve_llm_client", return_value=llm), \
          patch("brain.systems.runs.direct_agent._harvest_session"):
         result = agent.run_agent(
             message="hello",

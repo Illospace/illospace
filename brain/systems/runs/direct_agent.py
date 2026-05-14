@@ -23,24 +23,28 @@ Public release note: internal issue links were removed from source comments.
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import inspect
 import json
 import logging
 import os
 import time
 import uuid
+from contextlib import suppress
 from typing import Callable
 
 from brain.platform.integrations.llm import (
+    async_resolve_llm_client,
     resolve_llm_client,
     _degrade_betas,
 )
+from brain.platform.async_io import run_blocking
 from brain.platform.integrations.providers import get_provider
 from brain.platform.integrations.providers import ContentBlockType, LLMRequest, MessageRole, StopReason
 from brain.platform.providers.model_policy import (
     MODEL_TIERS,
-    get_default_model,
-    get_model_for_tier,
+    async_get_model_for_tier,
     infer_provider_from_model,
     normalize_model_tier,
     resolve_default_provider,
@@ -87,30 +91,38 @@ from brain.systems.runs.direct_loop.context_recovery import (
     context_overflow_payload,
     is_context_overflow_error,
 )
-from brain.systems.runs.direct_loop.retry import api_call_with_retry as _runtime_api_call_with_retry
+from brain.systems.runs.direct_loop.retry import (
+    api_call_with_retry as _runtime_api_call_with_retry,
+    async_api_call_with_retry as _runtime_async_api_call_with_retry,
+)
 from brain.systems.runs.direct_loop.session_effects import (
-    _auto_encode_if_needed,
-    _memory_org_for_user,
-    apply_agent_session_side_effects as _runtime_apply_agent_session_side_effects,
+    async_apply_agent_session_side_effects as _runtime_async_apply_agent_session_side_effects,
 )
 from brain.systems.runs.direct_loop.state import AgentLoopState
-from brain.systems.runs.direct_loop.streaming import streaming_call as _runtime_streaming_call
+from brain.systems.runs.direct_loop.streaming import (
+    async_streaming_call as _runtime_async_streaming_call,
+    streaming_call as _runtime_streaming_call,
+)
 from brain.systems.runs.execution_context import (
     bind_agent_context,
     current_agent_context,
 )
-from brain.systems.runs.direct_loop.telemetry import record_api_call as _record_api_call
+from brain.systems.runs.direct_loop.telemetry import (
+    async_record_api_call as _async_record_api_call,
+)
 from brain.systems.runs.direct_loop.tool_execution import (
     PendingToolCall as _PendingToolCall,
     ResolvedToolCall as _ResolvedToolCall,
     emit_resolved_tool_call as _runtime_emit_resolved_tool_call,
     execute_parallel_tool_batch as _runtime_execute_parallel_tool_batch,
+    async_execute_tool_calls as _runtime_async_execute_tool_calls,
     execute_tool_calls as _runtime_execute_tool_calls,
     invoke_tool_handler as _runtime_invoke_tool_handler,
     resolve_tool_call as _runtime_resolve_tool_call,
     run_tool_awaitable as _runtime_run_tool_awaitable,
 )
 from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
+from brain.systems import sessions as _session_store
 
 logger = logging.getLogger("agent")
 
@@ -434,6 +446,110 @@ def _init_llm(
         llm.is_oauth,
     )
     return llm, provider, extra_headers
+
+
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _resolve_model_async(
+    model: str | None,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> str:
+    tier = normalize_model_tier(model, default=None) if model else "medium"
+    if tier in MODEL_TIERS:
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+        async with UnitOfWork() as uow:
+            return await async_get_model_for_tier(
+                uow.session,
+                tier,
+                include_provider_prefix=True,
+                user_id=user_id,
+                org_id=org_id,
+            )
+    return str(model)
+
+
+async def _init_llm_async(
+    user_id: str | None,
+    session_id: str,
+    model: str,
+    *,
+    org_id: str | None = None,
+    resolved_llm=None,
+):
+    """Resolve LLM client from async runtime code without sync DB access."""
+    if resolved_llm is None:
+        requested_provider = infer_provider_from_model(model)
+        llm = await async_resolve_llm_client(
+            user_id=user_id,
+            org_id=org_id,
+            provider=requested_provider,
+            auth_mode=_required_openai_auth_mode(model) if requested_provider == "openai" else None,
+        )
+    else:
+        llm = resolved_llm
+    provider = get_provider(llm.provider, llm.client)
+    extra_headers = llm.build_request_headers(session_id=session_id)
+    logger.info(
+        "Agent %s: provider=%s, source=%s, auth_mode=%s, token=%s…, oauth=%s",
+        session_id,
+        llm.provider,
+        llm.source,
+        getattr(llm, "auth_mode", None),
+        llm.token_prefix,
+        llm.is_oauth,
+    )
+    return llm, provider, extra_headers
+
+
+async def _cancel_event_is_set_async(cancel_event) -> bool:
+    if cancel_event is None:
+        return False
+    checker = getattr(cancel_event, "a_is_set", None) or getattr(cancel_event, "is_set", None)
+    if checker is None:
+        return False
+    return bool(await _maybe_await(checker()))
+
+
+async def _call_optional_async(callback, *args, **kwargs):
+    if callback is None:
+        return None
+    return await _maybe_await(callback(*args, **kwargs))
+
+
+async def _append_live_guidance_async(
+    messages: list[dict],
+    live_guidance_loader: Callable[[], list[str]] | None,
+    *,
+    session_id: str,
+    on_stream_activity: Callable[[str], None] | None = None,
+) -> int:
+    if live_guidance_loader is None:
+        return 0
+    try:
+        guidance_items = await _maybe_await(live_guidance_loader() or [])
+    except Exception:
+        logger.debug("Agent %s: live guidance loader failed", session_id, exc_info=True)
+        return 0
+    clean_items = [str(item).strip() for item in guidance_items if str(item or "").strip()]
+    if not clean_items:
+        return 0
+    content = (
+        "[Live user guidance received while you were working]\n"
+        "Use this to adjust the current run. Preserve useful progress; do not restart unless the user explicitly asks.\n\n"
+        + "\n\n".join(clean_items)
+    )
+    messages.append({"role": "user", "content": content})
+    with suppress(Exception):
+        await _call_optional_async(on_stream_activity, "Received live user guidance")
+    logger.info("Agent %s: appended %d live guidance item(s)", session_id, len(clean_items))
+    return len(clean_items)
 
 
 def _build_system_blocks(llm, system_prompt: str, cache: bool) -> list[dict] | None:
@@ -829,7 +945,51 @@ def _update_thread_handoff_after_run(
         run_id=run_id,
     )
     payload = handoff.to_payload()
-    (save_session_handoff or _save_session_handoff)(session_id, payload, user_id=user_id)
+    (save_session_handoff or globals()["_save_session_handoff"])(session_id, payload, user_id=user_id)
+    if fallback_error:
+        logger.debug("Agent %s: post-run handoff fallback used: %s", session_id, fallback_error)
+    logger.info(
+        "Agent %s: updated durable thread handoff through %d raw messages (source=%s)",
+        session_id,
+        handoff.message_count,
+        handoff.source,
+    )
+    return payload
+
+
+async def _update_thread_handoff_after_run_async(
+    *,
+    session_id: str,
+    archive_messages: list[dict],
+    previous_handoff: dict | None,
+    semantic_compactor=None,
+    run_id: int | None = None,
+    user_id: str | None = None,
+    save_session_handoff: Callable[..., None] | None = None,
+) -> dict | None:
+    """Incrementally summarize the raw archive without sync DB writes."""
+    from brain.systems.context.thread_handoff import ThreadHandoff, build_thread_handoff
+
+    previous = ThreadHandoff.from_payload(previous_handoff)
+    previous_count = min(previous.message_count if previous else 0, len(archive_messages))
+    messages_since = archive_messages[previous_count:]
+    if not messages_since and previous_handoff:
+        return previous_handoff
+    handoff, fallback_error = await run_blocking(
+        build_thread_handoff,
+        previous_handoff=previous,
+        messages_since=messages_since,
+        total_message_count=len(archive_messages),
+        session_id=session_id,
+        semantic_compactor=semantic_compactor,
+        run_id=run_id,
+    )
+    payload = handoff.to_payload()
+    await _maybe_await((save_session_handoff or _session_store.async_save_session_handoff)(
+        session_id,
+        payload,
+        user_id=user_id,
+    ))
     if fallback_error:
         logger.debug("Agent %s: post-run handoff fallback used: %s", session_id, fallback_error)
     logger.info(
@@ -1127,6 +1287,33 @@ def _api_call_with_retry(
     )
 
 
+async def _api_call_with_retry_async(
+    provider, request: LLMRequest, llm, cancel_event, on_stream_activity, on_stream_delta,
+    session_id: str, turn: int, tokens: _TokenAccumulator,
+    start_time: float, tool_calls_made: list[str], _call_start: float,
+):
+    """Make API call from async runtime code with retry and explicit sync SDK boundaries."""
+    return await _runtime_async_api_call_with_retry(
+        provider,
+        request,
+        llm,
+        cancel_event,
+        on_stream_activity,
+        on_stream_delta,
+        session_id=session_id,
+        turn=turn,
+        tokens=tokens,
+        start_time=start_time,
+        tool_calls_made=tool_calls_made,
+        call_start=_call_start,
+        retry_delays=_API_RETRY_DELAYS,
+        streaming_call=_runtime_async_streaming_call,
+        make_cancelled_result=_make_result,
+        degrade_betas=_degrade_betas,
+        is_cancelled_result=lambda response: isinstance(response, AgentResult),
+    )
+
+
 def _streaming_call(
     provider, request, cancel_event, on_stream_activity, on_stream_delta,
     session_id, tokens, start_time, tool_calls_made, _call_start,
@@ -1251,6 +1438,34 @@ def _execute_tool_calls(
     )
 
 
+async def _execute_tool_calls_async(
+    response, tool_handlers: dict, tool_calls_made: list[str],
+    gates: _GateState,
+    on_tool_call, run_id, idea_id, tool_call_source: str,
+    *,
+    max_parallel_tool_calls: int = _MAX_PARALLEL_TOOL_CALLS,
+) -> list[dict]:
+    """Execute all tool calls from async runtime code."""
+    return await _runtime_async_execute_tool_calls(
+        response,
+        tool_handlers,
+        tool_calls_made,
+        gates,
+        on_tool_call,
+        run_id,
+        idea_id,
+        tool_call_source,
+        agent_context=_agent_context,
+        brain_tool_names=_BRAIN_TOOL_NAMES,
+        gated_tool_names=_GATED_TOOL_NAMES,
+        research_tool_names=_RESEARCH_TOOL_NAMES,
+        research_budget=_RESEARCH_BUDGET,
+        parallel_safe_tool_names=_PARALLEL_SAFE_TOOL_NAMES,
+        max_parallel_tool_calls=max(1, int(max_parallel_tool_calls)),
+        check_gate_violations=_runtime_check_gate_violations,
+    )
+
+
 def _append_live_guidance(
     messages: list[dict],
     live_guidance_loader: Callable[[], list[str]] | None,
@@ -1286,7 +1501,7 @@ def _append_live_guidance(
 
 # ── The Agent Loop ───────────────────────────────────────────
 
-def run_agent(
+async def run_agent_async(
     message: str,
     system_prompt: str = "",
     session_id: str | None = None,
@@ -1317,7 +1532,7 @@ def run_agent(
     save_session: Callable[..., None] | None = None,
     save_session_handoff: Callable[..., None] | None = None,
 ) -> AgentResult:
-    """Run an agent loop with tool use.
+    """Run an agent loop with tool use from async runtime code.
 
     Args:
         message: The user message to send
@@ -1335,8 +1550,6 @@ def run_agent(
         workspace_root: Override workspace root for file/exec tools
         brain_context_preloaded: If True, brain gate starts satisfied
     """
-    import threading
-
     start_time = time.time()
     session_id = session_id or f"agent-{uuid.uuid4().hex[:12]}"
     metadata = dict(metadata or {})
@@ -1418,25 +1631,26 @@ def run_agent(
             if getattr(_agent_context, "execution_artifacts", None) is None:
                 _agent_context.execution_artifacts = []
 
-        if not model:
-            model = get_default_model(
-                include_provider_prefix=True,
-                user_id=user_id,
-                org_id=metadata.get("org_id"),
+        if await _cancel_event_is_set_async(cancel_event):
+            return _make_result(
+                "",
+                False,
+                session_id,
+                state.tokens,
+                start_time,
+                state.tool_calls_made,
+                error="Cancelled by runner",
             )
-        else:
-            tier = normalize_model_tier(model, default=None)
-            if tier in MODEL_TIERS:
-                model = get_model_for_tier(
-                    tier,
-                    include_provider_prefix=True,
-                    user_id=user_id,
-                    org_id=metadata.get("org_id"),
-                )
+
+        model = await _resolve_model_async(
+            model,
+            user_id=user_id,
+            org_id=metadata.get("org_id"),
+        )
         model = _normalize_model(model)
 
         # Resolve LLM client
-        llm, state.provider, _runtime_extra_headers = _init_llm(
+        llm, state.provider, _runtime_extra_headers = await _init_llm_async(
             user_id,
             session_id,
             model,
@@ -1459,19 +1673,21 @@ def run_agent(
                 model=model,
                 provider_name=state.provider_name,
                 session_id=session_id,
-            )
+        )
 
         # Load existing raw session archive, then use durable handoff + recent messages as active context.
-        load_session = load_session or _load_session
-        load_session_handoff = load_session_handoff or _load_session_handoff
-        save_session = save_session or _save_session
-        save_session_handoff = save_session_handoff or _save_session_handoff
+        load_session = load_session or _session_store.async_load_session
+        load_session_handoff = load_session_handoff or _session_store.async_load_session_handoff
+        save_session = save_session or _session_store.async_save_session
+        save_session_handoff = save_session_handoff or _session_store.async_save_session_handoff
 
-        loaded_messages, stored_system = load_session(session_id) if persist_session else ([], None)
+        loaded_messages, stored_system = (
+            await _maybe_await(load_session(session_id)) if persist_session else ([], None)
+        )
         if stored_system and not system_prompt:
             system_prompt = stored_system
         raw_archive_messages = copy.deepcopy(loaded_messages) if persist_session else None
-        thread_handoff = load_session_handoff(session_id) if persist_session else None
+        thread_handoff = await _maybe_await(load_session_handoff(session_id)) if persist_session else None
 
         # Build system + reasoning config
         system = _build_system_blocks(llm, system_prompt, cache_system_prompt)
@@ -1499,7 +1715,7 @@ def run_agent(
         turn = 0
 
         for turn in range(max_turns):
-            if cancel_event and cancel_event.is_set():
+            if await _cancel_event_is_set_async(cancel_event):
                 return _make_result(
                     "",
                     False,
@@ -1511,7 +1727,7 @@ def run_agent(
                 )
 
             before_guidance_len = len(state.messages)
-            guidance_count = _append_live_guidance(
+            guidance_count = await _append_live_guidance_async(
                 state.messages,
                 live_guidance_loader,
                 session_id=session_id,
@@ -1570,7 +1786,7 @@ def run_agent(
             overflow_retry_used = False
             while True:
                 try:
-                    response = _api_call_with_retry(
+                    response = await _api_call_with_retry_async(
                         state.provider, request, llm, cancel_event, on_stream_activity, on_stream_delta,
                         session_id, turn, state.tokens, start_time, state.tool_calls_made, _call_start,
                     )
@@ -1586,7 +1802,7 @@ def run_agent(
                         turn,
                         overflow_payload.get("message", "")[:240],
                     )
-                    _record_api_call(
+                    await _async_record_api_call(
                         session_id=session_id, run_id=run_id, turn=turn,
                         model=model,
                         context_messages=len(state.messages),
@@ -1618,10 +1834,7 @@ def run_agent(
                         )
                         raise
                     if on_stream_activity:
-                        try:
-                            on_stream_activity("Compacted context after provider limit; retrying")
-                        except Exception:
-                            pass
+                        await _call_optional_async(on_stream_activity, "Compacted context after provider limit; retrying")
                     if state.provider_name == "anthropic" and cache_system_prompt and len(state.messages) >= 2:
                         _clear_message_cache_breakpoints(state.messages)
                         _set_cache_breakpoint(state.messages[-1])
@@ -1652,7 +1865,7 @@ def run_agent(
                 )
 
             # Per-call telemetry (fire-and-forget)
-            _record_api_call(
+            await _async_record_api_call(
                 session_id=session_id, run_id=run_id, turn=turn,
                 model=model,
                 tokens_input=getattr(response.usage, "input_tokens", 0),
@@ -1689,7 +1902,7 @@ def run_agent(
 
             if response.stop_reason == StopReason.END_TURN:
                 before_guidance_len = len(state.messages)
-                guidance_count = _append_live_guidance(
+                guidance_count = await _append_live_guidance_async(
                     state.messages,
                     live_guidance_loader,
                     session_id=session_id,
@@ -1730,7 +1943,7 @@ def run_agent(
                     break
 
                 # Execute tool calls
-                tool_results = _execute_tool_calls(
+                tool_results = await _execute_tool_calls_async(
                     response, tool_handlers, state.tool_calls_made, state.gates,
                     on_tool_call, run_id, idea_id,
                     tool_call_source,
@@ -1768,7 +1981,7 @@ def run_agent(
         persistable_messages = _messages_without_inline_attachment_binary(
             _sanitize_tool_pairs(copy.deepcopy(raw_persist_source), session_id)
         )
-        _runtime_apply_agent_session_side_effects(
+        await _runtime_async_apply_agent_session_side_effects(
             session_id=session_id,
             messages=persistable_messages,
             output=output,
@@ -1782,12 +1995,10 @@ def run_agent(
             run_id=run_id,
             skip_harvest=skip_harvest,
             persist_session=persist_session,
-            memory_org_for_user=_memory_org_for_user,
-            auto_encode_if_needed=_auto_encode_if_needed,
             save_session=save_session,
         )
         if persist_session and raw_archive_messages is not None:
-            _update_thread_handoff_after_run(
+            await _update_thread_handoff_after_run_async(
                 session_id=session_id,
                 archive_messages=persistable_messages,
                 previous_handoff=thread_handoff,
@@ -1826,7 +2037,7 @@ def run_agent(
                 session_id, getattr(e, 'status_code', '?'), e,
                 str(_body)[:500], _hdrs.get('x-request-id', 'unknown'),
             )
-            _record_api_call(
+            await _async_record_api_call(
                 session_id=session_id, run_id=run_id, turn=0,
                 model=model, status="error", error=f"{e} | body={str(_body)[:200]}",
             )
@@ -1866,6 +2077,87 @@ def run_agent(
                 _agent_context.final_reply_review = _previous_final_reply_review
         finally:
             _agent_agent_context.__exit__(None, None, None)
+
+
+def _async_from_sync(callback):
+    async def wrapped(*args, **kwargs):
+        return await run_blocking(callback, *args, **kwargs)
+
+    return wrapped
+
+
+def run_agent(
+    message: str,
+    system_prompt: str = "",
+    session_id: str | None = None,
+    model: str | None = None,
+    thinking: str | None = "medium",
+    tools: list[dict] | None = None,
+    tool_handlers: dict | None = None,
+    max_turns: int = 200,
+    timeout_sec: int | None = None,
+    cache_system_prompt: bool = True,
+    persist_session: bool = True,
+    on_tool_call: Callable[[str, dict, str], None] | None = None,
+    workspace_root: str | None = None,
+    brain_context_preloaded: bool = False,
+    run_id: int | None = None,
+    idea_id: str | None = None,
+    tool_call_source: str = "runner",
+    cancel_event: "threading.Event | None" = None,
+    on_stream_activity: "Callable[[str], None] | None" = None,
+    on_stream_delta: "Callable[[str], None] | None" = None,
+    live_guidance_loader: "Callable[[], list[str]] | None" = None,
+    user_id: str | None = None,
+    skip_harvest: bool = False,
+    resolved_llm=None,
+    metadata: dict | None = None,
+    load_session: Callable[..., tuple[list[dict], str | None]] | None = None,
+    load_session_handoff: Callable[..., dict | None] | None = None,
+    save_session: Callable[..., None] | None = None,
+    save_session_handoff: Callable[..., None] | None = None,
+) -> AgentResult:
+    """Sync compatibility edge around the native async agent runtime."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("run_agent cannot run inside an active event loop; await run_agent_async")
+
+    kwargs = {
+        "message": message,
+        "system_prompt": system_prompt,
+        "session_id": session_id,
+        "model": model,
+        "thinking": thinking,
+        "tools": tools,
+        "tool_handlers": tool_handlers,
+        "max_turns": max_turns,
+        "timeout_sec": timeout_sec,
+        "cache_system_prompt": cache_system_prompt,
+        "persist_session": persist_session,
+        "on_tool_call": on_tool_call,
+        "workspace_root": workspace_root,
+        "brain_context_preloaded": brain_context_preloaded,
+        "run_id": run_id,
+        "idea_id": idea_id,
+        "tool_call_source": tool_call_source,
+        "cancel_event": cancel_event,
+        "on_stream_activity": on_stream_activity,
+        "on_stream_delta": on_stream_delta,
+        "live_guidance_loader": live_guidance_loader,
+        "user_id": user_id,
+        "skip_harvest": skip_harvest,
+        "resolved_llm": resolved_llm,
+        "metadata": metadata,
+        "load_session": load_session or _async_from_sync(globals()["_load_session"]),
+        "load_session_handoff": load_session_handoff or _async_from_sync(globals()["_load_session_handoff"]),
+        "save_session": save_session or _async_from_sync(globals()["_save_session"]),
+        "save_session_handoff": save_session_handoff or _async_from_sync(globals()["_save_session_handoff"]),
+    }
+    with asyncio.Runner() as runner:
+        return runner.run(run_agent_async(**kwargs))
 
 
 
