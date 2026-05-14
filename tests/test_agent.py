@@ -114,6 +114,27 @@ class TestProviderInference:
         assert mock_resolve.call_args.kwargs["provider"] == "openai"
         assert mock_resolve.call_args.kwargs["auth_mode"] == "chatgpt"
 
+    @patch("brain.systems.runs.direct_agent.get_provider")
+    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    def test_init_llm_reuses_pre_resolved_client(self, mock_resolve, mock_get_provider):
+        from brain.systems.runs.direct_agent import _init_llm
+
+        llm = SimpleNamespace(
+            provider="openai",
+            client=object(),
+            source="user_default",
+            auth_mode="chatgpt",
+            token_prefix="access-token",
+            is_oauth=False,
+            build_request_headers=MagicMock(return_value={}),
+        )
+        mock_get_provider.return_value = MagicMock()
+
+        _init_llm("user-1", "sess-1", "openai/gpt-5.5", resolved_llm=llm)
+
+        mock_resolve.assert_not_called()
+        mock_get_provider.assert_called_once_with("openai", llm.client)
+
 
 class TestLiveGuidance:
     def test_append_live_guidance_adds_user_message(self):

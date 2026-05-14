@@ -173,7 +173,7 @@ from brain.systems.sessions.harvest import (  # noqa: F401
 
 
 # ── Client ───────────────────────────────────────────────────
-# All client creation goes through brain.platform.integrations.llm.resolve_llm_client().
+# LLM clients are normally resolved before this blocking loop enters.
 # No singleton, no ALLOW_* flags, no filesystem credential files.
 
 def _normalize_model(model: str) -> str:
@@ -408,16 +408,20 @@ def _init_llm(
     model: str,
     *,
     org_id: str | None = None,
+    resolved_llm=None,
 ):
     """Resolve LLM client, provider, and extra headers."""
-    default_provider = resolve_default_provider(user_id=user_id, org_id=org_id)
-    requested_provider = infer_provider_from_model(model, default=default_provider)
-    llm = resolve_llm_client(
-        user_id=user_id,
-        org_id=org_id,
-        provider=requested_provider,
-        auth_mode=_required_openai_auth_mode(model) if requested_provider == "openai" else None,
-    )
+    if resolved_llm is None:
+        default_provider = resolve_default_provider(user_id=user_id, org_id=org_id)
+        requested_provider = infer_provider_from_model(model, default=default_provider)
+        llm = resolve_llm_client(
+            user_id=user_id,
+            org_id=org_id,
+            provider=requested_provider,
+            auth_mode=_required_openai_auth_mode(model) if requested_provider == "openai" else None,
+        )
+    else:
+        llm = resolved_llm
     provider = get_provider(llm.provider, llm.client)
     extra_headers = llm.build_request_headers(session_id=session_id)
     logger.info(
@@ -1305,6 +1309,7 @@ def run_agent(
     live_guidance_loader: "Callable[[], list[str]] | None" = None,
     user_id: str | None = None,
     skip_harvest: bool = False,
+    resolved_llm=None,
     metadata: dict | None = None,
 ) -> AgentResult:
     """Run an agent loop with tool use.
@@ -1431,6 +1436,7 @@ def run_agent(
             session_id,
             model,
             org_id=metadata.get("org_id"),
+            resolved_llm=resolved_llm,
         )
         state.provider_name = llm.provider
         if semantic_compactor is None:

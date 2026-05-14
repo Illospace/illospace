@@ -21,7 +21,7 @@ from brain.platform.async_io import run_blocking
 from brain.systems.runs.events import async_record_tool_call
 from brain.platform.db.models.org import Org, User
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.integrations.llm import _resolve_key_from_db, _resolve_key_from_env, resolve_llm_client
+from brain.platform.integrations.llm import _resolve_key_from_env, resolve_llm_client
 from brain.platform.integrations.providers import LLMRequest, _merge_streamed_output_into_response, get_provider
 from brain.systems.runs.direct_agent import (
     AgentResult,
@@ -854,9 +854,7 @@ def _build_predict_rlm_lm(
         )
 
     if provider == "anthropic":
-        token, _ = _resolve_key_from_db(user_id=user_id, org_id=org_id, provider="anthropic")
-        if not token:
-            token, _ = _resolve_key_from_env(provider="anthropic")
+        token, _ = _resolve_key_from_env(provider="anthropic")
         if not token:
             raise RuntimeError(
                 "PredictRLM requires an Anthropic API key. "

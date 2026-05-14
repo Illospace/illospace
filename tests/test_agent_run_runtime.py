@@ -380,6 +380,54 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert any(_artifact_type(artifact) == "file_observation" for artifact in runtime.store.artifacts)
 
 
+async def test_direct_agent_threaded_resolves_llm_before_blocking(monkeypatch):
+    from brain.systems.runs.invocation import build_direct_agent_invocation
+    from brain.systems.runs.recipes import threaded_invocation
+
+    class FakeUnitOfWork:
+        session = object()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    resolved_llm = SimpleNamespace(provider="openai", client=object())
+    calls = {}
+
+    async def fake_model_for_tier(session, tier, **kwargs):
+        calls["model_for_tier"] = {"session": session, "tier": tier, **kwargs}
+        return "openai/gpt-5.5"
+
+    async def fake_resolve_llm_client(**kwargs):
+        calls["resolve_llm_client"] = kwargs
+        return resolved_llm
+
+    monkeypatch.setattr(threaded_invocation, "UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr(threaded_invocation, "async_get_model_for_tier", fake_model_for_tier)
+    monkeypatch.setattr(threaded_invocation, "async_resolve_llm_client", fake_resolve_llm_client)
+
+    spec = build_direct_agent_invocation(
+        message="hello",
+        model="high",
+        user_id="user-1",
+        metadata={"org_id": "org-1"},
+    )
+
+    resolved_spec, resolved_model, resolved = await threaded_invocation._resolve_direct_agent_runtime(spec)
+
+    assert resolved_spec is spec
+    assert resolved_model == "openai/gpt-5.5"
+    assert resolved is resolved_llm
+    assert calls["model_for_tier"]["session"] is FakeUnitOfWork.session
+    assert calls["model_for_tier"]["tier"] == "high"
+    assert calls["model_for_tier"]["include_provider_prefix"] is True
+    assert calls["resolve_llm_client"]["provider"] == "openai"
+    assert calls["resolve_llm_client"]["auth_mode"] == "chatgpt"
+    assert calls["resolve_llm_client"]["session"] is FakeUnitOfWork.session
+
+
 def test_fast_onboarding_tool_surface_uses_standard_fast_surface(monkeypatch):
     from brain.systems.runs.recipes.fast import _agent_tools_for_runtime
 

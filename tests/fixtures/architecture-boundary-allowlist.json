@@ -207,7 +207,7 @@
       "import": "brain.systems.vault",
       "source_layer": "brain.platform",
       "target_layer": "brain.systems",
-      "allowed_occurrences": 3,
+      "allowed_occurrences": 2,
       "owner": "architecture-boundaries",
       "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
       "reason": "Platform code calls system behavior; replace with callback, event, or interface owned outside the adapter."

@@ -5,9 +5,9 @@ injection, and provider-specific logic lives here. No other module should
 create Anthropic/OpenAI clients directly.
 
 Usage:
-    from brain.platform.integrations.llm import resolve_llm_client
+    from brain.platform.integrations.llm import async_resolve_llm_client
 
-    result = resolve_llm_client(user_id="u-123")
+    result = await async_resolve_llm_client(user_id="u-123", session=session)
     response = result.call(model="openai/gpt-5.4", messages=[...], ...)
 
 To fix provider auth issues, change ONE file: this one.
@@ -149,15 +149,6 @@ class ResolvedProviderAuth:
 
 
 # ── Resolution ───────────────────────────────────────────────────
-
-def _resolve_key_from_db(
-    user_id: str | None = None,
-    org_id: str | None = None,
-    provider: str = "anthropic",
-) -> tuple[str | None, str]:
-    """Sync client resolution does not perform DB I/O; use async_resolve_llm_client."""
-    return None, "none"
-
 
 async def _async_resolve_key_from_db(
     session: AsyncSession,
@@ -369,36 +360,6 @@ def _refresh_codex_credential_if_needed(
     return refreshed
 
 
-def _persist_refreshed_openai_codex_db_credential(
-    *,
-    user_id: str | None,
-    org_id: str | None,
-    source: str,
-    cred: OpenAICodexCredential,
-) -> None:
-    if source not in {"user_default", "org_main"}:
-        return
-
-    from brain.systems.vault import update_resolved_api_key
-
-    stored_payload = json.dumps(encode_codex_auth_payload(cred))
-    updated = update_resolved_api_key(
-        user_id=user_id,
-        org_id=org_id,
-        provider="openai",
-        source=source,
-        api_key=stored_payload,
-    )
-    if not updated:
-        logger.warning(
-            "Refreshed OpenAI Codex credential could not be persisted; "
-            "no matching DB key row for source=%s user_id=%s org_id=%s",
-            source,
-            user_id,
-            org_id,
-        )
-
-
 async def _async_persist_refreshed_openai_codex_db_credential(
     *,
     session: AsyncSession,
@@ -431,13 +392,13 @@ async def _async_persist_refreshed_openai_codex_db_credential(
         )
 
 
-def _coerce_openai_db_auth(
+def _coerce_openai_stored_auth(
     raw_value: str | None,
     source: str,
     auth_mode: str | None = None,
     on_refresh: Callable[[OpenAICodexCredential], None] | None = None,
 ) -> ResolvedProviderAuth | None:
-    """Interpret a DB-stored OpenAI credential as API key or Codex auth."""
+    """Interpret a stored OpenAI credential as API key or Codex auth."""
     token = (raw_value or "").strip()
     if not token:
         return None
@@ -485,31 +446,10 @@ def _coerce_openai_db_auth(
     return None
 
 
-def _resolve_openai_auth(
-    user_id: str | None = None,
-    org_id: str | None = None,
+def _resolve_openai_local_auth(
     auth_mode: str | None = None,
 ) -> ResolvedProviderAuth | None:
-    """Resolve OpenAI auth with DB-backed user/org state first.
-
-    Machine-local Codex auth is a development fallback only unless explicitly
-    re-enabled by environment override.
-    """
-    db_value, db_source = _resolve_key_from_db(user_id=user_id, org_id=org_id, provider="openai")
-    db_auth = _coerce_openai_db_auth(
-        db_value,
-        db_source,
-        auth_mode=auth_mode,
-        on_refresh=lambda cred: _persist_refreshed_openai_codex_db_credential(
-            user_id=user_id,
-            org_id=org_id,
-            source=db_source,
-            cred=cred,
-        ),
-    )
-    if db_auth is not None:
-        return db_auth
-
+    """Resolve OpenAI auth from sync-safe local fallbacks only."""
     if auth_mode != "api_key" and _allow_local_codex_auth_fallback():
         codex_auth = load_codex_auth_json()
         if (
@@ -557,20 +497,28 @@ async def _async_resolve_openai_auth(
         nonlocal refreshed_cred
         refreshed_cred = cred
 
-    db_auth = _coerce_openai_db_auth(
+    db_auth = _coerce_openai_stored_auth(
         db_value,
         db_source,
         auth_mode,
         _capture_refresh,
     )
     if refreshed_cred is not None:
-        await _async_persist_refreshed_openai_codex_db_credential(
-            session=session,
-            user_id=user_id,
-            org_id=org_id,
-            source=db_source,
-            cred=refreshed_cred,
-        )
+        try:
+            await _async_persist_refreshed_openai_codex_db_credential(
+                session=session,
+                user_id=user_id,
+                org_id=org_id,
+                source=db_source,
+                cred=refreshed_cred,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist refreshed OpenAI Codex credential for source=%s: %s",
+                db_source,
+                exc,
+                exc_info=True,
+            )
     if db_auth is not None:
         return db_auth
 
@@ -608,24 +556,21 @@ def resolve_llm_client(
     provider: str | None = None,
     auth_mode: str | None = None,
 ) -> LLMClient:
-    """Resolve an LLM client from DB-stored keys.
+    """Resolve an LLM client from sync-safe local fallbacks.
 
-    Priority:
-        1. User's default key (set via Settings UI)
-        2. Org main key (set by org owner)
-        3. Environment variable (dev convenience)
-
-    Anthropic stays DB/env-only. OpenAI may additionally use a machine-local
-    Codex auth cache as an explicit development fallback.
+    User/org DB credentials require async_resolve_llm_client.
+    OpenAI may use a machine-local Codex auth cache as an explicit development
+    fallback; provider API keys may come from the environment.
 
     Raises RuntimeError if no key can be resolved.
     """
-    if not user_id and not org_id:
+    if user_id or org_id:
         import traceback
         caller = "".join(traceback.format_stack(limit=4)[:-1])
         logger.warning(
-            "resolve_llm_client called without user_id or org_id — "
-            "will fall back to env key. Thread user_id from the caller.\n%s",
+            "resolve_llm_client called with user/org context, but sync auth "
+            "resolution only supports local fallbacks. Use async_resolve_llm_client "
+            "for user/org credentials.\n%s",
             caller,
         )
 
@@ -642,16 +587,12 @@ def resolve_llm_client(
         raise NotImplementedError(f"Provider '{provider}' not yet supported. Add it here.")
 
     if provider == "openai":
-        resolved_auth = _resolve_openai_auth(
-            user_id=user_id,
-            org_id=org_id,
-            auth_mode=auth_mode,
-        )
+        resolved_auth = _resolve_openai_local_auth(auth_mode=auth_mode)
         if not resolved_auth:
             shared_hint = (
-                "Add a user-scoped OpenAI/Codex credential in Illo."
+                "user-scoped OpenAI/Codex credentials require async_resolve_llm_client."
                 if os.environ.get("ILLO_ENV", "development") == "production"
-                else "Add a user-scoped OpenAI/Codex credential in Illo, or set OPENAI_API_KEY in dev. Machine-local Codex login is only a local fallback."
+                else "user-scoped OpenAI/Codex credentials require async_resolve_llm_client; set OPENAI_API_KEY in dev or enable the machine-local Codex fallback."
             )
             raise RuntimeError(
                 f"No OpenAI auth found. {shared_hint}"
@@ -660,16 +601,11 @@ def resolve_llm_client(
             return _build_openai_codex_client(resolved_auth)
         return _build_openai_client(resolved_auth.token, resolved_auth.source)
 
-    # 1+2. DB keys (user default → org main → org vault → env fallback inside resolve_api_key)
-    key, source = _resolve_key_from_db(user_id=user_id, org_id=org_id, provider=provider)
-
-    # 3. Env fallback (for dev — no DB key yet)
-    if not key:
-        key, source = _resolve_key_from_env(provider=provider)
+    key, source = _resolve_key_from_env(provider=provider)
 
     if not key:
         raise RuntimeError(
-            f"No API key found for {provider}. Add one in Settings. Environment keys are only a development fallback."
+            f"No API key found for {provider}. User/org credentials require async_resolve_llm_client; environment keys are only a development fallback."
         )
 
     result = _build_anthropic_client(key)

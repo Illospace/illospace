@@ -2,43 +2,39 @@
 import json
 import os
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
-def test_sync_db_key_resolution_is_disabled_without_async_session():
-    from brain.platform.integrations.llm import _resolve_key_from_db
+@pytest.mark.asyncio
+async def test_async_resolve_llm_client_uses_stored_anthropic_key():
+    """User/org credentials are only resolved through the async auth path."""
+    from brain.platform.integrations.llm import async_resolve_llm_client
 
-    assert _resolve_key_from_db(user_id="user-1", provider="anthropic") == (None, "none")
-
-
-def test_resolve_llm_client_uses_db_key():
-    """Explicit Anthropic requests still use Anthropic DB keys."""
-    from brain.platform.integrations.llm import resolve_llm_client
-
-    with patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=("sk-ant-api03-test-key", "user_default")), \
+    mock_resolve = AsyncMock(return_value=("sk-ant-api03-test-key", "user_default"))
+    with patch("brain.platform.integrations.llm._async_resolve_key_from_db", mock_resolve), \
          patch("brain.platform.integrations.llm._build_anthropic_client") as mock_build:
         mock_build.return_value = MagicMock(
             client=MagicMock(), provider="anthropic", source="",
-            is_oauth=False, extra_headers={}, token_prefix="sk-ant-api03-test",
+            auth_mode="api_key", is_oauth=False, extra_headers={}, token_prefix="sk-ant-api03-test",
             get_extra_headers=MagicMock(return_value={}),
         )
-        result = resolve_llm_client(user_id="user-1", provider="anthropic")
+        result = await async_resolve_llm_client(user_id="user-1", provider="anthropic", session=object())
 
     assert result.source == "user_default"
     mock_build.assert_called_once_with("sk-ant-api03-test-key")
+    mock_resolve.assert_awaited_once()
 
 
 def test_resolve_llm_client_falls_back_to_env():
-    """When no DB key exists, explicit Anthropic requests fall back to Anthropic env auth."""
+    """The sync resolver only uses local/env fallback auth."""
     from brain.platform.integrations.llm import resolve_llm_client
 
-    with patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(None, "none")), \
-         patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=("sk-ant-api03-env-key", "env")), \
+    with patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=("sk-ant-api03-env-key", "env")), \
          patch("brain.platform.integrations.llm._build_anthropic_client") as mock_build:
         mock_build.return_value = MagicMock(
             client=MagicMock(), provider="anthropic", source="",
-            is_oauth=False, extra_headers={}, token_prefix="sk-ant-api03-env-",
+            auth_mode="api_key", is_oauth=False, extra_headers={}, token_prefix="sk-ant-api03-env-",
             get_extra_headers=MagicMock(return_value={}),
         )
         result = resolve_llm_client(user_id="user-1", provider="anthropic")
@@ -50,8 +46,7 @@ def test_resolve_llm_client_raises_when_no_key():
     """RuntimeError when no key can be found anywhere."""
     from brain.platform.integrations.llm import resolve_llm_client
 
-    with patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(None, "none")), \
-         patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=(None, "none")), \
+    with patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=(None, "none")), \
          patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=None):
         with pytest.raises(RuntimeError, match="No API key found"):
             resolve_llm_client(user_id="user-1", provider="anthropic")
@@ -61,18 +56,18 @@ def test_resolve_llm_client_detects_oauth_token():
     """Setup tokens (sk-ant-oat*) are detected and get OAuth headers."""
     from brain.platform.integrations.llm import resolve_llm_client
 
-    with patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=("sk-ant-oat01-setup-token", "org_main")), \
+    with patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=("sk-ant-oat01-setup-token", "env")), \
          patch("brain.platform.integrations.llm._build_anthropic_client") as mock_build:
         mock_build.return_value = MagicMock(
             client=MagicMock(), provider="anthropic", source="",
-            is_oauth=True, extra_headers={"anthropic-beta": "oauth-2025-04-20"},
+            auth_mode="api_key", is_oauth=True, extra_headers={"anthropic-beta": "oauth-2025-04-20"},
             token_prefix="sk-ant-oat01-setu",
             get_extra_headers=MagicMock(return_value={"anthropic-beta": "oauth-2025-04-20"}),
         )
         result = resolve_llm_client(user_id="user-1", provider="anthropic")
 
     assert result.is_oauth is True
-    assert result.source == "org_main"
+    assert result.source == "env"
 
 
 def test_resolve_llm_client_default_provider_coerces_anthropic_to_openai():
@@ -81,20 +76,20 @@ def test_resolve_llm_client_default_provider_coerces_anthropic_to_openai():
 
     with patch("brain.platform.providers.model_policy.resolve_default_provider", return_value="anthropic"), \
          patch(
-             "brain.platform.integrations.llm._resolve_openai_auth",
-             return_value=ResolvedProviderAuth(token="sk-openai-test", source="user_default", auth_mode="api_key"),
+             "brain.platform.integrations.llm._resolve_openai_local_auth",
+             return_value=ResolvedProviderAuth(token="sk-openai-test", source="env", auth_mode="api_key"),
          ), \
          patch("brain.platform.integrations.llm._build_openai_client") as mock_build, \
          patch("brain.platform.integrations.llm._build_anthropic_client") as mock_anthropic_build:
         mock_build.return_value = MagicMock(
-            client=MagicMock(), provider="openai", source="user_default",
+            client=MagicMock(), provider="openai", source="env",
             auth_mode="api_key", is_oauth=False, extra_headers={}, token_prefix="sk-openai-test",
             get_extra_headers=MagicMock(return_value={}),
         )
         result = resolve_llm_client(user_id="user-1")
 
     assert result.provider == "openai"
-    mock_build.assert_called_once_with("sk-openai-test", "user_default")
+    mock_build.assert_called_once_with("sk-openai-test", "env")
     mock_anthropic_build.assert_not_called()
 
 
@@ -118,7 +113,6 @@ def test_resolve_openai_client_uses_codex_cache_when_available():
         "ILLO_ALLOW_LOCAL_CODEX_AUTH_FALLBACK": "1",
     }
     with patch.dict(os.environ, env, clear=False), \
-         patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(None, "none")), \
          patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=codex_auth), \
          patch("brain.platform.integrations.llm.OpenAICodexClient", return_value=mock_client) as mock_codex_cls:
         result = resolve_llm_client(user_id="user-1", provider="openai")
@@ -132,9 +126,10 @@ def test_resolve_openai_client_uses_codex_cache_when_available():
     assert mock_codex_cls.call_args.kwargs["timeout"] == 123.0
 
 
-def test_resolve_openai_client_refreshes_expired_codex_db_credential():
+@pytest.mark.asyncio
+async def test_async_resolve_openai_client_refreshes_expired_codex_credential():
     """Expired ChatGPT/Codex access tokens should refresh before client construction."""
-    from brain.platform.integrations.llm import resolve_llm_client
+    from brain.platform.integrations.llm import async_resolve_llm_client
     from brain.platform.integrations.openai_codex_auth import (
         OpenAICodexCredential,
         encode_codex_auth_payload,
@@ -156,14 +151,16 @@ def test_resolve_openai_client_refreshes_expired_codex_db_credential():
     )
     mock_client = MagicMock()
 
-    with patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(expired_payload, "user_default")), \
+    mock_resolve = AsyncMock(return_value=(expired_payload, "user_default"))
+    mock_persist = AsyncMock()
+    with patch("brain.platform.integrations.llm._async_resolve_key_from_db", mock_resolve), \
          patch("brain.platform.integrations.llm.refresh_codex_access_token", return_value=refreshed) as mock_refresh, \
-         patch("brain.platform.integrations.llm._persist_refreshed_openai_codex_db_credential") as mock_persist, \
+         patch("brain.platform.integrations.llm._async_persist_refreshed_openai_codex_db_credential", mock_persist), \
          patch("brain.platform.integrations.llm.OpenAICodexClient", return_value=mock_client) as mock_codex_cls:
-        result = resolve_llm_client(user_id="user-1", provider="openai")
+        result = await async_resolve_llm_client(user_id="user-1", provider="openai", session=object())
 
     mock_refresh.assert_called_once_with("refresh-token-123")
-    mock_persist.assert_called_once()
+    mock_persist.assert_awaited_once()
     assert mock_persist.call_args.kwargs["user_id"] == "user-1"
     assert mock_persist.call_args.kwargs["source"] == "user_default"
     assert mock_persist.call_args.kwargs["cred"].access_token == "fresh-access"
@@ -175,9 +172,10 @@ def test_resolve_openai_client_refreshes_expired_codex_db_credential():
     assert mock_codex_cls.call_args.args[0] == "fresh-access"
 
 
-def test_resolve_openai_client_continues_when_refreshed_credential_persist_fails():
+@pytest.mark.asyncio
+async def test_async_resolve_openai_client_continues_when_refreshed_credential_persist_fails():
     """A successful token refresh should not fail the current model call if DB writeback hiccups."""
-    from brain.platform.integrations.llm import resolve_llm_client
+    from brain.platform.integrations.llm import async_resolve_llm_client
     from brain.platform.integrations.openai_codex_auth import (
         OpenAICodexCredential,
         encode_codex_auth_payload,
@@ -199,14 +197,13 @@ def test_resolve_openai_client_continues_when_refreshed_credential_persist_fails
     )
     mock_client = MagicMock()
 
-    with patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(expired_payload, "user_default")), \
+    mock_resolve = AsyncMock(return_value=(expired_payload, "user_default"))
+    mock_persist = AsyncMock(side_effect=RuntimeError("db unavailable"))
+    with patch("brain.platform.integrations.llm._async_resolve_key_from_db", mock_resolve), \
          patch("brain.platform.integrations.llm.refresh_codex_access_token", return_value=refreshed), \
-         patch(
-             "brain.platform.integrations.llm._persist_refreshed_openai_codex_db_credential",
-             side_effect=RuntimeError("db unavailable"),
-         ), \
+         patch("brain.platform.integrations.llm._async_persist_refreshed_openai_codex_db_credential", mock_persist), \
          patch("brain.platform.integrations.llm.OpenAICodexClient", return_value=mock_client) as mock_codex_cls:
-        result = resolve_llm_client(user_id="user-1", provider="openai")
+        result = await async_resolve_llm_client(user_id="user-1", provider="openai", session=object())
 
     assert result.token_prefix == "fresh-access"[:18]
     assert mock_codex_cls.call_args.args[0] == "fresh-access"
@@ -226,7 +223,6 @@ def test_resolve_openai_client_does_not_use_codex_cache_in_production_by_default
     )
 
     with patch.dict(os.environ, {"ILLO_ENV": "production"}, clear=False), \
-         patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(None, "none")), \
          patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=codex_auth), \
          patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=(None, "none")):
         with pytest.raises(RuntimeError, match="user-scoped OpenAI/Codex credential"):
@@ -248,7 +244,6 @@ def test_resolve_openai_client_can_reenable_codex_cache_with_explicit_override()
     )
 
     with patch.dict(os.environ, {"ILLO_ENV": "production", "ILLO_ALLOW_LOCAL_CODEX_AUTH_FALLBACK": "1"}, clear=False), \
-         patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(None, "none")), \
          patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=codex_auth), \
          patch("brain.platform.integrations.llm.OpenAICodexClient", return_value=mock_client):
         result = resolve_llm_client(user_id="user-1", provider="openai")
@@ -261,8 +256,7 @@ def test_resolve_openai_client_falls_back_to_env_api_key_when_no_codex_cache():
     """OpenAI env API keys still work when no Codex auth is available."""
     from brain.platform.integrations.llm import resolve_llm_client
 
-    with patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(None, "none")), \
-         patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=None), \
+    with patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=None), \
          patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=("sk-openai-test", "env")), \
          patch("brain.platform.integrations.llm._import_openai_sdk") as mock_sdk:
         mock_sdk.return_value.OpenAI.return_value = MagicMock()
