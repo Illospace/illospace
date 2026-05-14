@@ -72,7 +72,7 @@ def _optional_mapping(value: Any, field: str) -> tuple[dict[str, Any] | None, di
     return None, {"error": f"{field} must be an object when provided"}
 
 
-def _handle_manage_workspace_app(
+async def _handle_manage_workspace_app(
     action: str,
     operation: str | None = None,
     app_id: str | None = None,
@@ -149,17 +149,17 @@ def _handle_manage_workspace_app(
     from brain.systems.workspace_apps.service import (
         WorkspaceAppContractError,
         WorkspaceAppError,
-        archive_app,
-        create_app,
-        get_app,
-        get_state,
-        list_apps,
-        restore_app,
-        serialize_app,
-        serialize_apps,
+        a_archive_app,
+        a_create_app,
+        a_get_app,
+        a_get_state,
+        a_list_apps,
+        a_restore_app,
+        a_serialize_app,
+        a_serialize_apps,
+        a_update_app,
+        a_update_state,
         serialize_state,
-        update_app,
-        update_state,
     )
     from brain.systems.workspace_apps.events import publish_workspace_app_change
 
@@ -170,11 +170,11 @@ def _handle_manage_workspace_app(
     actor_id = str(user_id) if user_id else None
 
     try:
-        with UnitOfWork() as uow:
+        async with UnitOfWork() as uow:
             if action == "list":
-                apps = serialize_apps(
+                apps = await a_serialize_apps(
                     uow.session,
-                    list_apps(
+                    await a_list_apps(
                         uow.session,
                         org_id,
                         include_archived=include_archived,
@@ -198,7 +198,7 @@ def _handle_manage_workspace_app(
                     metadata=metadata,
                     initial_state=initial_state,
                 )
-                app = create_app(
+                app = await a_create_app(
                     uow.session,
                     org_id=org_id,
                     key=key,
@@ -215,8 +215,8 @@ def _handle_manage_workspace_app(
                     initial_state=initial_state,
                     state_key=state_key,
                 )
-                serialized = serialize_app(uow.session, app)
-                uow.commit()
+                serialized = await a_serialize_app(uow.session, app)
+                await uow.commit()
                 publish_workspace_app_change(org_id=org_id, action="create", app=serialized)
                 payload = {"app": serialized}
                 if compiled.repairs:
@@ -224,8 +224,8 @@ def _handle_manage_workspace_app(
                 return json.dumps(payload, default=str)
 
             if action == "get":
-                app = get_app(uow.session, org_id, app_id, key=key, include_archived=include_archived)
-                return json.dumps({"app": serialize_app(uow.session, app)}, default=str)
+                app = await a_get_app(uow.session, org_id, app_id, key=key, include_archived=include_archived)
+                return json.dumps({"app": await a_serialize_app(uow.session, app)}, default=str)
 
             if action == "update":
                 if not app_id and not key:
@@ -241,7 +241,7 @@ def _handle_manage_workspace_app(
                     visual_spec=visual_spec,
                     metadata=metadata,
                 )
-                app = update_app(
+                app = await a_update_app(
                     uow.session,
                     org_id=org_id,
                     app_id=app_id,
@@ -257,8 +257,8 @@ def _handle_manage_workspace_app(
                     anchor_user_id=anchor_user_id,
                     updated_by_user_id=actor_id,
                 )
-                serialized = serialize_app(uow.session, app)
-                uow.commit()
+                serialized = await a_serialize_app(uow.session, app)
+                await uow.commit()
                 publish_workspace_app_change(org_id=org_id, action="update", app=serialized)
                 payload = {"app": serialized}
                 if compiled.repairs:
@@ -268,8 +268,8 @@ def _handle_manage_workspace_app(
             if action == "archive":
                 if not app_id and not key:
                     return json.dumps({"error": "archive requires: app_id or key"})
-                result = archive_app(uow.session, org_id=org_id, app_id=app_id, key=key)
-                uow.commit()
+                result = await a_archive_app(uow.session, org_id=org_id, app_id=app_id, key=key)
+                await uow.commit()
                 archived = result.get("archived", {})
                 publish_workspace_app_change(
                     org_id=org_id,
@@ -292,16 +292,16 @@ def _handle_manage_workspace_app(
                             )
                         }
                     )
-                app = restore_app(uow.session, org_id=org_id, app_id=app_id, key=key)
-                serialized = serialize_app(uow.session, app)
-                uow.commit()
+                app = await a_restore_app(uow.session, org_id=org_id, app_id=app_id, key=key)
+                serialized = await a_serialize_app(uow.session, app)
+                await uow.commit()
                 publish_workspace_app_change(org_id=org_id, action="restore", app=serialized)
                 return json.dumps({"app": serialized}, default=str)
 
             if action == "get_state":
                 if not app_id:
                     return json.dumps({"error": "get_state requires: app_id"})
-                state = get_state(
+                state = await a_get_state(
                     uow.session,
                     org_id=org_id,
                     app_id=app_id,
@@ -313,7 +313,7 @@ def _handle_manage_workspace_app(
             if action == "update_state":
                 if not app_id:
                     return json.dumps({"error": "update_state requires: app_id"})
-                state = update_state(
+                state = await a_update_state(
                     uow.session,
                     org_id=org_id,
                     app_id=app_id,

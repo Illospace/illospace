@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 from io import BytesIO
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 import zipfile
+
+import pytest
 
 
 def _result(rows):
@@ -93,9 +95,9 @@ def _cycle_run(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
-    from brain.systems.runs.cortex.recording import build_agent_trace_snapshot
-    from brain.platform.db.models.agent_run import AgentRunRow
+@pytest.mark.asyncio
+async def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
+    from brain.systems.runs.cortex.recording import build_agent_trace_snapshot_async
 
     run = _run(
         workspace_ref={
@@ -144,8 +146,7 @@ def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
         created_at=now,
     )
 
-    session = MagicMock()
-    session.get.side_effect = lambda model, key: run if model is AgentRunRow and key == 42 else None
+    session = AsyncMock()
     session.scalars.side_effect = [
         _result([42]),
         _result([run]),
@@ -156,7 +157,7 @@ def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
         _result([_cycle_run()]),
     ]
 
-    snapshot = build_agent_trace_snapshot(session, run, saved_by="user-1")
+    snapshot = await build_agent_trace_snapshot_async(session, run, saved_by="user-1")
 
     assert snapshot["schema_version"] == 1
     assert snapshot["trace_id"] == "run:42"
@@ -174,12 +175,79 @@ def test_agent_trace_snapshot_is_bounded_and_analysis_ready():
     assert "not copied" not in str(snapshot)
 
 
-def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
+@pytest.mark.asyncio
+async def test_agent_trace_snapshot_async_uses_same_bounded_payload_shape():
+    from brain.systems.runs.cortex.recording import build_agent_trace_snapshot_async
+
+    run = _run()
+    now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+    message = SimpleNamespace(
+        id=9,
+        idea_id="idea-1",
+        role="illo",
+        content="Final answer " + ("x" * 5000),
+        attachments=[],
+        metadata_={"run_id": 42, "trace_id": "run:42", "private": "not copied"},
+        message_type="message",
+        created_at=now,
+    )
+    event = SimpleNamespace(
+        id=99,
+        run_id=42,
+        root_run_id=42,
+        sequence_no=3,
+        event_type="run.tool_completed",
+        payload={"tool_name": "read_file", "args": {"path": "README.md"}, "result": "y" * 5000},
+        producer="agent_runtime",
+        visibility="public",
+        created_at=now,
+    )
+    artifact = SimpleNamespace(
+        id=100,
+        run_id=42,
+        root_run_id=42,
+        artifact_type="reply",
+        title="Final reply",
+        payload={"large": "z" * 5000},
+        text="artifact text",
+        uri=None,
+        visibility="public",
+        created_at=now,
+    )
+
+    session = AsyncMock()
+    session.scalars.side_effect = [
+        _result([42]),
+        _result([run]),
+        _result([message]),
+        _result([event]),
+        _result([artifact]),
+        _result([]),
+        _result([]),
+    ]
+
+    snapshot = await build_agent_trace_snapshot_async(session, run, saved_by="user-1")
+
+    assert snapshot["schema_version"] == 1
+    assert snapshot["trace_id"] == "run:42"
+    assert snapshot["thread"]["messages"][0]["metadata"] == {
+        "run_id": 42,
+        "trace_id": "run:42",
+        "execution_profile": None,
+        "live_agent_text": None,
+    }
+    assert snapshot["tools"][0]["tool_name"] == "read_file"
+    assert snapshot["artifacts"][0]["artifact_type"] == "reply"
+    assert snapshot["storage_estimate"]["truncated"] is True
+    assert "not copied" not in str(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
     from brain.systems.runs.cortex.recording import (
         agent_trace_export_filename,
-        build_thread_trace_snapshot,
+        build_thread_trace_snapshot_async,
     )
-    from brain.platform.db.models.agent_run import AgentRunRow
 
     now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
     run = _run(id=42, trace_id="run:42", input_message="Start the thread")
@@ -234,8 +302,7 @@ def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
         created_at=now,
     )
 
-    session = MagicMock()
-    session.get.side_effect = lambda model, key: {42: run, 43: child}.get(key) if model is AgentRunRow else None
+    session = AsyncMock()
     session.scalars.side_effect = [
         _result([run, child]),
         _result([first_message, second_message]),
@@ -247,7 +314,7 @@ def test_thread_trace_snapshot_covers_conversation_and_all_thread_runs():
         _result([_cycle_run(run_id=43)]),
     ]
 
-    snapshot = build_thread_trace_snapshot(session, "idea-1", saved_by="user-1")
+    snapshot = await build_thread_trace_snapshot_async(session, "idea-1", saved_by="user-1")
 
     assert snapshot["export_scope"] == "thread"
     assert snapshot["trace_id"] == "thread:idea-1"

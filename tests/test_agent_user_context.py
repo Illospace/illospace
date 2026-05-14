@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -43,37 +44,43 @@ USER_B = {
 
 class TestCrossUserAttribution:
 
-    def test_attribution_enabled_shows_name(self):
+    async def test_attribution_enabled_shows_name(self):
         """When attribution_enabled=True, cross-user memories show the author's name."""
         from brain.app.mcp.server import _add_attribution
         mock_session = MagicMock()
-        mock_session.execute.return_value.mappings.return_value.all.return_value = [
+        result = MagicMock()
+        result.mappings.return_value.all.return_value = [
             {"id": 1, "user_id": USER_B["id"], "name": "Bob", "attribution_enabled": True},
         ]
+        mock_session.execute = AsyncMock(return_value=result)
         memories = [{"id": 1, "content": "test", "type": "lesson"}]
-        result = _add_attribution(mock_session, memories, USER_A["id"])
+        result = await _add_attribution(mock_session, memories, USER_A["id"])
         assert result[0]["attributed_to"] == "Bob"
 
-    def test_attribution_disabled_anonymizes(self):
+    async def test_attribution_disabled_anonymizes(self):
         """When attribution_enabled=False, cross-user memories show 'A teammate'."""
         from brain.app.mcp.server import _add_attribution
         mock_session = MagicMock()
-        mock_session.execute.return_value.mappings.return_value.all.return_value = [
+        result = MagicMock()
+        result.mappings.return_value.all.return_value = [
             {"id": 1, "user_id": USER_B["id"], "name": "Bob", "attribution_enabled": False},
         ]
+        mock_session.execute = AsyncMock(return_value=result)
         memories = [{"id": 1, "content": "test", "type": "lesson"}]
-        result = _add_attribution(mock_session, memories, USER_A["id"])
+        result = await _add_attribution(mock_session, memories, USER_A["id"])
         assert result[0]["attributed_to"] == "A teammate"
 
-    def test_own_memories_no_attribution(self):
+    async def test_own_memories_no_attribution(self):
         """Own memories should not get attribution tag."""
         from brain.app.mcp.server import _add_attribution
         mock_session = MagicMock()
-        mock_session.execute.return_value.mappings.return_value.all.return_value = [
+        result = MagicMock()
+        result.mappings.return_value.all.return_value = [
             {"id": 1, "user_id": USER_A["id"], "name": "Alice", "attribution_enabled": True},
         ]
+        mock_session.execute = AsyncMock(return_value=result)
         memories = [{"id": 1, "content": "test", "type": "lesson"}]
-        result = _add_attribution(mock_session, memories, USER_A["id"])
+        result = await _add_attribution(mock_session, memories, USER_A["id"])
         assert "attributed_to" not in result[0]
 
 
@@ -88,6 +95,8 @@ class TestBrainEncodeUserScoped:
         mock_uow = MagicMock()
         mock_uow.__enter__ = MagicMock(return_value=mock_uow)
         mock_uow.__exit__ = MagicMock(return_value=False)
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
         mock_uow.memories.insert_memory.return_value = {
             "id": 42,
             "type": "episode",
@@ -118,6 +127,8 @@ class TestBrainEncodeUserScoped:
         mock_uow = MagicMock()
         mock_uow.__enter__ = MagicMock(return_value=mock_uow)
         mock_uow.__exit__ = MagicMock(return_value=False)
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
         mock_uow.memories.insert_memory.return_value = {
             "id": 43,
             "type": "episode",
@@ -141,50 +152,45 @@ class TestBrainEncodeUserScoped:
 
 class TestRunUserPassthrough:
 
-    def test_admit_run_stores_user_id(self):
-        """admit_run() should store user_id in agent_runs."""
+    async def test_admit_run_stores_user_id(self):
+        """async_admit_run() should pass user_id into run request construction."""
         from types import SimpleNamespace
 
-        from brain.systems.runs.cortex import RunAdmissionRequest, admit_run
+        import brain.systems.runs.cortex as cortex
+        from brain.systems.runs.cortex import RunAdmissionRequest, async_admit_run
 
-        mock_uow = MagicMock()
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
-        mock_uow.session.get.return_value = SimpleNamespace(
-            id="idea-123",
-            org_id=USER_A["org_id"],
-            user_id=USER_A["id"],
-            title="Idea",
-        )
-        mock_uow.session.get_bind.return_value.dialect.name = "sqlite"
-        mock_uow.session.scalar.return_value = 0
+        captured_kwargs = {}
+        captured_request = None
 
-        added_objects = []
-        def _track_add(obj):
-            added_objects.append(obj)
-        mock_uow.session.add.side_effect = _track_add
-        def _flush():
-            if not added_objects:
-                return
-            obj = added_objects[-1]
-            if getattr(obj, "id", None) is None:
-                obj.id = 100 if obj.__class__.__name__ == "AgentRunRow" else 1
-        mock_uow.session.flush.side_effect = _flush
+        async def _build_request(session, **kwargs):
+            captured_kwargs.update(kwargs)
+            return SimpleNamespace(user_id=kwargs["user_id"], thread_id=kwargs["idea_id"])
 
-        with patch("brain.systems.runs.cortex.UnitOfWork", return_value=mock_uow):
-            result = admit_run(
+        class _Store:
+            def __init__(self, session):
+                self.session = session
+
+            async def create_run(self, run_request):
+                nonlocal captured_request
+                captured_request = run_request
+                return SimpleNamespace(id=100)
+
+        with patch.object(cortex, "a_build_run_request", side_effect=_build_request), \
+             patch.object(cortex, "AsyncAgentRunStore", _Store), \
+             patch.object(cortex, "_a_mark_idea_working_for_run_admission", new=AsyncMock(return_value=None)):
+            result = await async_admit_run(
                 RunAdmissionRequest(
                     idea_id="idea-123",
                     event="thread_reply",
                     message="test message",
                     user_id=USER_A["id"],
-                )
+                ),
+                session=MagicMock(),
             )
 
         assert result.run_id == 100
-        run_objects = [obj for obj in added_objects if obj.__class__.__name__ == "AgentRunRow"]
-        assert len(run_objects) == 1
-        run_obj = run_objects[0]
-        assert run_obj.user_id == USER_A["id"]
-        assert run_obj.thread_id == "idea-123"
-        assert run_obj.target_ref["event"] == "thread_reply"
+        assert captured_kwargs["user_id"] == USER_A["id"]
+        assert captured_kwargs["idea_id"] == "idea-123"
+        assert captured_kwargs["event"] == "thread_reply"
+        assert captured_request.user_id == USER_A["id"]
+        assert captured_request.thread_id == "idea-123"

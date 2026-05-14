@@ -22,7 +22,7 @@ def _journal_dir() -> Path:
 
 
 @router.get("/journal")
-def list_journal_entries(
+async def list_journal_entries(
     limit: int | None = Query(None, ge=1, le=200),
     offset: int = Query(0, ge=0),
     user: dict[str, Any] = Depends(get_current_user),

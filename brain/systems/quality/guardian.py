@@ -11,30 +11,30 @@ from sqlalchemy import text
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 
-def load_rules(active_only: bool = True) -> list[dict]:
+async def load_rules(active_only: bool = True) -> list[dict]:
     """Load guardian rules from DB."""
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         clause = "WHERE active = true" if active_only else ""
-        rows = uow.session.execute(text(f"""
+        rows = (await uow.session.execute(text(f"""
             SELECT id, name, description, trigger_type, trigger_pattern,
                    required_evidence, check_description, source_lesson_ids,
                    source_violation_count, trust_level_required,
                    times_enforced, times_passed, times_bounced
             FROM guardian_rules {clause}
             ORDER BY trust_level_required ASC, times_bounced DESC
-        """)).mappings().all()
+        """))).mappings().all()
         return [dict(r) for r in rows]
 
 
-def check_completion(action_log: list[str], task_context: dict) -> tuple[bool, list[str]]:
+async def check_completion(action_log: list[str], task_context: dict) -> tuple[bool, list[str]]:
     """Check if a completion should be allowed through.
 
     Returns (allowed, violations).
     action_log: list of recent agent actions (tool calls, file edits, etc.)
     task_context: {involves_code: bool, involves_investigation: bool, ...}
     """
-    rules = load_rules()
-    trust = get_trust_level()
+    rules = await load_rules()
+    trust = await get_trust_level()
     violations = []
     action_text = " ".join(action_log).lower()
 
@@ -73,8 +73,8 @@ def check_completion(action_log: list[str], task_context: dict) -> tuple[bool, l
                 missing.append(evidence)
 
         # Update enforcement counter
-        with UnitOfWork() as uow:
-            uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            await uow.session.execute(text("""
                 UPDATE guardian_rules SET times_enforced = times_enforced + 1,
                        updated_at = NOW() WHERE id = :id
             """), {"id": rule["id"]})
@@ -84,14 +84,14 @@ def check_completion(action_log: list[str], task_context: dict) -> tuple[bool, l
                 f"[{rule['name']}] {rule['check_description']} "
                 f"(missing: {', '.join(missing)})"
             )
-            with UnitOfWork() as uow:
-                uow.session.execute(text("""
+            async with UnitOfWork() as uow:
+                await uow.session.execute(text("""
                     UPDATE guardian_rules SET times_bounced = times_bounced + 1
                     WHERE id = :id
                 """), {"id": rule["id"]})
         else:
-            with UnitOfWork() as uow:
-                uow.session.execute(text("""
+            async with UnitOfWork() as uow:
+                await uow.session.execute(text("""
                     UPDATE guardian_rules SET times_passed = times_passed + 1
                     WHERE id = :id
                 """), {"id": rule["id"]})
@@ -99,15 +99,15 @@ def check_completion(action_log: list[str], task_context: dict) -> tuple[bool, l
     return (len(violations) == 0, violations)
 
 
-def record_completion(passed: bool, violations: list[str], caught_by: str):
+async def record_completion(passed: bool, violations: list[str], caught_by: str):
     """Record a completion outcome and update trust state.
 
     caught_by: 'guardian', 'self', 'user'
     """
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         if caught_by == "user":
             # Worst case: user caught something we missed
-            uow.session.execute(text("""
+            await uow.session.execute(text("""
                 UPDATE trust_state SET
                     total_completions = total_completions + 1,
                     total_user_caught = total_user_caught + 1,
@@ -118,7 +118,7 @@ def record_completion(passed: bool, violations: list[str], caught_by: str):
                 WHERE id = (SELECT id FROM trust_state LIMIT 1)
             """), {"reason": f"User caught: {'; '.join(violations[:3])}"})
         elif caught_by == "guardian":
-            uow.session.execute(text("""
+            await uow.session.execute(text("""
                 UPDATE trust_state SET
                     total_completions = total_completions + 1,
                     total_bounced = total_bounced + 1,
@@ -128,7 +128,7 @@ def record_completion(passed: bool, violations: list[str], caught_by: str):
             """))
         else:
             # Clean pass or self-corrected
-            uow.session.execute(text("""
+            await uow.session.execute(text("""
                 UPDATE trust_state SET
                     total_completions = total_completions + 1,
                     consecutive_clean = consecutive_clean + 1,
@@ -148,18 +148,18 @@ def record_completion(passed: bool, violations: list[str], caught_by: str):
 
         # Log violations
         for v in violations:
-            uow.session.execute(text("""
+            await uow.session.execute(text("""
                 INSERT INTO violation_log (detected_by, context, session_date)
                 VALUES (:detected_by, :context, CURRENT_DATE)
             """), {"detected_by": caught_by, "context": v})
 
 
-def get_trust_level() -> dict:
+async def get_trust_level() -> dict:
     """Return current trust state."""
-    with UnitOfWork() as uow:
-        row = uow.session.execute(
+    async with UnitOfWork() as uow:
+        row = (await uow.session.execute(
             text("SELECT * FROM trust_state LIMIT 1")
-        ).mappings().first()
+        )).mappings().first()
         if not row:
             return {"current_level": 0, "consecutive_clean": 0,
                     "total_completions": 0, "level_name": "probation"}
@@ -170,10 +170,10 @@ def get_trust_level() -> dict:
         return result
 
 
-def demote(reason: str):
+async def demote(reason: str):
     """Demote trust level. Called when user catches a miss."""
-    with UnitOfWork() as uow:
-        uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        await uow.session.execute(text("""
             UPDATE trust_state SET
                 current_level = GREATEST(0, current_level - 1),
                 consecutive_clean = 0,
@@ -183,14 +183,14 @@ def demote(reason: str):
         """), {"reason": reason})
 
 
-def get_scout_checklist() -> str:
+async def get_scout_checklist() -> str:
     """Generate the pre-flight checklist as markdown for private operator context."""
-    with UnitOfWork() as uow:
-        rows = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        rows = (await uow.session.execute(text("""
             SELECT category, check_text, priority
             FROM checklist_items WHERE active = true
             ORDER BY priority ASC, category, check_text
-        """)).mappings().all()
+        """))).mappings().all()
         items = [dict(r) for r in rows]
 
     if not items:

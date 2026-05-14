@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import inspect
+from types import SimpleNamespace
+
 import pytest
 
 from brain.platform.db.repositories import unit_of_work as uow_module
-from brain.platform.db.repositories.unit_of_work import AsyncRepositoryProxy, UnitOfWork, run_sync_with_unit_of_work
+from brain.platform.db.repositories.unit_of_work import (
+    AsyncRepositoryProxy,
+    UnitOfWork,
+)
 from brain.systems.runs import event_log as event_log_module
 from brain.systems.runs.cortex import runner as cortex_runner
+from brain.systems.runs.direct_loop import session_effects as session_effects_module
+from brain.systems.runs.direct_loop import telemetry as telemetry_module
+from brain.systems.runs import project_execution_env as project_execution_env_module
 from brain.systems.runs import store as run_store_module
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.app.scheduler import executor as scheduler_executor
@@ -24,11 +33,13 @@ class _SyncSession:
 class _AsyncSession:
     def __init__(self) -> None:
         self.sync_session = _SyncSession()
+        self.run_sync_calls = 0
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
 
     async def run_sync(self, fn):
+        self.run_sync_calls += 1
         return fn(self.sync_session)
 
     async def commit(self) -> None:
@@ -50,13 +61,65 @@ class _Repo:
         return list(self._session.values)
 
 
+class _NativeAsyncRepo:
+    def __init__(self, session: _AsyncSession) -> None:
+        self._session = session
+
+    def record(self, value: str) -> list[str]:
+        raise AssertionError("native async repository methods should not use run_sync")
+
+    async def a_record(self, value: str) -> list[str]:
+        self._session.sync_session.values.append(f"async:{value}")
+        return list(self._session.sync_session.values)
+
+
+class _BaseNativeAsyncRepo:
+    def __init__(self, session) -> None:
+        self._session = session
+
+    def record(self, value: str) -> list[str]:
+        self._session.values.append(f"base:{value}")
+        return list(self._session.values)
+
+    async def a_record(self, value: str) -> list[str]:
+        self._session.sync_session.values.append(f"base-async:{value}")
+        return list(self._session.sync_session.values)
+
+
+class _OverridesSyncRepo(_BaseNativeAsyncRepo):
+    def record(self, value: str) -> list[str]:
+        self._session.values.append(f"override:{value}")
+        return list(self._session.values)
+
+
 @pytest.mark.asyncio
-async def test_async_repository_proxy_runs_sync_repo_in_async_session():
+async def test_async_repository_proxy_rejects_sync_only_repo_method():
     session = _AsyncSession()
     repo = AsyncRepositoryProxy(session, _Repo)
 
-    assert await repo.record("alpha") == ["alpha"]
-    assert session.sync_session.values == ["alpha"]
+    with pytest.raises(AttributeError, match="no native async implementation"):
+        repo.record("alpha")
+    assert session.run_sync_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_async_repository_proxy_prefers_native_async_repo_method():
+    session = _AsyncSession()
+    repo = AsyncRepositoryProxy(session, _NativeAsyncRepo)
+
+    assert await repo.record("alpha") == ["async:alpha"]
+    assert session.sync_session.values == ["async:alpha"]
+    assert session.run_sync_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_async_repository_proxy_rejects_subclass_sync_override():
+    session = _AsyncSession()
+    repo = AsyncRepositoryProxy(session, _OverridesSyncRepo)
+
+    with pytest.raises(AttributeError, match="no native async implementation"):
+        repo.record("alpha")
+    assert session.run_sync_calls == 0
 
 
 @pytest.mark.asyncio
@@ -66,7 +129,7 @@ async def test_unit_of_work_async_lifecycle_commits_and_closes(monkeypatch):
 
     async with UnitOfWork() as uow:
         assert uow.session is session
-        assert await uow._repo(_Repo).record("beta") == ["beta"]
+        assert await uow._repo(_NativeAsyncRepo).record("beta") == ["async:beta"]
 
     assert session.commits == 1
     assert session.rollbacks == 0
@@ -81,10 +144,35 @@ async def test_unit_of_work_async_cortex_idea_and_thread_repositories(monkeypatc
     monkeypatch.setattr(uow_module, "IdeaThreadRepository", _Repo)
 
     async with UnitOfWork() as uow:
-        assert await uow.ideas.record("idea") == ["idea"]
-        assert await uow.idea_threads.record("thread") == ["idea", "thread"]
+        with pytest.raises(AttributeError, match="no native async implementation"):
+            uow.ideas.record("idea")
+        with pytest.raises(AttributeError, match="no native async implementation"):
+            uow.idea_threads.record("thread")
 
-    assert session.sync_session.values == ["idea", "thread"]
+    assert session.run_sync_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_unit_of_work_notifications_is_repository_property(monkeypatch):
+    session = _AsyncSession()
+    monkeypatch.setattr(uow_module, "SessionFactory", lambda: session)
+    monkeypatch.setattr(uow_module, "NotificationEventRepository", _Repo)
+
+    async with UnitOfWork() as uow:
+        with pytest.raises(AttributeError, match="no native async implementation"):
+            uow.notifications.record("notification")
+
+
+@pytest.mark.asyncio
+async def test_unit_of_work_notifications_prefers_native_async_repository(monkeypatch):
+    session = _AsyncSession()
+    monkeypatch.setattr(uow_module, "SessionFactory", lambda: session)
+    monkeypatch.setattr(uow_module, "NotificationEventRepository", _NativeAsyncRepo)
+
+    async with UnitOfWork() as uow:
+        assert await uow.notifications.record("notification") == ["async:notification"]
+
+    assert session.run_sync_calls == 0
 
 
 @pytest.mark.asyncio
@@ -101,102 +189,68 @@ async def test_unit_of_work_async_lifecycle_rolls_back_on_error(monkeypatch):
     assert session.closed is True
 
 
-@pytest.mark.asyncio
-async def test_run_sync_with_unit_of_work_reuses_async_sync_session(monkeypatch):
-    session = _AsyncSession()
-    monkeypatch.setattr(uow_module, "SessionFactory", lambda: session)
+def test_cortex_runner_exposes_async_db_boundaries_without_sync_bridge():
+    source = inspect.getsource(cortex_runner)
 
-    def legacy_shaped_service(value: str) -> list[str]:
-        with UnitOfWork() as uow:
-            assert uow.session is session.sync_session
-            uow.session.values.append(value)
-            return list(uow.session.values)
-
-    result = await run_sync_with_unit_of_work(legacy_shaped_service, "gamma")
-
-    assert result == ["gamma"]
-    assert session.sync_session.flushes == 1
-    assert session.commits == 1
-    assert session.closed is True
+    assert "_run_db" not in source
+    assert "_runner_unit_of_work" not in source
 
 
-@pytest.mark.asyncio
-async def test_sync_unit_of_work_refuses_legacy_engine_inside_async_runtime():
-    with pytest.raises(RuntimeError, match="Synchronous UnitOfWork cannot open the legacy DB engine"):
-        with UnitOfWork():
-            pass
+def test_async_agent_run_store_uses_native_async_db_path():
+    source = inspect.getsource(run_store_module.AsyncAgentRunStore)
+
+    assert "run_session_task" not in source
+    assert ".run_sync(" not in source
 
 
-def test_cortex_runner_db_bridge_uses_sync_path_outside_async_runtime(monkeypatch):
-    async def fail_async_bridge(*args, **kwargs):
-        raise AssertionError("runner should not spawn a short-lived async DB loop")
+def test_async_event_log_uses_native_async_store():
+    source = inspect.getsource(event_log_module.async_record_run_event)
 
-    monkeypatch.setattr(
-        cortex_runner,
-        "run_sync_with_unit_of_work",
-        fail_async_bridge,
-        raising=False,
-    )
-
-    assert cortex_runner._run_db(lambda value: f"sync:{value}", "ok") == "sync:ok"
+    assert "._run(" not in source
+    assert "run_session_task" not in source
+    assert ".run_sync(" not in source
 
 
-@pytest.mark.asyncio
-async def test_cortex_runner_db_bridge_rejects_calls_inside_async_runtime():
-    with pytest.raises(RuntimeError, match="cannot be called from a running event loop"):
-        cortex_runner._run_db(lambda: None)
+def test_run_runtime_async_entrypoints_do_not_use_sync_bridges():
+    sources = [
+        inspect.getsource(event_log_module.async_record_run_event),
+        inspect.getsource(event_log_module.async_record_run_degraded_event),
+        inspect.getsource(telemetry_module.async_record_api_call),
+        inspect.getsource(session_effects_module.async_memory_org_for_user),
+        inspect.getsource(session_effects_module.async_auto_encode_if_needed),
+        inspect.getsource(session_effects_module.async_apply_agent_session_side_effects),
+        inspect.getsource(project_execution_env_module._async_current_run_target_context),
+        inspect.getsource(project_execution_env_module.async_current_project_bound_env),
+        inspect.getsource(project_execution_env_module.async_prepare_project_execution_env),
+    ]
+
+    forbidden = [
+        "open_unit_of_work",
+        "run_unit_of_work_task",
+        "run_session_task",
+        "run_async_from_sync",
+        "asyncio.run",
+        "asyncio.to_thread",
+        "threading.Thread",
+        "ThreadPoolExecutor",
+        ".run_sync(",
+    ]
+    for source in sources:
+        for pattern in forbidden:
+            assert pattern not in source
 
 
-@pytest.mark.asyncio
-async def test_async_agent_run_store_delegates_through_run_sync(monkeypatch):
-    calls: list[tuple[str, object]] = []
+def test_scheduler_async_helpers_are_native_async():
+    sources = [
+        inspect.getsource(scheduler_runtime.async_claim_run),
+        inspect.getsource(scheduler_runtime.async_claim_next_due_run),
+        inspect.getsource(scheduler_executor.async_execute_scheduler_run),
+        inspect.getsource(scheduler_executor.async_drain_scheduler),
+    ]
 
-    class _Store:
-        def __init__(self, sync_session, *, auto_commit: bool = False) -> None:
-            calls.append(("init", sync_session))
-            self.auto_commit = auto_commit
-
-        def create_run(self, request):
-            calls.append(("create_run", request))
-            return {"request": request, "auto_commit": self.auto_commit}
-
-    session = _AsyncSession()
-    monkeypatch.setattr(run_store_module, "AgentRunStore", _Store)
-
-    result = await AsyncAgentRunStore(session, auto_commit=True).create_run("request")
-
-    assert result == {"request": "request", "auto_commit": True}
-    assert calls == [("init", session.sync_session), ("create_run", "request")]
-
-
-@pytest.mark.asyncio
-async def test_scheduler_async_claim_wrapper_uses_run_sync(monkeypatch):
-    session = _AsyncSession()
-
-    def fake_claim(sync_session, run_id, **kwargs):
-        assert sync_session is session.sync_session
-        return ("run", run_id, kwargs["owner_id"])
-
-    monkeypatch.setattr(scheduler_runtime, "claim_run", fake_claim)
-
-    result = await scheduler_runtime.async_claim_run(session, 42, owner_id="worker-1")
-
-    assert result == ("run", 42, "worker-1")
-
-
-@pytest.mark.asyncio
-async def test_scheduler_async_executor_wrapper_uses_run_sync(monkeypatch):
-    session = _AsyncSession()
-
-    def fake_execute(sync_session, run_id, **kwargs):
-        assert sync_session is session.sync_session
-        return {"run_id": run_id, "owner_id": kwargs["owner_id"]}
-
-    monkeypatch.setattr(scheduler_executor, "execute_scheduler_run", fake_execute)
-
-    result = await scheduler_executor.async_execute_scheduler_run(session, 99, owner_id="worker-2")
-
-    assert result == {"run_id": 99, "owner_id": "worker-2"}
+    for source in sources:
+        assert "run_session_task" not in source
+        assert ".run_sync(" not in source
 
 
 @pytest.mark.asyncio
@@ -208,13 +262,9 @@ async def test_async_record_run_event_uses_short_lived_async_store(monkeypatch):
         def __init__(self, active_session):
             assert active_session is session
 
-        async def _run(self, fn):
-            class _SyncStore:
-                def require_run(self, run_id: int):
-                    assert run_id == 7
-                    return type("Run", (), {"root_run_id": 3})()
-
-            return fn(_SyncStore())
+        async def require_run(self, run_id: int):
+            assert run_id == 7
+            return type("Run", (), {"root_run_id": 3})()
 
         async def append_event(self, event):
             appended.append(event)
@@ -234,3 +284,88 @@ async def test_async_record_run_event_uses_short_lived_async_store(monkeypatch):
     assert event.root_run_id == 3
     assert event.event_type == "run.test"
     assert event.payload == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_async_record_api_call_uses_supplied_async_session():
+    class _TelemetrySession:
+        def __init__(self) -> None:
+            self.executed = []
+
+        async def execute(self, statement, params):
+            self.executed.append((statement, params))
+
+        async def rollback(self):
+            raise AssertionError("rollback should not be needed for a successful insert")
+
+    session = _TelemetrySession()
+
+    await telemetry_module.async_record_api_call(
+        session_id="session-1",
+        run_id=7,
+        turn=2,
+        model="test-model",
+        tokens_input=11,
+        tokens_output=13,
+        cache_read=3,
+        cache_write=5,
+        context_messages=8,
+        system_prompt_chars=21,
+        status="success",
+        stop_reason="stop",
+        latency_ms=34,
+        session=session,
+    )
+
+    assert len(session.executed) == 1
+    statement, params = session.executed[0]
+    assert "agent_api_calls" in str(statement)
+    assert params["sid"] == "session-1"
+    assert params["did"] == 7
+    assert params["trace_id"] == "run:7"
+    assert params["ti"] == 11
+    assert params["to"] == 13
+
+
+@pytest.mark.asyncio
+async def test_async_session_effects_awaits_async_callbacks():
+    calls = []
+    tokens = SimpleNamespace(input=10, output=5, cache_read=2, cache_creation=1)
+    messages = [{"role": "user", "content": "hello"}]
+
+    async def memory_org(user_id):
+        calls.append(("memory_org", user_id))
+        return "org-from-memory"
+
+    async def auto_encode(tool_calls_made, output, session_id, **kwargs):
+        calls.append(("auto", tool_calls_made, output, session_id, kwargs))
+
+    async def harvest(session_id, harvested_messages, **kwargs):
+        calls.append(("harvest", session_id, harvested_messages, kwargs))
+
+    async def save(session_id, saved_messages, system_prompt, *token_args):
+        calls.append(("save", session_id, saved_messages, system_prompt, token_args))
+
+    effective_org_id = await session_effects_module.async_apply_agent_session_side_effects(
+        session_id="session-1",
+        messages=messages,
+        output="A long enough output to be eligible for auto encode if the tools acted.",
+        system_prompt="system",
+        tokens=tokens,
+        tool_calls_made=["write_file"],
+        user_id="user-1",
+        metadata={},
+        agent_context=SimpleNamespace(org_id=None),
+        idea_id="idea-1",
+        run_id=42,
+        memory_org_for_user=memory_org,
+        auto_encode_if_needed=auto_encode,
+        harvest_session=harvest,
+        save_session=save,
+    )
+
+    assert effective_org_id == "org-from-memory"
+    assert [call[0] for call in calls] == ["memory_org", "auto", "harvest", "save"]
+    assert calls[1][4]["org_id"] == "org-from-memory"
+    assert calls[2][3]["org_id"] == "org-from-memory"
+    assert calls[3][4] == (10, 5, 2, 1)

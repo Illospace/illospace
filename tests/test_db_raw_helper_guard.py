@@ -6,7 +6,6 @@ from pathlib import Path
 
 
 RAW_HELPER_CALL = re.compile(r"\b(?:get_cursor|get_conn)\(")
-ALLOWED_DEFINITIONS = ("def get_cursor(", "def get_conn(")
 
 
 def test_brain_runtime_does_not_call_raw_db_helpers():
@@ -19,8 +18,6 @@ def test_brain_runtime_does_not_call_raw_db_helpers():
             if not RAW_HELPER_CALL.search(line):
                 continue
             stripped = line.strip()
-            if rel == "brain/platform/db/legacy.py" and stripped.startswith(ALLOWED_DEFINITIONS):
-                continue
             offenders.append(f"{rel}:{line_no}: {stripped}")
 
     assert not offenders, (

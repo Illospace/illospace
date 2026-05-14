@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Generator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
-from sqlalchemy import create_engine, select, text
-from sqlalchemy.orm import Session, sessionmaker
-from starlette.testclient import TestClient
+from httpx import ASGITransport, AsyncClient, Response
+import pytest
+import pytest_asyncio
+from sqlalchemy import select, text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.schema import CreateTable
 
 from brain.kernel import config
 from brain.app.api.auth import get_current_user
@@ -25,6 +29,7 @@ from brain.platform.db.models.notification import (
     NotificationEvent,
 )
 from brain.platform.db.models.org import Org, User
+from tests.db_engine_utils import create_async_test_engine
 
 ORG_ID = "00000000-0000-4000-8000-000000000001"
 USER_1_ID = "00000000-0000-4000-8000-000000000101"
@@ -49,7 +54,7 @@ def _schema_name() -> str:
     return f"notification_test_{uuid.uuid4().hex[:8]}"
 
 
-def _seed_users(session: Session, schema: str) -> None:
+async def _seed_users(session: AsyncSession, schema: str) -> None:
     session.add(Org(id=ORG_ID, name="Org 1", slug=f"slug-{schema}"))
     session.add_all(
         [
@@ -73,11 +78,11 @@ def _seed_users(session: Session, schema: str) -> None:
             ),
         ]
     )
-    session.commit()
+    await session.commit()
 
 
-def _user_context(session: Session, user_id: str) -> dict[str, str]:
-    user = session.get(User, user_id)
+async def _user_context(session: AsyncSession, user_id: str) -> dict[str, str]:
+    user = await session.get(User, user_id)
     assert user is not None
     return {
         "id": user.id,
@@ -89,7 +94,7 @@ def _user_context(session: Session, user_id: str) -> dict[str, str]:
     }
 
 
-def _seed_workspace_notification(session: Session) -> int:
+async def _seed_workspace_notification(session: AsyncSession) -> int:
     session.add(
         Idea(
             id=IDEA_ID,
@@ -108,7 +113,7 @@ def _seed_workspace_notification(session: Session) -> int:
             user_id=USER_1_ID,
         )
     )
-    session.flush()
+    await session.flush()
     session.add(
         UserMention(
             user_id=USER_2_ID,
@@ -130,35 +135,73 @@ def _seed_workspace_notification(session: Session) -> int:
         payload={"thread_message_id": 41},
     )
     session.add(notification)
-    session.commit()
+    await session.commit()
     return notification.id
 
 
-def _build_request_as(session: Session) -> Callable[..., object]:
-    def override_db() -> Generator[Session, None, None]:
+def _build_request_as(async_session: AsyncSession) -> Callable[..., Awaitable[Response]]:
+    async def override_db() -> AsyncIterator[AsyncSession]:
         try:
-            yield session
-            session.commit()
+            yield async_session
+            await async_session.commit()
         except Exception:
-            session.rollback()
+            await async_session.rollback()
             raise
 
-    def _request(user_id: str, method: str, path: str, **kwargs):
+    async def _request(user_id: str, method: str, path: str, **kwargs) -> Response:
+        async def override_user() -> dict[str, str]:
+            return await _user_context(async_session, user_id)
+
         app.dependency_overrides[get_db] = override_db
-        app.dependency_overrides[get_current_user] = lambda: _user_context(session, user_id)
+        app.dependency_overrides[get_current_user] = override_user
         app.dependency_overrides[rate_limit] = lambda: None
         try:
-            with TestClient(app) as client:
-                return client.request(method, path, **kwargs)
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                return await client.request(method, path, **kwargs)
         finally:
             app.dependency_overrides.clear()
 
     return _request
 
 
-def test_openapi_registers_notification_routes():
-    with TestClient(app) as client:
-        response = client.get("/api/openapi.json")
+@pytest_asyncio.fixture
+async def notification_db_session() -> AsyncIterator[AsyncSession]:
+    schema = _schema_name()
+    engine = create_async_test_engine(config.DB_URL)
+    try:
+        admin_conn = await engine.connect()
+    except (OSError, SQLAlchemyError) as exc:
+        await engine.dispose()
+        pytest.skip(f"Postgres test DB unavailable: {exc}")
+    admin_conn = await admin_conn.execution_options(isolation_level="AUTOCOMMIT")
+    await admin_conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+    conn = await engine.connect()
+    session: AsyncSession | None = None
+    try:
+        await conn.execute(text(f'SET search_path TO "{schema}", public'))
+        for table in _TABLES:
+            await conn.execute(CreateTable(table))
+        await conn.commit()
+
+        factory = async_sessionmaker(bind=conn, expire_on_commit=False)
+        session = factory()
+        await session.execute(text(f'SET search_path TO "{schema}", public'))
+        await _seed_users(session, schema)
+        yield session
+    finally:
+        if session is not None:
+            await session.close()
+        await conn.close()
+        await admin_conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_conn.close()
+        await engine.dispose()
+
+
+async def test_openapi_registers_notification_routes():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/openapi.json")
 
     assert response.status_code == 200
     paths = response.json()["paths"]
@@ -169,106 +212,60 @@ def test_openapi_registers_notification_routes():
     assert "/api/notifications/read-all" in paths
 
 
-def test_notification_preferences_are_persisted():
-    schema = _schema_name()
-    engine = create_engine(config.DB_SYNC_URL)
-    admin_conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
-    admin_conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-    conn = engine.connect()
-    conn.execute(text(f'SET search_path TO "{schema}", public'))
+async def test_notification_preferences_are_persisted(notification_db_session: AsyncSession):
+    request_as = _build_request_as(notification_db_session)
+    response = await request_as(USER_2_ID, "GET", "/api/notifications/preferences")
+    assert response.status_code == 200
+    assert response.json() == {
+        "sound_enabled": True,
+        "message_notifications_enabled": True,
+    }
 
-    try:
-        for table in _TABLES:
-            table.create(bind=conn)
+    response = await request_as(
+        USER_2_ID,
+        "PATCH",
+        "/api/notifications/preferences",
+        json={"sound_enabled": False, "message_notifications_enabled": False},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "sound_enabled": False,
+        "message_notifications_enabled": False,
+    }
 
-        session = sessionmaker(bind=conn, expire_on_commit=False)()
-        session.execute(text(f'SET search_path TO "{schema}", public'))
-        _seed_users(session, schema)
-
-        request_as = _build_request_as(session)
-        response = request_as(USER_2_ID, "GET", "/api/notifications/preferences")
-        assert response.status_code == 200
-        assert response.json() == {
-            "sound_enabled": True,
-            "message_notifications_enabled": True,
-        }
-
-        response = request_as(
-            USER_2_ID,
-            "PATCH",
-            "/api/notifications/preferences",
-            json={"sound_enabled": False, "message_notifications_enabled": False},
-        )
-        assert response.status_code == 200
-        assert response.json() == {
-            "sound_enabled": False,
-            "message_notifications_enabled": False,
-        }
-
-        session.expire_all()
-        user = session.get(User, USER_2_ID)
-        assert user is not None
-        assert user.notification_sound_enabled is False
-        assert user.message_notifications_enabled is False
-    finally:
-        try:
-            session.close()
-        except Exception:
-            pass
-        conn.close()
-        admin_conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        admin_conn.close()
-        engine.dispose()
+    notification_db_session.expire_all()
+    user = await notification_db_session.get(User, USER_2_ID)
+    assert user is not None
+    assert user.notification_sound_enabled is False
+    assert user.message_notifications_enabled is False
 
 
-def test_workspace_notification_read_marks_user_mentions_seen():
-    schema = _schema_name()
-    engine = create_engine(config.DB_SYNC_URL)
-    admin_conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
-    admin_conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-    conn = engine.connect()
-    conn.execute(text(f'SET search_path TO "{schema}", public'))
+async def test_workspace_notification_read_marks_user_mentions_seen(notification_db_session: AsyncSession):
+    notification_id = await _seed_workspace_notification(notification_db_session)
 
-    try:
-        for table in _TABLES:
-            table.create(bind=conn)
+    request_as = _build_request_as(notification_db_session)
+    response = await request_as(USER_2_ID, "POST", f"/api/notifications/{notification_id}/read")
+    assert response.status_code == 200
+    assert response.json()["unread_notification_total"] == 0
 
-        session = sessionmaker(bind=conn, expire_on_commit=False)()
-        session.execute(text(f'SET search_path TO "{schema}", public'))
-        _seed_users(session, schema)
-        notification_id = _seed_workspace_notification(session)
+    notification = await notification_db_session.get(NotificationEvent, notification_id)
+    assert notification is not None
+    assert notification.read_at is not None
 
-        request_as = _build_request_as(session)
-        response = request_as(USER_2_ID, "POST", f"/api/notifications/{notification_id}/read")
-        assert response.status_code == 200
-        assert response.json()["unread_notification_total"] == 0
-
-        notification = session.get(NotificationEvent, notification_id)
-        assert notification is not None
-        assert notification.read_at is not None
-
-        mention_row = session.execute(
-            text(
-                """
-                SELECT seen_at
-                FROM user_mentions
-                WHERE user_id = :user_id AND idea_id = :idea_id AND thread_message_id = :thread_message_id
-                """
-            ),
-            {
-                "user_id": USER_2_ID,
-                "idea_id": IDEA_ID,
-                "thread_message_id": 41,
-            },
-        ).mappings().first()
-        assert mention_row is not None
-        assert mention_row["seen_at"] is not None
-    finally:
-        try:
-            session.close()
-        except Exception:
-            pass
-        conn.close()
-        admin_conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        admin_conn.close()
-        engine.dispose()
+    mention_result = await notification_db_session.execute(
+        text(
+            """
+            SELECT seen_at
+            FROM user_mentions
+            WHERE user_id = :user_id AND idea_id = :idea_id AND thread_message_id = :thread_message_id
+            """
+        ),
+        {
+            "user_id": USER_2_ID,
+            "idea_id": IDEA_ID,
+            "thread_message_id": 41,
+        },
+    )
+    mention_row = mention_result.mappings().first()
+    assert mention_row is not None
+    assert mention_row["seen_at"] is not None

@@ -5,7 +5,7 @@ import sys
 
 import numpy as np
 import pytest
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import AsyncMock, patch, MagicMock, PropertyMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
 
@@ -15,8 +15,8 @@ def _make_mock_uow():
     uow = MagicMock()
     session = MagicMock()
     uow.session = session
-    uow.__enter__ = MagicMock(return_value=uow)
-    uow.__exit__ = MagicMock(return_value=False)
+    uow.__aenter__ = AsyncMock(return_value=uow)
+    uow.__aexit__ = AsyncMock(return_value=False)
     return uow, session
 
 
@@ -49,7 +49,7 @@ class TestClusterEpisodes:
     """Test episode clustering logic."""
 
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_clusters_similar_memories(self, mock_uow_cls):
+    async def test_clusters_similar_memories(self, mock_uow_cls):
         """Should group memories with high embedding similarity."""
         from brain.systems.cognition.consolidate import cluster_episodes
 
@@ -72,15 +72,15 @@ class TestClusterEpisodes:
             _scoped({"id": i + 1, "content": f"episode {i}", "semantic_embedding": embs[i].tolist()})
             for i in range(6)
         ]
-        session.execute.return_value = _make_mapping_result(rows)
+        session.execute = AsyncMock(return_value=_make_mapping_result(rows))
 
-        clusters = cluster_episodes(user_id=TEST_USER_ID)
+        clusters = await cluster_episodes(user_id=TEST_USER_ID)
         assert len(clusters) >= 1  # At least one cluster
         for cluster in clusters:
             assert len(cluster) >= 3  # MIN_CLUSTER_SIZE
 
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_no_clusters_when_too_few(self, mock_uow_cls):
+    async def test_no_clusters_when_too_few(self, mock_uow_cls):
         """Should return empty when fewer than MIN_CLUSTER_SIZE memories."""
         from brain.systems.cognition.consolidate import cluster_episodes
 
@@ -90,13 +90,13 @@ class TestClusterEpisodes:
         rows = [
             _scoped({"id": 1, "content": "solo memory", "semantic_embedding": np.random.randn(2000).tolist()})
         ]
-        session.execute.return_value = _make_mapping_result(rows)
+        session.execute = AsyncMock(return_value=_make_mapping_result(rows))
 
-        clusters = cluster_episodes(user_id=TEST_USER_ID)
+        clusters = await cluster_episodes(user_id=TEST_USER_ID)
         assert clusters == []
 
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_no_clusters_when_dissimilar(self, mock_uow_cls):
+    async def test_no_clusters_when_dissimilar(self, mock_uow_cls):
         """Should return empty when memories are very different."""
         from brain.systems.cognition.consolidate import cluster_episodes
 
@@ -109,13 +109,13 @@ class TestClusterEpisodes:
                      "semantic_embedding": np.random.randn(2000).tolist()})
             for i in range(10)
         ]
-        session.execute.return_value = _make_mapping_result(rows)
+        session.execute = AsyncMock(return_value=_make_mapping_result(rows))
 
-        clusters = cluster_episodes(user_id=TEST_USER_ID)
+        clusters = await cluster_episodes(user_id=TEST_USER_ID)
         assert isinstance(clusters, list)
 
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_does_not_cluster_across_org_scope(self, mock_uow_cls):
+    async def test_does_not_cluster_across_org_scope(self, mock_uow_cls):
         """Python post-filter keeps mocked mixed rows from crossing org boundaries."""
         from brain.systems.cognition.consolidate import cluster_episodes
 
@@ -141,9 +141,9 @@ class TestClusterEpisodes:
             )
             for i in range(3)
         ]
-        session.execute.return_value = _make_mapping_result(rows)
+        session.execute = AsyncMock(return_value=_make_mapping_result(rows))
 
-        clusters = cluster_episodes(org_id=TEST_ORG_ID, visibility="org")
+        clusters = await cluster_episodes(org_id=TEST_ORG_ID, visibility="org")
 
         assert clusters
         assert {memory_id for cluster in clusters for memory_id in cluster} <= {1, 2, 3}
@@ -156,7 +156,7 @@ class TestExtractSemantic:
     @patch("brain.systems.memory.embeddings.vec_to_pg")
     @patch("brain.systems.memory.embeddings.embed_document")
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_creates_semantic_memory(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
+    async def test_creates_semantic_memory(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
         """Should create a semantic memory from episode cluster."""
         from brain.systems.cognition.consolidate import extract_semantic
 
@@ -176,16 +176,16 @@ class TestExtractSemantic:
         returning_row = {"id": 100}
 
         # First call: fetch episodes; subsequent calls: INSERT RETURNING, UPDATE, edge inserts
-        session.execute.side_effect = [
+        session.execute = AsyncMock(side_effect=[
             _make_mapping_result(episode_rows),   # fetch episodes
             _make_mapping_result([returning_row]), # INSERT RETURNING id
             _make_mapping_result([{"id": 300}]),   # review INSERT RETURNING id
             _make_mapping_result([]),              # UPDATE consolidated
             _make_mapping_result([]),              # edge insert 1
             _make_mapping_result([]),              # edge insert 2
-        ]
+        ])
 
-        result = extract_semantic([1, 2], user_id=TEST_USER_ID)
+        result = await extract_semantic([1, 2], user_id=TEST_USER_ID)
         assert result == 100
 
         # Verify consolidated = TRUE was set (check the text() SQL arguments)
@@ -197,7 +197,7 @@ class TestExtractSemantic:
     @patch("brain.systems.memory.embeddings.vec_to_pg")
     @patch("brain.systems.memory.embeddings.embed_document")
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_fallback_when_ollama_fails(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
+    async def test_fallback_when_ollama_fails(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
         """Should use heuristic fallback when GPU server unavailable."""
         from brain.systems.cognition.consolidate import extract_semantic
 
@@ -214,31 +214,31 @@ class TestExtractSemantic:
         ]
         returning_row = {"id": 101}
 
-        session.execute.side_effect = [
+        session.execute = AsyncMock(side_effect=[
             _make_mapping_result(episode_rows),
             _make_mapping_result([returning_row]),
             _make_mapping_result([{"id": 301}]),
             _make_mapping_result([]),
             _make_mapping_result([]),
-        ]
+        ])
 
-        result = extract_semantic([1], user_id=TEST_USER_ID)
+        result = await extract_semantic([1], user_id=TEST_USER_ID)
         assert result == 101
 
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_returns_none_on_empty_cluster(self, mock_uow_cls):
+    async def test_returns_none_on_empty_cluster(self, mock_uow_cls):
         """Should return None when cluster is empty."""
         from brain.systems.cognition.consolidate import extract_semantic
 
         uow, session = _make_mock_uow()
         mock_uow_cls.return_value = uow
 
-        session.execute.return_value = _make_mapping_result([])
+        session.execute = AsyncMock(return_value=_make_mapping_result([]))
 
-        assert extract_semantic([], user_id=TEST_USER_ID) is None
+        assert await extract_semantic([], user_id=TEST_USER_ID) is None
 
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_rejects_cluster_with_private_memory_in_org_scope(self, mock_uow_cls):
+    async def test_rejects_cluster_with_private_memory_in_org_scope(self, mock_uow_cls):
         """Org summaries must not absorb private memories from the same org."""
         from brain.systems.cognition.consolidate import extract_semantic
 
@@ -256,9 +256,9 @@ class TestExtractSemantic:
                 visibility="private",
             ),
         ]
-        session.execute.return_value = _make_mapping_result(rows)
+        session.execute = AsyncMock(return_value=_make_mapping_result(rows))
 
-        assert extract_semantic([1, 2], org_id=TEST_ORG_ID, visibility="org") is None
+        assert await extract_semantic([1, 2], org_id=TEST_ORG_ID, visibility="org") is None
         assert session.execute.call_count == 1
 
 
@@ -269,7 +269,7 @@ class TestCrystallizeProcedural:
     @patch("brain.systems.memory.embeddings.vec_to_pg")
     @patch("brain.systems.memory.embeddings.embed_document")
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_creates_procedural_from_semantics(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
+    async def test_creates_procedural_from_semantics(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
         """Should crystallize semantic memories into a procedure."""
         from brain.systems.cognition.consolidate import crystallize_procedural
 
@@ -287,31 +287,31 @@ class TestCrystallizeProcedural:
         no_existing = []
         returning_row = {"id": 200}
 
-        session.execute.side_effect = [
+        session.execute = AsyncMock(side_effect=[
             _make_mapping_result(semantic_rows),    # fetch semantics
             _make_mapping_result(no_existing),       # check existing procedural (None)
             _make_mapping_result([returning_row]),    # INSERT RETURNING
             _make_mapping_result([{"id": 400}]),      # review INSERT RETURNING
             _make_mapping_result([]),                 # edge insert 1
             _make_mapping_result([]),                 # edge insert 2
-        ]
+        ])
 
-        result = crystallize_procedural("redis-ops", user_id=TEST_USER_ID)
+        result = await crystallize_procedural("redis-ops", user_id=TEST_USER_ID)
         assert result == 200
 
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_skips_when_too_few_semantics(self, mock_uow_cls):
+    async def test_skips_when_too_few_semantics(self, mock_uow_cls):
         """Should return None with fewer than 2 semantic memories."""
         from brain.systems.cognition.consolidate import crystallize_procedural
 
         uow, session = _make_mock_uow()
         mock_uow_cls.return_value = uow
 
-        session.execute.return_value = _make_mapping_result([
+        session.execute = AsyncMock(return_value=_make_mapping_result([
             _scoped({"id": 10, "content": "Single memory", "salience": 5.0})
-        ])
+        ]))
 
-        result = crystallize_procedural("rare-skill", user_id=TEST_USER_ID)
+        result = await crystallize_procedural("rare-skill", user_id=TEST_USER_ID)
         assert result is None
 
 
@@ -319,7 +319,7 @@ class TestForgettingCurve:
     """Test salience decay and archival."""
 
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_forgetting_returns_stats(self, mock_uow_cls):
+    async def test_forgetting_returns_stats(self, mock_uow_cls):
         """Should return proper stats dict."""
         from brain.systems.cognition.consolidate import apply_forgetting_curve
 
@@ -334,9 +334,9 @@ class TestForgettingCurve:
         result_2 = MagicMock()
         result_2.rowcount = 2
 
-        session.execute.side_effect = [result_5, result_3, result_2]
+        session.execute = AsyncMock(side_effect=[result_5, result_3, result_2])
 
-        stats = apply_forgetting_curve()
+        stats = await apply_forgetting_curve()
         assert stats["episodic_decayed"] == 5
         assert stats["semantic_decayed"] == 3
         assert stats["archived"] == 2
@@ -357,13 +357,13 @@ class TestForgettingCurve:
 class TestRunConsolidation:
     """Test full consolidation pipeline."""
 
-    @patch("brain.systems.cognition.consolidate.run_dag_compaction")
-    @patch("brain.systems.cognition.consolidate.apply_forgetting_curve")
-    @patch("brain.systems.cognition.consolidate.crystallize_procedural")
-    @patch("brain.systems.cognition.consolidate.extract_semantic")
-    @patch("brain.systems.cognition.consolidate.cluster_episodes")
+    @patch("brain.systems.cognition.consolidate.run_dag_compaction", new_callable=AsyncMock)
+    @patch("brain.systems.cognition.consolidate.apply_forgetting_curve", new_callable=AsyncMock)
+    @patch("brain.systems.cognition.consolidate.crystallize_procedural", new_callable=AsyncMock)
+    @patch("brain.systems.cognition.consolidate.extract_semantic", new_callable=AsyncMock)
+    @patch("brain.systems.cognition.consolidate.cluster_episodes", new_callable=AsyncMock)
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    def test_full_pipeline(self, mock_uow_cls, mock_cluster, mock_extract,
+    async def test_full_pipeline(self, mock_uow_cls, mock_cluster, mock_extract,
                            mock_crystallize, mock_forget, mock_dag):
         """Should run all steps and return stats."""
         from brain.systems.cognition.consolidate import run_consolidation
@@ -378,11 +378,11 @@ class TestRunConsolidation:
         mock_uow_cls.return_value = uow
 
         # For the skills query
-        session.execute.return_value = _make_mapping_result([
+        session.execute = AsyncMock(return_value=_make_mapping_result([
             {"name": "deploy"}, {"name": "debug"}
-        ])
+        ]))
 
-        stats = run_consolidation(user_id=TEST_USER_ID)
+        stats = await run_consolidation(user_id=TEST_USER_ID)
         assert stats["clusters_found"] == 2
         assert stats["semantic_created"] == 2
         assert stats["procedural_created"] == 0

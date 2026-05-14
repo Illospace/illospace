@@ -174,7 +174,7 @@ def build_frame(
     )
 
 
-def gather_frame_context(
+async def gather_frame_context(
     task: str,
     skill_name: str | None = None,
     idea_id: str | None = None,
@@ -207,14 +207,14 @@ def gather_frame_context(
         try:
             from sqlalchemy import text
             from brain.platform.db.repositories.unit_of_work import UnitOfWork
-            with UnitOfWork() as uow:
-                row = uow.session.execute(text("""
+            async with UnitOfWork() as uow:
+                row = (await uow.session.execute(text("""
                     SELECT name, procedure, pitfalls, maturity, confidence,
                            model_tier, thinking_tier, fitness_score,
                            success_count, failure_count, use_count,
                            graduated_steps
                     FROM skills WHERE name = :name AND NOT archived
-                """), {"name": skill_name}).mappings().first()
+                """), {"name": skill_name})).mappings().first()
                 if row:
                     result["skill"] = dict(row)
                     use = row["use_count"] or 0
@@ -228,14 +228,14 @@ def gather_frame_context(
         try:
             from sqlalchemy import text
             from brain.platform.db.repositories.unit_of_work import UnitOfWork
-            with UnitOfWork() as uow:
-                result["heuristics"] = [dict(r) for r in uow.session.execute(text("""
+            async with UnitOfWork() as uow:
+                result["heuristics"] = [dict(r) for r in (await uow.session.execute(text("""
                     SELECT condition, action, confidence
                     FROM skill_heuristics
                     WHERE skill_name = :name AND active AND confidence >= 0.6
                       AND (graduated = FALSE OR graduated IS NULL)
                     ORDER BY confidence DESC LIMIT 5
-                """), {"name": skill_name}).mappings().all()]
+                """), {"name": skill_name})).mappings().all()]
         except Exception as e:
             logger.debug(f"Heuristic load failed: {e}")
 
@@ -291,13 +291,13 @@ def gather_frame_context(
             from brain.platform.db.models.idea import IdeaThread
             from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
-            with UnitOfWork() as uow:
-                rows = uow.session.scalars(
+            async with UnitOfWork() as uow:
+                rows = (await uow.session.scalars(
                     select(IdeaThread)
                     .where(IdeaThread.idea_id == idea_id)
                     .order_by(IdeaThread.created_at.desc())
                     .limit(6)
-                ).all()
+                )).all()
             summary = "\n".join(f"{row.role}: {(row.content or '')[:240]}" for row in reversed(rows))
             if summary:
                 result["thread_context"] = summary
@@ -307,7 +307,7 @@ def gather_frame_context(
     # ── Shadow attention decision logging (frame assembly) ──
     try:
         frame_candidates = list(result["memories"])
-        attention_decision = observe_retrieval(
+        attention_decision = await observe_retrieval(
             stage="frame_assembly",
             query_text=task,
             candidates=frame_candidates,

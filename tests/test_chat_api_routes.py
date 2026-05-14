@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Generator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from unittest.mock import AsyncMock
 
+from httpx import ASGITransport, AsyncClient, Response
 import pytest
-from sqlalchemy import create_engine, func, select, text
-from sqlalchemy.orm import Session, sessionmaker
-from starlette.testclient import TestClient
+import pytest_asyncio
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.schema import CreateTable
 
 from brain.kernel import config
 from brain.app.api.auth import get_current_user
@@ -26,6 +29,7 @@ from brain.platform.db.models.chat import (
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.notification import NotificationEvent
 from brain.platform.db.models.org import Org, User
+from tests.db_engine_utils import create_async_test_engine
 
 pytestmark = pytest.mark.requires_db
 
@@ -55,7 +59,7 @@ def _schema_name() -> str:
     return f"chat_test_{uuid.uuid4().hex[:8]}"
 
 
-def _seed_users(session: Session, schema: str) -> None:
+async def _seed_users(session: AsyncSession, schema: str) -> None:
     session.add(Org(id=ORG_ID, name="Org 1", slug=f"slug-{schema}"))
     session.add_all(
         [
@@ -88,11 +92,11 @@ def _seed_users(session: Session, schema: str) -> None:
             ),
         ]
     )
-    session.commit()
+    await session.commit()
 
 
-def _user_context(session: Session, user_id: str) -> dict[str, str]:
-    user = session.get(User, user_id)
+async def _user_context(session: AsyncSession, user_id: str) -> dict[str, str]:
+    user = await session.get(User, user_id)
     assert user is not None
     return {
         "id": user.id,
@@ -104,59 +108,70 @@ def _user_context(session: Session, user_id: str) -> dict[str, str]:
     }
 
 
-@pytest.fixture
-def chat_db_session() -> Generator[Session, None, None]:
+@pytest_asyncio.fixture
+async def chat_db_session() -> AsyncIterator[AsyncSession]:
     schema = _schema_name()
-    engine = create_engine(config.DB_SYNC_URL)
-    admin_conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
-    admin_conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-    conn = engine.connect()
-    conn.execute(text(f'SET search_path TO "{schema}", public'))
+    engine = create_async_test_engine(config.DB_URL)
     try:
+        admin_conn = await engine.connect()
+    except (OSError, SQLAlchemyError) as exc:
+        await engine.dispose()
+        pytest.skip(f"Postgres test DB unavailable: {exc}")
+    admin_conn = await admin_conn.execution_options(isolation_level="AUTOCOMMIT")
+    await admin_conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+    conn = await engine.connect()
+    session: AsyncSession | None = None
+    try:
+        await conn.execute(text(f'SET search_path TO "{schema}", public'))
         for table in _TABLES:
-            table.create(bind=conn)
+            await conn.execute(CreateTable(table))
+        await conn.commit()
 
-        session = sessionmaker(bind=conn, expire_on_commit=False)()
-        session.execute(text(f'SET search_path TO "{schema}", public'))
-        _seed_users(session, schema)
+        factory = async_sessionmaker(bind=conn, expire_on_commit=False)
+        session = factory()
+        await session.execute(text(f'SET search_path TO "{schema}", public'))
+        await _seed_users(session, schema)
         yield session
     finally:
-        try:
-            session.close()
-        except Exception:
-            pass
-        conn.close()
-        admin_conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        admin_conn.close()
-        engine.dispose()
+        if session is not None:
+            await session.close()
+        await conn.close()
+        await admin_conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_conn.close()
+        await engine.dispose()
 
 
 @pytest.fixture
-def request_as(chat_db_session: Session) -> Callable[..., object]:
-    def override_db() -> Generator[Session, None, None]:
+def request_as(chat_db_session: AsyncSession) -> Callable[..., Awaitable[Response]]:
+    async def override_db() -> AsyncIterator[AsyncSession]:
         try:
             yield chat_db_session
-            chat_db_session.commit()
+            await chat_db_session.commit()
         except Exception:
-            chat_db_session.rollback()
+            await chat_db_session.rollback()
             raise
 
-    def _request(user_id: str, method: str, path: str, **kwargs):
+    async def _request(user_id: str, method: str, path: str, **kwargs) -> Response:
+        async def override_user() -> dict[str, str]:
+            return await _user_context(chat_db_session, user_id)
+
         app.dependency_overrides[get_db] = override_db
-        app.dependency_overrides[get_current_user] = lambda: _user_context(chat_db_session, user_id)
+        app.dependency_overrides[get_current_user] = override_user
         app.dependency_overrides[rate_limit] = lambda: None
         try:
-            with TestClient(app) as client:
-                return client.request(method, path, **kwargs)
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                return await client.request(method, path, **kwargs)
         finally:
             app.dependency_overrides.clear()
 
     return _request
 
 
-def test_openapi_registers_chat_routes():
-    with TestClient(app) as client:
-        response = client.get("/api/openapi.json")
+async def test_openapi_registers_chat_routes():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/openapi.json")
 
     assert response.status_code == 200
     paths = response.json()["paths"]
@@ -169,11 +184,11 @@ def test_openapi_registers_chat_routes():
     assert "/api/chat/notifications" in paths
 
 
-def test_bootstrap_creates_room_and_syncs_new_approved_members(
-    chat_db_session: Session,
+async def test_bootstrap_creates_room_and_syncs_new_approved_members(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
 ):
-    response = request_as(USER_1_ID, "GET", "/api/chat/bootstrap")
+    response = await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")
     assert response.status_code == 200
 
     payload = response.json()
@@ -182,30 +197,31 @@ def test_bootstrap_creates_room_and_syncs_new_approved_members(
     assert payload["room"]["participant_count"] == 2
     assert payload["default_conversation_id"] == room_id
 
-    members = chat_db_session.scalars(
+    members_result = await chat_db_session.scalars(
         select(ChatConversationMember.user_id).where(
             ChatConversationMember.conversation_id == room_id
         )
-    ).all()
+    )
+    members = members_result.all()
     assert sorted(str(member_id) for member_id in members) == [USER_1_ID, USER_2_ID]
 
-    pending_user = chat_db_session.get(User, USER_3_ID)
+    pending_user = await chat_db_session.get(User, USER_3_ID)
     assert pending_user is not None
     pending_user.approved = True
-    chat_db_session.commit()
+    await chat_db_session.commit()
 
-    second_response = request_as(USER_1_ID, "GET", "/api/chat/bootstrap")
+    second_response = await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")
     assert second_response.status_code == 200
     assert second_response.json()["room"]["participant_count"] == 3
 
 
-def test_dm_creation_is_idempotent_from_either_side(
-    chat_db_session: Session,
+async def test_dm_creation_is_idempotent_from_either_side(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
 ):
-    first = request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})
-    second = request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})
-    third = request_as(USER_2_ID, "POST", "/api/chat/dms", json={"user_id": USER_1_ID})
+    first = await request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})
+    second = await request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})
+    third = await request_as(USER_2_ID, "POST", "/api/chat/dms", json={"user_id": USER_1_ID})
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -215,30 +231,34 @@ def test_dm_creation_is_idempotent_from_either_side(
     assert first_payload["id"] == second.json()["id"] == third.json()["id"]
     assert first_payload["stable_key"] == f"dm:{USER_1_ID}:{USER_2_ID}"
 
-    dm_count = chat_db_session.scalar(
+    dm_count = await chat_db_session.scalar(
         select(func.count()).select_from(ChatConversation).where(ChatConversation.type == "dm")
     )
     assert dm_count == 1
 
 
-def test_room_history_excludes_replies_and_thread_history_returns_root_plus_replies(
+async def test_room_history_excludes_replies_and_thread_history_returns_root_plus_replies(
     request_as: Callable[..., object],
 ):
-    room = request_as(USER_1_ID, "GET", "/api/chat/bootstrap").json()["room"]
-    root_message = request_as(
-        USER_1_ID,
-        "POST",
-        f"/api/chat/conversations/{room['id']}/messages",
-        json={"body": "Ship the first room message"},
+    room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
+    root_message = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{room['id']}/messages",
+            json={"body": "Ship the first room message"},
+        )
     ).json()
-    reply = request_as(
-        USER_2_ID,
-        "POST",
-        f"/api/chat/messages/{root_message['id']}/thread",
-        json={"body": "Reply inside the room thread"},
+    reply = (
+        await request_as(
+            USER_2_ID,
+            "POST",
+            f"/api/chat/messages/{root_message['id']}/thread",
+            json={"body": "Reply inside the room thread"},
+        )
     ).json()
 
-    room_page = request_as(
+    room_page = await request_as(
         USER_1_ID,
         "GET",
         f"/api/chat/conversations/{room['id']}/messages",
@@ -253,7 +273,7 @@ def test_room_history_excludes_replies_and_thread_history_returns_root_plus_repl
     assert room_payload["messages"][0]["thread_preview_participants"][0]["color"] == reply["sender_color"]
     assert room_payload["messages"][0]["thread_preview_participants"][0]["email"]
 
-    thread_page = request_as(
+    thread_page = await request_as(
         USER_1_ID,
         "GET",
         f"/api/chat/messages/{root_message['id']}/thread",
@@ -270,37 +290,43 @@ def test_room_history_excludes_replies_and_thread_history_returns_root_plus_repl
     assert thread_payload["root_message"]["thread_preview_participants"][0]["email"]
 
 
-def test_room_search_returns_root_matches_and_thread_replies(
+async def test_room_search_returns_root_matches_and_thread_replies(
     request_as: Callable[..., object],
 ):
-    room = request_as(USER_1_ID, "GET", "/api/chat/bootstrap").json()["room"]
-    matching_root = request_as(
-        USER_1_ID,
-        "POST",
-        f"/api/chat/conversations/{room['id']}/messages",
-        json={"body": "Search indexing needs a quick pass"},
+    room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
+    matching_root = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{room['id']}/messages",
+            json={"body": "Search indexing needs a quick pass"},
+        )
     ).json()
-    thread_root = request_as(
-        USER_1_ID,
-        "POST",
-        f"/api/chat/conversations/{room['id']}/messages",
-        json={"body": "Thread root without the keyword"},
+    thread_root = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{room['id']}/messages",
+            json={"body": "Thread root without the keyword"},
+        )
     ).json()
-    matching_reply = request_as(
-        USER_2_ID,
-        "POST",
-        f"/api/chat/messages/{thread_root['id']}/thread",
-        json={"body": "The search indexing conversation belongs in here"},
+    matching_reply = (
+        await request_as(
+            USER_2_ID,
+            "POST",
+            f"/api/chat/messages/{thread_root['id']}/thread",
+            json={"body": "The search indexing conversation belongs in here"},
+        )
     ).json()
-    dm = request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID}).json()
-    request_as(
+    dm = (await request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})).json()
+    await request_as(
         USER_1_ID,
         "POST",
         f"/api/chat/conversations/{dm['id']}/messages",
         json={"body": "Search should not include DM messages yet"},
     )
 
-    response = request_as(USER_1_ID, "GET", "/api/chat/search", params={"query": "search"})
+    response = await request_as(USER_1_ID, "GET", "/api/chat/search", params={"query": "search"})
     assert response.status_code == 200
 
     payload = response.json()
@@ -312,11 +338,11 @@ def test_room_search_returns_root_matches_and_thread_replies(
     assert payload[1]["root_message"]["id"] == matching_root["id"]
 
 
-def test_attachment_only_message_is_allowed(
+async def test_attachment_only_message_is_allowed(
     request_as: Callable[..., object],
 ):
-    room = request_as(USER_1_ID, "GET", "/api/chat/bootstrap").json()["room"]
-    response = request_as(
+    room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
+    response = await request_as(
         USER_1_ID,
         "POST",
         f"/api/chat/conversations/{room['id']}/messages",
@@ -338,12 +364,12 @@ def test_attachment_only_message_is_allowed(
     assert payload["attachments"][0]["filename"] == "demo.png"
 
 
-def test_dm_unread_read_cursor_and_notifications_flow(
-    chat_db_session: Session,
+async def test_dm_unread_read_cursor_and_notifications_flow(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
 ):
-    dm = request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID}).json()
-    sent = request_as(
+    dm = (await request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})).json()
+    sent = await request_as(
         USER_1_ID,
         "POST",
         f"/api/chat/conversations/{dm['id']}/messages",
@@ -352,23 +378,24 @@ def test_dm_unread_read_cursor_and_notifications_flow(
     assert sent.status_code == 200
     sent_payload = sent.json()
 
-    sender_read = chat_db_session.scalars(
+    sender_read_result = await chat_db_session.scalars(
         select(ChatConversationRead).where(
             ChatConversationRead.conversation_id == dm["id"],
             ChatConversationRead.user_id == USER_1_ID,
         )
-    ).one()
+    )
+    sender_read = sender_read_result.one()
     assert sender_read.last_read_conversation_seq == sent_payload["conversation_seq"]
     assert sender_read.last_read_message_id == sent_payload["id"]
 
-    sender_bootstrap = request_as(USER_1_ID, "GET", "/api/chat/bootstrap").json()
+    sender_bootstrap = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()
     assert sender_bootstrap["unread_summary"]["dms"] == 0
 
-    recipient_bootstrap = request_as(USER_2_ID, "GET", "/api/chat/bootstrap").json()
+    recipient_bootstrap = (await request_as(USER_2_ID, "GET", "/api/chat/bootstrap")).json()
     assert recipient_bootstrap["unread_summary"]["dms"] == 1
     assert recipient_bootstrap["dms"][0]["unread_count"] == 1
 
-    notifications = request_as(USER_2_ID, "GET", "/api/chat/notifications")
+    notifications = await request_as(USER_2_ID, "GET", "/api/chat/notifications")
     assert notifications.status_code == 200
     assert notifications.json() == [
         {
@@ -385,7 +412,7 @@ def test_dm_unread_read_cursor_and_notifications_flow(
         }
     ]
 
-    read = request_as(
+    read = await request_as(
         USER_2_ID,
         "POST",
         f"/api/chat/conversations/{dm['id']}/read",
@@ -397,26 +424,27 @@ def test_dm_unread_read_cursor_and_notifications_flow(
     assert read.status_code == 200
     assert read.json() == {"room": 0, "dms": 0, "total": 0}
 
-    recipient_read = chat_db_session.scalars(
+    recipient_read_result = await chat_db_session.scalars(
         select(ChatConversationRead).where(
             ChatConversationRead.conversation_id == dm["id"],
             ChatConversationRead.user_id == USER_2_ID,
         )
-    ).one()
+    )
+    recipient_read = recipient_read_result.one()
     assert recipient_read.last_read_conversation_seq == sent_payload["conversation_seq"]
     assert recipient_read.last_read_message_id == sent_payload["id"]
 
-    refreshed_bootstrap = request_as(USER_2_ID, "GET", "/api/chat/bootstrap").json()
+    refreshed_bootstrap = (await request_as(USER_2_ID, "GET", "/api/chat/bootstrap")).json()
     assert refreshed_bootstrap["unread_summary"]["dms"] == 0
     assert refreshed_bootstrap["dms"][0]["unread_count"] == 0
 
 
-def test_room_messages_notify_other_team_members(
-    chat_db_session: Session,
+async def test_room_messages_notify_other_team_members(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
 ):
-    room = request_as(USER_1_ID, "GET", "/api/chat/bootstrap").json()["room"]
-    sent = request_as(
+    room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
+    sent = await request_as(
         USER_1_ID,
         "POST",
         f"/api/chat/conversations/{room['id']}/messages",
@@ -425,11 +453,11 @@ def test_room_messages_notify_other_team_members(
     assert sent.status_code == 200
     sent_payload = sent.json()
 
-    sender_notifications = request_as(USER_1_ID, "GET", "/api/chat/notifications")
+    sender_notifications = await request_as(USER_1_ID, "GET", "/api/chat/notifications")
     assert sender_notifications.status_code == 200
     assert sender_notifications.json() == []
 
-    recipient_notifications = request_as(USER_2_ID, "GET", "/api/chat/notifications")
+    recipient_notifications = await request_as(USER_2_ID, "GET", "/api/chat/notifications")
     assert recipient_notifications.status_code == 200
     assert recipient_notifications.json() == [
         {
@@ -446,23 +474,24 @@ def test_room_messages_notify_other_team_members(
         }
     ]
 
-    unified_notification = chat_db_session.scalars(
+    unified_notification_result = await chat_db_session.scalars(
         select(NotificationEvent).where(NotificationEvent.user_id == USER_2_ID)
-    ).one()
+    )
+    unified_notification = unified_notification_result.one()
     assert unified_notification.kind == "chat.room_message"
     assert unified_notification.title == "Alex Example posted in team chat"
     assert unified_notification.conversation_id == room["id"]
 
-    recipient_bootstrap = request_as(USER_2_ID, "GET", "/api/chat/bootstrap").json()
+    recipient_bootstrap = (await request_as(USER_2_ID, "GET", "/api/chat/bootstrap")).json()
     assert recipient_bootstrap["unread_summary"]["room"] == 1
 
 
-def test_mentions_create_notifications_and_illo_routes_room_run(
-    chat_db_session: Session,
+async def test_mentions_create_notifications_and_illo_routes_room_run(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
 ):
-    room = request_as(USER_1_ID, "GET", "/api/chat/bootstrap").json()["room"]
-    posted = request_as(
+    room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
+    posted = await request_as(
         USER_1_ID,
         "POST",
         f"/api/chat/conversations/{room['id']}/messages",
@@ -475,21 +504,23 @@ def test_mentions_create_notifications_and_illo_routes_room_run(
         "mentioned_user_ids": [USER_2_ID],
     }
 
-    mention_rows = chat_db_session.scalars(select(ChatMessageMention)).all()
+    mention_rows_result = await chat_db_session.scalars(select(ChatMessageMention))
+    mention_rows = mention_rows_result.all()
     assert len(mention_rows) == 1
     assert str(mention_rows[0].mentioned_user_id) == USER_2_ID
 
-    notifications = request_as(USER_2_ID, "GET", "/api/chat/notifications")
+    notifications = await request_as(USER_2_ID, "GET", "/api/chat/notifications")
     assert notifications.status_code == 200
     assert notifications.json()[0]["type"] == "mention"
     assert notifications.json()[0]["actor_user_id"] == USER_1_ID
 
-    message_count = chat_db_session.scalar(select(func.count()).select_from(ChatMessage))
-    notification_count = chat_db_session.scalar(select(func.count()).select_from(ChatNotification))
+    message_count = await chat_db_session.scalar(select(func.count()).select_from(ChatMessage))
+    notification_count = await chat_db_session.scalar(select(func.count()).select_from(ChatNotification))
     assert message_count == 1
     assert notification_count == 1
 
-    run = chat_db_session.scalars(select(AgentRunRow)).one()
+    run_result = await chat_db_session.scalars(select(AgentRunRow))
+    run = run_result.one()
     assert run.thread_id == f"chat:{room['id']}:{payload['id']}"
     assert run.user_id == USER_1_ID
     assert run.org_id == ORG_ID
@@ -498,12 +529,12 @@ def test_mentions_create_notifications_and_illo_routes_room_run(
     assert run.metadata_["illo_trigger"]["event_type"] == "chat.room_message_mention"
 
 
-def test_dm_illo_mention_does_not_route_run(
-    chat_db_session: Session,
+async def test_dm_illo_mention_does_not_route_run(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
 ):
-    dm = request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID}).json()
-    posted = request_as(
+    dm = (await request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})).json()
+    posted = await request_as(
         USER_1_ID,
         "POST",
         f"/api/chat/conversations/{dm['id']}/messages",
@@ -512,21 +543,23 @@ def test_dm_illo_mention_does_not_route_run(
 
     assert posted.status_code == 200
     assert posted.json()["metadata"] == {"illo_invoked": True}
-    assert chat_db_session.scalar(select(func.count()).select_from(AgentRunRow)) == 0
+    assert await chat_db_session.scalar(select(func.count()).select_from(AgentRunRow)) == 0
 
 
-def test_thread_illo_mention_routes_thread_target(
-    chat_db_session: Session,
+async def test_thread_illo_mention_routes_thread_target(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
 ):
-    room = request_as(USER_1_ID, "GET", "/api/chat/bootstrap").json()["room"]
-    root = request_as(
-        USER_1_ID,
-        "POST",
-        f"/api/chat/conversations/{room['id']}/messages",
-        json={"body": "Root topic"},
+    room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
+    root = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{room['id']}/messages",
+            json={"body": "Root topic"},
+        )
     ).json()
-    reply = request_as(
+    reply = await request_as(
         USER_2_ID,
         "POST",
         f"/api/chat/messages/{root['id']}/thread",
@@ -534,7 +567,8 @@ def test_thread_illo_mention_routes_thread_target(
     )
 
     assert reply.status_code == 200
-    run = chat_db_session.scalars(select(AgentRunRow)).one()
+    run_result = await chat_db_session.scalars(select(AgentRunRow))
+    run = run_result.one()
     assert run.thread_id == f"chat:{room['id']}:{root['id']}"
     assert run.metadata_["chat_trigger"]["message_id"] == reply.json()["id"]
     assert run.metadata_["chat_trigger"]["thread_root_message_id"] == root["id"]
@@ -544,54 +578,61 @@ def test_thread_illo_mention_routes_thread_target(
     }
 
 
-def test_agent_message_posts_to_room_and_rejects_dm(
-    chat_db_session: Session,
+async def test_agent_message_posts_to_room_and_rejects_dm(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
 ):
     from fastapi import HTTPException
 
     from brain.app.api.services.chat import ChatService
 
-    room = request_as(USER_1_ID, "GET", "/api/chat/bootstrap").json()["room"]
-    service = ChatService(chat_db_session, _user_context(chat_db_session, USER_1_ID))
-    message, publish = service.post_agent_message(
+    room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
+    service = ChatService(chat_db_session, await _user_context(chat_db_session, USER_1_ID))
+    message, publish = await service.post_agent_message(
         conversation_id=room["id"],
         body="I created a Cortex thought for this.",
     )
-    chat_db_session.commit()
+    await chat_db_session.commit()
 
     assert message.sender_kind == "agent"
     assert message.sender_user_id is None
     assert message.sender_name == "Illo"
     assert publish.conversation_id == room["id"]
 
-    dm = request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID}).json()
+    dm = (await request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})).json()
     with pytest.raises(HTTPException, match="team room"):
-        ChatService(chat_db_session, _user_context(chat_db_session, USER_1_ID)).post_agent_message(
+        await ChatService(
+            chat_db_session,
+            await _user_context(chat_db_session, USER_1_ID),
+        ).post_agent_message(
             conversation_id=dm["id"],
             body="Nope",
         )
 
 
-def test_read_with_message_id_only_preserves_partial_unread(
-    chat_db_session: Session,
+async def test_read_with_message_id_only_preserves_partial_unread(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
 ):
-    dm = request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID}).json()
-    first = request_as(
-        USER_1_ID,
-        "POST",
-        f"/api/chat/conversations/{dm['id']}/messages",
-        json={"body": "First DM"},
+    dm = (await request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})).json()
+    first = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{dm['id']}/messages",
+            json={"body": "First DM"},
+        )
     ).json()
-    second = request_as(
-        USER_1_ID,
-        "POST",
-        f"/api/chat/conversations/{dm['id']}/messages",
-        json={"body": "Second DM"},
+    second = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{dm['id']}/messages",
+            json={"body": "Second DM"},
+        )
     ).json()
 
-    read = request_as(
+    read = await request_as(
         USER_2_ID,
         "POST",
         f"/api/chat/conversations/{dm['id']}/read",
@@ -600,49 +641,55 @@ def test_read_with_message_id_only_preserves_partial_unread(
     assert read.status_code == 200
     assert read.json() == {"room": 0, "dms": 1, "total": 1}
 
-    recipient_read = chat_db_session.scalars(
+    recipient_read_result = await chat_db_session.scalars(
         select(ChatConversationRead).where(
             ChatConversationRead.conversation_id == dm["id"],
             ChatConversationRead.user_id == USER_2_ID,
         )
-    ).one()
+    )
+    recipient_read = recipient_read_result.one()
     assert recipient_read.last_read_message_id == first["id"]
     assert recipient_read.last_read_conversation_seq == first["conversation_seq"]
 
-    refreshed_bootstrap = request_as(USER_2_ID, "GET", "/api/chat/bootstrap").json()
+    refreshed_bootstrap = (await request_as(USER_2_ID, "GET", "/api/chat/bootstrap")).json()
     assert refreshed_bootstrap["dms"][0]["unread_count"] == 1
     assert refreshed_bootstrap["unread_summary"]["dms"] == 1
     assert second["conversation_seq"] > first["conversation_seq"]
 
 
-def test_partial_chat_read_syncs_legacy_rows_but_keeps_unified_conversation_notification_open(
-    chat_db_session: Session,
+async def test_partial_chat_read_syncs_legacy_rows_but_keeps_unified_conversation_notification_open(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
 ):
-    dm = request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID}).json()
-    first = request_as(
-        USER_1_ID,
-        "POST",
-        f"/api/chat/conversations/{dm['id']}/messages",
-        json={"body": "First unread DM"},
+    dm = (await request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})).json()
+    first = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{dm['id']}/messages",
+            json={"body": "First unread DM"},
+        )
     ).json()
-    second = request_as(
-        USER_1_ID,
-        "POST",
-        f"/api/chat/conversations/{dm['id']}/messages",
-        json={"body": "Second unread DM"},
+    second = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{dm['id']}/messages",
+            json={"body": "Second unread DM"},
+        )
     ).json()
 
-    unread_unified = chat_db_session.scalars(
+    unread_unified_result = await chat_db_session.scalars(
         select(NotificationEvent).where(
             NotificationEvent.user_id == USER_2_ID,
             NotificationEvent.conversation_id == dm["id"],
             NotificationEvent.read_at.is_(None),
         )
-    ).all()
+    )
+    unread_unified = unread_unified_result.all()
     assert len(unread_unified) == 1
 
-    read = request_as(
+    read = await request_as(
         USER_2_ID,
         "POST",
         f"/api/chat/conversations/{dm['id']}/read",
@@ -650,30 +697,33 @@ def test_partial_chat_read_syncs_legacy_rows_but_keeps_unified_conversation_noti
     )
     assert read.status_code == 200
 
-    first_legacy = chat_db_session.scalars(
+    first_legacy_result = await chat_db_session.scalars(
         select(ChatNotification).where(
             ChatNotification.user_id == USER_2_ID,
             ChatNotification.message_id == first["id"],
         )
-    ).one()
-    second_legacy = chat_db_session.scalars(
+    )
+    first_legacy = first_legacy_result.one()
+    second_legacy_result = await chat_db_session.scalars(
         select(ChatNotification).where(
             ChatNotification.user_id == USER_2_ID,
             ChatNotification.message_id == second["id"],
         )
-    ).one()
+    )
+    second_legacy = second_legacy_result.one()
     assert first_legacy.read_at is not None
     assert second_legacy.read_at is None
 
-    unified_after_partial = chat_db_session.scalars(
+    unified_after_partial_result = await chat_db_session.scalars(
         select(NotificationEvent).where(
             NotificationEvent.user_id == USER_2_ID,
             NotificationEvent.conversation_id == dm["id"],
         )
-    ).one()
+    )
+    unified_after_partial = unified_after_partial_result.one()
     assert unified_after_partial.read_at is None
 
-    finished = request_as(
+    finished = await request_as(
         USER_2_ID,
         "POST",
         f"/api/chat/conversations/{dm['id']}/read",
@@ -684,22 +734,22 @@ def test_partial_chat_read_syncs_legacy_rows_but_keeps_unified_conversation_noti
     )
     assert finished.status_code == 200
 
-    chat_db_session.refresh(unified_after_partial)
+    await chat_db_session.refresh(unified_after_partial)
     assert unified_after_partial.read_at is not None
 
 
-def test_dm_notifications_coalesce_into_one_unified_inbox_row(
-    chat_db_session: Session,
+async def test_dm_notifications_coalesce_into_one_unified_inbox_row(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
 ):
-    dm = request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID}).json()
-    first = request_as(
+    dm = (await request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})).json()
+    first = await request_as(
         USER_1_ID,
         "POST",
         f"/api/chat/conversations/{dm['id']}/messages",
         json={"body": "First unread DM"},
     )
-    second = request_as(
+    second = await request_as(
         USER_1_ID,
         "POST",
         f"/api/chat/conversations/{dm['id']}/messages",
@@ -709,44 +759,50 @@ def test_dm_notifications_coalesce_into_one_unified_inbox_row(
     assert first.status_code == 200
     assert second.status_code == 200
 
-    legacy_rows = chat_db_session.scalars(
+    legacy_rows_result = await chat_db_session.scalars(
         select(ChatNotification).where(
             ChatNotification.user_id == USER_2_ID,
             ChatNotification.conversation_id == dm["id"],
         )
-    ).all()
+    )
+    legacy_rows = legacy_rows_result.all()
     assert len(legacy_rows) == 2
 
-    unified_rows = chat_db_session.scalars(
+    unified_rows_result = await chat_db_session.scalars(
         select(NotificationEvent).where(
             NotificationEvent.user_id == USER_2_ID,
             NotificationEvent.conversation_id == dm["id"],
             NotificationEvent.read_at.is_(None),
         )
-    ).all()
+    )
+    unified_rows = unified_rows_result.all()
     assert len(unified_rows) == 1
     assert unified_rows[0].occurrence_count == 2
     assert unified_rows[0].body == "Second unread DM"
 
 
-def test_invalid_thread_reply_target_returns_400(
+async def test_invalid_thread_reply_target_returns_400(
     request_as: Callable[..., object],
 ):
-    room = request_as(USER_1_ID, "GET", "/api/chat/bootstrap").json()["room"]
-    root_one = request_as(
-        USER_1_ID,
-        "POST",
-        f"/api/chat/conversations/{room['id']}/messages",
-        json={"body": "Root one"},
+    room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
+    root_one = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{room['id']}/messages",
+            json={"body": "Root one"},
+        )
     ).json()
-    root_two = request_as(
-        USER_1_ID,
-        "POST",
-        f"/api/chat/conversations/{room['id']}/messages",
-        json={"body": "Root two"},
+    root_two = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{room['id']}/messages",
+            json={"body": "Root two"},
+        )
     ).json()
 
-    response = request_as(
+    response = await request_as(
         USER_2_ID,
         "POST",
         f"/api/chat/messages/{root_one['id']}/thread",
@@ -759,10 +815,10 @@ def test_invalid_thread_reply_target_returns_400(
     assert response.json() == {"detail": "Reply target not found in thread"}
 
 
-def test_chat_service_404_preserves_detail(
+async def test_chat_service_404_preserves_detail(
     request_as: Callable[..., object],
 ):
-    response = request_as(
+    response = await request_as(
         USER_1_ID,
         "POST",
         "/api/chat/dms",
@@ -772,42 +828,46 @@ def test_chat_service_404_preserves_detail(
     assert response.json() == {"detail": "User not found"}
 
 
-def test_message_publish_waits_for_commit(
-    chat_db_session: Session,
+async def test_message_publish_waits_for_commit(
+    chat_db_session: AsyncSession,
     request_as: Callable[..., object],
     monkeypatch: pytest.MonkeyPatch,
 ):
     from brain.app.api.routers import chat as chat_router
 
-    room = request_as(USER_1_ID, "GET", "/api/chat/bootstrap").json()["room"]
+    room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
     publish_mock = AsyncMock()
     monkeypatch.setattr(chat_router, "_publish_message_events", publish_mock)
 
     original_commit = chat_db_session.commit
     commit_calls = {"count": 0}
 
-    def failing_commit():
+    async def failing_commit():
         commit_calls["count"] += 1
         if commit_calls["count"] == 1:
             raise RuntimeError("boom")
-        return original_commit()
+        return await original_commit()
 
     monkeypatch.setattr(chat_db_session, "commit", failing_commit)
 
-    def override_db() -> Generator[Session, None, None]:
+    async def override_db() -> AsyncIterator[AsyncSession]:
         try:
             yield chat_db_session
-            chat_db_session.commit()
+            await chat_db_session.commit()
         except Exception:
-            chat_db_session.rollback()
+            await chat_db_session.rollback()
             raise
 
+    async def override_user() -> dict[str, str]:
+        return await _user_context(chat_db_session, USER_1_ID)
+
     app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[get_current_user] = lambda: _user_context(chat_db_session, USER_1_ID)
+    app.dependency_overrides[get_current_user] = override_user
     app.dependency_overrides[rate_limit] = lambda: None
     try:
-        with TestClient(app, raise_server_exceptions=False) as client:
-            response = client.post(
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
                 f"/api/chat/conversations/{room['id']}/messages",
                 json={"body": "This should not publish"},
             )

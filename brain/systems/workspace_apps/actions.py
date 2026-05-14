@@ -8,17 +8,18 @@ never runs arbitrary connector code in the browser.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import re
-from typing import Any, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.workspace_app import WorkspaceApp, WorkspaceAppVersion
 from brain.systems.workspace_apps.contracts import ACTION_EFFECTS, ACTION_EXECUTOR_TYPES, ACTION_KINDS
 from brain.systems.workspace_apps.service import (
     WorkspaceAppError,
-    active_version,
-    get_app,
+    a_active_version,
+    a_get_app,
 )
 
 
@@ -40,7 +41,7 @@ class WorkspaceAppActionContractError(WorkspaceAppActionError):
 
 @dataclass(frozen=True)
 class WorkspaceAppActionContext:
-    session: Session
+    session: AsyncSession
     org_id: str
     user_id: str | None
     app: WorkspaceApp
@@ -49,7 +50,10 @@ class WorkspaceAppActionContext:
     declaration: dict[str, Any]
 
 
-WorkspaceAppActionExecutor = Callable[[WorkspaceAppActionContext, dict[str, Any]], Mapping[str, Any] | None]
+WorkspaceAppActionExecutor = Callable[
+    [WorkspaceAppActionContext, dict[str, Any]],
+    Mapping[str, Any] | Awaitable[Mapping[str, Any] | None] | None,
+]
 
 _EXECUTORS: dict[str, WorkspaceAppActionExecutor] = {}
 _BUILTIN_EXECUTOR_KEYS = {"generic.http"}
@@ -125,8 +129,8 @@ def validate_action_declaration(action_key: str, declaration: Mapping[str, Any])
     return action
 
 
-def run_workspace_app_action(
-    session: Session,
+async def async_run_workspace_app_action(
+    session: AsyncSession,
     *,
     org_id: str,
     app_id: str,
@@ -140,8 +144,8 @@ def run_workspace_app_action(
     if not normalized_key:
         raise WorkspaceAppActionContractError("actions.run(actionKey) requires an action key")
 
-    app = get_app(session, org_id=org_id, app_id=app_id)
-    version = active_version(session, app.id)
+    app = await a_get_app(session, org_id=org_id, app_id=app_id)
+    version = await a_active_version(session, app.id)
     if version is None:
         raise WorkspaceAppActionContractError("Workspace app has no active version")
 
@@ -181,7 +185,9 @@ def run_workspace_app_action(
         action_key=normalized_key,
         declaration=declaration,
     )
-    result = registered(context, payload_dict) or {}
+    raw_result = registered(context, payload_dict)
+    result = await raw_result if inspect.isawaitable(raw_result) else raw_result
+    result = result or {}
     return {
         "ok": True,
         "action_key": normalized_key,
@@ -202,9 +208,9 @@ def _missing_executor_message(action_key: str) -> str:
 def _builtin_executor(key: str) -> WorkspaceAppActionExecutor | None:
     if key not in _BUILTIN_EXECUTOR_KEYS:
         return None
-    from brain.systems.workspace_apps.generic_http import execute_generic_http_action
+    from brain.systems.workspace_apps.generic_http import async_execute_generic_http_action
 
-    return execute_generic_http_action
+    return async_execute_generic_http_action
 
 
 def _connector_keys(declaration: Mapping[str, Any]) -> list[str]:
@@ -245,7 +251,7 @@ __all__ = [
     "WorkspaceAppActionError",
     "WorkspaceAppActionExecutorMissing",
     "WorkspaceAppActionNotDeclared",
+    "async_run_workspace_app_action",
     "register_workspace_app_action_executor",
-    "run_workspace_app_action",
     "unregister_workspace_app_action_executor",
 ]

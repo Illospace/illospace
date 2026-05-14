@@ -23,11 +23,11 @@ def _patch_uow(monkeypatch, session: _FakeSession) -> None:
     from brain.platform.db.repositories import unit_of_work
 
     class _FakeUow:
-        def __enter__(self):
+        async def __aenter__(self):
             self.session = session
             return self
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
             return None
 
     monkeypatch.setattr(unit_of_work, "UnitOfWork", _FakeUow)
@@ -49,7 +49,7 @@ def test_workspace_data_casts_idea_uuid_for_legacy_run_thread_join():
     assert "ideas.id = agent_runs.thread_id" not in compiled
 
 
-def test_workspace_data_run_queries_scope_on_agent_run_org():
+async def test_workspace_data_run_queries_scope_on_agent_run_org():
     from brain.systems.runs.tool_catalog.handlers import workspace_data
 
     captured = {}
@@ -63,7 +63,7 @@ def test_workspace_data_run_queries_scope_on_agent_run_org():
             captured["sql"] = str(stmt.compile(dialect=postgresql.dialect()))
             return _Result()
 
-    workspace_data._query_runs(
+    await workspace_data._query_runs(
         _Session(),
         {"sources": {}},
         start=None,
@@ -81,7 +81,7 @@ def test_workspace_data_run_queries_scope_on_agent_run_org():
     assert "WHERE ideas.org_id" not in captured["sql"]
 
 
-def test_workspace_data_source_failure_rolls_back_and_continues(monkeypatch):
+async def test_workspace_data_source_failure_rolls_back_and_continues(monkeypatch):
     from brain.systems.runs.tool_catalog.handlers import workspace_data
 
     session = _FakeSession()
@@ -112,7 +112,7 @@ def test_workspace_data_source_failure_rolls_back_and_continues(monkeypatch):
         },
     )
 
-    payload = workspace_data.query_workspace_data(
+    payload = await workspace_data.query_workspace_data(
         sources=["broken", "after"],
         org_id="org-1",
     )
@@ -124,7 +124,7 @@ def test_workspace_data_source_failure_rolls_back_and_continues(monkeypatch):
     assert any(warning["source"] == "broken" for warning in payload["warnings"])
 
 
-def test_workspace_data_invalid_postgres_idea_id_uses_empty_sentinel(monkeypatch):
+async def test_workspace_data_invalid_postgres_idea_id_uses_empty_sentinel(monkeypatch):
     from brain.systems.runs.tool_catalog.handlers import workspace_data
 
     session = _FakeSession(dialect="postgresql")
@@ -149,7 +149,7 @@ def test_workspace_data_invalid_postgres_idea_id_uses_empty_sentinel(monkeypatch
         },
     )
 
-    payload = workspace_data.query_workspace_data(
+    payload = await workspace_data.query_workspace_data(
         sources=["capture"],
         org_id="44faf010-23ae-4aca-b6ad-2e1b574c717c",
         idea_id="0",
@@ -162,7 +162,7 @@ def test_workspace_data_invalid_postgres_idea_id_uses_empty_sentinel(monkeypatch
     assert session.rollbacks == 0
 
 
-def test_workspace_data_runs_include_latest_final_answer_artifact():
+async def test_workspace_data_runs_include_latest_final_answer_artifact():
     from brain.systems.runs.tool_catalog.handlers import workspace_data
 
     now = datetime(2026, 5, 6, 18, 30, tzinfo=timezone.utc)
@@ -200,7 +200,7 @@ def test_workspace_data_runs_include_latest_final_answer_artifact():
             return _Result([(7, "Alex has been actively polishing the Cortex thread flow.")])
 
     payload = {"sources": {}}
-    workspace_data._query_runs(
+    await workspace_data._query_runs(
         _Session(),
         payload,
         start=None,

@@ -11,7 +11,7 @@ from brain.systems.runs.execution_context import _agent_context
 logger = logging.getLogger("agent")
 
 
-def _handle_my_activity() -> dict:
+async def _handle_my_activity() -> dict:
     """Return the current agent's own activity trace for self-assessment."""
     run = getattr(_agent_context, "run", None)
     start_time = getattr(_agent_context, "start_time", None)
@@ -49,7 +49,7 @@ def _handle_my_activity() -> dict:
                 execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
                 execution_id = execution_metadata.get("execution_id")
                 if execution_id:
-                    persisted = load_execution_artifacts(execution_id=execution_id)
+                    persisted = await load_execution_artifacts(execution_id=execution_id)
                     if persisted:
                         result["execution_artifacts"] = persisted
             except Exception:

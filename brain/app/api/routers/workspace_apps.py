@@ -5,12 +5,10 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.db_utils import run_db
 from brain.app.api.schemas.workspace_apps import (
     WorkspaceAppActionRun,
     WorkspaceAppActionRunRead,
@@ -25,26 +23,26 @@ from brain.systems.workspace_apps.actions import (
     WorkspaceAppActionError,
     WorkspaceAppActionExecutorMissing,
     WorkspaceAppActionNotDeclared,
-    run_workspace_app_action,
+    async_run_workspace_app_action,
 )
 from brain.systems.workspace_apps.service import (
     WorkspaceAppConflict,
     WorkspaceAppContractError,
     WorkspaceAppError,
     WorkspaceAppNotFound,
-    archive_app,
-    create_app,
-    delete_archived_apps,
-    get_app,
-    get_state,
-    list_archived_apps,
-    list_apps,
-    restore_app,
-    serialize_app,
-    serialize_apps,
+    a_archive_app,
+    a_create_app,
+    a_delete_archived_apps,
+    a_get_app,
+    a_get_state,
+    a_list_archived_apps,
+    a_list_apps,
+    a_restore_app,
+    a_serialize_app,
+    a_serialize_apps,
+    a_update_app,
+    a_update_state,
     serialize_state,
-    update_app,
-    update_state,
 )
 from brain.systems.workspace_apps.events import publish_workspace_app_change
 
@@ -89,7 +87,7 @@ async def list_workspace_apps(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-    return await run_db(db, lambda sync_db: serialize_apps(sync_db, list_apps(sync_db, org_id)))
+    return await a_serialize_apps(db, await a_list_apps(db, org_id))
 
 
 @router.get("/archived", response_model=list[WorkspaceAppRead])
@@ -99,7 +97,7 @@ async def list_archived_workspace_apps(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-    return await run_db(db, lambda sync_db: serialize_apps(sync_db, list_archived_apps(sync_db, org_id, limit=limit)))
+    return await a_serialize_apps(db, await a_list_archived_apps(db, org_id, limit=limit))
 
 
 @router.delete("/archived")
@@ -108,15 +106,11 @@ async def empty_archived_workspace_apps(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-
-    def _delete(sync_db: Session):
-        deleted = delete_archived_apps(sync_db, org_id=org_id)
-        sync_db.commit()
-        if deleted:
-            publish_workspace_app_change(org_id=org_id, action="empty_archive")
-        return {"deleted": deleted}
-
-    return await run_db(db, _delete)
+    deleted = await a_delete_archived_apps(db, org_id=org_id)
+    await db.commit()
+    if deleted:
+        publish_workspace_app_change(org_id=org_id, action="empty_archive")
+    return {"deleted": deleted}
 
 
 @router.post("", response_model=WorkspaceAppRead, status_code=201, include_in_schema=False)
@@ -127,33 +121,30 @@ async def create_workspace_app(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-    def _create(sync_db: Session):
-        try:
-            app = create_app(
-                sync_db,
-                org_id=org_id,
-                key=body.key,
-                name=body.name,
-                description=body.description,
-                renderer_key=body.renderer_key,
-                source_kind=body.source_kind,
-                source_code=body.source_code,
-                manifest=body.manifest,
-                visual_spec=body.visual_spec,
-                metadata=body.metadata,
-                created_by_user_id=_user_id(user),
-                anchor_user_id=body.anchor_user_id,
-                initial_state=body.initial_state,
-                state_key=body.state_key,
-            )
-            serialized = serialize_app(sync_db, app)
-            sync_db.commit()
-            publish_workspace_app_change(org_id=org_id, action="create", app=serialized)
-            return serialized
-        except WorkspaceAppError as exc:
-            _raise_http(exc)
-
-    return await run_db(db, _create)
+    try:
+        app = await a_create_app(
+            db,
+            org_id=org_id,
+            key=body.key,
+            name=body.name,
+            description=body.description,
+            renderer_key=body.renderer_key,
+            source_kind=body.source_kind,
+            source_code=body.source_code,
+            manifest=body.manifest,
+            visual_spec=body.visual_spec,
+            metadata=body.metadata,
+            created_by_user_id=_user_id(user),
+            anchor_user_id=body.anchor_user_id,
+            initial_state=body.initial_state,
+            state_key=body.state_key,
+        )
+        serialized = await a_serialize_app(db, app)
+        await db.commit()
+        publish_workspace_app_change(org_id=org_id, action="create", app=serialized)
+        return serialized
+    except WorkspaceAppError as exc:
+        _raise_http(exc)
 
 
 @router.get("/{app_id}", response_model=WorkspaceAppRead)
@@ -163,13 +154,10 @@ async def get_workspace_app(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-    def _get(sync_db: Session):
-        try:
-            return serialize_app(sync_db, get_app(sync_db, org_id, app_id))
-        except WorkspaceAppError as exc:
-            _raise_http(exc)
-
-    return await run_db(db, _get)
+    try:
+        return await a_serialize_app(db, await a_get_app(db, org_id, app_id))
+    except WorkspaceAppError as exc:
+        _raise_http(exc)
 
 
 @router.patch("/{app_id}", response_model=WorkspaceAppRead)
@@ -180,31 +168,28 @@ async def update_workspace_app(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-    def _update(sync_db: Session):
-        try:
-            app = update_app(
-                sync_db,
-                org_id=org_id,
-                app_id=app_id,
-                name=body.name,
-                description=body.description,
-                renderer_key=body.renderer_key,
-                source_kind=body.source_kind,
-                source_code=body.source_code,
-                manifest=body.manifest,
-                visual_spec=body.visual_spec,
-                metadata=body.metadata,
-                anchor_user_id=body.anchor_user_id,
-                updated_by_user_id=_user_id(user),
-            )
-            serialized = serialize_app(sync_db, app)
-            sync_db.commit()
-            publish_workspace_app_change(org_id=org_id, action="update", app=serialized)
-            return serialized
-        except WorkspaceAppError as exc:
-            _raise_http(exc)
-
-    return await run_db(db, _update)
+    try:
+        app = await a_update_app(
+            db,
+            org_id=org_id,
+            app_id=app_id,
+            name=body.name,
+            description=body.description,
+            renderer_key=body.renderer_key,
+            source_kind=body.source_kind,
+            source_code=body.source_code,
+            manifest=body.manifest,
+            visual_spec=body.visual_spec,
+            metadata=body.metadata,
+            anchor_user_id=body.anchor_user_id,
+            updated_by_user_id=_user_id(user),
+        )
+        serialized = await a_serialize_app(db, app)
+        await db.commit()
+        publish_workspace_app_change(org_id=org_id, action="update", app=serialized)
+        return serialized
+    except WorkspaceAppError as exc:
+        _raise_http(exc)
 
 
 @router.delete("/{app_id}")
@@ -214,22 +199,19 @@ async def archive_workspace_app(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-    def _archive(sync_db: Session):
-        try:
-            result = archive_app(sync_db, org_id=org_id, app_id=app_id)
-            sync_db.commit()
-            archived = result.get("archived", {})
-            publish_workspace_app_change(
-                org_id=org_id,
-                action="archive",
-                app_id=archived.get("id") or app_id,
-                key=archived.get("key"),
-            )
-            return result
-        except WorkspaceAppError as exc:
-            _raise_http(exc)
-
-    return await run_db(db, _archive)
+    try:
+        result = await a_archive_app(db, org_id=org_id, app_id=app_id)
+        await db.commit()
+        archived = result.get("archived", {})
+        publish_workspace_app_change(
+            org_id=org_id,
+            action="archive",
+            app_id=archived.get("id") or app_id,
+            key=archived.get("key"),
+        )
+        return result
+    except WorkspaceAppError as exc:
+        _raise_http(exc)
 
 
 @router.post("/{app_id}/restore", response_model=WorkspaceAppRead)
@@ -239,17 +221,14 @@ async def restore_workspace_app(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-    def _restore(sync_db: Session):
-        try:
-            app = restore_app(sync_db, org_id=org_id, app_id=app_id)
-            serialized = serialize_app(sync_db, app)
-            sync_db.commit()
-            publish_workspace_app_change(org_id=org_id, action="restore", app=serialized)
-            return serialized
-        except WorkspaceAppError as exc:
-            _raise_http(exc)
-
-    return await run_db(db, _restore)
+    try:
+        app = await a_restore_app(db, org_id=org_id, app_id=app_id)
+        serialized = await a_serialize_app(db, app)
+        await db.commit()
+        publish_workspace_app_change(org_id=org_id, action="restore", app=serialized)
+        return serialized
+    except WorkspaceAppError as exc:
+        _raise_http(exc)
 
 
 @router.get("/{app_id}/state/{state_key}", response_model=WorkspaceAppStateRead)
@@ -260,14 +239,11 @@ async def get_workspace_app_state(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-    def _get(sync_db: Session):
-        try:
-            state = get_state(sync_db, org_id=org_id, app_id=app_id, key=state_key, user_id=_user_id(user))
-            return serialize_state(state)
-        except WorkspaceAppError as exc:
-            _raise_http(exc)
-
-    return await run_db(db, _get)
+    try:
+        state = await a_get_state(db, org_id=org_id, app_id=app_id, key=state_key, user_id=_user_id(user))
+        return serialize_state(state)
+    except WorkspaceAppError as exc:
+        _raise_http(exc)
 
 
 @router.put("/{app_id}/state/{state_key}", response_model=WorkspaceAppStateRead)
@@ -280,7 +256,7 @@ async def update_workspace_app_state(
 ):
     org_id = require_org_context(user)
     try:
-        state = update_state(
+        state = await a_update_state(
             db,
             org_id=org_id,
             app_id=app_id,
@@ -302,21 +278,18 @@ async def run_workspace_app_declared_action(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
-    def _run(sync_db: Session):
-        try:
-            result = run_workspace_app_action(
-                sync_db,
-                org_id=org_id,
-                app_id=app_id,
-                action_key=body.action_key,
-                payload=body.payload,
-                user_id=_user_id(user),
-            )
-            sync_db.commit()
-            return result
-        except WorkspaceAppActionError as exc:
-            _raise_action_http(exc)
-        except WorkspaceAppError as exc:
-            _raise_http(exc)
-
-    return await run_db(db, _run)
+    try:
+        result = await async_run_workspace_app_action(
+            db,
+            org_id=org_id,
+            app_id=app_id,
+            action_key=body.action_key,
+            payload=body.payload,
+            user_id=_user_id(user),
+        )
+        await db.commit()
+        return result
+    except WorkspaceAppActionError as exc:
+        _raise_action_http(exc)
+    except WorkspaceAppError as exc:
+        _raise_http(exc)

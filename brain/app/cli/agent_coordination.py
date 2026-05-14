@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -32,7 +33,7 @@ from brain.platform.db.repositories.unit_of_work import UnitOfWork
 # Core functions
 # ============================================================
 
-def register_agent(
+async def register_agent(
     session_key: str,
     task_description: str,
     files_touched: list[str] | None = None,
@@ -43,8 +44,8 @@ def register_agent(
 
     Returns the agent_coordination row id.
     """
-    with UnitOfWork() as uow:
-        row = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             INSERT INTO agent_coordination (
                 session_key, task_description, files_touched,
                 git_branch, resources_locked, status, started_at
@@ -63,18 +64,19 @@ def register_agent(
             "files": files_touched or [],
             "branch": git_branch,
             "resources": resources_locked or [],
-        }).mappings().first()
+        })
+        row = result.mappings().first()
         return row["id"]
 
 
-def get_active_agents(exclude_session: str | None = None) -> list[dict]:
+async def get_active_agents(exclude_session: str | None = None) -> list[dict]:
     """Get all currently running agents and their resources.
 
     Agents older than 2 hours are auto-expired (stale detection).
     """
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # Auto-expire stale agents (running > 2 hours)
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             UPDATE agent_coordination
             SET status = 'expired'
             WHERE status = 'running'
@@ -82,39 +84,41 @@ def get_active_agents(exclude_session: str | None = None) -> list[dict]:
         """))
 
         if exclude_session:
-            rows = uow.session.execute(text("""
+            result = await uow.session.execute(text("""
                 SELECT id, session_key, task_description, files_touched,
                        git_branch, resources_locked, status, started_at
                 FROM agent_coordination
                 WHERE status = 'running' AND session_key != :exclude
                 ORDER BY started_at DESC
-            """), {"exclude": exclude_session}).mappings().all()
+            """), {"exclude": exclude_session})
         else:
-            rows = uow.session.execute(text("""
+            result = await uow.session.execute(text("""
                 SELECT id, session_key, task_description, files_touched,
                        git_branch, resources_locked, status, started_at
                 FROM agent_coordination
                 WHERE status = 'running'
                 ORDER BY started_at DESC
-            """)).mappings().all()
+            """))
+        rows = result.mappings().all()
         return [dict(r) for r in rows]
 
 
-def release_agent(session_key: str, status: str = "done") -> bool:
+async def release_agent(session_key: str, status: str = "done") -> bool:
     """Release an agent's resource claims. Returns True if found."""
     if status not in ("done", "failed"):
         raise ValueError(f"Invalid status: {status}. Use 'done' or 'failed'.")
-    with UnitOfWork() as uow:
-        row = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             UPDATE agent_coordination
             SET status = :status, completed_at = NOW()
             WHERE session_key = :session_key AND status = 'running'
             RETURNING id
-        """), {"status": status, "session_key": session_key}).mappings().first()
+        """), {"status": status, "session_key": session_key})
+        row = result.mappings().first()
         return row is not None
 
 
-def check_conflicts(
+async def check_conflicts(
     files: list[str] | None = None,
     branch: str | None = None,
     exclude_session: str | None = None,
@@ -123,7 +127,7 @@ def check_conflicts(
 
     Returns list of conflicting agents with details about what conflicts.
     """
-    active = get_active_agents(exclude_session=exclude_session)
+    active = await get_active_agents(exclude_session=exclude_session)
     conflicts = []
 
     for agent in active:
@@ -167,12 +171,12 @@ def check_conflicts(
     return conflicts
 
 
-def build_awareness_context(exclude_session: str | None = None) -> str:
+async def build_awareness_context(exclude_session: str | None = None) -> str:
     """Build a formatted context string for injection into child agent prompts.
 
     Returns empty string if no other agents are active.
     """
-    active = get_active_agents(exclude_session=exclude_session)
+    active = await get_active_agents(exclude_session=exclude_session)
     if not active:
         return ""
 
@@ -217,31 +221,31 @@ def build_awareness_context(exclude_session: str | None = None) -> str:
 # CLI
 # ============================================================
 
-def cmd_register(args):
+async def cmd_register(args):
     files = [f.strip() for f in args.files.split(",")] if args.files else None
     resources = [r.strip() for r in args.resources.split(",")] if args.resources else None
-    row_id = register_agent(args.session_key, args.task, files, args.branch, resources)
+    row_id = await register_agent(args.session_key, args.task, files, args.branch, resources)
     print(json.dumps({"id": row_id, "session_key": args.session_key, "status": "registered"}))
 
 
-def cmd_active(args):
-    agents = get_active_agents()
+async def cmd_active(args):
+    agents = await get_active_agents()
     print(json.dumps(agents, indent=2, default=str))
 
 
-def cmd_conflicts(args):
+async def cmd_conflicts(args):
     files = [f.strip() for f in args.files.split(",")] if args.files else None
-    conflicts = check_conflicts(files, args.branch, args.exclude)
+    conflicts = await check_conflicts(files, args.branch, args.exclude)
     print(json.dumps(conflicts, indent=2, default=str))
 
 
-def cmd_release(args):
-    released = release_agent(args.session_key, args.status or "done")
+async def cmd_release(args):
+    released = await release_agent(args.session_key, args.status or "done")
     print(json.dumps({"session_key": args.session_key, "released": released}))
 
 
-def cmd_context(args):
-    ctx = build_awareness_context(args.exclude)
+async def cmd_context(args):
+    ctx = await build_awareness_context(args.exclude)
     if ctx:
         print(ctx)
     else:
@@ -274,8 +278,9 @@ def main():
     p.add_argument("--exclude", default=None)
 
     args = parser.parse_args()
-    {"register": cmd_register, "active": cmd_active, "conflicts": cmd_conflicts,
-     "release": cmd_release, "context": cmd_context}[args.command](args)
+    command = {"register": cmd_register, "active": cmd_active, "conflicts": cmd_conflicts,
+               "release": cmd_release, "context": cmd_context}[args.command]
+    asyncio.run(command(args))
 
 
 if __name__ == "__main__":

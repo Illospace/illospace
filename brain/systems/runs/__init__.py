@@ -13,7 +13,7 @@ from brain.systems.runs.domain import (
     RunProfile,
     RunRecipe,
 )
-from brain.systems.runs.engine import AgentRunEngine, RunRecipeResult, RunRuntime
+from brain.systems.runs.engine import AsyncAgentRunEngine, RunRecipeResult, RunRuntime
 from brain.systems.runs.execution_context import (
     AgentExecutionContext,
     bind_agent_context,
@@ -102,7 +102,7 @@ __all__ = [
     "AcceptanceCriteria",
     "AgentRun",
     "AgentRunArtifact",
-    "AgentRunEngine",
+    "AsyncAgentRunEngine",
     "AgentRunEvent",
     "AgentRunRequest",
     "AgentExecutionContext",

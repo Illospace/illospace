@@ -41,15 +41,15 @@ def resolve_model(
         )
 
 
-def get_skill_tiers() -> list[dict]:
+async def get_skill_tiers() -> list[dict]:
     """Return all non-archived skills with their tier settings."""
     try:
-        with UnitOfWork() as uow:
-            rows = uow.session.execute(text(
+        async with UnitOfWork() as uow:
+            rows = (await uow.session.execute(text(
                 "SELECT name, model_tier, thinking_tier, maturity, confidence, "
                 "use_count, success_count, version "
                 "FROM skills WHERE NOT archived ORDER BY name"
-            )).mappings().all()
+            ))).mappings().all()
             return [dict(row) for row in rows]
     except Exception as exc:
         print(f"Warning: get_skill_tiers failed: {exc}", file=sys.stderr)

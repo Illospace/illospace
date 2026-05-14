@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -172,14 +172,14 @@ async def test_explicit_skill_permission_can_mutate_skill(client):
     _act_as(app, {**MEMBER, "permissions": [PERMISSION_SKILLS_MANAGE]})
 
     with patch("brain.app.api.routers.skills.SkillRepository") as repo:
-        repo.return_value.add_guardrail.return_value = _skill_obj()
+        repo.return_value.a_add_guardrail = AsyncMock(return_value=_skill_obj())
         response = await c.post(
             "/api/skills/demo/guardrail",
             json={"text": "Do not leak secrets"},
         )
 
     assert response.status_code == 200
-    repo.return_value.add_guardrail.assert_called_once_with("demo", "Do not leak secrets", "warning")
+    repo.return_value.a_add_guardrail.assert_awaited_once_with("demo", "Do not leak secrets", "warning")
 
 
 @pytest.mark.asyncio
@@ -187,8 +187,7 @@ async def test_explicit_scheduler_permission_can_create_scheduler_job(client):
     c, app = client
     _act_as(app, {**MEMBER, "permissions": [PERMISSION_SCHEDULER_MANAGE]})
 
-    with patch("brain.app.api.routers.system.upsert_scheduler_job") as upsert_job:
-        upsert_job.return_value = SimpleNamespace(job_key="demo", cron_expr="0 8 * * *")
+    with patch("brain.app.api.routers.system.async_upsert_scheduler_job", new=AsyncMock(return_value=SimpleNamespace(job_key="demo", cron_expr="0 8 * * *"))) as upsert_job:
         response = await c.post(
             "/api/system/scheduler/jobs",
             json={"job_key": "demo", "cron_expr": "0 8 * * *", "handler_ref": "python -m demo"},
@@ -196,7 +195,7 @@ async def test_explicit_scheduler_permission_can_create_scheduler_job(client):
 
     assert response.status_code == 200
     assert response.json()["schedule_human"] == "at 8:00 AM"
-    upsert_job.assert_called_once()
+    upsert_job.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -241,8 +240,12 @@ async def test_member_cannot_mutate_installation_memory(client, method, url, bod
     _act_as(app, MEMBER)
     member = SimpleNamespace(id="user-1", org_id="org-1", role="member")
 
-    with patch("brain.systems.runtime_settings.router.refresh_user", return_value=member):
-        response = await c.request(method, url, json=body)
+    class RuntimeSettingsDb:
+        async def get(self, model, identifier):
+            return member if identifier == "user-1" else None
+
+    app.dependency_overrides[get_db] = lambda: RuntimeSettingsDb()
+    response = await c.request(method, url, json=body)
 
     assert response.status_code == 403
 

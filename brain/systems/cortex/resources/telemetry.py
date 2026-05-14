@@ -85,7 +85,7 @@ def build_browser_resource_summary(
     }
 
 
-def record_run_resource_telemetry(
+async def record_run_resource_telemetry(
     run_id: int | None,
     summary: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -95,8 +95,8 @@ def record_run_resource_telemetry(
         return normalized
 
     try:
-        with UnitOfWork() as uow:
-            run = uow.session.get(AgentRun, run_id)
+        async with UnitOfWork() as uow:
+            run = await uow.session.get(AgentRun, run_id)
             if not run:
                 return normalized
 

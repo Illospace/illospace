@@ -9,6 +9,7 @@ lessons, preferences, decisions, procedures, or other semantic types.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from dataclasses import dataclass
@@ -49,7 +50,7 @@ def extract_lessons(text: str, source: str = "session") -> list[ExtractedLesson]
     ]
 
 
-def encode_lessons(lessons: list[ExtractedLesson], dry_run: bool = False) -> list[dict]:
+async def encode_lessons(lessons: list[ExtractedLesson], dry_run: bool = False) -> list[dict]:
     """Encode raw episodes via ``add_memory``."""
     results = []
     for lesson in lessons:
@@ -61,7 +62,7 @@ def encode_lessons(lessons: list[ExtractedLesson], dry_run: bool = False) -> lis
                 "dry_run": True,
             })
             continue
-        result = add_memory(
+        result = await add_memory(
             content=lesson.content,
             memory_type="episode",
             salience=lesson.salience,
@@ -77,16 +78,16 @@ def encode_lessons(lessons: list[ExtractedLesson], dry_run: bool = False) -> lis
     return results
 
 
-def auto_encode_session(text: str, dry_run: bool = False) -> list[dict]:
+async def auto_encode_session(text: str, dry_run: bool = False) -> list[dict]:
     """Capture a raw session episode."""
     lessons = extract_lessons(text, source="session")
-    return encode_lessons(lessons, dry_run=dry_run)
+    return await encode_lessons(lessons, dry_run=dry_run)
 
 
-def auto_encode_agent_run(text: str, dry_run: bool = False) -> list[dict]:
+async def auto_encode_agent_run(text: str, dry_run: bool = False) -> list[dict]:
     """Capture a raw AgentRun episode."""
     lessons = extract_lessons(text, source="agent_run")
-    return encode_lessons(lessons, dry_run=dry_run)
+    return await encode_lessons(lessons, dry_run=dry_run)
 
 
 def main():
@@ -98,10 +99,10 @@ def main():
     args = parser.parse_args()
 
     if args.session_summary:
-        results = auto_encode_session(args.session_summary, dry_run=args.dry_run)
+        results = asyncio.run(auto_encode_session(args.session_summary, dry_run=args.dry_run))
         source = "session"
     else:
-        results = auto_encode_agent_run(args.from_agent_run, dry_run=args.dry_run)
+        results = asyncio.run(auto_encode_agent_run(args.from_agent_run, dry_run=args.dry_run))
         source = "agent_run"
 
     import json

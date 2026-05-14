@@ -6,6 +6,7 @@ import base64
 from dataclasses import dataclass
 import logging
 import os
+from types import SimpleNamespace
 
 from brain.systems.runs.execution_context import _agent_context
 
@@ -61,22 +62,40 @@ def _run_payload_context(run: object) -> dict | None:
     return {"binding": {"raw_target_metadata": target_payload}, "execution_defaults": defaults}
 
 
+def _threadlocal_payload_context() -> dict | None:
+    run = getattr(_agent_context, "run", None)
+    if run is not None:
+        context = _run_payload_context(run)
+        if context:
+            return context
+
+    target_payload = dict(getattr(_agent_context, "target_ref", None) or {})
+    workspace_payload = dict(getattr(_agent_context, "workspace_ref", None) or {})
+    if not target_payload and not workspace_payload:
+        return None
+    return _run_payload_context(SimpleNamespace(target_ref=target_payload, workspace_ref=workspace_payload))
+
+
 def _current_run_target_context() -> dict | None:
     """Load the current run target context, if the tool call is running inside one."""
+    return _threadlocal_payload_context()
+
+
+async def _async_current_run_target_context() -> dict | None:
+    """Load the current run target context with native async DB access when needed."""
+    context = _threadlocal_payload_context()
+    if context:
+        return context
+
     run_id = _current_context_run_id()
     if not run_id:
         return None
-
     try:
         from brain.platform.db.models.run import AgentRun
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        from brain.systems.environment import load_run_target_context
 
-        with UnitOfWork() as uow:
-            context = load_run_target_context(uow.session, int(run_id))
-            if context:
-                return context
-            run = uow.session.get(AgentRun, int(run_id))
+        async with UnitOfWork() as uow:
+            run = await uow.session.get(AgentRun, int(run_id))
             if run:
                 return _run_payload_context(run)
     except Exception:
@@ -91,6 +110,23 @@ def _current_workspace_root_hint() -> str | None:
         return workspace_root
 
     context = _current_run_target_context()
+    if not context:
+        return None
+
+    defaults = context.get("execution_defaults") or {}
+    workspace_hint = defaults.get("workspace_root") or defaults.get("workspace_hint")
+    if isinstance(workspace_hint, str) and workspace_hint.strip():
+        return workspace_hint
+    return None
+
+
+async def _async_current_workspace_root_hint() -> str | None:
+    """Return the safest current workspace root hint using async context loading."""
+    workspace_root = getattr(_agent_context, "workspace_root", None)
+    if isinstance(workspace_root, str) and workspace_root.strip():
+        return workspace_root
+
+    context = await _async_current_run_target_context()
     if not context:
         return None
 
@@ -183,18 +219,64 @@ def _current_project_token_context() -> dict:
     }
 
 
+async def _async_current_project_token_context() -> dict:
+    """Return the project identity used for project-bound vault tokens."""
+    context = await _async_current_run_target_context() or {}
+    binding = context.get("binding") or {}
+    registry = context.get("registry") or binding.get("target_registry") or {}
+    raw_target = binding.get("raw_target_metadata") or {}
+
+    target_registry_id = registry.get("id") or binding.get("target_registry_id")
+    project_slugs: list[str] = []
+
+    def add_slug(value: object, *, require_repo_like: bool = False) -> None:
+        slug = _canonical_project_token_slug(value, require_repo_like=require_repo_like)
+        if slug and slug not in project_slugs:
+            project_slugs.append(slug)
+
+    add_slug(registry.get("slug"))
+    for key in ("project_slug", "slug", "repo", "name"):
+        add_slug(raw_target.get(key))
+    for slug in _project_context_token_slugs(raw_target):
+        add_slug(slug)
+
+    workspace_root = getattr(_agent_context, "workspace_root", None) or await _async_current_workspace_root_hint()
+    if isinstance(workspace_root, str) and workspace_root.strip():
+        add_slug(os.path.basename(os.path.realpath(workspace_root)))
+
+    try:
+        target_registry_id = int(target_registry_id) if target_registry_id is not None else None
+    except (TypeError, ValueError):
+        target_registry_id = None
+
+    return {
+        "project_slug": project_slugs[0] if project_slugs else None,
+        "project_slugs": project_slugs,
+        "target_registry_id": target_registry_id,
+    }
+
+
 def current_project_bound_env() -> dict[str, str]:
+    """Resolve project-bound vault tokens for command env injection."""
+    preloaded = getattr(_agent_context, "project_bound_env", None)
+    if isinstance(preloaded, dict):
+        return {str(key): str(value) for key, value in preloaded.items() if key and value is not None}
+    logger.debug("project_bound_vault_env_skipped_sync_runtime")
+    return {}
+
+
+async def async_current_project_bound_env() -> dict[str, str]:
     """Resolve project-bound vault tokens for command env injection."""
     user_id = getattr(_agent_context, "user_id", None)
     if not user_id:
         return {}
-    project_context = _current_project_token_context()
+    project_context = await _async_current_project_token_context()
     if not project_context.get("project_slug") and project_context.get("target_registry_id") is None:
         return {}
     try:
-        from brain.systems.vault import resolve_project_bound_env_tokens
+        from brain.systems.vault import async_resolve_project_bound_env_tokens
 
-        resolved = resolve_project_bound_env_tokens(
+        resolved = await async_resolve_project_bound_env_tokens(
             user_id=user_id,
             org_id=getattr(_agent_context, "org_id", None),
             project_slug=project_context.get("project_slug"),
@@ -209,6 +291,27 @@ def current_project_bound_env() -> dict[str, str]:
 
 def prepare_project_execution_env() -> ProjectExecutionEnv:
     project_env = current_project_bound_env()
+    if not project_env:
+        return ProjectExecutionEnv(
+            env=None,
+            injected_env=[],
+            git_auth_hosts=[],
+            sensitive_values=[],
+        )
+
+    run_env = os.environ.copy()
+    run_env.update(project_env)
+    git_auth_hosts, git_sensitive_values = _configure_project_bound_git_auth(run_env, project_env)
+    return ProjectExecutionEnv(
+        env=run_env,
+        injected_env=sorted(project_env),
+        git_auth_hosts=git_auth_hosts,
+        sensitive_values=list(project_env.values()) + git_sensitive_values,
+    )
+
+
+async def async_prepare_project_execution_env() -> ProjectExecutionEnv:
+    project_env = await async_current_project_bound_env()
     if not project_env:
         return ProjectExecutionEnv(
             env=None,

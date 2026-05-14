@@ -3,7 +3,7 @@ import json
 import os
 import sys
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -13,13 +13,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 class TestExperimentCreation:
     """Test experiment memory creation via experiment_tracking module."""
 
-    @patch("brain.jobs.pipelines.experiment_tracking.add_memory")
-    def test_create_experiment_memory_basic(self, mock_add):
+    @patch("brain.jobs.pipelines.experiment_tracking.add_memory", new_callable=AsyncMock)
+    async def test_create_experiment_memory_basic(self, mock_add):
         from brain.jobs.pipelines.experiment_tracking import create_experiment_memory
 
         mock_add.return_value = {"id": 42}
-
-        result = create_experiment_memory(
+        result = await create_experiment_memory(
             description="Added retry logic to delegation",
             hypothesis="Retry logic reduces delegation failures",
             what_changed="services/delegation.py",
@@ -52,12 +51,12 @@ class TestExperimentCreation:
         assess_date = date.fromisoformat(meta["assess_by"])
         assert assess_date == date.today() + timedelta(days=7)
 
-    @patch("brain.jobs.pipelines.experiment_tracking.add_memory")
-    def test_create_experiment_no_pr(self, mock_add):
+    @patch("brain.jobs.pipelines.experiment_tracking.add_memory", new_callable=AsyncMock)
+    async def test_create_experiment_no_pr(self, mock_add):
         from brain.jobs.pipelines.experiment_tracking import create_experiment_memory
 
         mock_add.return_value = {"id": 43}
-        result = create_experiment_memory(
+        await create_experiment_memory(
             description="Test change",
             hypothesis="Test hypothesis",
             what_changed="test.py",
@@ -145,9 +144,9 @@ class TestAssessmentLogic:
 class TestExtensionLogic:
     """Test inconclusive extension behavior."""
 
-    @patch("brain.jobs.pipelines.nightly_assess.gather_data")
+    @patch("brain.jobs.pipelines.nightly_assess.gather_data", new_callable=AsyncMock)
     @patch("brain.jobs.pipelines.nightly_assess.UnitOfWork")
-    def test_inconclusive_extends_assess_by(self, MockUoW, mock_gather):
+    async def test_inconclusive_extends_assess_by(self, MockUoW, mock_gather):
         from brain.jobs.pipelines.nightly_assess import assess_single_experiment
 
         mock_gather.return_value = {"available": False, "metrics": {}, "summary": "No data"}
@@ -163,16 +162,16 @@ class TestExtensionLogic:
             "meta": {"status": "active", "assess_by": "2026-03-10", "hypothesis": "h", "data_source": "manual", "extensions": 0},
         }
 
-        result = assess_single_experiment(exp, target, dry_run=True)
+        result = await assess_single_experiment(exp, target, dry_run=True)
         assert result["verdict"] == "inconclusive"
         # Meta should be updated to extend
         assert exp["meta"]["status"] == "active"
         assert exp["meta"]["assess_by"] == "2026-03-17"
         assert exp["meta"]["extensions"] == 1
 
-    @patch("brain.jobs.pipelines.nightly_assess.gather_data")
+    @patch("brain.jobs.pipelines.nightly_assess.gather_data", new_callable=AsyncMock)
     @patch("brain.jobs.pipelines.nightly_assess.UnitOfWork")
-    def test_max_extensions_reached(self, MockUoW, mock_gather):
+    async def test_max_extensions_reached(self, MockUoW, mock_gather):
         from brain.jobs.pipelines.nightly_assess import assess_single_experiment
 
         mock_gather.return_value = {"available": False, "metrics": {}, "summary": "No data"}
@@ -184,15 +183,15 @@ class TestExtensionLogic:
             "meta": {"status": "active", "assess_by": "2026-03-24", "hypothesis": "h", "data_source": "manual", "extensions": 2},
         }
 
-        result = assess_single_experiment(exp, target, dry_run=True)
+        result = await assess_single_experiment(exp, target, dry_run=True)
         assert result["verdict"] == "inconclusive"
         # Should NOT extend further — status stays inconclusive (not active)
         assert exp["meta"]["status"] == "inconclusive"
 
-    @patch("brain.jobs.pipelines.nightly_assess.gather_data")
+    @patch("brain.jobs.pipelines.nightly_assess.gather_data", new_callable=AsyncMock)
     @patch("brain.jobs.pipelines.nightly_assess.UnitOfWork")
-    @patch("brain.jobs.pipelines.nightly_assess.add_memory")
-    def test_failed_creates_revert_recommendation(self, mock_add, MockUoW, mock_gather):
+    @patch("brain.jobs.pipelines.nightly_assess.add_memory", new_callable=AsyncMock)
+    async def test_failed_creates_revert_recommendation(self, mock_add, MockUoW, mock_gather):
         from brain.jobs.pipelines.nightly_assess import assess_single_experiment
 
         mock_gather.return_value = {
@@ -202,8 +201,9 @@ class TestExtensionLogic:
         }
         mock_uow = MagicMock()
         MockUoW.return_value = mock_uow
-        mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-        mock_uow.__exit__ = MagicMock(return_value=False)
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
+        mock_uow.session.execute = AsyncMock()
         mock_add.return_value = {"id": 99}
 
         target = date(2026, 3, 10)
@@ -213,7 +213,7 @@ class TestExtensionLogic:
             "meta": {"status": "active", "assess_by": "2026-03-10", "hypothesis": "improve skills", "data_source": "skill_success_rates", "extensions": 0, "pr_number": 42},
         }
 
-        result = assess_single_experiment(exp, target, dry_run=False)
+        result = await assess_single_experiment(exp, target, dry_run=False)
         assert result["verdict"] == "failed"
         # Should have created an improvement memory for revert
         mock_add.assert_called_once()

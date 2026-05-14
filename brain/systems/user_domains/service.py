@@ -6,7 +6,7 @@ import re
 from typing import Any, Iterable, Sequence
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.domain import (
     Domain,
@@ -52,33 +52,102 @@ class DomainNotFound(LookupError):
     """Raised when a requested domain row is not visible in the caller org."""
 
 
-class DomainService:
-    """Schema-aware service for org-wide domains."""
+def _validate_record_data(
+    fields: Iterable[DomainFieldDefinition],
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise DomainError("record data must be an object")
+    field_map = {field.key: field for field in fields}
+    unknown = sorted(set(data) - set(field_map))
+    if unknown:
+        raise DomainError(f"Unknown field(s): {', '.join(unknown)}")
 
-    def __init__(self, session: Session):
+    normalized: dict[str, Any] = {}
+    for key, field in field_map.items():
+        value = data.get(key, field.default_value)
+        if _is_empty(value):
+            if field.required:
+                raise DomainError(f"Field '{key}' is required")
+            normalized[key] = None
+            continue
+        normalized[key] = _coerce_field_value(field, value)
+    return normalized
+
+
+def _serialize_field(field: DomainFieldDefinition) -> dict[str, Any]:
+    return {
+        "id": field.id,
+        "domain_id": field.domain_id,
+        "object_type_id": field.object_type_id,
+        "key": field.key,
+        "name": field.name,
+        "field_type": field.field_type,
+        "required": field.required,
+        "options": field.options or [],
+        "default_value": field.default_value,
+        "validation": field.validation or {},
+        "searchable": field.searchable,
+        "sortable": field.sortable,
+        "created_at": field.created_at,
+        "updated_at": field.updated_at,
+    }
+
+
+def _serialize_event(event: DomainEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "org_id": event.org_id,
+        "domain_id": event.domain_id,
+        "record_id": event.record_id,
+        "relation_id": event.relation_id,
+        "event_type": event.event_type,
+        "actor_kind": event.actor_kind,
+        "actor_id": event.actor_id,
+        "run_id": event.run_id,
+        "idea_id": event.idea_id,
+        "before": event.before or {},
+        "after": event.after or {},
+        "patch": event.patch or {},
+        "reason": event.reason,
+        "created_at": event.created_at,
+    }
+
+
+class AsyncDomainService:
+    """AsyncSession-backed domain service for request/runtime code."""
+
+    def __init__(self, session: AsyncSession):
         self.session = session
 
-    # ------------------------------------------------------------------
-    # Domain and schema operations
-    # ------------------------------------------------------------------
-
-    def list_domains(self, org_id: str, *, include_archived: bool = False) -> Sequence[Domain]:
+    async def list_domains(
+        self,
+        org_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> Sequence[Domain]:
         stmt = select(Domain).where(Domain.org_id == org_id)
         if not include_archived:
             stmt = stmt.where(Domain.archived_at.is_(None))
         stmt = stmt.order_by(Domain.updated_at.desc(), Domain.id.desc())
-        return self.session.scalars(stmt).all()
+        return (await self.session.scalars(stmt)).all()
 
-    def get_domain(self, org_id: str, domain_id: int, *, include_archived: bool = False) -> Domain:
+    async def get_domain(
+        self,
+        org_id: str,
+        domain_id: int,
+        *,
+        include_archived: bool = False,
+    ) -> Domain:
         stmt = select(Domain).where(Domain.id == domain_id, Domain.org_id == org_id)
         if not include_archived:
             stmt = stmt.where(Domain.archived_at.is_(None))
-        domain = self.session.scalars(stmt).first()
+        domain = (await self.session.scalars(stmt)).first()
         if domain is None:
             raise DomainNotFound(f"Domain {domain_id} not found")
         return domain
 
-    def create_domain(
+    async def create_domain(
         self,
         org_id: str,
         *,
@@ -92,7 +161,7 @@ class DomainService:
     ) -> Domain:
         name = _nonempty(name, "name")
         slug = _normalize_slug(slug or name)
-        self._ensure_slug_available(org_id, slug)
+        await self._ensure_slug_available(org_id, slug)
         domain = Domain(
             org_id=org_id,
             slug=slug,
@@ -102,11 +171,11 @@ class DomainService:
             updated_by_user_id=actor_id,
         )
         self.session.add(domain)
-        self.session.flush()
+        await self.session.flush()
 
         object_map: dict[str, DomainObjectType] = {}
         for idx, payload in enumerate(objects or []):
-            obj = self.add_object_type(
+            obj = await self.add_object_type(
                 domain,
                 payload,
                 actor_id=actor_id,
@@ -117,7 +186,7 @@ class DomainService:
             object_map[obj.key] = obj
 
         for payload in relations or []:
-            self.add_relation_type(
+            await self.add_relation_type(
                 domain,
                 payload,
                 object_map=object_map,
@@ -126,17 +195,17 @@ class DomainService:
                 emit_event=False,
             )
 
-        self._add_event(
+        await self._add_event(
             org_id=org_id,
             domain_id=domain.id,
             event_type="domain.created",
             actor_id=actor_id,
             actor_kind=actor_kind,
-            after=self.serialize_domain_schema(domain),
+            after=await self.serialize_domain_schema(domain),
         )
         return domain
 
-    def remove_domain(
+    async def remove_domain(
         self,
         org_id: str,
         domain_id: int,
@@ -147,12 +216,14 @@ class DomainService:
         run_id: int | None = None,
         idea_id: str | None = None,
     ) -> dict[str, Any]:
-        domain = self.get_domain(org_id, domain_id)
-        before = self.serialize_domain_schema(domain)
+        domain = await self.get_domain(org_id, domain_id)
+        before = await self.serialize_domain_schema(domain)
         if mode == "archive":
             domain.archived_at = datetime.now(timezone.utc)
             domain.updated_by_user_id = actor_id
-            self._add_event(
+            await self.session.flush()
+            await self.session.refresh(domain)
+            await self._add_event(
                 org_id=org_id,
                 domain_id=domain.id,
                 event_type="domain.archived",
@@ -161,16 +232,16 @@ class DomainService:
                 run_id=run_id,
                 idea_id=idea_id,
                 before=before,
-                after=self.serialize_domain_schema(domain),
+                after=await self.serialize_domain_schema(domain),
             )
             return {"id": domain_id, "mode": "archive", "archived": True}
         if mode == "delete":
-            self.session.delete(domain)
-            self.session.flush()
+            await self.session.delete(domain)
+            await self.session.flush()
             return {"id": domain_id, "mode": "delete", "deleted": True}
         raise DomainError("mode must be 'archive' or 'delete'")
 
-    def add_object_type(
+    async def add_object_type(
         self,
         domain: Domain,
         payload: dict[str, Any],
@@ -181,7 +252,7 @@ class DomainService:
         sort_order: int | None = None,
     ) -> DomainObjectType:
         key = _normalize_key(payload.get("key") or payload.get("name"), "object key")
-        self._ensure_object_key_available(domain.id, key)
+        await self._ensure_object_key_available(domain.id, key)
         obj = DomainObjectType(
             domain_id=domain.id,
             key=key,
@@ -191,22 +262,22 @@ class DomainService:
             sort_order=sort_order if sort_order is not None else int(payload.get("sort_order") or 0),
         )
         self.session.add(obj)
-        self.session.flush()
+        await self.session.flush()
         for field in payload.get("fields") or []:
-            self.add_field_definition(obj, field, emit_event=False)
+            await self.add_field_definition(obj, field, emit_event=False)
         if emit_event:
             domain.updated_by_user_id = actor_id
-            self._add_event(
+            await self._add_event(
                 org_id=domain.org_id,
                 domain_id=domain.id,
                 event_type="schema.object_added",
                 actor_id=actor_id,
                 actor_kind=actor_kind,
-                after=self.serialize_object_type(obj),
+                after=await self.serialize_object_type(obj),
             )
         return obj
 
-    def add_field_definition(
+    async def add_field_definition(
         self,
         object_type: DomainObjectType,
         payload: dict[str, Any],
@@ -214,7 +285,7 @@ class DomainService:
         emit_event: bool = True,
     ) -> DomainFieldDefinition:
         key = _normalize_key(payload.get("key") or payload.get("name"), "field key")
-        self._ensure_field_key_available(object_type.id, key)
+        await self._ensure_field_key_available(object_type.id, key)
         field_type = _normalize_field_type(payload.get("field_type") or payload.get("type"))
         options = payload.get("options") or []
         if field_type in {"enum", "multi_enum"} and not options:
@@ -235,17 +306,17 @@ class DomainService:
             sortable=bool(payload.get("sortable", True)),
         )
         self.session.add(field)
-        self.session.flush()
+        await self.session.flush()
         if emit_event:
-            self._add_event(
-                org_id=self._domain_org_id(object_type.domain_id),
+            await self._add_event(
+                org_id=await self._domain_org_id(object_type.domain_id),
                 domain_id=object_type.domain_id,
                 event_type="schema.field_added",
                 after=self.serialize_field(field),
             )
         return field
 
-    def add_relation_type(
+    async def add_relation_type(
         self,
         domain: Domain,
         payload: dict[str, Any],
@@ -256,8 +327,8 @@ class DomainService:
         emit_event: bool = True,
     ) -> DomainRelationType:
         key = _normalize_key(payload.get("key") or payload.get("name"), "relation key")
-        self._ensure_relation_type_key_available(domain.id, key)
-        object_map = object_map or self._object_map(domain.id)
+        await self._ensure_relation_type_key_available(domain.id, key)
+        object_map = object_map or await self._object_map(domain.id)
         source_key = _normalize_key(payload.get("source_object") or payload.get("source"), "source object")
         target_key = _normalize_key(payload.get("target_object") or payload.get("target"), "target object")
         source = object_map.get(source_key)
@@ -279,24 +350,20 @@ class DomainService:
             cardinality=cardinality,
         )
         self.session.add(relation_type)
-        self.session.flush()
+        await self.session.flush()
         if emit_event:
             domain.updated_by_user_id = actor_id
-            self._add_event(
+            await self._add_event(
                 org_id=domain.org_id,
                 domain_id=domain.id,
                 event_type="schema.relation_type_added",
                 actor_id=actor_id,
                 actor_kind=actor_kind,
-                after=self.serialize_relation_type(relation_type),
+                after=await self.serialize_relation_type(relation_type),
             )
         return relation_type
 
-    # ------------------------------------------------------------------
-    # Record and relation operations
-    # ------------------------------------------------------------------
-
-    def list_records(
+    async def list_records(
         self,
         org_id: str,
         domain_id: int,
@@ -306,13 +373,13 @@ class DomainService:
         include_archived: bool = False,
         limit: int = 100,
     ) -> Sequence[DomainRecord]:
-        domain = self.get_domain(org_id, domain_id)
+        domain = await self.get_domain(org_id, domain_id)
         stmt = select(DomainRecord).where(
             DomainRecord.org_id == org_id,
             DomainRecord.domain_id == domain.id,
         )
         if object_key:
-            obj = self.get_object_type(domain.id, object_key)
+            obj = await self.get_object_type(domain.id, object_key)
             stmt = stmt.where(DomainRecord.object_type_id == obj.id)
         if not include_archived:
             stmt = stmt.where(DomainRecord.archived_at.is_(None))
@@ -321,21 +388,21 @@ class DomainService:
         stmt = stmt.order_by(DomainRecord.updated_at.desc(), DomainRecord.id.desc()).limit(
             max(1, min(int(limit), 500))
         )
-        return self.session.scalars(stmt).all()
+        return (await self.session.scalars(stmt)).all()
 
-    def get_record(self, org_id: str, domain_id: int, record_id: int) -> DomainRecord:
-        self.get_domain(org_id, domain_id)
+    async def get_record(self, org_id: str, domain_id: int, record_id: int) -> DomainRecord:
+        await self.get_domain(org_id, domain_id)
         stmt = select(DomainRecord).where(
             DomainRecord.id == record_id,
             DomainRecord.org_id == org_id,
             DomainRecord.domain_id == domain_id,
         )
-        record = self.session.scalars(stmt).first()
+        record = (await self.session.scalars(stmt)).first()
         if record is None:
             raise DomainNotFound(f"Record {record_id} not found")
         return record
 
-    def create_record(
+    async def create_record(
         self,
         org_id: str,
         domain_id: int,
@@ -348,9 +415,9 @@ class DomainService:
         run_id: int | None = None,
         idea_id: str | None = None,
     ) -> DomainRecord:
-        domain = self.get_domain(org_id, domain_id)
-        obj = self.get_object_type(domain.id, object_key)
-        fields = self.list_fields(obj.id)
+        domain = await self.get_domain(org_id, domain_id)
+        obj = await self.get_object_type(domain.id, object_key)
+        fields = await self.list_fields(obj.id)
         normalized = self.validate_record_data(fields, data)
         record = DomainRecord(
             org_id=org_id,
@@ -363,11 +430,11 @@ class DomainService:
             updated_by_user_id=actor_id,
         )
         self.session.add(record)
-        self.session.flush()
+        await self.session.flush()
         record.title = _record_title(obj, fields, normalized, title=title, record_id=record.id)
         record.search_text = _record_search_text(record.title, fields, normalized)
         domain.updated_by_user_id = actor_id
-        self._add_event(
+        await self._add_event(
             org_id=org_id,
             domain_id=domain.id,
             record_id=record.id,
@@ -376,11 +443,12 @@ class DomainService:
             actor_kind=actor_kind,
             run_id=run_id,
             idea_id=idea_id,
-            after=self.serialize_record(record),
+            after=await self.serialize_record(record),
         )
+        await self.session.refresh(record)
         return record
 
-    def update_record(
+    async def update_record(
         self,
         org_id: str,
         domain_id: int,
@@ -394,14 +462,14 @@ class DomainService:
         run_id: int | None = None,
         idea_id: str | None = None,
     ) -> DomainRecord:
-        record = self.get_record(org_id, domain_id, record_id)
+        record = await self.get_record(org_id, domain_id, record_id)
         if expected_version is not None and record.version != expected_version:
             raise DomainError(
                 f"Record version mismatch: expected {expected_version}, current {record.version}"
             )
-        obj = self.get_object_type_by_id(record.object_type_id)
-        fields = self.list_fields(obj.id)
-        before = self.serialize_record(record)
+        obj = await self.get_object_type_by_id(record.object_type_id)
+        fields = await self.list_fields(obj.id)
+        before = await self.serialize_record(record)
         merged = dict(record.data or {})
         merged.update(data_patch or {})
         normalized = self.validate_record_data(fields, merged)
@@ -413,9 +481,11 @@ class DomainService:
         else:
             record.title = _record_title(obj, fields, normalized, record_id=record.id)
         record.search_text = _record_search_text(record.title, fields, normalized)
-        domain = self.get_domain(org_id, domain_id)
+        domain = await self.get_domain(org_id, domain_id)
         domain.updated_by_user_id = actor_id
-        self._add_event(
+        await self.session.flush()
+        await self.session.refresh(record)
+        await self._add_event(
             org_id=org_id,
             domain_id=domain.id,
             record_id=record.id,
@@ -425,12 +495,13 @@ class DomainService:
             run_id=run_id,
             idea_id=idea_id,
             before=before,
-            after=self.serialize_record(record),
+            after=await self.serialize_record(record),
             patch=data_patch,
         )
+        await self.session.refresh(record)
         return record
 
-    def remove_record(
+    async def remove_record(
         self,
         org_id: str,
         domain_id: int,
@@ -442,13 +513,15 @@ class DomainService:
         run_id: int | None = None,
         idea_id: str | None = None,
     ) -> dict[str, Any]:
-        record = self.get_record(org_id, domain_id, record_id)
-        before = self.serialize_record(record)
+        record = await self.get_record(org_id, domain_id, record_id)
+        before = await self.serialize_record(record)
         if mode == "archive":
             record.archived_at = datetime.now(timezone.utc)
             record.version += 1
             record.updated_by_user_id = actor_id
-            self._add_event(
+            await self.session.flush()
+            await self.session.refresh(record)
+            await self._add_event(
                 org_id=org_id,
                 domain_id=domain_id,
                 record_id=record.id,
@@ -458,11 +531,11 @@ class DomainService:
                 run_id=run_id,
                 idea_id=idea_id,
                 before=before,
-                after=self.serialize_record(record),
+                after=await self.serialize_record(record),
             )
             return {"id": record_id, "mode": "archive", "archived": True}
         if mode == "delete":
-            self._add_event(
+            await self._add_event(
                 org_id=org_id,
                 domain_id=domain_id,
                 record_id=record.id,
@@ -473,12 +546,12 @@ class DomainService:
                 idea_id=idea_id,
                 before=before,
             )
-            self.session.delete(record)
-            self.session.flush()
+            await self.session.delete(record)
+            await self.session.flush()
             return {"id": record_id, "mode": "delete", "deleted": True}
         raise DomainError("mode must be 'archive' or 'delete'")
 
-    def create_relation(
+    async def create_relation(
         self,
         org_id: str,
         domain_id: int,
@@ -492,10 +565,10 @@ class DomainService:
         run_id: int | None = None,
         idea_id: str | None = None,
     ) -> DomainRelation:
-        domain = self.get_domain(org_id, domain_id)
-        relation_type = self.get_relation_type(domain.id, relation_key)
-        source = self.get_record(org_id, domain.id, source_record_id)
-        target = self.get_record(org_id, domain.id, target_record_id)
+        domain = await self.get_domain(org_id, domain_id)
+        relation_type = await self.get_relation_type(domain.id, relation_key)
+        source = await self.get_record(org_id, domain.id, source_record_id)
+        target = await self.get_record(org_id, domain.id, target_record_id)
         if source.object_type_id != relation_type.source_object_type_id:
             raise DomainError("source_record_id does not match relation source object type")
         if target.object_type_id != relation_type.target_object_type_id:
@@ -510,8 +583,8 @@ class DomainService:
             created_by_user_id=actor_id,
         )
         self.session.add(relation)
-        self.session.flush()
-        self._add_event(
+        await self.session.flush()
+        await self._add_event(
             org_id=org_id,
             domain_id=domain.id,
             relation_id=relation.id,
@@ -520,11 +593,11 @@ class DomainService:
             actor_kind=actor_kind,
             run_id=run_id,
             idea_id=idea_id,
-            after=self.serialize_relation(relation),
+            after=await self.serialize_relation(relation),
         )
         return relation
 
-    def list_relations(
+    async def list_relations(
         self,
         org_id: str,
         domain_id: int,
@@ -535,13 +608,13 @@ class DomainService:
         include_archived: bool = False,
         limit: int = 100,
     ) -> Sequence[DomainRelation]:
-        domain = self.get_domain(org_id, domain_id)
+        domain = await self.get_domain(org_id, domain_id)
         stmt = select(DomainRelation).where(
             DomainRelation.org_id == org_id,
             DomainRelation.domain_id == domain.id,
         )
         if relation_key:
-            relation_type = self.get_relation_type(domain.id, relation_key)
+            relation_type = await self.get_relation_type(domain.id, relation_key)
             stmt = stmt.where(DomainRelation.relation_type_id == relation_type.id)
         if source_record_id is not None:
             stmt = stmt.where(DomainRelation.source_record_id == source_record_id)
@@ -552,9 +625,9 @@ class DomainService:
         stmt = stmt.order_by(DomainRelation.updated_at.desc(), DomainRelation.id.desc()).limit(
             max(1, min(int(limit), 500))
         )
-        return self.session.scalars(stmt).all()
+        return (await self.session.scalars(stmt)).all()
 
-    def remove_relation(
+    async def remove_relation(
         self,
         org_id: str,
         domain_id: int,
@@ -566,20 +639,22 @@ class DomainService:
         run_id: int | None = None,
         idea_id: str | None = None,
     ) -> dict[str, Any]:
-        domain = self.get_domain(org_id, domain_id)
+        domain = await self.get_domain(org_id, domain_id)
         stmt = select(DomainRelation).where(
             DomainRelation.id == relation_id,
             DomainRelation.org_id == org_id,
             DomainRelation.domain_id == domain_id,
         )
-        relation = self.session.scalars(stmt).first()
+        relation = (await self.session.scalars(stmt)).first()
         if relation is None:
             raise DomainNotFound(f"Relation {relation_id} not found")
-        before = self.serialize_relation(relation)
+        before = await self.serialize_relation(relation)
         if mode == "archive":
             relation.archived_at = datetime.now(timezone.utc)
             domain.updated_by_user_id = actor_id
-            self._add_event(
+            await self.session.flush()
+            await self.session.refresh(relation)
+            await self._add_event(
                 org_id=org_id,
                 domain_id=domain_id,
                 relation_id=relation.id,
@@ -589,12 +664,12 @@ class DomainService:
                 run_id=run_id,
                 idea_id=idea_id,
                 before=before,
-                after=self.serialize_relation(relation),
+                after=await self.serialize_relation(relation),
             )
             return {"id": relation_id, "mode": "archive", "archived": True}
         if mode == "delete":
             domain.updated_by_user_id = actor_id
-            self._add_event(
+            await self._add_event(
                 org_id=org_id,
                 domain_id=domain_id,
                 relation_id=relation.id,
@@ -605,12 +680,12 @@ class DomainService:
                 idea_id=idea_id,
                 before=before,
             )
-            self.session.delete(relation)
-            self.session.flush()
+            await self.session.delete(relation)
+            await self.session.flush()
             return {"id": relation_id, "mode": "delete", "deleted": True}
         raise DomainError("mode must be 'archive' or 'delete'")
 
-    def list_events(
+    async def list_events(
         self,
         org_id: str,
         domain_id: int,
@@ -618,51 +693,47 @@ class DomainService:
         record_id: int | None = None,
         limit: int = 50,
     ) -> Sequence[DomainEvent]:
-        self.get_domain(org_id, domain_id)
+        await self.get_domain(org_id, domain_id)
         stmt = select(DomainEvent).where(
             DomainEvent.org_id == org_id,
             DomainEvent.domain_id == domain_id,
         )
         if record_id is not None:
             stmt = stmt.where(DomainEvent.record_id == record_id)
-        stmt = stmt.order_by(DomainEvent.created_at.desc()).limit(max(1, min(limit, 200)))
-        return self.session.scalars(stmt).all()
+        stmt = stmt.order_by(DomainEvent.created_at.desc(), DomainEvent.id.desc()).limit(max(1, min(limit, 200)))
+        return (await self.session.scalars(stmt)).all()
 
-    # ------------------------------------------------------------------
-    # Lookup helpers
-    # ------------------------------------------------------------------
-
-    def get_object_type(self, domain_id: int, object_key: str) -> DomainObjectType:
+    async def get_object_type(self, domain_id: int, object_key: str) -> DomainObjectType:
         key = _normalize_key(object_key, "object key")
         stmt = select(DomainObjectType).where(
             DomainObjectType.domain_id == domain_id,
             DomainObjectType.key == key,
             DomainObjectType.archived_at.is_(None),
         )
-        obj = self.session.scalars(stmt).first()
+        obj = (await self.session.scalars(stmt)).first()
         if obj is None:
             raise DomainNotFound(f"Object type '{key}' not found")
         return obj
 
-    def get_object_type_by_id(self, object_type_id: int) -> DomainObjectType:
-        obj = self.session.get(DomainObjectType, object_type_id)
+    async def get_object_type_by_id(self, object_type_id: int) -> DomainObjectType:
+        obj = await self.session.get(DomainObjectType, object_type_id)
         if obj is None or obj.archived_at is not None:
             raise DomainNotFound(f"Object type {object_type_id} not found")
         return obj
 
-    def get_relation_type(self, domain_id: int, relation_key: str) -> DomainRelationType:
+    async def get_relation_type(self, domain_id: int, relation_key: str) -> DomainRelationType:
         key = _normalize_key(relation_key, "relation key")
         stmt = select(DomainRelationType).where(
             DomainRelationType.domain_id == domain_id,
             DomainRelationType.key == key,
             DomainRelationType.archived_at.is_(None),
         )
-        relation_type = self.session.scalars(stmt).first()
+        relation_type = (await self.session.scalars(stmt)).first()
         if relation_type is None:
             raise DomainNotFound(f"Relation type '{key}' not found")
         return relation_type
 
-    def list_objects(self, domain_id: int) -> Sequence[DomainObjectType]:
+    async def list_objects(self, domain_id: int) -> Sequence[DomainObjectType]:
         stmt = (
             select(DomainObjectType)
             .where(
@@ -671,9 +742,9 @@ class DomainService:
             )
             .order_by(DomainObjectType.sort_order, DomainObjectType.id)
         )
-        return self.session.scalars(stmt).all()
+        return (await self.session.scalars(stmt)).all()
 
-    def list_fields(self, object_type_id: int) -> Sequence[DomainFieldDefinition]:
+    async def list_fields(self, object_type_id: int) -> Sequence[DomainFieldDefinition]:
         stmt = (
             select(DomainFieldDefinition)
             .where(
@@ -682,9 +753,9 @@ class DomainService:
             )
             .order_by(DomainFieldDefinition.id)
         )
-        return self.session.scalars(stmt).all()
+        return (await self.session.scalars(stmt)).all()
 
-    def list_relation_types(self, domain_id: int) -> Sequence[DomainRelationType]:
+    async def list_relation_types(self, domain_id: int) -> Sequence[DomainRelationType]:
         stmt = (
             select(DomainRelationType)
             .where(
@@ -693,41 +764,23 @@ class DomainService:
             )
             .order_by(DomainRelationType.id)
         )
-        return self.session.scalars(stmt).all()
-
-    # ------------------------------------------------------------------
-    # Validation and serialization
-    # ------------------------------------------------------------------
+        return (await self.session.scalars(stmt)).all()
 
     def validate_record_data(
         self,
         fields: Iterable[DomainFieldDefinition],
         data: dict[str, Any],
     ) -> dict[str, Any]:
-        if not isinstance(data, dict):
-            raise DomainError("record data must be an object")
-        field_map = {field.key: field for field in fields}
-        unknown = sorted(set(data) - set(field_map))
-        if unknown:
-            raise DomainError(f"Unknown field(s): {', '.join(unknown)}")
+        return _validate_record_data(fields, data)
 
-        normalized: dict[str, Any] = {}
-        for key, field in field_map.items():
-            value = data.get(key, field.default_value)
-            if _is_empty(value):
-                if field.required:
-                    raise DomainError(f"Field '{key}' is required")
-                normalized[key] = None
-                continue
-            normalized[key] = _coerce_field_value(field, value)
-        return normalized
-
-    def serialize_domain_summary(self, domain: Domain) -> dict[str, Any]:
-        objects = self.list_objects(domain.id)
-        has_records = self.session.execute(
-            select(DomainRecord.id)
-            .where(DomainRecord.domain_id == domain.id, DomainRecord.archived_at.is_(None))
-            .limit(1)
+    async def serialize_domain_summary(self, domain: Domain) -> dict[str, Any]:
+        objects = await self.list_objects(domain.id)
+        has_records = (
+            await self.session.execute(
+                select(DomainRecord.id)
+                .where(DomainRecord.domain_id == domain.id, DomainRecord.archived_at.is_(None))
+                .limit(1)
+            )
         ).first()
         return {
             "id": domain.id,
@@ -742,18 +795,18 @@ class DomainService:
             "updated_at": domain.updated_at,
         }
 
-    def serialize_domain_schema(self, domain: Domain) -> dict[str, Any]:
-        objects = [self.serialize_object_type(obj) for obj in self.list_objects(domain.id)]
+    async def serialize_domain_schema(self, domain: Domain) -> dict[str, Any]:
+        objects = [await self.serialize_object_type(obj) for obj in await self.list_objects(domain.id)]
         return {
-            **self.serialize_domain_summary(domain),
+            **await self.serialize_domain_summary(domain),
             "objects": objects,
             "relation_types": [
-                self.serialize_relation_type(relation_type)
-                for relation_type in self.list_relation_types(domain.id)
+                await self.serialize_relation_type(relation_type)
+                for relation_type in await self.list_relation_types(domain.id)
             ],
         }
 
-    def serialize_object_type(self, obj: DomainObjectType) -> dict[str, Any]:
+    async def serialize_object_type(self, obj: DomainObjectType) -> dict[str, Any]:
         return {
             "id": obj.id,
             "domain_id": obj.domain_id,
@@ -762,32 +815,17 @@ class DomainService:
             "description": obj.description,
             "title_field": obj.title_field,
             "sort_order": obj.sort_order,
-            "fields": [self.serialize_field(field) for field in self.list_fields(obj.id)],
+            "fields": [self.serialize_field(field) for field in await self.list_fields(obj.id)],
             "created_at": obj.created_at,
             "updated_at": obj.updated_at,
         }
 
     def serialize_field(self, field: DomainFieldDefinition) -> dict[str, Any]:
-        return {
-            "id": field.id,
-            "domain_id": field.domain_id,
-            "object_type_id": field.object_type_id,
-            "key": field.key,
-            "name": field.name,
-            "field_type": field.field_type,
-            "required": field.required,
-            "options": field.options or [],
-            "default_value": field.default_value,
-            "validation": field.validation or {},
-            "searchable": field.searchable,
-            "sortable": field.sortable,
-            "created_at": field.created_at,
-            "updated_at": field.updated_at,
-        }
+        return _serialize_field(field)
 
-    def serialize_relation_type(self, relation_type: DomainRelationType) -> dict[str, Any]:
-        source = self.session.get(DomainObjectType, relation_type.source_object_type_id)
-        target = self.session.get(DomainObjectType, relation_type.target_object_type_id)
+    async def serialize_relation_type(self, relation_type: DomainRelationType) -> dict[str, Any]:
+        source = await self.session.get(DomainObjectType, relation_type.source_object_type_id)
+        target = await self.session.get(DomainObjectType, relation_type.target_object_type_id)
         return {
             "id": relation_type.id,
             "domain_id": relation_type.domain_id,
@@ -803,8 +841,8 @@ class DomainService:
             "updated_at": relation_type.updated_at,
         }
 
-    def serialize_record(self, record: DomainRecord) -> dict[str, Any]:
-        obj = self.session.get(DomainObjectType, record.object_type_id)
+    async def serialize_record(self, record: DomainRecord) -> dict[str, Any]:
+        obj = await self.session.get(DomainObjectType, record.object_type_id)
         return {
             "id": record.id,
             "org_id": record.org_id,
@@ -819,8 +857,8 @@ class DomainService:
             "updated_at": record.updated_at,
         }
 
-    def serialize_relation(self, relation: DomainRelation) -> dict[str, Any]:
-        relation_type = self.session.get(DomainRelationType, relation.relation_type_id)
+    async def serialize_relation(self, relation: DomainRelation) -> dict[str, Any]:
+        relation_type = await self.session.get(DomainRelationType, relation.relation_type_id)
         return {
             "id": relation.id,
             "org_id": relation.org_id,
@@ -836,29 +874,9 @@ class DomainService:
         }
 
     def serialize_event(self, event: DomainEvent) -> dict[str, Any]:
-        return {
-            "id": event.id,
-            "org_id": event.org_id,
-            "domain_id": event.domain_id,
-            "record_id": event.record_id,
-            "relation_id": event.relation_id,
-            "event_type": event.event_type,
-            "actor_kind": event.actor_kind,
-            "actor_id": event.actor_id,
-            "run_id": event.run_id,
-            "idea_id": event.idea_id,
-            "before": event.before or {},
-            "after": event.after or {},
-            "patch": event.patch or {},
-            "reason": event.reason,
-            "created_at": event.created_at,
-        }
+        return _serialize_event(event)
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _add_event(
+    async def _add_event(
         self,
         *,
         org_id: str,
@@ -891,51 +909,59 @@ class DomainService:
             reason=reason,
         )
         self.session.add(event)
-        self.session.flush()
+        await self.session.flush()
         return event
 
-    def _ensure_slug_available(self, org_id: str, slug: str) -> None:
-        existing = self.session.scalars(
-            select(Domain.id).where(Domain.org_id == org_id, Domain.slug == slug)
+    async def _ensure_slug_available(self, org_id: str, slug: str) -> None:
+        existing = (
+            await self.session.scalars(
+                select(Domain.id).where(Domain.org_id == org_id, Domain.slug == slug)
+            )
         ).first()
         if existing is not None:
             raise DomainError(f"Domain slug '{slug}' already exists")
 
-    def _ensure_object_key_available(self, domain_id: int, key: str) -> None:
-        existing = self.session.scalars(
-            select(DomainObjectType.id).where(
-                DomainObjectType.domain_id == domain_id,
-                DomainObjectType.key == key,
+    async def _ensure_object_key_available(self, domain_id: int, key: str) -> None:
+        existing = (
+            await self.session.scalars(
+                select(DomainObjectType.id).where(
+                    DomainObjectType.domain_id == domain_id,
+                    DomainObjectType.key == key,
+                )
             )
         ).first()
         if existing is not None:
             raise DomainError(f"Object key '{key}' already exists")
 
-    def _ensure_field_key_available(self, object_type_id: int, key: str) -> None:
-        existing = self.session.scalars(
-            select(DomainFieldDefinition.id).where(
-                DomainFieldDefinition.object_type_id == object_type_id,
-                DomainFieldDefinition.key == key,
+    async def _ensure_field_key_available(self, object_type_id: int, key: str) -> None:
+        existing = (
+            await self.session.scalars(
+                select(DomainFieldDefinition.id).where(
+                    DomainFieldDefinition.object_type_id == object_type_id,
+                    DomainFieldDefinition.key == key,
+                )
             )
         ).first()
         if existing is not None:
             raise DomainError(f"Field key '{key}' already exists")
 
-    def _ensure_relation_type_key_available(self, domain_id: int, key: str) -> None:
-        existing = self.session.scalars(
-            select(DomainRelationType.id).where(
-                DomainRelationType.domain_id == domain_id,
-                DomainRelationType.key == key,
+    async def _ensure_relation_type_key_available(self, domain_id: int, key: str) -> None:
+        existing = (
+            await self.session.scalars(
+                select(DomainRelationType.id).where(
+                    DomainRelationType.domain_id == domain_id,
+                    DomainRelationType.key == key,
+                )
             )
         ).first()
         if existing is not None:
             raise DomainError(f"Relation key '{key}' already exists")
 
-    def _object_map(self, domain_id: int) -> dict[str, DomainObjectType]:
-        return {obj.key: obj for obj in self.list_objects(domain_id)}
+    async def _object_map(self, domain_id: int) -> dict[str, DomainObjectType]:
+        return {obj.key: obj for obj in await self.list_objects(domain_id)}
 
-    def _domain_org_id(self, domain_id: int) -> str:
-        domain = self.session.get(Domain, domain_id)
+    async def _domain_org_id(self, domain_id: int) -> str:
+        domain = await self.session.get(Domain, domain_id)
         if domain is None:
             raise DomainNotFound(f"Domain {domain_id} not found")
         return domain.org_id

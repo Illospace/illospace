@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sys
@@ -10,17 +11,17 @@ import tempfile
 from pathlib import Path
 from time import perf_counter
 
-from sqlalchemy import create_engine
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.schema import CreateTable
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from brain.systems.runs.domain import AgentRunRequest
-from brain.systems.runs.engine import AgentRunEngine, RunRecipeResult, RunRuntime
+from brain.systems.runs.engine import AsyncAgentRunEngine, RunRecipeResult, RunRuntime
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.stream import RunStream
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
@@ -41,31 +42,35 @@ class RecordingStream(RunStream):
 
 
 class ReadmeRecipe:
-    def execute(self, runtime: RunRuntime) -> RunRecipeResult:
-        runtime.activity("Reading README", skill_loaded=False, blocking_verification=False)
+    async def execute(self, runtime: RunRuntime) -> RunRecipeResult:
+        await runtime.activity("Reading README", skill_loaded=False, blocking_verification=False)
         root = Path(str(runtime.request.workspace_ref["workspace_root"]))
         text = (root / "README.md").read_text(encoding="utf-8")
-        runtime.text_delta(text[:160])
+        await runtime.text_delta(text[:160])
         return RunRecipeResult(output=text)
 
 
-def main() -> int:
+async def _main_async() -> int:
     _patch_sqlite()
     with tempfile.TemporaryDirectory() as tmp:
         workspace = Path(tmp)
         (workspace / "README.md").write_text("# Demo\n\nFast path README smoke.\n", encoding="utf-8")
-        session = _session()
+        engine, session_factory = await _session_factory()
         stream = RecordingStream()
-        run = AgentRunEngine(session, recipes={"fast": ReadmeRecipe()}, stream=stream).run(
-            AgentRunRequest(
-                thread_id="bench-fast-readme",
-                message="What is in the README?",
-                profile="fast",
-                workspace_ref={"workspace_root": str(workspace)},
-                model_policy={"tier": "high", "thinking": "high"},
-            )
-        )
-        session.commit()
+        try:
+            async with session_factory() as session:
+                run = await AsyncAgentRunEngine(session, recipes={"fast": ReadmeRecipe()}, stream=stream).run(
+                    AgentRunRequest(
+                        thread_id="bench-fast-readme",
+                        message="What is in the README?",
+                        profile="fast",
+                        workspace_ref={"workspace_root": str(workspace)},
+                        model_policy={"tier": "high", "thinking": "high"},
+                    )
+                )
+                await session.commit()
+        finally:
+            await engine.dispose()
     result = {
         "run_id": run.id,
         "status": run.status.value,
@@ -81,11 +86,16 @@ def main() -> int:
     return 0 if result["passed"] else 1
 
 
-def _session():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    for table in (AgentRunRow.__table__, AgentRunEventRow.__table__, AgentRunArtifactRow.__table__):
-        table.create(engine, checkfirst=True)
-    return sessionmaker(bind=engine, expire_on_commit=False)()
+def main() -> int:
+    return asyncio.run(_main_async())
+
+
+async def _session_factory():
+    engine = create_async_engine("sqlite+aiosqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    async with engine.begin() as conn:
+        for table in (AgentRunRow.__table__, AgentRunEventRow.__table__, AgentRunArtifactRow.__table__):
+            await conn.execute(CreateTable(table, if_not_exists=True))
+    return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
 def _patch_sqlite() -> None:

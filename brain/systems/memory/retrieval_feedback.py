@@ -38,7 +38,7 @@ BOOST_EXPLICIT = 0.3
 PENALTY_EXPLICIT = 0.2
 
 
-def apply_retrieval_feedback(log_id: int, feedback: str, *, cur=None) -> dict:
+async def apply_retrieval_feedback(log_id: int, feedback: str, *, cur=None) -> dict:
     """Apply feedback to a retrieval_log entry and adjust memory salience.
 
     Args:
@@ -49,14 +49,14 @@ def apply_retrieval_feedback(log_id: int, feedback: str, *, cur=None) -> dict:
     Returns:
         dict with log_id, feedback, memory_id, old_salience, new_salience
     """
-    def _do(uow):
+    async def _do(uow):
         was_relevant = feedback == "hit"
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             UPDATE retrieval_log SET was_relevant = :was_relevant, feedback = :feedback WHERE id = :id
         """), {"was_relevant": was_relevant, "feedback": feedback, "id": log_id})
 
         # Get the memory that was retrieved
-        result = uow.session.execute(text(
+        result = await uow.session.execute(text(
             "SELECT top_result_id FROM retrieval_log WHERE id = :id"
         ), {"id": log_id})
         row = result.mappings().first()
@@ -70,7 +70,7 @@ def apply_retrieval_feedback(log_id: int, feedback: str, *, cur=None) -> dict:
             return {"log_id": log_id, "feedback": feedback, "memory_id": memory_id,
                     "old_salience": None, "new_salience": None}
 
-        result = uow.session.execute(text(
+        result = await uow.session.execute(text(
             "SELECT salience FROM memories WHERE id = :id"
         ), {"id": memory_id})
         mem = result.mappings().first()
@@ -87,18 +87,18 @@ def apply_retrieval_feedback(log_id: int, feedback: str, *, cur=None) -> dict:
         else:
             new_salience = old_salience
 
-        uow.session.execute(text(
+        await uow.session.execute(text(
             "UPDATE memories SET salience = :salience WHERE id = :id"
         ), {"salience": new_salience, "id": memory_id})
 
         return {"log_id": log_id, "feedback": feedback, "memory_id": memory_id,
                 "old_salience": old_salience, "new_salience": new_salience}
 
-    with UnitOfWork() as uow:
-        return _do(uow)
+    async with UnitOfWork() as uow:
+        return await _do(uow)
 
 
-def analyze_missed_memories(*, cur=None, min_misses: int = 3, days: int = 30) -> list[dict]:
+async def analyze_missed_memories(*, cur=None, min_misses: int = 3, days: int = 30) -> list[dict]:
     """Find memories that are consistently missed in retrievals.
 
     Args:
@@ -108,8 +108,8 @@ def analyze_missed_memories(*, cur=None, min_misses: int = 3, days: int = 30) ->
 
     Returns list of {memory_id, content, miss_count, hit_count, salience}.
     """
-    with UnitOfWork() as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             SELECT rl.top_result_id as memory_id,
                    m.content,
                    m.salience,
@@ -132,7 +132,7 @@ def analyze_missed_memories(*, cur=None, min_misses: int = 3, days: int = 30) ->
 # ---------------------------------------------------------------------------
 
 
-def apply_auto_feedback(
+async def apply_auto_feedback(
     memory_ids: list[int],
     pool_tags: list[str],
     *,
@@ -146,14 +146,14 @@ def apply_auto_feedback(
     """
     delta = BOOST_SUCCESS if success else -PENALTY_FAILURE
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         for mid in memory_ids:
-            _adjust_salience_uow(uow, mid, delta)
+            await _adjust_salience_uow(uow, mid, delta)
         for pool_name in pool_tags:
-            _record_pool_outcome_uow(uow, pool_name, hit=success, org_id=org_id)
+            await _record_pool_outcome_uow(uow, pool_name, hit=success, org_id=org_id)
 
 
-def apply_explicit_feedback(
+async def apply_explicit_feedback(
     memory_ids: list[int],
     *,
     positive: bool,
@@ -164,12 +164,12 @@ def apply_explicit_feedback(
     """
     delta = BOOST_EXPLICIT if positive else -PENALTY_EXPLICIT
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         for mid in memory_ids:
-            _adjust_salience_uow(uow, mid, delta)
+            await _adjust_salience_uow(uow, mid, delta)
 
 
-def record_attention_usefulness(
+async def record_attention_usefulness(
     retrieval_decision_id: int,
     *,
     user_id: str | None = None,
@@ -188,7 +188,7 @@ def record_attention_usefulness(
     """Write real usefulness signals back to the attention controller."""
     from brain.systems.memory.attention_controller import AttentionController
 
-    return AttentionController().record_usefulness(
+    return await AttentionController().record_usefulness(
         retrieval_decision_id=retrieval_decision_id,
         user_id=user_id,
         org_id=org_id,
@@ -205,7 +205,7 @@ def record_attention_usefulness(
     )
 
 
-def record_attention_lazy_load(
+async def record_attention_lazy_load(
     retrieval_decision_id: int,
     *,
     user_id: str | None = None,
@@ -217,7 +217,7 @@ def record_attention_lazy_load(
     """Mark a deferred item as lazily loaded through a real follow-up lookup."""
     from brain.systems.memory.attention_controller import AttentionController
 
-    return AttentionController().record_lazy_load(
+    return await AttentionController().record_lazy_load(
         retrieval_decision_id=retrieval_decision_id,
         user_id=user_id,
         org_id=org_id,
@@ -227,17 +227,17 @@ def record_attention_lazy_load(
     )
 
 
-def _adjust_salience(memory_id: int, delta: float) -> None:
+async def _adjust_salience(memory_id: int, delta: float) -> None:
     """Adjust a single memory's salience using UnitOfWork (standalone)."""
-    with UnitOfWork() as uow:
-        _adjust_salience_uow(uow, memory_id, delta)
+    async with UnitOfWork() as uow:
+        await _adjust_salience_uow(uow, memory_id, delta)
 
 
-def _adjust_salience_uow(uow, memory_id: int, delta: float) -> None:
+async def _adjust_salience_uow(uow, memory_id: int, delta: float) -> None:
     """Adjust a single memory's salience within an existing UnitOfWork."""
     from brain.platform.db.models.memory import Memory
 
-    mem = uow.session.get(Memory, memory_id)
+    mem = await uow.session.get(Memory, memory_id)
     if mem is None:
         logger.warning("Memory %d not found for salience adjustment", memory_id)
         return
@@ -246,16 +246,16 @@ def _adjust_salience_uow(uow, memory_id: int, delta: float) -> None:
     mem.salience = max(SALIENCE_FLOOR, min(SALIENCE_CAP, old + delta))
 
 
-def _record_pool_outcome(
+async def _record_pool_outcome(
     pool_name: str, *, hit: bool, org_id: str | None = None
 ) -> None:
     """Record a pool outcome via RetrievalPoolStatsRepository (standalone)."""
-    with UnitOfWork() as uow:
-        _record_pool_outcome_uow(uow, pool_name, hit=hit, org_id=org_id)
+    async with UnitOfWork() as uow:
+        await _record_pool_outcome_uow(uow, pool_name, hit=hit, org_id=org_id)
 
 
-def _record_pool_outcome_uow(
+async def _record_pool_outcome_uow(
     uow, pool_name: str, *, hit: bool, org_id: str | None = None
 ) -> None:
     """Record a pool outcome within an existing UnitOfWork."""
-    uow.pool_stats.record_outcome(pool_name, hit=hit, org_id=org_id)
+    await uow.pool_stats.record_outcome(pool_name, hit=hit, org_id=org_id)

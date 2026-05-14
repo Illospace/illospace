@@ -1,7 +1,7 @@
 """Tests for core/cognition — strategy selection and cognitive frames."""
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 
 class TestSimpleTaskHeuristic:
@@ -118,8 +118,8 @@ class TestCognitiveFrames:
 
     @patch("brain.app.mcp.server.tool_brain_recall")
     @patch("brain.app.mcp.server.tool_brain_guardrails")
-    @patch("brain.systems.cognition.frame.observe_retrieval")
-    def test_gather_frame_context_serializes_guardrails(self, mock_observe, mock_guardrails, mock_recall):
+    @patch("brain.systems.cognition.frame.observe_retrieval", new_callable=AsyncMock)
+    async def test_gather_frame_context_serializes_guardrails(self, mock_observe, mock_guardrails, mock_recall):
         from brain.systems.cognition.frame import gather_frame_context
 
         mock_recall.return_value = {"memories": []}
@@ -130,20 +130,20 @@ class TestCognitiveFrames:
         }
         mock_observe.return_value = {"retrieval_decision_id": 123, "stage": "frame_assembly"}
 
-        ctx = gather_frame_context("deploy the fix", skill_name="deploy")
+        ctx = await gather_frame_context("deploy the fix", skill_name="deploy")
 
         assert ctx["memory_status"] == "empty"
         assert "[failure] deploy: forgot migrations" in ctx["guardrails"]
         assert "[warning] always verify prod state" in ctx["guardrails"]
         assert "[pitfall:high] do not skip rollback plan" in ctx["guardrails"]
         assert ctx["attention_decision"]["stage"] == "frame_assembly"
-        mock_observe.assert_called_once()
+        mock_observe.assert_awaited_once()
 
     @patch("brain.systems.cognition.frame._lazy_load_enabled", return_value=True)
-    @patch("brain.systems.cognition.frame.observe_retrieval")
+    @patch("brain.systems.cognition.frame.observe_retrieval", new_callable=AsyncMock)
     @patch("brain.app.mcp.server.tool_brain_guardrails")
     @patch("brain.app.mcp.server.tool_brain_recall")
-    def test_gather_frame_context_can_expand_lazy_loads(self, mock_recall, mock_guardrails, mock_observe, _mock_lazy_enabled):
+    async def test_gather_frame_context_can_expand_lazy_loads(self, mock_recall, mock_guardrails, mock_observe, _mock_lazy_enabled):
         from brain.systems.cognition.frame import gather_frame_context
 
         mock_recall.return_value = {
@@ -157,7 +157,7 @@ class TestCognitiveFrames:
         mock_guardrails.return_value = {"guardrails": [], "warnings": [], "pitfalls": []}
         mock_observe.return_value = {"retrieval_decision_id": 77, "stage": "frame_assembly"}
 
-        ctx = gather_frame_context("fix bug", memory_limit=1)
+        ctx = await gather_frame_context("fix bug", memory_limit=1)
 
         assert ctx["memory_status"] == "found"
         assert mock_recall.call_args.kwargs["expand_lazy_load"] is True
@@ -214,18 +214,18 @@ class TestCognitiveFrames:
 class TestPrediction:
     """Test prediction and reward computation."""
 
-    def test_predict_default(self):
+    async def test_predict_default(self):
         from brain.systems.feedback.predict import predict_outcome
-        pred = predict_outcome("fix the bug")
+        pred = await predict_outcome("fix the bug")
         assert pred.predicted_quality > 0
         assert pred.predicted_tokens > 0
         assert pred.confidence > 0
         assert pred.basis
 
-    def test_predict_different_tasks(self):
+    async def test_predict_different_tasks(self):
         from brain.systems.feedback.predict import predict_outcome
-        simple = predict_outcome("fix typo")
-        complex_task = predict_outcome("refactor auth")
+        simple = await predict_outcome("fix typo")
+        complex_task = await predict_outcome("refactor auth")
         assert simple.predicted_tokens <= complex_task.predicted_tokens
 
     def test_compute_reward_success(self):

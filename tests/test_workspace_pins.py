@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -31,13 +31,15 @@ async def test_workspace_pin_delete_removes_record(monkeypatch):
 
     pin = SimpleNamespace(id="pin-1", created_by_user_id="author-user", archived_at=None)
     db = MagicMock()
+    db.delete = AsyncMock()
+    db.flush = AsyncMock()
     broadcasts = []
 
     async def fake_broadcast(org_id, event_type, payload):
         broadcasts.append((org_id, event_type, payload))
 
     monkeypatch.setattr(workspace_pins, "require_org_context", lambda user: "org-1")
-    monkeypatch.setattr(workspace_pins, "_get_pin_for_org", lambda session, org_id, pin_id: pin)
+    monkeypatch.setattr(workspace_pins, "_get_pin_for_org", AsyncMock(return_value=pin))
     monkeypatch.setattr(workspace_pins.ws_manager, "broadcast_to_org", fake_broadcast)
 
     result = await workspace_pins.delete_workspace_pin(
@@ -47,6 +49,6 @@ async def test_workspace_pin_delete_removes_record(monkeypatch):
     )
 
     assert result == {"deleted": {"id": "pin-1"}}
-    db.delete.assert_called_once_with(pin)
-    db.flush.assert_called_once()
+    db.delete.assert_awaited_once_with(pin)
+    db.flush.assert_awaited_once()
     assert broadcasts == [("org-1", "workspace_pin_deleted", {"pin_id": "pin-1"})]

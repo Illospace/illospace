@@ -12,6 +12,7 @@ Run nightly via cron or manually:
 """
 
 import argparse
+import asyncio
 import glob
 import json
 import os
@@ -52,10 +53,10 @@ def _mapping_count(result, key: str = "cnt") -> int:
 # Phase 1: CONSOLIDATION
 # ============================================================
 
-def phase_consolidation(target_date: date, org_id: str | None = None):
+async def phase_consolidation(target_date: date, org_id: str | None = None):
     """Import and compress raw daily logs into the memory graph."""
-    with UnitOfWork() as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             INSERT INTO consolidation_runs (run_date, phase, org_id)
             VALUES (:run_date, 'consolidation', :org_id) RETURNING id
         """), {"run_date": target_date, "org_id": org_id})
@@ -68,7 +69,7 @@ def phase_consolidation(target_date: date, org_id: str | None = None):
         daily_file = os.path.join(MEMORY_DIR, f"{target_date.isoformat()}.md")
         if os.path.exists(daily_file):
             print(f"[consolidate] Processing {daily_file}")
-            memories_created += import_daily_log(uow, daily_file, target_date)
+            memories_created += await import_daily_log(uow, daily_file, target_date)
         else:
             print(f"[consolidate] No daily log for {target_date}")
 
@@ -79,29 +80,29 @@ def phase_consolidation(target_date: date, org_id: str | None = None):
                 continue
             if basename in ('heartbeat-state.json',):
                 continue
-            result = uow.session.execute(text("""
+            result = await uow.session.execute(text("""
                 SELECT COUNT(*) as cnt FROM memories
                 WHERE source = :source AND NOT archived
             """), {"source": f"import:{basename}"})
             existing = _mapping_count(result)
             if existing == 0:
                 print(f"[consolidate] Importing {basename} (first time)")
-                memories_created += import_domain_file(uow, md_file)
+                memories_created += await import_domain_file(uow, md_file)
 
         # 3. Auto-associate: rebuild similarity edges for new memories
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT id FROM memories
             WHERE created_at >= CURRENT_DATE AND NOT archived
         """))
         new_ids = [r["id"] for r in result.mappings().all()]
         for mid in new_ids:
-            edges_created += auto_associate(uow, mid)
+            edges_created += await auto_associate(uow, mid)
 
         # 4. Decay old memories
-        decayed = decay_memories(uow, days=30, threshold=2.0)
+        decayed = await decay_memories(uow, days=30, threshold=2.0)
 
         # Complete run
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             UPDATE consolidation_runs
             SET completed_at = NOW(), status = 'completed',
                 memories_created = :memories_created, edges_created = :edges_created,
@@ -120,7 +121,7 @@ def phase_consolidation(target_date: date, org_id: str | None = None):
         hier_stats = {"semantic_created": 0, "procedural_created": 0}
         try:
             from brain.systems.cognition.consolidate import run_consolidation
-            hier_stats = run_consolidation()
+            hier_stats = await run_consolidation()
             print(f"[consolidate] Hierarchical: {hier_stats['semantic_created']} semantic, "
                   f"{hier_stats['procedural_created']} procedural, "
                   f"forgetting={hier_stats.get('forgetting', {})}")
@@ -131,14 +132,14 @@ def phase_consolidation(target_date: date, org_id: str | None = None):
         return memories_created, edges_created
 
 
-def import_daily_log(uow, filepath: str, log_date: date) -> int:
+async def import_daily_log(uow, filepath: str, log_date: date) -> int:
     """Import sections from a daily log into compressed memory nodes."""
     with open(filepath) as f:
         content = f.read()
 
     # Check if already imported
     source_tag = f"import:{os.path.basename(filepath)}"[:50]
-    result = uow.session.execute(text(
+    result = await uow.session.execute(text(
         "SELECT COUNT(*) as cnt FROM memories WHERE source = :source"
     ), {"source": source_tag})
     if _mapping_count(result) > 0:
@@ -162,7 +163,7 @@ def import_daily_log(uow, filepath: str, log_date: date) -> int:
         tags = extract_tags(title + " " + body)
         tags.append(log_date.isoformat())
 
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             INSERT INTO memories (content, memory_type, semantic_embedding,
                                 salience,
                                 source, tags, created_at, decay_eligible)
@@ -181,7 +182,7 @@ def import_daily_log(uow, filepath: str, log_date: date) -> int:
     return created
 
 
-def import_domain_file(uow, filepath: str) -> int:
+async def import_domain_file(uow, filepath: str) -> int:
     """Import a domain knowledge file (architecture.md, lessons.md, etc.)."""
     with open(filepath) as f:
         content = f.read()
@@ -219,7 +220,7 @@ def import_domain_file(uow, filepath: str) -> int:
         tags = extract_tags(title + " " + body)
         tags.append(filename.replace('.md', ''))
 
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             INSERT INTO memories (content, memory_type, semantic_embedding,
                                 salience,
                                 source, tags, decay_eligible)
@@ -237,9 +238,9 @@ def import_domain_file(uow, filepath: str) -> int:
     return created
 
 
-def auto_associate(uow, memory_id: int, k: int = 5, threshold: float = 0.5) -> int:
+async def auto_associate(uow, memory_id: int, k: int = 5, threshold: float = 0.5) -> int:
     """Create similarity edges for a memory based on embedding proximity."""
-    result = uow.session.execute(text("""
+    result = await uow.session.execute(text("""
         SELECT id, 1 - (semantic_embedding <=> (SELECT semantic_embedding FROM memories WHERE id = :mid)) as similarity
         FROM memories
         WHERE id != :mid AND NOT archived
@@ -250,7 +251,7 @@ def auto_associate(uow, memory_id: int, k: int = 5, threshold: float = 0.5) -> i
     edges = 0
     for row in result.mappings().all():
         if row["similarity"] > threshold:
-            uow.session.execute(text("""
+            await uow.session.execute(text("""
                 INSERT INTO edges (source_id, target_id, relationship, weight, auto_generated)
                 VALUES (:source_id, :target_id, 'similar_to', :weight, TRUE)
                 ON CONFLICT (source_id, target_id, relationship) DO UPDATE SET weight = EXCLUDED.weight
@@ -259,10 +260,10 @@ def auto_associate(uow, memory_id: int, k: int = 5, threshold: float = 0.5) -> i
     return edges
 
 
-def decay_memories(uow, days: int = 30, threshold: float = 2.0) -> int:
+async def decay_memories(uow, days: int = 30, threshold: float = 2.0) -> int:
     """Decay old low-salience memories."""
     cutoff = datetime.now() - timedelta(days=days)
-    result = uow.session.execute(text("""
+    result = await uow.session.execute(text("""
         UPDATE memories SET archived = TRUE
         WHERE decay_eligible AND NOT archived
           AND last_accessed < :cutoff AND salience < :threshold
@@ -275,17 +276,17 @@ def decay_memories(uow, days: int = 30, threshold: float = 2.0) -> int:
 # Phase 2: REFLECTION
 # ============================================================
 
-def phase_reflection(target_date: date, org_id: str | None = None):
+async def phase_reflection(target_date: date, org_id: str | None = None):
     """Analyze performance and retrieval quality."""
-    with UnitOfWork() as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             INSERT INTO consolidation_runs (run_date, phase, org_id)
             VALUES (:run_date, 'reflection', :org_id) RETURNING id
         """), {"run_date": target_date, "org_id": org_id})
         run_id = result.mappings().first()["id"]
 
         # 1. Retrieval quality analysis
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT COUNT(*) as total,
                    COUNT(*) FILTER (WHERE feedback = 'hit') as hits,
                    COUNT(*) FILTER (WHERE feedback = 'miss') as misses,
@@ -296,7 +297,7 @@ def phase_reflection(target_date: date, org_id: str | None = None):
         retrieval = result.mappings().first()
 
         # 2. Check for known-mistake recurrence
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT COUNT(*) as accessed_lessons
             FROM memories
             WHERE memory_type = 'lesson' AND last_accessed::date = :target_date
@@ -304,7 +305,7 @@ def phase_reflection(target_date: date, org_id: str | None = None):
         lessons_accessed = result.mappings().first()["accessed_lessons"]
 
         # 3. Compute competence scores
-        competence = compute_competence(uow, target_date)
+        competence = await compute_competence(uow, target_date)
 
         # 4. Generate reflection notes
         notes = []
@@ -315,7 +316,7 @@ def phase_reflection(target_date: date, org_id: str | None = None):
                 notes.append("LOW retrieval quality — review embedding/indexing.")
 
         # 6. Write daily metrics
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             INSERT INTO daily_metrics (metric_date, retrieval_attempts, retrieval_hits, retrieval_misses,
                 competence_architecture, competence_debugging, competence_frontend,
                 competence_provider_apis, competence_communication, competence_proactivity,
@@ -349,7 +350,7 @@ def phase_reflection(target_date: date, org_id: str | None = None):
         })
 
         # Complete run
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             UPDATE consolidation_runs
             SET completed_at = NOW(), status = 'completed',
                 summary = :summary
@@ -363,7 +364,7 @@ def phase_reflection(target_date: date, org_id: str | None = None):
         return notes
 
 
-def compute_competence(uow, target_date: date) -> dict:
+async def compute_competence(uow, target_date: date) -> dict:
     """Compute competence scores by domain based on memory access patterns and mistake tracking."""
     domains = {
         "architecture": ["architecture", "stack", "infrastructure", "deployment"],
@@ -376,7 +377,7 @@ def compute_competence(uow, target_date: date) -> dict:
 
     competence = {}
     for domain, tag_list in domains.items():
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT
                 COUNT(*) FILTER (WHERE memory_type = 'lesson') as lessons,
                 COUNT(*) FILTER (WHERE memory_type = 'pattern') as patterns,
@@ -405,10 +406,10 @@ def compute_competence(uow, target_date: date) -> dict:
 # Phase 3: SYNTHESIS
 # ============================================================
 
-def phase_synthesis(target_date: date, org_id: str | None = None):
+async def phase_synthesis(target_date: date, org_id: str | None = None):
     """Look for cross-cluster patterns and generate insights."""
-    with UnitOfWork() as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             INSERT INTO consolidation_runs (run_date, phase, org_id)
             VALUES (:run_date, 'synthesis', :org_id) RETURNING id
         """), {"run_date": target_date, "org_id": org_id})
@@ -417,7 +418,7 @@ def phase_synthesis(target_date: date, org_id: str | None = None):
         patterns_detected = 0
 
         # 1. Find topic clusters with high density
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT unnest(tags) as tag, COUNT(*) as cnt, AVG(salience) as avg_sal
             FROM memories WHERE NOT archived
             GROUP BY tag
@@ -445,7 +446,7 @@ def phase_synthesis(target_date: date, org_id: str | None = None):
 
         summary = "; ".join(summary_parts) if summary_parts else "No new patterns detected"
 
-        uow.session.execute(text("""
+        await uow.session.execute(text("""
             UPDATE consolidation_runs
             SET completed_at = NOW(), status = 'completed',
                 patterns_detected = :patterns_detected, summary = :summary
@@ -517,11 +518,11 @@ def extract_tags(text: str) -> list:
 # Wake-up Index Generator
 # ============================================================
 
-def generate_index(output_path: str = None) -> str:
+async def generate_index(output_path: str = None) -> str:
     """Generate a lightweight wake-up index file."""
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # High-salience memories by type
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT id, content, memory_type, salience, tags
             FROM memories
             WHERE NOT archived AND superseded_by IS NULL AND salience >= 5
@@ -531,9 +532,9 @@ def generate_index(output_path: str = None) -> str:
         memories = result.mappings().all()
 
         # Stats
-        result = uow.session.execute(text("SELECT COUNT(*) as total FROM memories WHERE NOT archived"))
+        result = await uow.session.execute(text("SELECT COUNT(*) as total FROM memories WHERE NOT archived"))
         total = result.mappings().first()["total"]
-        result = uow.session.execute(text("SELECT COUNT(*) as total FROM edges"))
+        result = await uow.session.execute(text("SELECT COUNT(*) as total FROM edges"))
         total_edges = result.mappings().first()["total"]
 
     # Build index
@@ -583,15 +584,7 @@ def _get_all_users() -> list[dict]:
         return []
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Illo Memory Consolidation")
-    parser.add_argument("--phase", default="all", choices=["all", "consolidate", "reflect", "synthesize", "index"])
-    parser.add_argument("--date", help="Target date (YYYY-MM-DD), default yesterday")
-    parser.add_argument("--user-id", help="Run for specific user only (UUID)")
-    parser.add_argument("--all-users", action="store_true",
-                        help="Run per-user, staggered (multiplayer mode)")
-    args = parser.parse_args()
-
+async def _async_main(args) -> None:
     if args.date:
         target = date.fromisoformat(args.date)
     else:
@@ -608,21 +601,21 @@ def main():
             org_id = str(org["id"])
             print(f"\n--- Org: {org['name']} ({i+1}/{len(orgs)}) ---")
             if args.phase in ("all", "consolidate"):
-                phase_consolidation(target, org_id=org_id)
+                await phase_consolidation(target, org_id=org_id)
             if args.phase in ("all", "reflect"):
-                phase_reflection(target, org_id=org_id)
+                await phase_reflection(target, org_id=org_id)
             if args.phase in ("all", "synthesize"):
-                phase_synthesis(target, org_id=org_id)
+                await phase_synthesis(target, org_id=org_id)
             # Divergence detection (multiplayer only)
             if args.phase == "all":
                 try:
                     from brain.jobs.pipelines.divergence import detect_divergence, store_divergence_results
-                    overlaps = detect_divergence(target, org_id=org_id)
+                    overlaps = await detect_divergence(target, org_id=org_id)
                     if overlaps:
                         print(f"  [divergence] Found {len(overlaps)} overlap(s):")
                         for o in overlaps:
                             print(f"    → {o['suggestion']}")
-                        store_divergence_results(target, org_id, overlaps)
+                        await store_divergence_results(target, org_id, overlaps)
                     else:
                         print("  [divergence] No significant topic overlap detected")
                 except Exception as exc:
@@ -633,21 +626,32 @@ def main():
         print(f"{'='*60}")
 
         if args.phase in ("all", "consolidate"):
-            phase_consolidation(target)
+            await phase_consolidation(target)
 
         if args.phase in ("all", "reflect"):
-            phase_reflection(target)
+            await phase_reflection(target)
 
         if args.phase in ("all", "synthesize"):
-            phase_synthesis(target)
+            await phase_synthesis(target)
 
     if args.phase in ("all", "index"):
         index_path = os.path.join(str(config.PRIVATE_HOME), "WAKEUP_INDEX.md")
-        generate_index(index_path)
+        await generate_index(index_path)
 
     print(f"\n{'='*60}")
-    print(f"CONSOLIDATION COMPLETE")
+    print("CONSOLIDATION COMPLETE")
     print(f"{'='*60}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Illo Memory Consolidation")
+    parser.add_argument("--phase", default="all", choices=["all", "consolidate", "reflect", "synthesize", "index"])
+    parser.add_argument("--date", help="Target date (YYYY-MM-DD), default yesterday")
+    parser.add_argument("--user-id", help="Run for specific user only (UUID)")
+    parser.add_argument("--all-users", action="store_true",
+                        help="Run per-user, staggered (multiplayer mode)")
+    args = parser.parse_args()
+    asyncio.run(_async_main(args))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -20,10 +21,14 @@ class _VaultRepo:
 class _Session:
     def __init__(self) -> None:
         self.added = []
+        self.deleted = []
         self.flushes = 0
 
     def add(self, obj) -> None:
         self.added.append(obj)
+
+    async def delete(self, obj) -> None:
+        self.deleted.append(obj)
 
     async def flush(self) -> None:
         self.flushes += 1
@@ -92,3 +97,36 @@ async def test_async_get_secret_reads_and_audits(monkeypatch):
     assert secret.access_count == 1
     assert secret.last_accessed_at is not None
     assert audit[0][0][:4] == ("user-1", 9, "OPENAI_API_KEY", "read")
+
+
+@pytest.mark.asyncio
+async def test_async_delete_secret_uses_native_async_uow(monkeypatch):
+    secret = SimpleNamespace(id=12)
+    repo = _VaultRepo(secret=secret)
+    session = _Session()
+    audit = []
+
+    monkeypatch.setattr(vault, "UnitOfWork", lambda: _UoW(repo, session))
+
+    async def fake_log(*args, **kwargs):
+        audit.append((args, kwargs))
+
+    monkeypatch.setattr(vault, "_async_log_access", fake_log)
+
+    deleted = await vault.async_delete_secret("OPENAI_API_KEY", "user-1")
+
+    assert deleted is True
+    assert repo.keys == [("user-1", "OPENAI_API_KEY")]
+    assert session.deleted == [secret]
+    assert audit[0][0][:4] == ("user-1", 12, "OPENAI_API_KEY", "delete")
+
+
+def test_async_vault_entrypoints_do_not_use_sync_uow_bridges():
+    assert not hasattr(vault, "run_unit_of_work_task")
+
+    for name, fn in inspect.getmembers(vault, inspect.iscoroutinefunction):
+        if not (name.startswith("async_") or name.startswith("_async_")):
+            continue
+        source = inspect.getsource(fn)
+        assert "run_unit_of_work_task" not in source, name
+        assert "open_unit_of_work" not in source, name

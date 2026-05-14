@@ -17,8 +17,12 @@ from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import IdeaThread
 
 
-def build_run_run_summary(session, run_id: int) -> dict[str, Any]:
-    run = session.get(AgentRunRow, int(run_id))
+async def build_run_run_summary_async(session, run_id: int) -> dict[str, Any]:
+    run = await session.get(AgentRunRow, int(run_id))
+    return _run_summary(run, run_id)
+
+
+def _run_summary(run: AgentRunRow | None, run_id: int) -> dict[str, Any]:
     if run is None:
         return {"run_id": run_id, "status": "missing", "trace_id": trace_id_for_run_id(run_id)}
     return {
@@ -36,17 +40,25 @@ def build_run_run_summary(session, run_id: int) -> dict[str, Any]:
     }
 
 
-def build_run_flight_recorder(session, run_id: int, *, summary: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
-    events = session.scalars(
+async def build_run_flight_recorder_async(
+    session,
+    run_id: int,
+    *,
+    summary: dict[str, Any] | None = None,
+    **_: Any,
+) -> dict[str, Any]:
+    events_result = await session.scalars(
         select(AgentRunEventRow)
         .where(AgentRunEventRow.run_id == int(run_id))
         .order_by(AgentRunEventRow.sequence_no.asc())
-    ).all()
-    artifacts = session.scalars(
+    )
+    artifacts_result = await session.scalars(
         select(AgentRunArtifactRow)
         .where(AgentRunArtifactRow.run_id == int(run_id))
         .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
-    ).all()
+    )
+    events = events_result.all()
+    artifacts = artifacts_result.all()
     artifact_payloads = [
         artifact.payload
         for artifact in artifacts
@@ -55,7 +67,7 @@ def build_run_flight_recorder(session, run_id: int, *, summary: dict[str, Any] |
     worker_recordings = _worker_recordings({"run_artifacts": artifact_payloads})
     return {
         "schema_version": 1,
-        "summary": summary or build_run_run_summary(session, run_id),
+        "summary": summary or await build_run_run_summary_async(session, run_id),
         "events": [
             {
                 "id": event.id,
@@ -82,11 +94,11 @@ def build_run_flight_recorder(session, run_id: int, *, summary: dict[str, Any] |
     }
 
 
-def load_run_recordings(session, run_id: int) -> dict[str, Any]:
-    summary = build_run_run_summary(session, run_id)
+async def load_run_recordings_async(session, run_id: int) -> dict[str, Any]:
+    summary = await build_run_run_summary_async(session, run_id)
     return {
         "summary": summary,
-        "flight_recorder": build_run_flight_recorder(session, run_id, summary=summary),
+        "flight_recorder": await build_run_flight_recorder_async(session, run_id, summary=summary),
     }
 
 
@@ -107,7 +119,7 @@ TRACE_MAX_COLLECTION_ITEMS = 80
 TRACE_MAX_DEPTH = 6
 
 
-def build_agent_trace_snapshot(
+async def build_agent_trace_snapshot_async(
     session,
     run: AgentRunRow,
     *,
@@ -116,21 +128,50 @@ def build_agent_trace_snapshot(
     max_events: int = TRACE_MAX_EVENTS,
     max_artifacts: int = TRACE_MAX_ARTIFACTS,
 ) -> dict[str, Any]:
-    """Build a bounded, JSON-safe trace bundle suitable for later analysis."""
+    """Build a bounded, JSON-safe trace bundle using an async DB session."""
 
-    related_run_ids = _related_run_ids(session, run)
-    related_runs = _runs_by_id(session, related_run_ids)
+    related_run_ids = await _related_run_ids_async(session, run)
+    related_runs = await _runs_by_id_async(session, related_run_ids)
     if not related_runs:
         related_runs = [run]
-    messages = _trace_messages(session, run, max_messages=max_messages)
-    events = _trace_events(session, related_run_ids, max_events=max_events)
-    artifacts = _trace_artifacts(session, related_run_ids, max_artifacts=max_artifacts)
-    cycle_state = _trace_cycle_state(
+    messages = await _trace_messages_async(session, run, max_messages=max_messages)
+    events = await _trace_events_async(session, related_run_ids, max_events=max_events)
+    artifacts = await _trace_artifacts_async(session, related_run_ids, max_artifacts=max_artifacts)
+    cycle_state = await _trace_cycle_state_async(
         session,
         idea_id=str(run.thread_id) if getattr(run, "thread_id", None) else None,
         runs=related_runs,
     )
     diagnostics = _trace_diagnostics(related_runs, events, artifacts, cycle_state)
+    return _agent_trace_snapshot_payload(
+        run,
+        related_run_ids=related_run_ids,
+        messages=messages,
+        events=events,
+        artifacts=artifacts,
+        cycle_state=cycle_state,
+        diagnostics=diagnostics,
+        saved_by=saved_by,
+        max_messages=max_messages,
+        max_events=max_events,
+        max_artifacts=max_artifacts,
+    )
+
+
+def _agent_trace_snapshot_payload(
+    run: AgentRunRow,
+    *,
+    related_run_ids: list[int],
+    messages: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    cycle_state: dict[str, Any],
+    diagnostics: dict[str, Any],
+    saved_by: str | None,
+    max_messages: int,
+    max_events: int,
+    max_artifacts: int,
+) -> dict[str, Any]:
     trace_id = run.trace_id or trace_id_for_run_id(run.id)
     bundle = {
         "schema_version": AGENT_TRACE_SNAPSHOT_SCHEMA_VERSION,
@@ -146,7 +187,7 @@ def build_agent_trace_snapshot(
             "large_values": "truncated_in_place",
         },
         "run": _cap_jsonable({
-            **build_run_run_summary(session, int(run.id)),
+            **_run_summary(run, int(run.id)),
             "parent_run_id": getattr(run, "parent_run_id", None),
             "root_run_id": getattr(run, "root_run_id", None),
             "input_message": getattr(run, "input_message", None),
@@ -180,7 +221,7 @@ def build_agent_trace_snapshot(
     return _jsonable(bundle)
 
 
-def build_thread_trace_snapshot(
+async def build_thread_trace_snapshot_async(
     session,
     idea_id: str,
     *,
@@ -190,15 +231,48 @@ def build_thread_trace_snapshot(
     max_events: int = THREAD_TRACE_MAX_EVENTS,
     max_artifacts: int = THREAD_TRACE_MAX_ARTIFACTS,
 ) -> dict[str, Any]:
-    """Build a bounded export for analyzing a whole Cortex thread conversation."""
+    """Build a bounded thread trace export using an async DB session."""
 
-    runs = _thread_runs(session, idea_id, max_runs=max_runs)
+    runs = await _thread_runs_async(session, idea_id, max_runs=max_runs)
     run_ids = [int(run.id) for run in runs if _is_int_like(getattr(run, "id", None))]
-    messages = _trace_thread_messages(session, idea_id, max_messages=max_messages)
-    events = _trace_events(session, run_ids, max_events=max_events)
-    artifacts = _trace_artifacts(session, run_ids, max_artifacts=max_artifacts)
-    cycle_state = _trace_cycle_state(session, idea_id=idea_id, runs=runs)
+    messages = await _trace_thread_messages_async(session, idea_id, max_messages=max_messages)
+    events = await _trace_events_async(session, run_ids, max_events=max_events)
+    artifacts = await _trace_artifacts_async(session, run_ids, max_artifacts=max_artifacts)
+    cycle_state = await _trace_cycle_state_async(session, idea_id=idea_id, runs=runs)
     diagnostics = _trace_diagnostics(runs, events, artifacts, cycle_state)
+    return _thread_trace_snapshot_payload(
+        idea_id,
+        runs=runs,
+        run_ids=run_ids,
+        messages=messages,
+        events=events,
+        artifacts=artifacts,
+        cycle_state=cycle_state,
+        diagnostics=diagnostics,
+        saved_by=saved_by,
+        max_messages=max_messages,
+        max_runs=max_runs,
+        max_events=max_events,
+        max_artifacts=max_artifacts,
+    )
+
+
+def _thread_trace_snapshot_payload(
+    idea_id: str,
+    *,
+    runs: list[AgentRunRow],
+    run_ids: list[int],
+    messages: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    cycle_state: dict[str, Any],
+    diagnostics: dict[str, Any],
+    saved_by: str | None,
+    max_messages: int | None,
+    max_runs: int,
+    max_events: int,
+    max_artifacts: int,
+) -> dict[str, Any]:
     trace_id = f"thread:{idea_id}"
     bundle = {
         "schema_version": AGENT_TRACE_SNAPSHOT_SCHEMA_VERSION,
@@ -224,7 +298,7 @@ def build_thread_trace_snapshot(
         },
         "runs": [
             _cap_jsonable({
-                **build_run_run_summary(session, int(run.id)),
+                **_run_summary(run, int(run.id)),
                 "parent_run_id": getattr(run, "parent_run_id", None),
                 "root_run_id": getattr(run, "root_run_id", None),
                 "input_message": getattr(run, "input_message", None),
@@ -323,13 +397,20 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def _related_run_ids(session, run: AgentRunRow) -> list[int]:
+async def _related_run_ids_async(session, run: AgentRunRow) -> list[int]:
     root_run_id = getattr(run, "root_run_id", None) or getattr(run, "id", None)
-    rows = session.scalars(
+    result = await session.scalars(
         select(AgentRunRow.id)
         .where((AgentRunRow.id == int(root_run_id)) | (AgentRunRow.root_run_id == int(root_run_id)))
         .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
-    ).all()
+    )
+    ids = _coerce_run_ids(result.all())
+    if int(run.id) not in ids:
+        ids.insert(0, int(run.id))
+    return ids
+
+
+def _coerce_run_ids(rows: list[Any]) -> list[int]:
     ids: list[int] = []
     for value in rows:
         candidate = getattr(value, "id", value)
@@ -337,47 +418,55 @@ def _related_run_ids(session, run: AgentRunRow) -> list[int]:
             ids.append(int(candidate))
         except (TypeError, ValueError):
             continue
-    if int(run.id) not in ids:
-        ids.insert(0, int(run.id))
     return ids
 
 
-def _thread_runs(session, idea_id: str, *, max_runs: int) -> list[AgentRunRow]:
-    return session.scalars(
+async def _thread_runs_async(session, idea_id: str, *, max_runs: int) -> list[AgentRunRow]:
+    result = await session.scalars(
         select(AgentRunRow)
         .where(AgentRunRow.thread_id == str(idea_id))
         .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
         .limit(max_runs)
-    ).all()
+    )
+    return list(result.all())
 
 
-def _runs_by_id(session, run_ids: list[int]) -> list[AgentRunRow]:
+async def _trace_messages_async(session, run: AgentRunRow, *, max_messages: int) -> list[dict[str, Any]]:
+    return await _trace_thread_messages_async(session, str(run.thread_id), max_messages=max_messages)
+
+
+async def _runs_by_id_async(session, run_ids: list[int]) -> list[AgentRunRow]:
     if not run_ids:
         return []
-    return session.scalars(
+    result = await session.scalars(
         select(AgentRunRow)
         .where(AgentRunRow.id.in_(run_ids))
         .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
-    ).all()
+    )
+    return list(result.all())
 
 
-def _trace_messages(session, run: AgentRunRow, *, max_messages: int) -> list[dict[str, Any]]:
-    return _trace_thread_messages(session, str(run.thread_id), max_messages=max_messages)
-
-
-def _trace_thread_messages(session, idea_id: str, *, max_messages: int | None) -> list[dict[str, Any]]:
+async def _trace_thread_messages_async(
+    session,
+    idea_id: str,
+    *,
+    max_messages: int | None,
+) -> list[dict[str, Any]]:
     query = select(IdeaThread).where(IdeaThread.idea_id == str(idea_id))
     if max_messages is None:
-        rows = session.scalars(
-            query.order_by(IdeaThread.created_at.asc(), IdeaThread.id.asc())
-        ).all()
+        result = await session.scalars(query.order_by(IdeaThread.created_at.asc(), IdeaThread.id.asc()))
+        rows = result.all()
     else:
-        limited_rows = session.scalars(
+        result = await session.scalars(
             query
             .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
             .limit(max_messages)
-        ).all()
-        rows = list(reversed(limited_rows))
+        )
+        rows = list(reversed(result.all()))
+    return _thread_message_payloads(rows)
+
+
+def _thread_message_payloads(rows: list[IdeaThread]) -> list[dict[str, Any]]:
     messages = []
     for row in rows:
         metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
@@ -398,18 +487,19 @@ def _trace_thread_messages(session, idea_id: str, *, max_messages: int | None) -
     return messages
 
 
-def _trace_events(session, run_ids: list[int], *, max_events: int) -> list[dict[str, Any]]:
+async def _trace_events_async(session, run_ids: list[int], *, max_events: int) -> list[dict[str, Any]]:
     if not run_ids:
         return []
     per_run_limit = max(10, max_events // max(len(run_ids), 1))
     rows: list[Any] = []
     for run_id in run_ids:
-        rows.extend(session.scalars(
+        result = await session.scalars(
             select(AgentRunEventRow)
             .where(AgentRunEventRow.run_id == int(run_id))
             .order_by(AgentRunEventRow.sequence_no.asc(), AgentRunEventRow.id.asc())
             .limit(per_run_limit)
-        ).all())
+        )
+        rows.extend(result.all())
     return [
         _cap_jsonable({
             "id": event.id,
@@ -426,13 +516,13 @@ def _trace_events(session, run_ids: list[int], *, max_events: int) -> list[dict[
     ]
 
 
-def _trace_artifacts(session, run_ids: list[int], *, max_artifacts: int) -> list[dict[str, Any]]:
+async def _trace_artifacts_async(session, run_ids: list[int], *, max_artifacts: int) -> list[dict[str, Any]]:
     if not run_ids:
         return []
     per_run_limit = max(5, max_artifacts // max(len(run_ids), 1))
     rows: list[Any] = []
     for run_id in run_ids:
-        run_rows = session.scalars(
+        result = await session.scalars(
             select(AgentRunArtifactRow)
             .where(
                 AgentRunArtifactRow.run_id == int(run_id),
@@ -440,7 +530,8 @@ def _trace_artifacts(session, run_ids: list[int], *, max_artifacts: int) -> list
             )
             .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())
             .limit(per_run_limit)
-        ).all()
+        )
+        run_rows = result.all()
         rows.extend(reversed(run_rows))
     return [
         _cap_jsonable({
@@ -459,7 +550,7 @@ def _trace_artifacts(session, run_ids: list[int], *, max_artifacts: int) -> list
     ]
 
 
-def _trace_cycle_state(
+async def _trace_cycle_state_async(
     session,
     *,
     idea_id: str | None,
@@ -488,11 +579,11 @@ def _trace_cycle_state(
             _add_int(cycle_run_ids, envelope.get("cycle_run_id"))
 
     try:
-        cycle_rows = _query_cycles(session, idea_id=idea_id, cycle_ids=cycle_ids, limit=max_cycles)
+        cycle_rows = await _query_cycles_async(session, idea_id=idea_id, cycle_ids=cycle_ids, limit=max_cycles)
         for cycle in cycle_rows:
             _add_int(cycle_ids, getattr(cycle, "id", None))
 
-        cycle_run_rows = _query_cycle_runs(
+        cycle_run_rows = await _query_cycle_runs_async(
             session,
             idea_id=idea_id,
             run_ids=run_ids,
@@ -510,7 +601,7 @@ def _trace_cycle_state(
             if cycle_id not in {int(cycle.id) for cycle in cycle_rows if _is_int_like(getattr(cycle, "id", None))}
         }
         if missing_cycle_ids:
-            cycle_rows.extend(_query_cycles(session, idea_id=None, cycle_ids=missing_cycle_ids, limit=max_cycles))
+            cycle_rows.extend(await _query_cycles_async(session, idea_id=None, cycle_ids=missing_cycle_ids, limit=max_cycles))
     except Exception as exc:
         return {
             "schema_version": 1,
@@ -534,7 +625,7 @@ def _trace_cycle_state(
     }
 
 
-def _query_cycles(
+async def _query_cycles_async(
     session,
     *,
     idea_id: str | None,
@@ -548,15 +639,16 @@ def _query_cycles(
         conditions.append(Cycle.id.in_(sorted(cycle_ids)))
     if not conditions:
         return []
-    return list(session.scalars(
+    result = await session.scalars(
         select(Cycle)
         .where(or_(*conditions))
         .order_by(Cycle.updated_at.desc(), Cycle.id.asc())
         .limit(limit)
-    ).all())
+    )
+    return list(result.all())
 
 
-def _query_cycle_runs(
+async def _query_cycle_runs_async(
     session,
     *,
     idea_id: str | None,
@@ -576,12 +668,13 @@ def _query_cycle_runs(
         conditions.append(CycleRun.id.in_(sorted(cycle_run_ids)))
     if not conditions:
         return []
-    rows = session.scalars(
+    result = await session.scalars(
         select(CycleRun)
         .where(or_(*conditions))
         .order_by(CycleRun.created_at.desc(), CycleRun.id.desc())
         .limit(limit)
-    ).all()
+    )
+    rows = result.all()
     return list(reversed(rows))
 
 
@@ -1186,11 +1279,12 @@ def trace_id_for_scheduler_run_id(run_id: int | str | None) -> str | None:
 __all__ = [
     "AGENT_TRACE_SNAPSHOT_ARTIFACT_TYPE",
     "agent_trace_export_filename",
-    "build_agent_trace_snapshot",
+    "build_agent_trace_snapshot_async",
     "build_agent_trace_export_zip",
-    "build_run_flight_recorder",
-    "build_run_run_summary",
-    "load_run_recordings",
+    "build_run_flight_recorder_async",
+    "build_run_run_summary_async",
+    "build_thread_trace_snapshot_async",
+    "load_run_recordings_async",
     "persist_run_recordings",
     "trace_id_for_run_id",
     "trace_id_for_scheduler_run_id",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
+import inspect
 import json
 import uuid
 from typing import Any, Mapping
@@ -160,6 +161,29 @@ def _session_dialect_name(session: Any) -> str | None:
         return None
 
 
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _result_all(result: Any) -> list[Any]:
+    result = await _maybe_await(result)
+    return list(await _maybe_await(result.all()))
+
+
+async def _session_execute_all(session: Any, stmt: Any) -> list[Any]:
+    return await _result_all(session.execute(stmt))
+
+
+async def _session_scalars_all(session: Any, stmt: Any) -> list[Any]:
+    return await _result_all(session.scalars(stmt))
+
+
+async def _session_get(session: Any, model: Any, identifier: Any) -> Any:
+    return await _maybe_await(session.get(model, identifier))
+
+
 def _valid_uuid(value: Any) -> str | None:
     if value is None:
         return None
@@ -191,14 +215,14 @@ def _normalize_postgres_uuid_filter(
     return fallback
 
 
-def _rollback_after_source_error(session: Any, source: str) -> None:
+async def _rollback_after_source_error(session: Any, source: str) -> None:
     try:
-        session.rollback()
+        await _maybe_await(session.rollback())
     except Exception:
         logger.exception("query_workspace_data rollback failed after source=%s", source)
 
 
-def _resolve_people(session: Any, *, org_id: str | None, person: str | None) -> list[dict[str, Any]]:
+async def _resolve_people(session: Any, *, org_id: str | None, person: str | None) -> list[dict[str, Any]]:
     if not person:
         return []
     from brain.platform.db.models.org import User
@@ -214,7 +238,7 @@ def _resolve_people(session: Any, *, org_id: str | None, person: str | None) -> 
     )
     if org_id:
         stmt = stmt.where(User.org_id == org_id)
-    rows = session.scalars(stmt.limit(10)).all()
+    rows = await _session_scalars_all(session, stmt.limit(10))
     return [
         {
             "id": str(user.id),
@@ -255,7 +279,7 @@ def _add_error(payload: dict[str, Any], source: str, exc: Exception) -> None:
     })
 
 
-def _latest_run_final_answers(session: Any, run_ids: list[int]) -> dict[int, str]:
+async def _latest_run_final_answers(session: Any, run_ids: list[int]) -> dict[int, str]:
     if not run_ids:
         return {}
     from brain.platform.db.models.agent_run import AgentRunArtifactRow
@@ -273,7 +297,7 @@ def _latest_run_final_answers(session: Any, run_ids: list[int]) -> dict[int, str
         )
     )
     answers: dict[int, str] = {}
-    for run_id, text in session.execute(stmt).all():
+    for run_id, text in await _session_execute_all(session, stmt):
         run_id_int = int(run_id)
         if run_id_int not in answers:
             answer = _snippet(text, 520)
@@ -302,7 +326,7 @@ def _project_context_resource_summary(context: Mapping[str, Any] | None) -> dict
     }
 
 
-def _query_team_members(
+async def _query_team_members(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -331,7 +355,7 @@ def _query_team_members(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.scalars(stmt).all()
+    rows = await _session_scalars_all(session, stmt)
     payload["sources"]["team_members"] = [
         {
             "id": str(user.id),
@@ -351,7 +375,7 @@ def _query_team_members(
     ]
 
 
-def _query_runs(
+async def _query_runs(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -395,8 +419,8 @@ def _query_runs(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.execute(stmt).all()
-    final_answers = _latest_run_final_answers(
+    rows = await _session_execute_all(session, stmt)
+    final_answers = await _latest_run_final_answers(
         session,
         [int(run.id) for run, _idea, _user in rows],
     )
@@ -447,7 +471,7 @@ def _query_runs(
     ]
 
 
-def _query_threads(
+async def _query_threads(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -480,7 +504,7 @@ def _query_threads(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.execute(stmt).all()
+    rows = await _session_execute_all(session, stmt)
     payload["sources"]["threads"] = [
         {
             "id": int(thread.id),
@@ -499,7 +523,7 @@ def _query_threads(
     ]
 
 
-def _query_ideas(
+async def _query_ideas(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -528,7 +552,7 @@ def _query_ideas(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.scalars(stmt).all()
+    rows = await _session_scalars_all(session, stmt)
     payload["sources"]["ideas"] = [
         {
             "id": str(idea.id),
@@ -548,7 +572,7 @@ def _query_ideas(
     ]
 
 
-def _query_tool_calls(
+async def _query_tool_calls(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -588,7 +612,7 @@ def _query_tool_calls(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.execute(stmt).all()
+    rows = await _session_execute_all(session, stmt)
     payload["sources"]["tool_calls"] = [
         {
             "id": int(event.id),
@@ -608,7 +632,7 @@ def _query_tool_calls(
     ]
 
 
-def _query_project_profiles(
+async def _query_project_profiles(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -651,7 +675,7 @@ def _query_project_profiles(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.execute(stmt).all()
+    rows = await _session_execute_all(session, stmt)
     payload["sources"]["project_profiles"] = [
         {
             "id": str(profile.id),
@@ -673,7 +697,7 @@ def _query_project_profiles(
     ]
 
 
-def _query_project_attachments(
+async def _query_project_attachments(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -717,7 +741,7 @@ def _query_project_attachments(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.execute(stmt).all()
+    rows = await _session_execute_all(session, stmt)
     payload["sources"]["project_attachments"] = [
         {
             "id": int(attachment.id),
@@ -742,7 +766,7 @@ def _query_project_attachments(
     ]
 
 
-def _query_domains(
+async def _query_domains(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -773,7 +797,7 @@ def _query_domains(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.scalars(stmt).all()
+    rows = await _session_scalars_all(session, stmt)
     payload["sources"]["domains"] = [
         {
             "id": int(domain.id),
@@ -792,7 +816,7 @@ def _query_domains(
     ]
 
 
-def _query_domain_records(
+async def _query_domain_records(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -833,7 +857,7 @@ def _query_domain_records(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.execute(stmt).all()
+    rows = await _session_execute_all(session, stmt)
     payload["sources"]["domain_records"] = [
         {
             "id": int(record.id),
@@ -853,7 +877,7 @@ def _query_domain_records(
     ]
 
 
-def _query_domain_events(
+async def _query_domain_events(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -887,7 +911,7 @@ def _query_domain_events(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.execute(stmt).all()
+    rows = await _session_execute_all(session, stmt)
     payload["sources"]["domain_events"] = [
         {
             "id": int(event.id),
@@ -909,7 +933,7 @@ def _query_domain_events(
     ]
 
 
-def _query_workspace_apps(
+async def _query_workspace_apps(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -937,7 +961,7 @@ def _query_workspace_apps(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.scalars(stmt).all()
+    rows = await _session_scalars_all(session, stmt)
     payload["sources"]["workspace_apps"] = [
         {
             "id": str(app.id),
@@ -957,7 +981,7 @@ def _query_workspace_apps(
     ]
 
 
-def _query_app_state(
+async def _query_app_state(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -988,7 +1012,7 @@ def _query_app_state(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.execute(stmt).all()
+    rows = await _session_execute_all(session, stmt)
     payload["sources"]["app_state"] = [
         {
             "id": int(state.id),
@@ -1023,7 +1047,7 @@ def _scope_cycle(
     return stmt
 
 
-def _query_cycles(
+async def _query_cycles(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -1066,7 +1090,7 @@ def _query_cycles(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.execute(stmt).all()
+    rows = await _session_execute_all(session, stmt)
     payload["sources"]["cycles"] = [
         {
             "id": int(cycle.id),
@@ -1095,7 +1119,7 @@ def _query_cycles(
     ]
 
 
-def _query_cycle_runs(
+async def _query_cycle_runs(
     session: Any,
     payload: dict[str, Any],
     *,
@@ -1142,7 +1166,7 @@ def _query_cycle_runs(
     if text_match is not None:
         stmt = stmt.where(text_match)
 
-    rows = session.execute(stmt).all()
+    rows = await _session_execute_all(session, stmt)
     payload["sources"]["cycle_runs"] = [
         {
             "id": int(run.id),
@@ -1291,8 +1315,8 @@ def _build_activity_items(payload: Mapping[str, Any], *, limit: int = 30) -> lis
     return items[: max(1, int(limit or 30))]
 
 
-def _run_team_members(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_team_members(
+async def _run_team_members(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_team_members(
         session,
         payload,
         start=ctx.start,
@@ -1305,8 +1329,8 @@ def _run_team_members(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQ
     )
 
 
-def _run_runs(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_runs(
+async def _run_runs(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_runs(
         session,
         payload,
         start=ctx.start,
@@ -1321,8 +1345,8 @@ def _run_runs(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryCont
     )
 
 
-def _run_threads(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_threads(
+async def _run_threads(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_threads(
         session,
         payload,
         start=ctx.start,
@@ -1336,54 +1360,8 @@ def _run_threads(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryC
     )
 
 
-def _run_ideas(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_ideas(
-        session,
-        payload,
-        start=ctx.start,
-        end=ctx.end,
-        org_id=ctx.org_id,
-        user_id=ctx.user_id,
-        person_ids=ctx.person_ids,
-        idea_id=ctx.idea_id,
-        search=ctx.search,
-        include_archived=ctx.include_archived,
-        limit=ctx.limit,
-    )
-
-
-def _run_tool_calls(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_tool_calls(
-        session,
-        payload,
-        start=ctx.start,
-        end=ctx.end,
-        org_id=ctx.org_id,
-        user_id=ctx.user_id,
-        person_ids=ctx.person_ids,
-        idea_id=ctx.idea_id,
-        search=ctx.search,
-        limit=ctx.limit,
-    )
-
-
-def _run_project_profiles(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_project_profiles(
-        session,
-        payload,
-        start=ctx.start,
-        end=ctx.end,
-        org_id=ctx.org_id,
-        user_id=ctx.user_id,
-        person_ids=ctx.person_ids,
-        search=ctx.search,
-        include_archived=ctx.include_archived,
-        limit=ctx.limit,
-    )
-
-
-def _run_project_attachments(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_project_attachments(
+async def _run_ideas(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_ideas(
         session,
         payload,
         start=ctx.start,
@@ -1398,8 +1376,54 @@ def _run_project_attachments(session: Any, payload: dict[str, Any], ctx: Workspa
     )
 
 
-def _run_domains(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_domains(
+async def _run_tool_calls(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_tool_calls(
+        session,
+        payload,
+        start=ctx.start,
+        end=ctx.end,
+        org_id=ctx.org_id,
+        user_id=ctx.user_id,
+        person_ids=ctx.person_ids,
+        idea_id=ctx.idea_id,
+        search=ctx.search,
+        limit=ctx.limit,
+    )
+
+
+async def _run_project_profiles(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_project_profiles(
+        session,
+        payload,
+        start=ctx.start,
+        end=ctx.end,
+        org_id=ctx.org_id,
+        user_id=ctx.user_id,
+        person_ids=ctx.person_ids,
+        search=ctx.search,
+        include_archived=ctx.include_archived,
+        limit=ctx.limit,
+    )
+
+
+async def _run_project_attachments(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_project_attachments(
+        session,
+        payload,
+        start=ctx.start,
+        end=ctx.end,
+        org_id=ctx.org_id,
+        user_id=ctx.user_id,
+        person_ids=ctx.person_ids,
+        idea_id=ctx.idea_id,
+        search=ctx.search,
+        include_archived=ctx.include_archived,
+        limit=ctx.limit,
+    )
+
+
+async def _run_domains(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_domains(
         session,
         payload,
         start=ctx.start,
@@ -1413,8 +1437,8 @@ def _run_domains(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryC
     )
 
 
-def _run_domain_records(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_domain_records(
+async def _run_domain_records(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_domain_records(
         session,
         payload,
         start=ctx.start,
@@ -1429,8 +1453,8 @@ def _run_domain_records(session: Any, payload: dict[str, Any], ctx: WorkspaceDat
     )
 
 
-def _run_domain_events(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_domain_events(
+async def _run_domain_events(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_domain_events(
         session,
         payload,
         start=ctx.start,
@@ -1443,8 +1467,8 @@ def _run_domain_events(session: Any, payload: dict[str, Any], ctx: WorkspaceData
     )
 
 
-def _run_workspace_apps(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_workspace_apps(
+async def _run_workspace_apps(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_workspace_apps(
         session,
         payload,
         start=ctx.start,
@@ -1457,8 +1481,8 @@ def _run_workspace_apps(session: Any, payload: dict[str, Any], ctx: WorkspaceDat
     )
 
 
-def _run_app_state(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_app_state(
+async def _run_app_state(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_app_state(
         session,
         payload,
         start=ctx.start,
@@ -1470,8 +1494,8 @@ def _run_app_state(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQuer
     )
 
 
-def _run_cycles(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_cycles(
+async def _run_cycles(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_cycles(
         session,
         payload,
         start=ctx.start,
@@ -1485,8 +1509,8 @@ def _run_cycles(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryCo
     )
 
 
-def _run_cycle_runs(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
-    _query_cycle_runs(
+async def _run_cycle_runs(session: Any, payload: dict[str, Any], ctx: WorkspaceDataQueryContext) -> None:
+    await _query_cycle_runs(
         session,
         payload,
         start=ctx.start,
@@ -1606,7 +1630,7 @@ def _source_aliases() -> dict[str, tuple[str, ...]]:
     return {key: tuple(dict.fromkeys(values)) for key, values in aliases.items()}
 
 
-def query_workspace_data(
+async def query_workspace_data(
     *,
     sources: list[str] | None = None,
     query: str | None = None,
@@ -1663,7 +1687,7 @@ def query_workspace_data(
         "warnings": [],
     }
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         session = uow.session
         if _session_dialect_name(session) == "postgresql":
             org_id = _normalize_postgres_uuid_filter(payload, field="org_id", value=org_id)
@@ -1677,12 +1701,12 @@ def query_workspace_data(
             try:
                 from brain.platform.db.models.org import User
 
-                current_user = session.get(User, user_id)
+                current_user = await _session_get(session, User, user_id)
                 if current_user and current_user.org_id:
                     org_id = str(current_user.org_id)
                     payload["scope"]["org_id"] = org_id
             except Exception as exc:
-                _rollback_after_source_error(session, "scope")
+                await _rollback_after_source_error(session, "scope")
                 _add_error(payload, "scope", exc)
         if not org_id and not user_id:
             payload["warnings"].append({
@@ -1693,9 +1717,9 @@ def query_workspace_data(
             source_names = [source for source in source_names if not adapters[source].db_backed]
             payload["checked_sources"] = source_names
         try:
-            people = _resolve_people(session, org_id=org_id, person=person)
+            people = await _resolve_people(session, org_id=org_id, person=person)
         except Exception as exc:
-            _rollback_after_source_error(session, "people")
+            await _rollback_after_source_error(session, "people")
             _add_error(payload, "people", exc)
             people = []
         person_ids = [person_row["id"] for person_row in people]
@@ -1726,10 +1750,10 @@ def query_workspace_data(
 
         for source in source_names:
             try:
-                adapters[source].handler(session, payload, ctx)
+                await _maybe_await(adapters[source].handler(session, payload, ctx))
             except Exception as exc:
                 logger.exception("query_workspace_data source failed source=%s", source)
-                _rollback_after_source_error(session, source)
+                await _rollback_after_source_error(session, source)
                 payload["sources"][source] = []
                 _add_error(payload, source, exc)
 
@@ -1766,7 +1790,7 @@ def _workspace_query_scope(
     }
 
 
-def _query_workspace_data_for_agent(**kwargs: Any) -> dict[str, Any]:
+async def _query_workspace_data_for_agent(**kwargs: Any) -> dict[str, Any]:
     scope_kwargs = _workspace_query_scope(
         idea_id=kwargs.pop("idea_id", None),
         domain_id=kwargs.pop("domain_id", None),
@@ -1774,7 +1798,7 @@ def _query_workspace_data_for_agent(**kwargs: Any) -> dict[str, Any]:
         include_archived=bool(kwargs.pop("include_archived", False)),
         default_current_idea=bool(kwargs.pop("_default_current_idea", False)),
     )
-    return query_workspace_data(**kwargs, **scope_kwargs)
+    return await query_workspace_data(**kwargs, **scope_kwargs)
 
 
 def _workspace_view_payload(view: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1841,7 +1865,7 @@ def _add_team_member_activity_summary(payload: dict[str, Any]) -> None:
     ]
 
 
-def _handle_query_workspace_data(
+async def _handle_query_workspace_data(
     sources: list[str] | None = None,
     query: str | None = None,
     search: str | None = None,
@@ -1855,7 +1879,7 @@ def _handle_query_workspace_data(
     object_key: str | None = None,
     include_archived: bool = False,
 ) -> str:
-    payload = _query_workspace_data_for_agent(
+    payload = await _query_workspace_data_for_agent(
         sources=sources,
         query=query,
         search=search,
@@ -1873,13 +1897,13 @@ def _handle_query_workspace_data(
     return json.dumps(payload, default=str)
 
 
-def _handle_read_workspace_overview(
+async def _handle_read_workspace_overview(
     query: str | None = None,
     time_window: str = "all",
     limit: int = 10,
     include_archived: bool = False,
 ) -> str:
-    payload = _query_workspace_data_for_agent(
+    payload = await _query_workspace_data_for_agent(
         sources=[
             "team_members",
             "ideas",
@@ -1907,7 +1931,7 @@ def _handle_read_workspace_overview(
     return json.dumps(payload, default=str)
 
 
-def _handle_read_team_activity(
+async def _handle_read_team_activity(
     query: str | None = None,
     search: str | None = None,
     person: str | None = None,
@@ -1917,7 +1941,7 @@ def _handle_read_team_activity(
     limit: int = 20,
     idea_id: str | None = None,
 ) -> str:
-    payload = _query_workspace_data_for_agent(
+    payload = await _query_workspace_data_for_agent(
         sources=["activity"],
         query=query or "team activity",
         search=search,
@@ -1936,7 +1960,7 @@ def _handle_read_team_activity(
     return json.dumps(payload, default=str)
 
 
-def _handle_read_project_contexts(
+async def _handle_read_project_contexts(
     query: str | None = None,
     search: str | None = None,
     idea_id: str | None = None,
@@ -1946,7 +1970,7 @@ def _handle_read_project_contexts(
     limit: int = 20,
     include_inactive: bool = False,
 ) -> str:
-    payload = _query_workspace_data_for_agent(
+    payload = await _query_workspace_data_for_agent(
         sources=["project_contexts"],
         query=query or "project contexts",
         search=search,
@@ -1965,7 +1989,7 @@ def _handle_read_project_contexts(
     return json.dumps(payload, default=str)
 
 
-def _handle_read_team_members(
+async def _handle_read_team_members(
     query: str | None = None,
     search: str | None = None,
     person: str | None = None,
@@ -1974,7 +1998,7 @@ def _handle_read_team_members(
     include_activity: bool = True,
 ) -> str:
     sources = ["team_members", "runs", "threads", "ideas"] if include_activity else ["team_members"]
-    payload = _query_workspace_data_for_agent(
+    payload = await _query_workspace_data_for_agent(
         sources=sources,
         query=query or "team members",
         search=search,
@@ -1992,7 +2016,7 @@ def _handle_read_team_members(
     return json.dumps(payload, default=str)
 
 
-def _handle_read_workspace_records(
+async def _handle_read_workspace_records(
     query: str | None = None,
     search: str | None = None,
     domain_id: int | None = None,
@@ -2003,7 +2027,7 @@ def _handle_read_workspace_records(
     limit: int = 20,
     include_archived: bool = False,
 ) -> str:
-    payload = _query_workspace_data_for_agent(
+    payload = await _query_workspace_data_for_agent(
         sources=["records"],
         query=query or "workspace records",
         search=search,
@@ -2023,7 +2047,7 @@ def _handle_read_workspace_records(
     return json.dumps(payload, default=str)
 
 
-def _handle_read_cycles(
+async def _handle_read_cycles(
     query: str | None = None,
     search: str | None = None,
     person: str | None = None,
@@ -2033,7 +2057,7 @@ def _handle_read_cycles(
     limit: int = 20,
     include_deleted: bool = False,
 ) -> str:
-    payload = _query_workspace_data_for_agent(
+    payload = await _query_workspace_data_for_agent(
         sources=["cycles"],
         query=query or "workspace cycles",
         search=search,
@@ -2052,7 +2076,7 @@ def _handle_read_cycles(
     return json.dumps(payload, default=str)
 
 
-def _handle_read_workspace_apps(
+async def _handle_read_workspace_apps(
     query: str | None = None,
     search: str | None = None,
     time_window: str = "all",
@@ -2074,7 +2098,7 @@ def _handle_read_workspace_apps(
             },
             default=str,
         )
-    payload = _query_workspace_data_for_agent(
+    payload = await _query_workspace_data_for_agent(
         sources=["apps"] if include_state else ["workspace_apps"],
         query=query or "workspace apps",
         search=search,

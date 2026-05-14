@@ -59,7 +59,7 @@ What topics/concepts should we search for? Return ONLY a JSON object:
     return raw_message
 
 
-def mark_relevant(retrieval_log_id: int, relevant: bool) -> bool:
+async def mark_relevant(retrieval_log_id: int, relevant: bool) -> bool:
     """Mark a retrieval log entry as relevant or not.
 
     Args:
@@ -71,8 +71,8 @@ def mark_relevant(retrieval_log_id: int, relevant: bool) -> bool:
     """
     feedback = "hit" if relevant else "miss"
     try:
-        with UnitOfWork() as uow:
-            result = uow.session.execute(text(
+        async with UnitOfWork() as uow:
+            result = await uow.session.execute(text(
                 "UPDATE retrieval_log SET was_relevant = :relevant, feedback = :feedback "
                 "WHERE id = :id RETURNING id"
             ), {"relevant": relevant, "feedback": feedback, "id": retrieval_log_id})
@@ -83,7 +83,7 @@ def mark_relevant(retrieval_log_id: int, relevant: bool) -> bool:
         return False
 
 
-def get_retrieval_stats(days: int = 7) -> dict:
+async def get_retrieval_stats(days: int = 7) -> dict:
     """Get retrieval quality statistics.
 
     Returns:
@@ -97,8 +97,8 @@ def get_retrieval_stats(days: int = 7) -> dict:
             avg_results_returned: float,
         }
     """
-    with UnitOfWork() as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             SELECT
                 COUNT(*) as total,
                 COUNT(*) FILTER (WHERE feedback IS NOT NULL) as with_feedback,

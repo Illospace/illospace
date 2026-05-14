@@ -14,7 +14,6 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 # Re-export database config
 DB_URL = brain_config.DB_URL
-DB_SYNC_URL = brain_config.DB_SYNC_URL
 DB_POOL_MAX = brain_config.DB_POOL_MAX
 
 # API-specific

@@ -19,7 +19,8 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from unittest.mock import MagicMock, patch, PropertyMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch, PropertyMock, AsyncMock
 
 import pytest
 
@@ -432,6 +433,8 @@ class TestSessionPersistence:
             MockUoW.return_value = mock_uow
             mock_uow.__enter__ = MagicMock(return_value=mock_uow)
             mock_uow.__exit__ = MagicMock(return_value=False)
+            mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+            mock_uow.__aexit__ = AsyncMock(return_value=False)
             mock_uow.session.execute.return_value.mappings.return_value.first.return_value = None
 
             messages, system = _load_session("nonexistent-session")
@@ -445,6 +448,8 @@ class TestSessionPersistence:
             MockUoW.return_value = mock_uow
             mock_uow.__enter__ = MagicMock(return_value=mock_uow)
             mock_uow.__exit__ = MagicMock(return_value=False)
+            mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+            mock_uow.__aexit__ = AsyncMock(return_value=False)
             mock_uow.session.execute.return_value.mappings.return_value.first.return_value = {
                 "messages": [{"role": "user", "content": "hello"}],
                 "system_prompt": "You are helpful.",
@@ -461,6 +466,8 @@ class TestSessionPersistence:
             MockUoW.return_value = mock_uow
             mock_uow.__enter__ = MagicMock(return_value=mock_uow)
             mock_uow.__exit__ = MagicMock(return_value=False)
+            mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+            mock_uow.__aexit__ = AsyncMock(return_value=False)
 
             _save_session(
                 "test-session",
@@ -591,7 +598,9 @@ class TestAgentLoop:
 
     @pytest.mark.asyncio
     async def test_execute_tool_calls_supports_async_handlers_inside_running_loop(self):
-        from brain.systems.runs.direct_agent import _execute_tool_calls, _GateState
+        from brain.systems.runs.direct_agent import _GateState
+        from brain.systems.runs.direct_loop.gates import check_gate_violations
+        from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
 
         block = MagicMock()
         block.type = "tool_use"
@@ -606,7 +615,7 @@ class TestAgentLoop:
             await asyncio.sleep(0)
             return {"guardrails": ["stay grounded"]}
 
-        results = _execute_tool_calls(
+        results = await async_execute_tool_calls(
             response,
             {"brain_guardrails": handler},
             [],
@@ -615,12 +624,23 @@ class TestAgentLoop:
             None,
             None,
             "runner",
+            agent_context=SimpleNamespace(),
+            brain_tool_names=frozenset(),
+            gated_tool_names=frozenset(),
+            research_tool_names=frozenset(),
+            research_budget=0,
+            parallel_safe_tool_names=frozenset(),
+            max_parallel_tool_calls=1,
+            check_gate_violations=check_gate_violations,
         )
 
         assert json.loads(results[0]["content"]) == {"guardrails": ["stay grounded"]}
 
-    def test_parallel_safe_tool_batch_overlaps_and_preserves_order(self):
-        from brain.systems.runs.direct_agent import _execute_tool_calls, _GateState
+    @pytest.mark.asyncio
+    async def test_parallel_safe_tool_batch_overlaps_and_preserves_order(self):
+        from brain.systems.runs.direct_agent import _GateState
+        from brain.systems.runs.direct_loop.gates import check_gate_violations
+        from brain.systems.runs.direct_loop.tool_execution import async_execute_tool_calls
 
         block_a = MagicMock()
         block_a.type = "tool_use"
@@ -639,24 +659,21 @@ class TestAgentLoop:
 
         active = 0
         max_active = 0
-        lock = threading.Lock()
         callback_calls = []
 
         def make_handler(label: str, delay: float):
-            def handler(**kwargs):
+            async def handler(**kwargs):
                 nonlocal active, max_active
-                with lock:
-                    active += 1
-                    max_active = max(max_active, active)
+                active += 1
+                max_active = max(max_active, active)
                 try:
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     return {"label": label, "payload": kwargs}
                 finally:
-                    with lock:
-                        active -= 1
+                    active -= 1
             return handler
 
-        results = _execute_tool_calls(
+        results = await async_execute_tool_calls(
             response,
             {
                 "read_file": make_handler("read_file", 0.15),
@@ -668,6 +685,14 @@ class TestAgentLoop:
             None,
             None,
             "runner",
+            agent_context=SimpleNamespace(),
+            brain_tool_names=frozenset(),
+            gated_tool_names=frozenset(),
+            research_tool_names=frozenset(),
+            research_budget=0,
+            parallel_safe_tool_names=frozenset({"read_file", "search_files"}),
+            max_parallel_tool_calls=2,
+            check_gate_violations=check_gate_violations,
         )
 
         assert max_active == 2
@@ -1935,7 +1960,7 @@ class TestExecutionArtifacts:
             if hasattr(_agent_context, "execution_metadata"):
                 delattr(_agent_context, "execution_metadata")
 
-    def test_my_activity_includes_execution_artifacts(self):
+    async def test_my_activity_includes_execution_artifacts(self):
         from brain.systems.runs.direct_agent import _handle_my_activity, _agent_context
 
         class _Run:
@@ -1949,7 +1974,7 @@ class TestExecutionArtifacts:
         _agent_context.tool_calls_log = []
         _agent_context.execution_artifacts = [{"type": "pr", "number": 123, "url": "https://github.com/x/y/pull/123"}]
         try:
-            result = _handle_my_activity()
+            result = await _handle_my_activity()
             assert result["execution_artifacts"][0]["type"] == "pr"
             assert result["execution_artifacts"][0]["number"] == 123
         finally:
@@ -1959,7 +1984,7 @@ class TestExecutionArtifacts:
             _agent_context.tool_calls_log = []
             _agent_context.execution_artifacts = []
 
-    def test_my_activity_loads_persisted_execution_artifacts_from_execution_id(self):
+    async def test_my_activity_loads_persisted_execution_artifacts_from_execution_id(self):
         from brain.systems.runs.direct_agent import _handle_my_activity, _agent_context
 
         class _Run:
@@ -1976,15 +2001,15 @@ class TestExecutionArtifacts:
         try:
             with patch(
                 "brain.systems.runs.tool_catalog.handlers.activity.load_execution_artifacts",
-                return_value=[{"type": "commit", "sha": "abc1234", "summary": "Fix provenance"}],
+                new=AsyncMock(return_value=[{"type": "commit", "sha": "abc1234", "summary": "Fix provenance"}]),
             ) as mock_load, patch(
                 "brain.platform.db.repositories.unit_of_work.UnitOfWork",
                 side_effect=AssertionError("my_activity should not load run execution_artifacts"),
             ):
-                result = _handle_my_activity()
+                result = await _handle_my_activity()
 
             assert result["execution_artifacts"] == [{"type": "commit", "sha": "abc1234", "summary": "Fix provenance"}]
-            mock_load.assert_called_once_with(execution_id="exec-123")
+            mock_load.assert_awaited_once_with(execution_id="exec-123")
         finally:
             _agent_context.run = None
             _agent_context.start_time = None
@@ -1994,7 +2019,7 @@ class TestExecutionArtifacts:
             if hasattr(_agent_context, "execution_metadata"):
                 delattr(_agent_context, "execution_metadata")
 
-    def test_my_activity_does_not_load_persisted_artifacts_without_execution_id(self):
+    async def test_my_activity_does_not_load_persisted_artifacts_without_execution_id(self):
         from brain.systems.runs.direct_agent import _handle_my_activity, _agent_context
 
         class _Run:
@@ -2007,10 +2032,10 @@ class TestExecutionArtifacts:
         _agent_context.reply_contents = []
         _agent_context.tool_calls_log = []
         _agent_context.execution_artifacts = []
-        _agent_context.execution_metadata = {"run_id": 42, "run_id": "run-123"}
+        _agent_context.execution_metadata = {"run_id": "run-123"}
         try:
-            with patch("brain.systems.runs.tool_handlers.load_execution_artifacts") as mock_load:
-                result = _handle_my_activity()
+            with patch("brain.systems.runs.tool_catalog.handlers.activity.load_execution_artifacts") as mock_load:
+                result = await _handle_my_activity()
 
             assert "execution_artifacts" not in result
             mock_load.assert_not_called()

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.org import Org, User
 from brain.platform.db.models.system import OrgProviderModelMapping
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.providers.model_policy import DEFAULT_PROVIDER_MODEL_MAPS, get_provider_model_map
+from brain.platform.providers.model_policy import (
+    DEFAULT_PROVIDER_MODEL_MAPS,
+    async_get_provider_model_map,
+)
 
 from .schemas import RuntimeModelsRead, RuntimeModelsUpdate, RuntimeOption
 
@@ -48,9 +51,9 @@ def _defaults() -> dict[str, str]:
     }
 
 
-def get_runtime_models(user: User) -> RuntimeModelsRead:
+async def async_get_runtime_models(session: AsyncSession, user: User) -> RuntimeModelsRead:
     models = _defaults()
-    mapped = get_provider_model_map("openai", org_id=user.org_id, user_id=user.id)
+    mapped = await async_get_provider_model_map(session, "openai", org_id=user.org_id, user_id=user.id)
     for tier in MODEL_TIERS:
         value = mapped.get(tier)
         if isinstance(value, str) and value:
@@ -58,31 +61,34 @@ def get_runtime_models(user: User) -> RuntimeModelsRead:
     return RuntimeModelsRead(**models, options=OPENAI_MODEL_OPTIONS)
 
 
-def update_runtime_models(user: User, update: RuntimeModelsUpdate) -> RuntimeModelsRead:
+async def async_update_runtime_models(
+    session: AsyncSession,
+    user: User,
+    update: RuntimeModelsUpdate,
+) -> RuntimeModelsRead:
     values = {tier: _normalize_model(getattr(update, tier)) for tier in MODEL_TIERS}
-    with UnitOfWork() as uow:
-        uow.session.execute(
-            delete(OrgProviderModelMapping).where(
-                OrgProviderModelMapping.org_id == user.org_id,
-                OrgProviderModelMapping.provider == "openai",
+    await session.execute(
+        delete(OrgProviderModelMapping).where(
+            OrgProviderModelMapping.org_id == user.org_id,
+            OrgProviderModelMapping.provider == "openai",
+        )
+    )
+    for tier, model in values.items():
+        session.add(
+            OrgProviderModelMapping(
+                org_id=user.org_id,
+                provider="openai",
+                intelligence_level=tier,
+                model_name=model,
             )
         )
-        for tier, model in values.items():
-            uow.session.add(
-                OrgProviderModelMapping(
-                    org_id=user.org_id,
-                    provider="openai",
-                    intelligence_level=tier,
-                    model_name=model,
-                )
-            )
 
-        org = uow.session.get(Org, user.org_id)
-        if org is not None:
-            config = dict(org.memory_model_config or {})
-            config["default_provider"] = "openai"
-            for legacy_key in ("session_harvest", "depth_0", "depth_1_plus"):
-                config.pop(legacy_key, None)
-            org.memory_model_config = config
-        uow.commit()
-    return get_runtime_models(user)
+    org = await session.get(Org, user.org_id)
+    if org is not None:
+        config = dict(org.memory_model_config or {})
+        config["default_provider"] = "openai"
+        for legacy_key in ("session_harvest", "depth_0", "depth_1_plus"):
+            config.pop(legacy_key, None)
+        org.memory_model_config = config
+    await session.flush()
+    return await async_get_runtime_models(session, user)

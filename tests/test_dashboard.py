@@ -96,19 +96,19 @@ class TestOverviewRoute:
         MockConsolRepo, client,
     ):
         mem = MockMemRepo.return_value
-        mem.count_active.return_value = 42
-        mem.count_by_type.return_value = {"lesson": 10}
-        mem.recent_activity.return_value = []
-        mem.retrieval_accuracy.return_value = 0.9
+        mem.a_count_active = AsyncMock(return_value=42)
+        mem.a_count_by_type = AsyncMock(return_value={"lesson": 10})
+        mem.a_recent_activity = AsyncMock(return_value=[])
+        mem.a_retrieval_accuracy = AsyncMock(return_value=0.9)
 
-        MockEdgeRepo.return_value.count_all.return_value = 18
-        MockSkillRepo.return_value.overview_summary.return_value = (
+        MockEdgeRepo.return_value.a_count_all = AsyncMock(return_value=18)
+        MockSkillRepo.return_value.a_overview_summary = AsyncMock(return_value=(
             [{"name": "test-skill", "maturity": "developing", "use_count": 5}],
             1,
             5,
-        )
+        ))
 
-        MockConsolRepo.return_value.list_recent.return_value = [_fake_consolidation()]
+        MockConsolRepo.return_value.a_list_recent = AsyncMock(return_value=[_fake_consolidation()])
 
         resp = client.get("/api/overview")
         assert resp.status_code == 200
@@ -125,7 +125,7 @@ class TestOverviewRoute:
         MockConsolRepo, client,
     ):
         """When a repository raises, the global exception handler returns 500."""
-        MockMemRepo.return_value.count_active.side_effect = RuntimeError("db down")
+        MockMemRepo.return_value.a_count_active = AsyncMock(side_effect=RuntimeError("db down"))
         resp = client.get("/api/overview")
         assert resp.status_code == 500
 
@@ -180,7 +180,7 @@ class TestHealthRoute:
     @patch("brain.platform.db.repositories.memories.MemoryRepository")
     def test_route_health_delegates(self, MockMemRepo, MockSkillRepo, client):
         """Health endpoint returns status."""
-        MockMemRepo.return_value.count_active.return_value = 10
+        MockMemRepo.return_value.a_count_active = AsyncMock(return_value=10)
         MockSkillRepo.return_value.list_active.return_value = []
         resp = client.get("/api/health")
         assert resp.status_code == 200
@@ -193,7 +193,7 @@ class TestSkillsRoute:
     @patch("brain.app.api.routers.skills._ensure_builtin_skill_catalog", new_callable=AsyncMock)
     @patch("brain.app.api.routers.skills.SkillRepository")
     def test_route_skills_delegates(self, MockSkillRepo, ensure_catalog, client):
-        MockSkillRepo.return_value.list_active_with_executions.return_value = []
+        MockSkillRepo.return_value.a_list_active_with_executions = AsyncMock(return_value=[])
         resp = client.get("/api/skills/")
         assert resp.status_code == 200
         ensure_catalog.assert_awaited_once_with()
@@ -235,12 +235,12 @@ class TestSkillsRoute:
             trust_level="private_local",
             graduated_steps=[],
         )
-        MockSkillRepo.return_value.list_active.return_value = [skill]
+        MockSkillRepo.return_value.a_list_active = AsyncMock(return_value=[skill])
 
         resp = client.get("/api/skills/enhanced")
 
         assert resp.status_code == 200
-        ensure_catalog.assert_called_once()
+        ensure_catalog.assert_awaited_once_with()
         data = resp.json()
         assert data[0]["skill"]["name"] == "develop"
         assert data[0]["package"]["package_kind"] == "legacy_db"

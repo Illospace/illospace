@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -10,13 +11,13 @@ from croniter import croniter
 from sqlalchemy import and_, or_, select
 
 from brain.app.api.routers.cortex._helpers import _parse_message_type
-from brain.systems.runs.cortex import RunAdmissionRequest, admit_run
+from brain.systems.runs.cortex import RunAdmissionRequest, async_admit_run
 from brain.systems.cortex.events import publish
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
 from brain.platform.db.models.org import User
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 logger = logging.getLogger("cycles")
 
@@ -287,7 +288,7 @@ def _cycle_idea_title(cycle: Cycle, scheduled_for: datetime, *, per_run: bool) -
     return f"{cycle.name} - {local_time.strftime('%b %d %I:%M %p')}"
 
 
-def _idea_has_active_run(session, idea_id: str) -> bool:
+async def _async_idea_has_active_run(session, idea_id: str) -> bool:
     stmt = (
         select(AgentRun.id)
         .where(
@@ -296,7 +297,8 @@ def _idea_has_active_run(session, idea_id: str) -> bool:
         )
         .limit(1)
     )
-    return session.execute(stmt).first() is not None
+    result = await session.execute(stmt)
+    return result.first() is not None
 
 
 def _cycle_target_idea_scope_condition(cycle: Cycle):
@@ -309,7 +311,7 @@ def _cycle_target_idea_scope_condition(cycle: Cycle):
     return Idea.user_id == cycle.user_id
 
 
-def _admit_cycle_run(
+async def _async_admit_cycle_run(
     session,
     *,
     idea_id: str,
@@ -319,7 +321,7 @@ def _admit_cycle_run(
     metadata: dict | None,
     cycle_run_id: int,
 ) -> int | None:
-    result = admit_run(
+    result = await async_admit_run(
         RunAdmissionRequest(
             idea_id=idea_id,
             event="thread_reply",
@@ -396,7 +398,7 @@ def _cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
     return f"{header}{cycle.prompt[:2000]}"
 
 
-def _append_cycle_thread_message(
+async def _async_append_cycle_thread_message(
     session,
     idea: Idea,
     cycle: Cycle,
@@ -420,7 +422,7 @@ def _append_cycle_thread_message(
         message_type=_parse_message_type(cycle.prompt, "user"),
     )
     session.add(thread_msg)
-    session.flush()
+    await session.flush()
 
     new_status = None
     if current_status in ("needs_input", "unread_reply", "emerged"):
@@ -479,48 +481,34 @@ def _finalize_cycle_run(
     cycle.last_error = error
 
 
-def create_cycle_run_record(cycle_id: int, *, scheduled_for: datetime, prompt_snapshot: str) -> int:
-    with UnitOfWork() as uow:
+async def async_run_cycle_now(cycle_id: int) -> dict:
+    scheduled_for = datetime.now(timezone.utc)
+    async with UnitOfWork() as uow:
+        cycle = await uow.session.get(Cycle, cycle_id)
+        if not cycle or cycle.deleted_at is not None:
+            raise ValueError("Cycle not found")
         run = CycleRun(
             cycle_id=cycle_id,
             scheduled_for=scheduled_for,
-            prompt_snapshot=prompt_snapshot,
+            prompt_snapshot=cycle.prompt,
             status="queued",
         )
         uow.session.add(run)
-        uow.session.flush()
-        return run.id
+        await uow.session.flush()
+        run_id = run.id
 
+    await async_execute_cycle_run(run_id)
 
-def _load_cycle_prompt(cycle_id: int) -> str:
-    with UnitOfWork() as uow:
-        cycle = uow.session.get(Cycle, cycle_id)
-        if not cycle or cycle.deleted_at is not None:
-            raise ValueError("Cycle not found")
-        return cycle.prompt
-
-
-def run_cycle_now(cycle_id: int) -> dict:
-    run_id = create_cycle_run_record(
-        cycle_id,
-        scheduled_for=datetime.now(timezone.utc),
-        prompt_snapshot=_load_cycle_prompt(cycle_id),
-    )
-    execute_cycle_run(run_id)
-    with UnitOfWork() as uow:
-        run = uow.session.get(CycleRun, run_id)
+    async with UnitOfWork() as uow:
+        run = await uow.session.get(CycleRun, run_id)
         return serialize_cycle_run(run)
 
 
-async def async_run_cycle_now(cycle_id: int) -> dict:
-    return await run_sync_with_unit_of_work(run_cycle_now, cycle_id)
-
-
-def schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
+async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
     claimed_run_ids: list[int] = []
     now = datetime.now(timezone.utc)
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         stmt = (
             select(Cycle)
             .where(
@@ -533,7 +521,7 @@ def schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
-        cycles = uow.session.scalars(stmt).all()
+        cycles = (await uow.session.scalars(stmt)).all()
         for cycle in cycles:
             scheduled_for = cycle.next_run_at or now
             run = CycleRun(
@@ -543,7 +531,7 @@ def schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
                 status="queued",
             )
             uow.session.add(run)
-            uow.session.flush()
+            await uow.session.flush()
             next_run_at = compute_next_run_at(
                 cycle.schedule_expr,
                 cycle.timezone,
@@ -555,12 +543,12 @@ def schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
             claimed_run_ids.append(run.id)
 
     for run_id in claimed_run_ids:
-        execute_cycle_run(run_id)
+        await async_execute_cycle_run(run_id)
 
     return claimed_run_ids
 
 
-def execute_cycle_run(run_id: int) -> None:
+async def async_execute_cycle_run(run_id: int) -> None:
     message_payload = None
     status_payload = None
     should_publish_idea = False
@@ -572,15 +560,17 @@ def execute_cycle_run(run_id: int) -> None:
     cycle_user_id = None
     agent_run_id = None
 
-    with UnitOfWork() as uow:
-        run = uow.session.scalars(
+    async with UnitOfWork() as uow:
+        result = await uow.session.scalars(
             select(CycleRun).where(CycleRun.id == run_id).with_for_update()
-        ).first()
+        )
+        run = result.first()
         if not run or run.status in TERMINAL_RUN_STATUSES:
             return
-        cycle = uow.session.scalars(
+        result = await uow.session.scalars(
             select(Cycle).where(Cycle.id == run.cycle_id).with_for_update()
-        ).first()
+        )
+        cycle = result.first()
         if not cycle or cycle.deleted_at is not None:
             if cycle:
                 _finalize_cycle_run(
@@ -597,20 +587,21 @@ def execute_cycle_run(run_id: int) -> None:
 
         cycle_name = cycle.name
         cycle_user_id = cycle.user_id
-        owner = uow.session.get(User, cycle.user_id)
+        owner = await uow.session.get(User, cycle.user_id)
         cycle.execution_mode = REUSABLE_THREAD_EXECUTION_MODE
         cycle.reopen_archived = True
 
         idea = None
         if cycle.target_idea_id:
-            idea = uow.session.scalars(
+            result = await uow.session.scalars(
                 select(Idea)
                 .where(
                     Idea.id == cycle.target_idea_id,
                     _cycle_target_idea_scope_condition(cycle),
                 )
                 .with_for_update()
-            ).first()
+            )
+            idea = result.first()
         if idea and idea.archived_at is not None:
             old_status = idea.status
             idea.archived_at = None
@@ -625,7 +616,7 @@ def execute_cycle_run(run_id: int) -> None:
                 )
             )
             should_publish_idea = True
-        if idea and _idea_has_active_run(uow.session, idea.id):
+        if idea and await _async_idea_has_active_run(uow.session, idea.id):
             run.idea_id = idea.id
             _finalize_cycle_run(
                 run,
@@ -645,7 +636,7 @@ def execute_cycle_run(run_id: int) -> None:
                 org_id=cycle.org_id,
             )
             uow.session.add(idea)
-            uow.session.flush()
+            await uow.session.flush()
             cycle.target_idea_id = idea.id
             should_publish_idea = True
 
@@ -655,7 +646,7 @@ def execute_cycle_run(run_id: int) -> None:
         idea_id = idea.id
         run_metadata = _cycle_run_metadata(cycle, run)
         run_message = _cycle_run_message(idea, cycle, run)
-        agent_run_id = _admit_cycle_run(
+        agent_run_id = await _async_admit_cycle_run(
             uow.session,
             idea_id=idea.id,
             message=run_message,
@@ -672,7 +663,7 @@ def execute_cycle_run(run_id: int) -> None:
                 skip_reason="idea_busy",
             )
             return
-        message_payload, status_payload = _append_cycle_thread_message(
+        message_payload, status_payload = await _async_append_cycle_thread_message(
             uow.session,
             idea,
             cycle,
@@ -698,7 +689,7 @@ def execute_cycle_run(run_id: int) -> None:
         )
 
 
-def finalize_cycle_run_from_run(
+async def async_finalize_cycle_run_from_run(
     run_id: int,
     *,
     status: str,
@@ -706,16 +697,16 @@ def finalize_cycle_run_from_run(
 ) -> None:
     if status not in {"completed", "failed"}:
         return
-    with UnitOfWork() as uow:
-        run = uow.session.get(AgentRun, run_id)
+    async with UnitOfWork() as uow:
+        run = await uow.session.get(AgentRun, run_id)
         metadata = run.metadata_ if run else None
         if not isinstance(metadata, dict) or metadata.get("source") != "cycle":
             return
         cycle_run_id = metadata.get("cycle_run_id")
         if not cycle_run_id:
             return
-        run = uow.session.get(CycleRun, int(cycle_run_id))
-        cycle = uow.session.get(Cycle, run.cycle_id) if run else None
+        run = await uow.session.get(CycleRun, int(cycle_run_id))
+        cycle = await uow.session.get(Cycle, run.cycle_id) if run else None
         if not run or not cycle or run.status in TERMINAL_RUN_STATUSES:
             return
         _finalize_cycle_run(
@@ -724,3 +715,13 @@ def finalize_cycle_run_from_run(
             status=status,
             error=error if status == "failed" else None,
         )
+
+
+def finalize_cycle_run_from_run(
+    run_id: int,
+    *,
+    status: str,
+    error: str | None = None,
+) -> None:
+    with asyncio.Runner() as runner:
+        runner.run(async_finalize_cycle_run_from_run(run_id, status=status, error=error))

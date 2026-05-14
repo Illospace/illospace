@@ -1,10 +1,16 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.dialects import postgresql
 
 
-def test_query_memories_accepts_user_id_and_null_scores(mock_uow, mock_embeddings):
+def _async_uow(mock_uow: MagicMock) -> MagicMock:
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    return mock_uow
+
+
+async def test_query_memories_accepts_user_id_and_null_scores(mock_uow, mock_embeddings):
     from brain.app.cli.memory import query_memories
 
     row = {
@@ -21,14 +27,15 @@ def test_query_memories_accepts_user_id_and_null_scores(mock_uow, mock_embedding
         "recency_score": None,
         "emotion_score": None,
     }
-    mock_uow.memories.query_ranked.return_value = {
+    _async_uow(mock_uow)
+    mock_uow.memories.query_ranked = AsyncMock(return_value={
         "results": [row],
         "spread_activation": [],
-    }
+    })
 
     with patch("brain.app.cli.memory.UnitOfWork", return_value=mock_uow), \
-         patch("brain.app.cli.memory.observe_retrieval", return_value={"retrieval_decision_id": 1, "stage": "memory_query"}) as mock_observe:
-        result = query_memories(
+         patch("brain.app.cli.memory.observe_retrieval", new=AsyncMock(return_value={"retrieval_decision_id": 1, "stage": "memory_query"})) as mock_observe:
+        result = await query_memories(
             query="test",
             limit=1,
             emotion_context="neutral",
@@ -39,11 +46,11 @@ def test_query_memories_accepts_user_id_and_null_scores(mock_uow, mock_embedding
     assert result["results"][0]["scores"]["combined"] == 0.0
     assert result["results"][0]["scores"]["semantic"] == 0.0
     assert result["attention_decision"]["stage"] == "memory_query"
-    mock_observe.assert_called_once()
-    mock_uow.memories.query_ranked.assert_called_once()
+    mock_observe.assert_awaited_once()
+    mock_uow.memories.query_ranked.assert_awaited_once()
 
 
-def test_query_memories_applies_selection_and_debug_view(mock_uow, mock_embeddings):
+async def test_query_memories_applies_selection_and_debug_view(mock_uow, mock_embeddings):
     from brain.app.cli.memory import query_memories
 
     rows = [
@@ -76,10 +83,11 @@ def test_query_memories_applies_selection_and_debug_view(mock_uow, mock_embeddin
             "emotion_score": 0.0,
         },
     ]
-    mock_uow.memories.query_ranked.return_value = {
+    _async_uow(mock_uow)
+    mock_uow.memories.query_ranked = AsyncMock(return_value={
         "results": rows,
         "spread_activation": [],
-    }
+    })
 
     decision = {
         "retrieval_decision_id": 7,
@@ -99,8 +107,8 @@ def test_query_memories_applies_selection_and_debug_view(mock_uow, mock_embeddin
     }
 
     with patch("brain.app.cli.memory.UnitOfWork", return_value=mock_uow), \
-         patch("brain.app.cli.memory.observe_retrieval", return_value=decision):
-        result = query_memories(
+         patch("brain.app.cli.memory.observe_retrieval", new=AsyncMock(return_value=decision)):
+        result = await query_memories(
             query="test",
             limit=2,
             emotion_context="neutral",
@@ -115,7 +123,7 @@ def test_query_memories_applies_selection_and_debug_view(mock_uow, mock_embeddin
     assert result["attention_explain"]["decision"]["selected_item_ids"] == [1]
 
 
-def test_query_memories_expands_lazy_loads_when_enabled(mock_uow, mock_embeddings):
+async def test_query_memories_expands_lazy_loads_when_enabled(mock_uow, mock_embeddings):
     from brain.app.cli.memory import query_memories
 
     rows = [
@@ -148,10 +156,11 @@ def test_query_memories_expands_lazy_loads_when_enabled(mock_uow, mock_embedding
             "emotion_score": 0.0,
         },
     ]
-    mock_uow.memories.query_ranked.return_value = {
+    _async_uow(mock_uow)
+    mock_uow.memories.query_ranked = AsyncMock(return_value={
         "results": rows,
         "spread_activation": [],
-    }
+    })
 
     decision = {
         "retrieval_decision_id": 7,
@@ -181,9 +190,9 @@ def test_query_memories_expands_lazy_loads_when_enabled(mock_uow, mock_embedding
     }]
 
     with patch("brain.app.cli.memory.UnitOfWork", return_value=mock_uow), \
-         patch("brain.app.cli.memory.observe_retrieval", return_value=decision), \
-         patch("brain.app.cli.memory.AttentionController.load_lazy_candidates", return_value=lazy_loaded) as mock_load:
-        result = query_memories(
+         patch("brain.app.cli.memory.observe_retrieval", new=AsyncMock(return_value=decision)), \
+         patch("brain.app.cli.memory.AttentionController.load_lazy_candidates", new=AsyncMock(return_value=lazy_loaded)) as mock_load:
+        result = await query_memories(
             query="test",
             limit=2,
             emotion_context="neutral",
@@ -194,16 +203,17 @@ def test_query_memories_expands_lazy_loads_when_enabled(mock_uow, mock_embedding
 
     assert [row["id"] for row in result["results"]] == [1, 2]
     assert [row["id"] for row in result["lazy_loaded_results"]] == [2]
-    mock_load.assert_called_once()
+    mock_load.assert_awaited_once()
 
 
-def test_repository_touch_memories_updates_access_count():
+async def test_repository_touch_memories_updates_access_count():
     from brain.platform.db.repositories.memories import MemoryRepository
 
     session = MagicMock()
+    session.execute = AsyncMock(return_value=MagicMock())
     repo = MemoryRepository(session)
 
-    repo.touch_memories([1, 2])
+    await repo.touch_memories([1, 2])
 
     stmt = session.execute.call_args.args[0]
     compiled = str(
@@ -217,15 +227,17 @@ def test_repository_touch_memories_updates_access_count():
     assert "memories.id IN (1, 2)" in compiled
 
 
-def test_graph_context_applies_visibility_scope_to_recursive_query():
+async def test_graph_context_applies_visibility_scope_to_recursive_query():
     from brain.platform.db.repositories.memories import MemoryRepository
     from brain.platform.db.repositories.memory_visibility import MemoryVisibilityContext
 
     session = MagicMock()
-    session.execute.return_value.mappings.return_value.all.return_value = []
+    result = MagicMock()
+    result.mappings.return_value.all.return_value = []
+    session.execute = AsyncMock(return_value=result)
     repo = MemoryRepository(session)
 
-    repo.get_graph_context(
+    await repo.get_graph_context(
         42,
         context=MemoryVisibilityContext(user_id="user-1", org_id="org-1"),
     )
@@ -239,14 +251,15 @@ def test_graph_context_applies_visibility_scope_to_recursive_query():
     assert params["context_org_id"] == "org-1"
 
 
-def test_connect_memories_propagates_edge_failure_for_uow_rollback(mock_uow):
+async def test_connect_memories_propagates_edge_failure_for_uow_rollback(mock_uow):
     from brain.app.cli.memory import connect_memories
 
-    mock_uow.edges.upsert_edge.side_effect = RuntimeError("edge insert failed")
+    _async_uow(mock_uow)
+    mock_uow.edges.upsert_edge = AsyncMock(side_effect=RuntimeError("edge insert failed"))
 
     with patch("brain.app.cli.memory.UnitOfWork", return_value=mock_uow), pytest.raises(RuntimeError):
-        connect_memories(1, 2, "related_to")
+        await connect_memories(1, 2, "related_to")
 
-    exc_type, exc, _tb = mock_uow.__exit__.call_args.args
+    exc_type, exc, _tb = mock_uow.__aexit__.call_args.args
     assert exc_type is RuntimeError
     assert str(exc) == "edge insert failed"

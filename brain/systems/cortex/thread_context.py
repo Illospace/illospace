@@ -53,7 +53,7 @@ class ThreadContextEntry:
         return payload
 
 
-def build_agent_visible_thread_context(
+async def async_build_agent_visible_thread_context(
     session: Any,
     idea_id: str,
     *,
@@ -62,29 +62,23 @@ def build_agent_visible_thread_context(
     limit: int = DEFAULT_THREAD_CONTEXT_LIMIT,
     char_limit: int = DEFAULT_THREAD_CONTEXT_CHAR_LIMIT,
 ) -> dict[str, Any] | None:
-    """Return compact thread context that matches what the user can see.
-
-    Cortex's UI stream is composed from durable thread messages plus final
-    answers stored as AgentRun artifacts. A new AgentRun should see that same
-    prior exchange, excluding the user message that is already passed as the
-    current request.
-    """
+    """Async equivalent of ``build_agent_visible_thread_context``."""
 
     if not idea_id or not hasattr(session, "execute"):
         return None
 
     try:
         entries = [
-            *_thread_message_entries(
+            *(await _a_thread_message_entries(
                 session,
                 idea_id,
                 max_rows=max(int(limit) * 3, int(limit) + 8),
-            ),
-            *_final_answer_entries(
+            )),
+            *(await _a_final_answer_entries(
                 session,
                 idea_id,
                 max_rows=max(int(limit) * 2, int(limit) + 4),
-            ),
+            )),
         ]
     except Exception:
         logger.debug("agent_visible_thread_context_load_failed", exc_info=True)
@@ -115,8 +109,8 @@ def build_agent_visible_thread_context(
     }
 
 
-def _thread_message_entries(session: Any, idea_id: str, *, max_rows: int) -> list[ThreadContextEntry]:
-    rows = session.execute(
+async def _a_thread_message_entries(session: Any, idea_id: str, *, max_rows: int) -> list[ThreadContextEntry]:
+    result = await session.execute(
         select(
             IdeaThread.id,
             IdeaThread.role,
@@ -127,7 +121,8 @@ def _thread_message_entries(session: Any, idea_id: str, *, max_rows: int) -> lis
         .where(IdeaThread.idea_id == idea_id)
         .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
         .limit(max(1, int(max_rows)))
-    ).all()
+    )
+    rows = result.all()
     entries: list[ThreadContextEntry] = []
     for row in rows:
         content = _clean_content(row.content)
@@ -151,8 +146,8 @@ def _thread_message_entries(session: Any, idea_id: str, *, max_rows: int) -> lis
     return entries
 
 
-def _final_answer_entries(session: Any, idea_id: str, *, max_rows: int) -> list[ThreadContextEntry]:
-    rows = session.execute(
+async def _a_final_answer_entries(session: Any, idea_id: str, *, max_rows: int) -> list[ThreadContextEntry]:
+    result = await session.execute(
         select(AgentRunArtifactRow, AgentRunRow)
         .join(AgentRunRow, AgentRunRow.id == AgentRunArtifactRow.run_id)
         .where(
@@ -161,7 +156,8 @@ def _final_answer_entries(session: Any, idea_id: str, *, max_rows: int) -> list[
         )
         .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())
         .limit(max(1, int(max_rows)))
-    ).all()
+    )
+    rows = result.all()
     entries: list[ThreadContextEntry] = []
     for artifact, run in rows:
         content = _clean_content(getattr(artifact, "text", None))
@@ -282,5 +278,5 @@ __all__ = [
     "DEFAULT_THREAD_CONTEXT_CHAR_LIMIT",
     "DEFAULT_THREAD_CONTEXT_LIMIT",
     "ThreadContextEntry",
-    "build_agent_visible_thread_context",
+    "async_build_agent_visible_thread_context",
 ]

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from sqlalchemy.dialects import postgresql
 
@@ -70,14 +70,16 @@ def test_service_context_can_run_explicit_global_memory_maintenance():
     assert memory_visibility_sql(context, alias="m") == ("", {})
 
 
-def test_repository_visible_search_applies_policy_to_query():
+async def test_repository_visible_search_applies_policy_to_query():
     from brain.platform.db.repositories.memories import MemoryRepository
 
     session = MagicMock()
-    session.scalars.return_value.all.return_value = []
+    result = MagicMock()
+    result.all.return_value = []
+    session.scalars = AsyncMock(return_value=result)
     repo = MemoryRepository(session)
 
-    repo.search_visible("roadmap", MemoryVisibilityContext(user_id="usera", org_id="org1"))
+    await repo.search_visible("roadmap", MemoryVisibilityContext(user_id="usera", org_id="org1"))
 
     stmt = session.scalars.call_args.args[0]
     compiled = str(

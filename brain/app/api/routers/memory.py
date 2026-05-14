@@ -6,11 +6,9 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.db_utils import run_db
 from brain.app.api.schemas.memories import (
     EdgeRead,
     GraphResponse,
@@ -31,8 +29,8 @@ from brain.platform.db.repositories.memory_visibility import (
     normalize_memory_visibility,
 )
 from brain.systems.memory.truth_maintenance import (
+    async_record_memory_review,
     build_demotion_truth_fields,
-    record_memory_review,
     validate_truth_action_context,
 )
 
@@ -126,7 +124,7 @@ async def list_org_memories(
 
 
 @router.get("/duplicate-candidates")
-def list_duplicate_candidates(
+async def list_duplicate_candidates(
     since_hours: int = Query(48, ge=1, le=720),
     user: dict[str, Any] = Depends(get_current_user),
 ):
@@ -177,36 +175,33 @@ async def review_memory_truth(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Apply a human truth-maintenance review with required evidence/confidence."""
-    def _review(sync_db: Session):
-        repo = MemoryRepository(sync_db)
-        context = MemoryVisibilityContext.from_user(user)
-        try:
-            mem = repo.get_or_raise_visible(memory_id, context)
-        except LookupError:
-            raise HTTPException(status_code=404, detail="Memory not found")
+    repo = MemoryRepository(db)
+    context = MemoryVisibilityContext.from_user(user)
+    try:
+        mem = await repo.a_get_or_raise_visible(memory_id, context)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Memory not found")
 
-        contradictions = repo.list_contradictions(memory_id)
-        open_contradiction_count = sum(
-            1
-            for contradiction in contradictions
-            if str(getattr(contradiction, "status", "open")).lower()
-            not in {"resolved", "closed", "dismissed", "accepted"}
+    contradictions = await repo.a_list_contradictions(memory_id)
+    open_contradiction_count = sum(
+        1
+        for contradiction in contradictions
+        if str(getattr(contradiction, "status", "open")).lower()
+        not in {"resolved", "closed", "dismissed", "accepted"}
+    )
+    try:
+        await _apply_truth_review_action(
+            db,
+            mem,
+            body,
+            reviewer_id=user.get("id"),
+            open_contradiction_count=open_contradiction_count,
         )
-        try:
-            _apply_truth_review_action(
-                sync_db,
-                mem,
-                body,
-                reviewer_id=user.get("id"),
-                open_contradiction_count=open_contradiction_count,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-        sync_db.flush()
-        return repo.get_truth_snapshot(memory_id, include_records=True, context=context)
-
-    return await run_db(db, _review)
+    await db.flush()
+    return await repo.a_get_truth_snapshot(memory_id, include_records=True, context=context)
 
 
 @router.get("/{memory_id}/neighborhood", response_model=list[EdgeRead])
@@ -325,8 +320,8 @@ async def promote_memory(
         return mem
 
 
-def _apply_truth_review_action(
-    db: Session,
+async def _apply_truth_review_action(
+    db: AsyncSession,
     mem: Memory,
     body: MemoryTruthReviewRequest,
     *,
@@ -396,7 +391,7 @@ def _apply_truth_review_action(
         mem.reviewed_at = now
         mem.reviewed_by = reviewer_id
 
-    record_memory_review(
+    await async_record_memory_review(
         db,
         memory_id=mem.id,
         action=body.action,
@@ -416,8 +411,8 @@ def _apply_truth_review_action(
         from brain.platform.db.repositories.narratives import NarrativeRepository
 
         reason = body.rationale or f"memory truth review: {body.action}"
-        MemorySummaryRepository(db).mark_stale_for_memory(mem.id, reason)
-        NarrativeRepository(db).mark_stale_for_memory(mem.id, reason)
+        await MemorySummaryRepository(db).a_mark_stale_for_memory(mem.id, reason)
+        await NarrativeRepository(db).a_mark_stale_for_memory(mem.id, reason)
 
 
 def _validate_tier(value: str) -> None:

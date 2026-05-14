@@ -51,14 +51,14 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
     # Bundle identity
     # ------------------------------------------------------------------
 
-    def get_bundle(self, namespace: str, name: str) -> SkillBundle | None:
+    async def a_get_bundle(self, namespace: str, name: str) -> SkillBundle | None:
         stmt = select(SkillBundle).where(
             SkillBundle.namespace == namespace,
             SkillBundle.name == name,
         )
-        return self._session.scalars(stmt).first()
+        return (await self._session.scalars(stmt)).first()
 
-    def get_or_create_bundle(
+    async def a_get_or_create_bundle(
         self,
         namespace: str,
         name: str,
@@ -81,7 +81,7 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             SkillBundleTrustLevel,
             "trust_level",
         )
-        bundle = self.get_bundle(namespace, name)
+        bundle = await self.a_get_bundle(namespace, name)
         if bundle is not None:
             return bundle
 
@@ -97,14 +97,14 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             trust_level=trust_level,
         )
         self._session.add(bundle)
-        self._session.flush()
+        await self._session.flush()
         return bundle
 
     # ------------------------------------------------------------------
     # Immutable versions
     # ------------------------------------------------------------------
 
-    def get_version(
+    async def a_get_version(
         self,
         bundle_id: int,
         semver: str,
@@ -113,9 +113,9 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             SkillBundleVersion.bundle_id == bundle_id,
             SkillBundleVersion.semver == semver,
         )
-        return self._session.scalars(stmt).first()
+        return (await self._session.scalars(stmt)).first()
 
-    def create_version(
+    async def a_create_version(
         self,
         bundle: SkillBundle | int,
         *,
@@ -133,7 +133,7 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
         status: str = "draft",
         validate_manifest: bool = False,
     ) -> SkillBundleVersion:
-        bundle_id = self._bundle_id(bundle)
+        bundle_id = await self._a_bundle_id(bundle)
         status = coerce_skill_bundle_enum_value(
             status,
             SkillBundleReviewStatus,
@@ -142,7 +142,7 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
         if validate_manifest and manifest is not None:
             manifest = dict(validate_skill_bundle_manifest_payload(manifest).raw)
 
-        existing_semver = self.get_version(bundle_id, semver)
+        existing_semver = await self.a_get_version(bundle_id, semver)
         if existing_semver is not None:
             if existing_semver.content_digest != content_digest:
                 raise SkillBundleVersionConflict(
@@ -150,7 +150,7 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
                 )
             return existing_semver
 
-        existing_digest = self._get_version_by_digest(bundle_id, content_digest)
+        existing_digest = await self._a_get_version_by_digest(bundle_id, content_digest)
         if existing_digest is not None:
             raise SkillBundleVersionConflict(
                 "SkillBundleVersion digest already exists with a different semver"
@@ -172,10 +172,10 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             status=status,
         )
         self._session.add(version)
-        self._session.flush()
+        await self._session.flush()
         return version
 
-    def _get_version_by_digest(
+    async def _a_get_version_by_digest(
         self,
         bundle_id: int,
         content_digest: str,
@@ -184,21 +184,21 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             SkillBundleVersion.bundle_id == bundle_id,
             SkillBundleVersion.content_digest == content_digest,
         )
-        return self._session.scalars(stmt).first()
+        return (await self._session.scalars(stmt)).first()
 
-    def get_version_by_digest(
+    async def a_get_version_by_digest(
         self,
         bundle: SkillBundle | int,
         content_digest: str,
     ) -> SkillBundleVersion | None:
         """Return an existing immutable version by content digest."""
-        return self._get_version_by_digest(self._bundle_id(bundle), content_digest)
+        return await self._a_get_version_by_digest(await self._a_bundle_id(bundle), content_digest)
 
     # ------------------------------------------------------------------
     # Assets
     # ------------------------------------------------------------------
 
-    def add_asset(
+    async def a_add_asset(
         self,
         bundle_version: SkillBundleVersion | int,
         *,
@@ -213,7 +213,7 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
         loading_budget_tokens: int | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> SkillAsset:
-        version_id = self._version_id(bundle_version)
+        version_id = await self._a_version_id(bundle_version)
         asset_kind = coerce_skill_bundle_enum_value(
             asset_kind,
             SkillBundleAssetType,
@@ -233,26 +233,26 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             metadata_=metadata or {},
         )
         self._session.add(asset)
-        self._session.flush()
+        await self._session.flush()
         return asset
 
-    def list_assets(self, bundle_version: SkillBundleVersion | int) -> Sequence[SkillAsset]:
-        version_id = self._version_id(bundle_version)
+    async def a_list_assets(self, bundle_version: SkillBundleVersion | int) -> Sequence[SkillAsset]:
+        version_id = await self._a_version_id(bundle_version)
         stmt = (
             select(SkillAsset)
             .where(SkillAsset.bundle_version_id == version_id)
             .order_by(SkillAsset.path)
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
     # ------------------------------------------------------------------
     # Installations
     # ------------------------------------------------------------------
 
-    def get_installation(self, installation_id: int) -> SkillInstallation | None:
-        return self._session.get(SkillInstallation, installation_id)
+    async def a_get_installation(self, installation_id: int) -> SkillInstallation | None:
+        return await self._session.get(SkillInstallation, installation_id)
 
-    def create_installation(
+    async def a_create_installation(
         self,
         bundle_version: SkillBundleVersion | int,
         *,
@@ -270,7 +270,7 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
         rollback_bundle_version_id: int | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> SkillInstallation:
-        version = self._load_version(bundle_version)
+        version = await self._a_load_version(bundle_version)
         update_policy = coerce_skill_bundle_enum_value(
             update_policy,
             SkillBundleUpdatePolicy,
@@ -285,7 +285,7 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
         if digest != version.content_digest:
             raise ValueError("installed_digest must match the pinned bundle version digest")
 
-        existing = self.get_active_installation(
+        existing = await self.a_get_active_installation(
             version.bundle_id,
             org_id=org_id,
             user_id=user_id,
@@ -316,10 +316,10 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             metadata_=metadata or {},
         )
         self._session.add(installation)
-        self._session.flush()
+        await self._session.flush()
         return installation
 
-    def get_active_installation(
+    async def a_get_active_installation(
         self,
         bundle_id: int,
         *,
@@ -344,13 +344,13 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             SkillInstallation.enabled_scope == enabled_scope,
             _not_archived(SkillInstallation),
         )
-        return self._session.scalars(stmt).first()
+        return (await self._session.scalars(stmt)).first()
 
     # ------------------------------------------------------------------
     # Overlays
     # ------------------------------------------------------------------
 
-    def add_overlay_revision(
+    async def add_overlay_revision(
         self,
         installation: SkillInstallation | int,
         *,
@@ -363,15 +363,15 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
         reason: str | None = None,
         promoted_bundle_version_id: int | None = None,
     ) -> SkillOverlay:
-        installation_obj = self._load_installation(installation)
+        installation_obj = await self._load_installation(installation)
         status = coerce_skill_bundle_enum_value(
             status,
             SkillBundleInstallStatus,
             "status",
         )
-        revision = overlay_revision or self._next_overlay_revision(installation_obj.id)
+        revision = overlay_revision or await self._next_overlay_revision(installation_obj.id)
 
-        existing = self._get_overlay_revision(installation_obj.id, revision)
+        existing = await self._get_overlay_revision(installation_obj.id, revision)
         if existing is not None:
             raise SkillOverlayConflict(
                 "SkillOverlay revision already exists for this installation"
@@ -390,14 +390,14 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             promoted_bundle_version_id=promoted_bundle_version_id,
         )
         self._session.add(overlay)
-        self._session.flush()
+        await self._session.flush()
         return overlay
 
-    def get_active_overlay(
+    async def get_active_overlay(
         self,
         installation: SkillInstallation | int,
     ) -> SkillOverlay | None:
-        installation_id = self._installation_id(installation)
+        installation_id = await self._installation_id(installation)
         stmt = (
             select(SkillOverlay)
             .where(
@@ -406,13 +406,13 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             )
             .order_by(SkillOverlay.overlay_revision.desc(), SkillOverlay.id.desc())
         )
-        return self._session.scalars(stmt).first()
+        return (await self._session.scalars(stmt)).first()
 
     # ------------------------------------------------------------------
     # Runtime projection metadata
     # ------------------------------------------------------------------
 
-    def get_runtime_projection_metadata(
+    async def get_runtime_projection_metadata(
         self,
         *,
         skill_id: int | None = None,
@@ -422,24 +422,24 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             raise ValueError("Provide exactly one of skill_id or installation_id")
 
         installation = (
-            self.get_installation(installation_id)
+            await self.a_get_installation(installation_id)
             if installation_id is not None
-            else self._get_installation_by_skill_id(skill_id)
+            else await self._get_installation_by_skill_id(skill_id)
         )
         if installation is None:
             return None
 
-        bundle = self._session.get(SkillBundle, installation.bundle_id)
-        version = self._session.get(SkillBundleVersion, installation.bundle_version_id)
+        bundle = await self._session.get(SkillBundle, installation.bundle_id)
+        version = await self._session.get(SkillBundleVersion, installation.bundle_version_id)
         if bundle is None or version is None:
             raise LookupError("Installed bundle projection is missing bundle/version rows")
 
         skill = (
-            self._session.get(Skill, installation.skill_id)
+            await self._session.get(Skill, installation.skill_id)
             if installation.skill_id is not None
             else None
         )
-        active_overlay = self.get_active_overlay(installation.id)
+        active_overlay = await self.get_active_overlay(installation.id)
         effective_digest = (
             active_overlay.effective_digest
             if active_overlay and active_overlay.effective_digest
@@ -483,51 +483,51 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _bundle_id(self, bundle: SkillBundle | int) -> int:
-        if isinstance(bundle, SkillBundle):
-            if bundle.id is None:
-                self._session.flush()
-            return bundle.id
-        return bundle
-
-    def _version_id(self, bundle_version: SkillBundleVersion | int) -> int:
-        if isinstance(bundle_version, SkillBundleVersion):
-            if bundle_version.id is None:
-                self._session.flush()
-            return bundle_version.id
-        return bundle_version
-
-    def _installation_id(self, installation: SkillInstallation | int) -> int:
+    async def _installation_id(self, installation: SkillInstallation | int) -> int:
         if isinstance(installation, SkillInstallation):
             if installation.id is None:
-                self._session.flush()
+                await self._session.flush()
             return installation.id
         return installation
 
-    def _load_version(self, bundle_version: SkillBundleVersion | int) -> SkillBundleVersion:
+    async def _a_bundle_id(self, bundle: SkillBundle | int) -> int:
+        if isinstance(bundle, SkillBundle):
+            if bundle.id is None:
+                await self._session.flush()
+            return bundle.id
+        return bundle
+
+    async def _a_version_id(self, bundle_version: SkillBundleVersion | int) -> int:
         if isinstance(bundle_version, SkillBundleVersion):
             if bundle_version.id is None:
-                self._session.flush()
+                await self._session.flush()
+            return bundle_version.id
+        return bundle_version
+
+    async def _a_load_version(self, bundle_version: SkillBundleVersion | int) -> SkillBundleVersion:
+        if isinstance(bundle_version, SkillBundleVersion):
+            if bundle_version.id is None:
+                await self._session.flush()
             return bundle_version
-        version = self._session.get(SkillBundleVersion, bundle_version)
+        version = await self._session.get(SkillBundleVersion, bundle_version)
         if version is None:
             raise LookupError(f"SkillBundleVersion {bundle_version} not found")
         return version
 
-    def _load_installation(
+    async def _load_installation(
         self,
         installation: SkillInstallation | int,
     ) -> SkillInstallation:
         if isinstance(installation, SkillInstallation):
             if installation.id is None:
-                self._session.flush()
+                await self._session.flush()
             return installation
-        installation_obj = self.get_installation(installation)
+        installation_obj = await self.a_get_installation(installation)
         if installation_obj is None:
             raise LookupError(f"SkillInstallation {installation} not found")
         return installation_obj
 
-    def _get_overlay_revision(
+    async def _get_overlay_revision(
         self,
         installation_id: int,
         overlay_revision: int,
@@ -536,16 +536,16 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             SkillOverlay.installation_id == installation_id,
             SkillOverlay.overlay_revision == overlay_revision,
         )
-        return self._session.scalars(stmt).first()
+        return (await self._session.scalars(stmt)).first()
 
-    def _next_overlay_revision(self, installation_id: int) -> int:
+    async def _next_overlay_revision(self, installation_id: int) -> int:
         stmt = select(func.max(SkillOverlay.overlay_revision)).where(
             SkillOverlay.installation_id == installation_id
         )
-        current = self._session.scalar(stmt)
+        current = await self._session.scalar(stmt)
         return (current or 0) + 1
 
-    def _get_installation_by_skill_id(
+    async def _get_installation_by_skill_id(
         self,
         skill_id: int | None,
     ) -> SkillInstallation | None:
@@ -560,11 +560,11 @@ class SkillBundleRepository(BaseRepository[SkillBundle]):
             )
             .order_by(SkillInstallation.id.desc())
         )
-        installation = self._session.scalars(stmt).first()
+        installation = (await self._session.scalars(stmt)).first()
         if installation is not None:
             return installation
 
-        skill = self._session.get(Skill, skill_id)
+        skill = await self._session.get(Skill, skill_id)
         if skill is None or skill.skill_installation_id is None:
             return None
-        return self.get_installation(skill.skill_installation_id)
+        return await self.a_get_installation(skill.skill_installation_id)

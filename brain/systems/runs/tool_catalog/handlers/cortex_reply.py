@@ -228,7 +228,7 @@ def _handle_cortex_reply(content: str) -> dict:
         return {"error": str(e)}
 
 
-def _handle_cortex_visual_reply(content_type: str, title: str, content: str, display: str = "inline") -> dict:
+async def _handle_cortex_visual_reply(content_type: str, title: str, content: str, display: str = "inline") -> dict:
     """Persist and broadcast a visual content block in the Cortex workspace."""
     idea_id = getattr(_agent_context, "idea_id", None)
     if not idea_id:
@@ -251,11 +251,11 @@ def _handle_cortex_visual_reply(content_type: str, title: str, content: str, dis
         d_id = run.run_id if run else None
 
         # Find the latest thread message for this idea to set position_after
-        with UnitOfWork() as uow:
-            last_msg = uow.session.execute(sa_text(
+        async with UnitOfWork() as uow:
+            last_msg = (await uow.session.execute(sa_text(
                 "SELECT id FROM idea_threads WHERE idea_id = :idea_id "
                 "ORDER BY created_at DESC LIMIT 1"
-            ), {"idea_id": idea_id}).scalar()
+            ), {"idea_id": idea_id})).scalar()
 
             block = VisualBlock(
                 idea_id=idea_id,
@@ -267,7 +267,7 @@ def _handle_cortex_visual_reply(content_type: str, title: str, content: str, dis
                 run_id=d_id,
             )
             uow.session.add(block)
-            uow.session.flush()
+            await uow.session.flush()
             block_id = block.id
             created_at = block.created_at
 

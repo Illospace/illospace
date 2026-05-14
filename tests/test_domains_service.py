@@ -3,9 +3,7 @@ from __future__ import annotations
 import re
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-from sqlalchemy.orm import Session
 
 from brain.platform.db.models.domain import (
     Domain,
@@ -16,7 +14,7 @@ from brain.platform.db.models.domain import (
     DomainRelation,
     DomainRelationType,
 )
-from brain.systems.user_domains.service import DomainError, DomainService
+from brain.systems.user_domains.service import AsyncDomainService, DomainError
 
 ORG_ID = "11111111-1111-4111-8111-111111111111"
 USER_ID = "22222222-2222-4222-8222-222222222222"
@@ -40,10 +38,9 @@ def _patch_sqlite_for_pg_types():
 
 
 @pytest.fixture
-def session():
+async def session(async_sqlite_session_factory):
     _patch_sqlite_for_pg_types()
-    engine = create_engine("sqlite://", echo=False)
-    for table in [
+    return await async_sqlite_session_factory([
         Domain.__table__,
         DomainObjectType.__table__,
         DomainFieldDefinition.__table__,
@@ -51,17 +48,13 @@ def session():
         DomainRecord.__table__,
         DomainRelation.__table__,
         DomainEvent.__table__,
-    ]:
-        table.create(engine, checkfirst=True)
-    db = Session(engine)
-    yield db
-    db.close()
+    ])
 
 
-def test_create_custom_domain_schema_and_record(session):
-    service = DomainService(session)
+async def test_create_custom_domain_schema_and_record(session):
+    service = AsyncDomainService(session)
 
-    domain = service.create_domain(
+    domain = await service.create_domain(
         ORG_ID,
         name="Hooks Tried",
         objects=[
@@ -84,7 +77,7 @@ def test_create_custom_domain_schema_and_record(session):
         actor_id=USER_ID,
     )
 
-    schema = service.serialize_domain_schema(domain)
+    schema = await service.serialize_domain_schema(domain)
     assert schema["slug"] == "hooks-tried"
     assert schema["objects"][0]["key"] == "hook"
     assert [field["key"] for field in schema["objects"][0]["fields"]] == [
@@ -93,7 +86,7 @@ def test_create_custom_domain_schema_and_record(session):
         "score",
     ]
 
-    record = service.create_record(
+    record = await service.create_record(
         ORG_ID,
         domain.id,
         "hook",
@@ -104,15 +97,15 @@ def test_create_custom_domain_schema_and_record(session):
     assert record.title == "Start with the pain"
     assert record.data == {"text": "Start with the pain", "status": "new", "score": 8}
     assert record.version == 1
-    assert [event.event_type for event in service.list_events(ORG_ID, domain.id)] == [
+    assert [event.event_type for event in await service.list_events(ORG_ID, domain.id)] == [
         "record.created",
         "domain.created",
     ]
 
 
-def test_record_validation_rejects_missing_unknown_and_bad_enum(session):
-    service = DomainService(session)
-    domain = service.create_domain(
+async def test_record_validation_rejects_missing_unknown_and_bad_enum(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
         ORG_ID,
         name="Tasks",
         objects=[
@@ -127,13 +120,13 @@ def test_record_validation_rejects_missing_unknown_and_bad_enum(session):
     )
 
     with pytest.raises(DomainError, match="title"):
-        service.create_record(ORG_ID, domain.id, "task", data={})
+        await service.create_record(ORG_ID, domain.id, "task", data={})
 
     with pytest.raises(DomainError, match="Unknown field"):
-        service.create_record(ORG_ID, domain.id, "task", data={"title": "One", "bogus": 1})
+        await service.create_record(ORG_ID, domain.id, "task", data={"title": "One", "bogus": 1})
 
     with pytest.raises(DomainError, match="state"):
-        service.create_record(
+        await service.create_record(
             ORG_ID,
             domain.id,
             "task",
@@ -141,9 +134,9 @@ def test_record_validation_rejects_missing_unknown_and_bad_enum(session):
         )
 
 
-def test_update_record_uses_expected_version_and_archives_or_deletes(session):
-    service = DomainService(session)
-    domain = service.create_domain(
+async def test_update_record_uses_expected_version_and_archives_or_deletes(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
         ORG_ID,
         name="Todos",
         objects=[
@@ -156,14 +149,14 @@ def test_update_record_uses_expected_version_and_archives_or_deletes(session):
             }
         ],
     )
-    record = service.create_record(
+    record = await service.create_record(
         ORG_ID,
         domain.id,
         "todo",
         data={"title": "Ship domains"},
     )
 
-    updated = service.update_record(
+    updated = await service.update_record(
         ORG_ID,
         domain.id,
         record.id,
@@ -174,7 +167,7 @@ def test_update_record_uses_expected_version_and_archives_or_deletes(session):
     assert updated.data["done"] is True
 
     with pytest.raises(DomainError, match="version mismatch"):
-        service.update_record(
+        await service.update_record(
             ORG_ID,
             domain.id,
             record.id,
@@ -182,43 +175,43 @@ def test_update_record_uses_expected_version_and_archives_or_deletes(session):
             expected_version=1,
         )
 
-    archived = service.remove_record(ORG_ID, domain.id, record.id, mode="archive")
+    archived = await service.remove_record(ORG_ID, domain.id, record.id, mode="archive")
     assert archived["archived"] is True
-    assert service.get_record(ORG_ID, domain.id, record.id).archived_at is not None
+    assert (await service.get_record(ORG_ID, domain.id, record.id)).archived_at is not None
 
-    second = service.create_record(
+    second = await service.create_record(
         ORG_ID,
         domain.id,
         "todo",
         data={"title": "Delete me"},
     )
-    deleted = service.remove_record(ORG_ID, domain.id, second.id, mode="delete")
+    deleted = await service.remove_record(ORG_ID, domain.id, second.id, mode="delete")
     assert deleted["deleted"] is True
-    assert session.get(DomainRecord, second.id) is None
+    assert await session.get(DomainRecord, second.id) is None
 
 
-def test_domain_slug_edges_and_archive_or_delete(session):
-    service = DomainService(session)
-    short = service.create_domain(ORG_ID, name="X")
+async def test_domain_slug_edges_and_archive_or_delete(session):
+    service = AsyncDomainService(session)
+    short = await service.create_domain(ORG_ID, name="X")
     assert short.slug == "x"
 
-    long = service.create_domain(ORG_ID, name="Very " * 30 + "Long Domain")
+    long = await service.create_domain(ORG_ID, name="Very " * 30 + "Long Domain")
     assert len(long.slug) <= 80
     assert not long.slug.endswith("-")
 
-    archived = service.remove_domain(ORG_ID, short.id, mode="archive")
+    archived = await service.remove_domain(ORG_ID, short.id, mode="archive")
     assert archived["archived"] is True
-    assert short not in service.list_domains(ORG_ID)
-    assert service.get_domain(ORG_ID, short.id, include_archived=True).archived_at is not None
+    assert short not in await service.list_domains(ORG_ID)
+    assert (await service.get_domain(ORG_ID, short.id, include_archived=True)).archived_at is not None
 
-    deleted = service.remove_domain(ORG_ID, long.id, mode="delete")
+    deleted = await service.remove_domain(ORG_ID, long.id, mode="delete")
     assert deleted["deleted"] is True
-    assert session.get(Domain, long.id) is None
+    assert await session.get(Domain, long.id) is None
 
 
-def test_relations_validate_object_types(session):
-    service = DomainService(session)
-    domain = service.create_domain(
+async def test_relations_validate_object_types(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
         ORG_ID,
         name="Hooks",
         objects=[
@@ -234,26 +227,26 @@ def test_relations_validate_object_types(session):
             }
         ],
     )
-    hook = service.create_record(ORG_ID, domain.id, "hook", data={"text": "Pain first"})
-    trial = service.create_record(ORG_ID, domain.id, "trial", data={"name": "TikTok A"})
+    hook = await service.create_record(ORG_ID, domain.id, "hook", data={"text": "Pain first"})
+    trial = await service.create_record(ORG_ID, domain.id, "trial", data={"name": "TikTok A"})
 
-    relation = service.create_relation(
+    relation = await service.create_relation(
         ORG_ID,
         domain.id,
         "trial_tests_hook",
         source_record_id=trial.id,
         target_record_id=hook.id,
     )
-    assert service.serialize_relation(relation)["relation_key"] == "trial_tests_hook"
-    assert service.list_relations(ORG_ID, domain.id, source_record_id=trial.id)[0].id == relation.id
-    assert service.list_relations(ORG_ID, domain.id, target_record_id=hook.id)[0].id == relation.id
-    assert service.remove_relation(ORG_ID, domain.id, relation.id)["archived"] is True
-    assert service.list_relations(ORG_ID, domain.id) == []
-    assert service.list_relations(ORG_ID, domain.id, include_archived=True)[0].id == relation.id
-    assert service.list_events(ORG_ID, domain.id, limit=2)[0].event_type == "relation.archived"
+    assert (await service.serialize_relation(relation))["relation_key"] == "trial_tests_hook"
+    assert (await service.list_relations(ORG_ID, domain.id, source_record_id=trial.id))[0].id == relation.id
+    assert (await service.list_relations(ORG_ID, domain.id, target_record_id=hook.id))[0].id == relation.id
+    assert (await service.remove_relation(ORG_ID, domain.id, relation.id))["archived"] is True
+    assert await service.list_relations(ORG_ID, domain.id) == []
+    assert (await service.list_relations(ORG_ID, domain.id, include_archived=True))[0].id == relation.id
+    assert (await service.list_events(ORG_ID, domain.id, limit=2))[0].event_type == "relation.archived"
 
     with pytest.raises(DomainError, match="source_record_id"):
-        service.create_relation(
+        await service.create_relation(
             ORG_ID,
             domain.id,
             "trial_tests_hook",

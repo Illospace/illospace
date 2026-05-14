@@ -1,6 +1,6 @@
 """Tests for heuristic graduation and demotion."""
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 from brain.systems.feedback.heuristics import (
     graduate_heuristics,
@@ -16,12 +16,12 @@ def mock_uow():
     with patch("brain.systems.feedback.heuristics.UnitOfWork") as MockUoW:
         mock = MagicMock()
         MockUoW.return_value = mock
-        mock.__enter__ = MagicMock(return_value=mock)
-        mock.__exit__ = MagicMock(return_value=False)
+        mock.__aenter__ = AsyncMock(return_value=mock)
+        mock.__aexit__ = AsyncMock(return_value=False)
         yield mock
 
 
-def test_graduate_heuristics_promotes_qualified(mock_uow):
+async def test_graduate_heuristics_promotes_qualified(mock_uow):
     """Heuristics meeting all criteria should be graduated."""
     qualified = [
         {
@@ -34,14 +34,16 @@ def test_graduate_heuristics_promotes_qualified(mock_uow):
             "demoted_at": None,
         }
     ]
-    mock_uow.session.execute.return_value.mappings.return_value.all.return_value = qualified
+    result = MagicMock()
+    result.mappings.return_value.all.return_value = qualified
+    mock_uow.session.execute = AsyncMock(return_value=result)
 
-    result = graduate_heuristics("debugging")
-    assert len(result) == 1
-    assert result[0]["id"] == 1
+    graduated = await graduate_heuristics("debugging")
+    assert len(graduated) == 1
+    assert graduated[0]["id"] == 1
 
 
-def test_graduate_heuristics_skips_recently_demoted(mock_uow):
+async def test_graduate_heuristics_skips_recently_demoted(mock_uow):
     """Heuristics demoted within cooldown period should not re-graduate."""
     from datetime import datetime, timezone, timedelta
 
@@ -56,18 +58,22 @@ def test_graduate_heuristics_skips_recently_demoted(mock_uow):
             "demoted_at": datetime.now(timezone.utc) - timedelta(days=2),
         }
     ]
-    mock_uow.session.execute.return_value.mappings.return_value.all.return_value = recently_demoted
+    result = MagicMock()
+    result.mappings.return_value.all.return_value = recently_demoted
+    mock_uow.session.execute = AsyncMock(return_value=result)
 
-    result = graduate_heuristics("some_skill")
-    assert len(result) == 0  # Should skip -- cooldown not expired
+    graduated = await graduate_heuristics("some_skill")
+    assert len(graduated) == 0  # Should skip -- cooldown not expired
 
 
-def test_get_active_heuristics_excludes_graduated(mock_uow):
+async def test_get_active_heuristics_excludes_graduated(mock_uow):
     """get_active_heuristics should not return graduated heuristics."""
-    mock_uow.session.execute.return_value.mappings.return_value.all.return_value = []
+    result = MagicMock()
+    result.mappings.return_value.all.return_value = []
+    mock_uow.session.execute = AsyncMock(return_value=result)
 
     from brain.systems.feedback.heuristics import get_active_heuristics
-    get_active_heuristics("test_skill")
+    await get_active_heuristics("test_skill")
 
     # Verify the SQL includes graduated filter
     assert mock_uow.session.execute.called

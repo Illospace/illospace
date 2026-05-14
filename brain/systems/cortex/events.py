@@ -14,7 +14,6 @@ from typing import Any, Callable
 
 from sqlalchemy import false, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.platform.db.models.run import CortexEvent
 from brain.platform.db.models.idea import Idea
@@ -137,7 +136,7 @@ def _infer_run_id(payload: Mapping[str, Any]) -> int | None:
     return None
 
 
-def _lookup_idea_org_id(idea_id: str, *, session: Session | None = None) -> str | None:
+def _lookup_idea_org_id(idea_id: str, *, session: Any | None = None) -> str | None:
     cache_key = str(idea_id)
     if cache_key in _idea_org_cache:
         return _idea_org_cache[cache_key]
@@ -146,9 +145,7 @@ def _lookup_idea_org_id(idea_id: str, *, session: Session | None = None) -> str 
             idea = session.get(Idea, cache_key)
             org_id = _optional_text(getattr(idea, "org_id", None)) if idea is not None else None
         else:
-            with UnitOfWork() as uow:
-                idea = uow.session.get(Idea, cache_key)
-                org_id = _optional_text(getattr(idea, "org_id", None)) if idea is not None else None
+            org_id = None
     except Exception as exc:
         logger.debug("event_org_lookup_by_idea_failed idea_id=%s error=%s", cache_key, exc)
         return None
@@ -181,7 +178,7 @@ async def _lookup_idea_org_id_async(
     return org_id
 
 
-def _lookup_run_org_id(run_id: int, *, session: Session | None = None) -> str | None:
+def _lookup_run_org_id(run_id: int, *, session: Any | None = None) -> str | None:
     cache_key = int(run_id)
     if cache_key in _run_org_cache:
         return _run_org_cache[cache_key]
@@ -192,9 +189,7 @@ def _lookup_run_org_id(run_id: int, *, session: Session | None = None) -> str | 
             run = session.get(AgentRunRow, cache_key)
             org_id = _optional_text(getattr(run, "org_id", None)) if run is not None else None
         else:
-            with UnitOfWork() as uow:
-                run = uow.session.get(AgentRunRow, cache_key)
-                org_id = _optional_text(getattr(run, "org_id", None)) if run is not None else None
+            org_id = None
     except Exception as exc:
         logger.debug("event_org_lookup_by_run_failed run_id=%s error=%s", cache_key, exc)
         return None
@@ -232,7 +227,7 @@ async def _lookup_run_org_id_async(
 def resolve_event_org_id(
     payload: Mapping[str, Any],
     *,
-    session: Session | None = None,
+    session: Any | None = None,
 ) -> str | None:
     """Resolve the org scope for a live Cortex event payload."""
     org_id = _optional_text(payload.get("org_id"))
@@ -294,18 +289,6 @@ def _new_cortex_event(
     )
 
 
-def _write_cortex_event(
-    session: Session,
-    *,
-    event_type: str,
-    payload: dict[str, Any] | None = None,
-) -> CortexEvent:
-    event = _new_cortex_event(event_type, payload)
-    session.add(event)
-    session.flush()
-    return event
-
-
 async def _write_cortex_event_async(
     session: AsyncSession,
     *,
@@ -316,20 +299,6 @@ async def _write_cortex_event_async(
     session.add(event)
     await session.flush()
     return event
-
-
-def record_cortex_event(
-    event_type: str,
-    payload: dict[str, Any] | None = None,
-    *,
-    session: Session | None = None,
-) -> CortexEvent:
-    """Persist a generic Cortex websocket event for bounded client replay."""
-    if session is not None:
-        return _write_cortex_event(session, event_type=event_type, payload=payload)
-
-    with UnitOfWork() as uow:
-        return _write_cortex_event(uow.session, event_type=event_type, payload=payload)
 
 
 async def record_cortex_event_async(
@@ -353,12 +322,18 @@ def _active_async_loop() -> asyncio.AbstractEventLoop | None:
         return None
 
 
-def _log_async_event_write_failure(event_type: str, task: asyncio.Task) -> None:
+def _log_async_event_write_failure(
+    event_type: str,
+    task: asyncio.Task,
+    *,
+    log_name: str = "cortex_event_write_failed",
+) -> None:
     try:
         task.result()
     except Exception as exc:
         logger.warning(
-            "cortex_event_write_failed event_type=%s error=%s",
+            "%s event_type=%s error=%s",
+            log_name,
             event_type,
             exc,
         )
@@ -392,18 +367,6 @@ def cortex_event_to_message(
     if replayed:
         message["replayed"] = True
     return message
-
-
-def list_cortex_events_after_for_principal(
-    session: Session,
-    principal: Mapping[str, Any],
-    *,
-    last_event_id: int = 0,
-    limit: int = 100,
-) -> list[CortexEvent]:
-    """Return Cortex events visible to a replay principal after a cursor."""
-    stmt = _cortex_event_replay_stmt(principal, last_event_id=last_event_id, limit=limit)
-    return list(session.scalars(stmt).all())
 
 
 def _cortex_event_replay_stmt(
@@ -448,9 +411,9 @@ def publish(event_type: str, data: dict[str, Any]) -> None:
     recorded_durable = False
     if scope and scope.get("run_id") is not None:
         try:
-            from brain.systems.runs.event_log import record_run_event
+            from brain.systems.runs.event_log import async_record_run_event
 
-            record_run_event(
+            write = async_record_run_event(
                 int(scope["run_id"]),
                 event_type,
                 data,
@@ -459,6 +422,18 @@ def publish(event_type: str, data: dict[str, Any]) -> None:
                 consumer_runtime=scope.get("consumer_runtime"),
                 session=scope.get("session"),
             )
+            loop = _active_async_loop()
+            if loop is not None:
+                task = loop.create_task(write)
+                task.add_done_callback(
+                    lambda done_task, event_type=event_type: _log_async_event_write_failure(
+                        event_type,
+                        done_task,
+                        log_name="run_event_write_failed",
+                    )
+                )
+            else:
+                asyncio.run(write)
         except Exception as exc:
             logger.warning(
                 "run_event_write_failed event_type=%s error=%s",
@@ -485,7 +460,7 @@ def publish(event_type: str, data: dict[str, Any]) -> None:
             )
         else:
             try:
-                record_cortex_event(event_type, data)
+                asyncio.run(record_cortex_event_async(event_type, data))
             except Exception as exc:
                 logger.warning(
                     "cortex_event_write_failed event_type=%s error=%s",

@@ -9,6 +9,7 @@
 """
 
 import argparse
+import asyncio
 import json
 import os
 import subprocess
@@ -37,7 +38,7 @@ from brain.app.cli.memory import add_memory
 # Cross-channel recall
 # ============================================================
 
-def get_cross_channel_context(
+async def get_cross_channel_context(
     current_session: str | None = None,
     hours: int = 24,
     limit: int = 20,
@@ -53,16 +54,16 @@ def get_cross_channel_context(
         allow_global=allow_global,
     )
     vis_clause, vis_params = memory_visibility_sql(visibility_context, alias="")
-    params = {"hours_interval": f"{hours} hours", "limit": limit, **vis_params}
+    params = {"hours": hours, "limit": limit, **vis_params}
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         if current_session:
             params["current_session"] = current_session
-            rows = uow.session.execute(text("""
+            rows = (await uow.session.execute(text("""
                 SELECT id, content, memory_type, salience, source_session,
                        source, created_at, tags
                 FROM memories
-                WHERE created_at >= NOW() - INTERVAL :hours_interval
+                WHERE created_at >= NOW() - (CAST(:hours AS integer) * INTERVAL '1 hour')
                   AND source_session IS NOT NULL
                   AND source_session != :current_session
                   AND NOT archived
@@ -70,20 +71,20 @@ def get_cross_channel_context(
                   {vis_clause}
                 ORDER BY salience DESC, created_at DESC
                 LIMIT :limit
-            """.format(vis_clause=vis_clause)), params).mappings().all()
+            """.format(vis_clause=vis_clause)), params)).mappings().all()
         else:
-            rows = uow.session.execute(text("""
+            rows = (await uow.session.execute(text("""
                 SELECT id, content, memory_type, salience, source_session,
                        source, created_at, tags
                 FROM memories
-                WHERE created_at >= NOW() - INTERVAL :hours_interval
+                WHERE created_at >= NOW() - (CAST(:hours AS integer) * INTERVAL '1 hour')
                   AND source_session IS NOT NULL
                   AND NOT archived
                   AND superseded_by IS NULL
                   {vis_clause}
                 ORDER BY salience DESC, created_at DESC
                 LIMIT :limit
-            """.format(vis_clause=vis_clause)), params).mappings().all()
+            """.format(vis_clause=vis_clause)), params)).mappings().all()
 
     return [
         {
@@ -138,7 +139,7 @@ def _get_pending_review_prs() -> list[dict]:
         return []
 
 
-def cmd_wake(args):
+async def cmd_wake(args):
     """Session start: load wake-up index + recent context."""
     pending_path = os.path.join(config.BRAIN_DIR, "PENDING_REFLECTION.json")
     pending_reflection = None
@@ -152,12 +153,12 @@ def cmd_wake(args):
         with open(index_path) as f:
             index_content = f.read()
 
-    with UnitOfWork() as uow:
-        skills = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        skills = (await uow.session.execute(text("""
             SELECT name, maturity, confidence, use_count,
                    CASE WHEN use_count > 0 THEN ROUND(success_count::numeric/use_count*100,0) ELSE 0 END as pct
             FROM skills WHERE NOT archived ORDER BY use_count DESC
-        """)).mappings().all()
+        """))).mappings().all()
 
     # Morning brief
     briefs_dir = os.path.join(config.BRAIN_DIR, "briefs")
@@ -173,10 +174,10 @@ def cmd_wake(args):
 
     # Cross-channel context
     session_id = os.environ.get("ILLO_SESSION_ID", "")
-    cross_channel = get_cross_channel_context(session_id, hours=24, **_memory_scope_from_env())
+    cross_channel = await get_cross_channel_context(session_id, hours=24, **_memory_scope_from_env())
 
     # Experiment tracking
-    experiment_info = _get_experiment_info()
+    experiment_info = await _get_experiment_info()
 
     # Self-audit and trust level
     self_audit = _run_self_audit()
@@ -184,7 +185,7 @@ def cmd_wake(args):
 
     # Nightly changes: auto-merged commits and dream memories
     nightly_changes = _get_nightly_changes()
-    dream_memories = _get_dream_memories()
+    dream_memories = await _get_dream_memories()
     pending_review_prs = _get_pending_review_prs()
 
     print(json.dumps({
@@ -208,18 +209,18 @@ def cmd_wake(args):
     }, indent=2, default=str))
 
 
-def _get_experiment_info() -> dict:
+async def _get_experiment_info() -> dict:
     """Get experiment tracking info for wake output."""
     import json as _json
     from datetime import date as _date
     result = {"active_count": 0, "assessed_last_night": [], "due_soon": []}
     try:
-        with UnitOfWork() as uow:
-            rows = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            rows = (await uow.session.execute(text("""
                 SELECT id, content FROM memories
                 WHERE memory_type = 'experiment' AND NOT archived
                 ORDER BY created_at DESC
-            """)).mappings().all()
+            """))).mappings().all()
 
         today = _date.today()
         soon_threshold = (today + timedelta(days=3)).isoformat()
@@ -273,11 +274,11 @@ def _get_nightly_changes() -> list[str]:
     return []
 
 
-def _get_dream_memories() -> list[dict]:
+async def _get_dream_memories() -> list[dict]:
     """Get dream memories from the last nightly cycle."""
     try:
-        with UnitOfWork() as uow:
-            rows = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            rows = (await uow.session.execute(text("""
                 SELECT id, content, created_at
                 FROM memories
                 WHERE memory_type = 'dream'
@@ -285,7 +286,7 @@ def _get_dream_memories() -> list[dict]:
                   AND NOT archived
                 ORDER BY created_at DESC
                 LIMIT 5
-            """)).mappings().all()
+            """))).mappings().all()
             return [{"id": r["id"], "content": r["content"][:200],
                      "created": str(r["created_at"])} for r in rows]
     except Exception:
@@ -320,7 +321,7 @@ def _get_trust_info():
         return None
 
 
-def _sense_context(message: str, timeout_s: int = 30) -> list:
+async def _sense_context(message: str, timeout_s: int = 30) -> list:
     """Semantic context retrieval with graceful timeout. Returns context list."""
     import signal
 
@@ -340,13 +341,13 @@ def _sense_context(message: str, timeout_s: int = 30) -> list:
     try:
         qemb = embed_query(message)
         emb_str = vec_to_pg(qemb)
-        with UnitOfWork() as uow:
-            rows = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            rows = (await uow.session.execute(text("""
                 SELECT id, content, memory_type, salience,
                        1 - (semantic_embedding <=> CAST(:emb AS vector)) as sim
                 FROM memories WHERE NOT archived AND superseded_by IS NULL
                 ORDER BY semantic_embedding <=> CAST(:emb AS vector) LIMIT 5
-            """), {"emb": emb_str}).mappings().all()
+            """), {"emb": emb_str})).mappings().all()
 
             for row in rows:
                 if row["sim"] > 0.35:
@@ -356,7 +357,7 @@ def _sense_context(message: str, timeout_s: int = 30) -> list:
                         "similarity": round(row["sim"], 3),
                     })
 
-            uow.session.execute(text("""
+            await uow.session.execute(text("""
                 INSERT INTO retrieval_log (query_text, results_returned, top_result_id, top_score)
                 VALUES (:query_text, :results_returned, :top_result_id, :top_score)
             """), {
@@ -374,11 +375,11 @@ def _sense_context(message: str, timeout_s: int = 30) -> list:
     return context
 
 
-def cmd_sense(args):
+async def cmd_sense(args):
     """Process incoming message and retrieve semantic context."""
     message = args.message
     timeout_s = getattr(args, "timeout", 30) or 30
-    context = _sense_context(message, timeout_s=timeout_s)
+    context = await _sense_context(message, timeout_s=timeout_s)
 
     output = {
         "relevant_context": context,
@@ -388,18 +389,18 @@ def cmd_sense(args):
     print(json.dumps(output, indent=2, default=str))
 
 
-def cmd_sense_context(args):
+async def cmd_sense_context(args):
     """Standalone context retrieval — use when embed server is known to be warm."""
     timeout_s = getattr(args, "timeout", 60) or 60
-    context = _sense_context(args.message, timeout_s=timeout_s)
+    context = await _sense_context(args.message, timeout_s=timeout_s)
     print(json.dumps({"relevant_context": context, "context_count": len(context)}, indent=2, default=str))
 
 
-def cmd_encode(args):
+async def cmd_encode(args):
     """Quick-encode a memory during a session."""
     tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
     related = [int(x.strip()) for x in args.related.split(",")] if args.related else None
-    result = add_memory(
+    result = await add_memory(
         content=args.content, memory_type=args.type or "episode",
         salience=args.salience or 5.0,
         tags=tags, source="session", related_ids=related,
@@ -409,14 +410,14 @@ def cmd_encode(args):
     print(json.dumps(result, indent=2))
 
 
-def cmd_log_retrieval(args):
+async def cmd_log_retrieval(args):
     """Log retrieval feedback and adjust memory salience."""
     from retrieval_feedback import apply_retrieval_feedback
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # Find the most recent retrieval log entry
-        row = uow.session.execute(text(
+        row = (await uow.session.execute(text(
             "SELECT id FROM retrieval_log ORDER BY timestamp DESC LIMIT 1"
-        )).mappings().first()
+        ))).mappings().first()
         if not row:
             print(json.dumps({"logged": False, "error": "no retrieval_log entries"}))
             return
@@ -424,12 +425,12 @@ def cmd_log_retrieval(args):
     print(json.dumps({"logged": True, **result}))
 
 
-def cmd_sleep(args):
+async def cmd_sleep(args):
     """Session end: encode session summary."""
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         if args.summary:
             semantic_emb = embed_document(args.summary)
-            uow.session.execute(text("""
+            await uow.session.execute(text("""
                 INSERT INTO memories (content, memory_type, semantic_embedding,
                                     salience, source, tags)
                 VALUES (:content, 'episode', CAST(:semantic_emb AS vector), 5.0, 'session-end', :tags)
@@ -439,12 +440,12 @@ def cmd_sleep(args):
                 "tags": [datetime.now().strftime("%Y-%m-%d")],
             })
 
-        ret = uow.session.execute(text("""
+        ret = (await uow.session.execute(text("""
             SELECT COUNT(*) as total,
                    COUNT(*) FILTER (WHERE feedback = 'hit') as hits,
                    COUNT(*) FILTER (WHERE feedback = 'miss') as misses
             FROM retrieval_log WHERE timestamp::date = CURRENT_DATE
-        """)).mappings().first()
+        """))).mappings().first()
 
     print(json.dumps({
         "session_encoded": bool(args.summary),
@@ -452,29 +453,29 @@ def cmd_sleep(args):
     }))
 
 
-def cmd_status(args):
+async def cmd_status(args):
     """Quick health dashboard."""
-    with UnitOfWork() as uow:
-        mem_row = uow.session.execute(text(
+    async with UnitOfWork() as uow:
+        mem_row = (await uow.session.execute(text(
             "SELECT COUNT(*) as c FROM memories WHERE NOT archived"
-        )).mappings().first()
+        ))).mappings().first()
         mem_count = mem_row["c"]
-        edge_row = uow.session.execute(text("SELECT COUNT(*) as c FROM edges")).mappings().first()
+        edge_row = (await uow.session.execute(text("SELECT COUNT(*) as c FROM edges"))).mappings().first()
         edge_count = edge_row["c"]
 
-        skill_rows = uow.session.execute(text(
+        skill_rows = (await uow.session.execute(text(
             "SELECT maturity, COUNT(*) as cnt FROM skills WHERE NOT archived GROUP BY maturity"
-        )).mappings().all()
+        ))).mappings().all()
         skill_maturity = {r["maturity"]: r["cnt"] for r in skill_rows}
 
-        ret = uow.session.execute(text("""
+        ret = (await uow.session.execute(text("""
             SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE feedback = 'hit') as hits
             FROM retrieval_log WHERE timestamp >= CURRENT_DATE - INTERVAL '7 days'
-        """)).mappings().first()
+        """))).mappings().first()
 
-        last_consol = uow.session.execute(text(
+        last_consol = (await uow.session.execute(text(
             "SELECT run_date, status FROM consolidation_runs ORDER BY started_at DESC LIMIT 1"
-        )).mappings().first()
+        ))).mappings().first()
 
     health = server_health()
     embed_status = f"up ({health['uptime_s']}s, shuts down in {health.get('shutdown_in_s', '?')}s)" if health else "off (starts on demand)"
@@ -491,7 +492,7 @@ def cmd_status(args):
 # Main
 # ============================================================
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Illo Session Hooks")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -510,10 +511,10 @@ def main():
     sub.add_parser("status")
 
     args = parser.parse_args()
-    {"wake": cmd_wake, "sense": cmd_sense,
-     "sense-context": cmd_sense_context, "encode": cmd_encode,
-     "log-retrieval": cmd_log_retrieval, "sleep": cmd_sleep, "status": cmd_status}[args.command](args)
+    await {"wake": cmd_wake, "sense": cmd_sense,
+           "sense-context": cmd_sense_context, "encode": cmd_encode,
+           "log-retrieval": cmd_log_retrieval, "sleep": cmd_sleep, "status": cmd_status}[args.command](args)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

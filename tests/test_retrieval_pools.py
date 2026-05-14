@@ -6,7 +6,7 @@ orchestration logic (Task 8).
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -252,7 +252,7 @@ class TestPoolRetrieverOrchestration:
             "salience": salience,
         }
 
-    def test_results_tagged_with_pool(self):
+    async def test_results_tagged_with_pool(self):
         retriever = PoolRetriever(RetrievalConfig(total_results=6))
 
         exploit_results = [self._make_pool_result("exploit-1", [1, 0, 0, 0, 0])]
@@ -263,14 +263,14 @@ class TestPoolRetrieverOrchestration:
              patch.object(retriever, "_explore_pool", return_value=explore_results), \
              patch.object(retriever, "_narrative_pool", return_value=narrative_results):
 
-            results = retriever.retrieve([0.5, 0.5, 0.5, 0.5, 0.5])
+            results = await retriever.retrieve([0.5, 0.5, 0.5, 0.5, 0.5])
 
         pools_found = {r["_pool"] for r in results}
         assert PoolName.EXPLOIT in pools_found
         assert PoolName.EXPLORE in pools_found
         assert PoolName.NARRATIVE in pools_found
 
-    def test_dedup_across_pools(self):
+    async def test_dedup_across_pools(self):
         """Duplicate results across pools are deduplicated."""
         retriever = PoolRetriever(RetrievalConfig(total_results=5))
 
@@ -283,14 +283,14 @@ class TestPoolRetrieverOrchestration:
              patch.object(retriever, "_explore_pool", return_value=explore_results), \
              patch.object(retriever, "_narrative_pool", return_value=narrative_results):
 
-            results = retriever.retrieve([0.5, 0.5, 0.5, 0.5, 0.5])
+            results = await retriever.retrieve([0.5, 0.5, 0.5, 0.5, 0.5])
 
         # The duplicate should be removed
         contents = [r["content"] for r in results]
         assert "same memory" in contents
         assert "same memory dup" not in contents
 
-    def test_respects_total_results_limit(self):
+    async def test_respects_total_results_limit(self):
         retriever = PoolRetriever(RetrievalConfig(total_results=2))
 
         exploit_results = [
@@ -304,18 +304,18 @@ class TestPoolRetrieverOrchestration:
              patch.object(retriever, "_explore_pool", return_value=explore_results), \
              patch.object(retriever, "_narrative_pool", return_value=narrative_results):
 
-            results = retriever.retrieve([0.5, 0.5, 0.5, 0.5, 0.5])
+            results = await retriever.retrieve([0.5, 0.5, 0.5, 0.5, 0.5])
 
         assert len(results) <= 2
 
-    def test_custom_ratios_override(self):
+    async def test_custom_ratios_override(self):
         retriever = PoolRetriever(RetrievalConfig(total_results=6))
 
         with patch.object(retriever, "_exploit_pool", return_value=[]) as mock_exploit, \
              patch.object(retriever, "_explore_pool", return_value=[]) as mock_explore, \
              patch.object(retriever, "_narrative_pool", return_value=[]) as mock_narrative:
 
-            retriever.retrieve(
+            await retriever.retrieve(
                 [0.5, 0.5],
                 ratios={PoolName.EXPLOIT: 0.5, PoolName.EXPLORE: 0.3, PoolName.NARRATIVE: 0.2},
             )
@@ -325,25 +325,25 @@ class TestPoolRetrieverOrchestration:
         mock_explore.assert_called_once()
         mock_narrative.assert_called_once()
 
-    def test_empty_pools_return_empty(self):
+    async def test_empty_pools_return_empty(self):
         retriever = PoolRetriever()
 
         with patch.object(retriever, "_exploit_pool", return_value=[]), \
              patch.object(retriever, "_explore_pool", return_value=[]), \
              patch.object(retriever, "_narrative_pool", return_value=[]):
 
-            results = retriever.retrieve([0.5, 0.5])
+            results = await retriever.retrieve([0.5, 0.5])
 
         assert results == []
 
-    def test_no_session_pools_return_empty(self):
+    async def test_no_session_pools_return_empty(self):
         """Without a session, pool methods return empty lists."""
         retriever = PoolRetriever()
-        assert retriever._exploit_pool([0.5], 3) == []
-        assert retriever._explore_pool([0.5], 3) == []
-        assert retriever._narrative_pool([0.5], 3) == []
+        assert await retriever._exploit_pool([0.5], 3) == []
+        assert await retriever._explore_pool([0.5], 3) == []
+        assert await retriever._narrative_pool([0.5], 3) == []
 
-    def test_narrative_pool_suppresses_cross_org_rows(self):
+    async def test_narrative_pool_suppresses_cross_org_rows(self):
         retriever = PoolRetriever(RetrievalConfig(user_id="user-1", org_id="org-1"))
         session = MagicMock()
         same_org = SimpleNamespace(
@@ -364,9 +364,9 @@ class TestPoolRetrieverOrchestration:
             user_id="user-3",
             org_id="org-2",
         )
-        session.scalars.return_value.all.return_value = [same_org, other_org]
+        session.scalars = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[same_org, other_org])))
 
-        results = retriever._narrative_pool([0.5, 0.5], 3, session=session)
+        results = await retriever._narrative_pool([0.5, 0.5], 3, session=session)
 
         assert [row["id"] for row in results] == [1]
         assert results[0]["visibility"] == "org"

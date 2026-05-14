@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.systems.runs.ui_events import run_event_to_ui_message
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
@@ -24,14 +25,13 @@ def _event_message(event: AgentRunEventRow, run: AgentRunRow, org_id: str | None
     return run_event_to_ui_message(event, run=run, org_id=org_id)
 
 
-def run_event_backbone_status(
-    session,
+def _backbone_status_payload(
+    max_event_id: int,
     consumer_name: str = DEFAULT_CONSUMER_NAME,
     *,
     consumer_running: bool | None = None,
     stale_after_seconds: int = 120,
 ) -> dict[str, Any]:
-    max_event_id = int(session.scalar(select(func.coalesce(func.max(AgentRunEventRow.id), 0))) or 0)
     lag = max(0, max_event_id - int(_last_event_id or 0))
     health = "healthy"
     if consumer_running is False:
@@ -50,6 +50,22 @@ def run_event_backbone_status(
         "replay_safe": health in {"healthy", "lagging"},
         "stale_after_seconds": stale_after_seconds,
     }
+
+
+async def async_run_event_backbone_status(
+    session: AsyncSession,
+    consumer_name: str = DEFAULT_CONSUMER_NAME,
+    *,
+    consumer_running: bool | None = None,
+    stale_after_seconds: int = 120,
+) -> dict[str, Any]:
+    max_event_id = int(await session.scalar(select(func.coalesce(func.max(AgentRunEventRow.id), 0))) or 0)
+    return _backbone_status_payload(
+        max_event_id,
+        consumer_name,
+        consumer_running=consumer_running,
+        stale_after_seconds=stale_after_seconds,
+    )
 
 
 async def fanout_run_events_once(
@@ -130,4 +146,9 @@ async def fanout_run_events(
             await asyncio.sleep(poll_interval_sec)
 
 
-__all__ = ["DEFAULT_CONSUMER_NAME", "fanout_run_events", "fanout_run_events_once", "run_event_backbone_status"]
+__all__ = [
+    "DEFAULT_CONSUMER_NAME",
+    "async_run_event_backbone_status",
+    "fanout_run_events",
+    "fanout_run_events_once",
+]

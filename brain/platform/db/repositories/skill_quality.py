@@ -15,7 +15,7 @@ class SkillRunEvidenceRepository(BaseRepository[SkillRunEvidence]):
 
     model = SkillRunEvidence
 
-    def record_evidence_idempotent(
+    async def a_record_evidence_idempotent(
         self,
         *,
         skill_name: str,
@@ -44,9 +44,8 @@ class SkillRunEvidenceRepository(BaseRepository[SkillRunEvidence]):
         org_id: str | None = None,
         user_id: str | None = None,
     ) -> SkillRunEvidence:
-        """Insert evidence once per run/digest pair when run is known."""
         if run_id is not None:
-            existing = self.get_by_run_digest(run_id, skill_effective_digest)
+            existing = await self.a_get_by_run_digest(run_id, skill_effective_digest)
             if existing is not None:
                 return existing
 
@@ -78,10 +77,10 @@ class SkillRunEvidenceRepository(BaseRepository[SkillRunEvidence]):
             user_id=user_id,
         )
         self._session.add(evidence)
-        self._session.flush()
+        await self._session.flush()
         return evidence
 
-    def get_by_run_digest(
+    async def a_get_by_run_digest(
         self,
         run_id: int,
         skill_effective_digest: str,
@@ -90,9 +89,9 @@ class SkillRunEvidenceRepository(BaseRepository[SkillRunEvidence]):
             SkillRunEvidence.run_id == run_id,
             SkillRunEvidence.skill_effective_digest == skill_effective_digest,
         )
-        return self._session.scalars(stmt).first()
+        return (await self._session.scalars(stmt)).first()
 
-    def list_by_skill(
+    async def a_list_by_skill(
         self,
         *,
         skill_effective_digest: str | None = None,
@@ -112,15 +111,14 @@ class SkillRunEvidenceRepository(BaseRepository[SkillRunEvidence]):
         stmt = stmt.order_by(SkillRunEvidence.created_at.desc(), SkillRunEvidence.id.desc())
         if limit:
             stmt = stmt.limit(limit)
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def aggregate_counts(
+    async def a_aggregate_counts(
         self,
         *,
         skill_effective_digest: str | None = None,
         skill_name: str | None = None,
     ) -> dict[str, Any]:
-        """Return simple quality-signal counts for one skill slice."""
         stmt = select(
             SkillRunEvidence.outcome_label,
             SkillRunEvidence.verifier_status,
@@ -145,7 +143,8 @@ class SkillRunEvidenceRepository(BaseRepository[SkillRunEvidence]):
             "by_verifier_status": defaultdict(int),
             "by_user_feedback": defaultdict(int),
         }
-        for outcome_label, verifier_status, user_feedback, count in self._session.execute(stmt):
+        result = await self._session.execute(stmt)
+        for outcome_label, verifier_status, user_feedback, count in result:
             total += count
             counts["by_outcome_label"][outcome_label or "unknown"] += count
             counts["by_verifier_status"][verifier_status or "unknown"] += count

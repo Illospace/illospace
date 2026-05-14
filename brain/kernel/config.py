@@ -80,7 +80,7 @@ DB_DSN = {
 
 from urllib.parse import quote_plus as _qp
 
-_DEFAULT_DB_SYNC_URL = (
+_DEFAULT_DB_URL = (
     f"postgresql://{_qp(DB_USER)}:{_qp(DB_PASSWORD)}"
     f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
@@ -88,7 +88,7 @@ _DB_URL_FROM_ENV = (
     os.getenv("DATABASE_URL")
     or os.getenv("DB_URL")
     or os.getenv("BRAIN_DB_URL")
-    or _DEFAULT_DB_SYNC_URL
+    or _DEFAULT_DB_URL
 )
 
 
@@ -108,21 +108,6 @@ def _to_async_pg_url(url: str) -> str:
     return url
 
 
-def _to_sync_pg_url(url: str) -> str:
-    """Return a sync PostgreSQL URL for Alembic and legacy compatibility."""
-
-    if url.startswith("postgresql+asyncpg://"):
-        return url.replace("postgresql+asyncpg://", "postgresql://", 1)
-    if url.startswith("postgresql+psycopg://"):
-        return url.replace("postgresql+psycopg://", "postgresql://", 1)
-    if url.startswith("postgresql+psycopg2://"):
-        return url.replace("postgresql+psycopg2://", "postgresql://", 1)
-    if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql://", 1)
-    return url
-
-
-DB_SYNC_URL = _to_sync_pg_url(_DB_URL_FROM_ENV)
 DB_ASYNC_URL = _to_async_pg_url(_DB_URL_FROM_ENV)
 DB_URL = DB_ASYNC_URL
 
@@ -314,7 +299,7 @@ def _row_value(row, key: str, index: int = 0):
     return row[index]
 
 
-def fetch_database_vector_type(
+async def fetch_database_vector_type(
     connection,
     table: str,
     column: str,
@@ -325,7 +310,7 @@ def fetch_database_vector_type(
 
     from sqlalchemy import text as sa_text
 
-    row = connection.execute(
+    result = await connection.execute(
         sa_text(
             """
             SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) AS vector_type
@@ -339,11 +324,12 @@ def fetch_database_vector_type(
             """
         ),
         {"schema": schema, "table": table, "column": column},
-    ).fetchone()
+    )
+    row = result.fetchone()
     return _row_value(row, "vector_type")
 
 
-def collect_embedding_typmod_mismatches(
+async def collect_embedding_typmod_mismatches(
     connection,
     *,
     schema: str = "public",
@@ -352,7 +338,7 @@ def collect_embedding_typmod_mismatches(
 
     mismatches: list[EmbeddingTypmodMismatch] = []
     for spec in embedding_database_vector_specs():
-        actual_type = fetch_database_vector_type(
+        actual_type = await fetch_database_vector_type(
             connection,
             spec.table,
             spec.column,
@@ -373,10 +359,10 @@ def collect_embedding_typmod_mismatches(
     return mismatches
 
 
-def validate_embedding_vector_typmods(connection, *, schema: str = "public") -> None:
+async def validate_embedding_vector_typmods(connection, *, schema: str = "public") -> None:
     """Fail clearly when database vector dimensions drift from policy."""
 
-    mismatches = collect_embedding_typmod_mismatches(connection, schema=schema)
+    mismatches = await collect_embedding_typmod_mismatches(connection, schema=schema)
     if not mismatches:
         return
 

@@ -1,7 +1,7 @@
 """Tests for agent session user_id validation."""
 import json
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 
 def _make_uow(first_result=None):
@@ -9,6 +9,8 @@ def _make_uow(first_result=None):
     uow = MagicMock()
     uow.__enter__ = MagicMock(return_value=uow)
     uow.__exit__ = MagicMock(return_value=False)
+    uow.__aenter__ = AsyncMock(return_value=uow)
+    uow.__aexit__ = AsyncMock(return_value=False)
     uow.session.execute.return_value.mappings.return_value.first.return_value = first_result
     return uow
 

@@ -1,7 +1,7 @@
 """Tests for Cortex-to-Brain encoding on thought archive."""
 import json
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 
 def _make_idea_row(title="Test idea", display_title=None, agent_details=None):
@@ -43,11 +43,11 @@ def _make_uow(idea_row, thread_rows):
     thread_exec = MagicMock()
     thread_exec.mappings.return_value.all.return_value = thread_rows
 
-    mock_session.execute.side_effect = [idea_exec, thread_exec]
+    mock_session.execute = AsyncMock(side_effect=[idea_exec, thread_exec])
 
     mock_uow = MagicMock()
-    mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-    mock_uow.__exit__ = MagicMock(return_value=False)
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
     mock_uow.session = mock_session
     return mock_uow
 
@@ -67,8 +67,9 @@ def _make_uow_factory(idea_row, thread_rows):
             return main_uow
         # Subsequent UoW contexts (encoded_at update)
         update_uow = MagicMock()
-        update_uow.__enter__ = MagicMock(return_value=update_uow)
-        update_uow.__exit__ = MagicMock(return_value=False)
+        update_uow.__aenter__ = AsyncMock(return_value=update_uow)
+        update_uow.__aexit__ = AsyncMock(return_value=False)
+        update_uow.session.execute = AsyncMock()
         return update_uow
 
     return factory
@@ -82,8 +83,8 @@ def _make_gpu_client(content: str):
 
 
 @patch("brain.platform.gpu_client.get_client")
-@patch("brain.app.cli.memory.add_memory")
-def test_encode_with_replies_high_salience(mock_add_mem, mock_get_client):
+@patch("brain.app.cli.memory.add_memory", new_callable=AsyncMock)
+async def test_encode_with_replies_high_salience(mock_add_mem, mock_get_client):
     """Thought with replies should encode with higher salience."""
     from brain.systems.cortex.encode import encode_thought_to_brain as _encode_thought_to_brain
 
@@ -96,7 +97,7 @@ def test_encode_with_replies_high_salience(mock_add_mem, mock_get_client):
     mock_add_mem.return_value = {"id": 1}
 
     with patch("brain.systems.cortex.encode.UnitOfWork", side_effect=_make_uow_factory(idea_row, thread_rows)):
-        _encode_thought_to_brain("abc12345-0000-0000-0000-000000000000")
+        await _encode_thought_to_brain("abc12345-0000-0000-0000-000000000000")
 
     mock_add_mem.assert_called_once()
     call_kwargs = mock_add_mem.call_args[1]
@@ -108,8 +109,8 @@ def test_encode_with_replies_high_salience(mock_add_mem, mock_get_client):
 
 
 @patch("brain.platform.gpu_client.get_client")
-@patch("brain.app.cli.memory.add_memory")
-def test_encode_with_agent_work(mock_add_mem, mock_get_client):
+@patch("brain.app.cli.memory.add_memory", new_callable=AsyncMock)
+async def test_encode_with_agent_work(mock_add_mem, mock_get_client):
     """Thought with agent work should encode as task_completed."""
     from brain.systems.cortex.encode import encode_thought_to_brain as _encode_thought_to_brain
 
@@ -125,7 +126,7 @@ def test_encode_with_agent_work(mock_add_mem, mock_get_client):
     mock_add_mem.return_value = {"id": 2}
 
     with patch("brain.systems.cortex.encode.UnitOfWork", side_effect=_make_uow_factory(idea_row, thread_rows)):
-        _encode_thought_to_brain("abc12345-0000-0000-0000-000000000000")
+        await _encode_thought_to_brain("abc12345-0000-0000-0000-000000000000")
 
     mock_add_mem.assert_called_once()
     call_kwargs = mock_add_mem.call_args[1]
@@ -134,8 +135,8 @@ def test_encode_with_agent_work(mock_add_mem, mock_get_client):
 
 
 @patch("brain.platform.gpu_client.get_client")
-@patch("brain.app.cli.memory.add_memory")
-def test_encode_no_interaction_low_salience(mock_add_mem, mock_get_client):
+@patch("brain.app.cli.memory.add_memory", new_callable=AsyncMock)
+async def test_encode_no_interaction_low_salience(mock_add_mem, mock_get_client):
     """Thought with no interaction should encode with low salience."""
     from brain.systems.cortex.encode import encode_thought_to_brain as _encode_thought_to_brain
 
@@ -148,7 +149,7 @@ def test_encode_no_interaction_low_salience(mock_add_mem, mock_get_client):
     mock_add_mem.return_value = {"id": 3}
 
     with patch("brain.systems.cortex.encode.UnitOfWork", side_effect=_make_uow_factory(idea_row, thread_rows)):
-        _encode_thought_to_brain("abc12345-0000-0000-0000-000000000000")
+        await _encode_thought_to_brain("abc12345-0000-0000-0000-000000000000")
 
     mock_add_mem.assert_called_once()
     call_kwargs = mock_add_mem.call_args[1]
@@ -156,8 +157,8 @@ def test_encode_no_interaction_low_salience(mock_add_mem, mock_get_client):
 
 
 @patch("brain.platform.gpu_client.get_client")
-@patch("brain.app.cli.memory.add_memory")
-def test_encode_skip_no_memory(mock_add_mem, mock_get_client):
+@patch("brain.app.cli.memory.add_memory", new_callable=AsyncMock)
+async def test_encode_skip_no_memory(mock_add_mem, mock_get_client):
     """When Qwen returns SKIP, no memory should be created."""
     from brain.systems.cortex.encode import encode_thought_to_brain as _encode_thought_to_brain
 
@@ -167,13 +168,13 @@ def test_encode_skip_no_memory(mock_add_mem, mock_get_client):
     mock_get_client.return_value = _make_gpu_client("SKIP")
 
     with patch("brain.systems.cortex.encode.UnitOfWork", side_effect=_make_uow_factory(idea_row, thread_rows)):
-        _encode_thought_to_brain("abc12345-0000-0000-0000-000000000000")
+        await _encode_thought_to_brain("abc12345-0000-0000-0000-000000000000")
 
     mock_add_mem.assert_not_called()
 
 
 @patch("brain.platform.gpu_client.get_client")
-def test_gpu_client_uses_correct_params(mock_get_client):
+async def test_gpu_client_uses_correct_params(mock_get_client):
     """Verify gpu_client.generate is called with think=False, temp 0.3, max_tokens=100."""
     from brain.systems.cortex.encode import encode_thought_to_brain as _encode_thought_to_brain
 
@@ -184,7 +185,7 @@ def test_gpu_client_uses_correct_params(mock_get_client):
     mock_get_client.return_value = client
 
     with patch("brain.systems.cortex.encode.UnitOfWork", side_effect=_make_uow_factory(idea_row, thread_rows)):
-        _encode_thought_to_brain("abc12345-0000-0000-0000-000000000000")
+        await _encode_thought_to_brain("abc12345-0000-0000-0000-000000000000")
 
     client.generate.assert_called_once()
     call_kwargs = client.generate.call_args[1]

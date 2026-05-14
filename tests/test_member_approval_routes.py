@@ -1,14 +1,15 @@
 """Coverage for workspace member access approvals."""
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
 
 from brain.app.api.routers import brain
+
+pytestmark = pytest.mark.asyncio
 
 
 def _user(**overrides):
@@ -32,32 +33,32 @@ def _target(**overrides):
     return SimpleNamespace(**fields)
 
 
-def test_workspace_member_can_approve_pending_user_in_same_org():
+async def test_workspace_member_can_approve_pending_user_in_same_org():
     db = MagicMock()
     pending = _target()
-    db.get.return_value = pending
+    db.get = AsyncMock(return_value=pending)
 
-    result = asyncio.run(brain.approve_user("pending-1", db=db, user=_user()))
+    result = await brain.approve_user("pending-1", db=db, user=_user())
 
     assert result == {"ok": True, "user_id": "pending-1", "approved": True}
     assert pending.approved is True
 
 
-def test_workspace_member_cannot_approve_user_outside_org():
+async def test_workspace_member_cannot_approve_user_outside_org():
     db = MagicMock()
-    db.get.return_value = _target(org_id="org-2")
+    db.get = AsyncMock(return_value=_target(org_id="org-2"))
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(brain.approve_user("pending-1", db=db, user=_user()))
+        await brain.approve_user("pending-1", db=db, user=_user())
 
     assert exc.value.status_code == 404
 
 
-def test_service_principal_cannot_approve_pending_user():
+async def test_service_principal_cannot_approve_pending_user():
     db = MagicMock()
-    db.get.return_value = _target()
+    db.get = AsyncMock(return_value=_target())
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(brain.approve_user("pending-1", db=db, user=_user(principal_type="service")))
+        await brain.approve_user("pending-1", db=db, user=_user(principal_type="service"))
 
     assert exc.value.status_code == 403

@@ -4,18 +4,17 @@ from __future__ import annotations
 import os
 import re
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterator
+from typing import Any
 
 import httpx
 from sqlalchemy import and_, func, or_, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.run import AgentRun
 from brain.platform.provider_health import provider_health_snapshot
-from brain.app.scheduler.daemon import scheduler_health_snapshot
+from brain.app.scheduler.daemon import async_scheduler_health_snapshot
 
 APP_VERSION = "6.0.0"
 DEFAULT_DB_TIMEOUT_MS = 1500
@@ -124,22 +123,19 @@ def sanitize_for_health(value: Any) -> Any:
     return value
 
 
-@contextmanager
-def _health_db_session(session: Session | None = None) -> Iterator[Session]:
-    if session is None:
-        raise RuntimeError("health checks require an explicit database session")
-    yield session
+async def _rollback_health_session(session: AsyncSession) -> None:
+    try:
+        await session.rollback()
+    except Exception:
+        pass
 
 
-def _apply_statement_timeout(session: Session, timeout_ms: int) -> None:
+async def _apply_statement_timeout(session: AsyncSession, timeout_ms: int) -> None:
     """Best-effort PostgreSQL statement timeout for health probes."""
     try:
-        session.execute(text(f"SET LOCAL statement_timeout = {int(timeout_ms)}"))
+        await session.execute(text(f"SET LOCAL statement_timeout = {int(timeout_ms)}"))
     except Exception:
-        try:
-            session.rollback()
-        except Exception:
-            pass
+        await _rollback_health_session(session)
 
 
 def _result_scalars(result: Any) -> set[str]:
@@ -156,11 +152,12 @@ def _alembic_head_revisions() -> set[str]:
     return set(script.get_heads())
 
 
-def _database_check(session: Session, *, timeout_ms: int = DEFAULT_DB_TIMEOUT_MS) -> HealthCheck:
+async def _database_check(session: AsyncSession, *, timeout_ms: int = DEFAULT_DB_TIMEOUT_MS) -> HealthCheck:
     start = time.monotonic()
     try:
-        _apply_statement_timeout(session, timeout_ms)
-        session.execute(text("SELECT 1")).scalar()
+        await _apply_statement_timeout(session, timeout_ms)
+        result = await session.execute(text("SELECT 1"))
+        result.scalar()
         return HealthCheck(
             name="database",
             status="ok",
@@ -168,6 +165,7 @@ def _database_check(session: Session, *, timeout_ms: int = DEFAULT_DB_TIMEOUT_MS
             latency_ms=_elapsed_ms(start),
         )
     except Exception as exc:
+        await _rollback_health_session(session)
         return HealthCheck(
             name="database",
             status="failed",
@@ -178,13 +176,13 @@ def _database_check(session: Session, *, timeout_ms: int = DEFAULT_DB_TIMEOUT_MS
         )
 
 
-def _migration_head_check(session: Session, *, timeout_ms: int = DEFAULT_DB_TIMEOUT_MS) -> HealthCheck:
+async def _migration_head_check(session: AsyncSession, *, timeout_ms: int = DEFAULT_DB_TIMEOUT_MS) -> HealthCheck:
     start = time.monotonic()
     try:
         head_revisions = _alembic_head_revisions()
-        _apply_statement_timeout(session, timeout_ms)
+        await _apply_statement_timeout(session, timeout_ms)
         current_revisions = _result_scalars(
-            session.execute(text("SELECT version_num FROM alembic_version"))
+            await session.execute(text("SELECT version_num FROM alembic_version"))
         )
         if current_revisions == head_revisions:
             return HealthCheck(
@@ -209,6 +207,7 @@ def _migration_head_check(session: Session, *, timeout_ms: int = DEFAULT_DB_TIME
             remediation="Run `python3 -m alembic upgrade head` before routing traffic.",
         )
     except Exception as exc:
+        await _rollback_health_session(session)
         return HealthCheck(
             name="migration_head",
             status="failed",
@@ -219,8 +218,8 @@ def _migration_head_check(session: Session, *, timeout_ms: int = DEFAULT_DB_TIME
         )
 
 
-def _event_backbone_health_check(
-    session: Session,
+async def _event_backbone_health_check(
+    session: AsyncSession,
     *,
     consumer_running: bool | None,
     timeout_ms: int = DEFAULT_DB_TIMEOUT_MS,
@@ -228,10 +227,10 @@ def _event_backbone_health_check(
     start = time.monotonic()
     try:
         from brain.app.api.ws.run_events import DEFAULT_CONSUMER_NAME
-        from brain.systems.runs.event_log import run_event_backbone_status
+        from brain.systems.runs.event_log import async_run_event_backbone_status
 
-        _apply_statement_timeout(session, timeout_ms)
-        status = run_event_backbone_status(
+        await _apply_statement_timeout(session, timeout_ms)
+        status = await async_run_event_backbone_status(
             session,
             DEFAULT_CONSUMER_NAME,
             consumer_running=consumer_running,
@@ -257,6 +256,7 @@ def _event_backbone_health_check(
             remediation="Check the API run-event fanout task and consumer error logs.",
         )
     except Exception as exc:
+        await _rollback_health_session(session)
         return HealthCheck(
             name="event_backbone",
             status="failed",
@@ -302,27 +302,30 @@ def liveness_health_snapshot() -> dict[str, Any]:
     }
 
 
-def readiness_health_snapshot(
+async def readiness_health_snapshot(
     *,
     consumer_running: bool | None = None,
-    session: Session | None = None,
+    session: AsyncSession | None = None,
 ) -> dict[str, Any]:
     timeout_ms = _timeout_ms("HEALTH_READY_DB_TIMEOUT_MS", DEFAULT_DB_TIMEOUT_MS)
     checks: dict[str, HealthCheck] = {}
     try:
-        with _health_db_session(session) as db:
-            checks["database"] = _database_check(db, timeout_ms=timeout_ms)
-            if checks["database"].ok:
-                checks["migration_head"] = _migration_head_check(db, timeout_ms=timeout_ms)
-                checks["event_backbone"] = _event_backbone_health_check(
-                    db,
-                    consumer_running=consumer_running,
-                    timeout_ms=timeout_ms,
-                )
-            else:
-                checks["migration_head"] = _skipped_check("migration_head", "blocked by database failure")
-                checks["event_backbone"] = _skipped_check("event_backbone", "blocked by database failure")
+        if session is None:
+            raise RuntimeError("health checks require an explicit database session")
+        checks["database"] = await _database_check(session, timeout_ms=timeout_ms)
+        if checks["database"].ok:
+            checks["migration_head"] = await _migration_head_check(session, timeout_ms=timeout_ms)
+            checks["event_backbone"] = await _event_backbone_health_check(
+                session,
+                consumer_running=consumer_running,
+                timeout_ms=timeout_ms,
+            )
+        else:
+            checks["migration_head"] = _skipped_check("migration_head", "blocked by database failure")
+            checks["event_backbone"] = _skipped_check("event_backbone", "blocked by database failure")
     except Exception as exc:
+        if session is not None:
+            await _rollback_health_session(session)
         checks["database"] = HealthCheck(
             name="database",
             status="failed",
@@ -485,13 +488,14 @@ def _provider_health_check() -> HealthCheck:
         )
 
 
-def _scheduler_health_check(session: Session | None = None) -> HealthCheck:
+async def _scheduler_health_check(session: AsyncSession | None = None) -> HealthCheck:
     start = time.monotonic()
     timeout_ms = _timeout_ms("HEALTH_DEEP_DB_TIMEOUT_MS", DEFAULT_DEEP_TIMEOUT_MS)
     try:
-        with _health_db_session(session) as db:
-            _apply_statement_timeout(db, timeout_ms)
-            snapshot = scheduler_health_snapshot(db)
+        if session is None:
+            raise RuntimeError("health checks require an explicit database session")
+        await _apply_statement_timeout(session, timeout_ms)
+        snapshot = await async_scheduler_health_snapshot(session)
         scheduler_status = ((snapshot.get("health") or {}).get("status") or "unknown").lower()
         if scheduler_status in {"healthy", "idle"}:
             status = "ok"
@@ -515,6 +519,8 @@ def _scheduler_health_check(session: Session | None = None) -> HealthCheck:
             remediation=remediation,
         )
     except Exception as exc:
+        if session is not None:
+            await _rollback_health_session(session)
         return HealthCheck(
             name="scheduler",
             status="failed",
@@ -548,7 +554,7 @@ def _run_row_payload(run: AgentRun, *, now: datetime | None = None) -> dict[str,
     }
 
 
-def _run_health_check(session: Session | None = None) -> HealthCheck:
+async def _run_health_check(session: AsyncSession | None = None) -> HealthCheck:
     start = time.monotonic()
     timeout_ms = _timeout_ms("HEALTH_DEEP_DB_TIMEOUT_MS", DEFAULT_DEEP_TIMEOUT_MS)
     stuck_after_seconds = _int_env(
@@ -566,33 +572,34 @@ def _run_health_check(session: Session | None = None) -> HealthCheck:
     stuck_cutoff = now - timedelta(seconds=stuck_after_seconds)
     failure_cutoff = now - timedelta(minutes=failure_window_minutes)
     try:
-        with _health_db_session(session) as db:
-            _apply_statement_timeout(db, timeout_ms)
-            stuck_stmt = (
-                select(AgentRun)
-                .where(
-                    AgentRun.status.in_(["starting", "running", "paused", "verifying"]),
-                    func.coalesce(AgentRun.updated_at, AgentRun.started_at, AgentRun.created_at) <= stuck_cutoff,
-                )
-                .order_by(AgentRun.created_at.asc())
-                .limit(recent_limit)
+        if session is None:
+            raise RuntimeError("health checks require an explicit database session")
+        await _apply_statement_timeout(session, timeout_ms)
+        stuck_stmt = (
+            select(AgentRun)
+            .where(
+                AgentRun.status.in_(["starting", "running", "paused", "verifying"]),
+                func.coalesce(AgentRun.updated_at, AgentRun.started_at, AgentRun.created_at) <= stuck_cutoff,
             )
-            stuck_runs = list(db.scalars(stuck_stmt).all())
-            recent_failure_clause = and_(
-                AgentRun.status.in_(["failed"]),
-                func.coalesce(AgentRun.completed_at, AgentRun.created_at) >= failure_cutoff,
-            )
-            recent_failures = list(
-                db.scalars(
-                    select(AgentRun)
-                    .where(recent_failure_clause)
-                    .order_by(func.coalesce(AgentRun.completed_at, AgentRun.created_at).desc())
-                    .limit(recent_limit)
-                ).all()
-            )
-            recent_failure_count = db.scalar(
-                select(func.count()).select_from(AgentRun).where(recent_failure_clause)
-            ) or 0
+            .order_by(AgentRun.created_at.asc())
+            .limit(recent_limit)
+        )
+        stuck_result = await session.scalars(stuck_stmt)
+        stuck_runs = list(stuck_result.all())
+        recent_failure_clause = and_(
+            AgentRun.status.in_(["failed"]),
+            func.coalesce(AgentRun.completed_at, AgentRun.created_at) >= failure_cutoff,
+        )
+        recent_failure_result = await session.scalars(
+            select(AgentRun)
+            .where(recent_failure_clause)
+            .order_by(func.coalesce(AgentRun.completed_at, AgentRun.created_at).desc())
+            .limit(recent_limit)
+        )
+        recent_failures = list(recent_failure_result.all())
+        recent_failure_count = await session.scalar(
+            select(func.count()).select_from(AgentRun).where(recent_failure_clause)
+        ) or 0
 
         status = "ok"
         reasons: list[str] = []
@@ -618,6 +625,8 @@ def _run_health_check(session: Session | None = None) -> HealthCheck:
             remediation="Inspect stuck run leases and recent failure errors." if status != "ok" else None,
         )
     except Exception as exc:
+        if session is not None:
+            await _rollback_health_session(session)
         return HealthCheck(
             name="run",
             status="failed",
@@ -628,16 +637,16 @@ def _run_health_check(session: Session | None = None) -> HealthCheck:
         )
 
 
-def deep_health_snapshot(
+async def deep_health_snapshot(
     *,
     consumer_running: bool | None = None,
-    session: Session | None = None,
+    session: AsyncSession | None = None,
 ) -> dict[str, Any]:
     checks = {
         "embedding": _embedding_health_check(),
         "providers": _provider_health_check(),
-        "scheduler": _scheduler_health_check(session) if session is not None else _scheduler_health_check(),
-        "run": _run_health_check(session) if session is not None else _run_health_check(),
+        "scheduler": await _scheduler_health_check(session),
+        "run": await _run_health_check(session),
     }
     if consumer_running is not None:
         checks["event_backbone_runtime"] = HealthCheck(
@@ -671,41 +680,44 @@ def deep_health_snapshot(
     return sanitize_for_health(payload)
 
 
-def compatibility_health_snapshot(
+async def compatibility_health_snapshot(
     *,
     consumer_running: bool | None = None,
-    session: Session | None = None,
+    session: AsyncSession | None = None,
 ) -> dict[str, Any]:
     try:
         from brain.platform.db.repositories.memories import MemoryRepository
         from brain.platform.db.models.skill import Skill
 
-        with _health_db_session(session) as db:
-            mem_repo = MemoryRepository(db)
-            skill_count = db.scalar(
-                select(func.count(Skill.id)).where(
-                    or_(Skill.archived == False, Skill.archived.is_(None))  # noqa: E712
-                )
-            ) or 0
-            event_check = _event_backbone_health_check(
-                db,
-                consumer_running=consumer_running,
-                timeout_ms=_timeout_ms("HEALTH_READY_DB_TIMEOUT_MS", DEFAULT_DB_TIMEOUT_MS),
+        if session is None:
+            raise RuntimeError("health checks require an explicit database session")
+        mem_repo = MemoryRepository(session)
+        skill_count = await session.scalar(
+            select(func.count(Skill.id)).where(
+                or_(Skill.archived == False, Skill.archived.is_(None))  # noqa: E712
             )
-            return sanitize_for_health({
-                "status": "ok",
-                "database": "connected",
-                "memory_count": mem_repo.count_active(),
-                "skill_count": skill_count,
-                "run_event_backbone": event_check.details,
-                "health_tiers": {
-                    "live": "/api/health/live",
-                    "ready": "/api/health/ready",
-                    "deep": "/api/health/deep",
-                },
-                "version": APP_VERSION,
-            })
+        ) or 0
+        event_check = await _event_backbone_health_check(
+            session,
+            consumer_running=consumer_running,
+            timeout_ms=_timeout_ms("HEALTH_READY_DB_TIMEOUT_MS", DEFAULT_DB_TIMEOUT_MS),
+        )
+        return sanitize_for_health({
+            "status": "ok",
+            "database": "connected",
+            "memory_count": await mem_repo.a_count_active(),
+            "skill_count": skill_count,
+            "run_event_backbone": event_check.details,
+            "health_tiers": {
+                "live": "/api/health/live",
+                "ready": "/api/health/ready",
+                "deep": "/api/health/deep",
+            },
+            "version": APP_VERSION,
+        })
     except Exception as exc:
+        if session is not None:
+            await _rollback_health_session(session)
         return sanitize_for_health({
             "status": "degraded",
             "database": "error",

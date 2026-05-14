@@ -57,7 +57,24 @@ def redact_tool_call_result(tool_name: str, result: Any) -> str:
     return str(result or "")
 
 
-def record_tool_call(
+def tool_call_completed_payload(
+    idea_id: str | None,
+    tool_name: str,
+    args: dict[str, Any] | None,
+    result: Any,
+    *,
+    source: str = "runner",
+) -> dict[str, Any]:
+    return {
+        "idea_id": idea_id,
+        "tool_name": tool_name,
+        "args": args or {},
+        "result": redact_tool_call_result(tool_name, result),
+        "source": source,
+    }
+
+
+async def async_record_tool_call(
     run_id: int,
     idea_id: str | None,
     tool_name: str,
@@ -67,23 +84,17 @@ def record_tool_call(
     source: str = "runner",
     **_: Any,
 ) -> None:
-    from brain.systems.runs.event_log import record_run_event
+    from brain.systems.runs.event_log import async_record_run_event
 
-    record_run_event(
+    await async_record_run_event(
         int(run_id),
         "run.tool_completed",
-        {
-            "idea_id": idea_id,
-            "tool_name": tool_name,
-            "args": args or {},
-            "result": redact_tool_call_result(tool_name, result),
-            "source": source,
-        },
+        tool_call_completed_payload(idea_id, tool_name, args, result, source=source),
         producer=source or "runner",
     )
 
 
-def record_tool_activity(
+async def async_record_tool_activity(
     run_id: int,
     tool_name: str,
     args: dict[str, Any] | None = None,
@@ -92,15 +103,16 @@ def record_tool_activity(
     source: str = "runner",
     **kwargs: Any,
 ) -> None:
-    record_tool_call(run_id, kwargs.get("idea_id"), tool_name, args or {}, result, source=source)
+    await async_record_tool_call(run_id, kwargs.get("idea_id"), tool_name, args or {}, result, source=source)
 
 
 __all__ = [
     "activity_event",
-    "record_tool_activity",
-    "record_tool_call",
+    "async_record_tool_activity",
+    "async_record_tool_call",
     "redact_tool_call_result",
     "run_event",
     "status_changed_event",
     "text_delta_event",
+    "tool_call_completed_payload",
 ]

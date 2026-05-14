@@ -1,14 +1,10 @@
 """Unit of Work — transaction boundary for database-backed code."""
 from __future__ import annotations
 
-import asyncio
-from contextlib import contextmanager
-from contextvars import ContextVar
 from functools import cached_property
-from collections.abc import Callable, Iterator
+import inspect
 from typing import Any, Generic, TypeVar
 
-from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db import SessionFactory
@@ -18,7 +14,7 @@ from brain.platform.db.repositories.agent_run import (
     AgentRunRepository,
 )
 from brain.platform.db.repositories.cycles import CycleRepository, CycleRunRepository
-from brain.systems.user_domains.service import DomainService
+from brain.systems.user_domains.service import AsyncDomainService
 from brain.platform.db.repositories.run import RunRepository
 from brain.platform.db.repositories.ideas import (
     IdeaConnectionRepository,
@@ -63,50 +59,21 @@ from brain.platform.db.repositories.vault import (
 )
 
 RepoT = TypeVar("RepoT")
-ReturnT = TypeVar("ReturnT")
-
-_sync_session_override: ContextVar[Session | None] = ContextVar(
-    "unit_of_work_sync_session_override",
-    default=None,
-)
 
 
-def _running_async_loop() -> bool:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return False
-    return True
-
-
-@contextmanager
-def use_sync_session(session: Session) -> Iterator[None]:
-    """Bind nested sync UnitOfWork blocks to an AsyncSession.run_sync session."""
-
-    token = _sync_session_override.set(session)
-    try:
-        yield
-    finally:
-        _sync_session_override.reset(token)
-
-
-async def run_sync_with_unit_of_work(fn: Callable[..., ReturnT], /, *args: Any, **kwargs: Any) -> ReturnT:
-    """Run a legacy-shaped service function inside an async UnitOfWork."""
-
-    async with UnitOfWork() as uow:
-        def _invoke(sync_session: Session) -> ReturnT:
-            with use_sync_session(sync_session):
-                return fn(*args, **kwargs)
-
-        return await uow.session.run_sync(_invoke)
+def _method_owner(repo_cls: type[Any], name: str) -> type[Any] | None:
+    for owner in repo_cls.__mro__:
+        value = owner.__dict__.get(name)
+        if callable(value):
+            return owner
+    return None
 
 
 class AsyncRepositoryProxy(Generic[RepoT]):
-    """Expose sync repository methods as awaitable async operations.
+    """Expose repository methods as awaitable async operations.
 
-    Repository classes remain focused on domain queries. The proxy runs each
-    call inside ``AsyncSession.run_sync`` so the SQLAlchemy sync ORM code is
-    executed in SQLAlchemy's greenlet bridge against the asyncpg connection.
+    Repositories expose native async methods. While callers migrate, ``foo``
+    resolves to explicit ``a_foo`` methods without keeping sync DB bodies alive.
     """
 
     def __init__(self, session: AsyncSession, repo_cls: type[RepoT]) -> None:
@@ -114,31 +81,43 @@ class AsyncRepositoryProxy(Generic[RepoT]):
         self._repo_cls = repo_cls
 
     def __getattr__(self, name: str) -> Any:
-        attr = getattr(self._repo_cls, name, None)
-        if not callable(attr):
-            raise AttributeError(name)
+        repo = self._repo_cls(self._session)
+        method = getattr(repo, name, None)
+        if method is not None and inspect.iscoroutinefunction(method):
+            return method
 
-        async def _call(*args: Any, **kwargs: Any) -> Any:
-            def _invoke(sync_session: Session) -> Any:
-                repo = self._repo_cls(sync_session)
-                return getattr(repo, name)(*args, **kwargs)
+        owner = _method_owner(self._repo_cls, name)
+        async_owner = _method_owner(self._repo_cls, f"a_{name}")
+        if owner is not None and async_owner is not owner:
+            raise AttributeError(
+                f"{self._repo_cls.__name__}.{name} has no native async implementation; "
+                f"add async {self._repo_cls.__name__}.{name} or "
+                f"{self._repo_cls.__name__}.a_{name}."
+            )
 
-            return await self._session.run_sync(_invoke)
+        async_method = getattr(repo, f"a_{name}", None)
+        if async_method is not None and inspect.iscoroutinefunction(async_method):
+            return async_method
 
-        return _call
+        raise AttributeError(
+            f"{self._repo_cls.__name__}.{name} has no native async implementation; "
+            f"add async {self._repo_cls.__name__}.{name} or "
+            f"{self._repo_cls.__name__}.a_{name}."
+        )
 
 
 class UnitOfWork:
     """All repos share one session.
 
-    New runtime code should use ``async with UnitOfWork()``. Synchronous context
-    manager support remains for older CLI/test paths while they are migrated.
+    Runtime code should use ``async with UnitOfWork()``.
     """
 
     def __init__(self) -> None:
-        self._session: Session | None = None
         self._async_session: AsyncSession | None = None
-        self._external_session = False
+
+    @classmethod
+    def blocking(cls) -> UnitOfWork:
+        raise RuntimeError("UnitOfWork is async-only; use `async with UnitOfWork()`.")
 
     async def __aenter__(self) -> UnitOfWork:
         self._async_session = SessionFactory()
@@ -155,38 +134,10 @@ class UnitOfWork:
         self._clear_cached_repositories()
 
     def __enter__(self) -> UnitOfWork:
-        override = _sync_session_override.get()
-        if override is not None:
-            self._session = override
-            self._external_session = True
-            return self
-
-        if _running_async_loop():
-            raise RuntimeError(
-                "Synchronous UnitOfWork cannot open the legacy DB engine inside async runtime. "
-                "Use `async with UnitOfWork()` or wrap sync code with `run_sync_with_unit_of_work()`."
-            )
-
-        from brain.platform.db.legacy import legacy_session_factory
-
-        self._session = legacy_session_factory()
-        self._external_session = False
-        return self
+        raise RuntimeError("UnitOfWork is async-only; use `async with UnitOfWork()`.")
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        assert self._session is not None
-        if self._external_session:
-            if exc_type is None:
-                self._session.flush()
-        elif exc_type:
-            self._session.rollback()
-        else:
-            self._session.commit()
-        if not self._external_session:
-            self._session.close()
-        self._session = None
-        self._external_session = False
-        self._clear_cached_repositories()
+        return None
 
     def _clear_cached_repositories(self) -> None:
         for attr in list(self.__dict__):
@@ -194,28 +145,22 @@ class UnitOfWork:
                 del self.__dict__[attr]
 
     @property
-    def session(self) -> Session | AsyncSession:
-        session = self._session or self._async_session
-        assert session is not None, "UnitOfWork not entered"
-        return session
+    def session(self) -> AsyncSession:
+        assert self._async_session is not None, "UnitOfWork not entered"
+        return self._async_session
 
     def _repo(self, repo_cls: type[RepoT]) -> RepoT | AsyncRepositoryProxy[RepoT]:
         if self._async_session is not None:
             return AsyncRepositoryProxy(self._async_session, repo_cls)
-        assert self._session is not None, "UnitOfWork not entered"
-        return repo_cls(self._session)
+        raise AssertionError("UnitOfWork not entered")
 
-    def commit(self):
-        if self._async_session is not None:
-            return self._async_session.commit()
-        assert self._session is not None, "UnitOfWork not entered"
-        return self._session.commit()
+    async def commit(self):
+        assert self._async_session is not None, "UnitOfWork not entered"
+        await self._async_session.commit()
 
-    def rollback(self):
-        if self._async_session is not None:
-            return self._async_session.rollback()
-        assert self._session is not None, "UnitOfWork not entered"
-        return self._session.rollback()
+    async def rollback(self):
+        assert self._async_session is not None, "UnitOfWork not entered"
+        await self._async_session.rollback()
 
     @cached_property
     def skills(self):
@@ -313,11 +258,10 @@ class UnitOfWork:
         return self._repo(CycleRepository)
 
     @cached_property
-    def domains(self) -> DomainService:
+    def domains(self) -> AsyncDomainService:
         if self._async_session is not None:
-            return AsyncRepositoryProxy(self._async_session, DomainService)
-        assert self._session is not None, "UnitOfWork not entered"
-        return DomainService(self.session)
+            return AsyncDomainService(self._async_session)
+        raise AssertionError("UnitOfWork not entered")
 
     @cached_property
     def cycle_runs(self):
@@ -362,5 +306,6 @@ class UnitOfWork:
     def chat_reads(self):
         return self._repo(ChatConversationReadRepository)
 
+    @cached_property
     def notifications(self):
         return self._repo(NotificationEventRepository)

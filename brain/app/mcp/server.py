@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -51,6 +52,32 @@ from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_
 logger = logging.getLogger("mcp_brain")
 
 # ── Tool Implementations ─────────────────────────────────────
+
+
+def _run_mcp_sync(awaitable: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        with asyncio.Runner() as runner:
+            return runner.run(awaitable)
+    close = getattr(awaitable, "close", None)
+    if callable(close):
+        close()
+    raise RuntimeError("MCP sync facade cannot run inside an active event loop; await the async tool API")
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _session_execute(session: Any, *args: Any, **kwargs: Any) -> Any:
+    return await _maybe_await(session.execute(*args, **kwargs))
+
+
+async def _session_flush(session: Any) -> None:
+    await _maybe_await(session.flush())
 
 
 def _jsonish(value: Any, default: Any) -> Any:
@@ -173,37 +200,35 @@ def _validate_skill_asset_path(path: str) -> str:
     return cleaned
 
 
-def _add_attribution(session, memories: list[dict], current_user_id: str) -> list[dict]:
+async def _add_attribution(session, memories: list[dict], current_user_id: str) -> list[dict]:
     """Add attribution info to shared memories from other users.
 
     If the source user has attribution_enabled=True, shows their name.
     Otherwise, shows "A teammate" (anonymous).
     """
     try:
-        return MemoryRepository(session).add_attribution(memories, current_user_id)
+        return await MemoryRepository(session).add_attribution(memories, current_user_id)
     except Exception:
         pass
     return memories
 
 
-def _log_retrieval(query: str, results: list) -> None:
+async def _async_log_retrieval(query: str, results: list) -> None:
     """Insert a row into retrieval_log for metrics tracking. Non-blocking."""
     try:
-        from brain.platform.db.models.system import RetrievalLog
-
         top_score = max((r.get("similarity", 0) for r in results), default=0)
-        with UnitOfWork() as uow:
-            uow.retrieval_logs.create(
+        async with UnitOfWork() as uow:
+            await _maybe_await(uow.retrieval_logs.create(
                 query_text=query[:500],
                 results_returned=len(results),
                 top_score=round(float(top_score), 4),
-            )
-            uow.session.flush()
+            ))
+            await _session_flush(uow.session)
     except Exception as e:
         logger.debug(f"retrieval_log insert failed (non-critical): {e}")
 
 
-def tool_brain_recall(
+async def async_tool_brain_recall(
     query: str,
     limit: int = 3,
     user_id: str | None = None,
@@ -218,7 +243,6 @@ def tool_brain_recall(
     Without viewer context, recall intentionally returns no memories.
     """
     from brain.systems.memory.embeddings import embed_query
-    from brain.systems.cognition.graph import graph_augmented_recall
 
     query_emb = embed_query(query)
     visibility_context = MemoryVisibilityContext(
@@ -229,15 +253,12 @@ def tool_brain_recall(
     )
 
     try:
-        with UnitOfWork() as uow:
-            results = graph_augmented_recall(
-                uow.session,
-                query_emb,
+        async with UnitOfWork() as uow:
+            results = await _maybe_await(uow.memories.graph_augmented_recall(
+                query_embedding=query_emb,
                 limit=limit,
-                user_id=user_id,
-                org_id=org_id,
-                service_retrieval=service_retrieval,
-            )
+                context=visibility_context,
+            ))
             memories = []
             for r in results:
                 mem = {
@@ -254,8 +275,8 @@ def tool_brain_recall(
                 memories.append(mem)
             # Add cross-user attribution for shared memories
             if user_id and memories:
-                memories = MemoryRepository(uow.session).add_attribution(memories, user_id)
-        return _finalize_recall_response(
+                memories = await _maybe_await(uow.memories.add_attribution(memories, user_id))
+        return await _finalize_recall_response(
             query=query,
             memories=memories,
             limit=limit,
@@ -269,16 +290,16 @@ def tool_brain_recall(
         logger.warning(f"Graph recall failed, falling back to vector: {e}")
 
     # Fallback: pure vector search with same visibility filtering
-    with UnitOfWork() as uow:
-        memories = MemoryRepository(uow.session).recall_vector(
+    async with UnitOfWork() as uow:
+        memories = await _maybe_await(uow.memories.recall_vector(
             query_embedding=query_emb,
             limit=limit,
             context=visibility_context,
-        )
+        ))
         if user_id and memories:
-            memories = MemoryRepository(uow.session).add_attribution(memories, user_id)
+            memories = await _maybe_await(uow.memories.add_attribution(memories, user_id))
 
-    return _finalize_recall_response(
+    return await _finalize_recall_response(
         query=query,
         memories=memories,
         limit=limit,
@@ -290,7 +311,29 @@ def tool_brain_recall(
     )
 
 
-def _finalize_recall_response(
+def tool_brain_recall(
+    query: str,
+    limit: int = 3,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    attention_debug: bool = False,
+    expand_lazy_load: bool | None = None,
+    service_retrieval: bool = False,
+) -> dict:
+    return _run_mcp_sync(
+        async_tool_brain_recall(
+            query=query,
+            limit=limit,
+            user_id=user_id,
+            org_id=org_id,
+            attention_debug=attention_debug,
+            expand_lazy_load=expand_lazy_load,
+            service_retrieval=service_retrieval,
+        ),
+    )
+
+
+async def _finalize_recall_response(
     *,
     query: str,
     memories: list[dict],
@@ -302,7 +345,7 @@ def _finalize_recall_response(
     service_retrieval: bool = False,
 ) -> dict:
 
-    _log_retrieval(query, memories)
+    await _async_log_retrieval(query, memories)
     service_retrieval = service_retrieval or user_id == "system"
     if not user_id and not org_id and not service_retrieval and not memories:
         return {
@@ -323,7 +366,7 @@ def _finalize_recall_response(
                 "fallback_reason": "missing_user_context",
             },
         }
-    attention_decision = observe_retrieval(
+    attention_decision = await observe_retrieval(
         stage="brain_recall",
         query_text=query,
         candidates=memories,
@@ -341,7 +384,7 @@ def _finalize_recall_response(
         else os.getenv("ATTENTION_LAZY_LOAD_ENABLED", "0").strip().lower() not in {"0", "false", "no"}
     )
     if should_expand and selection.lazy_load_eligible and retrieval_decision_id is not None:
-        lazy_loaded_memories = AttentionController().load_lazy_candidates(
+        lazy_loaded_memories = await AttentionController().load_lazy_candidates(
             retrieval_decision_id=int(retrieval_decision_id),
             user_id=user_id,
             org_id=org_id,
@@ -362,13 +405,13 @@ def _finalize_recall_response(
     }
 
 
-def tool_brain_guardrails(skill: str | None = None) -> dict:
+async def async_tool_brain_guardrails(skill: str | None = None) -> dict:
     """Get guardrails: recent failures, high-salience warnings, and skill-specific pitfalls."""
     result = {"guardrails": [], "warnings": [], "pitfalls": []}
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # Recent failures (last 7 days)
-        rows = uow.session.execute(text("""
+        rows_result = await _session_execute(uow.session, text("""
             SELECT s.name, se.outcome_details, se.error_analysis, se.started_at
             FROM skill_executions se
             JOIN skills s ON s.id = se.skill_id
@@ -376,7 +419,8 @@ def tool_brain_guardrails(skill: str | None = None) -> dict:
               AND se.started_at > NOW() - INTERVAL '7 days'
             ORDER BY se.started_at DESC
             LIMIT 5
-        """)).mappings().all()
+        """))
+        rows = rows_result.mappings().all()
         for row in rows:
             result["guardrails"].append({
                 "skill": row["name"],
@@ -389,7 +433,7 @@ def tool_brain_guardrails(skill: str | None = None) -> dict:
             from brain.systems.memory.embeddings import embed_query
             skill_emb = embed_query(skill)
             result["warnings"].extend(
-                uow.memories.high_salience_warnings_for_skill(skill_embedding=skill_emb)
+                await _maybe_await(uow.memories.high_salience_warnings_for_skill(skill_embedding=skill_emb))
             )
 
         # Skill-specific pitfalls
@@ -400,7 +444,8 @@ def tool_brain_guardrails(skill: str | None = None) -> dict:
                 SkillModel.name == skill,
                 or_(SkillModel.archived == False, SkillModel.archived.is_(None)),  # noqa: E712
             )
-            row = uow.session.execute(stmt).scalar()
+            row_result = await _session_execute(uow.session, stmt)
+            row = row_result.scalar()
             if row:
                 pitfalls = row if isinstance(row, list) else json.loads(row)
                 result["pitfalls"] = [
@@ -411,7 +456,11 @@ def tool_brain_guardrails(skill: str | None = None) -> dict:
     return result
 
 
-def tool_brain_skills(task: str) -> dict:
+def tool_brain_guardrails(skill: str | None = None) -> dict:
+    return _run_mcp_sync(async_tool_brain_guardrails(skill=skill))
+
+
+async def async_tool_brain_skills(task: str) -> dict:
     """Task planning — recommend skills, guardrails, and strategy for a task.
 
     Returns the same structure as `skills.py plan` but without the subprocess overhead.
@@ -419,7 +468,7 @@ def tool_brain_skills(task: str) -> dict:
     from brain.systems.skills.builtin import ensure_builtin_skills_cached
     from brain.systems.memory.embeddings import embed_query, vec_to_pg
 
-    asyncio.run(ensure_builtin_skills_cached())
+    await ensure_builtin_skills_cached()
 
     def _coerce_triggers(value) -> list:
         if not value:
@@ -525,8 +574,8 @@ def tool_brain_skills(task: str) -> dict:
             marker in lowered for marker in action_markers
         )
 
-    def _fetch_skill_card(uow, name: str):
-        return uow.session.execute(text("""
+    async def _fetch_skill_card(uow, name: str):
+        result = await _session_execute(uow.session, text("""
             SELECT id, name, description, version, maturity, confidence, use_count,
                    success_count::float / GREATEST(use_count, 1) as success_rate,
                    model_tier, thinking_tier, pitfalls, triggers,
@@ -540,7 +589,8 @@ def tool_brain_skills(task: str) -> dict:
               AND skill_type != 'meta'
               AND name = :name
             LIMIT 1
-        """), {"name": name}).mappings().first()
+        """), {"name": name})
+        return result.mappings().first()
 
     task_emb = None
     emb_str = None
@@ -554,16 +604,17 @@ def tool_brain_skills(task: str) -> dict:
 
     _SMALL_SKILLSET_THRESHOLD = 30  # below this, send ALL skills — model picks better than embeddings
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # Count active skills to decide strategy
-        count_row = uow.session.execute(text(
+        count_result = await _session_execute(uow.session, text(
             "SELECT COUNT(*) as cnt FROM skills WHERE NOT archived"
-        )).mappings().one()
+        ))
+        count_row = count_result.mappings().one()
         skill_count = count_row["cnt"]
 
         if emb_str is None:
             limit_clause = "" if skill_count <= _SMALL_SKILLSET_THRESHOLD else "LIMIT 15"
-            matching_skills = uow.session.execute(text(f"""
+            matching_result = await _session_execute(uow.session, text(f"""
                 SELECT id, name, description, version, maturity, confidence, use_count,
                        success_count::float / GREATEST(use_count, 1) as success_rate,
                        model_tier, thinking_tier, pitfalls, triggers,
@@ -576,9 +627,10 @@ def tool_brain_skills(task: str) -> dict:
                 WHERE NOT archived AND skill_type != 'meta'
                 ORDER BY use_count DESC, confidence DESC, name ASC
                 {limit_clause}
-            """)).mappings().all()
+            """))
+            matching_skills = matching_result.mappings().all()
         elif skill_count <= _SMALL_SKILLSET_THRESHOLD:
-            matching_skills = uow.session.execute(text("""
+            matching_result = await _session_execute(uow.session, text("""
                 SELECT id, name, description, version, maturity, confidence, use_count,
                        success_count::float / GREATEST(use_count, 1) as success_rate,
                        model_tier, thinking_tier, pitfalls, triggers,
@@ -596,9 +648,10 @@ def tool_brain_skills(task: str) -> dict:
                          THEN (1 - (task_centroid <=> CAST(:emb3 AS vector))) * 0.7 + (1 - (embedding <=> CAST(:emb4 AS vector))) * 0.3
                          ELSE 1 - (embedding <=> CAST(:emb5 AS vector))
                     END DESC
-            """), {"emb1": emb_str, "emb2": emb_str, "emb3": emb_str, "emb4": emb_str, "emb5": emb_str}).mappings().all()
+            """), {"emb1": emb_str, "emb2": emb_str, "emb3": emb_str, "emb4": emb_str, "emb5": emb_str})
+            matching_skills = matching_result.mappings().all()
         else:
-            matching_skills = uow.session.execute(text("""
+            matching_result = await _session_execute(uow.session, text("""
                 SELECT id, name, description, version, maturity, confidence, use_count,
                        success_count::float / GREATEST(use_count, 1) as success_rate,
                        model_tier, thinking_tier, pitfalls, triggers,
@@ -622,19 +675,20 @@ def tool_brain_skills(task: str) -> dict:
                          ELSE 1 - (embedding <=> CAST(:emb5 AS vector))
                     END DESC
                 LIMIT 15
-            """), {"emb1": emb_str, "emb2": emb_str, "emb3": emb_str, "emb4": emb_str, "emb5": emb_str}).mappings().all()
+            """), {"emb1": emb_str, "emb2": emb_str, "emb3": emb_str, "emb4": emb_str, "emb5": emb_str})
+            matching_skills = matching_result.mappings().all()
 
         # Relevant memories (lessons/patterns for guardrails)
         if task_emb is None:
             guardrail_memories = []
         else:
-            guardrail_memories = uow.memories.guardrail_memories_for_task(
+            guardrail_memories = await _maybe_await(uow.memories.guardrail_memories_for_task(
                 task_embedding=task_emb,
                 limit=5,
-            )
+            ))
 
         if _looks_like_workspace_app_task(task):
-            workspace_app_skill = _fetch_skill_card(uow, "build-workspace-app")
+            workspace_app_skill = await _fetch_skill_card(uow, "build-workspace-app")
             if workspace_app_skill is not None:
                 matching_skills = [
                     workspace_app_skill,
@@ -645,7 +699,7 @@ def tool_brain_skills(task: str) -> dict:
                     ],
                 ]
         if _looks_like_domain_task(task):
-            domain_skill = _fetch_skill_card(uow, "manage-domains")
+            domain_skill = await _fetch_skill_card(uow, "manage-domains")
             if domain_skill is not None:
                 matching_skills = [
                     domain_skill,
@@ -664,7 +718,7 @@ def tool_brain_skills(task: str) -> dict:
         }
         for version_id in bundle_version_ids:
             try:
-                assets = uow.skill_bundles.list_assets(version_id)
+                assets = await _maybe_await(uow.skill_bundles.list_assets(version_id))
             except Exception:
                 continue
             asset_paths_by_version[version_id] = [
@@ -795,7 +849,11 @@ def tool_brain_skills(task: str) -> dict:
     return result
 
 
-def tool_skill_view(
+def tool_brain_skills(task: str) -> dict:
+    return _run_mcp_sync(async_tool_brain_skills(task))
+
+
+async def async_tool_skill_view(
     name: str,
     section: str = "procedure",
     max_chars: int = 12000,
@@ -809,8 +867,8 @@ def tool_skill_view(
             "allowed_sections": sorted(allowed),
         }
 
-    with UnitOfWork() as uow:
-        skill = uow.skills.get_by_name(name)
+    async with UnitOfWork() as uow:
+        skill = await _maybe_await(uow.skills.get_by_name(name))
         if skill is None:
             return {"error": f"Skill '{name}' not found"}
 
@@ -867,7 +925,17 @@ def tool_skill_view(
         return payload
 
 
-def tool_skill_asset(
+def tool_skill_view(
+    name: str,
+    section: str = "procedure",
+    max_chars: int = 12000,
+) -> dict:
+    return _run_mcp_sync(
+        async_tool_skill_view(name=name, section=section, max_chars=max_chars),
+    )
+
+
+async def async_tool_skill_asset(
     name: str,
     path: str,
     max_chars: int = 12000,
@@ -878,8 +946,8 @@ def tool_skill_asset(
     except ValueError as exc:
         return {"error": str(exc)}
 
-    with UnitOfWork() as uow:
-        skill = uow.skills.get_by_name(name)
+    async with UnitOfWork() as uow:
+        skill = await _maybe_await(uow.skills.get_by_name(name))
         if skill is None:
             return {"error": f"Skill '{name}' not found"}
         if not skill.bundle_version_id:
@@ -889,7 +957,7 @@ def tool_skill_asset(
                 **_skill_digest_metadata(skill),
             }
 
-        assets = uow.skill_bundles.list_assets(skill.bundle_version_id)
+        assets = await _maybe_await(uow.skill_bundles.list_assets(skill.bundle_version_id))
         asset = next((item for item in assets if item.path == safe_path), None)
         if asset is None:
             return {
@@ -921,7 +989,17 @@ def tool_skill_asset(
         }
 
 
-def tool_brain_encode(
+def tool_skill_asset(
+    name: str,
+    path: str,
+    max_chars: int = 12000,
+) -> dict:
+    return _run_mcp_sync(
+        async_tool_skill_asset(name=name, path=path, max_chars=max_chars),
+    )
+
+
+async def async_tool_brain_encode(
     content: str,
     memory_type: str = "episode",
     salience: float = 5.0,
@@ -977,15 +1055,15 @@ def tool_brain_encode(
         else:
             degraded_reason = f"embedding_failed: {error_text[:200]}"
 
-    with UnitOfWork() as uow:
-        result = uow.memories.insert_memory(
+    async with UnitOfWork() as uow:
+        result = await _maybe_await(uow.memories.insert_memory(
             content=content,
             memory_type=memory_type,
             salience=salience,
             semantic_embedding=semantic_emb,
             context=write_context,
             auto_edge=False,
-        )
+        ))
 
     if degraded_reason:
         result["warning"] = degraded_reason
@@ -993,7 +1071,41 @@ def tool_brain_encode(
     return result
 
 
-def tool_brain_vault(
+def tool_brain_encode(
+    content: str,
+    memory_type: str = "episode",
+    salience: float = 5.0,
+    source: str = "agent_run",
+    user_id: str | None = None,
+    org_id: str | None = None,
+    visibility: str = "private",
+    conversation_id: str | None = None,
+    idea_id: str | None = None,
+    run_id: int | str | None = None,
+    session_id: str | None = None,
+    confidence: float | None = None,
+    evidence: dict | None = None,
+) -> dict:
+    return _run_mcp_sync(
+        async_tool_brain_encode(
+            content=content,
+            memory_type=memory_type,
+            salience=salience,
+            source=source,
+            user_id=user_id,
+            org_id=org_id,
+            visibility=visibility,
+            conversation_id=conversation_id,
+            idea_id=idea_id,
+            run_id=run_id,
+            session_id=session_id,
+            confidence=confidence,
+            evidence=evidence,
+        ),
+    )
+
+
+async def tool_brain_vault(
     key: str,
     reason: str | None = None,
     user_id: str | None = None,
@@ -1008,7 +1120,7 @@ def tool_brain_vault(
     from brain.systems.vault import authorize_agent_secret_read, get_secret
     if not user_id:
         return {"error": "Vault access requires an authenticated user context"}
-    authorization = authorize_agent_secret_read(
+    authorization = await authorize_agent_secret_read(
         key,
         user_id=user_id,
         org_id=org_id,
@@ -1028,7 +1140,7 @@ def tool_brain_vault(
                 "status": "pending",
             }
         return {"error": authorization.get("reason") or "Vault grant denied"}
-    value = get_secret(
+    value = await get_secret(
         key,
         user_id=user_id,
         org_id=org_id,
@@ -1080,7 +1192,7 @@ def _vault_prompt_url(
     })
 
 
-def tool_vault_secret_prompt(
+async def tool_vault_secret_prompt(
     key_name: str,
     description: str | None = None,
     category: str = "api",
@@ -1130,7 +1242,7 @@ def tool_vault_secret_prompt(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    record_missing_request(normalized_key, user_id=normalized_user_id, org_id=normalized_org_id)
+    await record_missing_request(normalized_key, user_id=normalized_user_id, org_id=normalized_org_id)
 
     if normalized_idea_id:
         publish_safe("vault_secret_prompt", {
@@ -1165,26 +1277,28 @@ def tool_vault_secret_prompt(
     return response
 
 
-def tool_runtime_settings(
+async def tool_runtime_settings(
     provider: str | None = None,
     user_id: str | None = None,
     org_id: str | None = None,
 ) -> dict:
     """Inspect active runtime/provider/auth settings for the current user."""
-    from brain.systems.services.runtime_introspection import get_runtime_settings_snapshot
+    from brain.systems.services.runtime_introspection import async_get_runtime_settings_snapshot
 
-    return get_runtime_settings_snapshot(
-        user_id=user_id,
-        org_id=org_id,
-        provider=provider,
-    )
+    async with UnitOfWork() as uow:
+        return await async_get_runtime_settings_snapshot(
+            uow.session,
+            user_id=user_id,
+            org_id=org_id,
+            provider=provider,
+        )
 
 
 # ── MCP Protocol Layer ───────────────────────────────────────
 
 TOOLS = {
     "brain_recall": {
-        "function": tool_brain_recall,
+        "function": async_tool_brain_recall,
         "description": "Search brain memories semantically. Returns the most relevant memories for the query.",
         "inputSchema": {
             "type": "object",
@@ -1198,7 +1312,7 @@ TOOLS = {
         },
     },
     "brain_guardrails": {
-        "function": tool_brain_guardrails,
+        "function": async_tool_brain_guardrails,
         "description": "Get guardrails: recent failures, high-salience warnings, and skill pitfalls.",
         "inputSchema": {
             "type": "object",
@@ -1208,7 +1322,7 @@ TOOLS = {
         },
     },
     "brain_skills": {
-        "function": tool_brain_skills,
+        "function": async_tool_brain_skills,
         "description": "Plan a task: recommend lightweight skill cards, guardrails, and execution strategy.",
         "inputSchema": {
             "type": "object",
@@ -1219,7 +1333,7 @@ TOOLS = {
         },
     },
     "skill_view": {
-        "function": tool_skill_view,
+        "function": async_tool_skill_view,
         "description": "Progressively load one section of an installed skill, from a small card to a full procedure.",
         "inputSchema": {
             "type": "object",
@@ -1245,7 +1359,7 @@ TOOLS = {
         },
     },
     "skill_asset": {
-        "function": tool_skill_asset,
+        "function": async_tool_skill_asset,
         "description": "Progressively load a specific versioned skill bundle asset by path.",
         "inputSchema": {
             "type": "object",
@@ -1258,7 +1372,7 @@ TOOLS = {
         },
     },
     "brain_encode": {
-        "function": tool_brain_encode,
+        "function": async_tool_brain_encode,
         "description": "Record a new memory (lesson, pattern, fact, or episode) into the brain.",
         "inputSchema": {
             "type": "object",
@@ -1328,7 +1442,7 @@ TOOLS = {
 }
 
 
-def handle_request(request: dict) -> dict:
+async def async_handle_request(request: dict) -> dict:
     """Handle a single MCP JSON-RPC request."""
     method = request.get("method", "")
     req_id = request.get("id")
@@ -1379,10 +1493,11 @@ def handle_request(request: dict) -> dict:
         try:
             # Map MCP argument names to function parameter names
             func = TOOLS[tool_name]["function"]
+            arguments = dict(arguments)
             # Handle the 'type' → 'memory_type' rename for brain_encode
             if tool_name == "brain_encode" and "type" in arguments:
                 arguments["memory_type"] = arguments.pop("type")
-            result = func(**arguments)
+            result = await _maybe_await(func(**arguments))
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -1407,6 +1522,18 @@ def handle_request(request: dict) -> dict:
         "id": req_id,
         "error": {"code": -32601, "message": f"Method not found: {method}"},
     }
+
+
+def handle_request(request: dict) -> dict:
+    """Sync MCP protocol boundary for stdio/stdlib HTTP transports."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("handle_request cannot run inside an active event loop; await async_handle_request")
+    with asyncio.Runner() as runner:
+        return runner.run(async_handle_request(request))
 
 
 def run_stdio():

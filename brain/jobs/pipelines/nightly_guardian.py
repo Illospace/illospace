@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -21,14 +22,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 
-def audit_day(target_date: str | None = None):
+async def audit_day(target_date: str | None = None):
     """Review all skill executions and violations for the given day."""
     target = target_date or date.today().isoformat()
     print(f"[guardian-audit] Auditing {target}")
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # 1. Get all skill executions from the day
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT se.id, se.task_description, se.outcome, s.name as skill_name,
                    se.outcome_details, se.started_at
             FROM skill_executions se
@@ -41,7 +42,7 @@ def audit_day(target_date: str | None = None):
         print(f"[guardian-audit] Found {len(executions)} executions")
 
         # 2. Get violations from the day
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT detected_by, context, session_date
             FROM violation_log
             WHERE session_date = CAST(:target AS date)
@@ -51,7 +52,7 @@ def audit_day(target_date: str | None = None):
         print(f"[guardian-audit] Found {len(violations)} violations")
 
         # 3. Analyze patterns — recurring violation types
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT context, COUNT(*) as cnt
             FROM violation_log
             WHERE session_date >= CAST(:target AS date) - INTERVAL '7 days'
@@ -91,7 +92,7 @@ def main():
     parser = argparse.ArgumentParser(description="Nightly Guardian Audit")
     parser.add_argument("--date", help="Date to audit (YYYY-MM-DD)")
     args = parser.parse_args()
-    audit_day(args.date)
+    asyncio.run(audit_day(args.date))
 
 
 if __name__ == "__main__":

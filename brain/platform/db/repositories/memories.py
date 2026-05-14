@@ -25,7 +25,6 @@ from brain.platform.db.repositories.memory_visibility import (
     require_memory_visible,
 )
 from brain.systems.memory.truth_maintenance import (
-    apply_active_truth_maintenance,
     build_truth_state,
     filter_truth_safe_memories,
     quarantine_filter_enabled,
@@ -56,7 +55,7 @@ class MemoryRepository(BaseRepository[Memory]):
             "MemoryRepository.create() is disabled; use insert_memory(context=MemoryWriteContext(...))"
         )
 
-    def insert_memory(
+    async def insert_memory(
         self,
         *,
         content: str,
@@ -101,7 +100,7 @@ class MemoryRepository(BaseRepository[Memory]):
         )
 
         if self._dialect_name() == "sqlite":
-            memory_id = self._insert_memory_orm(
+            memory_id = await self._insert_memory_orm(
                 content=content,
                 memory_type=memory_type,
                 context=context,
@@ -120,7 +119,7 @@ class MemoryRepository(BaseRepository[Memory]):
         else:
             from brain.systems.memory.embeddings import vec_to_pg
 
-            result = self._session.execute(
+            result = (await self._session.execute(
                 text("""
                     INSERT INTO memories (
                         content, memory_type, semantic_embedding,
@@ -165,13 +164,13 @@ class MemoryRepository(BaseRepository[Memory]):
                     "harvest_confidence": harvest_confidence,
                     "topic_tags": topic_tags,
                 },
-            )
+            ))
             memory_id = result.scalar_one()
 
         neighbors = []
         auto_edges_created = 0
         if auto_edge and semantic_embedding is not None and auto_edge_k > 0:
-            neighbors, auto_edges_created = self._create_auto_edges(
+            neighbors, auto_edges_created = await self._create_auto_edges(
                 memory_id=memory_id,
                 semantic_embedding=semantic_embedding,
                 context=context,
@@ -181,26 +180,12 @@ class MemoryRepository(BaseRepository[Memory]):
 
         manual_edges_created = 0
         if related_ids:
-            manual_edges_created = self._create_manual_edges(
+            manual_edges_created = await self._create_manual_edges(
                 memory_id=memory_id,
                 related_ids=related_ids,
                 rel_type=rel_type,
                 context=context,
             )
-
-        truth_maintenance: dict[str, Any] = {}
-        try:
-            truth_maintenance = apply_active_truth_maintenance(
-                self._session,
-                memory_id=memory_id,
-                content=content,
-                evidence=context.evidence,
-                confidence=confidence,
-                user_id=context.user_id,
-                org_id=context.org_id,
-            )
-        except Exception:
-            logger.debug("Active truth maintenance skipped for memory %s", memory_id, exc_info=True)
 
         return {
             "id": memory_id,
@@ -214,7 +199,7 @@ class MemoryRepository(BaseRepository[Memory]):
             "auto_edges": auto_edges_created,
             "manual_edges": manual_edges_created,
             "neighbors": neighbors,
-            "truth_maintenance": truth_maintenance,
+            "truth_maintenance": {},
         }
 
     def _dialect_name(self) -> str | None:
@@ -225,7 +210,7 @@ class MemoryRepository(BaseRepository[Memory]):
             bind = getattr(self._session, "bind", None)
             return getattr(getattr(bind, "dialect", None), "name", None)
 
-    def _insert_memory_orm(self, **kwargs) -> int:
+    async def _insert_memory_orm(self, **kwargs) -> int:
         context: MemoryWriteContext = kwargs.pop("context")
         memory = Memory(
             content=kwargs["content"],
@@ -249,10 +234,10 @@ class MemoryRepository(BaseRepository[Memory]):
             topic_tags=kwargs["topic_tags"],
         )
         self._session.add(memory)
-        self._session.flush()
+        await self._session.flush()
         return memory.id
 
-    def _create_auto_edges(
+    async def _create_auto_edges(
         self,
         *,
         memory_id: int,
@@ -272,7 +257,7 @@ class MemoryRepository(BaseRepository[Memory]):
             user_param="edge_user_id",
             org_param="edge_org_id",
         )
-        rows = self._session.execute(
+        rows = (await self._session.execute(
             text(f"""
                 SELECT m.id, 1 - (m.semantic_embedding <=> CAST(:embedding AS vector)) AS similarity
                 FROM memories m
@@ -289,7 +274,7 @@ class MemoryRepository(BaseRepository[Memory]):
                 "limit": limit,
                 **vis_params,
             },
-        ).mappings().all()
+        )).mappings().all()
 
         neighbors: list[dict] = []
         edges_created = 0
@@ -297,7 +282,7 @@ class MemoryRepository(BaseRepository[Memory]):
             similarity = float(row["similarity"] or 0.0)
             if similarity <= threshold:
                 continue
-            self._session.execute(
+            (await self._session.execute(
                 text("""
                     INSERT INTO edges (source_id, target_id, relationship, weight, auto_generated)
                     VALUES (:source_id, :target_id, 'similar_to', :weight, TRUE)
@@ -305,12 +290,12 @@ class MemoryRepository(BaseRepository[Memory]):
                     DO UPDATE SET weight = :weight
                 """),
                 {"source_id": memory_id, "target_id": row["id"], "weight": similarity},
-            )
+            ))
             neighbors.append({"id": row["id"], "similarity": round(similarity, 3)})
             edges_created += 1
         return neighbors, edges_created
 
-    def _create_manual_edges(
+    async def _create_manual_edges(
         self,
         *,
         memory_id: int,
@@ -321,9 +306,9 @@ class MemoryRepository(BaseRepository[Memory]):
         visibility_context = context.as_visibility_context()
         edges_created = 0
         for related_id in related_ids:
-            related = self.get_visible(related_id, visibility_context)
+            related = await self.a_get_visible(related_id, visibility_context)
             require_memory_visible(related, visibility_context)
-            self._session.execute(
+            (await self._session.execute(
                 text("""
                     INSERT INTO edges (source_id, target_id, relationship, weight)
                     VALUES (:source_id, :target_id, :relationship, 1.0)
@@ -334,7 +319,7 @@ class MemoryRepository(BaseRepository[Memory]):
                     "target_id": related_id,
                     "relationship": rel_type,
                 },
-            )
+            ))
             edges_created += 1
         return edges_created
 
@@ -371,7 +356,7 @@ class MemoryRepository(BaseRepository[Memory]):
           AND ({prefix}valid_until IS NULL OR {prefix}valid_until >= NOW())
         """
 
-    def touch_memories(self, ids: Iterable[int]) -> None:
+    async def touch_memories(self, ids: Iterable[int]) -> None:
         """Record that memories were read within the current transaction."""
         memory_ids = self._coerce_ids(ids)
         if not memory_ids:
@@ -384,9 +369,9 @@ class MemoryRepository(BaseRepository[Memory]):
                 access_count=func.coalesce(Memory.access_count, 0) + 1,
             )
         )
-        self._session.execute(stmt)
+        (await self._session.execute(stmt))
 
-    def query_ranked(
+    async def query_ranked(
         self,
         *,
         query_embedding: Any,
@@ -444,19 +429,19 @@ class MemoryRepository(BaseRepository[Memory]):
             FROM ranked ORDER BY combined_score DESC LIMIT :limit
         """
         params["limit"] = limit
-        rows = [dict(row) for row in self._session.execute(text(sql), params).mappings().all()]
-        self.touch_memories(row["id"] for row in rows)
+        rows = [dict(row) for row in (await self._session.execute(text(sql), params)).mappings().all()]
+        await self.touch_memories(row["id"] for row in rows)
 
         spread_rows: list[dict] = []
         if spread and rows:
-            spread_rows = self.spread_activation(
+            spread_rows = await self.spread_activation(
                 [row["id"] for row in rows[:3]],
                 context=visibility_context,
                 limit=5,
             )
         return {"results": rows, "spread_activation": spread_rows}
 
-    def retrieve_with_pools(
+    async def retrieve_with_pools(
         self,
         *,
         query_embedding: Any,
@@ -477,13 +462,13 @@ class MemoryRepository(BaseRepository[Memory]):
             org_id=org_id,
             user_id=user_id,
         )
-        return PoolRetriever(cfg).retrieve(
+        return await PoolRetriever(cfg).retrieve(
             query_embedding=list(query_embedding),
             session=self._session,
             ratios=None,
         )
 
-    def spread_activation(
+    async def spread_activation(
         self,
         seed_ids: Iterable[int],
         *,
@@ -501,7 +486,7 @@ class MemoryRepository(BaseRepository[Memory]):
             user_param="spread_user_id",
             org_param="spread_org_id",
         )
-        rows = self._session.execute(
+        rows = (await self._session.execute(
             text(f"""
                 SELECT DISTINCT m.id, m.content, m.memory_type, m.salience,
                        e.relationship, e.weight as edge_weight, e.source_id as from_id
@@ -513,10 +498,10 @@ class MemoryRepository(BaseRepository[Memory]):
                 ORDER BY e.weight DESC LIMIT :limit
             """),
             {"ids": ids, "limit": limit, **vis_params},
-        ).mappings().all()
+        )).mappings().all()
         return [dict(row) for row in rows]
 
-    def recall_vector(
+    async def recall_vector(
         self,
         *,
         query_embedding: Any,
@@ -528,7 +513,7 @@ class MemoryRepository(BaseRepository[Memory]):
         emb = self._embedding_to_pg(query_embedding)
         visibility_context = context or MemoryVisibilityContext()
         vis_clause, vis_params = memory_visibility_sql(visibility_context, alias="")
-        rows = self._session.execute(text(f"""
+        rows = (await self._session.execute(text(f"""
             SELECT id, content, memory_type, salience,
                    COALESCE(visibility, 'private') as visibility,
                    1 - (semantic_embedding <=> CAST(:emb1 AS vector)) as similarity
@@ -549,7 +534,7 @@ class MemoryRepository(BaseRepository[Memory]):
             "min_similarity": min_similarity,
             "lim": limit,
             **vis_params,
-        }).mappings().all()
+        })).mappings().all()
 
         memories = []
         for row in rows:
@@ -563,10 +548,10 @@ class MemoryRepository(BaseRepository[Memory]):
                     "similarity": round(similarity, 3),
                     "visibility": row.get("visibility", "private"),
                 })
-        self.touch_memories(memory["id"] for memory in memories)
+        await self.touch_memories(memory["id"] for memory in memories)
         return memories
 
-    def graph_augmented_recall(
+    async def graph_augmented_recall(
         self,
         *,
         query_embedding: Any,
@@ -582,7 +567,7 @@ class MemoryRepository(BaseRepository[Memory]):
         vis_clause, vis_params = memory_visibility_sql(visibility_context, alias="m")
         params: dict[str, Any] = {"emb": emb, "pool_size": limit * 3, **vis_params}
 
-        vector_results = self._session.execute(text(f"""
+        vector_results = (await self._session.execute(text(f"""
             SELECT m.id, m.content, m.memory_type, m.salience,
                    COALESCE(m.memory_tier, 'episodic') as memory_tier,
                    COALESCE(m.visibility, 'private') as visibility,
@@ -612,7 +597,7 @@ class MemoryRepository(BaseRepository[Memory]):
                        ELSE 0.0 END
                 DESC
             LIMIT :pool_size
-        """), params).mappings().all()
+        """), params)).mappings().all()
 
         if not vector_results:
             return []
@@ -656,7 +641,7 @@ class MemoryRepository(BaseRepository[Memory]):
             org_param="gvis_org_id",
         )
         graph_params.update(graph_vis_params)
-        graph_results = self._session.execute(text(f"""
+        graph_results = (await self._session.execute(text(f"""
             SELECT
                 e.source_id, e.target_id, e.relationship, e.weight,
                 m.id as connected_id, m.content, m.memory_type, m.salience,
@@ -683,7 +668,7 @@ class MemoryRepository(BaseRepository[Memory]):
               {graph_vis}
             ORDER BY e.weight DESC
             LIMIT :graph_limit
-        """), graph_params).mappings().all()
+        """), graph_params)).mappings().all()
 
         for row in graph_results:
             connected_id = row["connected_id"]
@@ -744,8 +729,8 @@ class MemoryRepository(BaseRepository[Memory]):
         ranked = sorted(seen.values(), key=lambda item: (item["priority"], -item["score"]))
         results = ranked[:limit]
         result_ids = [item["id"] for item in results]
-        self.touch_memories(result_ids)
-        EdgeRepository(self._session).activate_between(result_ids)
+        await self.touch_memories(result_ids)
+        await EdgeRepository(self._session).activate_between(result_ids)
         for item in results:
             item.pop("priority", None)
         return results
@@ -760,7 +745,7 @@ class MemoryRepository(BaseRepository[Memory]):
             memory_visibility_predicate(Memory, context),
         )
 
-    def list_active(self, *, limit: int | None = 500) -> Sequence[Memory]:
+    async def a_list_active(self, *, limit: int | None = 500) -> Sequence[Memory]:
         stmt = (
             select(Memory)
             .where(or_(Memory.archived == False, Memory.archived.is_(None)))  # noqa: E712
@@ -768,10 +753,10 @@ class MemoryRepository(BaseRepository[Memory]):
         )
         if limit:
             stmt = stmt.limit(limit * 2)
-        memories = self._session.scalars(stmt).all()
-        return self._truth_ranked(memories, limit=limit)
+        result = await self._session.scalars(stmt)
+        return self._truth_ranked(result.all(), limit=limit)
 
-    def list_visible(
+    async def a_list_visible(
         self,
         context: MemoryVisibilityContext,
         *,
@@ -780,10 +765,10 @@ class MemoryRepository(BaseRepository[Memory]):
         stmt = self._visible_active_stmt(context).order_by(Memory.salience.desc())
         if limit:
             stmt = stmt.limit(limit * 2)
-        memories = self._session.scalars(stmt).all()
+        memories = (await self._session.scalars(stmt)).all()
         return self._truth_ranked(memories, limit=limit)
 
-    def list_by_type(self, memory_type: str) -> Sequence[Memory]:
+    async def a_list_by_type(self, memory_type: str) -> Sequence[Memory]:
         stmt = (
             select(Memory)
             .where(
@@ -792,10 +777,10 @@ class MemoryRepository(BaseRepository[Memory]):
             )
             .order_by(Memory.salience.desc())
         )
-        memories = self._session.scalars(stmt).all()
+        memories = (await self._session.scalars(stmt)).all()
         return self._truth_ranked(memories)
 
-    def search(self, query: str, *, limit: int = 50) -> Sequence[Memory]:
+    async def a_search(self, query: str, *, limit: int = 50) -> Sequence[Memory]:
         stmt = (
             select(Memory)
             .where(
@@ -803,12 +788,12 @@ class MemoryRepository(BaseRepository[Memory]):
                 or_(Memory.archived == False, Memory.archived.is_(None)),  # noqa: E712
             )
             .order_by(Memory.salience.desc())
+            .limit(limit * 2)
         )
-        stmt = stmt.limit(limit * 2)
-        memories = self._session.scalars(stmt).all()
+        memories = (await self._session.scalars(stmt)).all()
         return self._truth_ranked(memories, limit=limit)
 
-    def search_visible(
+    async def search_visible(
         self,
         query: str,
         context: MemoryVisibilityContext,
@@ -821,10 +806,10 @@ class MemoryRepository(BaseRepository[Memory]):
             .order_by(Memory.salience.desc())
             .limit(limit * 2)
         )
-        memories = self._session.scalars(stmt).all()
+        memories = (await self._session.scalars(stmt)).all()
         return self._truth_ranked(memories, limit=limit)
 
-    def list_filtered(
+    async def list_filtered(
         self,
         *,
         memory_type: str | None = None,
@@ -843,9 +828,9 @@ class MemoryRepository(BaseRepository[Memory]):
         if tags:
             stmt = stmt.where(Memory.tags.overlap(tags))
         stmt = stmt.order_by(Memory.salience.desc(), Memory.created_at.desc()).limit(limit)
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def list_stale(
+    async def list_stale(
         self, *, days: int = 90, min_access: int = 3
     ) -> Sequence[Memory]:
         from datetime import datetime, timedelta, timezone
@@ -860,10 +845,10 @@ class MemoryRepository(BaseRepository[Memory]):
             )
             .order_by(Memory.access_count.asc())
         )
-        memories = self._session.scalars(stmt).all()
+        memories = (await self._session.scalars(stmt)).all()
         return self._truth_ranked(memories)
 
-    def list_stale_visible(
+    async def list_stale_visible(
         self,
         context: MemoryVisibilityContext,
         *,
@@ -881,37 +866,37 @@ class MemoryRepository(BaseRepository[Memory]):
             )
             .order_by(Memory.access_count.asc())
         )
-        memories = self._session.scalars(stmt).all()
+        memories = (await self._session.scalars(stmt)).all()
         return self._truth_ranked(memories)
 
-    def get_visible(self, memory_id: int, context: MemoryVisibilityContext) -> Memory | None:
+    async def a_get_visible(self, memory_id: int, context: MemoryVisibilityContext) -> Memory | None:
         stmt = select(Memory).where(
             Memory.id == memory_id,
             memory_visibility_predicate(Memory, context),
         )
-        return self._session.scalars(stmt).first()
+        return (await self._session.scalars(stmt)).first()
 
-    def get_or_raise_visible(self, memory_id: int, context: MemoryVisibilityContext) -> Memory:
-        memory = self.get_visible(memory_id, context)
+    async def a_get_or_raise_visible(self, memory_id: int, context: MemoryVisibilityContext) -> Memory:
+        memory = await self.a_get_visible(memory_id, context)
         if memory is None:
             raise LookupError(f"Memory {memory_id} not found")
         return memory
 
-    def get_detail(
+    async def get_detail(
         self,
         memory_id: int,
         *,
         context: MemoryVisibilityContext | None = None,
     ) -> dict | None:
-        memory = self.get_visible(memory_id, context) if context else self.get(memory_id)
+        memory = await self.a_get_visible(memory_id, context) if context else await self.a_get(memory_id)
         if not memory:
             return None
         return {
             "memory": memory,
-            "edges": self.connected_edge_rows(memory_id, context=context),
+            "edges": await self.connected_edge_rows(memory_id, context=context),
         }
 
-    def connected_edge_rows(
+    async def connected_edge_rows(
         self,
         memory_id: int,
         *,
@@ -926,7 +911,7 @@ class MemoryRepository(BaseRepository[Memory]):
                 user_param="detail_user_id",
                 org_param="detail_org_id",
             )
-        rows = self._session.execute(
+        rows = (await self._session.execute(
             text(f"""
                 SELECT e.*,
                        CASE WHEN e.source_id = :mid THEN e.target_id ELSE e.source_id END as connected_id,
@@ -938,10 +923,10 @@ class MemoryRepository(BaseRepository[Memory]):
                 ORDER BY e.weight DESC
             """),
             {"mid": memory_id, **vis_params},
-        ).mappings().all()
+        )).mappings().all()
         return [dict(row) for row in rows]
 
-    def get_graph_context(
+    async def get_graph_context(
         self,
         memory_id: int,
         *,
@@ -958,7 +943,7 @@ class MemoryRepository(BaseRepository[Memory]):
                 user_param="context_user_id",
                 org_param="context_org_id",
             )
-        nodes = self._session.execute(
+        nodes = (await self._session.execute(
             text(f"""
                 WITH RECURSIVE neighborhood AS (
                     SELECT m.id, m.content, m.memory_type, m.salience,
@@ -978,18 +963,18 @@ class MemoryRepository(BaseRepository[Memory]):
                 SELECT DISTINCT ON (id) * FROM neighborhood ORDER BY id, depth ASC
             """),
             {"sid": memory_id, "depth": depth, **vis_params},
-        ).mappings().all()
+        )).mappings().all()
 
         node_ids = [row["id"] for row in nodes]
         edge_rows: list[dict] = []
         if node_ids:
-            edge_rows = [dict(row) for row in self._session.execute(
+            edge_rows = [dict(row) for row in (await self._session.execute(
                 text("""
                     SELECT source_id, target_id, relationship, weight, auto_generated
                     FROM edges WHERE source_id = ANY(:ids) AND target_id = ANY(:ids)
                 """),
                 {"ids": node_ids},
-            ).mappings().all()]
+            )).mappings().all()]
 
         return {
             "center": memory_id,
@@ -1016,7 +1001,7 @@ class MemoryRepository(BaseRepository[Memory]):
             ],
         }
 
-    def get_memory_neighborhood(
+    async def get_memory_neighborhood(
         self,
         memory_id: int,
         *,
@@ -1042,7 +1027,7 @@ class MemoryRepository(BaseRepository[Memory]):
                 user_param="neighbor_user_id",
                 org_param="neighbor_org_id",
             )
-        center = self._session.execute(text(f"""
+        center = (await self._session.execute(text(f"""
             SELECT id, content, memory_type, salience,
                    COALESCE(memory_tier, 'episodic') as memory_tier,
                    COALESCE(truth_status, 'unknown') as truth_status,
@@ -1050,12 +1035,12 @@ class MemoryRepository(BaseRepository[Memory]):
                    COALESCE(confidence, 0.5) as confidence
             FROM memories WHERE id = :mem_id
             {center_vis}
-        """), {"mem_id": memory_id, **center_params}).mappings().first()
+        """), {"mem_id": memory_id, **center_params})).mappings().first()
 
         if not center:
             return {"error": f"Memory {memory_id} not found"}
 
-        neighbors = self._session.execute(text(f"""
+        neighbors = (await self._session.execute(text(f"""
             SELECT
                 e.relationship, e.weight,
                 m.id, m.content, m.memory_type, m.salience,
@@ -1072,7 +1057,7 @@ class MemoryRepository(BaseRepository[Memory]):
               {neighbor_vis}
             ORDER BY e.weight DESC
             LIMIT 20
-        """), {"mem_id": memory_id, **neighbor_params}).mappings().all()
+        """), {"mem_id": memory_id, **neighbor_params})).mappings().all()
 
         return {
             "center": {
@@ -1100,52 +1085,52 @@ class MemoryRepository(BaseRepository[Memory]):
             "edge_count": len(neighbors),
         }
 
-    def count_active(self) -> int:
-        """Count non-archived memories."""
+    async def a_count_active(self) -> int:
+        """Count non-archived memories using an async session."""
         if not quarantine_filter_enabled():
             stmt = select(func.count(Memory.id)).where(
                 or_(Memory.archived == False, Memory.archived.is_(None))  # noqa: E712
             )
-            return self._session.scalar(stmt) or 0
-        return len(self.list_active(limit=None))
+            return await self._session.scalar(stmt) or 0
+        return len(await self.a_list_active(limit=None))
 
-    def count_archived(self) -> int:
-        """Count archived memories."""
+    async def a_count_archived(self) -> int:
+        """Count archived memories using an async session."""
         stmt = select(func.count(Memory.id)).where(Memory.archived == True)  # noqa: E712
-        return self._session.scalar(stmt) or 0
+        return await self._session.scalar(stmt) or 0
 
-    def count_by_type(self) -> dict[str, int]:
-        """Count memories grouped by memory_type."""
+    async def a_count_by_type(self) -> dict[str, int]:
+        """Count memories grouped by memory_type using an async session."""
         if not quarantine_filter_enabled():
             stmt = (
                 select(Memory.memory_type, func.count(Memory.id))
                 .where(or_(Memory.archived == False, Memory.archived.is_(None)))  # noqa: E712
                 .group_by(Memory.memory_type)
             )
-            rows = self._session.execute(stmt).all()
+            rows = (await self._session.execute(stmt)).all()
             return {row[0]: row[1] for row in rows}
 
         counts: dict[str, int] = {}
-        for memory in self.list_active(limit=None):
+        for memory in await self.a_list_active(limit=None):
             counts[memory.memory_type] = counts.get(memory.memory_type, 0) + 1
         return counts
 
-    def stats(self) -> dict:
+    async def stats(self) -> dict:
         """Return the CLI/API memory statistics snapshot."""
-        total = self._session.scalar(select(func.count(Memory.id))) or 0
-        archived = self._session.scalar(
+        total = await self._session.scalar(select(func.count(Memory.id))) or 0
+        archived = await self._session.scalar(
             select(func.count(Memory.id)).where(Memory.archived == True)  # noqa: E712
         ) or 0
-        edge_total = self._session.scalar(select(func.count(Edge.id))) or 0
-        auto_edges = self._session.scalar(
+        edge_total = await self._session.scalar(select(func.count(Edge.id))) or 0
+        auto_edges = await self._session.scalar(
             select(func.count(Edge.id)).where(Edge.auto_generated == True)  # noqa: E712
         ) or 0
-        by_type_rows = self._session.execute(
+        by_type_rows = (await self._session.execute(
             select(Memory.memory_type, func.count(Memory.id), func.avg(Memory.salience))
             .where(self._active_predicate())
             .group_by(Memory.memory_type)
             .order_by(func.count(Memory.id).desc())
-        ).all()
+        )).all()
         return {
             "memories": {"total": total, "archived": archived, "active": total - archived},
             "edges": {"total": edge_total, "auto_generated": auto_edges},
@@ -1159,7 +1144,7 @@ class MemoryRepository(BaseRepository[Memory]):
             ],
         }
 
-    def list_org_memories(
+    async def list_org_memories(
         self,
         context: MemoryVisibilityContext,
         *,
@@ -1179,9 +1164,9 @@ class MemoryRepository(BaseRepository[Memory]):
             .offset(offset)
             .limit(limit)
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def list_decay_candidates(self, *, days: int = 30, threshold: float = 2.0) -> Sequence[Memory]:
+    async def list_decay_candidates(self, *, days: int = 30, threshold: float = 2.0) -> Sequence[Memory]:
         cutoff = datetime.now() - timedelta(days=days)
         stmt = (
             select(Memory)
@@ -1193,18 +1178,18 @@ class MemoryRepository(BaseRepository[Memory]):
             )
             .order_by(Memory.salience.asc(), Memory.last_accessed.asc())
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def archive_many(self, ids: Iterable[int]) -> int:
+    async def archive_many(self, ids: Iterable[int]) -> int:
         memory_ids = self._coerce_ids(ids)
         if not memory_ids:
             return 0
-        result = self._session.execute(
+        result = (await self._session.execute(
             update(Memory).where(Memory.id.in_(memory_ids)).values(archived=True)
-        )
+        ))
         return int(result.rowcount or 0)
 
-    def list_index_memories(self, *, limit: int = 50) -> Sequence[Memory]:
+    async def list_index_memories(self, *, limit: int = 50) -> Sequence[Memory]:
         stmt = (
             select(Memory)
             .where(
@@ -1215,16 +1200,16 @@ class MemoryRepository(BaseRepository[Memory]):
             .order_by(Memory.salience.desc(), Memory.last_accessed.desc())
             .limit(limit)
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def high_salience_warnings_for_skill(
+    async def high_salience_warnings_for_skill(
         self,
         *,
         skill_embedding: Any,
         limit: int = 3,
     ) -> list[str]:
         emb = self._embedding_to_pg(skill_embedding)
-        rows = self._session.execute(text("""
+        rows = (await self._session.execute(text("""
             SELECT content, salience
             FROM memories
             WHERE memory_type IN ('lesson', 'pattern')
@@ -1233,17 +1218,17 @@ class MemoryRepository(BaseRepository[Memory]):
               AND 1 - (semantic_embedding <=> CAST(:emb AS vector)) > 0.5
             ORDER BY salience DESC
             LIMIT :limit
-        """), {"emb": emb, "limit": limit}).mappings().all()
+        """), {"emb": emb, "limit": limit})).mappings().all()
         return [row["content"][:300] for row in rows]
 
-    def guardrail_memories_for_task(
+    async def guardrail_memories_for_task(
         self,
         *,
         task_embedding: Any,
         limit: int = 5,
     ) -> list[dict]:
         emb = self._embedding_to_pg(task_embedding)
-        rows = self._session.execute(text("""
+        rows = (await self._session.execute(text("""
             SELECT content, memory_type, salience,
                    1 - (semantic_embedding <=> CAST(:emb1 AS vector)) as similarity
             FROM memories
@@ -1252,10 +1237,10 @@ class MemoryRepository(BaseRepository[Memory]):
               AND 1 - (semantic_embedding <=> CAST(:emb2 AS vector)) > 0.4
             ORDER BY semantic_embedding <=> CAST(:emb3 AS vector)
             LIMIT :limit
-        """), {"emb1": emb, "emb2": emb, "emb3": emb, "limit": limit}).mappings().all()
+        """), {"emb1": emb, "emb2": emb, "emb3": emb, "limit": limit})).mappings().all()
         return [dict(row) for row in rows]
 
-    def add_attribution(self, memories: list[dict], current_user_id: str) -> list[dict]:
+    async def add_attribution(self, memories: list[dict], current_user_id: str) -> list[dict]:
         """Annotate cross-user shared memories with allowed attribution."""
         memory_ids = [memory["id"] for memory in memories]
         if not memory_ids:
@@ -1270,7 +1255,7 @@ class MemoryRepository(BaseRepository[Memory]):
             .outerjoin(User, User.id == Memory.user_id)
             .where(Memory.id.in_(memory_ids))
         )
-        rows = self._session.execute(stmt).mappings().all()
+        rows = (await self._session.execute(stmt)).mappings().all()
         user_map = {row["id"]: row for row in rows}
         for memory in memories:
             info = user_map.get(memory["id"])
@@ -1281,8 +1266,8 @@ class MemoryRepository(BaseRepository[Memory]):
                     memory["attributed_to"] = "A teammate"
         return memories
 
-    def recent_activity(self, *, limit: int = 20) -> list[dict]:
-        """Return recent memories as activity feed items."""
+    async def a_recent_activity(self, *, limit: int = 20) -> list[dict]:
+        """Return recent memories as activity feed items using an async session."""
         stmt = (
             select(Memory)
             .options(
@@ -1307,7 +1292,8 @@ class MemoryRepository(BaseRepository[Memory]):
             .where(or_(Memory.archived == False, Memory.archived.is_(None)))  # noqa: E712
             .order_by(Memory.created_at.desc())
         )
-        memories = self._filter_truth_safe(self._session.scalars(stmt.limit(limit * 2)).all())[:limit]
+        result = await self._session.scalars(stmt.limit(limit * 2))
+        memories = self._filter_truth_safe(result.all())[:limit]
         return [
             {
                 "type": "memory",
@@ -1318,29 +1304,31 @@ class MemoryRepository(BaseRepository[Memory]):
             for m in memories
         ]
 
-    def retrieval_accuracy(self) -> float | None:
-        """Average retrieval accuracy from retrieval_log (where was_relevant is set)."""
+    async def a_retrieval_accuracy(self) -> float | None:
+        """Average retrieval accuracy using an async session."""
         stmt = select(func.avg(
             func.cast(RetrievalLog.was_relevant, Integer)
         )).where(RetrievalLog.was_relevant.isnot(None))
-        result = self._session.scalar(stmt)
+        result = await self._session.scalar(stmt)
         return float(result) if result is not None else None
 
-    def get_graph_data(self, *, limit: int = 500, context: MemoryVisibilityContext | None = None) -> dict:
-        memories = self.list_visible(context, limit=limit) if context else self.list_active(limit=limit)
+    async def a_get_graph_data(self, *, limit: int = 500, context: MemoryVisibilityContext | None = None) -> dict:
+        memories = await self.a_list_visible(context, limit=limit) if context else await self.a_list_active(limit=limit)
         memory_ids = {m.id for m in memories}
         if not memory_ids:
             edges = []
         else:
-            edges = self._session.scalars(
-                select(Edge).where(
-                    Edge.source_id.in_(memory_ids),
-                    Edge.target_id.in_(memory_ids),
+            edges = (
+                await self._session.scalars(
+                    select(Edge).where(
+                        Edge.source_id.in_(memory_ids),
+                        Edge.target_id.in_(memory_ids),
+                    )
                 )
             ).all()
         return {"nodes": memories, "edges": edges}
 
-    def list_contradictions(
+    async def a_list_contradictions(
         self,
         memory_id: int | None = None,
         *,
@@ -1355,9 +1343,9 @@ class MemoryRepository(BaseRepository[Memory]):
                 )
             )
         stmt = stmt.limit(limit)
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def list_reviews(
+    async def a_list_reviews(
         self,
         memory_id: int | None = None,
         *,
@@ -1367,18 +1355,18 @@ class MemoryRepository(BaseRepository[Memory]):
         if memory_id is not None:
             stmt = stmt.where(MemoryReview.memory_id == memory_id)
         stmt = stmt.limit(limit)
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def get_truth_snapshot(
+    async def a_get_truth_snapshot(
         self,
         memory_id: int,
         *,
         include_records: bool = False,
         context: MemoryVisibilityContext | None = None,
     ) -> dict:
-        memory = self.get_or_raise_visible(memory_id, context) if context else self.get_or_raise(memory_id)
-        contradictions = self.list_contradictions(memory_id) if include_records else []
-        reviews = self.list_reviews(memory_id) if include_records else []
+        memory = await self.a_get_or_raise_visible(memory_id, context) if context else await self.a_get_or_raise(memory_id)
+        contradictions = await self.a_list_contradictions(memory_id) if include_records else []
+        reviews = await self.a_list_reviews(memory_id) if include_records else []
         open_contradictions = [
             contradiction
             for contradiction in contradictions
@@ -1405,7 +1393,7 @@ class MemoryRepository(BaseRepository[Memory]):
             "conservative_filter_enabled": quarantine_filter_enabled(),
         }
 
-    def get_similarity_edges(
+    async def get_similarity_edges(
         self,
         *,
         limit: int = 500,
@@ -1453,10 +1441,10 @@ class MemoryRepository(BaseRepository[Memory]):
                      1 - (a.semantic_embedding <=> b.semantic_embedding) DESC
         """)
 
-        rows = self._session.execute(
+        rows = (await self._session.execute(
             raw_sql,
             {"mem_limit": limit, "top_k": top_k, "threshold": threshold, **vis_params},
-        ).fetchall()
+        )).fetchall()
 
         return [
             {"source_id": row[0], "target_id": row[1], "similarity": float(row[2])}
@@ -1467,12 +1455,12 @@ class MemoryRepository(BaseRepository[Memory]):
 class EdgeRepository(BaseRepository[Edge]):
     model = Edge
 
-    def count_all(self) -> int:
-        """Count all edges."""
+    async def a_count_all(self) -> int:
+        """Count all edges using an async session."""
         stmt = select(func.count(Edge.id))
-        return self._session.scalar(stmt) or 0
+        return await self._session.scalar(stmt) or 0
 
-    def upsert_edge(
+    async def upsert_edge(
         self,
         source_id: int,
         target_id: int,
@@ -1488,7 +1476,7 @@ class EdgeRepository(BaseRepository[Edge]):
                 Edge.target_id == target_id,
                 Edge.relationship == relationship,
             )
-            edge = self._session.scalars(stmt).first()
+            edge = (await self._session.scalars(stmt)).first()
             if edge:
                 edge.weight = weight
                 edge.last_activated = datetime.utcnow()
@@ -1501,10 +1489,10 @@ class EdgeRepository(BaseRepository[Edge]):
                     auto_generated=auto_generated,
                 )
                 self._session.add(edge)
-            self._session.flush()
+            await self._session.flush()
             return edge.id
 
-        result = self._session.execute(
+        result = (await self._session.execute(
             text("""
                 INSERT INTO edges (source_id, target_id, relationship, weight, auto_generated)
                 VALUES (:source_id, :target_id, :relationship, :weight, :auto_generated)
@@ -1519,10 +1507,10 @@ class EdgeRepository(BaseRepository[Edge]):
                 "weight": weight,
                 "auto_generated": auto_generated,
             },
-        )
+        ))
         return result.scalar_one()
 
-    def activate_between(self, memory_ids: Iterable[int]) -> None:
+    async def activate_between(self, memory_ids: Iterable[int]) -> None:
         ids = [int(memory_id) for memory_id in memory_ids]
         if len(ids) < 2:
             return
@@ -1537,7 +1525,7 @@ class EdgeRepository(BaseRepository[Edge]):
                 activation_count=func.coalesce(Edge.activation_count, 0) + 1,
             )
         )
-        self._session.execute(stmt)
+        (await self._session.execute(stmt))
 
     def _dialect_name(self) -> str | None:
         try:
@@ -1547,18 +1535,18 @@ class EdgeRepository(BaseRepository[Edge]):
             bind = getattr(self._session, "bind", None)
             return getattr(getattr(bind, "dialect", None), "name", None)
 
-    def list_by_memory(self, memory_id: int) -> Sequence[Edge]:
+    async def a_list_by_memory(self, memory_id: int) -> Sequence[Edge]:
         stmt = select(Edge).where(
             or_(Edge.source_id == memory_id, Edge.target_id == memory_id)
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def list_by_memory_visible(
+    async def list_by_memory_visible(
         self,
         memory_id: int,
         context: MemoryVisibilityContext,
     ) -> Sequence[Edge]:
-        center = self._session.get(Memory, memory_id)
+        center = await self._session.get(Memory, memory_id)
         require_memory_visible(center, context)
         source = aliased(Memory)
         target = aliased(Memory)
@@ -1572,9 +1560,9 @@ class EdgeRepository(BaseRepository[Edge]):
                 memory_visibility_predicate(target, context),
             )
         )
-        return self._session.scalars(stmt).all()
+        return (await self._session.scalars(stmt)).all()
 
-    def neighborhood(
+    async def a_neighborhood(
         self,
         memory_id: int,
         *,
@@ -1582,5 +1570,19 @@ class EdgeRepository(BaseRepository[Edge]):
         context: MemoryVisibilityContext | None = None,
     ) -> Sequence[Edge]:
         if context:
-            return self.list_by_memory_visible(memory_id, context)
-        return self.list_by_memory(memory_id)
+            center = await self._session.get(Memory, memory_id)
+            require_memory_visible(center, context)
+            source = aliased(Memory)
+            target = aliased(Memory)
+            stmt = (
+                select(Edge)
+                .join(source, Edge.source_id == source.id)
+                .join(target, Edge.target_id == target.id)
+                .where(
+                    or_(Edge.source_id == memory_id, Edge.target_id == memory_id),
+                    memory_visibility_predicate(source, context),
+                    memory_visibility_predicate(target, context),
+                )
+            )
+            return (await self._session.scalars(stmt)).all()
+        return await self.a_list_by_memory(memory_id)

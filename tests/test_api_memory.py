@@ -10,12 +10,7 @@ from httpx import ASGITransport, AsyncClient
 @pytest.fixture(autouse=True)
 def mock_session_factory():
     session = MagicMock()
-
-    def _factory():
-        return session
-
-    with patch("brain.platform.db.legacy.legacy_session_factory", _factory):
-        yield session
+    yield session
 
 
 def _make_memory(**overrides):
@@ -89,6 +84,9 @@ async def client(mock_session_factory):
     from brain.app.api.main import app
 
     class _AsyncSession:
+        async def flush(self):
+            return None
+
         async def run_sync(self, fn):
             return fn(mock_session_factory)
 
@@ -185,11 +183,11 @@ async def test_truth_review_promotes_with_evidence_and_confidence(client, mock_s
         "conservative_filter_enabled": True,
     }
     with patch("brain.app.api.routers.memory.MemoryRepository") as MockRepo, \
-         patch("brain.app.api.routers.memory.record_memory_review", return_value={"id": 1}):
+         patch("brain.app.api.routers.memory.async_record_memory_review", new=AsyncMock(return_value={"id": 1})):
         repo = MockRepo.return_value
-        repo.get_or_raise_visible.return_value = mem
-        repo.list_contradictions.return_value = []
-        repo.get_truth_snapshot.return_value = truth_snapshot
+        repo.a_get_or_raise_visible = AsyncMock(return_value=mem)
+        repo.a_list_contradictions = AsyncMock(return_value=[])
+        repo.a_get_truth_snapshot = AsyncMock(return_value=truth_snapshot)
         resp = await client.post(
             "/api/memory/1/truth/review",
             json={
@@ -212,8 +210,8 @@ async def test_truth_review_requires_evidence(client, mock_session_factory):
     mem = _make_memory(content="review me", memory_tier="episodic")
     with patch("brain.app.api.routers.memory.MemoryRepository") as MockRepo:
         repo = MockRepo.return_value
-        repo.get_or_raise_visible.return_value = mem
-        repo.list_contradictions.return_value = []
+        repo.a_get_or_raise_visible = AsyncMock(return_value=mem)
+        repo.a_list_contradictions = AsyncMock(return_value=[])
         resp = await client.post(
             "/api/memory/1/truth/review",
             json={
@@ -245,11 +243,15 @@ async def test_truth_review_demotes_with_evidence_and_confidence(client, mock_se
         "conservative_filter_enabled": True,
     }
     with patch("brain.app.api.routers.memory.MemoryRepository") as MockRepo, \
-         patch("brain.app.api.routers.memory.record_memory_review", return_value={"id": 2}):
+         patch("brain.app.api.routers.memory.async_record_memory_review", new=AsyncMock(return_value={"id": 2})), \
+         patch("brain.platform.db.repositories.memory_dag.MemorySummaryRepository") as MockSummaryRepo, \
+         patch("brain.platform.db.repositories.narratives.NarrativeRepository") as MockNarrativeRepo:
         repo = MockRepo.return_value
-        repo.get_or_raise_visible.return_value = mem
-        repo.list_contradictions.return_value = []
-        repo.get_truth_snapshot.return_value = truth_snapshot
+        repo.a_get_or_raise_visible = AsyncMock(return_value=mem)
+        repo.a_list_contradictions = AsyncMock(return_value=[])
+        repo.a_get_truth_snapshot = AsyncMock(return_value=truth_snapshot)
+        MockSummaryRepo.return_value.a_mark_stale_for_memory = AsyncMock(return_value=0)
+        MockNarrativeRepo.return_value.a_mark_stale_for_memory = AsyncMock(return_value=0)
         resp = await client.post(
             "/api/memory/1/truth/review",
             json={

@@ -14,7 +14,7 @@ class MemoryHealthRepository(BaseRepository[MemoryHealthLog]):
 
     model = MemoryHealthLog
 
-    def log_check(
+    async def a_log_check(
         self,
         check_type: str,
         status: str,
@@ -29,7 +29,7 @@ class MemoryHealthRepository(BaseRepository[MemoryHealthLog]):
             org_id=org_id,
         )
         self._session.add(entry)
-        self._session.flush()
+        await self._session.flush()
         return entry
 
 
@@ -42,7 +42,7 @@ class RetrievalPoolStatsRepository(BaseRepository[RetrievalPoolStats]):
     _DEFAULT_RATIOS = {"recency": 0.60, "semantic": 0.25, "narrative": 0.15}
     _FLOOR = 0.10
 
-    def record_outcome(
+    async def a_record_outcome(
         self,
         pool_name: str,
         hit: bool,
@@ -52,7 +52,6 @@ class RetrievalPoolStatsRepository(BaseRepository[RetrievalPoolStats]):
         now = datetime.now(timezone.utc)
         window_start = now.replace(minute=0, second=0, microsecond=0)
 
-        # Try to find existing row for this window
         stmt = select(RetrievalPoolStats).where(
             RetrievalPoolStats.pool_name == pool_name,
             RetrievalPoolStats.window_start == window_start,
@@ -62,7 +61,7 @@ class RetrievalPoolStatsRepository(BaseRepository[RetrievalPoolStats]):
         else:
             stmt = stmt.where(RetrievalPoolStats.org_id.is_(None))
 
-        row = self._session.scalars(stmt).first()
+        row = (await self._session.scalars(stmt)).first()
         if row is None:
             row = RetrievalPoolStats(
                 pool_name=pool_name,
@@ -78,28 +77,23 @@ class RetrievalPoolStatsRepository(BaseRepository[RetrievalPoolStats]):
         else:
             row.miss_count = (row.miss_count or 0) + 1
 
-        self._session.flush()
+        await self._session.flush()
         return row
 
-    def get_pool_ratios(
+    async def a_get_pool_ratios(
         self, org_id: str | None = None
     ) -> dict[str, float]:
-        """Compute adaptive pool ratios from recent stats.
-
-        Returns dict like {"recency": 0.60, "semantic": 0.25, "narrative": 0.15}.
-        Falls back to defaults when no data exists. Applies a 10% floor per pool.
-        """
+        """Compute adaptive pool ratios from recent stats."""
         stmt = select(RetrievalPoolStats)
         if org_id is not None:
             stmt = stmt.where(RetrievalPoolStats.org_id == org_id)
         else:
             stmt = stmt.where(RetrievalPoolStats.org_id.is_(None))
 
-        rows = self._session.scalars(stmt).all()
+        rows = (await self._session.scalars(stmt)).all()
         if not rows:
             return dict(self._DEFAULT_RATIOS)
 
-        # Aggregate hit rates per pool
         pool_hits: dict[str, int] = {}
         pool_total: dict[str, int] = {}
         for row in rows:
@@ -114,7 +108,6 @@ class RetrievalPoolStatsRepository(BaseRepository[RetrievalPoolStats]):
         if not pool_total:
             return dict(self._DEFAULT_RATIOS)
 
-        # Compute raw ratios from hit rates
         raw: dict[str, float] = {}
         for name in self._DEFAULT_RATIOS:
             if name in pool_total and pool_total[name] > 0:
@@ -122,7 +115,6 @@ class RetrievalPoolStatsRepository(BaseRepository[RetrievalPoolStats]):
             else:
                 raw[name] = self._DEFAULT_RATIOS[name]
 
-        # Apply floor and normalise
         for name in raw:
             raw[name] = max(raw[name], self._FLOOR)
 

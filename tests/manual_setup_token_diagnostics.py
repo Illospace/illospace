@@ -6,11 +6,6 @@ Run locally, without the frontend:
 
 Optional env vars:
     ILLO_TEST_ANTHROPIC_TOKEN   Use this token instead of loading the latest DB token
-    ILLO_TEST_DB_HOST           Defaults to 127.0.0.1
-    ILLO_TEST_DB_PORT           Defaults to 5432
-    ILLO_TEST_DB_NAME           Defaults to illo_memory
-    ILLO_TEST_DB_USER           Defaults to illo
-    ILLO_TEST_DB_PASSWORD       Defaults to illo
 
 The shared adapter already writes exact request/response dumps to:
     /tmp/anthropic-debug/request_*.json
@@ -20,6 +15,7 @@ This script prints the new dump paths created by each hypothesis.
 
 from __future__ import annotations
 
+import asyncio
 import glob
 import json
 import os
@@ -29,11 +25,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import anthropic
-import psycopg2
+from sqlalchemy import select
 
 sys.path.insert(0, ".")
 
 from brain.platform.integrations.anthropic_adapter import build_auth_adapter, get_oauth_betas
+from brain.platform.db.models.org import UserApiKey
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.vault import _decrypt
 
 DEBUG_DIR = Path("/tmp/anthropic-debug")
@@ -48,35 +46,26 @@ class Case:
     default_headers: dict[str, str] | None = None
 
 
-def _load_token() -> str:
+async def _load_token() -> str:
     env_token = os.environ.get("ILLO_TEST_ANTHROPIC_TOKEN", "").strip()
     if env_token:
         return env_token
 
-    conn = psycopg2.connect(
-        host=os.environ.get("ILLO_TEST_DB_HOST", "127.0.0.1"),
-        port=int(os.environ.get("ILLO_TEST_DB_PORT", "5432")),
-        dbname=os.environ.get("ILLO_TEST_DB_NAME", "illo_memory"),
-        user=os.environ.get("ILLO_TEST_DB_USER", "illo"),
-        password=os.environ.get("ILLO_TEST_DB_PASSWORD", "illo"),
-    )
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT encrypted_key
-                FROM user_api_keys
-                WHERE provider = 'anthropic' AND is_active = TRUE
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
+    async with UnitOfWork() as uow:
+        row = (
+            await uow.session.scalars(
+                select(UserApiKey.encrypted_key)
+                .where(
+                    UserApiKey.provider == "anthropic",
+                    UserApiKey.is_active == True,  # noqa: E712
+                )
+                .order_by(UserApiKey.created_at.desc())
+                .limit(1)
             )
-            row = cur.fetchone()
-    finally:
-        conn.close()
-    if not row:
+        ).first()
+    if row is None:
         raise RuntimeError("No active anthropic token found in user_api_keys")
-    return _decrypt(bytes(row[0]))
+    return _decrypt(bytes(row))
 
 
 def _make_client(token: str, mode: str, default_headers: dict[str, str] | None = None):
@@ -228,8 +217,8 @@ def run_case(token: str, case: Case) -> tuple[str, str, list[str]]:
         return _status_from_exc(exc), str(exc)[:220], _new_debug_files(before)
 
 
-def main() -> int:
-    token = _load_token()
+async def main() -> int:
+    token = await _load_token()
     print(f"SDK version: {anthropic.__version__}")
     print(f"Token prefix: {token[:18]}...")
     print(f"Token suffix: ...{token[-40:]}")
@@ -259,4 +248,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

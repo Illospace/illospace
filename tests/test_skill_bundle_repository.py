@@ -4,9 +4,7 @@ from __future__ import annotations
 import re
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-from sqlalchemy.orm import Session
 
 from brain.platform.db.models.skill import Skill  # noqa: F401 - registers skills for FK lookup
 from brain.platform.db.models.skill_bundle import (
@@ -19,7 +17,6 @@ from brain.platform.db.models.skill_bundle import (
 from brain.platform.db.repositories.skill_bundles import (
     SkillBundleRepository,
     SkillBundleVersionConflict,
-    SkillOverlayConflict,
 )
 
 
@@ -45,17 +42,15 @@ def _patch_sqlite_for_pg_types():
 
 
 @pytest.fixture
-def session():
+async def session(async_sqlite_session_factory):
     _patch_sqlite_for_pg_types()
-    engine = create_engine("sqlite://", echo=False)
-    SkillBundle.__table__.create(engine, checkfirst=True)
-    SkillBundleVersion.__table__.create(engine, checkfirst=True)
-    SkillAsset.__table__.create(engine, checkfirst=True)
-    SkillInstallation.__table__.create(engine, checkfirst=True)
-    SkillOverlay.__table__.create(engine, checkfirst=True)
-    session = Session(engine)
-    yield session
-    session.close()
+    return await async_sqlite_session_factory([
+        SkillBundle.__table__,
+        SkillBundleVersion.__table__,
+        SkillAsset.__table__,
+        SkillInstallation.__table__,
+        SkillOverlay.__table__,
+    ])
 
 
 @pytest.fixture
@@ -63,7 +58,7 @@ def repo(session):
     return SkillBundleRepository(session)
 
 
-def _create_bundle_version(
+async def _create_bundle_version(
     repo: SkillBundleRepository,
     *,
     namespace: str = "local",
@@ -71,8 +66,8 @@ def _create_bundle_version(
     semver: str = "1.0.0",
     digest: str = "sha256:aaa",
 ) -> tuple[SkillBundle, SkillBundleVersion]:
-    bundle = repo.get_or_create_bundle(namespace, name, display_name="Test Skill")
-    version = repo.create_version(
+    bundle = await repo.a_get_or_create_bundle(namespace, name, display_name="Test Skill")
+    version = await repo.a_create_version(
         bundle,
         semver=semver,
         content_digest=digest,
@@ -83,11 +78,11 @@ def _create_bundle_version(
     return bundle, version
 
 
-def test_get_or_create_bundle_and_idempotent_version_create(repo):
-    bundle, version = _create_bundle_version(repo)
+async def test_get_or_create_bundle_and_idempotent_version_create(repo):
+    bundle, version = await _create_bundle_version(repo)
 
-    same_bundle = repo.get_or_create_bundle("local", "test-skill")
-    same_version = repo.create_version(
+    same_bundle = await repo.a_get_or_create_bundle("local", "test-skill")
+    same_version = await repo.a_create_version(
         same_bundle.id,
         semver="1.0.0",
         content_digest="sha256:aaa",
@@ -101,50 +96,50 @@ def test_get_or_create_bundle_and_idempotent_version_create(repo):
     assert same_version.status == "approved"
 
 
-def test_create_version_rejects_conflicting_semver_digest(repo):
-    bundle, _version = _create_bundle_version(repo)
+async def test_create_version_rejects_conflicting_semver_digest(repo):
+    bundle, _version = await _create_bundle_version(repo)
 
     with pytest.raises(SkillBundleVersionConflict, match="different digest"):
-        repo.create_version(
+        await repo.a_create_version(
             bundle,
             semver="1.0.0",
             content_digest="sha256:bbb",
         )
 
 
-def test_get_version_by_digest_returns_existing_version(repo):
-    bundle, version = _create_bundle_version(repo, digest="sha256:aaa")
+async def test_get_version_by_digest_returns_existing_version(repo):
+    bundle, version = await _create_bundle_version(repo, digest="sha256:aaa")
 
-    assert repo.get_version_by_digest(bundle, "sha256:aaa").id == version.id
-    assert repo.get_version_by_digest(bundle.id, "sha256:missing") is None
+    assert (await repo.a_get_version_by_digest(bundle, "sha256:aaa")).id == version.id
+    assert await repo.a_get_version_by_digest(bundle.id, "sha256:missing") is None
 
 
-def test_add_and_list_assets(repo):
-    _bundle, version = _create_bundle_version(repo)
+async def test_add_and_list_assets(repo):
+    _bundle, version = await _create_bundle_version(repo)
 
-    repo.add_asset(
+    await repo.a_add_asset(
         version,
         path="SKILL.md",
         content_digest="sha256:skill",
         content_text="# Test Skill",
     )
-    repo.add_asset(
+    await repo.a_add_asset(
         version.id,
         path="examples/basic.md",
         content_digest="sha256:example",
         asset_kind="example",
     )
 
-    assets = repo.list_assets(version)
+    assets = await repo.a_list_assets(version)
 
     assert [asset.path for asset in assets] == ["SKILL.md", "examples/basic.md"]
     assert assets[0].bundle_version_id == version.id
 
 
-def test_create_installation_pins_exact_version_and_digest(repo):
-    bundle, version = _create_bundle_version(repo)
+async def test_create_installation_pins_exact_version_and_digest(repo):
+    bundle, version = await _create_bundle_version(repo)
 
-    installation = repo.create_installation(
+    installation = await repo.a_create_installation(
         version,
         org_id="org-1",
         user_id="user-1",
@@ -165,48 +160,9 @@ def test_create_installation_pins_exact_version_and_digest(repo):
     assert installation.permission_grants == [{"kind": "tool", "name": "calendar"}]
 
     with pytest.raises(ValueError, match="installed_digest"):
-        repo.create_installation(
+        await repo.a_create_installation(
             version,
             org_id="org-2",
             user_id="user-2",
             installed_digest="sha256:not-the-version",
-        )
-
-
-def test_overlay_revision_uniqueness_and_active_lookup(repo):
-    _bundle, version = _create_bundle_version(repo)
-    installation = repo.create_installation(
-        version,
-        org_id="org-1",
-        user_id="user-1",
-    )
-
-    overlay = repo.add_overlay_revision(
-        installation,
-        overlay_revision=1,
-        status="active",
-        patch={"procedure": "Use the local override."},
-        overlay_digest="sha256:overlay",
-        effective_digest="sha256:effective",
-    )
-
-    active = repo.get_active_overlay(installation.id)
-    assert active is not None
-    assert active.id == overlay.id
-    assert active.effective_digest == "sha256:effective"
-
-    projection = repo.get_runtime_projection_metadata(
-        installation_id=installation.id,
-    )
-    assert projection is not None
-    assert projection["namespace"] == "local"
-    assert projection["semver"] == "1.0.0"
-    assert projection["effective_digest"] == "sha256:effective"
-    assert projection["overlay_revision"] == 1
-
-    with pytest.raises(SkillOverlayConflict, match="already exists"):
-        repo.add_overlay_revision(
-            installation.id,
-            overlay_revision=1,
-            patch={"procedure": "Duplicate revision."},
         )

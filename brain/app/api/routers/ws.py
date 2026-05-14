@@ -21,11 +21,11 @@ from brain.systems.cortex.events import (
 from brain.platform.db.repositories.chat import ChatConversationRepository, ChatMessageRepository
 from brain.app.api.schemas.chat import ChatReadUpdate
 from brain.app.api.services.chat import ChatReadPublishState, ChatService
-from brain.app.api.services.notifications import build_notification_summary
+from brain.app.api.services.notifications import async_build_notification_summary
 from brain.app.api.ws.manager import ConnectionManager
 from brain.app.api.ws.events import ServerEvent, ClientEvent
 from brain.app.api.ws.auth import WsTokenError, validate_auth_frame_claims, verify_ws_token
-from brain.platform.db.repositories.unit_of_work import UnitOfWork, run_sync_with_unit_of_work
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -564,22 +564,19 @@ async def _handle_chat_mark_read(user_id: str, org_id: str, data: dict, ws: WebS
         return
 
     try:
-        def _mark_read():
-            with UnitOfWork() as uow:
-                _, publish = ChatService(
-                    uow.session,
-                    {"id": user_id, "org_id": org_id},
-                ).mark_conversation_read(
-                    conversation_id,
-                    ChatReadUpdate(
-                        last_read_conversation_seq=last_read_conversation_seq,
-                        last_read_message_id=last_read_message_id,
-                    ),
-                )
-                summary = build_notification_summary(uow.session, user_id=user_id, org_id=org_id)
-                return publish, summary.model_dump(mode="json")
-
-        publish, summary_payload = await run_sync_with_unit_of_work(_mark_read)
+        async with UnitOfWork() as uow:
+            _, publish = await ChatService(
+                uow.session,
+                {"id": user_id, "org_id": org_id},
+            ).mark_conversation_read(
+                conversation_id,
+                ChatReadUpdate(
+                    last_read_conversation_seq=last_read_conversation_seq,
+                    last_read_message_id=last_read_message_id,
+                ),
+            )
+            summary = await async_build_notification_summary(uow.session, user_id=user_id, org_id=org_id)
+            summary_payload = summary.model_dump(mode="json")
     except HTTPException as exc:
         await _send_chat_error(ws, _chat_error_code_from_http_exception(exc))
         return
@@ -682,28 +679,25 @@ async def _authorize_chat_subscription(
     conversation_id: str,
     thread_root_message_id: int | None = None,
 ) -> str | None:
-    def _authorize():
-        with UnitOfWork() as uow:
-            conversation = ChatConversationRepository(uow.session).get_for_user(
-                conversation_id,
-                user_id,
-            )
-            if conversation is None:
-                return "CHAT_CONVERSATION_FORBIDDEN"
-            if str(conversation.org_id) != str(org_id):
-                return "CHAT_CONVERSATION_FORBIDDEN"
+    async with UnitOfWork() as uow:
+        conversation = await ChatConversationRepository(uow.session).a_get_for_user(
+            conversation_id,
+            user_id,
+        )
+        if conversation is None:
+            return "CHAT_CONVERSATION_FORBIDDEN"
+        if str(conversation.org_id) != str(org_id):
+            return "CHAT_CONVERSATION_FORBIDDEN"
 
-            if thread_root_message_id is None:
-                return None
-
-            root_message = ChatMessageRepository(uow.session).get(thread_root_message_id)
-            if (
-                root_message is None
-                or root_message.deleted_at is not None
-                or root_message.conversation_id != conversation.id
-                or root_message.thread_root_message_id is not None
-            ):
-                return "CHAT_THREAD_SUBSCRIPTION_INVALID"
+        if thread_root_message_id is None:
             return None
 
-    return await run_sync_with_unit_of_work(_authorize)
+        root_message = await ChatMessageRepository(uow.session).a_get(thread_root_message_id)
+        if (
+            root_message is None
+            or root_message.deleted_at is not None
+            or root_message.conversation_id != conversation.id
+            or root_message.thread_root_message_id is not None
+        ):
+            return "CHAT_THREAD_SUBSCRIPTION_INVALID"
+        return None

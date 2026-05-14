@@ -83,9 +83,9 @@ def test_workspace_app_db_defaults_are_in_canonical_model():
 
 def test_generated_app_host_styles_use_theme_tokens():
     checked_files = [
-        REPO_ROOT / "frontend/src/lib/components/cortex/GeneratedUiRenderer.svelte",
-        REPO_ROOT / "frontend/src/lib/components/cortex/GeneratedHtmlAppRuntime.svelte",
-        REPO_ROOT / "frontend/src/lib/components/cortex/GeneratedAppRenderer.svelte",
+        REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedUiRenderer.svelte",
+        REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedHtmlAppRuntime.svelte",
+        REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedAppRenderer.svelte",
     ]
     constellation_css = (REPO_ROOT / "frontend/src/lib/styles/constellation.css").read_text()
     raw_color = re.compile(r"#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(")
@@ -141,7 +141,7 @@ def test_daylight_signal_blob_root_tokens_do_not_depend_on_blob_locals():
 
 
 def test_workspace_app_object_preview_style_uses_theme_tokens():
-    source = (REPO_ROOT / "frontend/src/lib/components/cortex/CortexWorkspaceAppObject.svelte").read_text()
+    source = (REPO_ROOT / "frontend/src/lib/features/workspace-scene/renderers/WorkspaceAppObject.svelte").read_text()
     style = _last_style_block(source)
     raw_color = re.compile(r"#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(")
 
@@ -170,7 +170,7 @@ def test_chat_dock_light_mode_is_tokenized_at_shell_boundary():
 
 
 def test_cortex_workspace_chat_light_mode_is_page_tokenized():
-    source = (REPO_ROOT / "frontend/src/routes/cortex/+page.svelte").read_text()
+    source = (REPO_ROOT / "frontend/src/lib/features/cortex/components/CortexWorkspaceRoute.svelte").read_text()
 
     assert ":global(:root[data-color-scheme='light']) .cortex-page {" in source
     assert "--workspace-chat-expanded-background" in source
@@ -180,28 +180,27 @@ def test_cortex_workspace_chat_light_mode_is_page_tokenized():
 
 
 def test_thread_stage_sits_between_compact_and_foreground_chat_layers():
-    page = (REPO_ROOT / "frontend/src/routes/cortex/+page.svelte").read_text()
-    workspace_chat = (REPO_ROOT / "frontend/src/lib/components/cortex/WorkspaceChatDock.css").read_text()
-    thread_shell = (REPO_ROOT / "frontend/src/lib/components/cortex/ThreadStageShell.svelte").read_text()
+    page = (REPO_ROOT / "frontend/src/lib/features/cortex/components/CortexWorkspaceRoute.svelte").read_text()
+    workspace_chat = (REPO_ROOT / "frontend/src/lib/features/cortex/components/chat/WorkspaceChatDock.css").read_text()
+    thread_shell = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageShell.svelte").read_text()
 
     backdrop_start = page.index("<ConstellationWorkspaceBackdrop")
     backdrop_end = page.index("</ConstellationWorkspaceBackdrop>", backdrop_start)
     backdrop_markup = page[backdrop_start:backdrop_end]
 
-    scaffold_start = page.index("<CortexWorkspaceMigrationScaffold")
-    scaffold_end = page.index("</CortexWorkspaceMigrationScaffold>", scaffold_start)
-    scaffold_markup = page[scaffold_start:scaffold_end]
+    stage_start = page.index("{#if cortex.panelOpen && ThreadStageScreenComponent}")
+    stage_end = page.index("{#if !cortex.panelOpen && activeWorkspaceApp", stage_start)
+    stage_markup = page[stage_start:stage_end]
 
-    assert "CortexThreadStageLiveBridgeComponent" not in backdrop_markup
-    assert "{#snippet overlays()}" in scaffold_markup
-    assert "CortexThreadStageLiveBridgeComponent" in scaffold_markup
+    assert "ThreadStageScreenComponent" not in backdrop_markup
+    assert "ThreadStageScreenComponent" in stage_markup
     assert re.search(r"\.workspace-chat-dock\s*\{.*?z-index: 2;", workspace_chat, re.DOTALL)
     assert re.search(r"\.thread-stage-shell\s*\{.*?z-index: 25;", thread_shell, re.DOTALL)
     assert re.search(r"\.workspace-chat-dock\.is-foreground\s*\{.*?z-index: 120;", workspace_chat, re.DOTALL)
 
 
 def test_cortex_list_view_light_mode_is_component_tokenized():
-    source = (REPO_ROOT / "frontend/src/lib/components/cortex/CortexListView.svelte").read_text()
+    source = (REPO_ROOT / "frontend/src/lib/features/cortex/components/ListView.svelte").read_text()
     light_lines = [
         line.strip()
         for line in source.splitlines()
@@ -215,7 +214,7 @@ def test_cortex_list_view_light_mode_is_component_tokenized():
 
 def test_project_context_picker_light_mode_is_component_tokenized():
     source = (
-        REPO_ROOT / "frontend/src/lib/components/cortex/project-context/projectContextPicker.css"
+        REPO_ROOT / "frontend/src/lib/features/composer/components/project-context/projectContextPicker.css"
     ).read_text()
     light_lines = [
         line.strip()
@@ -234,8 +233,8 @@ def test_project_context_picker_light_mode_is_component_tokenized():
     assert "data-color-scheme='light'] .github-repo-option" not in source
 
 
-def test_cortex_panel_light_mode_is_boundary_tokenized():
-    source = (REPO_ROOT / "frontend/src/lib/components/cortex/CortexPanel.svelte").read_text()
+def test_cortex_thread_stage_screen_light_mode_is_boundary_tokenized():
+    source = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageScreen.svelte").read_text()
     light_lines = [
         line.strip()
         for line in source.splitlines()
@@ -243,49 +242,22 @@ def test_cortex_panel_light_mode_is_boundary_tokenized():
     ]
 
     assert light_lines == [
-        ":global(:root[data-color-scheme='light']) .panel-main {",
-        ":global(:root[data-color-scheme='light']) .panel-utility,",
-        ":global(:root[data-color-scheme='light']) .panel-utility-content-bare {",
+        ":global(:root[data-color-scheme='light']) .thread-stage-panel {",
     ]
-    assert "--thread-project-context-chip-border" in source
-    assert "--thread-mention-dropdown-background" in source
-    assert "--panel-utility-card-background" in source
-    assert "data-color-scheme='light']) .thread-composer-textarea" not in source
-    assert "data-color-scheme='light']) .audit-card" not in source
+    assert "--thread-stage-panel-backdrop-filter" in source
+    assert "--thread-stage-panel-before-filter" in source
+    assert "--thread-stage-docked-header-height" in source
+    assert "data-color-scheme='light']) .thread-stage-thread" not in source
+    assert "data-color-scheme='light']) .thread-stage-dock" not in source
 
 
-def test_cortex_thread_stage_main_column_light_mode_is_boundary_tokenized():
-    source = (
-        REPO_ROOT
-        / "frontend/src/lib/components/cortex/migration/CortexThreadStageMainColumn.svelte"
-    ).read_text()
-    light_lines = [
-        line.strip()
-        for line in source.splitlines()
-        if "data-color-scheme='light'" in line
-    ]
-
-    assert light_lines == [
-        ":global(:root[data-color-scheme='light']) .cortex-thread-stage-main-column {",
-    ]
-    assert "--thread-run-border-running" in source
-    assert "--thread-run-chevron-text" in source
-    assert "--thread-run-evidence-surface-background" in source
-    assert "--thread-reply-placeholder-background" in source
-    assert "data-color-scheme='light']) .cortex-thread-stage-main-column .run-" not in source
-    assert "data-color-scheme='light']) .cortex-thread-stage-main-column .thread-thinking" not in source
-
-
-def test_cortex_thread_stage_migration_surfaces_keep_light_mode_at_root_boundary():
+def test_cortex_thread_stage_surfaces_keep_light_mode_at_root_boundary():
     expected_boundaries = {
-        "frontend/src/lib/components/cortex/migration/CortexThreadStageRightDock.svelte": [
+        "frontend/src/lib/features/threads/components/ThreadStageRightDock.svelte": [
             ":global(:root[data-color-scheme='light']) .cortex-thread-stage-right-dock {",
         ],
-        "frontend/src/lib/components/cortex/migration/CortexThreadStageLiveBridge.svelte": [
+        "frontend/src/lib/features/threads/components/ThreadStageScreen.svelte": [
             ":global(:root[data-color-scheme='light']) .thread-stage-panel {",
-        ],
-        "frontend/src/lib/components/cortex/migration/CortexThreadStageMigrationScreen.svelte": [
-            ":global(:root[data-color-scheme='light']) .cortex-thread-stage-migration-screen {",
         ],
     }
 
@@ -298,41 +270,25 @@ def test_cortex_thread_stage_migration_surfaces_keep_light_mode_at_root_boundary
         ]
         assert light_lines == expected_lines
 
-    right_dock = (
-        REPO_ROOT / "frontend/src/lib/components/cortex/migration/CortexThreadStageRightDock.svelte"
-    ).read_text()
-    live_bridge = (
-        REPO_ROOT / "frontend/src/lib/components/cortex/migration/CortexThreadStageLiveBridge.svelte"
-    ).read_text()
-    migration_screen = (
-        REPO_ROOT
-        / "frontend/src/lib/components/cortex/migration/CortexThreadStageMigrationScreen.svelte"
-    ).read_text()
+    right_dock = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageRightDock.svelte").read_text()
+    stage_screen = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageScreen.svelte").read_text()
 
     assert "--right-dock-add-menu-background" in right_dock
-    assert "--thread-bridge-mention-dropdown-background" in live_bridge
-    assert "--migration-browser-surface-background" in migration_screen
+    assert "--thread-stage-panel-before-filter" in stage_screen
     assert "data-color-scheme='light']) .right-dock-tab" not in right_dock
-    assert "data-color-scheme='light']) .mention-dropdown" not in live_bridge
-    assert "data-color-scheme='light']) .thread-browser-surface" not in migration_screen
+    assert "data-color-scheme='light']) .thread-stage-layout" not in stage_screen
 
 
 def test_cortex_auxiliary_surfaces_keep_light_mode_at_root_boundary():
     expected_boundaries = {
-        "frontend/src/lib/components/cortex/CortexWorkspacePin.svelte": [
+        "frontend/src/lib/features/workspace-scene/renderers/WorkspacePin.svelte": [
             ":global(:root[data-color-scheme='light']) .cortex-workspace-pin {",
         ],
-        "frontend/src/lib/components/cortex/CortexDeepField.svelte": [
-            ":global(:root[data-color-scheme='light']) .cortex-deep-field {",
-        ],
-        "frontend/src/lib/components/cortex/CortexWorkspaceMenu.svelte": [
+        "frontend/src/lib/features/cortex/components/menus/WorkspaceMenu.svelte": [
             ":global(:root[data-color-scheme='light']) .cortex-workspace-menu {",
         ],
-        "frontend/src/lib/components/cortex/CortexWorkspacePinMenu.svelte": [
+        "frontend/src/lib/features/cortex/components/menus/WorkspacePinMenu.svelte": [
             ":global(:root[data-color-scheme='light']) .cortex-workspace-pin-menu {",
-        ],
-        "frontend/src/lib/components/cortex/AiPromptComposer.svelte": [
-            ":global(:root[data-color-scheme='light']) .ai-prompt-composer {",
         ],
     }
 

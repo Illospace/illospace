@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 import warnings
 
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.repositories.memory_visibility import (
     VALID_MEMORY_VISIBILITIES,
@@ -120,9 +120,9 @@ def require_memory_write_context(context: MemoryWriteContext | None) -> MemoryWr
     return context
 
 
-def dangerously_build_dev_test_memory_write_context(
+async def dangerously_build_dev_test_memory_write_context(
     *,
-    session: Session | None = None,
+    session: AsyncSession | None = None,
     source: str = "legacy_add_memory",
     source_session: str | None = None,
     visibility: str = "private",
@@ -150,7 +150,7 @@ def dangerously_build_dev_test_memory_write_context(
     user_id = _clean(os.getenv("ILLO_DEV_MEMORY_USER_ID"))
     org_id = _clean(os.getenv("ILLO_DEV_MEMORY_ORG_ID"))
     if (not user_id or not org_id) and session is not None:
-        row = _first_user_row(session)
+        row = await _first_user_row(session)
         if row:
             user_id = user_id or _clean(row.get("id"))
             org_id = org_id or _clean(row.get("org_id"))
@@ -175,10 +175,12 @@ def dangerously_build_dev_test_memory_write_context(
     )
 
 
-def _first_user_row(session: Session) -> dict[str, Any] | None:
+async def _first_user_row(session: AsyncSession) -> dict[str, Any] | None:
     try:
-        row = session.execute(
+        row = (
+            await session.execute(
             text("SELECT id, org_id FROM users ORDER BY created_at NULLS LAST, id LIMIT 1")
+            )
         ).mappings().first()
         return dict(row) if row else None
     except Exception:

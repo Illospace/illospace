@@ -18,7 +18,7 @@ from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.ideas import IdeaRepository
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.db.repositories.skills import SkillRepository
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +99,9 @@ def _rows_to_list(rows):
     return [_row_to_dict(r) for r in rows]
 
 
-def _validate_idea_org_orm(session, idea_id, org_id):
+async def _validate_idea_org_orm(session, idea_id, org_id):
     """Check idea belongs to org, return Idea or None."""
-    return IdeaRepository(session).get_for_org(idea_id, org_id)
+    return await IdeaRepository(session).a_get_for_org(idea_id, org_id)
 
 
 # Legacy alias used by older tests
@@ -117,10 +117,10 @@ def _require_worker_principal(user: dict | None) -> None:
         raise HTTPException(status_code=403, detail="Worker service principal required")
 
 
-def _get_idea_for_user(session, idea_id: str, user: dict | None) -> Idea | None:
+async def _get_idea_for_user(session, idea_id: str, user: dict | None) -> Idea | None:
     repo = IdeaRepository(session)
     if _caller_is_service_principal(user):
-        return repo.get(idea_id)
+        return await repo.a_get(idea_id)
     org_id = require_org_context(user or {})
     org_user_ids = select(User.id).where(User.org_id == str(org_id))
     stmt = select(Idea).where(
@@ -130,20 +130,24 @@ def _get_idea_for_user(session, idea_id: str, user: dict | None) -> Idea | None:
             and_(Idea.org_id.is_(None), Idea.user_id.in_(org_user_ids)),
         ),
     )
-    return session.scalars(stmt).first()
+    return (await session.scalars(stmt)).first()
 
 
-def _require_idea_for_user(
+async def _require_idea_for_user(
     session,
     idea_id: str,
     user: dict | None,
     *,
     detail: str = "Idea not found",
 ) -> Idea:
-    idea = _get_idea_for_user(session, idea_id, user)
+    idea = await _get_idea_for_user(session, idea_id, user)
     if idea is None:
         raise HTTPException(status_code=404, detail=detail)
     return idea
+
+
+_a_get_idea_for_user = _get_idea_for_user
+_a_require_idea_for_user = _require_idea_for_user
 
 
 def _parse_message_type(content, role="user"):
@@ -167,62 +171,63 @@ def _infer_feedback_tags(content: str) -> list[str]:
     return tags
 
 
-def _record_implicit_feedback(idea_id: str, content: str, tags: list[str]) -> None:
+async def _record_implicit_feedback(session, idea_id: str, content: str, tags: list[str]) -> None:
     if not tags:
         return
     try:
-        with UnitOfWork() as uow:
-            stmt = (
-                select(AgentRun)
-                .where(AgentRun.thread_id == idea_id)
-                .order_by(
-                    func.coalesce(
-                        AgentRun.completed_at,
-                        AgentRun.started_at,
-                        AgentRun.created_at,
-                    ).desc()
-                )
-                .limit(1)
+        stmt = (
+            select(AgentRun)
+            .where(AgentRun.thread_id == idea_id)
+            .order_by(
+                func.coalesce(
+                    AgentRun.completed_at,
+                    AgentRun.started_at,
+                    AgentRun.created_at,
+                ).desc()
             )
-            run = uow.session.scalars(stmt).first()
-            if run:
-                metadata = dict(run.metadata_ or {})
-                existing_tags = list(metadata.get("implicit_feedback_tags") or [])
-                metadata["implicit_feedback_tags"] = list(dict.fromkeys([*existing_tags, *tags]))
-                metadata["implicit_feedback_summary"] = content[:500]
-                run.metadata_ = metadata
+            .limit(1)
+        )
+        run = (await session.scalars(stmt)).first()
+        if run:
+            metadata = dict(run.metadata_ or {})
+            existing_tags = list(metadata.get("implicit_feedback_tags") or [])
+            metadata["implicit_feedback_tags"] = list(dict.fromkeys([*existing_tags, *tags]))
+            metadata["implicit_feedback_summary"] = content[:500]
+            run.metadata_ = metadata
     except Exception:
         logger.exception("Failed to persist implicit feedback for idea %s", idea_id)
 
-def _create_feedback_triggers(skill_used: str, task_summary: str, note: str):
-    from datetime import datetime as dt
-    with UnitOfWork() as uow:
-        skill = uow.skills.get_by_name(skill_used)
-        if skill:
-            triggers = list(skill.triggers or [])
-            triggers.append({
-                "direction": "negative",
-                "pattern": task_summary[:200],
-                "confidence": 0.85,
-                "source": "user_correction",
-                "created_at": dt.now().isoformat(),
-            })
-            skill.triggers = triggers
 
-        if note:
-            all_skills = uow.skills.list_active()
-            for s in all_skills:
-                if s.name.lower() in note.lower():
-                    s_triggers = list(s.triggers or [])
-                    s_triggers.append({
-                        "direction": "positive",
-                        "pattern": task_summary[:200],
-                        "confidence": 0.85,
-                        "source": "user_correction",
-                        "created_at": dt.now().isoformat(),
-                    })
-                    s.triggers = s_triggers
-                    break
+async def _create_feedback_triggers(session, skill_used: str, task_summary: str, note: str):
+    from datetime import datetime as dt
+
+    repo = SkillRepository(session)
+    skill = await repo.a_get_by_name(skill_used)
+    if skill:
+        triggers = list(skill.triggers or [])
+        triggers.append({
+            "direction": "negative",
+            "pattern": task_summary[:200],
+            "confidence": 0.85,
+            "source": "user_correction",
+            "created_at": dt.now().isoformat(),
+        })
+        skill.triggers = triggers
+
+    if note:
+        all_skills = await repo.a_list_active()
+        for s in all_skills:
+            if s.name.lower() in note.lower():
+                s_triggers = list(s.triggers or [])
+                s_triggers.append({
+                    "direction": "positive",
+                    "pattern": task_summary[:200],
+                    "confidence": 0.85,
+                    "source": "user_correction",
+                    "created_at": dt.now().isoformat(),
+                })
+                s.triggers = s_triggers
+                break
 
 
 # ── Presence tracking (in-memory) ──────────────────────────────

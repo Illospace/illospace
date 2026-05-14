@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine
+
+from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-from sqlalchemy.orm import Session
 
 from brain.platform.db.models.domain import (
     Domain,
@@ -21,23 +21,23 @@ from brain.platform.db.models.domain import (
 )
 from brain.platform.db.models.org import Org, User
 from brain.platform.db.models.workspace_app import WorkspaceApp, WorkspaceAppState, WorkspaceAppVersion
-from brain.systems.user_domains.service import DomainService
+from brain.systems.user_domains.service import AsyncDomainService
 from brain.systems.workspace_apps.service import (
     WorkspaceAppError,
     WorkspaceAppContractError,
-    active_version,
-    archive_app,
-    create_app,
-    delete_archived_apps,
-    list_archived_apps,
-    restore_app,
-    update_app,
+    a_active_version,
+    a_archive_app,
+    a_create_app,
+    a_delete_archived_apps,
+    a_list_archived_apps,
+    a_restore_app,
+    a_update_app,
 )
 from brain.systems.workspace_apps.actions import (
     WorkspaceAppActionContractError,
     WorkspaceAppActionExecutorMissing,
+    async_run_workspace_app_action,
     register_workspace_app_action_executor,
-    run_workspace_app_action,
     unregister_workspace_app_action_executor,
 )
 
@@ -96,10 +96,9 @@ def _patch_sqlite_for_pg_types():
 
 
 @pytest.fixture
-def session():
+async def session(async_sqlite_session_factory):
     _patch_sqlite_for_pg_types()
-    engine = create_engine("sqlite://", echo=False)
-    for table in [
+    db = await async_sqlite_session_factory([
         Org.__table__,
         User.__table__,
         Domain.__table__,
@@ -112,19 +111,18 @@ def session():
         WorkspaceApp.__table__,
         WorkspaceAppVersion.__table__,
         WorkspaceAppState.__table__,
-    ]:
-        table.create(engine, checkfirst=True)
-    db = Session(engine)
-    db.add(Org(id=ORG_ID, name="Test Org", slug="test"))
-    db.add(Org(id=OTHER_ORG_ID, name="Other Org", slug="other"))
-    db.add(User(id=USER_ID, org_id=ORG_ID, name="Alex", email="alex@example.test"))
-    db.flush()
-    yield db
-    db.close()
+    ])
+    db.add_all([
+        Org(id=ORG_ID, name="Test Org", slug="test"),
+        Org(id=OTHER_ORG_ID, name="Other Org", slug="other"),
+        User(id=USER_ID, org_id=ORG_ID, name="Alex", email="alex@example.test"),
+    ])
+    await db.flush()
+    return db
 
 
-def _todo_domain(session: Session):
-    return DomainService(session).create_domain(
+async def _todo_domain(session):
+    return await AsyncDomainService(session).create_domain(
         ORG_ID,
         name="Todo Notes",
         slug="todo-notes",
@@ -192,10 +190,26 @@ def _app_local_manifest(**overrides):
     return manifest
 
 
-def test_valid_domain_backed_manifest_saves(session):
-    domain = _todo_domain(session)
+async def _count(session, model, *criteria) -> int:
+    stmt = select(func.count()).select_from(model)
+    if criteria:
+        stmt = stmt.where(*criteria)
+    return int(await session.scalar(stmt))
 
-    app = create_app(
+
+async def _serialize_record_for_connector_test(_service, record):
+    return {
+        "id": record.id,
+        "title": record.title,
+        "data": record.data or {},
+        "version": record.version,
+    }
+
+
+async def test_valid_domain_backed_manifest_saves(session):
+    domain = await _todo_domain(session)
+
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="todo-notes",
@@ -208,13 +222,13 @@ def test_valid_domain_backed_manifest_saves(session):
         created_by_user_id=USER_ID,
     )
 
-    version = active_version(session, app.id)
+    version = await a_active_version(session, app.id)
     assert version is not None
     assert version.manifest["data_plan"]["bindings"]["todos"]["object_key"] == "todo_item"
 
 
-def test_domain_binding_accepts_generic_app_primitives(session):
-    domain = _todo_domain(session)
+async def test_domain_binding_accepts_generic_app_primitives(session):
+    domain = await _todo_domain(session)
     operations = [
         "schema",
         "list",
@@ -231,7 +245,7 @@ def test_domain_binding_accepts_generic_app_primitives(session):
         "archiveRelation",
     ]
 
-    app = create_app(
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="todo-workbench",
@@ -244,15 +258,15 @@ def test_domain_binding_accepts_generic_app_primitives(session):
         created_by_user_id=USER_ID,
     )
 
-    version = active_version(session, app.id)
+    version = await a_active_version(session, app.id)
     assert version is not None
     assert version.manifest["data_plan"]["bindings"]["todos"]["operations"] == operations
 
 
-def test_valid_structured_generated_ui_app_saves(session):
-    domain = _todo_domain(session)
+async def test_valid_structured_generated_ui_app_saves(session):
+    domain = await _todo_domain(session)
 
-    app = create_app(
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="todo-notes-ui",
@@ -265,15 +279,15 @@ def test_valid_structured_generated_ui_app_saves(session):
         created_by_user_id=USER_ID,
     )
 
-    version = active_version(session, app.id)
+    version = await a_active_version(session, app.id)
     assert version is not None
     assert version.renderer_key == "generated-ui-app"
     assert version.source_kind == "json"
     assert json.loads(version.source_code)["views"][0]["type"] == "table"
 
 
-def test_valid_structured_board_generated_ui_app_saves(session):
-    domain = _todo_domain(session)
+async def test_valid_structured_board_generated_ui_app_saves(session):
+    domain = await _todo_domain(session)
     board_spec = {
         "schema_version": 1,
         "title": "Todo Board",
@@ -295,7 +309,7 @@ def test_valid_structured_board_generated_ui_app_saves(session):
         ],
     }
 
-    app = create_app(
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="todo-board-ui",
@@ -308,7 +322,7 @@ def test_valid_structured_board_generated_ui_app_saves(session):
         created_by_user_id=USER_ID,
     )
 
-    version = active_version(session, app.id)
+    version = await a_active_version(session, app.id)
     assert version is not None
     assert json.loads(version.source_code)["actions"][0]["key"] == "tickets.syncExternal"
     assert json.loads(version.source_code)["views"][0]["type"] == "board"
@@ -326,11 +340,11 @@ def test_valid_structured_board_generated_ui_app_saves(session):
         ({"operations": ["schema", "teleport"]}, "unsupported operation"),
     ],
 )
-def test_invalid_domain_bindings_block_save(session, overrides, message):
-    domain = _todo_domain(session)
+async def test_invalid_domain_bindings_block_save(session, overrides, message):
+    domain = await _todo_domain(session)
 
     with pytest.raises(WorkspaceAppError, match=message):
-        create_app(
+        await a_create_app(
             session,
             org_id=ORG_ID,
             key=f"bad-{message.split()[0]}",
@@ -340,8 +354,8 @@ def test_invalid_domain_bindings_block_save(session, overrides, message):
         )
 
 
-def test_domain_binding_allows_virtual_record_title_field(session):
-    domain = DomainService(session).create_domain(
+async def test_domain_binding_allows_virtual_record_title_field(session):
+    domain = await AsyncDomainService(session).create_domain(
         ORG_ID,
         name="Ticket Board",
         slug="ticket-board",
@@ -358,7 +372,7 @@ def test_domain_binding_allows_virtual_record_title_field(session):
         actor_id=USER_ID,
     )
 
-    app = create_app(
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="ticket-board",
@@ -406,15 +420,15 @@ def test_domain_binding_allows_virtual_record_title_field(session):
         visual_spec=VALID_VISUAL_SPEC,
     )
 
-    assert active_version(session, app.id) is not None
+    assert await a_active_version(session, app.id) is not None
 
 
-def test_domain_binding_blocks_archived_or_cross_org_domain(session):
-    domain = _todo_domain(session)
+async def test_domain_binding_blocks_archived_or_cross_org_domain(session):
+    domain = await _todo_domain(session)
     domain.archived_at = datetime.now(timezone.utc)
 
     with pytest.raises(WorkspaceAppError, match="archived Domain"):
-        create_app(
+        await a_create_app(
             session,
             org_id=ORG_ID,
             key="archived-domain",
@@ -423,7 +437,7 @@ def test_domain_binding_blocks_archived_or_cross_org_domain(session):
             manifest=_manifest(domain.id),
         )
 
-    other_domain = DomainService(session).create_domain(
+    other_domain = await AsyncDomainService(session).create_domain(
         OTHER_ORG_ID,
         name="Other Todo Notes",
         slug="todo-notes",
@@ -435,7 +449,7 @@ def test_domain_binding_blocks_archived_or_cross_org_domain(session):
         ],
     )
     with pytest.raises(WorkspaceAppError, match=f"missing Domain {other_domain.id}"):
-        create_app(
+        await a_create_app(
             session,
             org_id=ORG_ID,
             key="cross-org-domain",
@@ -445,8 +459,8 @@ def test_domain_binding_blocks_archived_or_cross_org_domain(session):
         )
 
 
-def test_local_state_manifest_without_domain_bindings_still_saves(session):
-    app = create_app(
+async def test_local_state_manifest_without_domain_bindings_still_saves(session):
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="scratchpad",
@@ -459,12 +473,13 @@ def test_local_state_manifest_without_domain_bindings_still_saves(session):
         initial_state={"draft_text": ""},
     )
 
-    assert active_version(session, app.id).manifest == _app_local_manifest()
+    version = await a_active_version(session, app.id)
+    assert version.manifest == _app_local_manifest()
 
 
-def test_app_local_note_collections_are_record_like(session):
+async def test_app_local_note_collections_are_record_like(session):
     with pytest.raises(WorkspaceAppError, match="record-like collections"):
-        create_app(
+        await a_create_app(
             session,
             org_id=ORG_ID,
             key="local-notes",
@@ -476,9 +491,9 @@ def test_app_local_note_collections_are_record_like(session):
         )
 
 
-def test_update_validates_effective_domain_manifest(session):
-    domain = _todo_domain(session)
-    app = create_app(
+async def test_update_validates_effective_domain_manifest(session):
+    domain = await _todo_domain(session)
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="todo-notes",
@@ -490,16 +505,17 @@ def test_update_validates_effective_domain_manifest(session):
         visual_spec=VALID_VISUAL_SPEC,
     )
 
-    update_app(
+    await a_update_app(
         session,
         org_id=ORG_ID,
         app_id=app.id,
         source_code='<main class="illo-app"><section class="illo-panel">patched</section></main>',
     )
-    assert active_version(session, app.id).version == 2
+    version = await a_active_version(session, app.id)
+    assert version.version == 2
 
     with pytest.raises(WorkspaceAppError, match="omits required field"):
-        update_app(
+        await a_update_app(
             session,
             org_id=ORG_ID,
             app_id=app.id,
@@ -507,16 +523,16 @@ def test_update_validates_effective_domain_manifest(session):
         )
 
 
-def test_archive_and_restore_app_leave_domain_records_intact(session):
-    domain = _todo_domain(session)
-    record = DomainService(session).create_record(
+async def test_archive_and_restore_app_leave_domain_records_intact(session):
+    domain = await _todo_domain(session)
+    record = await AsyncDomainService(session).create_record(
         ORG_ID,
         domain.id,
         "todo_item",
         data={"title": "Follow up", "notes": "CRM lead", "completed": False},
         actor_id=USER_ID,
     )
-    app = create_app(
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="crm-list",
@@ -529,20 +545,22 @@ def test_archive_and_restore_app_leave_domain_records_intact(session):
         created_by_user_id=USER_ID,
     )
 
-    archive_app(session, org_id=ORG_ID, app_id=app.id)
+    await a_archive_app(session, org_id=ORG_ID, app_id=app.id)
     assert app.archived_at is not None
-    assert list_archived_apps(session, ORG_ID)[0].id == app.id
+    archived_apps = await a_list_archived_apps(session, ORG_ID)
+    assert archived_apps[0].id == app.id
 
-    service = DomainService(session)
-    assert service.get_record(ORG_ID, domain.id, record.id).archived_at is None
+    service = AsyncDomainService(session)
+    persisted_record = await service.get_record(ORG_ID, domain.id, record.id)
+    assert persisted_record.archived_at is None
 
-    restored = restore_app(session, org_id=ORG_ID, app_id=app.id)
+    restored = await a_restore_app(session, org_id=ORG_ID, app_id=app.id)
     assert restored.archived_at is None
 
 
-def test_delete_archived_apps_permanently_removes_app_versions_and_state(session):
-    domain = _todo_domain(session)
-    archived = create_app(
+async def test_delete_archived_apps_permanently_removes_app_versions_and_state(session):
+    domain = await _todo_domain(session)
+    archived = await a_create_app(
         session,
         org_id=ORG_ID,
         key="trash-me",
@@ -555,7 +573,7 @@ def test_delete_archived_apps_permanently_removes_app_versions_and_state(session
         created_by_user_id=USER_ID,
         initial_state={"view": "table"},
     )
-    active = create_app(
+    active = await a_create_app(
         session,
         org_id=ORG_ID,
         key="keep-me",
@@ -567,20 +585,20 @@ def test_delete_archived_apps_permanently_removes_app_versions_and_state(session
         visual_spec=VALID_VISUAL_SPEC,
         created_by_user_id=USER_ID,
     )
-    archive_app(session, org_id=ORG_ID, app_id=archived.id)
+    await a_archive_app(session, org_id=ORG_ID, app_id=archived.id)
 
-    deleted = delete_archived_apps(session, org_id=ORG_ID)
+    deleted = await a_delete_archived_apps(session, org_id=ORG_ID)
 
     assert deleted == 1
-    assert session.query(WorkspaceApp).filter_by(id=archived.id).count() == 0
-    assert session.query(WorkspaceAppVersion).filter_by(app_id=archived.id).count() == 0
-    assert session.query(WorkspaceAppState).filter_by(app_id=archived.id).count() == 0
-    assert session.query(WorkspaceApp).filter_by(id=active.id).count() == 1
+    assert await _count(session, WorkspaceApp, WorkspaceApp.id == archived.id) == 0
+    assert await _count(session, WorkspaceAppVersion, WorkspaceAppVersion.app_id == archived.id) == 0
+    assert await _count(session, WorkspaceAppState, WorkspaceAppState.app_id == archived.id) == 0
+    assert await _count(session, WorkspaceApp, WorkspaceApp.id == active.id) == 1
 
 
-def test_workspace_app_action_requires_registered_executor(session):
-    domain = _todo_domain(session)
-    app = create_app(
+async def test_workspace_app_action_requires_registered_executor(session):
+    domain = await _todo_domain(session)
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="ticket-actions",
@@ -594,7 +612,7 @@ def test_workspace_app_action_requires_registered_executor(session):
     )
 
     with pytest.raises(WorkspaceAppActionExecutorMissing, match="no server-side action executor"):
-        run_workspace_app_action(
+        await async_run_workspace_app_action(
             session,
             org_id=ORG_ID,
             app_id=app.id,
@@ -604,9 +622,9 @@ def test_workspace_app_action_requires_registered_executor(session):
         )
 
 
-def test_workspace_app_action_registered_executor_runs(session):
-    domain = _todo_domain(session)
-    app = create_app(
+async def test_workspace_app_action_registered_executor_runs(session):
+    domain = await _todo_domain(session)
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="ticket-action-runner",
@@ -635,7 +653,7 @@ def test_workspace_app_action_registered_executor_runs(session):
 
     register_workspace_app_action_executor("ticketing.sync", _executor)
     try:
-        result = run_workspace_app_action(
+        result = await async_run_workspace_app_action(
             session,
             org_id=ORG_ID,
             app_id=app.id,
@@ -653,8 +671,8 @@ def test_workspace_app_action_registered_executor_runs(session):
     assert result["result"] == {"synced": True, "ticketId": 42}
 
 
-def test_workspace_app_action_generic_http_syncs_domain_records(session):
-    domain = DomainService(session).create_domain(
+async def test_workspace_app_action_generic_http_syncs_domain_records(session):
+    domain = await AsyncDomainService(session).create_domain(
         ORG_ID,
         name="Tickets",
         slug="tickets",
@@ -672,8 +690,8 @@ def test_workspace_app_action_generic_http_syncs_domain_records(session):
         ],
         actor_id=USER_ID,
     )
-    service = DomainService(session)
-    existing = service.create_record(
+    service = AsyncDomainService(session)
+    existing = await service.create_record(
         ORG_ID,
         domain.id,
         "ticket",
@@ -722,7 +740,7 @@ def test_workspace_app_action_generic_http_syncs_domain_records(session):
             }
         },
     }
-    app = create_app(
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="generic-http-ticket-sync",
@@ -741,8 +759,8 @@ def test_workspace_app_action_generic_http_syncs_domain_records(session):
             {"id": 123, "number": 123, "title": "Updated issue", "html_url": "https://example.test/123"},
             {"id": 456, "number": 456, "title": "New issue", "html_url": "https://example.test/456"},
         ],
-    ):
-        result = run_workspace_app_action(
+    ), patch.object(AsyncDomainService, "serialize_record", _serialize_record_for_connector_test):
+        result = await async_run_workspace_app_action(
             session,
             org_id=ORG_ID,
             app_id=app.id,
@@ -754,15 +772,15 @@ def test_workspace_app_action_generic_http_syncs_domain_records(session):
     assert result["ok"] is True
     assert result["result"]["created"] == 1
     assert result["result"]["updated"] == 1
-    session.refresh(existing)
+    await session.refresh(existing)
     assert existing.title == "Updated issue"
     assert existing.data["status"] == "Done"
-    records = service.list_records(ORG_ID, domain.id, object_key="ticket", limit=10)
+    records = await service.list_records(ORG_ID, domain.id, object_key="ticket", limit=10)
     assert {record.title for record in records} == {"Updated issue", "New issue"}
 
 
-def test_workspace_app_action_generic_http_supports_templates_and_conditionals(session):
-    domain = DomainService(session).create_domain(
+async def test_workspace_app_action_generic_http_supports_templates_and_conditionals(session):
+    domain = await AsyncDomainService(session).create_domain(
         ORG_ID,
         name="Imported Tickets",
         slug="imported-tickets",
@@ -782,7 +800,7 @@ def test_workspace_app_action_generic_http_supports_templates_and_conditionals(s
         ],
         actor_id=USER_ID,
     )
-    service = DomainService(session)
+    service = AsyncDomainService(session)
     manifest = {
         "contract_version": 1,
         "data_plan": {
@@ -834,7 +852,7 @@ def test_workspace_app_action_generic_http_supports_templates_and_conditionals(s
             }
         },
     }
-    app = create_app(
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="generic-http-ticket-template-sync",
@@ -853,8 +871,8 @@ def test_workspace_app_action_generic_http_supports_templates_and_conditionals(s
             {"id": 1, "userId": 7, "title": "Buy milk", "completed": False},
             {"id": 2, "userId": 8, "title": "Ship fix", "completed": True},
         ],
-    ):
-        result = run_workspace_app_action(
+    ), patch.object(AsyncDomainService, "serialize_record", _serialize_record_for_connector_test):
+        result = await async_run_workspace_app_action(
             session,
             org_id=ORG_ID,
             app_id=app.id,
@@ -865,7 +883,7 @@ def test_workspace_app_action_generic_http_supports_templates_and_conditionals(s
 
     assert result["ok"] is True
     assert result["result"]["created"] == 2
-    records = service.list_records(ORG_ID, domain.id, object_key="ticket", limit=10)
+    records = await service.list_records(ORG_ID, domain.id, object_key="ticket", limit=10)
     by_external_id = {record.data["external_id"]: record for record in records}
     first = by_external_id["1"]
     assert first.title == "Buy milk"
@@ -878,8 +896,9 @@ def test_workspace_app_action_generic_http_supports_templates_and_conditionals(s
     assert second.data["status"] == "Done"
 
 
-def test_workspace_app_action_generic_http_supports_now_mapping(session):
-    domain = DomainService(session).create_domain(
+async def test_workspace_app_action_generic_http_supports_now_mapping(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
         ORG_ID,
         name="Timestamped Tickets",
         slug="timestamped-tickets",
@@ -934,7 +953,7 @@ def test_workspace_app_action_generic_http_supports_now_mapping(session):
             }
         },
     }
-    app = create_app(
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="generic-http-now-sync",
@@ -951,7 +970,7 @@ def test_workspace_app_action_generic_http_supports_now_mapping(session):
         "brain.systems.workspace_apps.generic_http._request_json",
         return_value=[{"id": "todo-1", "title": "Synced todo"}],
     ), patch("brain.systems.workspace_apps.generic_http._utc_now_iso", return_value="2026-05-13T21:20:05Z"):
-        result = run_workspace_app_action(
+        result = await async_run_workspace_app_action(
             session,
             org_id=ORG_ID,
             app_id=app.id,
@@ -962,14 +981,14 @@ def test_workspace_app_action_generic_http_supports_now_mapping(session):
 
     assert result["ok"] is True
     assert result["result"]["created"] == 1
-    record = DomainService(session).list_records(ORG_ID, domain.id, object_key="ticket", limit=1)[0]
+    record = (await service.list_records(ORG_ID, domain.id, object_key="ticket", limit=1))[0]
     assert record.title == "Synced todo"
     assert record.data["external_id"] == "todo-1"
     assert record.data["synced_at"] == "2026-05-13T21:20:05Z"
 
 
-def test_workspace_app_action_generic_http_request_returns_compact_response(session):
-    domain = _todo_domain(session)
+async def test_workspace_app_action_generic_http_request_returns_compact_response(session):
+    domain = await _todo_domain(session)
     manifest = _manifest_with_action(
         domain.id,
         {
@@ -986,7 +1005,7 @@ def test_workspace_app_action_generic_http_request_returns_compact_response(sess
             },
         },
     )
-    app = create_app(
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="generic-http-create-issue",
@@ -1000,7 +1019,7 @@ def test_workspace_app_action_generic_http_request_returns_compact_response(sess
     )
 
     with patch("brain.systems.workspace_apps.generic_http._request_json", return_value={"id": "abc", "ok": True}):
-        result = run_workspace_app_action(
+        result = await async_run_workspace_app_action(
             session,
             org_id=ORG_ID,
             app_id=app.id,
@@ -1013,11 +1032,11 @@ def test_workspace_app_action_generic_http_request_returns_compact_response(sess
     assert result["result"] == {"response": {"id": "abc", "ok": True}}
 
 
-def test_workspace_app_action_generic_http_rejects_invalid_mapping_at_save(session):
-    domain = _todo_domain(session)
+async def test_workspace_app_action_generic_http_rejects_invalid_mapping_at_save(session):
+    domain = await _todo_domain(session)
 
     with pytest.raises(WorkspaceAppContractError, match="mapping expressions must use const, path, template, now, or if/then/else"):
-        create_app(
+        await a_create_app(
             session,
             org_id=ORG_ID,
             key="generic-http-bad-mapping",
@@ -1049,14 +1068,14 @@ def test_workspace_app_action_generic_http_rejects_invalid_mapping_at_save(sessi
         )
 
 
-def test_workspace_app_action_generic_http_rejects_unknown_sync_field_at_save(session):
-    domain = _todo_domain(session)
+async def test_workspace_app_action_generic_http_rejects_unknown_sync_field_at_save(session):
+    domain = await _todo_domain(session)
 
     with pytest.raises(
         WorkspaceAppContractError,
         match=r"connector_spec\.sync\.fields\.sync_status must be a field on binding 'todos'",
     ):
-        create_app(
+        await a_create_app(
             session,
             org_id=ORG_ID,
             key="generic-http-unknown-sync-field",
@@ -1092,8 +1111,8 @@ def test_workspace_app_action_generic_http_rejects_unknown_sync_field_at_save(se
         )
 
 
-def test_workspace_app_action_generic_http_wraps_domain_validation_errors(session):
-    domain = DomainService(session).create_domain(
+async def test_workspace_app_action_generic_http_wraps_domain_validation_errors(session):
+    domain = await AsyncDomainService(session).create_domain(
         ORG_ID,
         name="Validated Tickets",
         slug="validated-tickets",
@@ -1166,7 +1185,7 @@ def test_workspace_app_action_generic_http_wraps_domain_validation_errors(sessio
             }
         },
     }
-    app = create_app(
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="generic-http-invalid-domain-data",
@@ -1187,7 +1206,7 @@ def test_workspace_app_action_generic_http_wraps_domain_validation_errors(sessio
             WorkspaceAppActionContractError,
             match="connector_spec.sync produced invalid Domain data: Field 'status' must be one of",
         ):
-            run_workspace_app_action(
+            await async_run_workspace_app_action(
                 session,
                 org_id=ORG_ID,
                 app_id=app.id,
@@ -1197,11 +1216,11 @@ def test_workspace_app_action_generic_http_wraps_domain_validation_errors(sessio
             )
 
 
-def test_workspace_app_action_boundaries_reject_raw_secrets(session):
-    domain = _todo_domain(session)
+async def test_workspace_app_action_boundaries_reject_raw_secrets(session):
+    domain = await _todo_domain(session)
 
     with pytest.raises(WorkspaceAppContractError, match="raw credentials"):
-        create_app(
+        await a_create_app(
             session,
             org_id=ORG_ID,
             key="bad-action-secret",
@@ -1222,7 +1241,7 @@ def test_workspace_app_action_boundaries_reject_raw_secrets(session):
             visual_spec=VALID_VISUAL_SPEC,
         )
 
-    app = create_app(
+    app = await a_create_app(
         session,
         org_id=ORG_ID,
         key="payload-secret",
@@ -1235,7 +1254,7 @@ def test_workspace_app_action_boundaries_reject_raw_secrets(session):
     )
 
     with pytest.raises(WorkspaceAppActionContractError, match="payload must not contain raw credentials"):
-        run_workspace_app_action(
+        await async_run_workspace_app_action(
             session,
             org_id=ORG_ID,
             app_id=app.id,

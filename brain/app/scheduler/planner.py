@@ -5,20 +5,20 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.scheduler import (
     OWNER_MODE_SCHEDULER,
     SchedulerJob,
     SchedulerRun,
 )
-from brain.systems.runs.cortex.recording import trace_id_for_scheduler_run_id
 from brain.app.scheduler.runtime import job_matches_identifier
 from brain.app.scheduler.contracts import validate_scheduler_run_contract
 from brain.app.scheduler.runtime import (
     RUN_STATUS_RECORDED,
     RUN_STATUS_SHELVED,
-    active_lease_count,
+    async_active_lease_count,
+    trace_id_for_scheduler_run_id,
 )
 
 
@@ -94,14 +94,14 @@ def next_run_after(expr: str, timezone_name: str, after_utc: datetime) -> dateti
     raise ValueError(f"Could not resolve next run for '{expr}' in timezone '{timezone_name}'")
 
 
-def materialize_due_runs(
-    session: Session,
+async def async_materialize_due_runs(
+    session: AsyncSession,
     *,
     now: datetime | None = None,
     allowed_owner_modes: tuple[str, ...] = (OWNER_MODE_SCHEDULER,),
     job_keys: tuple[str, ...] | None = None,
 ) -> list[SchedulerRun]:
-    """Record due scheduler-owned runs without executing them."""
+    """Record due scheduler-owned runs without executing them using an async session."""
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
@@ -111,13 +111,15 @@ def materialize_due_runs(
 
     normalized_job_keys = tuple(job_keys or ())
 
-    jobs = session.scalars(
-        select(SchedulerJob)
-        .where(
-            SchedulerJob.enabled.is_(True),
-            SchedulerJob.owner_mode.in_(allowed_owner_modes),
+    jobs = (
+        await session.scalars(
+            select(SchedulerJob)
+            .where(
+                SchedulerJob.enabled.is_(True),
+                SchedulerJob.owner_mode.in_(allowed_owner_modes),
+            )
+            .order_by(SchedulerJob.priority.desc(), SchedulerJob.id.asc())
         )
-        .order_by(SchedulerJob.priority.desc(), SchedulerJob.id.asc())
     ).all()
 
     created: list[SchedulerRun] = []
@@ -164,7 +166,7 @@ def materialize_due_runs(
         last_next_fire = None
         for fire_at in fires:
             idempotency_key = f"{job.job_key}:{fire_at.isoformat()}"
-            existing = session.scalar(
+            existing = await session.scalar(
                 select(SchedulerRun).where(SchedulerRun.idempotency_key == idempotency_key)
             )
             try:
@@ -175,7 +177,7 @@ def materialize_due_runs(
                 continue
 
             contract, contract_errors = validate_scheduler_run_contract(job, payload=job.default_payload or {})
-            active_runs = active_lease_count(session, job.id, now=now)
+            active_runs = await async_active_lease_count(session, job.id, now=now)
             status = RUN_STATUS_RECORDED
             result_summary = None
             load_shed_policy = job.load_shed_policy or {}
@@ -221,10 +223,10 @@ def materialize_due_runs(
                 last_next_fire = None
         job.next_run_at = last_next_fire
 
-    session.flush()
+    await session.flush()
     for run in created:
         if not run.trace_id:
             run.trace_id = trace_id_for_scheduler_run_id(run.id)
     if created:
-        session.flush()
+        await session.flush()
     return created

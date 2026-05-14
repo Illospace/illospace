@@ -3,23 +3,28 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
-import time
 from datetime import datetime
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.app.scheduler.catalog import list_scheduler_jobs, list_scheduler_runs, normalize_owner_mode, sync_scheduler_catalog
-from brain.app.scheduler.daemon import scheduler_daemon_tick, scheduler_health_snapshot
-from brain.app.scheduler.executor import (
-    drain_scheduler,
-    retry_scheduler_run,
-    resume_scheduler_run,
-    run_scheduler_job,
-    set_scheduler_job_load_shed,
-    set_scheduler_job_owner_mode,
-    set_scheduler_job_paused,
+from brain.app.scheduler.catalog import (
+    async_list_scheduler_jobs,
+    async_list_scheduler_runs,
+    async_sync_scheduler_catalog,
+    normalize_owner_mode,
 )
-from brain.app.scheduler.planner import materialize_due_runs
+from brain.app.scheduler.daemon import async_scheduler_daemon_tick, async_scheduler_health_snapshot
+from brain.app.scheduler.executor import (
+    async_drain_scheduler,
+    async_retry_scheduler_run,
+    async_resume_scheduler_run,
+    async_run_scheduler_job,
+    async_set_scheduler_job_load_shed,
+    async_set_scheduler_job_owner_mode,
+    async_set_scheduler_job_paused,
+)
+from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.runtime import make_lease_owner
 
 
@@ -34,9 +39,9 @@ def _now_from_args(args: argparse.Namespace) -> datetime | None:
     return datetime.fromisoformat(raw)
 
 
-def cmd_status(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
-        snapshot = scheduler_health_snapshot(
+async def cmd_status(args: argparse.Namespace) -> int:
+    async with UnitOfWork() as uow:
+        snapshot = await async_scheduler_health_snapshot(
             uow.session,
             owner_mode=args.owner_mode,
             recent_run_limit=args.recent_run_limit,
@@ -46,19 +51,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_state(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
+async def cmd_state(args: argparse.Namespace) -> int:
+    async with UnitOfWork() as uow:
         payload = {
-            "jobs": list_scheduler_jobs(uow.session),
-            "runs": list_scheduler_runs(uow.session, limit=args.limit),
+            "jobs": await async_list_scheduler_jobs(uow.session),
+            "runs": await async_list_scheduler_runs(uow.session, limit=args.limit),
         }
     _emit(payload)
     return 0
 
 
-def cmd_sync(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
-        result = sync_scheduler_catalog(
+async def cmd_sync(args: argparse.Namespace) -> int:
+    async with UnitOfWork() as uow:
+        result = await async_sync_scheduler_catalog(
             uow.session,
             owner_mode=args.owner_mode,
             job_keys=tuple(args.job_keys) if args.job_keys else None,
@@ -68,9 +73,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_materialize(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
-        runs = materialize_due_runs(
+async def cmd_materialize(args: argparse.Namespace) -> int:
+    async with UnitOfWork() as uow:
+        runs = await async_materialize_due_runs(
             uow.session,
             allowed_owner_modes=(args.owner_mode,),
             job_keys=tuple(args.job_keys) if args.job_keys else None,
@@ -80,14 +85,14 @@ def cmd_materialize(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_run_job(args: argparse.Namespace) -> int:
+async def cmd_run_job(args: argparse.Namespace) -> int:
     allowed_owner_modes = (
         (normalize_owner_mode(args.owner_mode),)
         if args.owner_mode
         else ("scheduler",)
     )
-    with UnitOfWork() as uow:
-        result = run_scheduler_job(
+    async with UnitOfWork() as uow:
+        result = await async_run_scheduler_job(
             uow.session,
             args.job_key,
             owner_id=make_lease_owner(label=args.owner_label),
@@ -98,9 +103,9 @@ def cmd_run_job(args: argparse.Namespace) -> int:
     return 0 if result.get("ok") else 1
 
 
-def cmd_drain(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
-        result = drain_scheduler(
+async def cmd_drain(args: argparse.Namespace) -> int:
+    async with UnitOfWork() as uow:
+        result = await async_drain_scheduler(
             uow.session,
             owner_mode=args.owner_mode,
             job_key=args.job_key,
@@ -113,9 +118,9 @@ def cmd_drain(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_pause_job(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
-        job = set_scheduler_job_paused(
+async def cmd_pause_job(args: argparse.Namespace) -> int:
+    async with UnitOfWork() as uow:
+        job = await async_set_scheduler_job_paused(
             uow.session,
             args.job_key,
             paused=True,
@@ -126,9 +131,9 @@ def cmd_pause_job(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_resume_job(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
-        job = set_scheduler_job_paused(
+async def cmd_resume_job(args: argparse.Namespace) -> int:
+    async with UnitOfWork() as uow:
+        job = await async_set_scheduler_job_paused(
             uow.session,
             args.job_key,
             paused=False,
@@ -139,9 +144,9 @@ def cmd_resume_job(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_owner_mode(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
-        job = set_scheduler_job_owner_mode(
+async def cmd_owner_mode(args: argparse.Namespace) -> int:
+    async with UnitOfWork() as uow:
+        job = await async_set_scheduler_job_owner_mode(
             uow.session,
             args.job_key,
             owner_mode=normalize_owner_mode(args.owner_mode),
@@ -150,10 +155,10 @@ def cmd_owner_mode(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_load_shed(args: argparse.Namespace) -> int:
+async def cmd_load_shed(args: argparse.Namespace) -> int:
     policy = json.loads(args.load_shed_policy) if args.load_shed_policy else None
-    with UnitOfWork() as uow:
-        job = set_scheduler_job_load_shed(
+    async with UnitOfWork() as uow:
+        job = await async_set_scheduler_job_load_shed(
             uow.session,
             args.job_key,
             load_shed_policy=policy,
@@ -172,9 +177,9 @@ def cmd_load_shed(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_resume_run(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
-        run = resume_scheduler_run(
+async def cmd_resume_run(args: argparse.Namespace) -> int:
+    async with UnitOfWork() as uow:
+        run = await async_resume_scheduler_run(
             uow.session,
             args.run_id,
             owner_id=make_lease_owner(label=args.owner_label),
@@ -184,19 +189,19 @@ def cmd_resume_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_retry_run(args: argparse.Namespace) -> int:
-    with UnitOfWork() as uow:
-        run = retry_scheduler_run(uow.session, args.run_id, now=_now_from_args(args))
+async def cmd_retry_run(args: argparse.Namespace) -> int:
+    async with UnitOfWork() as uow:
+        run = await async_retry_scheduler_run(uow.session, args.run_id, now=_now_from_args(args))
     _emit({"ok": True, "id": run.id, "status": run.status, "parent_run_id": run.parent_run_id})
     return 0
 
 
-def cmd_daemon(args: argparse.Namespace) -> int:
+async def cmd_daemon(args: argparse.Namespace) -> int:
     tick = 0
     try:
         while True:
-            with UnitOfWork() as uow:
-                result = scheduler_daemon_tick(
+            async with UnitOfWork() as uow:
+                result = await async_scheduler_daemon_tick(
                     uow.session,
                     owner_mode=args.owner_mode,
                     job_key=args.job_key,
@@ -208,7 +213,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             _emit({"tick": tick, **result})
             if args.once:
                 return 0
-            time.sleep(max(1, args.poll_interval_seconds))
+            await asyncio.sleep(max(1, args.poll_interval_seconds))
     except KeyboardInterrupt:
         _emit({"ok": True, "stopped": "keyboard_interrupt", "ticks": tick})
         return 0
@@ -328,7 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return int(args.func(args))
+    return int(asyncio.run(args.func(args)))
 
 
 if __name__ == "__main__":

@@ -2,10 +2,13 @@
 
 import os
 import sys
-from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.schema import CreateTable
+
+from tests.db_engine_utils import create_async_test_engine
 
 # Ensure the repository package is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
@@ -23,14 +26,9 @@ def mock_cursor():
 
 @pytest.fixture
 def mock_db(mock_cursor):
-    """Patch legacy db.get_cursor to yield mock_cursor."""
-    @contextmanager
-    def _get_cursor(commit=True):
-        yield mock_cursor
+    """Return a DB-shaped mock cursor for tests that do not touch a real DB."""
 
-    with patch("brain.platform.db.legacy.get_cursor", _get_cursor), \
-         patch("brain.platform.db.legacy._get_pool"):
-        yield mock_cursor
+    yield mock_cursor
 
 
 @pytest.fixture
@@ -76,64 +74,61 @@ def mock_embeddings():
 
 
 @pytest.fixture
-def rollback_cursor():
-    """Yields a real DB cursor inside a transaction that always rolls back.
+async def rollback_cursor(db_engine):
+    """Yield an async cursor-like object inside a transaction that always rolls back.
 
     Use for integration tests that need a real DB but must not pollute it.
     The entire transaction is rolled back after the test, leaving zero residue.
     """
-    import psycopg2.extras as _extras
-    import brain.platform.db.legacy as db
-    conn = db._get_pool().getconn()
-    conn.autocommit = False
-    cur = conn.cursor(cursor_factory=_extras.RealDictCursor)
+
+    connection = await db_engine.connect()
+    transaction = await connection.begin()
+    cur = _RollbackCursor(connection)
     try:
         yield cur
     finally:
-        conn.rollback()
-        db._get_pool().putconn(conn)
+        await transaction.rollback()
+        await connection.close()
 
 
 @pytest.fixture
-def rollback_db():
-    """Patches legacy db.get_cursor globally so ALL code paths use a rollback transaction.
+def rollback_db(rollback_cursor):
+    """Alias for DB-backed tests that need rollback-scoped SQL access."""
 
-    Unlike rollback_cursor (which passes a cursor directly), this fixture
-    monkey-patches legacy.get_cursor so that compatibility code calling
-    get_cursor() internally still goes through the same rolled-back transaction.
+    yield rollback_cursor
 
-    Use for integration tests where the code under test calls get_cursor() itself.
-    """
-    import psycopg2.extras as _extras
-    import brain.platform.db.legacy as db
 
-    conn = db._get_pool().getconn()
-    conn.autocommit = False
-    cur = conn.cursor(cursor_factory=_extras.RealDictCursor)
+class _RollbackCursor:
+    def __init__(self, connection):
+        self._connection = connection
+        self._result = None
+        self.rowcount = -1
 
-    # Create a savepoint so nested get_cursor calls don't commit
-    cur.execute("SAVEPOINT rollback_db_outer")
+    async def execute(self, statement: str, params: dict | None = None):
+        self._result = await self._connection.execute(text(statement), params or {})
+        self.rowcount = self._result.rowcount
+        return self
 
-    @contextmanager
-    def _fake_get_cursor(commit=True):
-        # Nested savepoint so each get_cursor() call is isolated
-        cur.execute("SAVEPOINT nested_call")
-        try:
-            yield cur
-            if commit:
-                cur.execute("RELEASE SAVEPOINT nested_call")
-        except Exception:
-            cur.execute("ROLLBACK TO SAVEPOINT nested_call")
-            raise
+    async def fetchone(self):
+        assert self._result is not None
+        row = self._result.mappings().first()
+        return dict(row) if row else None
 
-    original_get_cursor = db.get_cursor
-    db.get_cursor = _fake_get_cursor
+    async def fetchall(self):
+        assert self._result is not None
+        return [dict(row) for row in self._result.mappings().all()]
+
+
+@pytest.fixture(scope="session")
+async def db_engine():
+    """Async SQLAlchemy engine connected to Docker test Postgres. Session-scoped."""
+    if not TEST_DB_URL:
+        pytest.skip("TEST_DB_URL not set")
+    engine = create_async_test_engine(TEST_DB_URL)
     try:
-        yield cur
+        yield engine
     finally:
-        db.get_cursor = original_get_cursor
-        conn.rollback()
-        db._get_pool().putconn(conn)
+        await engine.dispose()
 
 
 @pytest.fixture
@@ -169,39 +164,66 @@ def allow_asgi_test_host_for_dev_auth_fallback(monkeypatch):
 
 TEST_DB_URL = os.environ.get("TEST_DB_URL")
 
+
 requires_db = pytest.mark.skipif(
     not TEST_DB_URL,
     reason="TEST_DB_URL not set — run via scripts/test-with-db.sh",
 )
 
 
-@pytest.fixture(scope="session")
-def db_engine():
-    """SQLAlchemy engine connected to Docker test Postgres. Session-scoped."""
-    from sqlalchemy import create_engine
+@pytest.fixture
+async def async_sqlite_session_factory():
+    """Create isolated async SQLite sessions for repository unit tests."""
 
-    if not TEST_DB_URL:
-        pytest.skip("TEST_DB_URL not set")
-    engine = create_engine(TEST_DB_URL, echo=False)
-    yield engine
-    engine.dispose()
+    pytest.importorskip("aiosqlite")
+
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    sessions = []
+    engines = []
+
+    async def make_session(tables, *, connect_listener=None, enable_foreign_keys: bool = False):
+        engine = create_async_engine("sqlite+aiosqlite://", echo=False)
+        engines.append(engine)
+        if connect_listener is not None:
+            event.listen(engine.sync_engine, "connect", connect_listener)
+        async with engine.begin() as connection:
+            for table in tables:
+                await connection.execute(CreateTable(table, if_not_exists=True))
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        session = factory()
+        if enable_foreign_keys:
+            await session.execute(text("PRAGMA foreign_keys=ON"))
+        sessions.append(session)
+        return session
+
+    try:
+        yield make_session
+    finally:
+        for session in reversed(sessions):
+            await session.close()
+        for engine in reversed(engines):
+            await engine.dispose()
 
 
 @pytest.fixture
-def db_session(db_engine):
-    """Per-test ORM session that rolls back after each test. Zero residue.
+async def db_session(db_engine):
+    """Per-test async ORM session that rolls back after each test. Zero residue.
 
     Use for SQLAlchemy ORM tests. Do NOT mix with rollback_db in the same test.
     """
-    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    connection = db_engine.connect()
-    transaction = connection.begin()
-    session = sessionmaker(bind=connection, expire_on_commit=False)()
-    yield session
-    session.close()
-    transaction.rollback()
-    connection.close()
+    connection = await db_engine.connect()
+    transaction = await connection.begin()
+    session = AsyncSession(bind=connection, expire_on_commit=False)
+    try:
+        yield session
+    finally:
+        await session.close()
+        await transaction.rollback()
+        await connection.close()
 
 
 @pytest.fixture
@@ -212,15 +234,18 @@ def unit_of_work_for_session(db_session):
     now uses UnitOfWork, so tests that need read-your-writes behavior can patch
     the module-local UnitOfWork symbol to this lightweight transaction wrapper.
     """
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork as AsyncUnitOfWork
 
-    class _SessionUnitOfWork:
-        def __enter__(self):
-            self.session = db_session
+    class _SessionUnitOfWork(AsyncUnitOfWork):
+        async def __aenter__(self):
+            self._async_session = db_session
             return self
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
             if exc_type is None:
-                db_session.flush()
+                await db_session.flush()
+            self._async_session = None
+            self._clear_cached_repositories()
             return False
 
     return _SessionUnitOfWork

@@ -127,19 +127,19 @@ def validate_sub_agent_output(output: str, expected_format: str = "json") -> tup
     return len(issues) == 0, issues
 
 
-def validate_memory_count(target_date: date) -> tuple[bool, list[str]]:
+async def validate_memory_count(target_date: date) -> tuple[bool, list[str]]:
     """Check memory creation bounds and duplicates."""
     issues = []
     try:
-        with UnitOfWork() as uow:
-            row = uow.session.execute(text(
+        async with UnitOfWork() as uow:
+            row = (await uow.session.execute(text(
                 "SELECT COUNT(*) as cnt FROM memories WHERE created_at::date = :dt AND NOT archived"
-            ), {"dt": target_date}).mappings().first()
+            ), {"dt": target_date})).mappings().first()
             count = row["cnt"]
             if count > MEMORY_MAX_PER_DAY:
                 issues.append(f"{count} memories on {target_date} (threshold: {MEMORY_MAX_PER_DAY})")
 
-            dupes = uow.session.execute(text("""
+            dupes = (await uow.session.execute(text("""
                 SELECT m1.id, m2.id, 1 - (m1.semantic_embedding <=> m2.semantic_embedding) as similarity
                 FROM memories m1 JOIN memories m2 ON m1.id < m2.id
                 WHERE m1.created_at::date = :dt AND m2.created_at::date = :dt
@@ -147,7 +147,7 @@ def validate_memory_count(target_date: date) -> tuple[bool, list[str]]:
                 AND m1.semantic_embedding IS NOT NULL AND m2.semantic_embedding IS NOT NULL
                 AND 1 - (m1.semantic_embedding <=> m2.semantic_embedding) > 0.85
                 LIMIT 20
-            """), {"dt": target_date}).all()
+            """), {"dt": target_date})).all()
             if dupes:
                 issues.append(f"{len(dupes)} near-duplicate pairs (>0.85 similarity)")
     except Exception as e:
@@ -156,7 +156,7 @@ def validate_memory_count(target_date: date) -> tuple[bool, list[str]]:
     return len(issues) == 0, issues
 
 
-def audit_last_night(target_date: date | None = None) -> dict:
+async def audit_last_night(target_date: date | None = None) -> dict:
     """Full audit of last night's automated runs."""
     if target_date is None:
         target_date = (datetime.now() - timedelta(days=1)).date() \
@@ -176,7 +176,10 @@ def audit_last_night(target_date: date | None = None) -> dict:
         ("curiosity", lambda: validate_curiosity_output(target_date)),
         ("memory_health", lambda: validate_memory_count(target_date)),
     ]:
-        passed, issues = check_fn()
+        result = check_fn()
+        if hasattr(result, "__await__"):
+            result = await result
+        passed, issues = result
         report["checks"][check_name] = {"passed": passed, "issues": issues}
         if not passed:
             report["all_passed"] = False
@@ -206,10 +209,11 @@ def format_audit_report(report: dict) -> str:
 
 
 if __name__ == "__main__":
+    import asyncio
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", help="Target date (YYYY-MM-DD)")
     args = parser.parse_args()
     target = date.fromisoformat(args.date) if args.date else None
-    report = audit_last_night(target)
+    report = asyncio.run(audit_last_night(target))
     print(format_audit_report(report))

@@ -23,53 +23,58 @@ from brain.systems.memory.retrieval import mark_relevant, get_retrieval_stats, p
 class TestMarkRelevant:
     """Test feedback marking on retrieval log entries."""
 
-    def test_mark_existing_entry_relevant(self, db_session, unit_of_work_for_session):
+    async def test_mark_existing_entry_relevant(self, db_session, unit_of_work_for_session):
         """Should update an existing retrieval log entry."""
-        row = db_session.execute(text("""
+        result = await db_session.execute(text("""
             INSERT INTO retrieval_log (query_text, results_returned, top_result_id, top_score)
             VALUES ('test query', 1, NULL, 0.85) RETURNING id
-        """)).mappings().first()
+        """))
+        row = result.mappings().first()
         log_id = row["id"]
 
         with patch("brain.systems.memory.retrieval.UnitOfWork", unit_of_work_for_session):
-            result = mark_relevant(log_id, True)
+            result = await mark_relevant(log_id, True)
         assert result is True
 
-        updated = db_session.execute(
+        result = await db_session.execute(
             text("SELECT feedback, was_relevant FROM retrieval_log WHERE id = :id"),
             {"id": log_id},
-        ).mappings().first()
+        )
+        updated = result.mappings().first()
         assert updated["feedback"] == "hit"
         assert updated["was_relevant"] is True
 
-    def test_mark_existing_entry_not_relevant(self, db_session, unit_of_work_for_session):
-        row = db_session.execute(text("""
+    async def test_mark_existing_entry_not_relevant(self, db_session, unit_of_work_for_session):
+        result = await db_session.execute(text("""
             INSERT INTO retrieval_log (query_text, results_returned, top_result_id, top_score)
             VALUES ('test query 2', 1, NULL, 0.75) RETURNING id
-        """)).mappings().first()
+        """))
+        row = result.mappings().first()
         log_id = row["id"]
 
         with patch("brain.systems.memory.retrieval.UnitOfWork", unit_of_work_for_session):
-            result = mark_relevant(log_id, False)
+            result = await mark_relevant(log_id, False)
         assert result is True
 
-        row = db_session.execute(
+        result = await db_session.execute(
             text("SELECT feedback FROM retrieval_log WHERE id = :id"),
             {"id": log_id},
-        ).mappings().first()
+        )
+        row = result.mappings().first()
         assert row["feedback"] == "miss"
 
-    def test_mark_nonexistent_returns_false(self, db_session, unit_of_work_for_session):
+    async def test_mark_nonexistent_returns_false(self, db_session, unit_of_work_for_session):
         with patch("brain.systems.memory.retrieval.UnitOfWork", unit_of_work_for_session):
-            result = mark_relevant(999999, True)
+            result = await mark_relevant(999999, True)
         assert result is False
 
 
 class TestGetRetrievalStats:
     """Test retrieval statistics."""
 
-    def test_returns_expected_keys(self, rollback_db):
-        stats = get_retrieval_stats()
+    async def test_returns_expected_keys(self, db_session, unit_of_work_for_session):
+        with patch("brain.systems.memory.retrieval.UnitOfWork", unit_of_work_for_session):
+            stats = await get_retrieval_stats()
         assert "total" in stats
         assert "with_feedback" in stats
         assert "hits" in stats
@@ -77,8 +82,9 @@ class TestGetRetrievalStats:
         assert "hit_rate" in stats
         assert "avg_top_score" in stats
 
-    def test_stats_are_numeric(self, rollback_db):
-        stats = get_retrieval_stats()
+    async def test_stats_are_numeric(self, db_session, unit_of_work_for_session):
+        with patch("brain.systems.memory.retrieval.UnitOfWork", unit_of_work_for_session):
+            stats = await get_retrieval_stats()
         assert isinstance(stats["total"], int)
         assert isinstance(stats["hit_rate"], float)
         assert 0 <= stats["hit_rate"] <= 1

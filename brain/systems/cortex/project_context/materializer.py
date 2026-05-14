@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import inspect
 import os
 import shutil
 import stat
@@ -122,9 +123,15 @@ def _vault_key_from_resource(resource: dict[str, Any]) -> str | None:
     return None
 
 
-def _github_secret_names(user_id: str, org_id: str | None) -> list[str]:
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _github_secret_names(user_id: str, org_id: str | None) -> list[str]:
     try:
-        candidates = list_secrets(user_id, category="github", org_id=org_id)
+        candidates = await _maybe_await(list_secrets(user_id, category="github", org_id=org_id))
     except Exception:
         candidates = []
     names: list[str] = []
@@ -138,7 +145,7 @@ def _github_secret_names(user_id: str, org_id: str | None) -> list[str]:
     return names[:5]
 
 
-def _token_candidates(resource: dict[str, Any], user_id: str | None, org_id: str | None) -> list[tuple[str | None, str | None]]:
+async def _token_candidates(resource: dict[str, Any], user_id: str | None, org_id: str | None) -> list[tuple[str | None, str | None]]:
     explicit_key = _vault_key_from_resource(resource)
     candidates: list[tuple[str | None, str | None]] = [] if explicit_key else [(None, None)]
     if not user_id:
@@ -148,7 +155,7 @@ def _token_candidates(resource: dict[str, Any], user_id: str | None, org_id: str
     if explicit_key:
         key_names.append(explicit_key)
     else:
-        key_names.extend(_github_secret_names(user_id, org_id))
+        key_names.extend(await _github_secret_names(user_id, org_id))
 
     seen: set[str] = set()
     for key_name in key_names:
@@ -156,12 +163,12 @@ def _token_candidates(resource: dict[str, Any], user_id: str | None, org_id: str
             continue
         seen.add(key_name)
         try:
-            token = get_secret(
+            token = await _maybe_await(get_secret(
                 key_name,
                 user_id=user_id,
                 org_id=org_id,
                 accessed_by="api",
-            )
+            ))
         except Exception:
             token = None
         if token:
@@ -329,7 +336,7 @@ def _merge_workspaces(existing: Any, additions: list[dict[str, str]]) -> list[di
     return merged
 
 
-def _materialize_resource(
+async def _materialize_resource(
     resource: dict[str, Any],
     *,
     workspace_root: Path,
@@ -374,7 +381,7 @@ def _materialize_resource(
         return None, message
 
     errors: list[str] = []
-    for key_name, token in _token_candidates(resource, user_id, org_id):
+    for key_name, token in await _token_candidates(resource, user_id, org_id):
         try:
             clone = _clone_github_repo(slug, destination, token=token, branch=branch)
         except Exception as exc:
@@ -441,7 +448,7 @@ def _snapshot_from_run(run: Any) -> dict[str, Any] | None:
     return None
 
 
-def materialize_project_context_workspaces(
+async def materialize_project_context_workspaces(
     run_id: int | None,
     *,
     workspace_root: str | None,
@@ -457,8 +464,8 @@ def materialize_project_context_workspaces(
         return result.fail("Project Context materialization requires a workspace root.")
 
     root = Path(workspace_root).expanduser()
-    with UnitOfWork() as uow:
-        run = uow.session.get(AgentRun, run_id)
+    async with UnitOfWork() as uow:
+        run = await uow.session.get(AgentRun, run_id)
         if not run:
             return result.fail(f"Agent run {run_id} was not found.")
         metadata = dict(getattr(run, "metadata_", None) or {})
@@ -479,7 +486,7 @@ def materialize_project_context_workspaces(
         if not slug:
             continue
         result.resources_checked += 1
-        workspace, error = _materialize_resource(
+        workspace, error = await _materialize_resource(
             resource,
             workspace_root=root,
             user_id=user_id,
@@ -501,8 +508,8 @@ def materialize_project_context_workspaces(
         snapshot["validation_errors"] = [*existing_errors, *result.errors]
         snapshot["status"] = "invalid"
 
-    with UnitOfWork() as uow:
-        run = uow.session.get(AgentRun, run_id)
+    async with UnitOfWork() as uow:
+        run = await uow.session.get(AgentRun, run_id)
         if not run:
             return result
         current_metadata = dict(getattr(run, "metadata_", None) or {})

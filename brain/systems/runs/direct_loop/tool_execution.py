@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 import inspect
 import json
 import logging
 import os
-import time
 from typing import Any, Callable
 
 from brain.systems.runs.tool_catalog.registry import output_budget_chars_for_tool
@@ -138,36 +136,148 @@ def _extract_model_visible_tool_content(result: Any) -> tuple[Any, Any | None]:
     return cleaned, model_content
 
 
+def _run_sync_boundary(awaitable: Any, *, name: str) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        with asyncio.Runner() as runner:
+            return runner.run(awaitable)
+    close = getattr(awaitable, "close", None)
+    if callable(close):
+        close()
+    raise RuntimeError(f"{name} cannot run inside an active event loop; await the async tool API")
+
+
+async def async_run_tool_awaitable(result):
+    """Resolve sync or async tool handler outputs from async runtime code."""
+    if not inspect.isawaitable(result):
+        return result
+    return await result
+
+
 def run_tool_awaitable(result):
     """Resolve sync or async tool handler outputs in the sync agent loop."""
     if not inspect.isawaitable(result):
         return result
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(result)
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-async-tool") as executor:
-        return executor.submit(asyncio.run, result).result()
+    return _run_sync_boundary(result, name="run_tool_awaitable")
 
 
-def invoke_tool_handler(handler: Callable, tool_input: dict, agent_context=None, threadlocal_context: dict | None = None):
+class _BoundAgentContext:
+    def __init__(self, agent_context, threadlocal_context: dict | None):
+        self.agent_context = agent_context
+        self.threadlocal_context = threadlocal_context
+        self.previous_context = None
+
+    def __enter__(self):
+        if self.agent_context is not None and self.threadlocal_context is not None:
+            self.previous_context = vars(self.agent_context).copy()
+            for key in list(vars(self.agent_context).keys()):
+                delattr(self.agent_context, key)
+            for key, value in self.threadlocal_context.items():
+                setattr(self.agent_context, key, value)
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.agent_context is not None and self.previous_context is not None:
+            for key in list(vars(self.agent_context).keys()):
+                delattr(self.agent_context, key)
+            for key, value in self.previous_context.items():
+                setattr(self.agent_context, key, value)
+        return False
+
+
+async def async_invoke_tool_handler(
+    handler: Callable,
+    tool_input: dict,
+    agent_context=None,
+    threadlocal_context: dict | None = None,
+):
     """Execute a tool handler with optional propagated AgentRun context."""
-    previous_context = None
-    if agent_context is not None and threadlocal_context is not None:
-        previous_context = vars(agent_context).copy()
-        for key in list(vars(agent_context).keys()):
-            delattr(agent_context, key)
-        for key, value in threadlocal_context.items():
-            setattr(agent_context, key, value)
+    with _BoundAgentContext(agent_context, threadlocal_context):
+        return await async_run_tool_awaitable(handler(**tool_input))
 
-    try:
+
+def invoke_tool_handler(
+    handler: Callable,
+    tool_input: dict,
+    agent_context=None,
+    threadlocal_context: dict | None = None,
+):
+    """Execute a tool handler with optional propagated AgentRun context."""
+    with _BoundAgentContext(agent_context, threadlocal_context):
         return run_tool_awaitable(handler(**tool_input))
-    finally:
-        if agent_context is not None and previous_context is not None:
-            for key in list(vars(agent_context).keys()):
-                delattr(agent_context, key)
-            for key, value in previous_context.items():
-                setattr(agent_context, key, value)
+
+
+async def _async_resolve_tool_call_once(
+    request: PendingToolCall,
+    *,
+    agent_context=None,
+    threadlocal_context: dict | None = None,
+) -> ResolvedToolCall:
+    """Execute one tool request and normalize success/error handling."""
+    try:
+        result = await async_invoke_tool_handler(
+            request.handler,
+            request.tool_input,
+            agent_context=agent_context,
+            threadlocal_context=threadlocal_context,
+        )
+        result, model_content = _extract_model_visible_tool_content(result)
+        result_text = json.dumps(result, default=str)
+        is_error = False
+        if request.tool_name == "brain_encode" and isinstance(result, dict) and result.get("error"):
+            result_text += (
+                "\n\n[System: brain_encode failed. Do not retry brain_encode in this run. "
+                "Move on and end your turn unless another required tool remains.]"
+            )
+            is_error = True
+        elif request.tool_name == "cortex_reply" and isinstance(result, dict) and (
+            result.get("blocked") or result.get("error")
+        ):
+            if result.get("instruction"):
+                result_text += f"\n\n[System: {result['instruction']}]"
+            is_error = True
+        elif request.result_nudge:
+            result_text += request.result_nudge
+        result_text = truncate_tool_result_text(request.tool_name, result_text)
+        return ResolvedToolCall(
+            block_id=request.block_id,
+            tool_name=request.tool_name,
+            tool_input=request.tool_input,
+            result_text=result_text,
+            is_error=is_error,
+            result_content=model_content,
+        )
+    except Exception as exc:
+        logger.warning("Tool %s failed: %s", request.tool_name, exc)
+        return ResolvedToolCall(
+            block_id=request.block_id,
+            tool_name=request.tool_name,
+            tool_input=request.tool_input,
+            result_text=f"Error: {exc}",
+            is_error=True,
+        )
+
+
+async def async_resolve_tool_call(
+    request: PendingToolCall,
+    *,
+    agent_context=None,
+    threadlocal_context: dict | None = None,
+) -> ResolvedToolCall:
+    """Execute one tool request with an async watchdog timeout."""
+    timeout_seconds = _tool_timeout_seconds(request.tool_name, request.tool_input)
+    call = _async_resolve_tool_call_once(
+        request,
+        agent_context=agent_context,
+        threadlocal_context=threadlocal_context,
+    )
+    if timeout_seconds is None:
+        return await call
+    try:
+        return await asyncio.wait_for(call, timeout=timeout_seconds)
+    except TimeoutError:
+        logger.warning("Tool %s timed out after %.2fs", request.tool_name, timeout_seconds)
+        return _timeout_result(request, timeout_seconds)
 
 
 def _resolve_tool_call_sync(
@@ -227,33 +337,29 @@ def resolve_tool_call(
     agent_context=None,
     threadlocal_context: dict | None = None,
 ) -> ResolvedToolCall:
-    """Execute one tool request with a watchdog timeout."""
-    timeout_seconds = _tool_timeout_seconds(request.tool_name, request.tool_input)
-    if timeout_seconds is None:
-        return _resolve_tool_call_sync(
-            request,
-            agent_context=agent_context,
-            threadlocal_context=threadlocal_context,
-        )
-
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-tool")
-    future = executor.submit(
-        _resolve_tool_call_sync,
+    """Execute one tool request from sync runtime code."""
+    return _resolve_tool_call_sync(
         request,
         agent_context=agent_context,
         threadlocal_context=threadlocal_context,
     )
-    try:
-        resolved = future.result(timeout=timeout_seconds)
-    except FutureTimeoutError:
-        logger.warning("Tool %s timed out after %.2fs", request.tool_name, timeout_seconds)
-        executor.shutdown(wait=False, cancel_futures=True)
-        return _timeout_result(request, timeout_seconds)
-    except BaseException:
-        executor.shutdown(wait=True)
-        raise
-    executor.shutdown(wait=True)
-    return resolved
+
+
+def resolve_tool_call_async_boundary(
+    request: PendingToolCall,
+    *,
+    agent_context=None,
+    threadlocal_context: dict | None = None,
+) -> ResolvedToolCall:
+    """Sync boundary for callers that need async timeout behavior."""
+    return _run_sync_boundary(
+        async_resolve_tool_call(
+            request,
+            agent_context=agent_context,
+            threadlocal_context=threadlocal_context,
+        ),
+        name="resolve_tool_call_async_boundary",
+    )
 
 
 def emit_resolved_tool_call(
@@ -263,7 +369,7 @@ def emit_resolved_tool_call(
     run_id,
     idea_id,
     tool_call_source: str,
-) -> None:
+) -> str:
     """Append tool_result content and record side effects in block order."""
     tool_results.append({
         "type": "tool_result",
@@ -276,10 +382,30 @@ def emit_resolved_tool_call(
         callback_result_text = "[secret redacted]"
     if on_tool_call:
         on_tool_call(resolved.tool_name, resolved.tool_input, callback_result_text)
-    if run_id and idea_id:
-        from brain.systems.runs.events import record_tool_call
+    return callback_result_text
 
-        record_tool_call(
+
+async def async_emit_resolved_tool_call(
+    resolved: ResolvedToolCall,
+    tool_results: list[dict],
+    on_tool_call,
+    run_id,
+    idea_id,
+    tool_call_source: str,
+) -> None:
+    """Append a tool result and persist its trace through the async event log."""
+    callback_result_text = emit_resolved_tool_call(
+        resolved,
+        tool_results,
+        on_tool_call,
+        None,
+        None,
+        tool_call_source,
+    )
+    if run_id and idea_id:
+        from brain.systems.runs.events import async_record_tool_call
+
+        await async_record_tool_call(
             run_id,
             idea_id,
             resolved.tool_name,
@@ -300,15 +426,46 @@ def execute_parallel_tool_batch(
     agent_context,
     max_parallel_tool_calls: int,
 ) -> None:
-    """Run independent tool calls concurrently while preserving output order."""
+    """Run independent tool calls from sync runtime code while preserving output order."""
     if not pending:
         return
 
-    threadlocal_context = vars(agent_context).copy()
+    threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
+    for request in pending:
+        emit_resolved_tool_call(
+            resolve_tool_call(
+                request,
+                agent_context=agent_context,
+                threadlocal_context=threadlocal_context,
+            ),
+            tool_results,
+            on_tool_call,
+            run_id,
+            idea_id,
+            tool_call_source,
+        )
+
+
+async def async_execute_parallel_tool_batch(
+    pending: list[PendingToolCall],
+    tool_results: list[dict],
+    on_tool_call,
+    run_id,
+    idea_id,
+    tool_call_source: str,
+    *,
+    agent_context,
+    max_parallel_tool_calls: int,
+) -> None:
+    """Run async-capable independent tool calls concurrently while preserving output order."""
+    if not pending:
+        return
+
+    threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
     if max_parallel_tool_calls <= 1:
         for request in pending:
-            emit_resolved_tool_call(
-                resolve_tool_call(
+            await async_emit_resolved_tool_call(
+                await async_resolve_tool_call(
                     request,
                     agent_context=agent_context,
                     threadlocal_context=threadlocal_context,
@@ -321,36 +478,32 @@ def execute_parallel_tool_batch(
             )
         return
 
-    max_workers = max(1, min(len(pending), max_parallel_tool_calls))
-    executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="agent-tools")
-    timed_out = False
-    start_time = time.monotonic()
-    futures = [
-        executor.submit(
-            _resolve_tool_call_sync,
-            request,
-            agent_context=agent_context,
-            threadlocal_context=threadlocal_context,
+    tasks = [
+        asyncio.create_task(
+            async_resolve_tool_call(
+                request,
+                agent_context=agent_context,
+                threadlocal_context=threadlocal_context,
+            )
         )
         for request in pending
     ]
-    deadlines = [
-        None if (timeout_seconds := _tool_timeout_seconds(request.tool_name, request.tool_input)) is None
-        else start_time + timeout_seconds
-        for request in pending
-    ]
     try:
-        for request, future, deadline in zip(pending, futures, deadlines, strict=True):
-            timeout_seconds = None if deadline is None else max(0.0, deadline - start_time)
-            wait_seconds = None if deadline is None else max(0.0, deadline - time.monotonic())
+        for request, task in zip(pending, tasks, strict=True):
             try:
-                resolved = future.result(timeout=wait_seconds)
-            except FutureTimeoutError:
-                timed_out = True
-                elapsed = timeout_seconds or 0.0
-                logger.warning("Tool %s timed out after %.2fs", request.tool_name, elapsed)
-                resolved = _timeout_result(request, elapsed)
-            emit_resolved_tool_call(
+                resolved = await task
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Tool %s failed: %s", request.tool_name, exc)
+                resolved = ResolvedToolCall(
+                    block_id=request.block_id,
+                    tool_name=request.tool_name,
+                    tool_input=request.tool_input,
+                    result_text=f"Error: {exc}",
+                    is_error=True,
+                )
+            await async_emit_resolved_tool_call(
                 resolved,
                 tool_results,
                 on_tool_call,
@@ -359,7 +512,9 @@ def execute_parallel_tool_batch(
                 tool_call_source,
             )
     finally:
-        executor.shutdown(wait=not timed_out, cancel_futures=timed_out)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
 
 
 def execute_tool_calls(
@@ -382,6 +537,13 @@ def execute_tool_calls(
     check_gate_violations: Callable,
 ) -> list[dict]:
     """Execute all tool calls from a provider response."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("execute_tool_calls cannot run inside an active event loop; await async_execute_tool_calls")
+
     tool_results: list[dict] = []
     pending_parallel: list[PendingToolCall] = []
     threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
@@ -476,4 +638,121 @@ def execute_tool_calls(
         )
 
     flush_parallel_batch()
+    return tool_results
+
+
+async def async_execute_tool_calls(
+    response,
+    tool_handlers: dict,
+    tool_calls_made: list[str],
+    gates,
+    on_tool_call,
+    run_id,
+    idea_id,
+    tool_call_source: str,
+    *,
+    agent_context,
+    brain_tool_names: frozenset[str],
+    gated_tool_names: frozenset[str],
+    research_tool_names: frozenset[str],
+    research_budget: int,
+    parallel_safe_tool_names: frozenset[str],
+    max_parallel_tool_calls: int,
+    check_gate_violations: Callable,
+) -> list[dict]:
+    """Execute all tool calls from async runtime code."""
+    tool_results: list[dict] = []
+    pending_parallel: list[PendingToolCall] = []
+    threadlocal_context = vars(agent_context).copy() if agent_context is not None else None
+
+    async def flush_parallel_batch() -> None:
+        nonlocal pending_parallel
+        if not pending_parallel:
+            return
+        await async_execute_parallel_tool_batch(
+            pending_parallel,
+            tool_results,
+            on_tool_call,
+            run_id,
+            idea_id,
+            tool_call_source,
+            agent_context=agent_context,
+            max_parallel_tool_calls=max_parallel_tool_calls,
+        )
+        pending_parallel = []
+
+    for block in response.content:
+        if not (hasattr(block, "type") and block.type == "tool_use"):
+            continue
+
+        tool_name = block.name
+        tool_input = block.input
+        tool_calls_made.append(tool_name)
+
+        if tool_name == "brain_encode" and tool_calls_made.count("brain_encode") > 1:
+            await flush_parallel_batch()
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": (
+                    "brain_encode already ran in this agent turn history. "
+                    "Do not call it again; end your turn unless you have a different required tool."
+                ),
+                "is_error": True,
+            })
+            continue
+
+        if tool_name in brain_tool_names:
+            gates.brain = True
+        if tool_name == "brain_skills":
+            gates.skills = True
+        violation = check_gate_violations(
+            tool_name,
+            block.id,
+            gates,
+            tool_handlers,
+            gated_tool_names=gated_tool_names,
+        )
+        if violation:
+            await flush_parallel_batch()
+            tool_results.append(violation)
+            continue
+
+        handler = tool_handlers.get(tool_name)
+        if not handler:
+            await flush_parallel_batch()
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": f"Unknown tool: {tool_name}",
+                "is_error": True,
+            })
+            continue
+
+        request = PendingToolCall(
+            block_id=block.id,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            handler=handler,
+        )
+
+        if tool_name in parallel_safe_tool_names:
+            pending_parallel.append(request)
+            continue
+
+        await flush_parallel_batch()
+        await async_emit_resolved_tool_call(
+            await async_resolve_tool_call(
+                request,
+                agent_context=agent_context,
+                threadlocal_context=threadlocal_context,
+            ),
+            tool_results,
+            on_tool_call,
+            run_id,
+            idea_id,
+            tool_call_source,
+        )
+
+    await flush_parallel_batch()
     return tool_results

@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
+
+import pytest
+
+
+class _AwaitableValue:
+    def __init__(self, value):
+        self.value = value
+
+    def __await__(self):
+        async def _coro():
+            return self.value
+
+        return _coro().__await__()
+
+    def __getattr__(self, name):
+        return getattr(self.value, name)
 
 
 class _Store:
@@ -22,11 +39,11 @@ class _Store:
 
     def append_event(self, event):
         self.events.append(event)
-        return event
+        return _AwaitableValue(event)
 
     def append_artifact(self, artifact):
         self.artifacts.append(artifact)
-        return artifact
+        return _AwaitableValue(artifact)
 
     def create_run(self, request):
         from brain.systems.runs.domain import AgentRun
@@ -53,7 +70,7 @@ class _Store:
         )
         self.created_requests.append(request)
         self.runs[run_id] = run
-        return run
+        return _AwaitableValue(run)
 
     def create_child_run(
         self,
@@ -91,7 +108,7 @@ class _Store:
                 model_policy=dict(model_policy if model_policy is not None else parent.model_policy or {}),
                 metadata=metadata_payload,
             )
-        )
+        ).value
         if step_key:
             self.children_by_step[step_key] = child
         self.append_event(
@@ -102,21 +119,25 @@ class _Store:
                 root_run_id=parent.root_run_id or parent.id,
             )
         )
-        return child
+        return _AwaitableValue(child)
 
     def list_artifacts(self, run_id):
         return [artifact for artifact in self.artifacts if artifact.run_id == run_id]
 
+    def drain_steering(self, run_id):
+        return _AwaitableValue([])
+
     def step_completed(self, run_id, step_key):
-        return step_key in self.completed_steps.get(run_id, {})
+        return _AwaitableValue(step_key in self.completed_steps.get(run_id, {}))
 
     def step_result(self, run_id, step_key):
-        return self.completed_steps.get(run_id, {}).get(step_key)
+        return _AwaitableValue(self.completed_steps.get(run_id, {}).get(step_key))
 
     def start_step(self, run_id, step_key):
         from brain.systems.runs.events import run_event
 
         self.append_event(run_event(run_id, "run.step_started", {"step": step_key, "step_key": step_key}, root_run_id=42))
+        return _AwaitableValue(None)
 
     def complete_step(self, run_id, step_key, result=None):
         from brain.systems.runs.events import run_event
@@ -130,7 +151,7 @@ class _Store:
                 root_run_id=42,
             )
         )
-        return result
+        return _AwaitableValue(result)
 
     def fail_step(self, run_id, step_key, error):
         from brain.systems.runs.events import run_event
@@ -138,16 +159,18 @@ class _Store:
         self.append_event(
             run_event(run_id, "run.step_failed", {"step": step_key, "step_key": step_key, "error": error}, root_run_id=42)
         )
+        return _AwaitableValue(None)
 
     def skip_step(self, run_id, step_key):
         from brain.systems.runs.events import run_event
 
         self.append_event(run_event(run_id, "run.step_skipped", {"step": step_key, "step_key": step_key}, root_run_id=42))
+        return _AwaitableValue(None)
 
     def require_run(self, run_id):
         from brain.systems.runs.status import RunStatus
 
-        return self.runs.get(run_id) or SimpleNamespace(
+        return _AwaitableValue(self.runs.get(run_id) or SimpleNamespace(
             id=run_id,
             trace_id=f"run_{run_id}",
             org_id="org-1",
@@ -156,16 +179,16 @@ class _Store:
             root_run_id=run_id,
             recipe="worker",
             status=self.statuses.get(run_id, RunStatus.RUNNING),
-        )
+        ))
 
     def to_domain(self, row):
         return row
 
     def set_status(self, run_id, status, reason=None):
-        row = self.require_run(run_id)
+        row = self.require_run(run_id).value
         row.status = status
         self.statuses[run_id] = status
-        return row
+        return _AwaitableValue(row)
 
 class _Stream:
     def __init__(self):
@@ -261,24 +284,24 @@ def _runtime(recipe: str = "fast", *, message: str = "Read the README", store=No
     )
 
 
-def test_run_admission_marks_idea_working_without_worker_details():
-    from brain.systems.runs.cortex import _mark_idea_working_for_run_admission
+async def test_run_admission_marks_idea_working_without_worker_details():
+    from brain.systems.runs.cortex import _a_mark_idea_working_for_run_admission
     from brain.platform.db.models.idea import Idea, IdeaStateLog
 
     idea = SimpleNamespace(id="idea-1", status="idle", updated_at=None, active_agents=7)
     added = []
 
     class FakeSession:
-        def get(self, model, key):
+        async def get(self, model, key):
             return idea if model is Idea and key == "idea-1" else None
 
         def add(self, row):
             added.append(row)
 
-        def flush(self):
+        async def flush(self):
             return None
 
-    payload = _mark_idea_working_for_run_admission(FakeSession(), "idea-1", 123)
+    payload = await _a_mark_idea_working_for_run_admission(FakeSession(), "idea-1", 123)
 
     assert payload == {
         "idea_id": "idea-1",
@@ -297,24 +320,24 @@ def test_run_admission_marks_idea_working_without_worker_details():
     assert added[0].trigger == "agent_run_admitted"
 
 
-def test_run_admission_preserves_protected_idea_statuses():
-    from brain.systems.runs.cortex import _mark_idea_working_for_run_admission
+async def test_run_admission_preserves_protected_idea_statuses():
+    from brain.systems.runs.cortex import _a_mark_idea_working_for_run_admission
     from brain.platform.db.models.idea import Idea
 
     idea = SimpleNamespace(id="idea-1", status="archived", updated_at=None)
     added = []
 
     class FakeSession:
-        def get(self, model, key):
+        async def get(self, model, key):
             return idea if model is Idea and key == "idea-1" else None
 
         def add(self, row):
             added.append(row)
 
-        def flush(self):
+        async def flush(self):
             return None
 
-    payload = _mark_idea_working_for_run_admission(FakeSession(), "idea-1", 123)
+    payload = await _a_mark_idea_working_for_run_admission(FakeSession(), "idea-1", 123)
 
     assert payload is None
     assert idea.status == "archived"
@@ -322,7 +345,7 @@ def test_run_admission_preserves_protected_idea_statuses():
     assert added == []
 
 
-def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance(monkeypatch):
+async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance(monkeypatch):
     from brain.systems.runs.recipes.fast import FastRecipe
 
     captured = {}
@@ -343,7 +366,7 @@ def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance(monke
     monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent", fake_invoke)
 
     runtime = _runtime("fast")
-    result = FastRecipe().execute(runtime)
+    result = await FastRecipe().execute(runtime)
 
     assert result.output == "README contents"
     assert result.status.value == "completed"
@@ -407,7 +430,7 @@ def test_fast_tool_surface_is_direct_coordinator_without_staged_reply_tools(monk
     assert roles == ["coordinator"]
 
 
-def test_runtime_drain_steering_can_use_isolated_durable_drain():
+async def test_runtime_drain_steering_can_use_isolated_durable_drain():
     from brain.systems.runs.steering import SteeringMessage
 
     runtime = _runtime("fast")
@@ -423,7 +446,7 @@ def test_runtime_drain_steering_can_use_isolated_durable_drain():
     runtime.store.drain_steering = fail_shared_drain
     runtime.durable_steering_drain = isolated_drain
 
-    messages = runtime.drain_steering()
+    messages = await runtime.drain_steering()
 
     assert calls == [42]
     assert messages == ["Use the smaller repro.", "Focus on setup steps."]
@@ -465,7 +488,7 @@ def test_workspace_root_from_ref_uses_thread_project_context_snapshot():
     ) == "/tmp/ideas/idea-1/project/repo"
 
 
-def test_fast_recipe_infers_workspace_root_from_project_context_snapshot(monkeypatch):
+async def test_fast_recipe_infers_workspace_root_from_project_context_snapshot(monkeypatch):
     from brain.systems.runs.recipes.fast import FastRecipe
 
     captured = {}
@@ -489,13 +512,13 @@ def test_fast_recipe_infers_workspace_root_from_project_context_snapshot(monkeyp
         },
     )
 
-    result = FastRecipe().execute(runtime)
+    result = await FastRecipe().execute(runtime)
 
     assert result.status.value == "completed"
     assert captured["spec"].workspace_root == "/tmp/ideas/idea-1/project/repo"
 
 
-def test_fast_recipe_applies_runtime_tool_policy(monkeypatch):
+async def test_fast_recipe_applies_runtime_tool_policy(monkeypatch):
     from brain.systems.runs.recipes.fast import FastRecipe
 
     captured = {}
@@ -520,32 +543,35 @@ def test_fast_recipe_applies_runtime_tool_policy(monkeypatch):
         metadata={"tool_policy": {"disabled_tools": ["manage_cycle"]}},
     )
 
-    result = FastRecipe().execute(runtime)
+    result = await FastRecipe().execute(runtime)
 
     assert result.status.value == "completed"
     assert [tool["name"] for tool in captured["spec"].tools] == ["web_search"]
     assert sorted(captured["spec"].tool_handlers) == ["web_search"]
 
 
-def test_runner_delegates_cycle_settlement_for_terminal_run(monkeypatch):
+async def test_runner_delegates_cycle_settlement_for_terminal_run(monkeypatch):
     from brain.systems.runs.cortex import runner
     from brain.systems.cycles import service as cycle_service
 
     calls = []
+    async def fake_finalize(run_id, *, status, error=None):
+        calls.append((run_id, status, error))
+
     monkeypatch.setattr(
         cycle_service,
-        "finalize_cycle_run_from_run",
-        lambda run_id, *, status, error=None: calls.append((run_id, status, error)),
+        "async_finalize_cycle_run_from_run",
+        fake_finalize,
     )
 
-    runner._finalize_cycle_run_if_needed(99, status="completed")
-    runner._finalize_cycle_run_if_needed(100, status="running")
-    runner._finalize_cycle_run_if_needed(101, status="failed", error="boom")
+    await runner._finalize_cycle_run_if_needed_async(99, status="completed")
+    await runner._finalize_cycle_run_if_needed_async(100, status="running")
+    await runner._finalize_cycle_run_if_needed_async(101, status="failed", error="boom")
 
     assert calls == [(99, "completed", None), (101, "failed", "boom")]
 
 
-def test_deep_recipe_uses_native_child_runs(monkeypatch):
+async def test_deep_recipe_uses_native_child_runs(monkeypatch):
     import brain.systems.runs.recipes.deep as deep_module
     from brain.systems.runs.domain import AgentRunArtifact
     from brain.systems.runs.recipes.deep import DeepRecipe
@@ -560,7 +586,7 @@ def test_deep_recipe_uses_native_child_runs(monkeypatch):
         def __init__(self, session, **kwargs):
             self.store = session
 
-        def run_existing(self, run_id):
+        async def run_existing(self, run_id):
             executed.append(run_id)
             run = self.store.runs[run_id]
             artifact_type = "worker_result" if str(getattr(run.recipe, "value", run.recipe)) == "worker" else "final_answer"
@@ -578,7 +604,7 @@ def test_deep_recipe_uses_native_child_runs(monkeypatch):
     store = _Store()
     runtime = _runtime("deep", message="Implement the README cleanup and verify the result.", store=store)
     runtime.engine = _ChildEngine(store)
-    result = DeepRecipe().execute(runtime)
+    result = await DeepRecipe().execute(runtime)
 
     worker_requests = [
         request
@@ -631,7 +657,7 @@ def test_deep_recipe_uses_native_child_runs(monkeypatch):
     assert max(worker_completion_positions) < min(worker_review_positions)
 
 
-def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkeypatch):
+async def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkeypatch):
     from brain.systems.runs.domain import AgentRunArtifact
     from brain.systems.runs.recipes.deep import DeepRecipe
     from brain.systems.runs.status import RunStatus
@@ -653,7 +679,7 @@ def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkeypatch)
         def __init__(self, session, **kwargs):
             self.store = session
 
-        def run_existing(self, run_id):
+        async def run_existing(self, run_id):
             run = self.store.runs[run_id]
             artifact_type = "worker_result" if str(getattr(run.recipe, "value", run.recipe)) == "worker" else "final_answer"
             self.store.append_artifact(
@@ -672,7 +698,7 @@ def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkeypatch)
     runtime = _runtime("deep", message=request_message, store=store)
     runtime.engine = _ChildEngine(store)
 
-    result = DeepRecipe().execute(runtime)
+    result = await DeepRecipe().execute(runtime)
 
     assert result.output == "Coordinator final answer."
     spec = captured["spec"]
@@ -688,7 +714,7 @@ def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkeypatch)
     assert any(event.event_type == "run.coordinator_synthesis_completed" for event in store.events)
 
 
-def test_deep_recipe_failed_verification_returns_failed_status(monkeypatch):
+async def test_deep_recipe_failed_verification_returns_failed_status(monkeypatch):
     import brain.systems.runs.recipes.deep as deep_module
     from brain.systems.runs.domain import AgentRunArtifact
     from brain.systems.runs.recipes.deep import DeepRecipe
@@ -699,7 +725,7 @@ def test_deep_recipe_failed_verification_returns_failed_status(monkeypatch):
         def __init__(self, session, **kwargs):
             self.store = session
 
-        def run_existing(self, run_id):
+        async def run_existing(self, run_id):
             self.store.append_artifact(
                 AgentRunArtifact(
                     run_id=run_id,
@@ -714,7 +740,7 @@ def test_deep_recipe_failed_verification_returns_failed_status(monkeypatch):
     store = _Store()
     runtime = _runtime("deep", message="Implement the README cleanup and verify the result.", store=store)
     runtime.engine = _ChildEngine(store)
-    result = DeepRecipe().execute(runtime)
+    result = await DeepRecipe().execute(runtime)
 
     assert result.status.value == "failed"
     assert result.output.startswith("Deep verification failed:")
@@ -724,7 +750,7 @@ def test_deep_recipe_failed_verification_returns_failed_status(monkeypatch):
     assert any(event.event_type == "run.verification_failed" for event in store.events)
 
 
-def test_deep_recipe_verifies_required_worker_artifacts_from_child_runs(monkeypatch):
+async def test_deep_recipe_verifies_required_worker_artifacts_from_child_runs(monkeypatch):
     from brain.systems.runs.domain import AgentRunArtifact
     from brain.systems.runs.recipes.deep import DeepRecipe
     from brain.systems.runs.status import RunStatus
@@ -734,7 +760,7 @@ def test_deep_recipe_verifies_required_worker_artifacts_from_child_runs(monkeypa
         def __init__(self, session, **kwargs):
             self.store = session
 
-        def run_existing(self, run_id):
+        async def run_existing(self, run_id):
             run = self.store.runs[run_id]
             artifact_type = "worker_result" if str(getattr(run.recipe, "value", run.recipe)) == "worker" else "final_answer"
             self.store.append_artifact(
@@ -764,7 +790,7 @@ def test_deep_recipe_verifies_required_worker_artifacts_from_child_runs(monkeypa
     )
     runtime.engine = _ChildEngine(store)
 
-    result = DeepRecipe().execute(runtime)
+    result = await DeepRecipe().execute(runtime)
 
     assert result.status.value == "failed"
     verification = [artifact for artifact in store.artifacts if _artifact_type(artifact) == "verifier_evidence"]
@@ -773,7 +799,7 @@ def test_deep_recipe_verifies_required_worker_artifacts_from_child_runs(monkeypa
     assert missing[0]["requirement"]["artifact_type"] == "command_output"
 
 
-def test_deep_phase_barrier_revises_pending_execute_assignment_from_investigate_output(monkeypatch):
+async def test_deep_phase_barrier_revises_pending_execute_assignment_from_investigate_output(monkeypatch):
     from brain.systems.runs.domain import AgentRunArtifact
     from brain.systems.runs.recipes.deep import DeepRecipe
     from brain.systems.runs.status import RunStatus
@@ -807,7 +833,7 @@ def test_deep_phase_barrier_revises_pending_execute_assignment_from_investigate_
         def __init__(self, session, **kwargs):
             self.store = session
 
-        def run_existing(self, run_id):
+        async def run_existing(self, run_id):
             run = self.store.runs[run_id]
             metadata = dict(run.metadata or {})
             role = str(metadata.get("worker_role") or "")
@@ -882,7 +908,7 @@ def test_deep_phase_barrier_revises_pending_execute_assignment_from_investigate_
     )
     runtime.engine = _ChildEngine(store)
 
-    result = DeepRecipe().execute(runtime)
+    result = await DeepRecipe().execute(runtime)
 
     assert result.status.value == "completed"
     execute_request = _child_request_for_node(store, "execute")
@@ -912,7 +938,7 @@ def test_deep_phase_barrier_revises_pending_execute_assignment_from_investigate_
     assert applied[0]["after"]["assignment"]["objective"] == revised_execute_objective
 
 
-def test_deep_phase_barrier_revises_only_pending_downstream_worker_nodes(monkeypatch):
+async def test_deep_phase_barrier_revises_only_pending_downstream_worker_nodes(monkeypatch):
     from brain.systems.runs.domain import AgentRunArtifact
     from brain.systems.runs.recipes.deep import DeepRecipe
     from brain.systems.runs.status import RunStatus
@@ -951,7 +977,7 @@ def test_deep_phase_barrier_revises_only_pending_downstream_worker_nodes(monkeyp
             self.store = session
             self.executed = []
 
-        def run_existing(self, run_id):
+        async def run_existing(self, run_id):
             self.executed.append(run_id)
             run = self.store.runs[run_id]
             metadata = dict(run.metadata or {})
@@ -1026,7 +1052,7 @@ def test_deep_phase_barrier_revises_only_pending_downstream_worker_nodes(monkeyp
     child_engine = _ChildEngine(store)
     runtime.engine = child_engine
 
-    result = DeepRecipe().execute(runtime)
+    result = await DeepRecipe().execute(runtime)
 
     assert result.status.value == "completed"
     investigate_requests = _child_requests_for_node(store, "investigate")
@@ -1059,14 +1085,14 @@ def _child_request_for_node(store, node_id):
     return requests[0]
 
 
-def test_runtime_tool_executor_records_public_events_and_redacted_artifact():
+async def test_runtime_tool_executor_records_public_events_and_redacted_artifact():
     from brain.systems.runs.domain import ArtifactType, EventVisibility
-    from brain.systems.runs.tools import RunToolExecutor, ToolExecution
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
 
     runtime = _runtime("worker")
-    executor = RunToolExecutor(runtime.store, stream=runtime.stream)
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
 
-    result = executor.execute(
+    result = await executor.execute(
         42,
         ToolExecution(
             name="brain_vault",
@@ -1091,16 +1117,16 @@ def test_runtime_tool_executor_records_public_events_and_redacted_artifact():
     assert _stream_has(runtime.stream.messages, "run.tool_completed", completed.payload | {"run_id": 42})
 
 
-def test_runtime_tool_executor_blocks_out_of_scope_worker_mutation():
+async def test_runtime_tool_executor_blocks_out_of_scope_worker_mutation():
     import pytest
 
-    from brain.systems.runs.tools import RunToolExecutor, ToolExecution, ToolScope, ToolScopeViolation
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution, ToolScope, ToolScopeViolation
 
     runtime = _runtime("worker")
-    executor = RunToolExecutor(runtime.store, stream=runtime.stream)
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
 
     with pytest.raises(ToolScopeViolation):
-        executor.execute(
+        await executor.execute(
             42,
             ToolExecution(
                 name="write_file",
@@ -1117,14 +1143,14 @@ def test_runtime_tool_executor_blocks_out_of_scope_worker_mutation():
     assert runtime.store.artifacts[-1].payload["status"] == "failed"
 
 
-def test_runtime_tool_executor_records_policy_blocked_results_as_failed():
-    from brain.systems.runs.tools import RunToolExecutor, ToolExecution
+async def test_runtime_tool_executor_records_policy_blocked_results_as_failed():
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
 
     runtime = _runtime("worker")
-    executor = RunToolExecutor(runtime.store, stream=runtime.stream)
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
     collector = []
 
-    result = executor.execute(
+    result = await executor.execute(
         42,
         ToolExecution(
             name="exec_command",
@@ -1150,8 +1176,8 @@ def test_runtime_tool_executor_records_policy_blocked_results_as_failed():
     assert runtime.store.artifacts[-1].payload["status"] == "failed"
 
 
-def test_runtime_tool_executor_enforces_policy_before_raw_handler(monkeypatch):
-    from brain.systems.runs.tools import RunToolExecutor, ToolExecution
+async def test_runtime_tool_executor_enforces_policy_before_raw_handler(monkeypatch):
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
 
     monkeypatch.setenv("AGENT_ACTION_POLICY_MODE", "enforce")
     records = []
@@ -1165,10 +1191,10 @@ def test_runtime_tool_executor_enforces_policy_before_raw_handler(monkeypatch):
         lambda manifest_id, **kwargs: completions.append({"manifest_id": manifest_id, **kwargs}),
     )
     runtime = _runtime("worker")
-    executor = RunToolExecutor(runtime.store, stream=runtime.stream)
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
     calls = []
 
-    result = executor.execute(
+    result = await executor.execute(
         42,
         ToolExecution(
             name="exec_command",
@@ -1189,9 +1215,9 @@ def test_runtime_tool_executor_enforces_policy_before_raw_handler(monkeypatch):
     }]
 
 
-def test_runtime_tool_executor_audits_high_risk_actions_autonomously(monkeypatch):
+async def test_runtime_tool_executor_audits_high_risk_actions_autonomously(monkeypatch):
     from brain.systems.runs.actions import wrap_action_manifest_audit
-    from brain.systems.runs.tools import RunToolExecutor, ToolExecution
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
 
     monkeypatch.setenv("AGENT_ACTION_POLICY_MODE", "enforce")
     records = []
@@ -1205,7 +1231,7 @@ def test_runtime_tool_executor_audits_high_risk_actions_autonomously(monkeypatch
         lambda manifest_id, **kwargs: completions.append({"manifest_id": manifest_id, **kwargs}),
     )
     runtime = _runtime("worker")
-    executor = RunToolExecutor(runtime.store, stream=runtime.stream)
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
     calls = []
     audited_handler = wrap_action_manifest_audit(
         "browser",
@@ -1218,7 +1244,7 @@ def test_runtime_tool_executor_audits_high_risk_actions_autonomously(monkeypatch
         handler=audited_handler,
     )
 
-    result = executor.execute(42, tool, root_run_id=42)
+    result = await executor.execute(42, tool, root_run_id=42)
 
     assert result == {"clicked": True}
     assert calls == [{"action": "click", "selector": "#ship"}]
@@ -1229,24 +1255,24 @@ def test_runtime_tool_executor_audits_high_risk_actions_autonomously(monkeypatch
     assert completions == [{"manifest_id": 1, "outcome_status": "succeeded", "outcome_error": None}]
 
 
-def test_direct_loop_returns_timeout_as_tool_error(monkeypatch):
-    from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, resolve_tool_call
-    import time
+@pytest.mark.asyncio
+async def test_direct_loop_returns_timeout_as_tool_error(monkeypatch):
+    from brain.systems.runs.direct_loop.tool_execution import PendingToolCall, async_resolve_tool_call
 
     monkeypatch.setenv("AGENT_TOOL_TIMEOUT_SECONDS", "0.02")
 
-    def slow_handler():
-        time.sleep(0.2)
+    async def slow_handler():
+        await asyncio.sleep(0.2)
         return {"ok": True}
 
-    resolved = resolve_tool_call(PendingToolCall("tool-1", "slow_tool", {}, slow_handler))
+    resolved = await async_resolve_tool_call(PendingToolCall("tool-1", "slow_tool", {}, slow_handler))
 
     assert resolved.is_error is True
     assert "slow_tool" in resolved.result_text
     assert "timed out" in resolved.result_text
 
 
-def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_result_artifact(monkeypatch):
+async def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_result_artifact(monkeypatch):
     from brain.systems.runs.domain import ArtifactType
     from brain.systems.runs.recipes.workers import WorkerRecipe
 
@@ -1272,7 +1298,7 @@ def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_result
     monkeypatch.setattr("brain.systems.runs.recipes.workers.invoke_direct_agent", fake_invoke)
 
     runtime = _runtime("worker")
-    result = WorkerRecipe().execute(runtime)
+    result = await WorkerRecipe().execute(runtime)
 
     assert result.output == "README setup documented"
     assert result.status.value == "completed"
@@ -1286,7 +1312,7 @@ def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_result
     assert worker_result.payload["evidence"]["tool_names"] == ["read_file"]
 
 
-def test_worker_recipe_infers_workspace_root_from_project_context_permission_scope(monkeypatch):
+async def test_worker_recipe_infers_workspace_root_from_project_context_permission_scope(monkeypatch):
     from brain.systems.runs.recipes.workers import WorkerRecipe
 
     captured = {}
@@ -1308,7 +1334,7 @@ def test_worker_recipe_infers_workspace_root_from_project_context_permission_sco
         },
     )
 
-    result = WorkerRecipe().execute(runtime)
+    result = await WorkerRecipe().execute(runtime)
 
     assert result.status.value == "completed"
     assert captured["spec"].workspace_root == "/tmp/ideas/idea-1/project/repo"
@@ -1354,12 +1380,23 @@ def test_run_stream_payload_is_the_single_cortex_projection():
     assert payload["model_policy"] == {"tier": "high", "thinking": "high"}
 
 
-def test_thread_binding_keeps_fast_high_intelligence_by_default():
-    from brain.systems.runs.cortex.thread_binding import build_run_request
+def _async_thread_binding_session(idea, *, attachment=None):
+    class _Session:
+        async def get(self, model, idea_id):
+            return idea
 
-    session = SimpleNamespace(get=lambda model, idea_id: SimpleNamespace(id=idea_id, org_id="org-1", user_id="u1", title="Thread"))
+        async def scalars(self, stmt):
+            return SimpleNamespace(first=lambda: attachment)
 
-    request = build_run_request(
+    return _Session()
+
+
+async def test_thread_binding_keeps_fast_high_intelligence_by_default():
+    from brain.systems.runs.cortex.thread_binding import a_build_run_request
+
+    session = _async_thread_binding_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
+
+    request = await a_build_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1374,12 +1411,12 @@ def test_thread_binding_keeps_fast_high_intelligence_by_default():
     assert request.metadata["event"] == "thread_reply"
 
 
-def test_thread_binding_records_slash_skill_interest():
-    from brain.systems.runs.cortex.thread_binding import build_run_request
+async def test_thread_binding_records_slash_skill_interest():
+    from brain.systems.runs.cortex.thread_binding import a_build_run_request
 
-    session = SimpleNamespace(get=lambda model, idea_id: SimpleNamespace(id=idea_id, org_id="org-1", user_id="u1", title="Thread"))
+    session = _async_thread_binding_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
 
-    request = build_run_request(
+    request = await a_build_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1392,8 +1429,8 @@ def test_thread_binding_records_slash_skill_interest():
     assert request.metadata["slash_skill_commands"][0]["token"] == "/debug"
 
 
-def test_thread_binding_inherits_project_context_from_idea():
-    from brain.systems.runs.cortex.thread_binding import build_run_request
+async def test_thread_binding_inherits_project_context_from_idea():
+    from brain.systems.runs.cortex.thread_binding import a_build_run_request
 
     idea = SimpleNamespace(
         id="idea-1",
@@ -1407,9 +1444,9 @@ def test_thread_binding_inherits_project_context_from_idea():
             },
         },
     )
-    session = SimpleNamespace(get=lambda model, idea_id: idea)
+    session = _async_thread_binding_session(idea)
 
-    request = build_run_request(
+    request = await a_build_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1423,8 +1460,8 @@ def test_thread_binding_inherits_project_context_from_idea():
     assert request.workspace_ref["project_context_snapshot"]["resources"][0]["path"] == "projects/yc-application"
 
 
-def test_thread_binding_skips_invalid_metadata_project_context_for_valid_idea_context():
-    from brain.systems.runs.cortex.thread_binding import build_run_request
+async def test_thread_binding_skips_invalid_metadata_project_context_for_valid_idea_context():
+    from brain.systems.runs.cortex.thread_binding import a_build_run_request
 
     idea = SimpleNamespace(
         id="idea-1",
@@ -1438,9 +1475,9 @@ def test_thread_binding_skips_invalid_metadata_project_context_for_valid_idea_co
             },
         },
     )
-    session = SimpleNamespace(get=lambda model, idea_id: idea)
+    session = _async_thread_binding_session(idea)
 
-    request = build_run_request(
+    request = await a_build_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1459,8 +1496,8 @@ def test_thread_binding_skips_invalid_metadata_project_context_for_valid_idea_co
     ]
 
 
-def test_thread_binding_drops_invalid_legacy_project_context_when_no_valid_fallback():
-    from brain.systems.runs.cortex.thread_binding import build_run_request
+async def test_thread_binding_drops_invalid_legacy_project_context_when_no_valid_fallback():
+    from brain.systems.runs.cortex.thread_binding import a_build_run_request
 
     idea = SimpleNamespace(
         id="idea-1",
@@ -1469,9 +1506,9 @@ def test_thread_binding_drops_invalid_legacy_project_context_when_no_valid_fallb
         title="Thread",
         agent_details={"project_context": {"name": "Legacy empty project", "resources": []}},
     )
-    session = SimpleNamespace(get=lambda model, idea_id: idea)
+    session = _async_thread_binding_session(idea)
 
-    request = build_run_request(
+    request = await a_build_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1491,8 +1528,8 @@ def test_thread_binding_drops_invalid_legacy_project_context_when_no_valid_fallb
     ]
 
 
-def test_thread_binding_falls_back_to_latest_project_attachment():
-    from brain.systems.runs.cortex.thread_binding import build_run_request
+async def test_thread_binding_falls_back_to_latest_project_attachment():
+    from brain.systems.runs.cortex.thread_binding import a_build_run_request
 
     idea = SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread", agent_details={})
     attachment = SimpleNamespace(
@@ -1501,12 +1538,9 @@ def test_thread_binding_falls_back_to_latest_project_attachment():
             "resources": [{"type": "folder", "path": "attached/project"}],
         },
     )
-    session = SimpleNamespace(
-        get=lambda model, idea_id: idea,
-        scalars=lambda stmt: SimpleNamespace(first=lambda: attachment),
-    )
+    session = _async_thread_binding_session(idea, attachment=attachment)
 
-    request = build_run_request(
+    request = await a_build_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1519,12 +1553,12 @@ def test_thread_binding_falls_back_to_latest_project_attachment():
     assert request.target_ref["project_context_snapshot"]["resources"][0]["path"] == "attached/project"
 
 
-def test_thread_binding_applies_intelligence_and_effort_overrides():
-    from brain.systems.runs.cortex.thread_binding import build_run_request
+async def test_thread_binding_applies_intelligence_and_effort_overrides():
+    from brain.systems.runs.cortex.thread_binding import a_build_run_request
 
-    session = SimpleNamespace(get=lambda model, idea_id: SimpleNamespace(id=idea_id, org_id="org-1", user_id="u1", title="Thread"))
+    session = _async_thread_binding_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
 
-    request = build_run_request(
+    request = await a_build_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1538,12 +1572,12 @@ def test_thread_binding_applies_intelligence_and_effort_overrides():
     assert request.model_policy == {"tier": "medium", "thinking": "xhigh"}
 
 
-def test_thread_binding_applies_explicit_model_override():
-    from brain.systems.runs.cortex.thread_binding import build_run_request
+async def test_thread_binding_applies_explicit_model_override():
+    from brain.systems.runs.cortex.thread_binding import a_build_run_request
 
-    session = SimpleNamespace(get=lambda model, idea_id: SimpleNamespace(id=idea_id, org_id="org-1", user_id="u1", title="Thread"))
+    session = _async_thread_binding_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
 
-    request = build_run_request(
+    request = await a_build_run_request(
         session,
         idea_id="idea-1",
         event="idea_created",
@@ -1560,8 +1594,8 @@ def test_thread_binding_applies_explicit_model_override():
     }
 
 
-def test_runner_settles_root_run_idea_status():
-    from brain.systems.runs.cortex.runner import _settle_idea_for_terminal_root_run
+async def test_runner_settles_root_run_idea_status():
+    from brain.systems.runs.cortex.runner import _settle_idea_for_terminal_root_run_async
     from brain.platform.db.models.agent_run import AgentRunRow
     from brain.platform.db.models.idea import Idea, IdeaStateLog
 
@@ -1570,7 +1604,7 @@ def test_runner_settles_root_run_idea_status():
     added = []
 
     class FakeSession:
-        def get(self, model, key):
+        async def get(self, model, key):
             if model is AgentRunRow and int(key) == 42:
                 return run
             if model is Idea and str(key) == "idea-1":
@@ -1580,10 +1614,10 @@ def test_runner_settles_root_run_idea_status():
         def add(self, obj):
             added.append(obj)
 
-        def flush(self):
+        async def flush(self):
             pass
 
-    payload = _settle_idea_for_terminal_root_run(FakeSession(), 42)
+    payload = await _settle_idea_for_terminal_root_run_async(FakeSession(), 42)
 
     assert idea.status == "unread_reply"
     assert payload == {
@@ -1595,14 +1629,14 @@ def test_runner_settles_root_run_idea_status():
     assert any(isinstance(obj, IdeaStateLog) for obj in added)
 
 
-def test_runner_does_not_settle_child_run_idea_status():
-    from brain.systems.runs.cortex.runner import _settle_idea_for_terminal_root_run
+async def test_runner_does_not_settle_child_run_idea_status():
+    from brain.systems.runs.cortex.runner import _settle_idea_for_terminal_root_run_async
     from brain.platform.db.models.agent_run import AgentRunRow
 
     run = SimpleNamespace(id=43, parent_run_id=42, thread_id="idea-1", status="completed")
 
     class FakeSession:
-        def get(self, model, key):
+        async def get(self, model, key):
             return run if model is AgentRunRow else None
 
-    assert _settle_idea_for_terminal_root_run(FakeSession(), 43) is None
+    assert await _settle_idea_for_terminal_root_run_async(FakeSession(), 43) is None

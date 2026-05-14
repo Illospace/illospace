@@ -4,7 +4,7 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -34,7 +34,19 @@ def _make_mock_uow():
     mock_uow = MagicMock()
     mock_uow.__enter__ = MagicMock(return_value=mock_uow)
     mock_uow.__exit__ = MagicMock(return_value=False)
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    mock_uow.session.execute = AsyncMock(return_value=_db_result(first=None, all_rows=[]))
     return mock_uow
+
+
+def _db_result(*, first=None, all_rows=None):
+    result = MagicMock()
+    mappings = MagicMock()
+    mappings.first.return_value = first
+    mappings.all.return_value = list(all_rows or [])
+    result.mappings.return_value = mappings
+    return result
 
 
 @pytest.fixture
@@ -61,18 +73,18 @@ def mock_embed():
 # ---- author_skill tests ----
 
 class TestAuthorSkill:
-    def test_rejects_vague_procedure(self, mock_uow_session, mock_embed):
-        result = author_skill("test", "desc", "do good work", "success rate above 80%")
+    async def test_rejects_vague_procedure(self, mock_uow_session, mock_embed):
+        result = await author_skill("test", "desc", "do good work", "success rate above 80%")
         assert not result["approved"]
         assert any("vague" in f.lower() or "Vague" in f for f in result["feedback"])
 
-    def test_rejects_short_procedure(self, mock_uow_session, mock_embed):
-        result = author_skill("test", "desc", "step one", "success rate above 80%")
+    async def test_rejects_short_procedure(self, mock_uow_session, mock_embed):
+        result = await author_skill("test", "desc", "step one", "success rate above 80%")
         assert not result["approved"]
         assert any("steps" in f.lower() for f in result["feedback"])
 
-    def test_rejects_unmeasurable_criteria(self, mock_uow_session, mock_embed):
-        result = author_skill(
+    async def test_rejects_unmeasurable_criteria(self, mock_uow_session, mock_embed):
+        result = await author_skill(
             "test", "desc",
             "First analyze the code. Then write tests. Then review output. Finally deploy.",
             "it should work well"
@@ -80,7 +92,7 @@ class TestAuthorSkill:
         assert not result["approved"]
         assert any("measurable" in f.lower() for f in result["feedback"])
 
-    def test_approves_good_skill(self, mock_uow_session, mock_embed):
+    async def test_approves_good_skill(self, mock_uow_session, mock_embed):
         session = mock_uow_session
         # _check_skill_overlap: no overlap found
         # _create_skill_via_db: returns id from INSERT RETURNING
@@ -100,10 +112,10 @@ class TestAuthorSkill:
                 result.mappings.return_value.all.return_value = []
             return result
 
-        session.execute = smart_execute
+        session.execute = AsyncMock(side_effect=smart_execute)
 
         with patch("brain.systems.skills.gate.enforce_gate"):
-            result = author_skill(
+            result = await author_skill(
                 "deploy",
                 "Deploy to production",
                 "First run tests. Then build container. Then push to registry. Finally update k8s.",
@@ -112,7 +124,7 @@ class TestAuthorSkill:
         assert result["approved"]
         assert result["skill_id"] == 42
 
-    def test_rejects_overlapping_skill(self, mock_uow_session, mock_embed):
+    async def test_rejects_overlapping_skill(self, mock_uow_session, mock_embed):
         session = mock_uow_session
 
         def smart_execute(sql, params=None):
@@ -124,9 +136,9 @@ class TestAuthorSkill:
                 result.mappings.return_value.first.return_value = None
             return result
 
-        session.execute = smart_execute
+        session.execute = AsyncMock(side_effect=smart_execute)
 
-        result = author_skill(
+        result = await author_skill(
             "test-skill", "desc",
             "Step one analyze. Step two implement. Step three validate. Step four ship.",
             "Success rate above 90%. Completes within 5 minutes."
@@ -134,7 +146,7 @@ class TestAuthorSkill:
         assert not result["approved"]
         assert any("overlap" in f.lower() for f in result["feedback"])
 
-    def test_records_decision(self, mock_uow_session, mock_embed, temp_meta_state):
+    async def test_records_decision(self, mock_uow_session, mock_embed, temp_meta_state):
         session = mock_uow_session
 
         def smart_execute(sql, params=None):
@@ -148,10 +160,10 @@ class TestAuthorSkill:
                 result.mappings.return_value.first.return_value = None
             return result
 
-        session.execute = smart_execute
+        session.execute = AsyncMock(side_effect=smart_execute)
 
         with patch("brain.systems.skills.gate.enforce_gate"):
-            author_skill(
+            await author_skill(
                 "s", "d",
                 "One step. Two step. Three step. Four step.",
                 "Success rate above 80%. Zero failures."
@@ -163,14 +175,14 @@ class TestAuthorSkill:
 # ---- assess_skill tests ----
 
 class TestAssessSkill:
-    def test_skill_not_found(self, mock_uow_session):
+    async def test_skill_not_found(self, mock_uow_session):
         session = mock_uow_session
-        session.execute.return_value.mappings.return_value.first.return_value = None
+        session.execute = AsyncMock(return_value=_db_result(first=None))
 
-        result = assess_skill("nonexistent")
+        result = await assess_skill("nonexistent")
         assert "error" in result
 
-    def test_healthy_skill(self, mock_uow_session, temp_meta_state):
+    async def test_healthy_skill(self, mock_uow_session, temp_meta_state):
         session = mock_uow_session
         call_count = [0]
 
@@ -194,13 +206,13 @@ class TestAssessSkill:
                 result.mappings.return_value.all.return_value = []
             return result
 
-        session.execute = smart_execute
+        session.execute = AsyncMock(side_effect=smart_execute)
 
-        result = assess_skill("develop")
+        result = await assess_skill("develop")
         assert result["status"] == "healthy"
         assert result["success_rate"] == 0.9
 
-    def test_dormant_skill(self, mock_uow_session, temp_meta_state):
+    async def test_dormant_skill(self, mock_uow_session, temp_meta_state):
         session = mock_uow_session
 
         def smart_execute(sql, params=None):
@@ -221,12 +233,12 @@ class TestAssessSkill:
                 result.mappings.return_value.all.return_value = []
             return result
 
-        session.execute = smart_execute
+        session.execute = AsyncMock(side_effect=smart_execute)
 
-        result = assess_skill("old-skill")
+        result = await assess_skill("old-skill")
         assert result["status"] == "dormant"
 
-    def test_underperforming_skill(self, mock_uow_session, temp_meta_state):
+    async def test_underperforming_skill(self, mock_uow_session, temp_meta_state):
         session = mock_uow_session
 
         def smart_execute(sql, params=None):
@@ -249,29 +261,29 @@ class TestAssessSkill:
                 result.mappings.return_value.all.return_value = []
             return result
 
-        session.execute = smart_execute
+        session.execute = AsyncMock(side_effect=smart_execute)
 
-        result = assess_skill("bad-skill")
+        result = await assess_skill("bad-skill")
         assert result["status"] in ("underperforming", "failing")
 
 
 # ---- cross_pollinate tests ----
 
 class TestCrossPollinate:
-    def test_insufficient_skills(self, mock_uow_session):
+    async def test_insufficient_skills(self, mock_uow_session):
         session = mock_uow_session
-        session.execute.return_value.mappings.return_value.all.return_value = [
+        session.execute = AsyncMock(return_value=_db_result(all_rows=[
             {"id": 1, "name": "only-one", "description": "", "procedure": "",
              "pitfalls": [], "refinements": [], "use_count": 5,
              "success_count": 4, "failure_count": 1, "maturity": "developing",
              "confidence": 0.5}
-        ]
-        result = cross_pollinate()
+        ]))
+        result = await cross_pollinate()
         assert "Need at least 2" in result["notes"][0]
 
-    def test_finds_shared_pitfalls(self, mock_uow_session):
+    async def test_finds_shared_pitfalls(self, mock_uow_session):
         session = mock_uow_session
-        session.execute.return_value.mappings.return_value.all.return_value = [
+        session.execute = AsyncMock(return_value=_db_result(all_rows=[
             {"id": 1, "name": "skill-a", "description": "", "procedure": "",
              "pitfalls": ["timeout errors"], "refinements": [],
              "use_count": 10, "success_count": 8, "failure_count": 2,
@@ -280,61 +292,61 @@ class TestCrossPollinate:
              "pitfalls": ["timeout errors"], "refinements": [],
              "use_count": 5, "success_count": 3, "failure_count": 2,
              "maturity": "developing", "confidence": 0.4},
-        ]
-        result = cross_pollinate()
+        ]))
+        result = await cross_pollinate()
         assert len(result["shared_pitfalls"]) >= 1
 
 
 # ---- evolve_meta tests ----
 
 class TestEvolveMeta:
-    def test_no_data(self, temp_meta_state):
-        result = evolve_meta()
+    async def test_no_data(self, temp_meta_state):
+        result = await evolve_meta()
         assert any("insufficient" in c.lower() for c in result["changes"])
 
-    def test_tightens_on_bad_approvals(self, mock_uow_session, temp_meta_state):
+    async def test_tightens_on_bad_approvals(self, mock_uow_session, temp_meta_state):
         state = _load_meta_state()
         state["author_decisions"] = [
             {"name": f"s{i}", "approved": True, "skill_id": i,
-             "timestamp": datetime.utcnow().isoformat(), "feedback": []}
+             "timestamp": datetime.now(timezone.utc).isoformat(), "feedback": []}
             for i in range(1, 6)
         ]
         _save_meta_state(state)
 
         session = mock_uow_session
         # All approved skills are underperforming
-        session.execute.return_value.mappings.return_value.all.return_value = [
+        session.execute = AsyncMock(return_value=_db_result(all_rows=[
             {"id": i, "use_count": 5, "success_count": 1, "failure_count": 4}
             for i in range(1, 6)
-        ]
+        ]))
 
-        result = evolve_meta()
+        result = await evolve_meta()
         assert result["current_criteria"]["min_procedure_steps"] > 3
 
-    def test_relaxes_on_good_approvals(self, mock_uow_session, temp_meta_state):
+    async def test_relaxes_on_good_approvals(self, mock_uow_session, temp_meta_state):
         state = _load_meta_state()
         state["author_decisions"] = [
             {"name": f"s{i}", "approved": True, "skill_id": i,
-             "timestamp": datetime.utcnow().isoformat(), "feedback": []}
+             "timestamp": datetime.now(timezone.utc).isoformat(), "feedback": []}
             for i in range(1, 6)
         ]
         _save_meta_state(state)
 
         session = mock_uow_session
-        session.execute.return_value.mappings.return_value.all.return_value = [
+        session.execute = AsyncMock(return_value=_db_result(all_rows=[
             {"id": i, "use_count": 10, "success_count": 9, "failure_count": 1}
             for i in range(1, 6)
-        ]
+        ]))
 
-        result = evolve_meta()
+        result = await evolve_meta()
         assert result["current_criteria"]["min_procedure_steps"] <= 3
 
 
 # ---- CLI tests ----
 
 class TestCLI:
-    def test_cli_help(self):
+    async def test_cli_help(self):
         from brain.app.cli.meta_learn import main
         with pytest.raises(SystemExit):
             with patch("sys.argv", ["meta_learn.py", "--help"]):
-                main()
+                await main()

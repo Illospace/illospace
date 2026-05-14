@@ -3,10 +3,8 @@ import uuid
 from datetime import datetime
 
 import pytest
-from sqlalchemy import create_engine, event
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
-from sqlalchemy.orm import Session
 
 from brain.platform.db.base import Base
 from brain.platform.db.models.memory import Edge, Memory
@@ -38,32 +36,23 @@ def _register_sqlite_adapters():
 
 
 @pytest.fixture
-def engine():
+async def session(async_sqlite_session_factory):
     _patch_sqlite_for_pg_types()
     _register_sqlite_adapters()
-    eng = create_engine("sqlite://", echo=False)
-    event.listen(eng, "connect", _register_sqlite_functions)
-    Org.__table__.create(eng, checkfirst=True)
-    User.__table__.create(eng, checkfirst=True)
-    Memory.__table__.create(eng, checkfirst=True)
-    Edge.__table__.create(eng, checkfirst=True)
-    return eng
+    session = await async_sqlite_session_factory(
+        [Org.__table__, User.__table__, Memory.__table__, Edge.__table__],
+        connect_listener=_register_sqlite_functions,
+    )
+    org = Org(id=_ORG_UUID, name="Test Org", slug="test-org")
+    session.add(org)
+    user = User(id=_USER_UUID, org_id=_ORG_UUID, name="Alex", email="alex@test.com")
+    session.add(user)
+    await session.flush()
+    return session
 
 
 _USER_UUID = str(uuid.uuid4())
 _ORG_UUID = str(uuid.uuid4())
-
-
-@pytest.fixture
-def session(engine):
-    s = Session(engine)
-    org = Org(id=_ORG_UUID, name="Test Org", slug="test-org")
-    s.add(org)
-    user = User(id=_USER_UUID, org_id=_ORG_UUID, name="Alex", email="alex@test.com")
-    s.add(user)
-    s.flush()
-    yield s
-    s.close()
 
 
 @pytest.fixture
@@ -76,7 +65,7 @@ def edge_repo(session):
     return EdgeRepository(session)
 
 
-def _make_memory(session, **kwargs):
+async def _make_memory(session, **kwargs):
     defaults = {
         "content": "test memory content",
         "memory_type": "episodic",
@@ -89,7 +78,7 @@ def _make_memory(session, **kwargs):
     defaults.update(kwargs)
     m = Memory(**defaults)
     session.add(m)
-    session.flush()
+    await session.flush()
     return m
 
 
@@ -97,31 +86,31 @@ class TestMemoryRepository:
     def test_model_assignment(self):
         assert MemoryRepository.model is Memory
 
-    def test_list_active(self, repo, session):
-        _make_memory(session, archived=False)
-        _make_memory(session, archived=True)
-        result = repo.list_active()
+    async def test_list_active(self, repo, session):
+        await _make_memory(session, archived=False)
+        await _make_memory(session, archived=True)
+        result = await repo.a_list_active()
         assert len(result) == 1
 
-    def test_list_by_type(self, repo, session):
-        _make_memory(session, memory_type="episodic")
-        _make_memory(session, memory_type="semantic")
-        result = repo.list_by_type("episodic")
+    async def test_list_by_type(self, repo, session):
+        await _make_memory(session, memory_type="episodic")
+        await _make_memory(session, memory_type="semantic")
+        result = await repo.a_list_by_type("episodic")
         assert len(result) == 1
 
-    def test_search(self, repo, session):
-        _make_memory(session, content="SQLAlchemy is great")
-        _make_memory(session, content="Nothing special")
-        result = repo.search("SQLAlchemy")
+    async def test_search(self, repo, session):
+        await _make_memory(session, content="SQLAlchemy is great")
+        await _make_memory(session, content="Nothing special")
+        result = await repo.a_search("SQLAlchemy")
         assert len(result) == 1
 
-    def test_get_graph_data(self, repo, session):
-        m1 = _make_memory(session, content="node 1")
-        m2 = _make_memory(session, content="node 2")
+    async def test_get_graph_data(self, repo, session):
+        m1 = await _make_memory(session, content="node 1")
+        m2 = await _make_memory(session, content="node 2")
         edge = Edge(source_id=m1.id, target_id=m2.id, relationship="related")
         session.add(edge)
-        session.flush()
-        data = repo.get_graph_data()
+        await session.flush()
+        data = await repo.a_get_graph_data()
         assert len(data["nodes"]) == 2
         assert len(data["edges"]) == 1
 
@@ -130,20 +119,20 @@ class TestEdgeRepository:
     def test_model_assignment(self):
         assert EdgeRepository.model is Edge
 
-    def test_list_by_memory(self, edge_repo, session):
-        m1 = _make_memory(session, content="a")
-        m2 = _make_memory(session, content="b")
+    async def test_list_by_memory(self, edge_repo, session):
+        m1 = await _make_memory(session, content="a")
+        m2 = await _make_memory(session, content="b")
         edge = Edge(source_id=m1.id, target_id=m2.id, relationship="related")
         session.add(edge)
-        session.flush()
-        result = edge_repo.list_by_memory(m1.id)
+        await session.flush()
+        result = await edge_repo.a_list_by_memory(m1.id)
         assert len(result) == 1
 
-    def test_neighborhood(self, edge_repo, session):
-        m1 = _make_memory(session, content="a")
-        m2 = _make_memory(session, content="b")
+    async def test_neighborhood(self, edge_repo, session):
+        m1 = await _make_memory(session, content="a")
+        m2 = await _make_memory(session, content="b")
         edge = Edge(source_id=m1.id, target_id=m2.id, relationship="related")
         session.add(edge)
-        session.flush()
-        result = edge_repo.neighborhood(m1.id)
+        await session.flush()
+        result = await edge_repo.a_neighborhood(m1.id)
         assert len(result) == 1

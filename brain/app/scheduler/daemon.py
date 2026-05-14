@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.scheduler import (
     OWNER_MODE_SCHEDULER,
@@ -14,9 +14,17 @@ from brain.platform.db.models.scheduler import (
     SchedulerLease,
     SchedulerRun,
 )
-from brain.app.scheduler.catalog import list_scheduler_jobs, list_scheduler_runs, normalize_owner_mode
-from brain.app.scheduler.executor import drain_scheduler
-from brain.app.scheduler.runtime import RUN_STATUS_SHELVED, normalize_run_status, reclaim_expired_leases
+from brain.app.scheduler.catalog import (
+    async_list_scheduler_jobs,
+    async_list_scheduler_runs,
+    normalize_owner_mode,
+)
+from brain.app.scheduler.executor import async_drain_scheduler
+from brain.app.scheduler.runtime import (
+    RUN_STATUS_SHELVED,
+    async_reclaim_expired_leases,
+    normalize_run_status,
+)
 
 
 def _utc_now() -> datetime:
@@ -36,22 +44,26 @@ def _job_scope(jobs: list[dict[str, Any]], owner_mode: str) -> list[dict[str, An
     return [job for job in jobs if job.get("owner_mode") == owner_mode]
 
 
-def _count_run_statuses(session: Session, owner_mode: str) -> dict[str, int]:
-    rows = session.execute(
+async def _async_count_run_statuses(session: AsyncSession, owner_mode: str) -> dict[str, int]:
+    result = await session.execute(
         select(SchedulerRun.status, func.count())
         .join(SchedulerJob, SchedulerRun.job_id == SchedulerJob.id)
         .where(SchedulerJob.owner_mode == owner_mode)
         .group_by(SchedulerRun.status)
-    ).all()
+    )
     counts: dict[str, int] = {}
-    for status, count in rows:
+    for status, count in result.all():
         normalized = normalize_run_status(str(status))
         counts[normalized] = counts.get(normalized, 0) + int(count)
     return counts
 
 
-def _count_leases(session: Session, owner_mode: str, now: datetime) -> tuple[int, int]:
-    active = session.scalar(
+async def _async_count_leases(
+    session: AsyncSession,
+    owner_mode: str,
+    now: datetime,
+) -> tuple[int, int]:
+    active = await session.scalar(
         select(func.count())
         .select_from(SchedulerLease)
         .join(SchedulerRun, SchedulerLease.run_id == SchedulerRun.id)
@@ -61,7 +73,7 @@ def _count_leases(session: Session, owner_mode: str, now: datetime) -> tuple[int
             SchedulerLease.released_at.is_(None),
         )
     ) or 0
-    expired = session.scalar(
+    expired = await session.scalar(
         select(func.count())
         .select_from(SchedulerLease)
         .join(SchedulerRun, SchedulerLease.run_id == SchedulerRun.id)
@@ -75,25 +87,17 @@ def _count_leases(session: Session, owner_mode: str, now: datetime) -> tuple[int
     return int(active), int(expired)
 
 
-def scheduler_health_snapshot(
-    session: Session,
+def _scheduler_health_payload(
     *,
-    owner_mode: str = OWNER_MODE_SCHEDULER,
-    now: datetime | None = None,
-    recent_run_limit: int = 20,
+    owner_mode: str,
+    now: datetime,
+    jobs: list[dict[str, Any]],
+    runs: list[dict[str, Any]],
+    run_statuses: dict[str, int],
+    active_leases: int,
+    expired_leases: int,
 ) -> dict[str, Any]:
-    """Return a usable scheduler health view for humans and service managers."""
-    now = now or _utc_now()
-    if now.tzinfo is None:
-        raise ValueError("now must be timezone-aware")
-
-    owner_mode = normalize_owner_mode(owner_mode)
-    jobs = list_scheduler_jobs(session)
     scoped_jobs = _job_scope(jobs, owner_mode)
-    runs = list_scheduler_runs(session, limit=recent_run_limit)
-    run_statuses = _count_run_statuses(session, owner_mode)
-    active_leases, expired_leases = _count_leases(session, owner_mode, now)
-
     paused_jobs = [
         {
             "job_key": job["job_key"],
@@ -197,8 +201,36 @@ def scheduler_health_snapshot(
     }
 
 
-def scheduler_daemon_tick(
-    session: Session,
+async def async_scheduler_health_snapshot(
+    session: AsyncSession,
+    *,
+    owner_mode: str = OWNER_MODE_SCHEDULER,
+    now: datetime | None = None,
+    recent_run_limit: int = 20,
+) -> dict[str, Any]:
+    """Return scheduler health using native async database queries."""
+    now = now or _utc_now()
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+
+    owner_mode = normalize_owner_mode(owner_mode)
+    jobs = await async_list_scheduler_jobs(session)
+    runs = await async_list_scheduler_runs(session, limit=recent_run_limit)
+    run_statuses = await _async_count_run_statuses(session, owner_mode)
+    active_leases, expired_leases = await _async_count_leases(session, owner_mode, now)
+    return _scheduler_health_payload(
+        owner_mode=owner_mode,
+        now=now,
+        jobs=jobs,
+        runs=runs,
+        run_statuses=run_statuses,
+        active_leases=active_leases,
+        expired_leases=expired_leases,
+    )
+
+
+async def async_scheduler_daemon_tick(
+    session: AsyncSession,
     *,
     owner_mode: str = OWNER_MODE_SCHEDULER,
     job_key: str | None = None,
@@ -206,14 +238,14 @@ def scheduler_daemon_tick(
     resume: bool = True,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Run one always-on scheduler tick: reclaim, materialize, claim, execute."""
+    """Run one always-on scheduler tick using native async database operations."""
     now = now or _utc_now()
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
 
     owner_mode = normalize_owner_mode(owner_mode)
-    reclaimed = reclaim_expired_leases(session, now=now)
-    drain = drain_scheduler(
+    reclaimed = await async_reclaim_expired_leases(session, now=now)
+    drain = await async_drain_scheduler(
         session,
         owner_mode=owner_mode,
         job_key=job_key,
@@ -221,8 +253,8 @@ def scheduler_daemon_tick(
         resume=resume,
         now=now,
     )
-    snapshot = scheduler_health_snapshot(session, owner_mode=owner_mode, now=now)
-    session.flush()
+    snapshot = await async_scheduler_health_snapshot(session, owner_mode=owner_mode, now=now)
+    await session.flush()
     return {
         "ok": True,
         "owner_mode": owner_mode,

@@ -34,7 +34,7 @@ def test_cortex_visual_reply_schema_preserves_supported_content_types():
     assert schema["required"] == ["content_type", "title", "content"]
 
 
-def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
+async def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
     import sys
     import brain.systems.runs.tool_catalog.handlers.cortex_reply as cortex_reply
 
@@ -49,7 +49,7 @@ def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
             self.created_at = None
 
     class FakeSession:
-        def execute(self, *_args, **_kwargs):
+        async def execute(self, *_args, **_kwargs):
             return SimpleNamespace(scalar=lambda: 42)
 
         def add(self, block):
@@ -57,17 +57,17 @@ def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
             block.created_at = now
             added_blocks.append(block)
 
-        def flush(self):
+        async def flush(self):
             pass
 
     class FakeUnitOfWork:
         def __init__(self):
             self.session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type, exc, tb):
             return False
 
     run = SimpleNamespace(run_id=123)
@@ -75,13 +75,13 @@ def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
     monkeypatch.setattr(cortex_reply._agent_context, "run", run, raising=False)
 
     fake_events = SimpleNamespace(publish_safe=lambda event, payload: published.append((event, payload)))
-    fake_uow_mod = SimpleNamespace(UnitOfWork=FakeUnitOfWork)
+    fake_uow_mod = SimpleNamespace(UnitOfWork=FakeUnitOfWork, open_unit_of_work=lambda factory: factory())
     fake_idea_mod = SimpleNamespace(VisualBlock=FakeVisualBlock)
     monkeypatch.setitem(sys.modules, "brain.systems.cortex.events", fake_events)
     monkeypatch.setitem(sys.modules, "brain.platform.db.repositories.unit_of_work", fake_uow_mod)
     monkeypatch.setitem(sys.modules, "brain.platform.db.models.idea", fake_idea_mod)
 
-    result = cortex_reply._handle_cortex_visual_reply(
+    result = await cortex_reply._handle_cortex_visual_reply(
         content_type="chart",
         title="Build health",
         content='{"type":"bar","data":[{"label":"passed","value":3}]}',
@@ -126,7 +126,6 @@ def test_cortex_visual_reply_persists_and_broadcasts_visual_block(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cortex_stream_includes_persisted_visual_block(monkeypatch):
-    import sys
     import brain.app.api.routers.cortex._idea_ops as idea_ops
 
     created = datetime(2026, 4, 27, 12, 30, tzinfo=timezone.utc)
@@ -154,40 +153,33 @@ async def test_cortex_stream_includes_persisted_visual_block(monkeypatch):
             return self._values
 
     class FakeSession:
-        def __init__(self, scalar_values):
-            self._scalar_values = scalar_values
+        def __init__(self):
+            self._scalar_calls = 0
 
-        def execute(self, *_args, **_kwargs):
+        async def execute(self, *_args, **_kwargs):
             return FakeExecuteResult()
 
-        def scalars(self, *_args, **_kwargs):
-            return FakeScalarResult(self._scalar_values)
+        async def scalars(self, *_args, **_kwargs):
+            self._scalar_calls += 1
+            values = [visual_block] if self._scalar_calls == 2 else []
+            return FakeScalarResult(values)
 
     class FakeUnitOfWork:
-        calls = 0
-
         def __init__(self):
-            # idea_unified_stream opens UnitOfWork for messages, runs,
-            # then visual blocks in the AgentRun stream path.
-            FakeUnitOfWork.calls += 1
-            values = [visual_block] if FakeUnitOfWork.calls == 3 else []
-            self.session = FakeSession(values)
+            self.session = FakeSession()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type, exc, tb):
             return False
 
     monkeypatch.setattr(idea_ops, "UnitOfWork", FakeUnitOfWork)
-    monkeypatch.setattr(idea_ops, "_require_idea_for_user", lambda *_args, **_kwargs: None)
 
-    async def fake_run_sync(fn, /, *args, **kwargs):
-        return fn(*args, **kwargs)
+    async def fake_require_idea(*_args, **_kwargs):
+        return None
 
-    monkeypatch.setattr(idea_ops, "run_sync_with_unit_of_work", fake_run_sync)
-    fake_run = SimpleNamespace(idea_run_history=lambda _idea_id: [])
-    monkeypatch.setitem(sys.modules, "brain.systems.runs.cortex", fake_run)
+    monkeypatch.setattr(idea_ops, "_require_idea_for_user", fake_require_idea)
 
     items = await idea_ops.idea_unified_stream("idea-1", user={"id": "user-1"})
 

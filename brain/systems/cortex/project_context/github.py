@@ -78,6 +78,23 @@ def _request(client: httpx.Client, method: str, path: str, *, token: str | None 
     return response.json()
 
 
+async def _async_request(
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    token: str | None = None,
+    params: dict[str, Any] | None = None,
+) -> Any:
+    try:
+        response = await client.request(method, f"{GITHUB_API_BASE}{path}", headers=_headers(token), params=params)
+    except httpx.HTTPError as exc:
+        raise GitHubConnectorError(status_code=502, message="Could not reach GitHub.") from exc
+    if not response.is_success:
+        raise _github_error(response)
+    return response.json()
+
+
 def _repo_payload(repo: dict[str, Any]) -> dict[str, Any]:
     permissions = repo.get("permissions") if isinstance(repo.get("permissions"), dict) else {}
     return {
@@ -134,11 +151,56 @@ def connect_with_token(token: str) -> dict[str, Any]:
         }
 
 
+async def async_connect_with_token(token: str) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        user = await _async_request(client, "GET", "/user", token=token)
+        repos: list[dict[str, Any]] = []
+        for page in range(1, GITHUB_REPO_PAGE_LIMIT + 1):
+            data = await _async_request(
+                client,
+                "GET",
+                "/user/repos",
+                token=token,
+                params={
+                    "per_page": 100,
+                    "page": page,
+                    "visibility": "all",
+                    "sort": "updated",
+                    "affiliation": "owner,collaborator,organization_member",
+                },
+            )
+            page_repos = data if isinstance(data, list) else []
+            repos.extend(page_repos)
+            if len(page_repos) < 100:
+                break
+        return {
+            "login": user.get("login") if isinstance(user, dict) else None,
+            "repos": _merge_repos(repos),
+        }
+
+
 def get_repo_by_slug(slug: str, *, token: str | None = None) -> dict[str, Any] | None:
     owner, repo = slug.split("/", 1)
     with httpx.Client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
         try:
             payload = _request(
+                client,
+                "GET",
+                f"/repos/{owner}/{repo}",
+                token=token,
+            )
+        except GitHubConnectorError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+    return _repo_payload(payload)
+
+
+async def async_get_repo_by_slug(slug: str, *, token: str | None = None) -> dict[str, Any] | None:
+    owner, repo = slug.split("/", 1)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        try:
+            payload = await _async_request(
                 client,
                 "GET",
                 f"/repos/{owner}/{repo}",
@@ -178,6 +240,49 @@ def search_repos(query: str, *, token: str | None = None) -> dict[str, Any]:
         for token_candidate in ([token, None] if token else [None]):
             try:
                 data = _request(
+                    client,
+                    "GET",
+                    "/search/repositories",
+                    token=token_candidate,
+                    params={"q": trimmed, "per_page": GITHUB_SEARCH_LIMIT},
+                )
+                items = data.get("items") if isinstance(data, dict) else []
+                groups.append(items if isinstance(items, list) else [])
+            except GitHubConnectorError as exc:
+                errors.append(exc)
+        repos = _merge_repos(*groups)
+        if not repos and errors:
+            raise errors[0]
+        return {"repos": repos, "matched_exact": False}
+
+
+async def async_search_repos(query: str, *, token: str | None = None) -> dict[str, Any]:
+    trimmed = (query or "").strip()
+    if not trimmed:
+        raise GitHubConnectorError(status_code=422, message="Search query is required.")
+
+    slug = parse_github_repo_slug(trimmed)
+    if slug:
+        token_candidates = [token, None] if token else [None]
+        first_error: GitHubConnectorError | None = None
+        for token_candidate in token_candidates:
+            try:
+                repo = await async_get_repo_by_slug(slug, token=token_candidate)
+            except GitHubConnectorError as exc:
+                first_error = first_error or exc
+                continue
+            if repo:
+                return {"repos": [repo], "matched_exact": True}
+        if first_error and first_error.status_code != 404:
+            raise first_error
+        return {"repos": [], "matched_exact": True}
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        groups: list[list[dict[str, Any]]] = []
+        errors: list[GitHubConnectorError] = []
+        for token_candidate in ([token, None] if token else [None]):
+            try:
+                data = await _async_request(
                     client,
                     "GET",
                     "/search/repositories",

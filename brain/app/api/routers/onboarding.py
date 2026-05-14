@@ -6,18 +6,16 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.db_utils import run_db
 from brain.app.triggers.adapters.internal import build_cortex_notify_trigger
-from brain.app.triggers.router import route_trigger
+from brain.app.triggers.router import async_route_trigger
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.idea import Idea
 from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
-from brain.systems.services.runtime_introspection import get_provider_auth_status
+from brain.systems.services.runtime_introspection import async_get_provider_auth_status
 from brain.systems.runs.status import RunStatus
 
 router = APIRouter(
@@ -52,8 +50,8 @@ def _has_personal_openai_connection(status: dict[str, Any]) -> bool:
     )
 
 
-def _require_personal_openai_connection(*, user_id: str, org_id: str) -> None:
-    status = get_provider_auth_status(user_id=user_id, org_id=org_id, provider="openai")
+async def _require_personal_openai_connection(db: AsyncSession, *, user_id: str, org_id: str) -> None:
+    status = await async_get_provider_auth_status(db, user_id=user_id, org_id=org_id, provider="openai")
     if not _has_personal_openai_connection(status):
         raise HTTPException(
             status_code=409,
@@ -61,7 +59,7 @@ def _require_personal_openai_connection(*, user_id: str, org_id: str) -> None:
         )
 
 
-def _find_existing_intro(session: Any, *, org_id: str, user_id: str) -> Idea | None:
+async def _find_existing_intro(session: Any, *, org_id: str, user_id: str) -> Idea | None:
     stmt = (
         select(Idea)
         .where(
@@ -74,17 +72,17 @@ def _find_existing_intro(session: Any, *, org_id: str, user_id: str) -> Idea | N
         .order_by(Idea.created_at.desc())
         .limit(1)
     )
-    return session.scalars(stmt).first()
+    return (await session.scalars(stmt)).first()
 
 
-def _latest_intro_run_status(session: Any, *, idea_id: str) -> str | None:
+async def _latest_intro_run_status(session: Any, *, idea_id: str) -> str | None:
     stmt = (
         select(AgentRunRow)
         .where(AgentRunRow.thread_id == str(idea_id))
         .order_by(AgentRunRow.created_at.desc(), AgentRunRow.id.desc())
         .limit(1)
     )
-    row = session.scalars(stmt).first()
+    row = (await session.scalars(stmt)).first()
     status = getattr(row, "status", None)
     return str(status) if status else None
 
@@ -103,7 +101,7 @@ def _intro_metadata(prompt_visibility: str = "hidden") -> dict[str, str]:
     }
 
 
-def _route_intro_run(session: Any, *, idea: Idea, user: dict[str, Any]) -> Any:
+async def _route_intro_run(session: Any, *, idea: Idea, user: dict[str, Any]) -> Any:
     trigger = build_cortex_notify_trigger(
         event="idea_created",
         idea_id=str(idea.id),
@@ -113,7 +111,7 @@ def _route_intro_run(session: Any, *, idea: Idea, user: dict[str, Any]) -> Any:
         metadata=_intro_metadata(),
         priority=1,
     )
-    return route_trigger(trigger, session=session)
+    return await async_route_trigger(trigger, session=session)
 
 
 def _queue_intro_display_title(
@@ -143,21 +141,18 @@ async def runtime_ready_intro_draft(
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
     org_id = require_org_context(user)
-    _require_personal_openai_connection(user_id=user_id, org_id=org_id)
+    await _require_personal_openai_connection(db, user_id=user_id, org_id=org_id)
 
-    def _draft(sync_db: Session) -> dict[str, Any]:
-        existing = _find_existing_intro(sync_db, org_id=org_id, user_id=user_id)
-        return {
-            "ok": True,
-            "idea_id": str(existing.id) if existing is not None else None,
-            "should_play": existing is None,
-            "prompt": INTRO_PROMPT,
-            "origin": INTRO_ORIGIN,
-            "origin_ref": _intro_ref(user_id),
-            "run_metadata": _intro_metadata("visible_composer"),
-        }
-
-    return await run_db(db, _draft)
+    existing = await _find_existing_intro(db, org_id=org_id, user_id=user_id)
+    return {
+        "ok": True,
+        "idea_id": str(existing.id) if existing is not None else None,
+        "should_play": existing is None,
+        "prompt": INTRO_PROMPT,
+        "origin": INTRO_ORIGIN,
+        "origin_ref": _intro_ref(user_id),
+        "run_metadata": _intro_metadata("visible_composer"),
+    }
 
 
 @router.post("/runtime-ready-intro")
@@ -171,66 +166,65 @@ async def start_runtime_ready_intro(
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
     org_id = require_org_context(user)
-    _require_personal_openai_connection(user_id=user_id, org_id=org_id)
+    await _require_personal_openai_connection(db, user_id=user_id, org_id=org_id)
 
-    def _start(sync_db: Session) -> dict[str, Any]:
-        existing = _find_existing_intro(sync_db, org_id=org_id, user_id=user_id)
-        if existing is not None:
-            latest_status = _latest_intro_run_status(sync_db, idea_id=str(existing.id))
-            if latest_status not in INTRO_RUN_SETTLED_STATUSES:
-                result = _route_intro_run(sync_db, idea=existing, user=user)
-                return {
-                    "ok": True,
-                    "idea_id": str(existing.id),
-                    "created": False,
-                    "run_id": result.run_id,
-                    "route": result.route,
-                    "skipped_reason": result.skipped_reason,
-                }
+    existing = await _find_existing_intro(db, org_id=org_id, user_id=user_id)
+    if existing is not None:
+        latest_status = await _latest_intro_run_status(db, idea_id=str(existing.id))
+        if latest_status not in INTRO_RUN_SETTLED_STATUSES:
+            result = await _route_intro_run(db, idea=existing, user=user)
+            await db.commit()
             return {
                 "ok": True,
                 "idea_id": str(existing.id),
                 "created": False,
-                "run_id": None,
+                "run_id": result.run_id,
+                "route": result.route,
+                "skipped_reason": result.skipped_reason,
             }
-
-        idea = Idea(
-            title=INTRO_TITLE,
-            description=INTRO_DESCRIPTION,
-            status="active",
-            origin=INTRO_ORIGIN,
-            origin_ref=_intro_ref(user_id),
-            user_id=user_id,
-            org_id=org_id,
-            position_x=0,
-            position_y=0,
-            agent_details={
-                "onboarding": {
-                    "source": "runtime_ready",
-                    "intro": True,
-                },
-            },
-        )
-        sync_db.add(idea)
-        sync_db.flush()
-
-        result = _route_intro_run(sync_db, idea=idea, user=user)
-        if background_tasks is not None:
-            _queue_intro_display_title(
-                background_tasks,
-                idea_id=str(idea.id),
-                user_id=user_id,
-                org_id=org_id,
-                raw_title=idea.title,
-            )
-
         return {
             "ok": True,
-            "idea_id": str(idea.id),
-            "created": True,
-            "run_id": result.run_id,
-            "route": result.route,
-            "skipped_reason": result.skipped_reason,
+            "idea_id": str(existing.id),
+            "created": False,
+            "run_id": None,
         }
 
-    return await run_db(db, _start)
+    idea = Idea(
+        title=INTRO_TITLE,
+        description=INTRO_DESCRIPTION,
+        status="active",
+        origin=INTRO_ORIGIN,
+        origin_ref=_intro_ref(user_id),
+        user_id=user_id,
+        org_id=org_id,
+        position_x=0,
+        position_y=0,
+        agent_details={
+            "onboarding": {
+                "source": "runtime_ready",
+                "intro": True,
+            },
+        },
+    )
+    db.add(idea)
+    await db.flush()
+
+    result = await _route_intro_run(db, idea=idea, user=user)
+    if background_tasks is not None:
+        _queue_intro_display_title(
+            background_tasks,
+            idea_id=str(idea.id),
+            user_id=user_id,
+            org_id=org_id,
+            raw_title=idea.title,
+        )
+    await db.commit()
+
+    return {
+        "ok": True,
+        "idea_id": str(idea.id),
+        "created": True,
+        "run_id": result.run_id,
+        "route": result.route,
+        "skipped_reason": result.skipped_reason,
+    }

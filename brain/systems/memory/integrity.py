@@ -132,12 +132,13 @@ def check_duplicates(
 # ---------------------------------------------------------------------------
 
 
-def run_all_checks(*, org_id: str | None = None) -> list[IntegrityResult]:
+async def run_all_checks(*, org_id: str | None = None) -> list[IntegrityResult]:
     """Run all integrity checks and persist results.
 
     Actual data gathering is deferred to integration wiring — this stub
     logs the intent and persists each result to MemoryHealthRepository.
     """
+    from brain.platform.db.models.memory_health import MemoryHealthLog
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
     logger.info("Running memory integrity checks (org_id=%s)", org_id)
@@ -145,13 +146,13 @@ def run_all_checks(*, org_id: str | None = None) -> list[IntegrityResult]:
     # Stub: no data gathered yet — individual checks run at integration time.
     results: list[IntegrityResult] = []
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         for result in results:
-            uow.memory_health.log_check(
+            uow.session.add(MemoryHealthLog(
                 check_type=result.check_type,
                 status=result.status,
                 details=result.details,
                 org_id=org_id,
-            )
+            ))
 
     return results
