@@ -24,11 +24,9 @@ import brain.kernel.config as config
 from brain.platform.async_io import (
     ensure_dir,
     path_exists,
-    read_text as read_text_async,
     rename_path,
     run_blocking,
     run_subprocess,
-    write_text as write_text_async,
 )
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
@@ -77,29 +75,39 @@ def _is_safe_path(filepath: str) -> bool:
     return resolved.startswith(os.path.realpath(PROJECT_ROOT))
 
 
-async def _get_processed_ids() -> set:
+def _get_processed_ids() -> set:
     """Load set of already-processed memory IDs."""
-    if await path_exists(PROCESSING_LOG):
+    path = Path(PROCESSING_LOG)
+    if path.exists():
         try:
-            data = json.loads(await read_text_async(PROCESSING_LOG))
+            data = json.loads(path.read_text(encoding="utf-8"))
             return set(data.get("processed_memory_ids", []))
         except (json.JSONDecodeError, KeyError):
             pass
     return set()
 
 
-async def _save_processed_ids(ids: set):
+async def _async_get_processed_ids() -> set:
+    return await run_blocking(_get_processed_ids)
+
+
+def _save_processed_ids(ids: set):
     """Save processed memory IDs."""
-    await ensure_dir(LOG_DIR)
+    Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
+    path = Path(PROCESSING_LOG)
     existing = {}
-    if await path_exists(PROCESSING_LOG):
+    if path.exists():
         try:
-            existing = json.loads(await read_text_async(PROCESSING_LOG))
+            existing = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, KeyError):
             existing = {}
     existing["processed_memory_ids"] = sorted(ids)
     existing["last_updated"] = datetime.now().isoformat()
-    await write_text_async(PROCESSING_LOG, json.dumps(existing, indent=2))
+    path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+
+
+async def _async_save_processed_ids(ids: set) -> None:
+    await run_blocking(_save_processed_ids, ids)
 
 
 async def gather_improvement_memories(target_date: date, processed_ids: set) -> list[dict]:
@@ -117,18 +125,23 @@ async def gather_improvement_memories(target_date: date, processed_ids: set) -> 
         return [dict(r) for r in result.mappings().all()]
 
 
-async def load_pending_reflection() -> list[dict]:
+def load_pending_reflection() -> list[dict]:
     """Load proposals from PENDING_REFLECTION.json."""
-    if not await path_exists(PENDING_PATH):
+    path = Path(PENDING_PATH)
+    if not path.exists():
         return []
     try:
-        data = json.loads(await read_text_async(PENDING_PATH))
+        data = json.loads(path.read_text(encoding="utf-8"))
         # Could be a single dict or a list
         if isinstance(data, dict):
             return [data] if data else []
         return data if isinstance(data, list) else []
     except (json.JSONDecodeError, TypeError):
         return []
+
+
+async def _async_load_pending_reflection() -> list[dict]:
+    return await run_blocking(load_pending_reflection)
 
 
 def classify_proposal(content: str) -> dict | None:
@@ -250,9 +263,9 @@ async def _async_main(args) -> None:
     _log("Direct writes and nightly PR automation are disabled; proposal mirroring is removed.", log_lines)
 
     # Gather items to process
-    processed_ids = await _get_processed_ids()
+    processed_ids = await _async_get_processed_ids()
     improvements = await gather_improvement_memories(target_date, processed_ids)
-    pending = await load_pending_reflection()
+    pending = await _async_load_pending_reflection()
 
     total = len(improvements) + len(pending)
     if total == 0:
@@ -329,7 +342,7 @@ async def _async_main(args) -> None:
 
     # Save processed IDs
     if not dry_run:
-        await _save_processed_ids(new_processed_ids)
+        await _async_save_processed_ids(new_processed_ids)
 
     # Clean up PENDING_REFLECTION.json if we processed it
     if pending and not dry_run and await path_exists(PENDING_PATH):
