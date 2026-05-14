@@ -428,6 +428,63 @@ async def test_direct_agent_threaded_resolves_llm_before_blocking(monkeypatch):
     assert calls["resolve_llm_client"]["session"] is FakeUnitOfWork.session
 
 
+async def test_direct_agent_threaded_routes_db_callbacks_to_runner_loop(monkeypatch):
+    from brain.systems.runs.invocation import build_direct_agent_invocation
+    from brain.systems.runs.recipes import threaded_invocation
+
+    loop = asyncio.get_running_loop()
+    seen = []
+
+    async def fake_load_session(session_id, user_id=None):
+        seen.append(("load", id(asyncio.get_running_loop()), session_id, user_id))
+        return ([{"role": "user", "content": "stored"}], "system")
+
+    async def fake_load_handoff(session_id, user_id=None):
+        seen.append(("load_handoff", id(asyncio.get_running_loop()), session_id, user_id))
+        return {"message_count": 1}
+
+    async def fake_save_session(session_id, messages, system_prompt, *token_args, user_id=None):
+        seen.append((
+            "save",
+            id(asyncio.get_running_loop()),
+            session_id,
+            len(messages),
+            system_prompt,
+            token_args,
+            user_id,
+        ))
+
+    async def fake_save_handoff(session_id, payload, *, user_id=None):
+        seen.append(("save_handoff", id(asyncio.get_running_loop()), session_id, payload, user_id))
+
+    async def fake_cancelled():
+        seen.append(("cancel", id(asyncio.get_running_loop())))
+        return True
+
+    monkeypatch.setattr(threaded_invocation, "async_load_session", fake_load_session)
+    monkeypatch.setattr(threaded_invocation, "async_load_session_handoff", fake_load_handoff)
+    monkeypatch.setattr(threaded_invocation, "async_save_session", fake_save_session)
+    monkeypatch.setattr(threaded_invocation, "async_save_session_handoff", fake_save_handoff)
+
+    spec = build_direct_agent_invocation(
+        message="hello",
+        cancel_event=SimpleNamespace(a_is_set=fake_cancelled),
+    )
+    overrides = threaded_invocation._direct_agent_loop_overrides(loop, spec)
+
+    def call_from_agent_thread():
+        assert overrides["load_session"]("session-1") == ([{"role": "user", "content": "stored"}], "system")
+        assert overrides["load_session_handoff"]("session-1") == {"message_count": 1}
+        overrides["save_session"]("session-1", [{"role": "user", "content": "x"}], "system", 1, 2, 3, 4)
+        overrides["save_session_handoff"]("session-1", {"message_count": 2})
+        assert overrides["cancel_event"].is_set() is True
+
+    await asyncio.to_thread(call_from_agent_thread)
+
+    assert {entry[1] for entry in seen} == {id(loop)}
+    assert [entry[0] for entry in seen] == ["load", "load_handoff", "save", "save_handoff", "cancel"]
+
+
 def test_fast_onboarding_tool_surface_uses_standard_fast_surface(monkeypatch):
     from brain.systems.runs.recipes.fast import _agent_tools_for_runtime
 
