@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
 from brain.app.api.db_utils import run_db
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.api.schemas.external_agents import (
     ExternalAgentConnectionCreate,
     ExternalAgentConnectionRead,
@@ -27,14 +28,8 @@ router = APIRouter(
 )
 
 
-def _raise_external_agent_error(exc: Exception) -> None:
-    if isinstance(exc, external_agents.ExternalAgentNotFound):
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if isinstance(exc, external_agents.ExternalAgentPermissionError):
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    if isinstance(exc, external_agents.ExternalAgentError):
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    raise exc
+def _is_connection_admin(user: dict[str, Any]) -> bool:
+    return str(user.get("role") or "").lower() in external_agents.CONNECTION_ADMIN_ROLES
 
 
 @router.get("", response_model=list[ExternalAgentConnectionRead])
@@ -43,11 +38,16 @@ async def list_agent_connections(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
+    owner_user_id = None if _is_connection_admin(user) else str(user.get("id") or "")
 
     def _list(sync_db):
         return [
             external_agents.serialize_connection(row)
-            for row in external_agents.list_connections(sync_db, org_id=org_id)
+            for row in external_agents.list_connections(
+                sync_db,
+                org_id=org_id,
+                owner_user_id=owner_user_id,
+            )
         ]
 
     return await run_db(db, _list)
@@ -79,7 +79,7 @@ async def create_agent_connection(
             )
             return external_agents.serialize_connection(row)
         except Exception as exc:
-            _raise_external_agent_error(exc)
+            raise_external_agent_http_error(exc)
 
     return await run_db(db, _create)
 
@@ -92,9 +92,19 @@ async def mint_agent_connection_token(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
+    user_id = str(user.get("id") or "")
+    role = str(user.get("role") or "")
 
     def _mint(sync_db):
         try:
+            external_agents.require_connection_for_user(
+                sync_db,
+                connection_id=connection_id,
+                org_id=org_id,
+                user_id=user_id,
+                role=role,
+                require_manage=True,
+            )
             raw_token, row = external_agents.mint_connection_token(
                 sync_db,
                 connection_id=connection_id,
@@ -107,7 +117,7 @@ async def mint_agent_connection_token(
             data["token"] = raw_token
             return data
         except Exception as exc:
-            _raise_external_agent_error(exc)
+            raise_external_agent_http_error(exc)
 
     return await run_db(db, _mint)
 
@@ -119,19 +129,24 @@ async def mark_agent_connection_tested(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = require_org_context(user)
+    user_id = str(user.get("id") or "")
+    role = str(user.get("role") or "")
 
     def _test(sync_db):
         try:
-            connection = external_agents._require_connection(  # intentional internal service helper
+            connection = external_agents.require_connection_for_user(
                 sync_db,
                 connection_id=connection_id,
                 org_id=org_id,
+                user_id=user_id,
+                role=role,
+                require_manage=True,
             )
             connection.last_tested_at = external_agents.utcnow()
             connection.status = "configured"
             sync_db.flush()
             return external_agents.serialize_connection(connection)
         except Exception as exc:
-            _raise_external_agent_error(exc)
+            raise_external_agent_http_error(exc)
 
     return await run_db(db, _test)

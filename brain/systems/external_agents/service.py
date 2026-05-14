@@ -58,6 +58,7 @@ DEFAULT_BRIDGE_SCOPES = (
 )
 
 TASK_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "canceled"}
+CONNECTION_ADMIN_ROLES = {"owner", "admin"}
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,39 @@ def _require_connection(
     return connection
 
 
+def require_connection(
+    session: Session,
+    *,
+    connection_id: str,
+    org_id: str | None = None,
+) -> ExternalAgentConnectionRow:
+    return _require_connection(session, connection_id=connection_id, org_id=org_id)
+
+
+def user_can_manage_connection(
+    connection: ExternalAgentConnectionRow,
+    *,
+    user_id: str,
+    role: str | None,
+) -> bool:
+    return str(role or "").lower() in CONNECTION_ADMIN_ROLES or str(connection.owner_user_id) == str(user_id)
+
+
+def require_connection_for_user(
+    session: Session,
+    *,
+    connection_id: str,
+    org_id: str,
+    user_id: str,
+    role: str | None,
+    require_manage: bool = False,
+) -> ExternalAgentConnectionRow:
+    connection = require_connection(session, connection_id=connection_id, org_id=org_id)
+    if require_manage and not user_can_manage_connection(connection, user_id=user_id, role=role):
+        raise ExternalAgentPermissionError("Permission denied for external agent connection")
+    return connection
+
+
 def _connection_disabled(connection: ExternalAgentConnectionRow) -> bool:
     return bool(connection.disabled_at or str(connection.status or "").lower() == "disabled")
 
@@ -159,6 +193,14 @@ def _require_task_for_principal(
     ):
         raise ExternalAgentNotFound("External agent task not found")
     return task
+
+
+def require_task_for_principal(
+    session: Session,
+    principal: AgentBridgePrincipal,
+    task_id: str,
+) -> ExternalAgentTaskRow:
+    return _require_task_for_principal(session, principal, task_id)
 
 
 def serialize_connection(row: ExternalAgentConnectionRow) -> dict[str, Any]:
@@ -506,6 +548,10 @@ def _idea_for_org(session: Session, *, idea_id: str, org_id: str) -> Idea:
     return idea
 
 
+def require_idea_for_org(session: Session, *, idea_id: str, org_id: str) -> Idea:
+    return _idea_for_org(session, idea_id=idea_id, org_id=org_id)
+
+
 def create_external_task_for_idea(
     session: Session,
     *,
@@ -722,6 +768,10 @@ def _thread_message_payload(message: IdeaThread) -> dict[str, Any]:
         "message_type": message.message_type,
         "created_at": _iso(message.created_at),
     }
+
+
+def serialize_thread_message(message: IdeaThread) -> dict[str, Any]:
+    return _thread_message_payload(message)
 
 
 def _add_external_agent_thread_message(
@@ -1263,6 +1313,7 @@ __all__ = [
     "SCOPE_TASK_UPDATE",
     "SCOPE_WORKSPACE_READ",
     "AgentBridgePrincipal",
+    "CONNECTION_ADMIN_ROLES",
     "ExternalAgentAuthError",
     "ExternalAgentError",
     "ExternalAgentNotFound",
@@ -1285,12 +1336,17 @@ __all__ = [
     "mint_connection_token",
     "post_thread_message_from_agent",
     "record_heartbeat",
+    "require_connection",
+    "require_connection_for_user",
+    "require_idea_for_org",
+    "require_task_for_principal",
     "search_workspace",
     "serialize_artifact",
     "serialize_connection",
     "serialize_event",
     "serialize_task",
     "serialize_token",
+    "serialize_thread_message",
     "token_prefix",
     "update_task_event",
 ]

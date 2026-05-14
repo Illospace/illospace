@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.db_utils import run_db
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
+from brain.app.api.routers.ws import ws_manager
 from brain.app.api.schemas.external_agents import (
     BridgeArtifactCreate,
     BridgeAskIlloRequest,
@@ -42,18 +44,6 @@ def _bearer_token(request: Request, x_illo_bridge_token: str | None) -> str:
     return ""
 
 
-def _auth_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, external_agents.ExternalAgentAuthError):
-        return HTTPException(status_code=401, detail=str(exc))
-    if isinstance(exc, external_agents.ExternalAgentPermissionError):
-        return HTTPException(status_code=403, detail=str(exc))
-    if isinstance(exc, external_agents.ExternalAgentNotFound):
-        return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(exc, external_agents.ExternalAgentError):
-        return HTTPException(status_code=400, detail=str(exc))
-    raise exc
-
-
 def require_bridge_scope(required_scope: str) -> Callable[..., Any]:
     async def _dependency(
         request: Request,
@@ -70,7 +60,7 @@ def require_bridge_scope(required_scope: str) -> Callable[..., Any]:
                     required_scope=required_scope,
                 )
             except Exception as exc:
-                raise _auth_error(exc) from exc
+                raise_external_agent_http_error(exc)
 
         return await run_db(db, _auth)
 
@@ -87,9 +77,43 @@ def _thread_payload(idea: Idea, message: Any, notified_user_ids: list[str]) -> d
             "origin_ref": idea.origin_ref,
             "created_at": message.created_at.isoformat() if getattr(message, "created_at", None) else None,
         },
-        "message": external_agents._thread_message_payload(message),
+        "message": external_agents.serialize_thread_message(message),
         "notified_user_ids": notified_user_ids,
     }
+
+
+async def _commit_for_live_fanout(db: AsyncSession) -> None:
+    await db.commit()
+
+
+async def _broadcast_thread_message(result: dict[str, Any], *, org_id: str | None) -> None:
+    message = result.get("thread_message")
+    if not isinstance(message, dict):
+        return
+    idea_id = str(message.get("idea_id") or "")
+    if not idea_id:
+        return
+    await ws_manager.broadcast_product_event(
+        "thread_message",
+        {"idea_id": idea_id, "message": message},
+        org_id=org_id,
+    )
+
+
+async def _broadcast_status_if_present(result: dict[str, Any], *, org_id: str | None) -> None:
+    idea = result.get("idea")
+    if not isinstance(idea, dict) or not idea.get("id") or not idea.get("status"):
+        return
+    await ws_manager.broadcast_product_event(
+        "status_change",
+        {"idea_id": str(idea["id"]), "new_status": str(idea["status"])},
+        org_id=org_id,
+    )
+
+
+async def _broadcast_thread_result(result: dict[str, Any], *, org_id: str | None) -> None:
+    await _broadcast_thread_message(result, org_id=org_id)
+    await _broadcast_status_if_present(result, org_id=org_id)
 
 
 def _run_trigger_if_requested(sync_db, *, idea: Idea, body: str, metadata: dict[str, Any], principal: external_agents.AgentBridgePrincipal):
@@ -164,7 +188,7 @@ async def get_task(
 ):
     def _get(sync_db):
         try:
-            task = external_agents._require_task_for_principal(sync_db, principal, task_id)
+            task = external_agents.require_task_for_principal(sync_db, principal, task_id)
             return external_agents.serialize_task(
                 task,
                 include_events=True,
@@ -172,7 +196,7 @@ async def get_task(
                 session=sync_db,
             )
         except Exception as exc:
-            raise _auth_error(exc) from exc
+            raise_external_agent_http_error(exc)
 
     return await run_db(db, _get)
 
@@ -200,7 +224,7 @@ async def append_task_event(
             )
             return {"event": external_agents.serialize_event(event)}
         except Exception as exc:
-            raise _auth_error(exc) from exc
+            raise_external_agent_http_error(exc)
 
     return await run_db(db, _event)
 
@@ -231,7 +255,7 @@ async def append_task_artifact(
             )
             return {"artifact": external_agents.serialize_artifact(artifact)}
         except Exception as exc:
-            raise _auth_error(exc) from exc
+            raise_external_agent_http_error(exc)
 
     return await run_db(db, _artifact)
 
@@ -257,12 +281,15 @@ async def complete_task(
             )
             return {
                 "task": external_agents.serialize_task(task, include_artifacts=True, session=sync_db),
-                "thread_message": external_agents._thread_message_payload(message) if message else None,
+                "thread_message": external_agents.serialize_thread_message(message) if message else None,
             }
         except Exception as exc:
-            raise _auth_error(exc) from exc
+            raise_external_agent_http_error(exc)
 
-    return await run_db(db, _complete)
+    result = await run_db(db, _complete)
+    await _commit_for_live_fanout(db)
+    await _broadcast_thread_result(result, org_id=principal.org_id)
+    return result
 
 
 @router.post("/tasks/{task_id}/fail")
@@ -285,12 +312,15 @@ async def fail_task(
             )
             return {
                 "task": external_agents.serialize_task(task),
-                "thread_message": external_agents._thread_message_payload(message) if message else None,
+                "thread_message": external_agents.serialize_thread_message(message) if message else None,
             }
         except Exception as exc:
-            raise _auth_error(exc) from exc
+            raise_external_agent_http_error(exc)
 
-    return await run_db(db, _fail)
+    result = await run_db(db, _fail)
+    await _commit_for_live_fanout(db)
+    await _broadcast_thread_result(result, org_id=principal.org_id)
+    return result
 
 
 @router.post("/workspace/search")
@@ -325,7 +355,7 @@ async def bridge_get_thread(
         try:
             return external_agents.get_thread(sync_db, principal, idea_id=idea_id, limit=limit)
         except Exception as exc:
-            raise _auth_error(exc) from exc
+            raise_external_agent_http_error(exc)
 
     return await run_db(db, _get)
 
@@ -373,7 +403,7 @@ async def get_illo_ask(
         try:
             return external_agents.get_headless_ask(sync_db, principal, ask_id=ask_id)
         except Exception as exc:
-            raise _auth_error(exc) from exc
+            raise_external_agent_http_error(exc)
 
     return await run_db(db, _get)
 
@@ -412,9 +442,19 @@ async def create_illo_thread(
             response["trigger"] = trigger_result
             return response
         except Exception as exc:
-            raise _auth_error(exc) from exc
+            raise_external_agent_http_error(exc)
 
-    return await run_db(db, _create)
+    result = await run_db(db, _create)
+    await _commit_for_live_fanout(db)
+    idea = result.get("idea") if isinstance(result, dict) else None
+    if isinstance(idea, dict):
+        await ws_manager.broadcast_product_event(
+            "idea_created",
+            {"idea_id": idea.get("id"), "title": idea.get("title")},
+            org_id=principal.org_id,
+        )
+    await _broadcast_thread_result(result, org_id=principal.org_id)
+    return result
 
 
 @router.post("/illo/threads/{idea_id}/messages", status_code=201)
@@ -452,6 +492,9 @@ async def post_illo_thread_message(
             response["trigger"] = trigger_result
             return response
         except Exception as exc:
-            raise _auth_error(exc) from exc
+            raise_external_agent_http_error(exc)
 
-    return await run_db(db, _post)
+    result = await run_db(db, _post)
+    await _commit_for_live_fanout(db)
+    await _broadcast_thread_result(result, org_id=principal.org_id)
+    return result
