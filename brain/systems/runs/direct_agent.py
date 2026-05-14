@@ -810,6 +810,7 @@ def _update_thread_handoff_after_run(
     semantic_compactor=None,
     run_id: int | None = None,
     user_id: str | None = None,
+    save_session_handoff: Callable[..., None] | None = None,
 ) -> dict | None:
     """Incrementally summarize the raw archive for the next persistent run."""
     from brain.systems.context.thread_handoff import ThreadHandoff, build_thread_handoff
@@ -828,7 +829,7 @@ def _update_thread_handoff_after_run(
         run_id=run_id,
     )
     payload = handoff.to_payload()
-    _save_session_handoff(session_id, payload, user_id=user_id)
+    (save_session_handoff or _save_session_handoff)(session_id, payload, user_id=user_id)
     if fallback_error:
         logger.debug("Agent %s: post-run handoff fallback used: %s", session_id, fallback_error)
     logger.info(
@@ -1311,6 +1312,10 @@ def run_agent(
     skip_harvest: bool = False,
     resolved_llm=None,
     metadata: dict | None = None,
+    load_session: Callable[..., tuple[list[dict], str | None]] | None = None,
+    load_session_handoff: Callable[..., dict | None] | None = None,
+    save_session: Callable[..., None] | None = None,
+    save_session_handoff: Callable[..., None] | None = None,
 ) -> AgentResult:
     """Run an agent loop with tool use.
 
@@ -1457,11 +1462,16 @@ def run_agent(
             )
 
         # Load existing raw session archive, then use durable handoff + recent messages as active context.
-        loaded_messages, stored_system = _load_session(session_id) if persist_session else ([], None)
+        load_session = load_session or _load_session
+        load_session_handoff = load_session_handoff or _load_session_handoff
+        save_session = save_session or _save_session
+        save_session_handoff = save_session_handoff or _save_session_handoff
+
+        loaded_messages, stored_system = load_session(session_id) if persist_session else ([], None)
         if stored_system and not system_prompt:
             system_prompt = stored_system
         raw_archive_messages = copy.deepcopy(loaded_messages) if persist_session else None
-        thread_handoff = _load_session_handoff(session_id) if persist_session else None
+        thread_handoff = load_session_handoff(session_id) if persist_session else None
 
         # Build system + reasoning config
         system = _build_system_blocks(llm, system_prompt, cache_system_prompt)
@@ -1774,7 +1784,7 @@ def run_agent(
             persist_session=persist_session,
             memory_org_for_user=_memory_org_for_user,
             auto_encode_if_needed=_auto_encode_if_needed,
-            save_session=_save_session,
+            save_session=save_session,
         )
         if persist_session and raw_archive_messages is not None:
             _update_thread_handoff_after_run(
@@ -1784,6 +1794,7 @@ def run_agent(
                 semantic_compactor=thread_handoff_compactor,
                 run_id=run_id,
                 user_id=None,
+                save_session_handoff=save_session_handoff,
             )
 
         logger.info(
