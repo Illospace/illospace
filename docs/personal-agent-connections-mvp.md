@@ -135,7 +135,7 @@ The MVP needs these new capabilities:
 - External task artifact model.
 - Adapter layer for Hermes/OpenClaw/bridge.
 - Illo-to-agent delegation endpoint.
-- Agent-to-Illo share endpoint.
+- Agent-to-Illo tool surface for workspace reads, headless Illo context asks, and public thread sharing.
 - Websocket/status projection into Cortex.
 - Minimal UI/API for creating and testing connections.
 - Bridge process that can run next to Hermes/OpenClaw when direct inbound/outbound networking is hard.
@@ -157,18 +157,18 @@ Expected MVP behavior:
 - Artifacts are attached or linked.
 - Failures are visible and retryable.
 
-### Story 2: Personal agent shares work into Illo
+### Story 2: Personal agent asks and shares into Illo
 
-As a user inside Hermes/OpenClaw, I can ask my personal agent to share work with a teammate in Illo.
+As a user inside Hermes/OpenClaw, I can ask my personal agent to inspect Illo workspace context, ask Illo a headless context question, or share work publicly with a teammate in Illo.
 
 Expected MVP behavior:
 
-- Personal agent calls an Illo bridge/share API.
-- Illo creates a Cortex idea with title, body, owner, and optional orbit target/teammate mention.
-- Illo inserts thread messages and artifacts.
-- Mentioned teammate receives normal Illo notifications.
-- The new idea/thread is visible in Cortex.
-- Optionally, the share can trigger Illo itself if the message explicitly invokes Illo.
+- Personal agent calls scoped Illo bridge APIs, never raw DB endpoints and never the broad internal service token.
+- For structured reads, Illo returns bounded workspace facts: threads, team members, recent activity, project context, and relevant workspace records.
+- For deeper context, `illo_ask_illo` runs Illo headlessly and returns a private answer to the personal agent.
+- For public collaboration, `illo_create_thread` creates a Cortex idea/thread with title, body, owner, artifacts, and optional teammate mentions.
+- Mentioned teammates receive normal Illo notifications.
+- A public created thread can trigger Illo visibly only when the personal agent explicitly asks for it.
 
 ## Architecture Recommendation
 
@@ -652,6 +652,13 @@ Endpoints:
 - `POST /api/agent-bridge/tasks/{task_id}/fail`
 - `POST /api/agent-bridge/tasks/{task_id}/cancelled`
 - `POST /api/agent-bridge/share/thread`
+- `POST /api/agent-bridge/threads/{idea_id}/messages`
+- `GET /api/agent-bridge/threads/{idea_id}`
+- `POST /api/agent-bridge/workspace/search`
+- `GET /api/agent-bridge/team/members`
+- `POST /api/agent-bridge/artifacts`
+- `POST /api/agent-bridge/illo/ask`
+- `GET /api/agent-bridge/illo/asks/{ask_id}`
 
 Bridge auth:
 
@@ -701,6 +708,7 @@ Bridge auth:
   "title": "Work to share",
   "body": "Summary in markdown",
   "teammate_mentions": ["Reda"],
+  "trigger_illo": false,
   "artifacts": [],
   "metadata": {
     "remote_session_id": "...",
@@ -716,7 +724,54 @@ Share behavior:
 - Resolve teammate mentions using the same mention logic as Cortex thread messages.
 - Create workspace notifications.
 - Broadcast `idea_created`, `thread_message`, and notification summary updates.
-- Optional: if body explicitly invokes Illo, route through the existing Cortex `/notify` path or trigger service.
+- By default, do not auto-trigger Illo. Sharing a summary should not accidentally spawn public Illo work.
+- If `trigger_illo` is true, or if the body explicitly invokes Illo, route through the existing Cortex `/notify` path or trigger service so Illo runs publicly in that thread.
+
+### Personal-agent Illo tool surface
+
+The bridge API should expose a small, scoped tool surface to Hermes/OpenClaw. This is the MVP shape for Personal agent -> Illo collaboration.
+
+Initial tools:
+
+- `illo_search_workspace`: bounded structured search/read over Illo workspace context.
+- `illo_get_thread`: read a known Cortex idea/thread.
+- `illo_get_team_members`: resolve teammate names and IDs for mentions.
+- `illo_ask_illo`: ask Illo a headless/private context question.
+- `illo_create_thread`: create a public Cortex idea/thread.
+- `illo_post_thread_message`: post a public update to an existing Cortex thread.
+- `illo_upload_artifact`: attach or link output artifacts.
+
+`illo_search_workspace` should not expose raw database access. It should return normalized facts from approved sources such as:
+
+- Cortex ideas and thread messages.
+- Team members.
+- Recent team/workspace activity.
+- Project Context profiles and attachments.
+- Workspace app/domain records that are safe for the connection scope.
+- AgentRun summaries and final artifacts when visible to the connection owner.
+
+`illo_ask_illo` is headless only. It does not create a Cortex idea/thread and it does not post public messages. It exists for questions like:
+
+```json
+{
+  "prompt": "What does Illo know about the API migration plan?",
+  "context": {
+    "reason": "Hermes is preparing a teammate handoff.",
+    "max_recent_threads": 10
+  }
+}
+```
+
+Implementation detail for `illo_ask_illo`:
+
+- Create an Illo-owned AgentRun with a synthetic `thread_id`, for example `external-agent:{connection_id}:{ask_id}`.
+- Store `target_ref.kind = "external_agent_headless_query"` and include `connection_id`, `ask_id`, and remote session metadata.
+- Use a read-focused tool policy for the first MVP. Favor workspace/context tools and avoid write tools.
+- Return `ask_id`, `run_id`, and status from `POST /api/agent-bridge/illo/ask`.
+- Let the personal agent poll `GET /api/agent-bridge/illo/asks/{ask_id}` for final answer/artifacts.
+- Do not include the synthetic thread in Cortex `unified-stream`; it is an audit/runtime record, not a public workspace thread.
+
+`illo_create_thread` is the public path. If the personal agent wants Illo to collaborate visibly, it should create a thread and set `trigger_illo: true` or write an explicit Illo invocation in the body.
 
 ## Bridge Process
 
@@ -763,6 +818,10 @@ Bridge commands:
 
 The bridge should include a tool manifest/prompt snippet for Hermes/OpenClaw:
 
+- `illo_search_workspace`
+- `illo_get_thread`
+- `illo_get_team_members`
+- `illo_ask_illo`
 - `illo_create_thread`
 - `illo_post_thread_message`
 - `illo_upload_artifact`
@@ -849,6 +908,8 @@ This mirrors the existing `add_thread_message_raw` lifecycle without pretending 
 - Validate artifact sizes and content types.
 - Ensure all external task reads/writes are org-scoped.
 - Record audit metadata on thread creation and task completion.
+- Keep `illo_ask_illo` headless and read-focused for MVP; it should not grant personal agents arbitrary Illo write tools.
+- Return normalized workspace facts from bridge read tools instead of raw SQL rows or unrestricted database access.
 
 ### Token design
 
@@ -919,7 +980,9 @@ Deliverables:
 - Add `agent_bridge.py` router.
 - Add scoped auth dependency.
 - Implement heartbeat, claim, event, artifact, complete, fail.
-- Implement inbound `share/thread`.
+- Implement scoped workspace read endpoints.
+- Implement headless `illo_ask_illo`.
+- Implement public inbound thread share/create/post endpoints.
 - Broadcast status events.
 - Insert final Cortex thread messages on completion.
 
@@ -928,12 +991,15 @@ Tests:
 - Bridge token cannot access normal APIs.
 - Wrong token cannot claim another connection's task.
 - Revoked token fails.
+- Workspace search returns bounded normalized records, not raw DB access.
+- `illo_ask_illo` creates a headless/audited run without creating a Cortex idea.
 - `share/thread` creates idea/thread and notifications.
+- `share/thread` only triggers public Illo work when explicitly requested.
 - Completion posts a final thread message exactly once.
 
 Exit criteria:
 
-- A fake bridge can complete a task end-to-end through the API.
+- A fake bridge can complete a task end-to-end through the API, query Illo context, ask Illo headlessly, and create a public thread.
 
 ### Milestone 3: Illo -> external task creation
 
@@ -1021,17 +1087,21 @@ Exit criteria:
 
 - A real OpenClaw instance completes a task initiated by Illo.
 
-### Milestone 7: Personal agent -> Illo share
+### Milestone 7: Personal agent -> Illo tool surface
 
 Deliverables:
 
-- Bridge/share API stabilized.
-- Hermes/OpenClaw bridge instructions include an `illo_create_thread` style tool call.
-- Share request creates Cortex idea/thread.
+- Bridge read/share/ask APIs stabilized.
+- Hermes/OpenClaw bridge instructions include `illo_search_workspace`, `illo_get_thread`, `illo_ask_illo`, `illo_create_thread`, and `illo_post_thread_message`.
+- `illo_ask_illo` runs headlessly and returns a private Illo answer to the personal agent.
+- `illo_create_thread` creates Cortex idea/thread.
 - Mentions/notifications work.
+- Public Illo triggering works only when explicitly requested.
 
 Manual confirmation:
 
+- From a Hermes session, ask Hermes to query Illo workspace context.
+- From a Hermes session, ask Hermes to use headless `illo_ask_illo` for a private context answer.
 - From a Hermes session, ask Hermes to share work with a teammate in Illo.
 - A new Illo Cortex thread is created.
 - The teammate can see or is notified about it.
@@ -1039,7 +1109,7 @@ Manual confirmation:
 
 Exit criteria:
 
-- Both Hermes and OpenClaw can initiate a share into Illo.
+- Both Hermes and OpenClaw can query Illo context, ask Illo headlessly, and initiate a public share into Illo.
 
 ### Final Milestone: End-to-end MVP confirmation
 
@@ -1058,9 +1128,12 @@ The MVP is confirmed only when all three live checks pass:
    - Illo receives and displays the final answer/artifact.
 
 3. Hermes/OpenClaw -> Illo:
+   - From a Hermes session, ask Illo a headless context question and receive the private result.
+   - From an OpenClaw session, ask Illo a headless context question and receive the private result.
    - From a Hermes session, create/share an Illo Cortex thread for a teammate.
    - From an OpenClaw session, create/share an Illo Cortex thread for a teammate.
    - The created thread is visible in Illo with correct content, metadata, and notifications.
+   - Public Illo work is triggered from `illo_create_thread` only when explicitly requested.
 
 ## Test Plan
 
@@ -1071,7 +1144,9 @@ Add tests under `tests/`:
 - `test_external_agent_connections.py`
 - `test_external_agent_bridge_auth.py`
 - `test_external_agent_tasks.py`
+- `test_external_agent_workspace_tools.py`
 - `test_external_agent_share.py`
+- `test_external_agent_ask_illo.py`
 - `test_external_agent_adapters.py`
 
 Coverage:
@@ -1085,7 +1160,10 @@ Coverage:
 - Event sequencing.
 - Artifact validation.
 - Completion projection into Cortex.
+- Bounded workspace search/read behavior.
+- Headless `illo_ask_illo` run creation and result polling.
 - Share thread creation.
+- Explicit-only public Illo trigger from thread creation.
 
 ### API tests
 
@@ -1096,6 +1174,8 @@ Coverage:
 - Human connection endpoints.
 - Bridge auth endpoints.
 - Claim/update/complete lifecycle.
+- Workspace search/get-thread/team-member endpoints.
+- Headless `illo_ask_illo` endpoint and polling endpoint.
 - Inbound share.
 - Org isolation.
 - Wrong/revoked/expired token.
@@ -1129,6 +1209,8 @@ Before calling the MVP done:
 - Run bridge against OpenClaw.
 - Test direct Hermes if base URL is reachable from Illo.
 - Test direct OpenClaw only if Gateway URL/auth are explicitly configured.
+- Ask Illo headlessly from Hermes and OpenClaw.
+- Query Illo workspace context from Hermes and OpenClaw.
 - Create personal-agent share into Illo from both agents.
 
 ## Open Questions
@@ -1140,6 +1222,8 @@ Questions that can wait until implementation:
 - Should direct Hermes be implemented before bridge Hermes, or after bridge fake mode?
 - Should OpenClaw use `/v1/responses` first or Gateway WS first for the live test?
 - How much binary artifact support is needed for the first user demo?
+- How broad should `illo_search_workspace` be in the first release?
+- Which existing Illo tools should be allowed inside read-focused `illo_ask_illo` runs?
 - Should external agent messages use `role="illo"` with metadata, or should we widen `IdeaThread.role` to include `external_agent`?
 
 Questions that should be answered before merging the MVP:
@@ -1148,6 +1232,7 @@ Questions that should be answered before merging the MVP:
 - Are personal-agent connection tokens per user, per org, or both?
 - Should a teammate be able to delegate work to another user's personal agent?
 - What is the audit text shown when a personal agent creates a thread on behalf of a user?
+- What audit text is shown when a personal agent privately asks Illo for workspace context?
 
 ## Recommended First Implementation Path
 
@@ -1156,7 +1241,7 @@ Questions that should be answered before merging the MVP:
 3. Build Hermes bridge adapter.
 4. Build OpenClaw bridge adapter using `/v1/responses`.
 5. Add minimal connection UI and bridge setup snippets.
-6. Add inbound `share/thread`.
+6. Add inbound Illo tool surface: search/get thread/team, headless ask, create/post thread, artifacts.
 7. Run the final live Hermes/OpenClaw confirmation.
 
 This keeps the core Illo product model stable and gives us a clean upgrade path to full A2A later.
