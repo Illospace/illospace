@@ -1,9 +1,4 @@
-"""DB adapter for the personal-agent bridge.
-
-The bridge service still owns a few sync repository boundaries while the API
-session is async. Keep the adapter local to this feature so the compatibility
-surface does not leak into newly async runtime code.
-"""
+"""Async-to-sync session task bridge for legacy repository islands."""
 
 from __future__ import annotations
 

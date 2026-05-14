@@ -10,7 +10,6 @@ from starlette.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.external_agent_db import run_external_agent_db
 from brain.app.api.routers.agent_bridge import (
     _bearer_token,
     _broadcast_thread_result,
@@ -20,6 +19,7 @@ from brain.app.api.routers.agent_bridge import (
 )
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.mentions import classify_mention_intent
+from brain.platform.db.session_tasks import run_external_agent_db
 from brain.systems.external_agents import service as external_agents
 
 

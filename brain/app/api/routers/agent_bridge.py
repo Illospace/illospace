@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.external_agent_db import run_external_agent_db
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.api.routers.ws import ws_manager
 from brain.app.api.schemas.external_agents import (
@@ -24,6 +23,7 @@ from brain.app.api.schemas.external_agents import (
     BridgeWorkspaceSearchRequest,
 )
 from brain.app.mentions import classify_mention_intent
+from brain.platform.db.session_tasks import run_external_agent_db
 from brain.platform.db.models.idea import Idea
 from brain.systems.external_agents import service as external_agents
 

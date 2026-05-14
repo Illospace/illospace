@@ -11,12 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
 from brain.app.api.deps import get_db
-from brain.app.api.external_agent_db import run_external_agent_db
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.api.routers.cortex._router import router
 from brain.app.api.routers.ws import ws_manager
 from brain.app.api.schemas.external_agents import CortexExternalAgentTaskCreate
 from brain.platform.db.models.external_agent import ExternalAgentTaskRow
+from brain.platform.db.session_tasks import run_external_agent_db
 from brain.systems.external_agents import service as external_agents
 
 @router.post("/ideas/{idea_id}/external-agent-tasks", status_code=201)

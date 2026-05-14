@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.external_agent_db import run_external_agent_db
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.api.schemas.external_agents import (
     ExternalAgentConnectionCreate,
@@ -18,6 +17,7 @@ from brain.app.api.schemas.external_agents import (
     ExternalAgentTokenCreate,
     ExternalAgentTokenRead,
 )
+from brain.platform.db.session_tasks import run_external_agent_db
 from brain.systems.external_agents import service as external_agents
 
 
