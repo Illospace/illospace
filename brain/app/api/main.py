@@ -302,6 +302,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 from brain.app.api.routers.ws import router as ws_router
 from brain.app.api.routers.auth import router as auth_router
 from brain.app.api.routers import brain, cortex, cortex_intel, memory, skills, vault, system, team, costs, journal, domains, workspace_apps, workspace_pins, onboarding
+from brain.app.api.routers import agent_bridge, agent_connections
 from brain.app.api.routers.cycles import router as cycles_router
 from brain.app.api.routers.chat import router as chat_router
 from brain.app.api.routers.notifications import router as notifications_router
@@ -318,6 +319,8 @@ app.include_router(vault.router)
 app.include_router(system.router)
 app.include_router(runtime_settings_router)
 app.include_router(onboarding.router)
+app.include_router(agent_connections.router)
+app.include_router(agent_bridge.router)
 app.include_router(cycles_router)
 app.include_router(team.router)
 app.include_router(costs.router)

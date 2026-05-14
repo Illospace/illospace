@@ -1054,6 +1054,7 @@
           <SlashAutocomplete
             bind:this={slashRef}
             visible={Boolean(slashToken)}
+            anchor={textareaEl}
             oninput={applySlashCommand}
           />
           {#if hasSkillMention(inputValue)}
@@ -1522,7 +1523,7 @@
     position: relative;
     min-height: 34px;
     max-height: 120px;
-    overflow: hidden;
+    overflow: visible;
     --skill-mention-padding: 0;
     --skill-mention-font-size: inherit;
     --skill-mention-line-height: 1.55;

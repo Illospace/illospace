@@ -179,6 +179,7 @@
     bind:this={slashRef}
     visible={Boolean(slashToken)}
     placement={slashPlacement}
+    anchor={textarea}
     oninput={applySlashCommand}
   />
 

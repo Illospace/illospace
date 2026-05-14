@@ -33,6 +33,13 @@ from brain.platform.db.repositories.chat import (
     ChatMessageRepository,
     ChatNotificationRepository,
 )
+from brain.platform.db.repositories.external_agents import (
+    ExternalAgentConnectionRepository,
+    ExternalAgentConnectionTokenRepository,
+    ExternalAgentTaskArtifactRepository,
+    ExternalAgentTaskEventRepository,
+    ExternalAgentTaskRepository,
+)
 from brain.platform.db.repositories.notifications import NotificationEventRepository
 from brain.platform.db.repositories.memories import EdgeRepository, MemoryRepository
 from brain.platform.db.repositories.memory_dag import MemorySummaryRepository
@@ -364,3 +371,23 @@ class UnitOfWork:
 
     def notifications(self):
         return self._repo(NotificationEventRepository)
+
+    @cached_property
+    def external_agent_connections(self):
+        return self._repo(ExternalAgentConnectionRepository)
+
+    @cached_property
+    def external_agent_connection_tokens(self):
+        return self._repo(ExternalAgentConnectionTokenRepository)
+
+    @cached_property
+    def external_agent_tasks(self):
+        return self._repo(ExternalAgentTaskRepository)
+
+    @cached_property
+    def external_agent_task_events(self):
+        return self._repo(ExternalAgentTaskEventRepository)
+
+    @cached_property
+    def external_agent_task_artifacts(self):
+        return self._repo(ExternalAgentTaskArtifactRepository)
