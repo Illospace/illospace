@@ -1205,6 +1205,18 @@ export const api = {
   vaultDeleteProjectBinding: (bindingId: number, vaultToken?: string | null) =>
     fetchJson<any>(`/api/vault/project-bindings/${bindingId}`, { method: 'DELETE', headers: vaultHeaders(vaultToken) }),
 
+  // Personal agent connections
+  listAgentConnections: () => fetchJson<any[]>('/api/agent-connections'),
+  createAgentConnection: (data: any) =>
+    fetchJson<any>('/api/agent-connections', { method: 'POST', body: JSON.stringify(data) }),
+  mintAgentConnectionToken: (connectionId: string, data: any) =>
+    fetchJson<any>(`/api/agent-connections/${connectionId}/tokens`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  markAgentConnectionTested: (connectionId: string) =>
+    fetchJson<any>(`/api/agent-connections/${connectionId}/test`, { method: 'POST' }),
+
   // System
   systemInfo: () => fetchJson<any>('/api/system'),
   runtimeSettings: () => fetchJson<any>('/api/runtime-settings'),

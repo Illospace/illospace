@@ -1,0 +1,26 @@
+[project]
+name = "illo-personal-agent-mcp"
+version = "0.1.0"
+description = "MCP tools for personal agents to collaborate with Illo workspaces"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [
+  { name = "Illo contributors" }
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.scripts]
+illo-personal-agent-mcp = "illo_personal_agent_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

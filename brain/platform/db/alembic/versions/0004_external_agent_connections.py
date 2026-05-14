@@ -18,7 +18,34 @@ branch_labels = None
 depends_on = None
 
 
+EXTERNAL_AGENT_TABLES = {
+    "external_agent_connections",
+    "external_agent_connection_tokens",
+    "external_agent_tasks",
+    "external_agent_task_events",
+    "external_agent_task_artifacts",
+}
+
+
+def _existing_external_agent_tables() -> set[str]:
+    inspector = sa.inspect(op.get_bind())
+    tables = set(inspector.get_table_names(schema="public"))
+    return tables.intersection(EXTERNAL_AGENT_TABLES)
+
+
 def upgrade() -> None:
+    existing_tables = _existing_external_agent_tables()
+    if existing_tables:
+        missing_tables = EXTERNAL_AGENT_TABLES.difference(existing_tables)
+        if not missing_tables:
+            return
+        missing = ", ".join(sorted(missing_tables))
+        existing = ", ".join(sorted(existing_tables))
+        raise RuntimeError(
+            "Refusing to apply partial external-agent migration state. "
+            f"Existing tables: {existing}. Missing tables: {missing}."
+        )
+
     op.create_table(
         "external_agent_connections",
         sa.Column("id", postgresql.UUID(as_uuid=False), primary_key=True, server_default=sa.text("gen_random_uuid()")),

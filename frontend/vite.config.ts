@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
 		server: {
 			proxy: {
 				'/api': apiTarget,
+				'/mcp': apiTarget,
 				'/static/uploads': apiTarget,
 				'/ws': { target: wsTarget, ws: true },
 			},

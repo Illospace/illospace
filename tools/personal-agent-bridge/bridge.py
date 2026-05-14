@@ -27,17 +27,20 @@ def _json_request(
     url: str,
     *,
     token: str | None = None,
+    headers: dict[str, str] | None = None,
     payload: dict[str, Any] | None = None,
     timeout: float = 60.0,
 ) -> dict[str, Any]:
     body = None
-    headers = {"Accept": "application/json"}
+    request_headers = {"Accept": "application/json"}
+    if headers:
+        request_headers.update(headers)
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
+        request_headers["Content-Type"] = "application/json"
     if token:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, data=body, method=method.upper(), headers=headers)
+        request_headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, data=body, method=method.upper(), headers=request_headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
@@ -162,12 +165,144 @@ class HttpAdapter:
             "artifacts": list(response.get("artifacts") or []),
         }
 
+def _format_task_for_personal_agent(task: dict[str, Any]) -> str:
+    title = str(task.get("title") or "Untitled Illo task").strip()
+    instructions = str(task.get("instructions") or "").strip()
+    source_surface = str(task.get("source_surface") or "illo").strip()
+    input_parts = task.get("input_parts") or []
+    try:
+        input_text = json.dumps(input_parts, indent=2, sort_keys=True)
+    except TypeError:
+        input_text = str(input_parts)
+    return "\n\n".join(
+        [
+            f"Illo delegated task: {title}",
+            f"Source surface: {source_surface}",
+            f"Task id: {task.get('id')}",
+            f"Instructions:\n{instructions}",
+            f"Input parts:\n{input_text}",
+            (
+                "Return the final result as plain text suitable for posting back to Illo. "
+                "If you create files, links, or other artifacts, summarize what changed and include the paths or URLs."
+            ),
+        ]
+    )
+
 
 class HermesAdapter(HttpAdapter):
     name = "hermes"
     env_base_url = "HERMES_BASE_URL"
     env_api_key = "HERMES_API_KEY"
     env_endpoint = "HERMES_RUN_ENDPOINT"
+    default_endpoint = "/v1/chat/completions"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = os.environ.get("HERMES_MODEL", "hermes-agent")
+        self.api_mode = os.environ.get("HERMES_API_MODE", "chat").strip().lower()
+        if self.api_mode not in {"chat", "chat_completions", "runs"}:
+            raise BridgeError("HERMES_API_MODE must be 'chat' or 'runs'")
+
+    def _headers_for_task(self, task: dict[str, Any]) -> dict[str, str]:
+        task_id = str(task.get("id") or "").strip()
+        connection_id = str(task.get("connection_id") or "").strip()
+        headers: dict[str, str] = {}
+        if task_id:
+            headers["X-Hermes-Session-Id"] = f"illo-task-{task_id}"
+        if connection_id:
+            headers["X-Hermes-Session-Key"] = f"illo-connection-{connection_id}"
+        return headers
+
+    def run_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        if not self.base_url:
+            raise BridgeError(f"{self.env_base_url} is required for {self.name} adapter")
+        if self.api_mode == "runs":
+            return self._run_task_with_runs_api(task)
+        return self._run_task_with_chat_completions(task)
+
+    def _run_task_with_chat_completions(self, task: dict[str, Any]) -> dict[str, Any]:
+        response = _json_request(
+            "POST",
+            f"{self.base_url}{self.endpoint}",
+            token=self.api_key or None,
+            headers=self._headers_for_task(task),
+            payload={
+                "model": self.model,
+                "stream": False,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are Hermes, a personal autonomous agent connected to Illo. "
+                            "Complete the delegated work and return only the final user-facing result."
+                        ),
+                    },
+                    {"role": "user", "content": _format_task_for_personal_agent(task)},
+                ],
+            },
+            timeout=float(os.environ.get("PERSONAL_AGENT_TIMEOUT", "300")),
+        )
+        result = ""
+        try:
+            result = str(response["choices"][0]["message"]["content"])
+        except (KeyError, IndexError, TypeError):
+            result = str(response.get("output") or response.get("answer") or "")
+        if not result:
+            result = json.dumps(response, indent=2, sort_keys=True)
+        artifacts = list(response.get("artifacts") or [])
+        metadata = {key: response.get(key) for key in ("id", "model", "usage") if response.get(key) is not None}
+        if metadata:
+            artifacts.append({"kind": "json", "title": "Hermes response metadata", "content_json": metadata})
+        return {"result_summary": result, "artifacts": artifacts}
+
+    def _run_task_with_runs_api(self, task: dict[str, Any]) -> dict[str, Any]:
+        endpoint = os.environ.get(self.env_endpoint, "/v1/runs")
+        start = _json_request(
+            "POST",
+            f"{self.base_url}{endpoint}",
+            token=self.api_key or None,
+            headers=self._headers_for_task(task),
+            payload={
+                "input": _format_task_for_personal_agent(task),
+                "session_id": f"illo-task-{task.get('id')}",
+                "instructions": "Complete the delegated work and return only the final user-facing result for Illo.",
+            },
+            timeout=float(os.environ.get("PERSONAL_AGENT_TIMEOUT", "300")),
+        )
+        run_id = str(start.get("run_id") or "").strip()
+        if not run_id:
+            raise BridgeError(f"Hermes runs API did not return a run_id: {start}")
+        deadline = time.monotonic() + float(os.environ.get("PERSONAL_AGENT_TIMEOUT", "300"))
+        poll_interval = max(0.5, float(os.environ.get("HERMES_RUN_POLL_INTERVAL", "2")))
+        status: dict[str, Any] = start
+        while time.monotonic() < deadline:
+            status = _json_request(
+                "GET",
+                f"{self.base_url}{endpoint.rstrip('/')}/{run_id}",
+                token=self.api_key or None,
+                timeout=30,
+            )
+            state = str(status.get("status") or "").lower()
+            if state == "completed":
+                output = str(status.get("output") or "Hermes run completed.")
+                return {
+                    "result_summary": output,
+                    "artifacts": [
+                        {
+                            "kind": "json",
+                            "title": "Hermes run metadata",
+                            "content_json": {
+                                key: status.get(key)
+                                for key in ("run_id", "session_id", "model", "usage", "last_event")
+                                if status.get(key) is not None
+                            },
+                        }
+                    ],
+                }
+            if state in {"failed", "cancelled", "canceled"}:
+                raise BridgeError(f"Hermes run {run_id} ended with status {state}: {status.get('error') or status}")
+            time.sleep(poll_interval)
+        raise BridgeError(f"Hermes run {run_id} did not finish before timeout; last status: {status}")
 
 
 class OpenClawAdapter(HttpAdapter):

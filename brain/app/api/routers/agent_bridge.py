@@ -87,7 +87,7 @@ async def _commit_for_live_fanout(db: AsyncSession) -> None:
 
 
 async def _broadcast_thread_message(result: dict[str, Any], *, org_id: str | None) -> None:
-    message = result.get("thread_message")
+    message = result.get("thread_message") or result.get("message")
     if not isinstance(message, dict):
         return
     idea_id = str(message.get("idea_id") or "")

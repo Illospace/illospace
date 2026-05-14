@@ -79,6 +79,24 @@ def _literal_sql_strings(node: ast.Call) -> list[str]:
     return values
 
 
+def _function_body_calls(module: ast.Module, function_name: str) -> list[ast.Call]:
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            return [child for child in ast.walk(node) if isinstance(child, ast.Call)]
+    return []
+
+
+def _literal_create_table_names(calls: list[ast.Call]) -> list[str]:
+    names: list[str] = []
+    for call in calls:
+        if _call_name(call.func) != "op.create_table" or not call.args:
+            continue
+        first = call.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            names.append(first.value)
+    return names
+
+
 def _normalized_sql(sql: str) -> str:
     return re.sub(r"\s+", " ", sql).strip().upper()
 
@@ -225,6 +243,35 @@ def test_only_public_baseline_may_materialize_model_metadata():
     assert violations == [], (
         "New migrations must use explicit Alembic operations, not metadata-wide "
         f"create_all/drop_all calls: {violations}"
+    )
+
+
+def test_post_baseline_model_table_migrations_guard_fresh_baseline_replay():
+    """Fresh installs run the baseline first, which materializes current models."""
+    from brain.platform.db.base import Base
+    import brain.platform.db.models  # noqa: F401
+
+    model_tables = set(Base.metadata.tables)
+    violations: list[str] = []
+    for path in _material_schema_migration_files():
+        if path.name == PUBLIC_BASELINE:
+            continue
+        module = ast.parse(path.read_text(), filename=str(path))
+        created_model_tables = [
+            table
+            for table in _literal_create_table_names(_function_body_calls(module, "upgrade"))
+            if table in model_tables
+        ]
+        if not created_model_tables:
+            continue
+
+        content = path.read_text()
+        if "get_table_names" not in content and "has_table" not in content:
+            violations.append(f"{path.name}: {created_model_tables}")
+
+    assert violations == [], (
+        "Post-baseline migrations that create model-owned tables must guard fresh "
+        f"baseline replay because Base.metadata.create_all already created them: {violations}"
     )
 
 
