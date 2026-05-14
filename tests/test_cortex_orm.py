@@ -303,6 +303,39 @@ class TestGenerateTitleLowTier:
         mock_get_client.return_value.generate.assert_not_called()
         mock_simple_text_completion.assert_not_called()
 
+    async def test_async_uses_configured_api_low_tier_model_with_user_context(self):
+        from brain.systems.cortex.title_generation import async_generate_display_title
+
+        fake_uow = MagicMock()
+        fake_uow.__aenter__ = AsyncMock(return_value=fake_uow)
+        fake_uow.__aexit__ = AsyncMock(return_value=False)
+        fake_uow.session = MagicMock()
+
+        with patch("brain.platform.db.repositories.unit_of_work.UnitOfWork", return_value=fake_uow), \
+             patch("brain.platform.providers.model_policy.async_resolve_default_provider", AsyncMock(return_value="openai")) as mock_resolve_default_provider, \
+             patch("brain.platform.providers.model_policy.async_get_model_for_tier", AsyncMock(return_value="gpt-5-mini")) as mock_get_model_for_tier, \
+             patch("brain.systems.cortex.title_generation._async_generate_with_provider_title_model", AsyncMock(return_value="Provider Title")) as mock_generate_with_provider, \
+             patch("brain.platform.integrations.completions.simple_text_completion") as mock_simple_text_completion:
+            assert await async_generate_display_title("some raw text", user_id="user-1", org_id="org-1") == "Provider Title"
+
+        mock_resolve_default_provider.assert_awaited_once_with(fake_uow.session, user_id="user-1", org_id="org-1")
+        mock_get_model_for_tier.assert_awaited_once_with(
+            fake_uow.session,
+            "low",
+            provider="openai",
+            include_provider_prefix=False,
+            user_id="user-1",
+            org_id="org-1",
+        )
+        mock_generate_with_provider.assert_awaited_once_with(
+            "some raw text",
+            provider="openai",
+            model="openai/gpt-5-mini",
+            user_id="user-1",
+            org_id="org-1",
+        )
+        mock_simple_text_completion.assert_not_called()
+
 
 class TestTitleRoutes:
     async def test_generate_title_threads_authenticated_user_context(self):
@@ -314,11 +347,11 @@ class TestTitleRoutes:
 
         user = {"id": "user-1", "org_id": "org-1"}
 
-        with patch("brain.app.api.routers.cortex._misc.generate_display_title", return_value="Threaded Title") as mock_generate_title:
+        with patch("brain.app.api.routers.cortex._misc.async_generate_display_title", AsyncMock(return_value="Threaded Title")) as mock_generate_title:
             result = await generate_title(FakeRequest(), user=user)
 
         assert result == {"title": "Threaded Title"}
-        mock_generate_title.assert_called_once_with(
+        mock_generate_title.assert_awaited_once_with(
             "Summarize this thought",
             user_id="user-1",
             org_id="org-1",
@@ -346,12 +379,12 @@ class TestTitleRoutes:
         update_result = MagicMock(rowcount=1)
         mock_uow_cls.side_effect = [FakeUow(list_result), FakeUow(update_result)]
 
-        with patch("brain.app.api.routers.cortex._misc.generate_display_title", return_value="Generated Title") as mock_generate_title, \
+        with patch("brain.app.api.routers.cortex._misc.async_generate_display_title", AsyncMock(return_value="Generated Title")) as mock_generate_title, \
              patch("brain.app.api.routers.cortex._misc._publish_generated_display_title") as mock_publish:
             result = await backfill_titles(user={"id": "user-1", "org_id": "org-1"})
 
         assert result == {"ok": True, "generated": 1, "total": 1}
-        mock_generate_title.assert_called_once_with(
+        mock_generate_title.assert_awaited_once_with(
             "Raw idea",
             user_id="user-1",
             org_id="org-1",
@@ -429,7 +462,7 @@ class TestStoredIdeaTitleGeneration:
         write_uow.session.execute = AsyncMock(return_value=write_result)
         mock_uow_cls.side_effect = [read_uow, write_uow]
 
-        with patch("brain.systems.cortex.title_generation.generate_display_title", return_value="Generated Title") as mock_generate:
+        with patch("brain.systems.cortex.title_generation.async_generate_display_title", AsyncMock(return_value="Generated Title")) as mock_generate:
             result = await generate_and_store_idea_display_title(
                 "idea-1",
                 raw_title="Raw idea",
@@ -439,7 +472,7 @@ class TestStoredIdeaTitleGeneration:
 
         assert result.updated is True
         assert result.title == "Generated Title"
-        mock_generate.assert_called_once_with(
+        mock_generate.assert_awaited_once_with(
             "Raw idea",
             user_id="user-1",
             org_id="org-1",
@@ -459,7 +492,7 @@ class TestStoredIdeaTitleGeneration:
         read_uow.session.get = AsyncMock(return_value=idea)
         mock_uow_cls.return_value = read_uow
 
-        with patch("brain.systems.cortex.title_generation.generate_display_title") as mock_generate:
+        with patch("brain.systems.cortex.title_generation.async_generate_display_title") as mock_generate:
             result = await generate_and_store_idea_display_title(
                 "idea-1",
                 raw_title="Raw idea",
@@ -490,7 +523,7 @@ class TestStoredIdeaTitleGeneration:
         write_uow.session.execute = AsyncMock(return_value=write_result)
         mock_uow_cls.side_effect = [read_uow, write_uow]
 
-        with patch("brain.systems.cortex.title_generation.generate_display_title", return_value="Generated Title"):
+        with patch("brain.systems.cortex.title_generation.async_generate_display_title", AsyncMock(return_value="Generated Title")):
             result = await generate_and_store_idea_display_title(
                 "idea-1",
                 raw_title="Raw idea",

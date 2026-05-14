@@ -43,7 +43,7 @@ from brain.platform.db.repositories.ideas import IdeaConnectionRepository
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.async_io import async_http_post, ensure_dir, run_subprocess, write_bytes
 from brain.systems.cortex.title_generation import (
-    generate_display_title,
+    async_generate_display_title,
 )
 from brain.systems.cortex.upload_preview import (
     build_upload_preview,
@@ -607,7 +607,7 @@ async def generate_title(request: Request, user: dict[str, Any] = Depends(get_cu
     text_content = data.get("text", "").strip()
     if not text_content:
         raise HTTPException(status_code=400, detail="text is required")
-    title = generate_display_title(
+    title = await async_generate_display_title(
         text_content,
         user_id=user.get("id"),
         org_id=user.get("org_id"),
@@ -631,7 +631,7 @@ async def backfill_titles(user: dict[str, Any] = Depends(get_current_user)):
 
     count = 0
     for idea_id, idea_title in ideas_to_process:
-        title = generate_display_title(str(idea_title or ""), user_id=user_id, org_id=org_id)
+        title = await async_generate_display_title(str(idea_title or ""), user_id=user_id, org_id=org_id)
         if not title:
             continue
         async with UnitOfWork() as uow:

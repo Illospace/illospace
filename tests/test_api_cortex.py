@@ -228,6 +228,17 @@ def test_project_context_merge_into_idea_agent_details():
     assert idea.agent_details["project_context"] == snapshot
 
 
+def test_project_context_merge_drops_non_dict_agent_details():
+    from brain.app.api.routers.cortex._idea_ops import _merge_project_context_into_idea
+
+    idea = _make_idea(agent_details=[{"old": True}])
+    snapshot = {"validation_status": "client_validated", "resources": [{"path": "brain"}]}
+
+    _merge_project_context_into_idea(idea, snapshot)
+
+    assert idea.agent_details == {"project_context": snapshot}
+
+
 async def test_notify_metadata_preserves_thread_project_context():
     from brain.app.api.routers.cortex._ideas import _effective_notify_metadata
 

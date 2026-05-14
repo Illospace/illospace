@@ -104,23 +104,6 @@ async def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_cur
                 "timestamp": ts.isoformat() if isinstance(ts, datetime) else ts,
             })
 
-        details = list(idea.agent_details or [])
-        for agent in details:
-            if agent.get("started_at"):
-                events.append({
-                    "type": "agent_started",
-                    "label": f"Agent started: \"{agent.get('label', '?')}\" ({agent.get('skill', '?')})",
-                    "timestamp": agent["started_at"],
-                })
-            if agent.get("finished_at"):
-                result_snippet = (agent.get("result") or agent.get("error") or "")[:60]
-                events.append({
-                    "type": "agent_finished",
-                    "label": f"Agent {agent.get('status', 'done')}: \"{agent.get('label', '?')}\""
-                             + (f" - {result_snippet}" if result_snippet else ""),
-                    "timestamp": agent["finished_at"],
-                })
-
         stmt = (
             select(
                 AgentRunEventRow.payload,
