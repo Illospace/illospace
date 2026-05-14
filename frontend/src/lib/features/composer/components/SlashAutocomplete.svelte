@@ -26,10 +26,12 @@
     oninput,
     visible = false,
     placement = 'above',
+    anchor,
   }: {
     oninput: (cmd: string) => void;
     visible: boolean;
     placement?: 'above' | 'below';
+    anchor?: HTMLElement | undefined;
   } = $props();
 
   let commands = $state<SlashCommand[]>([]);
@@ -40,27 +42,81 @@
   let loading = $state(false);
   let loaded = $state(false);
   let loadError = $state<string | null>(null);
-
-  const TIER_COLORS: Record<string, string> = {
-    high: 'var(--constellation-control-pill-thinking-text)',
-    medium: 'var(--constellation-color-text-muted)',
-    low: 'var(--constellation-control-pill-success-text)',
-    local: 'var(--constellation-control-pill-warning-text)',
-  };
+  let effectivePlacement = $state<'above' | 'below'>('above');
+  let menuMaxHeight = $state(220);
+  let geometryFrame: number | null = null;
 
   const shouldShowMenu = $derived(
     visible && active && (loading || Boolean(loadError) || loaded || filtered.length > 0),
   );
+  const dropdownStyle = $derived(`--slash-dropdown-max-height: ${menuMaxHeight}px;`);
 
-  function normalizeTier(tier: string | null | undefined): string {
-    const normalized = tier?.trim().toLowerCase() ?? '';
-    return TIER_COLORS[normalized] ? normalized : 'medium';
+  function updateMenuGeometry() {
+    if (typeof window === 'undefined' || !anchor) {
+      effectivePlacement = placement;
+      menuMaxHeight = 220;
+      return;
+    }
+
+    const rect = anchor.getBoundingClientRect();
+    const viewportGap = 12;
+    const menuGap = 8;
+    const preferredHeight = 160;
+    const maxHeight = 220;
+    const minHeight = 96;
+    const spaceAbove = Math.max(0, rect.top - viewportGap);
+    const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - viewportGap);
+
+    let nextPlacement = placement;
+    if (placement === 'above' && spaceAbove < preferredHeight && spaceBelow > spaceAbove) {
+      nextPlacement = 'below';
+    } else if (placement === 'below' && spaceBelow < preferredHeight && spaceAbove > spaceBelow) {
+      nextPlacement = 'above';
+    }
+
+    const availableSpace = nextPlacement === 'above' ? spaceAbove : spaceBelow;
+    effectivePlacement = nextPlacement;
+    menuMaxHeight = Math.max(minHeight, Math.min(maxHeight, availableSpace - menuGap));
   }
 
+  function queueMenuGeometryUpdate() {
+    if (typeof window === 'undefined') return;
+    if (geometryFrame !== null) window.cancelAnimationFrame(geometryFrame);
+    geometryFrame = window.requestAnimationFrame(() => {
+      geometryFrame = null;
+      updateMenuGeometry();
+    });
+  }
+
+  $effect(() => {
+    if (!visible || !active) return;
+    placement;
+    anchor;
+    loading;
+    loadError;
+    filtered.length;
+    queueMenuGeometryUpdate();
+
+    if (typeof window === 'undefined') return;
+    const handleViewportChange = () => queueMenuGeometryUpdate();
+    window.addEventListener('resize', handleViewportChange);
+    window.addEventListener('scroll', handleViewportChange, true);
+
+    return () => {
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('scroll', handleViewportChange, true);
+      if (geometryFrame !== null) {
+        window.cancelAnimationFrame(geometryFrame);
+        geometryFrame = null;
+      }
+    };
+  });
+
   async function ensureCommandsLoaded() {
-    if (commands.length > 0 || loading) return;
+    if (commands.length > 0 || loading || loaded) return;
     loading = true;
     loadError = null;
+    queueMenuGeometryUpdate();
     try {
       commands = await loadSlashCommands();
       loaded = true;
@@ -75,12 +131,14 @@
     if (active) {
       applyFilter(query, false);
     }
+    queueMenuGeometryUpdate();
   }
 
   function applyFilter(text: string, resetSelection = true) {
     if (/\s/.test(text)) {
       filtered = [];
       selectedIndex = 0;
+      queueMenuGeometryUpdate();
       return;
     }
     const q = text.toLowerCase();
@@ -90,6 +148,7 @@
         String(c.description ?? '').toLowerCase().includes(q),
     );
     selectedIndex = resetSelection ? 0 : Math.min(selectedIndex, Math.max(filtered.length - 1, 0));
+    queueMenuGeometryUpdate();
   }
 
   export function filter(text: string) {
@@ -101,6 +160,7 @@
       filtered = [];
       selectedIndex = 0;
       void ensureCommandsLoaded();
+      queueMenuGeometryUpdate();
       return;
     }
     applyFilter(normalized, resetSelection);
@@ -112,6 +172,10 @@
     selectedIndex = 0;
     active = false;
     loadError = null;
+    if (geometryFrame !== null && typeof window !== 'undefined') {
+      window.cancelAnimationFrame(geometryFrame);
+      geometryFrame = null;
+    }
   }
 
   export function handleKey(e: KeyboardEvent): boolean {
@@ -144,17 +208,19 @@
     filtered = [];
   }
 
-  function tierLabel(cmd: SlashCommand) {
-    return cmd.tier ?? cmd.model_tier ?? '';
-  }
-
   function commandDescription(cmd: SlashCommand) {
     return cmd.description || 'Skill';
   }
 </script>
 
 {#if shouldShowMenu}
-  <div class="slash-dropdown" class:placement-below={placement === 'below'} role="listbox" aria-label="Skills">
+  <div
+    class="slash-dropdown"
+    class:placement-below={effectivePlacement === 'below'}
+    style={dropdownStyle}
+    role="listbox"
+    aria-label="Skills"
+  >
     {#if loading}
       <div class="slash-status">Loading skills...</div>
     {:else if loadError}
@@ -163,7 +229,6 @@
       <div class="slash-status">No matching skills</div>
     {:else}
       {#each filtered as cmd, i (cmd.name)}
-        {@const tier = tierLabel(cmd)}
         <button
           class="slash-item"
           class:selected={i === selectedIndex}
@@ -174,11 +239,6 @@
         >
           <span class="slash-name">/{cmd.name}</span>
           <span class="slash-desc">{commandDescription(cmd)}</span>
-          {#if tier}
-            <span class="slash-tier" style="color: {TIER_COLORS[normalizeTier(tier)] ?? '#888'}">
-              {normalizeTier(tier)}
-            </span>
-          {/if}
         </button>
       {/each}
     {/if}
@@ -191,7 +251,7 @@
     bottom: 100%;
     left: 0;
     right: 0;
-    max-height: min(220px, 46vh);
+    max-height: var(--slash-dropdown-max-height, 220px);
     overflow-y: auto;
     padding: 5px;
     background: var(--constellation-select-chip-menu-background, var(--constellation-surface-floating-background, var(--bg-2)));
@@ -199,7 +259,7 @@
     border-radius: 8px;
     margin-bottom: 4px;
     box-shadow: var(--constellation-select-chip-menu-shadow, var(--constellation-surface-floating-shadow, 0 -4px 16px rgba(0, 0, 0, 0.4)));
-    z-index: 100;
+    z-index: var(--constellation-layer-popover, 1000);
     scrollbar-color: var(--constellation-utility-panel-scrollbar, rgba(255, 255, 255, 0.14)) transparent;
   }
 
@@ -255,14 +315,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
-  }
-
-  .slash-tier {
-    font-size: 9px;
-    font-weight: 600;
-    text-transform: uppercase;
-    flex-shrink: 0;
-    letter-spacing: 0;
   }
 
   .slash-status {

@@ -6,12 +6,14 @@
   import {
     ConstellationButton,
     ConstellationEmptyState,
+    ConstellationNotice,
     ConstellationPageFrame,
     ConstellationPanel,
     ConstellationPill,
     ConstellationSearchField,
     ConstellationSectionHeader,
     ConstellationSegmentedToggle,
+    ConstellationSnippetBlock,
     ConstellationTextInput,
   } from '$lib/components/constellation';
   import { auth } from '$lib/stores/auth.svelte';
@@ -66,6 +68,41 @@
     active: boolean;
   }
 
+  interface ExternalAgentConnection {
+    id: string;
+    org_id: string;
+    owner_user_id: string;
+    display_name: string;
+    agent_kind: string;
+    transport: string;
+    status: string;
+    endpoint_url: string | null;
+    remote_agent_id: string | null;
+    remote_session_key: string | null;
+    remote_agent_card: Record<string, any>;
+    capabilities: Record<string, any>;
+    last_seen_at: string | null;
+    last_tested_at: string | null;
+    last_error: string | null;
+    metadata: Record<string, any>;
+    disabled_at: string | null;
+    created_at: string | null;
+    updated_at: string | null;
+  }
+
+  interface ExternalAgentTokenRead {
+    id: string;
+    connection_id: string;
+    token_prefix: string;
+    name: string;
+    scopes: string[];
+    created_at: string | null;
+    last_used_at: string | null;
+    expires_at: string | null;
+    revoked_at: string | null;
+    token: string | null;
+  }
+
   interface VaultUnlockResponse {
     token: string;
     expires_at?: string | null;
@@ -92,6 +129,12 @@
     | { id: string; kind: 'pin' };
 
   const CATEGORIES = ['general', 'api', 'aws', 'auth', 'analytics', 'database', 'messaging', 'monitoring', 'payments', 'service'];
+  const AGENT_KIND_OPTIONS = [
+    { key: 'hermes', label: 'Hermes' },
+    { key: 'codex', label: 'Codex' },
+    { key: 'openclaw', label: 'OpenClaw' },
+    { key: 'custom', label: 'Custom MCP client' },
+  ];
   const VAULT_SESSION_STORAGE_PREFIX = 'illo:vault:unlock:v1';
   const VAULT_SESSION_EXPIRY_SKEW_MS = 5000;
   const FILTER_OPTIONS: Array<{ key: FilterMode; label: string }> = [
@@ -119,6 +162,7 @@
   let missing = $state<MissingSecret[]>([]);
   let agentGrants = $state<AgentGrant[]>([]);
   let projectBindings = $state<ProjectBinding[]>([]);
+  let agentConnections = $state<ExternalAgentConnection[]>([]);
   let loading = $state(true);
   let filterText = $state('');
   let filterMode = $state<FilterMode>('all');
@@ -174,6 +218,14 @@
   let bindEnvName = $state('');
   let bindSaving = $state(false);
 
+  // Personal agent connection state
+  let showAgentConnectionModal = $state(false);
+  let agentFormDisplayName = $state('Hermes');
+  let agentFormKind = $state('hermes');
+  let agentConnectionSaving = $state(false);
+  let mintedAgentToken = $state<ExternalAgentTokenRead | null>(null);
+  let mintedAgentTokenConnection = $state<ExternalAgentConnection | null>(null);
+
   // Reveal state
   let revealed = $state<Record<string, string>>({});
   let revealTimers: Record<string, ReturnType<typeof setTimeout>> = {};
@@ -190,6 +242,9 @@
   );
   const vaultSessionStorageKey = $derived(
     auth.user?.id ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.id)}` : '',
+  );
+  const hostedMcpUrl = $derived.by(
+    () => (typeof window === 'undefined' ? '/mcp' : `${window.location.origin}/mcp`),
   );
   const categoryCount = $derived.by(
     () => new Set(secrets.map((secret) => secret.category || 'general')).size,
@@ -318,6 +373,29 @@
         env_name: 'OPENAI_API_KEY',
         target_registry_id: null,
         active: true,
+      },
+    ];
+    agentConnections = [
+      {
+        id: 'preview-hermes',
+        org_id: 'preview-org',
+        owner_user_id: 'preview-user',
+        display_name: 'Hermes',
+        agent_kind: 'hermes',
+        transport: 'hosted_mcp',
+        status: 'configured',
+        endpoint_url: hostedMcpUrl,
+        remote_agent_id: null,
+        remote_session_key: null,
+        remote_agent_card: {},
+        capabilities: { mcp: true, hosted_mcp: true },
+        last_seen_at: previewIso(0, 2),
+        last_tested_at: previewIso(0, 2),
+        last_error: null,
+        metadata: { source: 'vault_preview' },
+        disabled_at: null,
+        created_at: previewIso(3),
+        updated_at: previewIso(0, 2),
       },
     ];
     missing = [
@@ -558,10 +636,11 @@
     try {
       secrets = await api.listSecrets(undefined, vaultToken);
 
-      const [missingResult, grantsResult, bindingsResult] = await Promise.allSettled([
+      const [missingResult, grantsResult, bindingsResult, connectionsResult] = await Promise.allSettled([
         api.missingSecrets(vaultToken),
         api.vaultAgentGrants(vaultToken, 'pending,approved,used,denied'),
         api.vaultProjectBindings(vaultToken),
+        api.listAgentConnections(),
       ]);
 
       if (missingResult.status === 'fulfilled') {
@@ -580,6 +659,12 @@
         projectBindings = bindingsResult.value;
       } else if (!handleOptionalVaultDataError(bindingsResult.reason, 'Failed to load project token bindings')) {
         projectBindings = [];
+      }
+
+      if (connectionsResult.status === 'fulfilled') {
+        agentConnections = connectionsResult.value;
+      } else {
+        agentConnections = [];
       }
 
       maybeApplyInitialCreatePrefill();
@@ -620,6 +705,18 @@
     if (level === 'available') return 'success';
     if (level === 'manual') return 'muted';
     return 'warning';
+  }
+
+  function agentKindLabel(kind: string | undefined): string {
+    return AGENT_KIND_OPTIONS.find((item) => item.key === (kind || '').toLowerCase())?.label || kind || 'Personal agent';
+  }
+
+  function connectionStatusVariant(status: string | undefined): PillTone {
+    const normalized = (status || '').toLowerCase();
+    if (normalized === 'online' || normalized === 'configured') return 'success';
+    if (normalized === 'disabled') return 'danger';
+    if (normalized === 'pending') return 'warning';
+    return 'muted';
   }
 
   function rowNeedsAttention(row: VaultRow): boolean {
@@ -1003,6 +1100,158 @@
     }
   }
 
+  function openAgentConnection() {
+    agentFormDisplayName = 'Hermes';
+    agentFormKind = 'hermes';
+    showAgentConnectionModal = true;
+  }
+
+  function mcpClientConfigSnippet(token: string): string {
+    return JSON.stringify(
+      {
+        mcpServers: {
+          illo: {
+            url: hostedMcpUrl,
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          },
+        },
+      },
+      null,
+      2,
+    );
+  }
+
+  function connectionFacts(connection: ExternalAgentConnection): string {
+    const parts = [
+      agentKindLabel(connection.agent_kind),
+      connection.status || 'pending',
+      connection.last_seen_at ? `seen ${timeAgo(connection.last_seen_at)}` : 'not seen yet',
+    ];
+    if (connection.last_error) parts.push('has error');
+    return parts.join(' · ');
+  }
+
+  function previewAgentConnection(displayName: string, kind: string): ExternalAgentConnection {
+    const now = new Date().toISOString();
+    return {
+      id: `preview-${kind}-${Date.now()}`,
+      org_id: 'preview-org',
+      owner_user_id: 'preview-user',
+      display_name: displayName,
+      agent_kind: kind,
+      transport: 'hosted_mcp',
+      status: 'configured',
+      endpoint_url: hostedMcpUrl,
+      remote_agent_id: null,
+      remote_session_key: null,
+      remote_agent_card: {},
+      capabilities: { mcp: true, hosted_mcp: true },
+      last_seen_at: null,
+      last_tested_at: now,
+      last_error: null,
+      metadata: { source: 'vault_preview' },
+      disabled_at: null,
+      created_at: now,
+      updated_at: now,
+    };
+  }
+
+  function previewAgentToken(connection: ExternalAgentConnection): ExternalAgentTokenRead {
+    const now = new Date().toISOString();
+    return {
+      id: `preview-token-${Date.now()}`,
+      connection_id: connection.id,
+      token_prefix: 'illo_conn_preview',
+      name: `${connection.display_name} MCP token`,
+      scopes: [],
+      created_at: now,
+      last_used_at: null,
+      expires_at: null,
+      revoked_at: null,
+      token: `illo_conn_preview_${connection.agent_kind}_${Math.random().toString(36).slice(2, 12)}`,
+    };
+  }
+
+  function showMintedAgentToken(connection: ExternalAgentConnection, token: ExternalAgentTokenRead) {
+    mintedAgentToken = token;
+    mintedAgentTokenConnection = connection;
+  }
+
+  async function submitAgentConnection() {
+    const displayName = agentFormDisplayName.trim();
+    if (!displayName) {
+      ui.toast('Agent name is required', 'error');
+      return;
+    }
+    if (isVaultPreview) {
+      const connection = previewAgentConnection(displayName, agentFormKind);
+      agentConnections = [
+        connection,
+        ...agentConnections.filter((item) => item.id !== connection.id),
+      ];
+      showMintedAgentToken(connection, previewAgentToken(connection));
+      showAgentConnectionModal = false;
+      ui.toast('Preview MCP token created', 'success');
+      return;
+    }
+    agentConnectionSaving = true;
+    try {
+      const connection: ExternalAgentConnection = await api.createAgentConnection({
+        display_name: displayName,
+        agent_kind: agentFormKind,
+        transport: 'hosted_mcp',
+        endpoint_url: hostedMcpUrl,
+        capabilities: { mcp: true, hosted_mcp: true },
+        metadata: { created_from: 'vault_personal_agents' },
+      });
+      const token: ExternalAgentTokenRead = await api.mintAgentConnectionToken(connection.id, {
+        name: `${connection.display_name} MCP token`,
+      });
+      agentConnections = [
+        connection,
+        ...agentConnections.filter((item) => item.id !== connection.id),
+      ];
+      showMintedAgentToken(connection, token);
+      showAgentConnectionModal = false;
+      ui.toast('MCP token created', 'success');
+    } catch (err: any) {
+      ui.toast(err?.detail || 'Failed to create MCP token', 'error');
+    } finally {
+      agentConnectionSaving = false;
+    }
+  }
+
+  async function mintTokenForConnection(connection: ExternalAgentConnection) {
+    if (isVaultPreview) {
+      showMintedAgentToken(connection, previewAgentToken(connection));
+      ui.toast('Preview MCP token created', 'success');
+      return;
+    }
+    try {
+      const token: ExternalAgentTokenRead = await api.mintAgentConnectionToken(connection.id, {
+        name: `${connection.display_name} MCP token`,
+      });
+      showMintedAgentToken(connection, token);
+      ui.toast('MCP token created', 'success');
+    } catch (err: any) {
+      ui.toast(err?.detail || 'Failed to mint token', 'error');
+    }
+  }
+
+  async function copyAgentText(value: string, key: string, message: string) {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      copiedKey = key;
+      setTimeout(() => { copiedKey = ''; }, 2000);
+      ui.toast(message, 'success');
+    } catch {
+      ui.toast('Clipboard access denied', 'error');
+    }
+  }
+
   async function approveAgentGrant(grantId: number) {
     if (isVaultPreview) {
       agentGrants = agentGrants.map((grant) =>
@@ -1136,7 +1385,7 @@
   <ConstellationPageFrame
     eyebrow="Constellation Vault"
     title="Vault"
-    subtitle={loading ? 'Loading protected secrets, missing keys, and lock state.' : `${secrets.length} secrets · ${categoryCount} categories tracked.`}
+    subtitle={loading ? 'Loading protected secrets, missing keys, and lock state.' : `${secrets.length} secrets · ${agentConnections.length} personal agents · ${categoryCount} categories tracked.`}
     className={frameClassName}
     contentClassName={frameContentClassName}
   >
@@ -1153,6 +1402,117 @@
     {/snippet}
 
     <section class="workspace">
+      <ConstellationPanel className="agent-panel" padding="none" ariaLabel="Personal agent MCP connections">
+        {#snippet header()}
+          <ConstellationSectionHeader
+            eyebrow="Personal agents"
+            title={agentConnections.length ? `${agentConnections.length} MCP connection${agentConnections.length === 1 ? '' : 's'}` : 'Connect an agent'}
+            description="Hosted MCP access for Hermes, Codex, OpenClaw, or another personal agent."
+            size="sm"
+          >
+            {#snippet actions()}
+              <ConstellationButton variant="secondary" size="sm" onclick={openAgentConnection}>
+                New token
+              </ConstellationButton>
+            {/snippet}
+          </ConstellationSectionHeader>
+        {/snippet}
+
+        <div class="agent-panel-content">
+          <div class="agent-summary-strip">
+            <span>{hostedMcpUrl}</span>
+            <ConstellationPill variant={agentConnections.length ? 'success' : 'info'} leadingDot>
+              {agentConnections.length ? 'Ready' : 'Setup'}
+            </ConstellationPill>
+          </div>
+
+          {#if mintedAgentToken?.token}
+            <section class="agent-token-section" aria-label="One-time MCP token">
+              <div class="agent-section-heading">
+                <strong>One-time token</strong>
+                <small>{mintedAgentTokenConnection?.display_name || 'Personal agent'}</small>
+              </div>
+              <div class="agent-token-stack">
+                <ConstellationNotice
+                  title="Copy this before leaving"
+                  description="Illo only shows the raw MCP token once."
+                  tone="warning"
+                  compact
+                />
+                <div class="vault-revealed minimal">
+                  <code>{mintedAgentToken.token}</code>
+                </div>
+                <ConstellationSnippetBlock
+                  label="MCP client config"
+                  code={mcpClientConfigSnippet(mintedAgentToken.token)}
+                  notes={['Use this when the client supports remote HTTP MCP.']}
+                />
+                <div class="expanded-actions">
+                  <ConstellationButton
+                    variant="quiet"
+                    size="sm"
+                    onclick={() => copyAgentText(mintedAgentToken?.token || '', 'agent-token', 'Token copied')}
+                  >
+                    {copiedKey === 'agent-token' ? 'Copied' : 'Copy token'}
+                  </ConstellationButton>
+                  <ConstellationButton
+                    variant="secondary"
+                    size="sm"
+                    onclick={() => copyAgentText(
+                      mcpClientConfigSnippet(mintedAgentToken?.token || ''),
+                      'agent-config',
+                      'MCP config copied',
+                    )}
+                  >
+                    {copiedKey === 'agent-config' ? 'Copied' : 'Copy config'}
+                  </ConstellationButton>
+                </div>
+              </div>
+            </section>
+          {/if}
+
+          <div class="agent-panel-grid">
+            <section class="agent-panel-section">
+              <div class="agent-section-heading">
+                <strong>Hosted MCP</strong>
+                <small>Bearer auth</small>
+              </div>
+              <dl class="metadata-list">
+                <div><dt>Endpoint</dt><dd>{hostedMcpUrl}</dd></div>
+                <div><dt>Header</dt><dd>Authorization</dd></div>
+                <div><dt>Alias</dt><dd>/api/mcp</dd></div>
+                <div><dt>Scopes</dt><dd>Default bridge tools</dd></div>
+              </dl>
+            </section>
+
+            <section class="agent-panel-section">
+              <div class="agent-section-heading">
+                <strong>Connections</strong>
+                <small>{agentConnections.length ? `${agentConnections.length} configured` : 'none yet'}</small>
+              </div>
+              {#if agentConnections.length}
+                <div class="agent-connection-list">
+                  {#each agentConnections as connection (connection.id)}
+                    <div class="agent-connection-row">
+                      <ConstellationPill variant={connectionStatusVariant(connection.status)}>{connection.status || 'pending'}</ConstellationPill>
+                      <div>
+                        <strong>{connection.display_name}</strong>
+                        <span>{connectionFacts(connection)}</span>
+                      </div>
+                      <ConstellationButton variant="quiet" size="sm" onclick={() => mintTokenForConnection(connection)}>
+                        New token
+                      </ConstellationButton>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <p class="empty-inline">No personal agents connected yet.</p>
+              {/if}
+            </section>
+          </div>
+        </div>
+      </ConstellationPanel>
+
       <ConstellationPanel className="inventory-panel" padding="none" ariaLabel="Vault inventory">
         {#snippet header()}
           <ConstellationSectionHeader
@@ -1392,6 +1752,54 @@
       </ConstellationPanel>
     </section>
   </ConstellationPageFrame>
+{/if}
+
+<!-- Personal Agent Connection Modal -->
+{#if showAgentConnectionModal}
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="modal-overlay" onclick={() => (showAgentConnectionModal = false)} role="dialog" aria-modal="true" tabindex="-1">
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal" onclick={(e) => e.stopPropagation()}>
+      <div class="modal-header">
+        <span class="modal-title">Connect Personal Agent</span>
+        <button class="modal-close" onclick={() => (showAgentConnectionModal = false)}>&times;</button>
+      </div>
+
+      <form onsubmit={(e) => { e.preventDefault(); submitAgentConnection(); }}>
+        <div class="form-field" style="margin-bottom: var(--sp-3)">
+          <label class="form-label" for="agent-name">Agent Name</label>
+          <input id="agent-name" class="input" type="text" placeholder="Hermes" bind:value={agentFormDisplayName} required />
+        </div>
+        <div class="form-field" style="margin-bottom: var(--sp-3)">
+          <label class="form-label" for="agent-kind">Agent Type</label>
+          <select id="agent-kind" class="tier-select" bind:value={agentFormKind}>
+            {#each AGENT_KIND_OPTIONS as option}
+              <option value={option.key}>{option.label}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-field" style="margin-bottom: var(--sp-3)">
+          <label class="form-label" for="agent-mcp-url">MCP Endpoint</label>
+          <input id="agent-mcp-url" class="input" type="text" value={hostedMcpUrl} readonly />
+        </div>
+        <ConstellationNotice
+          title="Token appears once"
+          description="The next screen gives you the bearer token and MCP client config."
+          tone="info"
+          compact
+          className="agent-modal-notice"
+        />
+        <div class="modal-actions">
+          <button type="button" class="btn" onclick={() => (showAgentConnectionModal = false)}>Cancel</button>
+          <button type="submit" class="btn btn-primary" disabled={agentConnectionSaving}>
+            {agentConnectionSaving ? 'Creating...' : 'Create token'}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
 {/if}
 
 <!-- Create Modal -->
@@ -1975,6 +2383,147 @@
     overflow-wrap: anywhere;
   }
 
+  :global(.agent-panel .constellation-panel-header) {
+    padding: 18px 18px 16px;
+  }
+
+  :global(.agent-panel .constellation-panel-content) {
+    display: grid;
+    gap: 0;
+  }
+
+  .agent-panel-content {
+    display: grid;
+    gap: 14px;
+    padding: 0 16px 16px;
+  }
+
+  .agent-summary-strip {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--constellation-surface-panel-separator);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--constellation-surface-nested-background) 78%, transparent);
+  }
+
+  .agent-summary-strip span {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--constellation-color-text-secondary);
+    font-family: var(--constellation-font-mono);
+    font-size: 12px;
+    line-height: 1.45;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .agent-token-section,
+  .agent-panel-section {
+    display: grid;
+    gap: 12px;
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid var(--constellation-surface-panel-separator);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--constellation-surface-nested-background) 82%, transparent);
+  }
+
+  .agent-panel-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .agent-section-heading {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .agent-section-heading strong {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--constellation-color-text-primary);
+    font-size: 13px;
+    font-weight: 560;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .agent-section-heading small {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--constellation-color-text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .agent-token-stack {
+    display: grid;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .agent-connection-list {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .agent-connection-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--constellation-surface-panel-separator);
+  }
+
+  .agent-connection-row:last-child {
+    border-bottom: 0;
+  }
+
+  .agent-connection-row div {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .agent-connection-row strong {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--constellation-color-text-primary);
+    font-size: 13px;
+    font-weight: 560;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .agent-connection-row span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--constellation-color-text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  :global(.agent-modal-notice) {
+    margin-bottom: var(--sp-3);
+  }
+
   .inline-action {
     border: 0;
     background: transparent;
@@ -2052,6 +2601,21 @@
 
     .metadata-list {
       grid-template-columns: 1fr;
+    }
+
+    .agent-panel-grid,
+    .agent-summary-strip,
+    .agent-section-heading {
+      grid-template-columns: 1fr;
+    }
+
+    .agent-section-heading small {
+      text-align: left;
+    }
+
+    .agent-connection-row {
+      grid-template-columns: 1fr;
+      align-items: start;
     }
   }
 </style>

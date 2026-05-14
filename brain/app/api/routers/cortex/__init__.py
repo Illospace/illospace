@@ -14,6 +14,7 @@ import brain.app.api.routers.cortex._misc  # noqa: F401
 import brain.app.api.routers.cortex._bootstrap  # noqa: F401
 import brain.app.api.routers.cortex._auth_keys  # noqa: F401
 import brain.app.api.routers.cortex._browser  # noqa: F401
+import brain.app.api.routers.cortex._external_agents  # noqa: F401
 
 # Re-export helpers and constants for backward compatibility
 from brain.app.api.routers.cortex._helpers import (  # noqa: F401

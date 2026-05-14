@@ -1324,7 +1324,7 @@
     --thread-reply-placeholder-hint: rgba(240, 240, 250, 0.46);
     --thread-composer-clearance: clamp(22px, 2.4vh, 34px);
     --thread-composer-inline-padding: 18px;
-    --thread-transient-rail-offset: var(--thread-composer-inline-padding);
+    --thread-transient-rail-offset: 0px;
 
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto;

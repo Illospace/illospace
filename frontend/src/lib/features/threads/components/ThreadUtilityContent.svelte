@@ -417,6 +417,7 @@
   });
 </script>
 
+<div class="panel-utility-content-bare">
 {#if activeTab === 'activity'}
   <div class="activity-trace-toolbar">
     <div class="activity-trace-copy">
@@ -910,6 +911,7 @@
     <div class="tab-empty">No audit data available. Send a message to start.</div>
   {/if}
 {/if}
+</div>
 
 <style>
   :global(.thread-utility-surface) {
@@ -1029,27 +1031,38 @@
 
 
   /* Activity tab */
+  .panel-utility-content-bare {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+  }
+
   .activity-trace-toolbar {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 12px;
     min-width: 0;
     width: 100%;
-    margin-bottom: 10px;
-    padding: 10px 2px 12px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    margin-bottom: 0;
+    padding: 2px 2px 12px;
+    border-bottom: 1px solid var(--panel-utility-divider-border);
   }
 
   .activity-trace-copy {
-    min-width: 0;
+    flex: 1 1 180px;
+    min-width: min(100%, 180px);
     display: flex;
     flex-direction: column;
     gap: 3px;
   }
 
   .activity-trace-title {
-    color: rgba(239, 244, 251, 0.92);
+    color: var(--panel-utility-primary-text);
     font-size: 12px;
     font-weight: 600;
     line-height: 1.3;
@@ -1109,18 +1122,22 @@
 
   .activity-trace-button {
     flex: 0 0 auto;
+    max-width: 100%;
     min-height: 20px;
     padding: 2px 7px;
-    border: 0;
+    border: 1px solid var(--panel-utility-action-border);
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.055);
-    color: rgba(231, 238, 247, 0.66);
+    background: var(--panel-utility-action-background);
+    color: var(--panel-utility-action-text);
     font: inherit;
     font-size: 10px;
     line-height: 1.4;
+    text-align: center;
+    white-space: normal;
     cursor: pointer;
     transition:
       background 150ms ease,
+      border-color 150ms ease,
       color 150ms ease,
       transform 150ms ease;
   }
@@ -1128,16 +1145,14 @@
   .activity-trace-button-primary {
     min-height: 28px;
     padding: 5px 10px;
-    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 16%, rgba(255, 255, 255, 0.055));
-    color: rgba(239, 244, 251, 0.92);
     font-size: 11px;
     font-weight: 600;
   }
 
   .activity-trace-button:hover:not(:disabled),
   .activity-trace-button:focus-visible {
-    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 14%, transparent);
-    color: rgba(239, 244, 251, 0.9);
+    background: var(--panel-utility-action-hover-background);
+    color: var(--panel-utility-action-hover-text);
   }
 
   .activity-trace-button:focus-visible {
