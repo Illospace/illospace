@@ -445,6 +445,7 @@ class AsyncDomainService:
             idea_id=idea_id,
             after=await self.serialize_record(record),
         )
+        await self.session.refresh(record)
         return record
 
     async def update_record(
@@ -497,6 +498,7 @@ class AsyncDomainService:
             after=await self.serialize_record(record),
             patch=data_patch,
         )
+        await self.session.refresh(record)
         return record
 
     async def remove_record(

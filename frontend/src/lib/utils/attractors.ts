@@ -140,6 +140,20 @@ function easeOutCubic(value: number): number {
   return 1 - Math.pow(1 - value, 3);
 }
 
+function stableMemberLayoutKey(member: TeamMember): string {
+  return String(member.id || member.email || member.name || '').toLowerCase();
+}
+
+export function sortTeamMembersForSharedAttractorLayout(members: TeamMember[]): TeamMember[] {
+  return [...members].sort((left, right) => {
+    const leftKey = stableMemberLayoutKey(left);
+    const rightKey = stableMemberLayoutKey(right);
+    if (leftKey < rightKey) return -1;
+    if (leftKey > rightKey) return 1;
+    return 0;
+  });
+}
+
 export function estimateClusterExtent(
   itemCount: number,
   load: number,

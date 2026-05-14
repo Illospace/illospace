@@ -59,6 +59,8 @@ def _handle_exec_command(
             return result
 
     timeout = min(timeout, 300)  # Cap at 5 minutes
+    if _workspace and os.path.exists(_workspace) and not os.path.isdir(_workspace):
+        _workspace = None
     if _workspace:
         try:
             cwd = _resolve_path(working_dir, _workspace) if working_dir else _workspace
@@ -133,6 +135,8 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
     import tempfile
 
     timeout = min(timeout, 300)
+    if _workspace and os.path.exists(_workspace) and not os.path.isdir(_workspace):
+        _workspace = None
     cwd = _workspace or _patched_workspace_root()
     project_execution = _prepare_project_execution_env()
 

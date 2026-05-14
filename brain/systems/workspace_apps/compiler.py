@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from brain.systems.workspace_apps.contracts import (
     APP_KIT_NAME,
     CONTRACT_VERSION,
+    DOMAIN_OPERATIONS,
     STRUCTURED_UI_RENDERER_KEY,
     STRUCTURED_UI_SOURCE_KIND,
 )
@@ -42,6 +43,31 @@ _VIEW_TYPE_ALIASES = {
     "card": "cards",
     "kanban": "board",
     "board-view": "board",
+}
+COMMON_DOMAIN_BINDING_OPERATIONS = [
+    "schema",
+    "list",
+    "get",
+    "query",
+    "create",
+    "update",
+    "archive",
+]
+_OPERATION_CANONICAL_BY_COMPACT = {
+    re.sub(r"[^a-z0-9]+", "", operation.lower()): operation for operation in DOMAIN_OPERATIONS
+}
+_OPERATION_ALIAS_EXPANSIONS = {
+    "read": ("schema", "list", "get", "query"),
+    "readonly": ("schema", "list", "get", "query"),
+    "write": ("create", "update"),
+    "writes": ("create", "update"),
+    "mutate": ("create", "update"),
+    "mutation": ("create", "update"),
+    "upsert": ("create", "update"),
+    "delete": ("archive",),
+    "remove": ("archive",),
+    "destroy": ("archive",),
+    "crud": tuple(COMMON_DOMAIN_BINDING_OPERATIONS),
 }
 
 
@@ -323,6 +349,8 @@ def _compile_manifest(
         ):
             next_plan["scope"] = DEFAULT_APP_LOCAL_SCOPE
             _record(repairs, "manifest.data_plan.scope", "defaulted app-local scope to UI state")
+        if next_plan.get("mode") == "domain":
+            _normalize_domain_bindings(next_plan, repairs=repairs)
         next_manifest["data_plan"] = next_plan
 
     design_contract = next_manifest.get("design_contract")
@@ -341,6 +369,80 @@ def _compile_manifest(
             _record(repairs, "manifest.design_contract.theme_modes", "ensured dark and light theme modes")
         next_manifest["design_contract"] = next_design
     return next_manifest
+
+
+def _normalize_domain_bindings(
+    data_plan: dict[str, Any],
+    *,
+    repairs: list[dict[str, Any]],
+) -> None:
+    bindings = data_plan.get("bindings")
+    if not isinstance(bindings, Mapping):
+        return
+
+    next_bindings: dict[str, Any] = {}
+    changed_bindings = False
+    for alias, raw_binding in bindings.items():
+        if not isinstance(raw_binding, Mapping):
+            next_bindings[alias] = raw_binding
+            continue
+
+        binding = dict(raw_binding)
+        operations, operations_changed = _normalize_domain_operations(binding.get("operations"))
+        if operations:
+            if operations != binding.get("operations"):
+                binding["operations"] = operations
+                _record(
+                    repairs,
+                    f"manifest.data_plan.bindings.{alias}.operations",
+                    "normalized Domain binding operations",
+                )
+                changed_bindings = True
+            elif operations_changed:
+                changed_bindings = True
+        next_bindings[alias] = binding
+
+    if changed_bindings:
+        data_plan["bindings"] = next_bindings
+
+
+def _normalize_domain_operations(value: Any) -> tuple[list[str], bool]:
+    if isinstance(value, str):
+        raw_items = [item for item in re.split(r"[\s,|/]+", value) if item]
+        changed = True
+    elif isinstance(value, list):
+        raw_items = value
+        changed = False
+    else:
+        return list(COMMON_DOMAIN_BINDING_OPERATIONS), True
+
+    if not raw_items:
+        return list(COMMON_DOMAIN_BINDING_OPERATIONS), True
+
+    operations: list[str] = []
+    for raw_item in raw_items:
+        canonical = _domain_operation_expansion(raw_item)
+        if canonical != [str(raw_item)]:
+            changed = True
+        for operation in canonical:
+            if operation not in operations:
+                operations.append(operation)
+
+    if not operations:
+        return list(COMMON_DOMAIN_BINDING_OPERATIONS), True
+    return operations, changed
+
+
+def _domain_operation_expansion(value: Any) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    compact = re.sub(r"[^a-z0-9]+", "", raw.lower())
+    if compact in _OPERATION_ALIAS_EXPANSIONS:
+        return list(_OPERATION_ALIAS_EXPANSIONS[compact])
+    if compact in _OPERATION_CANONICAL_BY_COMPACT:
+        return [_OPERATION_CANONICAL_BY_COMPACT[compact]]
+    return [raw]
 
 
 def _compile_visual_spec(

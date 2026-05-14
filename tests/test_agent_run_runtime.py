@@ -468,6 +468,8 @@ def test_workspace_root_from_ref_uses_thread_project_context_snapshot():
     assert (
         workspace_root_from_ref(
             {
+                "workspace_root": "/tmp/ideas/idea-1/uploads/agent.md",
+                "resolved_workspace_root": "/tmp/ideas/idea-1/uploads/agent.md",
                 "project_context_snapshot": {
                     "resources": [{"kind": "file", "path": "/tmp/ideas/idea-1/uploads/agent.md"}],
                     "permission_scope": {"allowed_paths": ["/tmp/ideas/idea-1/uploads/agent.md"]},

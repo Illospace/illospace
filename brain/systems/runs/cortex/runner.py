@@ -26,7 +26,10 @@ from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.stream import RunStream
 from brain.systems.runs.ui_events import run_event_to_ui_message
 from brain.systems.cortex.events import publish_live_safe, publish_safe
-from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+from brain.systems.cortex.project_context.materializer import (
+    materialize_project_context_workspaces,
+    project_context_has_materializable_resources,
+)
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaStateLog
 
@@ -256,11 +259,14 @@ def _run_has_project_context(run: AgentRunRow | None) -> bool:
         return False
     target_ref = run.target_ref if isinstance(run.target_ref, dict) else {}
     workspace_ref = run.workspace_ref if isinstance(run.workspace_ref, dict) else {}
-    return bool(
-        isinstance(target_ref.get("project_context_snapshot"), dict)
-        or isinstance(workspace_ref.get("project_context_snapshot"), dict)
-        or isinstance(workspace_ref.get("resources"), list)
-    )
+    for context in (
+        target_ref.get("project_context_snapshot"),
+        workspace_ref.get("project_context_snapshot"),
+        {"resources": workspace_ref.get("resources")},
+    ):
+        if isinstance(context, dict) and project_context_has_materializable_resources(context):
+            return True
+    return False
 
 
 def _project_context_root(run_id: int, *, thread_id: str | None = None) -> str:

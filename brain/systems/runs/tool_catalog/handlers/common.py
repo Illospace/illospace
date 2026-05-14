@@ -427,12 +427,16 @@ def _normalize_workspace_entry(entry) -> dict[str, str] | None:
     """Normalize a workspace entry into {name, path}."""
     if isinstance(entry, str) and entry.strip():
         expanded = os.path.realpath(os.path.expanduser(entry.strip()))
+        if os.path.exists(expanded) and not os.path.isdir(expanded):
+            return None
         return {"name": os.path.basename(expanded), "path": expanded}
     if isinstance(entry, dict):
         raw_path = str(entry.get("path", "")).strip()
         if not raw_path:
             return None
         expanded = os.path.realpath(os.path.expanduser(raw_path))
+        if os.path.exists(expanded) and not os.path.isdir(expanded):
+            return None
         name = str(entry.get("name") or os.path.basename(expanded)).strip()
         return {"name": name, "path": expanded}
     return None
@@ -463,10 +467,10 @@ def _select_workspace(
 ) -> str | None:
     """Resolve an explicit workspace selector against the allowed workspace set."""
     registry = _build_workspace_registry(workspace_root, allowed_workspaces)
-    default_root = registry[0]["path"] if registry else workspace_root
+    default_root = registry[0]["path"] if registry else None
     if not workspace:
         return default_root
-    if not registry and not workspace_root:
+    if not registry:
         return None
 
     requested = workspace.strip()

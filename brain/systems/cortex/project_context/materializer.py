@@ -19,6 +19,15 @@ from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.vault import get_secret, list_secrets
 
 
+_REPO_RESOURCE_KINDS = {
+    "repo",
+    "repository",
+    "github",
+    "github_repo",
+    "github_repository",
+}
+
+
 @dataclass
 class ProjectContextMaterializationResult:
     workspaces: list[dict[str, str]] = field(default_factory=list)
@@ -40,15 +49,57 @@ def _clean_text(value: Any) -> str | None:
     return None
 
 
+def _resource_kind(resource: dict[str, Any]) -> str:
+    return (_clean_text(resource.get("kind") or resource.get("type") or resource.get("resource_type")) or "").lower()
+
+
+def _looks_like_github_remote(value: str) -> bool:
+    lowered = value.lower()
+    return (
+        lowered.startswith("git@github.com:")
+        or lowered.startswith("https://github.com/")
+        or lowered.startswith("http://github.com/")
+        or lowered.startswith("github.com/")
+    )
+
+
 def _github_slug_from_resource(resource: dict[str, Any]) -> str | None:
-    for key in ("repo", "name", "uri", "url", "remote", "repo_url"):
-        value = _clean_text(resource.get(key))
-        if not value:
-            continue
-        slug = parse_github_repo_slug(value)
+    explicit_repo = _clean_text(resource.get("repo"))
+    if explicit_repo:
+        slug = parse_github_repo_slug(explicit_repo)
         if slug:
             return slug
+
+    kind = _resource_kind(resource)
+    source = (_clean_text(resource.get("source")) or "").lower()
+    is_repo_resource = kind in _REPO_RESOURCE_KINDS or source in _REPO_RESOURCE_KINDS
+
+    for key in ("uri", "url", "remote", "repo_url"):
+        value = _clean_text(resource.get(key))
+        if value and _looks_like_github_remote(value):
+            slug = parse_github_repo_slug(value)
+            if slug:
+                return slug
+
+    if is_repo_resource:
+        for key in ("name",):
+            value = _clean_text(resource.get(key))
+            if not value:
+                continue
+            slug = parse_github_repo_slug(value)
+            if slug:
+                return slug
     return None
+
+
+def project_context_has_materializable_resources(context: dict[str, Any] | None) -> bool:
+    resources = context.get("resources") if isinstance(context, dict) else None
+    if not isinstance(resources, list):
+        return False
+    return any(
+        isinstance(resource, dict) and _github_slug_from_resource(resource)
+        for resource in resources
+    )
 
 
 def _vault_key_from_resource(resource: dict[str, Any]) -> str | None:
@@ -163,7 +214,7 @@ def _should_use_existing_resource_path(existing_path: str | None, workspace_root
     if not existing_path:
         return None
     path = Path(existing_path).expanduser()
-    if not path.exists():
+    if not path.exists() or not path.is_dir():
         return None
     if _path_is_relative_to(path, workspace_root):
         return path

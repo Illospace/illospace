@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from pathlib import PurePath
 from typing import Any
 
@@ -22,6 +23,21 @@ def _looks_like_file_path(path: str) -> bool:
     return bool(PurePath(path).suffix)
 
 
+def _workspace_directory_path(path: str | None) -> str | None:
+    if not isinstance(path, str) or not path.strip():
+        return None
+    candidate = path.strip()
+    local_path = Path(candidate).expanduser()
+    try:
+        if local_path.exists():
+            return candidate if local_path.is_dir() else None
+    except OSError:
+        return None
+    if _looks_like_file_path(candidate):
+        return None
+    return candidate
+
+
 def _resource_workspace_path(resource: dict[str, Any]) -> str | None:
     path = resource.get("path")
     if not isinstance(path, str) or not path.strip():
@@ -30,8 +46,8 @@ def _resource_workspace_path(resource: dict[str, Any]) -> str | None:
     if resource_kind in {"file", "attachment"}:
         return None
     if resource_kind in {"repo", "repository", "directory", "folder", "workspace"}:
-        return path.strip()
-    return None if _looks_like_file_path(path) else path.strip()
+        return _workspace_directory_path(path)
+    return _workspace_directory_path(path)
 
 
 def workspace_root_from_ref(workspace_ref: dict[str, Any]) -> str | None:
@@ -43,8 +59,9 @@ def workspace_root_from_ref(workspace_ref: dict[str, Any]) -> str | None:
     """
     for key in _WORKSPACE_ROOT_KEYS:
         value = workspace_ref.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        path = _workspace_directory_path(value)
+        if path:
+            return path
 
     snapshot = workspace_ref.get("project_context_snapshot")
     if isinstance(snapshot, dict):
@@ -58,13 +75,15 @@ def workspace_root_from_ref(workspace_ref: dict[str, Any]) -> str | None:
         scope = snapshot.get("permission_scope")
         if isinstance(scope, dict):
             path = _single_allowed_path(scope)
-            if path and not _looks_like_file_path(path):
+            path = _workspace_directory_path(path)
+            if path:
                 return path
 
     scope = workspace_ref.get("project_context_permission_scope")
     if isinstance(scope, dict):
         path = _single_allowed_path(scope)
-        if path and not _looks_like_file_path(path):
+        path = _workspace_directory_path(path)
+        if path:
             return path
 
     return None

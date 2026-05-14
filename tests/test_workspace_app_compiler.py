@@ -123,6 +123,75 @@ def test_compiler_infers_domain_backed_table_from_single_binding():
     assert _validation_report(compiled)["status"] == "passed"
 
 
+def test_compiler_repairs_domain_binding_operation_aliases():
+    compiled = compile_workspace_app_input(
+        action="create",
+        name="Ticket Board",
+        source_code=json.dumps({"description": "Track tickets"}),
+        manifest={
+            "contract_version": 1,
+            "data_plan": {
+                "mode": "domain",
+                "bindings": {
+                    "tickets": {
+                        "domain_id": 1,
+                        "object_key": "ticket",
+                        "fields": ["title", "status"],
+                        "operations": ["read", "write", "bulk_update", "list-relations"],
+                    }
+                },
+            },
+        },
+    )
+
+    assert compiled.manifest["data_plan"]["bindings"]["tickets"]["operations"] == [
+        "schema",
+        "list",
+        "get",
+        "query",
+        "create",
+        "update",
+        "bulkUpdate",
+        "listRelations",
+    ]
+    assert {
+        repair["field"]: repair["message"] for repair in compiled.repairs
+    }["manifest.data_plan.bindings.tickets.operations"] == "normalized Domain binding operations"
+    assert _validation_report(compiled)["status"] == "passed"
+
+
+def test_compiler_defaults_missing_domain_binding_operations():
+    compiled = compile_workspace_app_input(
+        action="create",
+        name="Ticket Board",
+        source_code=json.dumps({"description": "Track tickets"}),
+        manifest={
+            "contract_version": 1,
+            "data_plan": {
+                "mode": "domain",
+                "bindings": {
+                    "tickets": {
+                        "domain_id": 1,
+                        "object_key": "ticket",
+                        "fields": ["title", "status"],
+                    }
+                },
+            },
+        },
+    )
+
+    assert compiled.manifest["data_plan"]["bindings"]["tickets"]["operations"] == [
+        "schema",
+        "list",
+        "get",
+        "query",
+        "create",
+        "update",
+        "archive",
+    ]
+    assert _validation_report(compiled)["status"] == "passed"
+
+
 def test_compiler_accepts_domain_backed_board_view():
     compiled = compile_workspace_app_input(
         action="create",

@@ -5,13 +5,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from io import BytesIO
 import json
+from pathlib import PurePath
 from typing import Any
 import zipfile
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from brain.systems.runs.ids import trace_id_for_run_id
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
+from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import IdeaThread
 
 
@@ -110,6 +112,8 @@ THREAD_TRACE_MAX_MESSAGES = None
 THREAD_TRACE_MAX_RUNS = 100
 THREAD_TRACE_MAX_EVENTS = 1200
 THREAD_TRACE_MAX_ARTIFACTS = 240
+TRACE_MAX_CYCLES = 50
+TRACE_MAX_CYCLE_RUNS = 200
 TRACE_MAX_STRING_CHARS = 4000
 TRACE_MAX_COLLECTION_ITEMS = 80
 TRACE_MAX_DEPTH = 6
@@ -127,15 +131,26 @@ async def build_agent_trace_snapshot_async(
     """Build a bounded, JSON-safe trace bundle using an async DB session."""
 
     related_run_ids = await _related_run_ids_async(session, run)
+    related_runs = await _runs_by_id_async(session, related_run_ids)
+    if not related_runs:
+        related_runs = [run]
     messages = await _trace_messages_async(session, run, max_messages=max_messages)
     events = await _trace_events_async(session, related_run_ids, max_events=max_events)
     artifacts = await _trace_artifacts_async(session, related_run_ids, max_artifacts=max_artifacts)
+    cycle_state = await _trace_cycle_state_async(
+        session,
+        idea_id=str(run.thread_id) if getattr(run, "thread_id", None) else None,
+        runs=related_runs,
+    )
+    diagnostics = _trace_diagnostics(related_runs, events, artifacts, cycle_state)
     return _agent_trace_snapshot_payload(
         run,
         related_run_ids=related_run_ids,
         messages=messages,
         events=events,
         artifacts=artifacts,
+        cycle_state=cycle_state,
+        diagnostics=diagnostics,
         saved_by=saved_by,
         max_messages=max_messages,
         max_events=max_events,
@@ -150,6 +165,8 @@ def _agent_trace_snapshot_payload(
     messages: list[dict[str, Any]],
     events: list[dict[str, Any]],
     artifacts: list[dict[str, Any]],
+    cycle_state: dict[str, Any],
+    diagnostics: dict[str, Any],
     saved_by: str | None,
     max_messages: int,
     max_events: int,
@@ -194,6 +211,8 @@ def _agent_trace_snapshot_payload(
         "artifacts": artifacts,
         "artifact_count": len(artifacts),
         "artifact_limit": max_artifacts,
+        "cycles": cycle_state,
+        "diagnostics": diagnostics,
     }
     bundle["storage_estimate"] = {
         "json_bytes": len(json.dumps(_jsonable(bundle), sort_keys=True, default=str).encode("utf-8")),
@@ -219,6 +238,8 @@ async def build_thread_trace_snapshot_async(
     messages = await _trace_thread_messages_async(session, idea_id, max_messages=max_messages)
     events = await _trace_events_async(session, run_ids, max_events=max_events)
     artifacts = await _trace_artifacts_async(session, run_ids, max_artifacts=max_artifacts)
+    cycle_state = await _trace_cycle_state_async(session, idea_id=idea_id, runs=runs)
+    diagnostics = _trace_diagnostics(runs, events, artifacts, cycle_state)
     return _thread_trace_snapshot_payload(
         idea_id,
         runs=runs,
@@ -226,6 +247,8 @@ async def build_thread_trace_snapshot_async(
         messages=messages,
         events=events,
         artifacts=artifacts,
+        cycle_state=cycle_state,
+        diagnostics=diagnostics,
         saved_by=saved_by,
         max_messages=max_messages,
         max_runs=max_runs,
@@ -242,6 +265,8 @@ def _thread_trace_snapshot_payload(
     messages: list[dict[str, Any]],
     events: list[dict[str, Any]],
     artifacts: list[dict[str, Any]],
+    cycle_state: dict[str, Any],
+    diagnostics: dict[str, Any],
     saved_by: str | None,
     max_messages: int | None,
     max_runs: int,
@@ -295,6 +320,8 @@ def _thread_trace_snapshot_payload(
         "artifacts": artifacts,
         "artifact_count": len(artifacts),
         "artifact_limit": max_artifacts,
+        "cycles": cycle_state,
+        "diagnostics": diagnostics,
     }
     bundle["storage_estimate"] = {
         "json_bytes": len(json.dumps(_jsonable(bundle), sort_keys=True, default=str).encode("utf-8")),
@@ -319,6 +346,15 @@ def build_agent_trace_export_zip(
         "trace_id": trace.get("trace_id"),
         "run_id": run.get("run_id"),
         "idea_id": thread.get("idea_id"),
+        "diagnostics": {
+            "cycle_count": ((trace.get("cycles") or {}).get("cycle_count") if isinstance(trace.get("cycles"), dict) else None),
+            "cycle_run_count": ((trace.get("cycles") or {}).get("cycle_run_count") if isinstance(trace.get("cycles"), dict) else None),
+            "delivery_signal_count": (
+                len(((trace.get("diagnostics") or {}).get("delivery_signals") or []))
+                if isinstance(trace.get("diagnostics"), dict)
+                else None
+            ),
+        },
         "files": [
             {"path": "trace.json", "description": "Bounded JSON trace for agent analysis."},
             {"path": "activity.json", "description": "Compact chronological activity list derived from the trace."},
@@ -399,6 +435,17 @@ async def _trace_messages_async(session, run: AgentRunRow, *, max_messages: int)
     return await _trace_thread_messages_async(session, str(run.thread_id), max_messages=max_messages)
 
 
+async def _runs_by_id_async(session, run_ids: list[int]) -> list[AgentRunRow]:
+    if not run_ids:
+        return []
+    result = await session.scalars(
+        select(AgentRunRow)
+        .where(AgentRunRow.id.in_(run_ids))
+        .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
+    )
+    return list(result.all())
+
+
 async def _trace_thread_messages_async(
     session,
     idea_id: str,
@@ -443,16 +490,16 @@ def _thread_message_payloads(rows: list[IdeaThread]) -> list[dict[str, Any]]:
 async def _trace_events_async(session, run_ids: list[int], *, max_events: int) -> list[dict[str, Any]]:
     if not run_ids:
         return []
-    result = await session.scalars(
-        select(AgentRunEventRow)
-        .where(AgentRunEventRow.run_id.in_(run_ids))
-        .order_by(AgentRunEventRow.run_id.asc(), AgentRunEventRow.sequence_no.asc(), AgentRunEventRow.id.asc())
-        .limit(max_events)
-    )
-    return _event_payloads(result.all())
-
-
-def _event_payloads(rows: list[AgentRunEventRow]) -> list[dict[str, Any]]:
+    per_run_limit = max(10, max_events // max(len(run_ids), 1))
+    rows: list[Any] = []
+    for run_id in run_ids:
+        result = await session.scalars(
+            select(AgentRunEventRow)
+            .where(AgentRunEventRow.run_id == int(run_id))
+            .order_by(AgentRunEventRow.sequence_no.asc(), AgentRunEventRow.id.asc())
+            .limit(per_run_limit)
+        )
+        rows.extend(result.all())
     return [
         _cap_jsonable({
             "id": event.id,
@@ -472,19 +519,20 @@ def _event_payloads(rows: list[AgentRunEventRow]) -> list[dict[str, Any]]:
 async def _trace_artifacts_async(session, run_ids: list[int], *, max_artifacts: int) -> list[dict[str, Any]]:
     if not run_ids:
         return []
-    result = await session.scalars(
-        select(AgentRunArtifactRow)
-        .where(
-            AgentRunArtifactRow.run_id.in_(run_ids),
-            AgentRunArtifactRow.artifact_type != AGENT_TRACE_SNAPSHOT_ARTIFACT_TYPE,
+    per_run_limit = max(5, max_artifacts // max(len(run_ids), 1))
+    rows: list[Any] = []
+    for run_id in run_ids:
+        result = await session.scalars(
+            select(AgentRunArtifactRow)
+            .where(
+                AgentRunArtifactRow.run_id == int(run_id),
+                AgentRunArtifactRow.artifact_type != AGENT_TRACE_SNAPSHOT_ARTIFACT_TYPE,
+            )
+            .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())
+            .limit(per_run_limit)
         )
-        .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
-        .limit(max_artifacts)
-    )
-    return _artifact_payloads(result.all())
-
-
-def _artifact_payloads(rows: list[AgentRunArtifactRow]) -> list[dict[str, Any]]:
+        run_rows = result.all()
+        rows.extend(reversed(run_rows))
     return [
         _cap_jsonable({
             "id": artifact.id,
@@ -500,6 +548,342 @@ def _artifact_payloads(rows: list[AgentRunArtifactRow]) -> list[dict[str, Any]]:
         })
         for artifact in rows
     ]
+
+
+async def _trace_cycle_state_async(
+    session,
+    *,
+    idea_id: str | None,
+    runs: list[AgentRunRow],
+    max_cycles: int = TRACE_MAX_CYCLES,
+    max_cycle_runs: int = TRACE_MAX_CYCLE_RUNS,
+) -> dict[str, Any]:
+    """Include Cycle control-plane rows that explain scheduled-run lifecycle state."""
+
+    run_ids = [
+        int(run.id)
+        for run in runs
+        if _is_int_like(getattr(run, "id", None))
+    ]
+    cycle_ids: set[int] = set()
+    cycle_run_ids: set[int] = set()
+    for run in runs:
+        metadata = getattr(run, "metadata_", None)
+        if not isinstance(metadata, dict):
+            continue
+        _add_int(cycle_ids, metadata.get("cycle_id"))
+        _add_int(cycle_run_ids, metadata.get("cycle_run_id"))
+        envelope = metadata.get("launch_envelope")
+        if isinstance(envelope, dict):
+            _add_int(cycle_ids, envelope.get("cycle_id"))
+            _add_int(cycle_run_ids, envelope.get("cycle_run_id"))
+
+    try:
+        cycle_rows = await _query_cycles_async(session, idea_id=idea_id, cycle_ids=cycle_ids, limit=max_cycles)
+        for cycle in cycle_rows:
+            _add_int(cycle_ids, getattr(cycle, "id", None))
+
+        cycle_run_rows = await _query_cycle_runs_async(
+            session,
+            idea_id=idea_id,
+            run_ids=run_ids,
+            cycle_ids=cycle_ids,
+            cycle_run_ids=cycle_run_ids,
+            limit=max_cycle_runs,
+        )
+        for cycle_run in cycle_run_rows:
+            _add_int(cycle_ids, getattr(cycle_run, "cycle_id", None))
+            _add_int(cycle_run_ids, getattr(cycle_run, "id", None))
+
+        missing_cycle_ids = {
+            cycle_id
+            for cycle_id in cycle_ids
+            if cycle_id not in {int(cycle.id) for cycle in cycle_rows if _is_int_like(getattr(cycle, "id", None))}
+        }
+        if missing_cycle_ids:
+            cycle_rows.extend(await _query_cycles_async(session, idea_id=None, cycle_ids=missing_cycle_ids, limit=max_cycles))
+    except Exception as exc:
+        return {
+            "schema_version": 1,
+            "cycles": [],
+            "cycle_runs": [],
+            "cycle_ids": sorted(cycle_ids),
+            "cycle_run_ids": sorted(cycle_run_ids),
+            "error": str(exc),
+        }
+
+    cycles = [_cap_jsonable(_cycle_payload(cycle)) for cycle in cycle_rows]
+    cycle_runs = [_cap_jsonable(_cycle_run_payload(cycle_run)) for cycle_run in cycle_run_rows]
+    return {
+        "schema_version": 1,
+        "cycles": cycles,
+        "cycle_runs": cycle_runs,
+        "cycle_count": len(cycles),
+        "cycle_run_count": len(cycle_runs),
+        "cycle_ids": sorted({int(cycle["id"]) for cycle in cycles if _is_int_like(cycle.get("id"))}),
+        "cycle_run_ids": sorted({int(run["id"]) for run in cycle_runs if _is_int_like(run.get("id"))}),
+    }
+
+
+async def _query_cycles_async(
+    session,
+    *,
+    idea_id: str | None,
+    cycle_ids: set[int],
+    limit: int,
+) -> list[Cycle]:
+    conditions = []
+    if idea_id:
+        conditions.append(Cycle.target_idea_id == str(idea_id))
+    if cycle_ids:
+        conditions.append(Cycle.id.in_(sorted(cycle_ids)))
+    if not conditions:
+        return []
+    result = await session.scalars(
+        select(Cycle)
+        .where(or_(*conditions))
+        .order_by(Cycle.updated_at.desc(), Cycle.id.asc())
+        .limit(limit)
+    )
+    return list(result.all())
+
+
+async def _query_cycle_runs_async(
+    session,
+    *,
+    idea_id: str | None,
+    run_ids: list[int],
+    cycle_ids: set[int],
+    cycle_run_ids: set[int],
+    limit: int,
+) -> list[CycleRun]:
+    conditions = []
+    if idea_id:
+        conditions.append(CycleRun.idea_id == str(idea_id))
+    if run_ids:
+        conditions.append(CycleRun.run_id.in_(run_ids))
+    if cycle_ids:
+        conditions.append(CycleRun.cycle_id.in_(sorted(cycle_ids)))
+    if cycle_run_ids:
+        conditions.append(CycleRun.id.in_(sorted(cycle_run_ids)))
+    if not conditions:
+        return []
+    result = await session.scalars(
+        select(CycleRun)
+        .where(or_(*conditions))
+        .order_by(CycleRun.created_at.desc(), CycleRun.id.desc())
+        .limit(limit)
+    )
+    rows = result.all()
+    return list(reversed(rows))
+
+
+def _cycle_payload(cycle: Cycle) -> dict[str, Any]:
+    return {
+        "id": cycle.id,
+        "user_id": cycle.user_id,
+        "org_id": cycle.org_id,
+        "name": cycle.name,
+        "prompt": cycle.prompt,
+        "schedule_expr": cycle.schedule_expr,
+        "timezone": cycle.timezone,
+        "enabled": cycle.enabled,
+        "model_override": cycle.model_override,
+        "thinking_override": cycle.thinking_override,
+        "execution_mode": cycle.execution_mode,
+        "target_idea_id": cycle.target_idea_id,
+        "reopen_archived": cycle.reopen_archived,
+        "next_run_at": _iso(cycle.next_run_at),
+        "last_run_at": _iso(cycle.last_run_at),
+        "last_status": cycle.last_status,
+        "last_error": cycle.last_error,
+        "deleted_at": _iso(cycle.deleted_at),
+        "created_at": _iso(getattr(cycle, "created_at", None)),
+        "updated_at": _iso(getattr(cycle, "updated_at", None)),
+    }
+
+
+def _cycle_run_payload(cycle_run: CycleRun) -> dict[str, Any]:
+    return {
+        "id": cycle_run.id,
+        "cycle_id": cycle_run.cycle_id,
+        "scheduled_for": _iso(cycle_run.scheduled_for),
+        "started_at": _iso(cycle_run.started_at),
+        "completed_at": _iso(cycle_run.completed_at),
+        "status": cycle_run.status,
+        "error": cycle_run.error,
+        "skip_reason": cycle_run.skip_reason,
+        "idea_id": cycle_run.idea_id,
+        "run_id": cycle_run.run_id,
+        "prompt_snapshot": cycle_run.prompt_snapshot,
+        "created_at": _iso(getattr(cycle_run, "created_at", None)),
+    }
+
+
+def _trace_diagnostics(
+    runs: list[AgentRunRow],
+    events: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    cycle_state: dict[str, Any],
+) -> dict[str, Any]:
+    workspace = _workspace_diagnostics(runs)
+    delivery = _delivery_signals(events, artifacts)
+    status = _run_status_diagnostics(runs, events)
+    return _cap_jsonable({
+        "schema_version": 1,
+        "workspace": workspace,
+        "delivery_signals": delivery,
+        "run_status": status,
+        "cycle_summary": {
+            "cycle_count": cycle_state.get("cycle_count"),
+            "cycle_run_count": cycle_state.get("cycle_run_count"),
+            "cycle_ids": cycle_state.get("cycle_ids") or [],
+            "cycle_run_ids": cycle_state.get("cycle_run_ids") or [],
+            "error": cycle_state.get("error"),
+        },
+    })
+
+
+def _workspace_diagnostics(runs: list[AgentRunRow]) -> list[dict[str, Any]]:
+    diagnostics = []
+    for run in runs:
+        workspace_ref = getattr(run, "workspace_ref", None)
+        if not isinstance(workspace_ref, dict):
+            workspace_ref = {}
+        roots = _workspace_root_candidates(workspace_ref)
+        resources = []
+        for resource in _safe_list(workspace_ref.get("resources")):
+            if not isinstance(resource, dict):
+                continue
+            path = resource.get("path")
+            resources.append({
+                "id": resource.get("id"),
+                "kind": resource.get("kind") or resource.get("type"),
+                "label": resource.get("label") or resource.get("name"),
+                "path": path,
+                "looks_like_file": _looks_like_file_path(path),
+            })
+        suspicious_roots = [
+            root for root in roots
+            if _looks_like_file_path(root.get("path"))
+        ]
+        diagnostics.append({
+            "run_id": getattr(run, "id", None),
+            "workspace_roots": roots,
+            "suspicious_file_roots": suspicious_roots,
+            "resources": resources,
+            "resource_count": len(resources),
+        })
+    return diagnostics
+
+
+def _workspace_root_candidates(workspace_ref: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = []
+    for key in ("resolved_workspace_root", "workspace_root", "worktree_path", "path", "local_path"):
+        value = workspace_ref.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append({"source": key, "path": value.strip(), "looks_like_file": _looks_like_file_path(value)})
+    materialization = workspace_ref.get("project_context_materialization")
+    if isinstance(materialization, dict):
+        for item in _safe_list(materialization.get("workspaces")):
+            if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"].strip():
+                path = item["path"].strip()
+                candidates.append({
+                    "source": "project_context_materialization.workspaces",
+                    "name": item.get("name"),
+                    "path": path,
+                    "looks_like_file": _looks_like_file_path(path),
+                })
+    snapshot = workspace_ref.get("project_context_snapshot")
+    if isinstance(snapshot, dict):
+        scope = snapshot.get("permission_scope")
+        if isinstance(scope, dict):
+            for path in _safe_list(scope.get("allowed_paths")):
+                if isinstance(path, str) and path.strip():
+                    candidates.append({
+                        "source": "project_context_snapshot.permission_scope.allowed_paths",
+                        "path": path.strip(),
+                        "looks_like_file": _looks_like_file_path(path),
+                    })
+    return candidates
+
+
+def _delivery_signals(events: list[dict[str, Any]], artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    signals = []
+    keywords = (
+        "mattermost", "webhook", "http", "post", "payload too large", "too large",
+        "16k", "not a directory", "path escapes workspace", "exec_command", "run_script",
+        "browser failed", "delivery",
+    )
+    for event in events:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        text = json.dumps(payload, default=str).lower()
+        if any(keyword in text for keyword in keywords):
+            signals.append({
+                "source": "event",
+                "at": event.get("created_at"),
+                "run_id": event.get("run_id"),
+                "event_type": event.get("event_type"),
+                "tool_name": payload.get("tool_name"),
+                "status": payload.get("status"),
+                "payload": payload,
+            })
+    for artifact in artifacts:
+        text = " ".join([
+            str(artifact.get("title") or ""),
+            str(artifact.get("artifact_type") or ""),
+            str(artifact.get("text") or ""),
+            json.dumps(artifact.get("payload") or {}, default=str),
+        ]).lower()
+        if any(keyword in text for keyword in keywords):
+            signals.append({
+                "source": "artifact",
+                "at": artifact.get("created_at"),
+                "run_id": artifact.get("run_id"),
+                "artifact_id": artifact.get("id"),
+                "title": artifact.get("title"),
+                "artifact_type": artifact.get("artifact_type"),
+                "text": artifact.get("text"),
+                "payload": artifact.get("payload") or {},
+            })
+    return signals
+
+
+def _run_status_diagnostics(runs: list[AgentRunRow], events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    changes_by_run: dict[int, list[dict[str, Any]]] = {}
+    for event in events:
+        if event.get("event_type") != "run.status_changed" or not _is_int_like(event.get("run_id")):
+            continue
+        run_id = int(event["run_id"])
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        changes_by_run.setdefault(run_id, []).append({
+            "at": event.get("created_at"),
+            "from_status": payload.get("from_status"),
+            "to_status": payload.get("to_status"),
+        })
+    rows = []
+    for run in runs:
+        run_id = int(run.id) if _is_int_like(getattr(run, "id", None)) else None
+        rows.append({
+            "run_id": run_id,
+            "status": getattr(run, "status", None),
+            "created_at": _iso(getattr(run, "created_at", None)),
+            "started_at": _iso(getattr(run, "started_at", None)),
+            "completed_at": _iso(getattr(run, "completed_at", None)),
+            "failed_at": _iso(getattr(run, "failed_at", None)),
+            "canceled_at": _iso(getattr(run, "canceled_at", None)),
+            "status_changes": changes_by_run.get(run_id or -1, []),
+        })
+    return rows
+
+
+def _looks_like_file_path(path: Any) -> bool:
+    return isinstance(path, str) and bool(PurePath(path).suffix)
+
+
+def _add_int(values: set[int], value: Any) -> None:
+    if _is_int_like(value):
+        values.add(int(value))
 
 
 def _tool_trace(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -633,6 +1017,56 @@ def _trace_activity_export(snapshot: dict[str, Any]) -> dict[str, Any]:
             "uri": artifact.get("uri"),
         }))
 
+    cycles = snapshot.get("cycles") if isinstance(snapshot.get("cycles"), dict) else {}
+    for cycle in _safe_list(cycles.get("cycles")):
+        if not isinstance(cycle, dict):
+            continue
+        items.append(_cap_jsonable({
+            "kind": "cycle",
+            "at": cycle.get("updated_at") or cycle.get("created_at"),
+            "cycle_id": cycle.get("id"),
+            "title": cycle.get("name") or "cycle",
+            "status": cycle.get("last_status"),
+            "enabled": cycle.get("enabled"),
+            "schedule_expr": cycle.get("schedule_expr"),
+            "timezone": cycle.get("timezone"),
+            "next_run_at": cycle.get("next_run_at"),
+            "last_run_at": cycle.get("last_run_at"),
+            "last_error": cycle.get("last_error"),
+        }))
+    for cycle_run in _safe_list(cycles.get("cycle_runs")):
+        if not isinstance(cycle_run, dict):
+            continue
+        items.append(_cap_jsonable({
+            "kind": "cycle_run",
+            "at": cycle_run.get("created_at") or cycle_run.get("scheduled_for"),
+            "cycle_run_id": cycle_run.get("id"),
+            "cycle_id": cycle_run.get("cycle_id"),
+            "run_id": cycle_run.get("run_id"),
+            "title": f"cycle_run {cycle_run.get('status') or 'unknown'}",
+            "status": cycle_run.get("status"),
+            "scheduled_for": cycle_run.get("scheduled_for"),
+            "started_at": cycle_run.get("started_at"),
+            "completed_at": cycle_run.get("completed_at"),
+            "error": cycle_run.get("error"),
+            "skip_reason": cycle_run.get("skip_reason"),
+        }))
+
+    diagnostics = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else {}
+    for signal in _safe_list(diagnostics.get("delivery_signals")):
+        if not isinstance(signal, dict):
+            continue
+        items.append(_cap_jsonable({
+            "kind": "diagnostic",
+            "at": signal.get("at"),
+            "run_id": signal.get("run_id"),
+            "title": "delivery signal",
+            "source": signal.get("source"),
+            "tool_name": signal.get("tool_name"),
+            "status": signal.get("status"),
+            "signal": signal,
+        }))
+
     items.sort(key=lambda item: (
         "" if item.get("at") is None else str(item.get("at")),
         int(item.get("sequence_no") or 0),
@@ -666,13 +1100,14 @@ def _trace_export_readme(snapshot: dict[str, Any]) -> str:
         scope_note,
         "",
         "Files:",
-        "- trace.json: the full bounded trace snapshot, including thread messages, run metadata, events, tool calls, and artifacts.",
-        "- activity.json: a compact chronological list derived from trace.json.",
+        "- trace.json: the full bounded trace snapshot, including thread messages, run metadata, events, tool calls, artifacts, Cycle rows, CycleRun rows, and diagnostics.",
+        "- activity.json: a compact chronological list derived from trace.json, including Cycle/CycleRun and delivery diagnostic items.",
         "- manifest.json: export metadata.",
         "",
         "Notes:",
         "- Large strings and deep values may be truncated in place.",
         "- The export can include prompts, assistant output, tool arguments/results, and artifact metadata.",
+        "- Diagnostics highlight workspace roots, file-only resources, run status transitions, Cycle lifecycle state, and delivery/webhook failure signals.",
         "- This export is generated on demand and is not saved as a database artifact.",
         "",
         f"Trace ID: {snapshot.get('trace_id') or 'unknown'}",

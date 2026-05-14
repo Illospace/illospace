@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -20,7 +21,7 @@ from brain.systems.workspace_apps.actions import (
     WorkspaceAppActionContractError,
     WorkspaceAppActionError,
 )
-from brain.systems.user_domains.service import AsyncDomainService
+from brain.systems.user_domains.service import AsyncDomainService, DomainError
 
 
 GENERIC_HTTP_EXECUTOR_KEY = "generic.http"
@@ -241,30 +242,35 @@ async def _sync_items_to_domain(
         title_text = str(title).strip() if title is not None else None
 
         existing = existing_by_remote.get(str(remote_id)) if remote_id is not None else None
-        if existing is not None:
-            record = await service.update_record(
-                context.org_id,
-                domain_id,
-                existing.id,
-                data_patch=data,
-                title=title_text,
-                actor_id=context.user_id,
-                actor_kind="workspace_app_action",
-            )
-            updated += 1
-        else:
-            record = await service.create_record(
-                context.org_id,
-                domain_id,
-                object_key,
-                data=data,
-                title=title_text,
-                actor_id=context.user_id,
-                actor_kind="workspace_app_action",
-            )
-            created += 1
-            if remote_id_field and remote_id is not None:
-                existing_by_remote[str(remote_id)] = record
+        try:
+            if existing is not None:
+                record = await service.update_record(
+                    context.org_id,
+                    domain_id,
+                    existing.id,
+                    data_patch=data,
+                    title=title_text,
+                    actor_id=context.user_id,
+                    actor_kind="workspace_app_action",
+                )
+                updated += 1
+            else:
+                record = await service.create_record(
+                    context.org_id,
+                    domain_id,
+                    object_key,
+                    data=data,
+                    title=title_text,
+                    actor_id=context.user_id,
+                    actor_kind="workspace_app_action",
+                )
+                created += 1
+                if remote_id_field and remote_id is not None:
+                    existing_by_remote[str(remote_id)] = record
+        except DomainError as exc:
+            raise WorkspaceAppActionContractError(
+                f"connector_spec.sync produced invalid Domain data: {exc}"
+            ) from exc
         synced_records.append(await service.serialize_record(record))
 
     return {
@@ -319,11 +325,15 @@ def _mapped_value(expr: Any, item: Mapping[str, Any]) -> Any:
             return _extract_path(item, str(expr.get("path") or ""))
         if "template" in expr:
             return _render_template(str(expr.get("template") or ""), item)
+        if "now" in expr:
+            if expr.get("now") is True:
+                return _utc_now_iso()
+            raise WorkspaceAppActionContractError("mapping expression.now must be true")
         if "if" in expr:
             condition = _mapping(expr.get("if"), "mapping expression.if")
             branch = expr.get("then") if _condition_matches(condition, item) else expr.get("else")
             return _literal_or_mapped_value(branch, item)
-        raise WorkspaceAppActionContractError("mapping expressions must use const, path, template, or if/then/else")
+        raise WorkspaceAppActionContractError("mapping expressions must use const, path, template, now, or if/then/else")
     if expr is None:
         return None
     return _extract_path(item, str(expr))
@@ -400,6 +410,10 @@ def _render_template(template: str, payload: Mapping[str, Any]) -> str:
         return "" if value is None else str(value)
 
     return _TEMPLATE_RE.sub(replace, template)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _validate_url(url: str) -> None:

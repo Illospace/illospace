@@ -1080,6 +1080,8 @@ WORKSPACE_APP_TOOLS = [
                         "\"operations\":[\"schema\",\"list\",\"query\",\"create\",\"update\",\"archive\","
                         "\"aggregate\",\"bulkUpdate\",\"history\",\"listRelations\",\"createRelation\","
                         "\"archiveRelation\"]}}}} and access them with window.illo.domain('todos'). "
+                        "Domain binding operations are exact SDK method names; do not use capability labels "
+                        "such as read, write, or crud in manifest.data_plan.bindings.*.operations. "
                         "The app runtime exposes manifest-bound Domain CRUD, aggregate, bulkUpdate, "
                         "history, relation helpers, polling-backed subscribe, app state, and "
                         "window.illo.actions.run(actionKey, payload) for manifest-declared server-side actions. "

@@ -536,10 +536,13 @@ Constellation design contract.
      non-GET methods with `external.write`, and add `domain.write` only when
      `sync` mutates the Domain. Sync mappings may use plain string paths
      (`"title"`), `{ "path": "nested.id" }`, `{ "const": "Todo" }`,
-     `{ "template": "ISSUE-{number}" }`, or
+     `{ "template": "ISSUE-{number}" }`, `{ "now": true }` for the current
+     UTC ISO timestamp, or
      `{ "if": { "field": "completed", "equals": true }, "then": "Done",
-     "else": "Todo" }`. Use `deferred` only when the API cannot fit the
-     generic spec yet.
+     "else": "Todo" }`. Put only real Domain data fields in `sync.fields`;
+     use `sync.title` for the record title, and do not invent helper fields
+     that are not in the bound Domain object. Use `deferred` only when the API
+     cannot fit the generic spec yet.
    - Missing external credentials are not blockers for creating the app when
      the external action can be deferred. Do not call `vault_secret_prompt`
      before producing the requested app. Declare the deferred action, deliver
@@ -558,6 +561,9 @@ Constellation design contract.
 6. When using Domains, save a manifest with `data_plan.mode="domain"` and
    one binding per SDK alias. Each binding must include `domain_id` and
    `object_key`; include `domain_slug`, `fields`, and `operations` when known.
+   Domain binding `operations` are method names, not capability labels: use
+   exact values like `schema`, `list`, `get`, `query`, `create`, `update`, and
+   `archive`. Do not write `read`, `write`, or `crud` in the manifest.
 7. Save with `manage_workspace_app(action="create" | "update")`.
 8. Verify contract validation, rendered behavior, persistence, dark/light theme
    fit, and thumbnail facade before telling the user the app is done.

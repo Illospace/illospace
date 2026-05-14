@@ -114,6 +114,75 @@ test('drops duplicate tool activity prose when a structured tool call exists', (
   assert.equal(items[0].tool, 'exec_command');
 });
 
+test('drops persisted tool activity prose even when work log omits tool metadata', () => {
+  const items = runWorkTimelineItems({
+    work_log: [
+      {
+        time: '2026-05-03T22:00:01.000Z',
+        text: 'Using skill_asset: examples/domain-backed-app.md',
+        kind: 'run.activity',
+      },
+      { time: '2026-05-03T22:00:02.000Z', text: 'Using skill_asset', kind: 'run.tool_started' },
+    ],
+    tool_calls: [
+      {
+        tool: 'skill_asset',
+        args: '{"path":"examples/domain-backed-app.md"}',
+        at: '2026-05-03T22:00:02.000Z',
+        status: 'completed',
+      },
+    ],
+  });
+
+  assert.deepEqual(items.map((item) => item.kind), ['tool']);
+  assert.equal(items[0].tool, 'skill_asset');
+});
+
+test('compacts progressive reflection snippets into the latest thought', () => {
+  const items = runWorkTimelineItems({
+    work_log: [
+      {
+        time: '2026-05-03T22:00:01.000Z',
+        text: 'Assessing API usage guidelines',
+        kind: 'run.activity',
+      },
+      {
+        time: '2026-05-03T22:00:04.000Z',
+        text: 'Assessing API usage guidelines and checking whether the app can fetch public JSON directly',
+        kind: 'run.activity',
+      },
+    ],
+  });
+
+  assert.deepEqual(items.map((item) => item.kind), ['thought']);
+  assert.equal(
+    items[0].text,
+    'Assessing API usage guidelines and checking whether the app can fetch public JSON directly',
+  );
+});
+
+test('compacts adjacent duplicate tool rows with the same arguments', () => {
+  const items = runWorkTimelineItems({
+    tool_calls: [
+      {
+        tool: 'skill_asset',
+        args: '{"path":"examples/domain-backed-app.md"}',
+        at: '2026-05-03T22:00:01.000Z',
+        status: 'completed',
+      },
+      {
+        tool: 'skill_asset',
+        args: '{"path":"examples/domain-backed-app.md"}',
+        at: '2026-05-03T22:00:02.000Z',
+        status: 'completed',
+      },
+    ],
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].tool, 'skill_asset');
+});
+
 test('keeps the latest persisted activity when the trace is newest first', () => {
   const steps = runActivitySteps({
     activity_trace: [
