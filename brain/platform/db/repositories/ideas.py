@@ -40,7 +40,9 @@ IDEA_LIST_LOAD_COLUMNS = (
     Idea.archived_at,
     Idea.user_id,
     Idea.org_id,
+    Idea.active_agents,
     Idea.agent_details,
+    Idea.attachments,
 )
 
 

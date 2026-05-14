@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 
@@ -24,15 +25,16 @@ def test_start_runner_starts_configured_worker_pool(monkeypatch):
     entered = 0
     entered_lock = threading.Lock()
 
-    def fake_loop(_slot_stop_event=None):
+    async def fake_loop(_slot_stop_event=None):
         nonlocal entered
         with entered_lock:
             entered += 1
-        release.wait(timeout=1)
+        await asyncio.to_thread(release.wait, 1)
 
     runner.stop_runner()
     monkeypatch.setattr(runner, "_runner_concurrency", lambda: 3)
     monkeypatch.setattr(runner, "_loop", fake_loop)
+    monkeypatch.setattr(runner, "_reap_stale_runs_if_due_async", _noop_reap)
     try:
         runner.start_runner()
         for _ in range(100):
@@ -40,9 +42,7 @@ def test_start_runner_starts_configured_worker_pool(monkeypatch):
                 if entered == 3:
                     break
             time.sleep(0.01)
-        active_names = [thread.name for thread in runner._active_runner_threads()]
-        assert len(active_names) == 3
-        assert all(name.startswith("agent-runner-") for name in active_names)
+        assert runner._active_runner_count() == 3
         with entered_lock:
             assert entered == 3
     finally:
@@ -57,14 +57,15 @@ def test_stop_runner_can_drain_active_slots(monkeypatch):
     entered = threading.Event()
     finished = threading.Event()
 
-    def fake_loop(_slot_stop_event=None):
+    async def fake_loop(_slot_stop_event=None):
         entered.set()
-        release.wait(timeout=1)
+        await asyncio.to_thread(release.wait, 1)
         finished.set()
 
     runner.stop_runner()
     monkeypatch.setattr(runner, "_runner_concurrency", lambda: 1)
     monkeypatch.setattr(runner, "_loop", fake_loop)
+    monkeypatch.setattr(runner, "_reap_stale_runs_if_due_async", _noop_reap)
     try:
         runner.start_runner()
         assert entered.wait(timeout=1)
@@ -79,3 +80,35 @@ def test_stop_runner_can_drain_active_slots(monkeypatch):
     finally:
         release.set()
         runner.stop_runner()
+
+
+def test_runner_pool_uses_one_event_loop(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    loops: list[int] = []
+    release = threading.Event()
+
+    async def fake_loop(_slot_stop_event=None):
+        loops.append(id(asyncio.get_running_loop()))
+        await asyncio.to_thread(release.wait, 1)
+
+    runner.stop_runner()
+    monkeypatch.setattr(runner, "_runner_concurrency", lambda: 3)
+    monkeypatch.setattr(runner, "_loop", fake_loop)
+    monkeypatch.setattr(runner, "_reap_stale_runs_if_due_async", _noop_reap)
+    try:
+        runner.start_runner()
+        for _ in range(100):
+            if len(loops) == 3:
+                break
+            time.sleep(0.01)
+    finally:
+        release.set()
+        runner.stop_runner()
+
+    assert len(loops) == 3
+    assert len(set(loops)) == 1
+
+
+async def _noop_reap(**_kwargs):
+    return 0
