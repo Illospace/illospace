@@ -344,6 +344,7 @@ class WorkerManager:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=5,
             )
         except Exception:
             return []
@@ -376,6 +377,7 @@ class WorkerManager:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=5,
             )
         except Exception:
             return []
