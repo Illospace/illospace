@@ -9,8 +9,8 @@ from fastapi import APIRouter, Depends, Header, Request, Response
 from starlette.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.app.api.db_utils import run_db
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.external_agent_db import run_external_agent_db
 from brain.app.api.routers.agent_bridge import (
     _bearer_token,
     _broadcast_thread_result,
@@ -225,7 +225,7 @@ async def require_mcp_principal(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    return await run_db(db, _auth)
+    return await run_external_agent_db(db, _auth)
 
 
 def _list_tools(principal: external_agents.AgentBridgePrincipal) -> list[dict[str, Any]]:
@@ -406,7 +406,7 @@ async def _handle_mcp_request(
             raise_external_agent_http_error(exc)
 
     try:
-        tool_payload = await run_db(db, _call)
+        tool_payload = await run_external_agent_db(db, _call)
         if spec.get("mutates_thread"):
             await _commit_for_live_fanout(db)
             await _broadcast_thread_result(tool_payload, org_id=principal.org_id)

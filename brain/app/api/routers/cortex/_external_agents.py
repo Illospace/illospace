@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
-from brain.app.api.db_utils import run_db
 from brain.app.api.deps import get_db
+from brain.app.api.external_agent_db import run_external_agent_db
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.api.routers.cortex._router import router
 from brain.app.api.routers.ws import ws_manager
@@ -51,7 +51,7 @@ async def create_cortex_external_agent_task(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    result = await run_db(db, _create)
+    result = await run_external_agent_db(db, _create)
     await db.commit()
     thread_message = result.get("thread_message") if isinstance(result, dict) else None
     if isinstance(thread_message, dict):
@@ -93,4 +93,4 @@ async def list_cortex_external_agent_tasks(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    return await run_db(db, _list)
+    return await run_external_agent_db(db, _list)

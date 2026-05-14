@@ -14,7 +14,6 @@ from starlette.responses import JSONResponse
 
 from brain.app.api.config import CORS_ORIGINS, SECRET_KEY, validate_auth_config
 from brain.app.api.deps import get_db
-from brain.app.api.db_utils import run_db
 
 validate_auth_config()
 
@@ -337,12 +336,9 @@ app.include_router(notifications_router)
 async def health(db: AsyncSession = Depends(get_db)):
     from brain.app.ops.health import compatibility_health_snapshot
 
-    return await run_db(
-        db,
-        lambda sync_db: compatibility_health_snapshot(
-            consumer_running=_run_event_consumer_running(),
-            session=sync_db,
-        )
+    return await compatibility_health_snapshot(
+        consumer_running=_run_event_consumer_running(),
+        session=db,
     )
 
 

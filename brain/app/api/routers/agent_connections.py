@@ -9,8 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import require_org_context
-from brain.app.api.db_utils import run_db
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.external_agent_db import run_external_agent_db
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.api.schemas.external_agents import (
     ExternalAgentConnectionCreate,
@@ -50,7 +50,7 @@ async def list_agent_connections(
             )
         ]
 
-    return await run_db(db, _list)
+    return await run_external_agent_db(db, _list)
 
 
 @router.post("", response_model=ExternalAgentConnectionRead, status_code=201)
@@ -81,7 +81,7 @@ async def create_agent_connection(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    return await run_db(db, _create)
+    return await run_external_agent_db(db, _create)
 
 
 @router.post("/{connection_id}/tokens", response_model=ExternalAgentTokenRead, status_code=201)
@@ -119,7 +119,7 @@ async def mint_agent_connection_token(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    return await run_db(db, _mint)
+    return await run_external_agent_db(db, _mint)
 
 
 @router.post("/{connection_id}/test")
@@ -149,4 +149,4 @@ async def mark_agent_connection_tested(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    return await run_db(db, _test)
+    return await run_external_agent_db(db, _test)

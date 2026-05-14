@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
-from brain.platform.db.models.agent_run import AgentRunRow
+from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.external_agent import (
     ExternalAgentConnectionRow,
     ExternalAgentConnectionTokenRow,
@@ -28,9 +28,10 @@ from brain.platform.db.models.notification import (
 )
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.notifications import NotificationEventRepository
-from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
+from brain.systems.runs.domain import AgentRunEvent, AgentRunRequest, EventVisibility, RunProfile, RunRecipe
+from brain.systems.runs.events import run_event
+from brain.systems.runs.ids import trace_id_for_run_id
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
-from brain.systems.runs.store import AgentRunStore
 
 
 TOKEN_PREFIX = "illo_conn_"
@@ -1195,6 +1196,87 @@ def _headless_prompt(question: str, context: Mapping[str, Any] | None) -> str:
     )
 
 
+def _dialect_name(session: Session) -> str:
+    bind = session.get_bind()
+    return str(getattr(getattr(bind, "dialect", None), "name", "") or "")
+
+
+def _append_run_event(session: Session, event: AgentRunEvent) -> AgentRunEventRow:
+    if _dialect_name(session) == "postgresql":
+        session.execute(text("SELECT pg_advisory_xact_lock(:run_id)"), {"run_id": int(event.run_id)})
+    sequence_no = event.sequence_no
+    if sequence_no is None:
+        sequence_no = int(
+            session.scalar(
+                select(func.coalesce(func.max(AgentRunEventRow.sequence_no), 0)).where(
+                    AgentRunEventRow.run_id == int(event.run_id)
+                )
+            )
+            or 0
+        ) + 1
+    row = AgentRunEventRow(
+        run_id=int(event.run_id),
+        root_run_id=event.root_run_id or event.run_id,
+        sequence_no=sequence_no,
+        event_type=event.event_type,
+        payload=dict(event.payload or {}),
+        producer=event.producer,
+        visibility=event.visibility.value if isinstance(event.visibility, EventVisibility) else str(event.visibility),
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _create_agent_run(session: Session, request: AgentRunRequest) -> AgentRunRow:
+    profile = request.normalized_profile
+    recipe = request.normalized_recipe
+    row = AgentRunRow(
+        org_id=request.org_id,
+        user_id=request.user_id,
+        thread_id=request.thread_id,
+        parent_run_id=request.parent_run_id,
+        root_run_id=request.root_run_id,
+        profile=profile.value,
+        recipe=recipe.value,
+        status=RunStatus.QUEUED.value,
+        input_message=request.message,
+        target_ref=dict(request.target_ref or {}),
+        workspace_ref=dict(request.workspace_ref or {}),
+        model_policy=dict(request.model_policy or {}),
+        metadata_=dict(request.metadata or {}),
+    )
+    session.add(row)
+    session.flush()
+    row.trace_id = trace_id_for_run_id(row.id)
+    if row.root_run_id is None:
+        row.root_run_id = row.id
+    session.flush()
+    _append_run_event(
+        session,
+        run_event(
+            int(row.id),
+            "run.created",
+            {"profile": profile.value, "recipe": recipe.value},
+            root_run_id=int(row.root_run_id),
+        ),
+    )
+    return row
+
+
+def _latest_run_artifact_text(session: Session, run_id: int) -> str:
+    row = session.scalars(
+        select(AgentRunArtifactRow)
+        .where(
+            AgentRunArtifactRow.run_id == int(run_id),
+            AgentRunArtifactRow.artifact_type == "final_answer",
+        )
+        .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())
+        .limit(1)
+    ).first()
+    return str(getattr(row, "text", None) or "") if row is not None else ""
+
+
 def create_headless_ask(
     session: Session,
     principal: AgentBridgePrincipal,
@@ -1219,7 +1301,8 @@ def create_headless_ask(
     )
     session.add(task)
     session.flush()
-    run = AgentRunStore(session).create_run(
+    run = _create_agent_run(
+        session,
         AgentRunRequest(
             org_id=principal.org_id,
             user_id=principal.owner_user_id,
@@ -1249,7 +1332,7 @@ def create_headless_ask(
                     ],
                 },
             },
-        )
+        ),
     )
     task.illo_run_id = int(run.id)
     task.status = "submitted"
@@ -1279,7 +1362,7 @@ def get_headless_ask(
     run_status = None
     if run is not None:
         run_status = coerce_run_status(run.status)
-        answer = AgentRunStore(session).latest_artifact_text(int(run.id))
+        answer = _latest_run_artifact_text(session, int(run.id))
         if run_status in TERMINAL_RUN_STATUSES:
             if run_status == RunStatus.COMPLETED:
                 task.status = "completed"

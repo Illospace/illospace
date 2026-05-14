@@ -7,8 +7,8 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.app.api.db_utils import run_db
 from brain.app.api.deps import get_db, rate_limit
+from brain.app.api.external_agent_db import run_external_agent_db
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.api.routers.ws import ws_manager
 from brain.app.api.schemas.external_agents import (
@@ -62,7 +62,7 @@ def require_bridge_scope(required_scope: str) -> Callable[..., Any]:
             except Exception as exc:
                 raise_external_agent_http_error(exc)
 
-        return await run_db(db, _auth)
+        return await run_external_agent_db(db, _auth)
 
     return _dependency
 
@@ -160,7 +160,7 @@ async def heartbeat(
         )
         return {"ok": True, "connection": external_agents.serialize_connection(connection)}
 
-    return await run_db(db, _heartbeat)
+    return await run_external_agent_db(db, _heartbeat)
 
 
 @router.post("/tasks/claim")
@@ -175,7 +175,7 @@ async def claim_tasks(
         rows = external_agents.claim_tasks(sync_db, principal, max_tasks=payload.max_tasks)
         return {"tasks": [external_agents.serialize_task(row) for row in rows]}
 
-    return await run_db(db, _claim)
+    return await run_external_agent_db(db, _claim)
 
 
 @router.get("/tasks/{task_id}")
@@ -198,7 +198,7 @@ async def get_task(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    return await run_db(db, _get)
+    return await run_external_agent_db(db, _get)
 
 
 @router.post("/tasks/{task_id}/events")
@@ -226,7 +226,7 @@ async def append_task_event(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    return await run_db(db, _event)
+    return await run_external_agent_db(db, _event)
 
 
 @router.post("/tasks/{task_id}/artifacts")
@@ -257,7 +257,7 @@ async def append_task_artifact(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    return await run_db(db, _artifact)
+    return await run_external_agent_db(db, _artifact)
 
 
 @router.post("/tasks/{task_id}/complete")
@@ -286,7 +286,7 @@ async def complete_task(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    result = await run_db(db, _complete)
+    result = await run_external_agent_db(db, _complete)
     await _commit_for_live_fanout(db)
     await _broadcast_thread_result(result, org_id=principal.org_id)
     return result
@@ -317,7 +317,7 @@ async def fail_task(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    result = await run_db(db, _fail)
+    result = await run_external_agent_db(db, _fail)
     await _commit_for_live_fanout(db)
     await _broadcast_thread_result(result, org_id=principal.org_id)
     return result
@@ -331,7 +331,7 @@ async def bridge_search_workspace(
         require_bridge_scope(external_agents.SCOPE_WORKSPACE_READ)
     ),
 ):
-    return await run_db(
+    return await run_external_agent_db(
         db,
         lambda sync_db: external_agents.search_workspace(
             sync_db,
@@ -357,7 +357,7 @@ async def bridge_get_thread(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    return await run_db(db, _get)
+    return await run_external_agent_db(db, _get)
 
 
 @router.get("/workspace/team-members")
@@ -367,7 +367,7 @@ async def bridge_get_team_members(
         require_bridge_scope(external_agents.SCOPE_WORKSPACE_READ)
     ),
 ):
-    return await run_db(db, lambda sync_db: external_agents.get_team_members(sync_db, principal))
+    return await run_external_agent_db(db, lambda sync_db: external_agents.get_team_members(sync_db, principal))
 
 
 @router.post("/illo/ask", status_code=202)
@@ -388,7 +388,7 @@ async def ask_illo(
         )
         return external_agents.serialize_task(task, include_events=True, session=sync_db)
 
-    return await run_db(db, _ask)
+    return await run_external_agent_db(db, _ask)
 
 
 @router.get("/illo/ask/{ask_id}")
@@ -405,7 +405,7 @@ async def get_illo_ask(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    return await run_db(db, _get)
+    return await run_external_agent_db(db, _get)
 
 
 @router.post("/illo/threads", status_code=201)
@@ -444,7 +444,7 @@ async def create_illo_thread(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    result = await run_db(db, _create)
+    result = await run_external_agent_db(db, _create)
     await _commit_for_live_fanout(db)
     idea = result.get("idea") if isinstance(result, dict) else None
     if isinstance(idea, dict):
@@ -494,7 +494,7 @@ async def post_illo_thread_message(
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
-    result = await run_db(db, _post)
+    result = await run_external_agent_db(db, _post)
     await _commit_for_live_fanout(db)
     await _broadcast_thread_result(result, org_id=principal.org_id)
     return result
