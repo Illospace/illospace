@@ -36,7 +36,6 @@ from typing import Callable
 
 from brain.platform.integrations.llm import (
     async_resolve_llm_client,
-    resolve_llm_client,
     _degrade_betas,
 )
 from brain.platform.async_io import run_blocking
@@ -47,7 +46,6 @@ from brain.platform.providers.model_policy import (
     async_get_model_for_tier,
     infer_provider_from_model,
     normalize_model_tier,
-    resolve_default_provider,
 )
 from brain.systems.runs.introspection import required_introspection_tool as resolve_required_introspection_tool
 from brain.systems.runs.direct_loop.final_reply import (
@@ -92,7 +90,6 @@ from brain.systems.runs.direct_loop.context_recovery import (
     is_context_overflow_error,
 )
 from brain.systems.runs.direct_loop.retry import (
-    api_call_with_retry as _runtime_api_call_with_retry,
     async_api_call_with_retry as _runtime_async_api_call_with_retry,
 )
 from brain.systems.runs.direct_loop.session_effects import (
@@ -101,7 +98,6 @@ from brain.systems.runs.direct_loop.session_effects import (
 from brain.systems.runs.direct_loop.state import AgentLoopState
 from brain.systems.runs.direct_loop.streaming import (
     async_streaming_call as _runtime_async_streaming_call,
-    streaming_call as _runtime_streaming_call,
 )
 from brain.systems.runs.execution_context import (
     bind_agent_context,
@@ -113,13 +109,9 @@ from brain.systems.runs.direct_loop.telemetry import (
 from brain.systems.runs.direct_loop.tool_execution import (
     PendingToolCall as _PendingToolCall,
     ResolvedToolCall as _ResolvedToolCall,
-    emit_resolved_tool_call as _runtime_emit_resolved_tool_call,
-    execute_parallel_tool_batch as _runtime_execute_parallel_tool_batch,
     async_execute_tool_calls as _runtime_async_execute_tool_calls,
-    execute_tool_calls as _runtime_execute_tool_calls,
     invoke_tool_handler as _runtime_invoke_tool_handler,
     resolve_tool_call as _runtime_resolve_tool_call,
-    run_tool_awaitable as _runtime_run_tool_awaitable,
 )
 from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
 from brain.systems import sessions as _session_store
@@ -379,7 +371,6 @@ def review_candidate_final_reply(
         model=model,
         session_id=session_id,
         normalize_model=_normalize_model,
-        init_llm=_init_llm,
         build_request=_build_api_request,
         extract_text=_extract_text,
         content_to_dicts=_content_to_dicts,
@@ -412,40 +403,6 @@ def review_final_reply_once(
         agent_context=_agent_context,
         review_candidate=review_candidate_final_reply,
     )
-
-
-def _init_llm(
-    user_id: str | None,
-    session_id: str,
-    model: str,
-    *,
-    org_id: str | None = None,
-    resolved_llm=None,
-):
-    """Resolve LLM client, provider, and extra headers."""
-    if resolved_llm is None:
-        default_provider = resolve_default_provider(user_id=user_id, org_id=org_id)
-        requested_provider = infer_provider_from_model(model, default=default_provider)
-        llm = resolve_llm_client(
-            user_id=user_id,
-            org_id=org_id,
-            provider=requested_provider,
-            auth_mode=_required_openai_auth_mode(model) if requested_provider == "openai" else None,
-        )
-    else:
-        llm = resolved_llm
-    provider = get_provider(llm.provider, llm.client)
-    extra_headers = llm.build_request_headers(session_id=session_id)
-    logger.info(
-        "Agent %s: provider=%s, source=%s, auth_mode=%s, token=%s…, oauth=%s",
-        session_id,
-        llm.provider,
-        llm.source,
-        getattr(llm, "auth_mode", None),
-        llm.token_prefix,
-        llm.is_oauth,
-    )
-    return llm, provider, extra_headers
 
 
 async def _maybe_await(value):
@@ -918,45 +875,6 @@ def _prepare_thread_startup_context(
     return active_messages, effective_handoff
 
 
-def _update_thread_handoff_after_run(
-    *,
-    session_id: str,
-    archive_messages: list[dict],
-    previous_handoff: dict | None,
-    semantic_compactor=None,
-    run_id: int | None = None,
-    user_id: str | None = None,
-    save_session_handoff: Callable[..., None] | None = None,
-) -> dict | None:
-    """Incrementally summarize the raw archive for the next persistent run."""
-    from brain.systems.context.thread_handoff import ThreadHandoff, build_thread_handoff
-
-    previous = ThreadHandoff.from_payload(previous_handoff)
-    previous_count = min(previous.message_count if previous else 0, len(archive_messages))
-    messages_since = archive_messages[previous_count:]
-    if not messages_since and previous_handoff:
-        return previous_handoff
-    handoff, fallback_error = build_thread_handoff(
-        previous_handoff=previous,
-        messages_since=messages_since,
-        total_message_count=len(archive_messages),
-        session_id=session_id,
-        semantic_compactor=semantic_compactor,
-        run_id=run_id,
-    )
-    payload = handoff.to_payload()
-    (save_session_handoff or globals()["_save_session_handoff"])(session_id, payload, user_id=user_id)
-    if fallback_error:
-        logger.debug("Agent %s: post-run handoff fallback used: %s", session_id, fallback_error)
-    logger.info(
-        "Agent %s: updated durable thread handoff through %d raw messages (source=%s)",
-        session_id,
-        handoff.message_count,
-        handoff.source,
-    )
-    return payload
-
-
 async def _update_thread_handoff_after_run_async(
     *,
     session_id: str,
@@ -1260,33 +1178,6 @@ def _tool_is_available(tools: list[dict] | None, tool_name: str | None) -> bool:
 _API_RETRY_DELAYS = (2, 5, 10)
 
 
-def _api_call_with_retry(
-    provider, request: LLMRequest, llm, cancel_event, on_stream_activity, on_stream_delta,
-    session_id: str, turn: int, tokens: _TokenAccumulator,
-    start_time: float, tool_calls_made: list[str], _call_start: float,
-):
-    """Make API call with retry on 500s. Returns (response, extra_headers) or AgentResult on cancel."""
-    return _runtime_api_call_with_retry(
-        provider,
-        request,
-        llm,
-        cancel_event,
-        on_stream_activity,
-        on_stream_delta,
-        session_id=session_id,
-        turn=turn,
-        tokens=tokens,
-        start_time=start_time,
-        tool_calls_made=tool_calls_made,
-        call_start=_call_start,
-        retry_delays=_API_RETRY_DELAYS,
-        streaming_call=_runtime_streaming_call,
-        make_cancelled_result=_make_result,
-        degrade_betas=_degrade_betas,
-        is_cancelled_result=lambda response: isinstance(response, AgentResult),
-    )
-
-
 async def _api_call_with_retry_async(
     provider, request: LLMRequest, llm, cancel_event, on_stream_activity, on_stream_delta,
     session_id: str, turn: int, tokens: _TokenAccumulator,
@@ -1314,32 +1205,7 @@ async def _api_call_with_retry_async(
     )
 
 
-def _streaming_call(
-    provider, request, cancel_event, on_stream_activity, on_stream_delta,
-    session_id, tokens, start_time, tool_calls_made, _call_start,
-):
-    """Handle streaming API call with cancellation support. Returns response or AgentResult."""
-    return _runtime_streaming_call(
-        provider,
-        request,
-        cancel_event,
-        on_stream_activity,
-        on_stream_delta,
-        session_id=session_id,
-        tokens=tokens,
-        start_time=start_time,
-        tool_calls_made=tool_calls_made,
-        call_start=_call_start,
-        make_cancelled_result=_make_result,
-    )
-
-
 # ── Tool Execution ───────────────────────────────────────────
-
-
-def _run_tool_awaitable(result):
-    """Resolve sync or async tool handler outputs in the sync agent loop."""
-    return _runtime_run_tool_awaitable(result)
 
 
 def _invoke_tool_handler(handler: Callable, tool_input: dict, threadlocal_context: dict | None = None):
@@ -1362,79 +1228,6 @@ def _resolve_tool_call(
         request,
         agent_context=_agent_context,
         threadlocal_context=threadlocal_context,
-    )
-
-
-def _emit_resolved_tool_call(
-    resolved: _ResolvedToolCall,
-    tool_results: list[dict],
-    on_tool_call,
-    run_id,
-    idea_id,
-    tool_call_source: str,
-) -> None:
-    """Append tool_result content and record side effects in block order."""
-    _runtime_emit_resolved_tool_call(
-        resolved,
-        tool_results,
-        on_tool_call,
-        run_id,
-        idea_id,
-        tool_call_source,
-    )
-
-
-def _execute_parallel_tool_batch(
-    pending: list[_PendingToolCall],
-    tool_results: list[dict],
-    on_tool_call,
-    run_id,
-    idea_id,
-    tool_call_source: str,
-) -> None:
-    """Run a batch of independent tool calls concurrently while preserving output order."""
-    _runtime_execute_parallel_tool_batch(
-        pending,
-        tool_results,
-        on_tool_call,
-        run_id,
-        idea_id,
-        tool_call_source,
-        agent_context=_agent_context,
-        max_parallel_tool_calls=_MAX_PARALLEL_TOOL_CALLS,
-    )
-
-
-def _tool_supports_parallel_batch(tool_name: str) -> bool:
-    """Return True when a tool can be safely co-scheduled with peer calls."""
-    return tool_name in _PARALLEL_SAFE_TOOL_NAMES
-
-
-def _execute_tool_calls(
-    response, tool_handlers: dict, tool_calls_made: list[str],
-    gates: _GateState,
-    on_tool_call, run_id, idea_id, tool_call_source: str,
-    *,
-    max_parallel_tool_calls: int = _MAX_PARALLEL_TOOL_CALLS,
-) -> list[dict]:
-    """Execute all tool calls from a response. Returns tool_results list."""
-    return _runtime_execute_tool_calls(
-        response,
-        tool_handlers,
-        tool_calls_made,
-        gates,
-        on_tool_call,
-        run_id,
-        idea_id,
-        tool_call_source,
-        agent_context=_agent_context,
-        brain_tool_names=_BRAIN_TOOL_NAMES,
-        gated_tool_names=_GATED_TOOL_NAMES,
-        research_tool_names=_RESEARCH_TOOL_NAMES,
-        research_budget=_RESEARCH_BUDGET,
-        parallel_safe_tool_names=_PARALLEL_SAFE_TOOL_NAMES,
-        max_parallel_tool_calls=max(1, int(max_parallel_tool_calls)),
-        check_gate_violations=_runtime_check_gate_violations,
     )
 
 
@@ -1464,39 +1257,6 @@ async def _execute_tool_calls_async(
         max_parallel_tool_calls=max(1, int(max_parallel_tool_calls)),
         check_gate_violations=_runtime_check_gate_violations,
     )
-
-
-def _append_live_guidance(
-    messages: list[dict],
-    live_guidance_loader: Callable[[], list[str]] | None,
-    *,
-    session_id: str,
-    on_stream_activity: Callable[[str], None] | None = None,
-) -> int:
-    """Append user guidance that arrived while the agent was already working."""
-    if live_guidance_loader is None:
-        return 0
-    try:
-        guidance_items = live_guidance_loader() or []
-    except Exception:
-        logger.debug("Agent %s: live guidance loader failed", session_id, exc_info=True)
-        return 0
-    clean_items = [str(item).strip() for item in guidance_items if str(item or "").strip()]
-    if not clean_items:
-        return 0
-    content = (
-        "[Live user guidance received while you were working]\n"
-        "Use this to adjust the current run. Preserve useful progress; do not restart unless the user explicitly asks.\n\n"
-        + "\n\n".join(clean_items)
-    )
-    messages.append({"role": "user", "content": content})
-    if on_stream_activity:
-        try:
-            on_stream_activity("Received live user guidance")
-        except Exception:
-            pass
-    logger.info("Agent %s: appended %d live guidance item(s)", session_id, len(clean_items))
-    return len(clean_items)
 
 
 # ── The Agent Loop ───────────────────────────────────────────

@@ -288,8 +288,7 @@ def test_run_agent_retries_once_after_context_overflow_with_checkpoint(monkeypat
         build_request_headers=lambda **_kwargs: {},
     )
 
-    with patch("brain.systems.runs.direct_agent.resolve_default_provider", return_value="anthropic"), \
-         patch("brain.systems.runs.direct_agent.async_resolve_llm_client", return_value=llm), \
+    with patch("brain.systems.runs.direct_agent.async_resolve_llm_client", return_value=llm), \
          patch("brain.systems.runs.direct_agent._load_session", return_value=(session_messages, None)), \
          patch("brain.systems.runs.direct_agent._load_session_handoff", return_value=stored_handoff.to_payload()), \
          patch("brain.systems.runs.direct_agent._save_session"), \
@@ -375,8 +374,7 @@ def test_run_agent_uses_thread_handoff_but_persists_raw_archive(monkeypatch):
         build_request_headers=lambda **_kwargs: {},
     )
 
-    with patch("brain.systems.runs.direct_agent.resolve_default_provider", return_value="anthropic"), \
-         patch("brain.systems.runs.direct_agent.async_resolve_llm_client", return_value=llm), \
+    with patch("brain.systems.runs.direct_agent.async_resolve_llm_client", return_value=llm), \
          patch("brain.systems.runs.direct_agent._load_session", return_value=(session_messages, None)), \
          patch("brain.systems.runs.direct_agent._load_session_handoff", return_value=stored_handoff.to_payload()), \
          patch("brain.systems.runs.direct_agent._save_session") as save_session, \

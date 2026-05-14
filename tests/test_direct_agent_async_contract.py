@@ -145,11 +145,8 @@ def test_sync_run_agent_edge_uses_async_auth_resolver(monkeypatch):
     async def async_resolve_llm_client(**_kwargs):
         return _FakeLLM()
 
-    def resolve_llm_client(**_kwargs):
-        raise AssertionError("sync run_agent must not use sync LLM auth resolution")
-
+    assert not hasattr(direct_agent, "resolve_llm_client")
     monkeypatch.setattr(direct_agent, "async_resolve_llm_client", async_resolve_llm_client)
-    monkeypatch.setattr(direct_agent, "resolve_llm_client", resolve_llm_client)
     monkeypatch.setattr(direct_agent, "get_provider", lambda *_args, **_kwargs: FakeProvider())
 
     result = direct_agent.run_agent(

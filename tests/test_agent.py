@@ -73,10 +73,10 @@ class TestModelNormalization:
 
 
 class TestProviderInference:
-    @patch("brain.systems.runs.direct_agent.get_provider")
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_loop.final_reply_checker.get_provider")
+    @patch("brain.systems.runs.direct_loop.final_reply_checker.resolve_llm_client")
     def test_init_llm_uses_provider_from_model_prefix(self, mock_resolve, mock_get_provider):
-        from brain.systems.runs.direct_agent import _init_llm
+        from brain.systems.runs.direct_loop.final_reply_checker import _init_llm
 
         llm = MagicMock()
         llm.provider = "openai"
@@ -93,10 +93,10 @@ class TestProviderInference:
 
         assert mock_resolve.call_args.kwargs["provider"] == "openai"
 
-    @patch("brain.systems.runs.direct_agent.get_provider")
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_loop.final_reply_checker.get_provider")
+    @patch("brain.systems.runs.direct_loop.final_reply_checker.resolve_llm_client")
     def test_init_llm_requires_chatgpt_auth_for_gpt_5_5(self, mock_resolve, mock_get_provider):
-        from brain.systems.runs.direct_agent import _init_llm
+        from brain.systems.runs.direct_loop.final_reply_checker import _init_llm
 
         llm = MagicMock()
         llm.provider = "openai"
@@ -114,36 +114,14 @@ class TestProviderInference:
         assert mock_resolve.call_args.kwargs["provider"] == "openai"
         assert mock_resolve.call_args.kwargs["auth_mode"] == "chatgpt"
 
-    @patch("brain.systems.runs.direct_agent.get_provider")
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
-    def test_init_llm_reuses_pre_resolved_client(self, mock_resolve, mock_get_provider):
-        from brain.systems.runs.direct_agent import _init_llm
-
-        llm = SimpleNamespace(
-            provider="openai",
-            client=object(),
-            source="user_default",
-            auth_mode="chatgpt",
-            token_prefix="access-token",
-            is_oauth=False,
-            build_request_headers=MagicMock(return_value={}),
-        )
-        mock_get_provider.return_value = MagicMock()
-
-        _init_llm("user-1", "sess-1", "openai/gpt-5.5", resolved_llm=llm)
-
-        mock_resolve.assert_not_called()
-        mock_get_provider.assert_called_once_with("openai", llm.client)
-
-
 class TestLiveGuidance:
-    def test_append_live_guidance_adds_user_message(self):
-        from brain.systems.runs.direct_agent import _append_live_guidance
+    async def test_append_live_guidance_adds_user_message(self):
+        from brain.systems.runs.direct_agent import _append_live_guidance_async
 
         messages = [{"role": "user", "content": "Original task"}]
         seen_activity = []
 
-        count = _append_live_guidance(
+        count = await _append_live_guidance_async(
             messages,
             lambda: ["Please keep the current approach, but check the tests too."],
             session_id="live-guidance-test",
@@ -559,8 +537,8 @@ class TestAgentLoop:
         assert result.tokens_input == 1000
         assert result.tokens_output == 200
 
-    def test_repeated_brain_encode_is_rejected(self):
-        from brain.systems.runs.direct_agent import _execute_tool_calls, _GateState
+    async def test_repeated_brain_encode_is_rejected(self):
+        from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState
 
         block = MagicMock()
         block.type = "tool_use"
@@ -574,7 +552,7 @@ class TestAgentLoop:
         tool_calls_made = ["brain_encode"]
         handler = MagicMock(return_value={"ok": True})
 
-        results = _execute_tool_calls(
+        results = await _execute_tool_calls_async(
             response,
             {"brain_encode": handler},
             tool_calls_made,
@@ -589,8 +567,8 @@ class TestAgentLoop:
         assert results[0]["is_error"] is True
         assert "already ran" in results[0]["content"]
 
-    def test_failed_brain_encode_is_marked_non_retryable(self):
-        from brain.systems.runs.direct_agent import _execute_tool_calls, _GateState
+    async def test_failed_brain_encode_is_marked_non_retryable(self):
+        from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState
 
         block = MagicMock()
         block.type = "tool_use"
@@ -603,7 +581,7 @@ class TestAgentLoop:
 
         handler = MagicMock(return_value={"error": "embedding worker unavailable"})
 
-        results = _execute_tool_calls(
+        results = await _execute_tool_calls_async(
             response,
             {"brain_encode": handler},
             [],
@@ -728,8 +706,8 @@ class TestAgentLoop:
             "payload": {"query": "beta"},
         }
 
-    def test_parallel_safe_tool_batch_propagates_agent_context(self):
-        from brain.systems.runs.direct_agent import _execute_tool_calls, _GateState, _agent_context
+    async def test_parallel_safe_tool_batch_propagates_agent_context(self):
+        from brain.systems.runs.direct_agent import _execute_tool_calls_async, _GateState, _agent_context
 
         block = MagicMock()
         block.type = "tool_use"
@@ -750,7 +728,7 @@ class TestAgentLoop:
                     "worker_name": getattr(_agent_context, "worker_name", None),
                 }
 
-            results = _execute_tool_calls(
+            results = await _execute_tool_calls_async(
                 response,
                 {"read_file": handler},
                 [],
@@ -1432,8 +1410,8 @@ class TestExecToolHandlers:
 
 
 class TestFinalReplyReview:
-    @patch("brain.systems.runs.direct_agent.get_provider")
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_loop.final_reply_checker.get_provider")
+    @patch("brain.systems.runs.direct_loop.final_reply_checker.resolve_llm_client")
     def test_checker_reviews_partial_reply_with_llm(self, mock_client, mock_get_provider):
         from brain.systems.runs.direct_agent import review_candidate_final_reply
 
@@ -1474,8 +1452,8 @@ class TestFinalReplyReview:
         mock_client.assert_called_once()
         provider.create.assert_called_once()
 
-    @patch("brain.systems.runs.direct_agent.get_provider")
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_loop.final_reply_checker.get_provider")
+    @patch("brain.systems.runs.direct_loop.final_reply_checker.resolve_llm_client")
     def test_checker_adds_session_header_for_chatgpt_auth(self, mock_client, mock_get_provider):
         from brain.systems.runs.direct_agent import review_candidate_final_reply
 
@@ -1514,8 +1492,8 @@ class TestFinalReplyReview:
         request = provider.create.call_args.args[0]
         assert request.extra_headers["session_id"] == "sess-123:final-reply-checker"
 
-    @patch("brain.systems.runs.direct_agent.get_provider")
-    @patch("brain.systems.runs.direct_agent.resolve_llm_client")
+    @patch("brain.systems.runs.direct_loop.final_reply_checker.get_provider")
+    @patch("brain.systems.runs.direct_loop.final_reply_checker.resolve_llm_client")
     def test_checker_caps_long_session_header_for_chatgpt_auth(self, mock_client, mock_get_provider):
         from brain.platform.integrations.openai_cache import normalize_openai_session_id
         from brain.systems.runs.direct_agent import review_candidate_final_reply
