@@ -8,6 +8,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 
+import httpx
+
 T = TypeVar("T")
 
 
@@ -92,3 +94,61 @@ async def check_output(
 
 async def popen(args: Sequence[str | Path], **kwargs: Any) -> subprocess.Popen[Any]:
     return await run_blocking(subprocess.Popen, args, **kwargs)
+
+
+def run_subprocess_sync(
+    args: Sequence[str | Path],
+    *,
+    timeout: float | None = None,
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[Any]:
+    return subprocess.run(args, timeout=timeout, **kwargs)
+
+
+def check_output_sync(
+    args: Sequence[str | Path],
+    *,
+    timeout: float | None = None,
+    **kwargs: Any,
+) -> bytes | str:
+    return subprocess.check_output(args, timeout=timeout, **kwargs)
+
+
+def popen_sync(args: Sequence[str | Path], **kwargs: Any) -> subprocess.Popen[Any]:
+    return subprocess.Popen(args, **kwargs)
+
+
+def sync_http_client(**kwargs: Any) -> httpx.Client:
+    return httpx.Client(**kwargs)
+
+
+def async_http_client(**kwargs: Any) -> httpx.AsyncClient:
+    return httpx.AsyncClient(**kwargs)
+
+
+def http_get(url: str, *, timeout: float | httpx.Timeout | None = None, **kwargs: Any) -> httpx.Response:
+    return httpx.get(url, timeout=timeout, **kwargs)
+
+
+def http_post(url: str, *, timeout: float | httpx.Timeout | None = None, **kwargs: Any) -> httpx.Response:
+    return httpx.post(url, timeout=timeout, **kwargs)
+
+
+async def async_http_get(
+    url: str,
+    *,
+    timeout: float | httpx.Timeout | None = None,
+    **kwargs: Any,
+) -> httpx.Response:
+    async with async_http_client(timeout=timeout) as client:
+        return await client.get(url, **kwargs)
+
+
+async def async_http_post(
+    url: str,
+    *,
+    timeout: float | httpx.Timeout | None = None,
+    **kwargs: Any,
+) -> httpx.Response:
+    async with async_http_client(timeout=timeout) as client:
+        return await client.post(url, **kwargs)

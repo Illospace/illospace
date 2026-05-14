@@ -11,11 +11,12 @@ import subprocess
 import tempfile
 from typing import Any
 
+from brain.platform.async_io import check_output_sync, run_subprocess_sync
+from brain.platform.db.models.run import AgentRun
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.project_context.github import parse_github_repo_slug
 from brain.systems.cortex.project_context.permissions import derive_project_permission_scope
 from brain.systems.cortex.project_context.snapshot import snapshot_from_project_context
-from brain.platform.db.models.run import AgentRun
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.vault import get_secret, list_secrets
 
 
@@ -187,7 +188,7 @@ def _safe_repo_destination(root: Path, slug: str) -> Path:
 
 def _git_output(cwd: Path, *args: str) -> str | None:
     try:
-        return subprocess.check_output(
+        return check_output_sync(
             ["git", *args],
             cwd=str(cwd),
             text=True,
@@ -286,7 +287,7 @@ def _clone_github_repo(
             command.extend([f"https://github.com/{slug}.git", str(destination)])
             if destination.exists():
                 shutil.rmtree(destination, ignore_errors=True)
-            proc = subprocess.run(
+            proc = run_subprocess_sync(
                 command,
                 capture_output=True,
                 text=True,

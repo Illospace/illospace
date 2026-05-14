@@ -18,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 
-import httpx
+from brain.platform.async_io import http_post, run_subprocess_sync
 
 logger = logging.getLogger("brain.systems.auth")
 
@@ -58,7 +58,7 @@ def _read_keychain_credentials() -> dict | None:
     if platform.system() != "Darwin":
         return None
     try:
-        result = subprocess.run(
+        result = run_subprocess_sync(
             ["security", "find-generic-password",
              "-s", "Claude Code-credentials", "-w"],
             capture_output=True, text=True, timeout=5,
@@ -121,7 +121,7 @@ def _parse_oauth(data: dict) -> dict | None:
 
 def _refresh_token(refresh_token: str) -> dict:
     """Refresh an expired OAuth token via Anthropic's token endpoint."""
-    resp = httpx.post(
+    resp = http_post(
         _TOKEN_URL,
         json={
             "grant_type": "refresh_token",
@@ -148,7 +148,7 @@ def _save_oauth_credentials(creds: dict) -> None:
     # Try macOS keychain first
     if platform.system() == "Darwin":
         try:
-            result = subprocess.run(
+            result = run_subprocess_sync(
                 ["security", "find-generic-password",
                  "-s", "Claude Code-credentials", "-w"],
                 capture_output=True, text=True, timeout=5,
@@ -160,7 +160,7 @@ def _save_oauth_credentials(creds: dict) -> None:
                 oauth["refreshToken"] = creds["refresh"]
                 oauth["expiresAt"] = creds["expires"]
                 data["claudeAiOauth"] = oauth
-                subprocess.run(
+                run_subprocess_sync(
                     ["security", "add-generic-password", "-U",
                      "-s", "Claude Code-credentials",
                      "-a", "Claude Code",
