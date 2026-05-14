@@ -26,7 +26,6 @@
     pinVisuals,
     appVisuals,
     blobVisuals,
-    panelOpen,
     semanticZoomLevel,
     themeMode,
     movingPinId,
@@ -66,7 +65,6 @@
     pinVisuals: PrimitivePinVisual[];
     appVisuals: PrimitiveAppVisual[];
     blobVisuals: PrimitiveBlobVisual[];
-    panelOpen: boolean;
     semanticZoomLevel: SemanticZoomLevel;
     themeMode: CortexThemeMode;
     movingPinId: string | null;
@@ -137,7 +135,7 @@
       semanticLevel={semanticZoomLevel}
       activity={astre.activity}
       presence={astre.presence}
-      animated={!panelOpen}
+      animated={true}
       interactive={true}
       archivedCount={astre.archivedCount}
       className={astreClass(astre)}
@@ -207,7 +205,7 @@
     treatment={blob.treatment}
     icon={blob.icon}
     attachmentCount={blob.attachmentCount}
-    animated={!panelOpen}
+    animated={true}
     interactive={true}
     dataId={blob.id}
     activate={() => activateBlob(blob)}

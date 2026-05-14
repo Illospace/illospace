@@ -322,7 +322,7 @@
     if (oauthState && data.status === 'success' && !data.state) return;
 
     if (data.status === 'callback' && data.callback) {
-      await completeOpenAI(data.callback);
+      captureManualCallback(data.callback);
       return;
     }
 
@@ -342,6 +342,16 @@
         detail: data.detail || 'Start the sign-in again.',
       };
     }
+  }
+
+  function captureManualCallback(callback: string) {
+    oauthCallback = callback.trim();
+    status = 'missing';
+    notice = {
+      tone: 'info',
+      title: 'Callback URL captured.',
+      detail: 'Press Finish to complete OpenAI sign-in.',
+    };
   }
 
   async function confirmOpenAIConnection() {

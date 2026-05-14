@@ -1429,10 +1429,6 @@
     opacity: 1;
   }
 
-  .panel-open .cortex-main :global(*) {
-    animation-play-state: paused !important;
-  }
-
   .loading-overlay {
     position: absolute;
     inset: 0;

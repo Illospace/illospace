@@ -12,11 +12,10 @@
     const state = callbackState();
     try {
       await api.exchangeRuntimeOpenAIOAuth({ callback: window.location.href });
-      const introUrl = await cortexIntroUrl();
       status = 'success';
-      message = 'ChatGPT / Codex connected. Opening Cortex...';
+      message = 'ChatGPT / Codex connected. Return to Illospace to continue.';
       notifySystem({ status: 'success', state });
-      scheduleCompletion(introUrl);
+      schedulePopupClose();
     } catch (err: any) {
       status = 'error';
       message = err?.detail || err?.message || 'Failed to finish ChatGPT / Codex login.';
@@ -51,17 +50,13 @@
     }
   }
 
-  async function cortexIntroUrl() {
-    const params = new URLSearchParams({ onboarding: 'runtime-ready' });
-    return `/cortex?${params.toString()}`;
-  }
-
-  function scheduleCompletion(returnUrl: string) {
+  function schedulePopupClose() {
     window.setTimeout(() => {
-      window.close();
-      window.setTimeout(() => {
-        window.location.assign(returnUrl);
-      }, 250);
+      try {
+        window.close();
+      } catch {
+        // Some browsers keep manually opened callback tabs visible.
+      }
     }, 900);
   }
 </script>
