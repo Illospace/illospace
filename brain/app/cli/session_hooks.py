@@ -54,7 +54,7 @@ async def get_cross_channel_context(
         allow_global=allow_global,
     )
     vis_clause, vis_params = memory_visibility_sql(visibility_context, alias="")
-    params = {"hours_interval": f"{hours} hours", "limit": limit, **vis_params}
+    params = {"hours": hours, "limit": limit, **vis_params}
 
     async with UnitOfWork() as uow:
         if current_session:
@@ -63,7 +63,7 @@ async def get_cross_channel_context(
                 SELECT id, content, memory_type, salience, source_session,
                        source, created_at, tags
                 FROM memories
-                WHERE created_at >= NOW() - INTERVAL :hours_interval
+                WHERE created_at >= NOW() - (CAST(:hours AS integer) * INTERVAL '1 hour')
                   AND source_session IS NOT NULL
                   AND source_session != :current_session
                   AND NOT archived
@@ -77,7 +77,7 @@ async def get_cross_channel_context(
                 SELECT id, content, memory_type, salience, source_session,
                        source, created_at, tags
                 FROM memories
-                WHERE created_at >= NOW() - INTERVAL :hours_interval
+                WHERE created_at >= NOW() - (CAST(:hours AS integer) * INTERVAL '1 hour')
                   AND source_session IS NOT NULL
                   AND NOT archived
                   AND superseded_by IS NULL

@@ -9,7 +9,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.schema import CreateTable
 
 from brain.kernel import config
@@ -29,6 +29,7 @@ from brain.platform.db.models.notification import (
     NotificationEvent,
 )
 from brain.platform.db.models.org import Org, User
+from tests.db_engine_utils import create_async_test_engine
 
 ORG_ID = "00000000-0000-4000-8000-000000000001"
 USER_1_ID = "00000000-0000-4000-8000-000000000101"
@@ -167,7 +168,7 @@ def _build_request_as(async_session: AsyncSession) -> Callable[..., Awaitable[Re
 @pytest_asyncio.fixture
 async def notification_db_session() -> AsyncIterator[AsyncSession]:
     schema = _schema_name()
-    engine = create_async_engine(config.DB_URL)
+    engine = create_async_test_engine(config.DB_URL)
     try:
         admin_conn = await engine.connect()
     except (OSError, SQLAlchemyError) as exc:

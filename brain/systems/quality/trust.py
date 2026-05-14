@@ -130,6 +130,6 @@ async def _count_recent_failures() -> int:
     async with UnitOfWork() as uow:
         row = (await uow.session.execute(text("""
             SELECT COUNT(*) as cnt FROM violation_log
-            WHERE session_date >= CURRENT_DATE - INTERVAL :days
-        """), {"days": f"{DEGRADE_WINDOW_DAYS} days"})).mappings().first()
+            WHERE session_date >= CURRENT_DATE - (CAST(:days AS integer) * INTERVAL '1 day')
+        """), {"days": DEGRADE_WINDOW_DAYS})).mappings().first()
         return row["cnt"] if row else 0

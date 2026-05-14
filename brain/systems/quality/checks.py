@@ -105,13 +105,13 @@ async def check_duplicate(
             FROM memories
             WHERE NOT archived
             AND semantic_embedding IS NOT NULL
-            AND created_at > NOW() - INTERVAL :window
+            AND created_at > NOW() - (CAST(:window_days AS integer) * INTERVAL '1 day')
             {vis_clause}
             ORDER BY semantic_embedding <=> CAST(:emb AS vector)
             LIMIT 1
         """.format(vis_clause=vis_clause)), {
             "emb": emb_str,
-            "window": f"{window_days} days",
+            "window_days": window_days,
             **vis_params,
         })).first()
 

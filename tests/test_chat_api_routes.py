@@ -10,7 +10,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.schema import CreateTable
 
 from brain.kernel import config
@@ -29,6 +29,7 @@ from brain.platform.db.models.chat import (
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.notification import NotificationEvent
 from brain.platform.db.models.org import Org, User
+from tests.db_engine_utils import create_async_test_engine
 
 pytestmark = pytest.mark.requires_db
 
@@ -110,7 +111,7 @@ async def _user_context(session: AsyncSession, user_id: str) -> dict[str, str]:
 @pytest_asyncio.fixture
 async def chat_db_session() -> AsyncIterator[AsyncSession]:
     schema = _schema_name()
-    engine = create_async_engine(config.DB_URL)
+    engine = create_async_test_engine(config.DB_URL)
     try:
         admin_conn = await engine.connect()
     except (OSError, SQLAlchemyError) as exc:

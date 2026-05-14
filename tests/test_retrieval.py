@@ -72,8 +72,9 @@ class TestMarkRelevant:
 class TestGetRetrievalStats:
     """Test retrieval statistics."""
 
-    async def test_returns_expected_keys(self, rollback_db):
-        stats = await get_retrieval_stats()
+    async def test_returns_expected_keys(self, db_session, unit_of_work_for_session):
+        with patch("brain.systems.memory.retrieval.UnitOfWork", unit_of_work_for_session):
+            stats = await get_retrieval_stats()
         assert "total" in stats
         assert "with_feedback" in stats
         assert "hits" in stats
@@ -81,8 +82,9 @@ class TestGetRetrievalStats:
         assert "hit_rate" in stats
         assert "avg_top_score" in stats
 
-    async def test_stats_are_numeric(self, rollback_db):
-        stats = await get_retrieval_stats()
+    async def test_stats_are_numeric(self, db_session, unit_of_work_for_session):
+        with patch("brain.systems.memory.retrieval.UnitOfWork", unit_of_work_for_session):
+            stats = await get_retrieval_stats()
         assert isinstance(stats["total"], int)
         assert isinstance(stats["hit_rate"], float)
         assert 0 <= stats["hit_rate"] <= 1

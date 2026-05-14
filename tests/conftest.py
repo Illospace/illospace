@@ -8,6 +8,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.schema import CreateTable
 
+from tests.db_engine_utils import create_async_test_engine
+
 # Ensure the repository package is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
 
@@ -120,11 +122,9 @@ class _RollbackCursor:
 @pytest.fixture(scope="session")
 async def db_engine():
     """Async SQLAlchemy engine connected to Docker test Postgres. Session-scoped."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
     if not TEST_DB_URL:
         pytest.skip("TEST_DB_URL not set")
-    engine = create_async_engine(_async_test_db_url(TEST_DB_URL), echo=False)
+    engine = create_async_test_engine(TEST_DB_URL)
     try:
         yield engine
     finally:
@@ -164,19 +164,6 @@ def allow_asgi_test_host_for_dev_auth_fallback(monkeypatch):
 
 TEST_DB_URL = os.environ.get("TEST_DB_URL")
 
-
-def _async_test_db_url(url: str) -> str:
-    if url.startswith("postgresql+asyncpg://"):
-        return url
-    if url.startswith("postgresql://"):
-        return "postgresql+asyncpg://" + url.removeprefix("postgresql://")
-    if url.startswith("postgres://"):
-        return "postgresql+asyncpg://" + url.removeprefix("postgres://")
-    if url.startswith("sqlite+aiosqlite://"):
-        return url
-    if url.startswith("sqlite://"):
-        return "sqlite+aiosqlite://" + url.removeprefix("sqlite://")
-    return url
 
 requires_db = pytest.mark.skipif(
     not TEST_DB_URL,
