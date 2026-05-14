@@ -27,6 +27,7 @@ from brain.systems.cortex.resources.telemetry import (
 )
 from brain.platform.db.models.resource_pool import BrowserPoolEntry, WorkspacePoolEntry
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.async_io import remove_tree
 
 logger = logging.getLogger(__name__)
 
@@ -610,7 +611,7 @@ class ResourcePoolManager:
 
     async def _destroy_workspace_entry(self, entry: WorkspacePoolEntry, reason: str) -> None:
         try:
-            shutil.rmtree(entry.base_path, ignore_errors=True)
+            await remove_tree(entry.base_path, ignore_errors=True)
         except Exception:
             pass
         try:

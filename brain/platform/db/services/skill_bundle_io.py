@@ -18,6 +18,7 @@ from brain.platform.db.models.skill_bundle import (
 )
 from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
 from brain.platform.db.repositories.skills import SkillRepository
+from brain.platform.async_io import ensure_dir, write_text
 from brain.systems.skills.bundles import (
     ASSET_KINDS,
     MAX_INLINE_TEXT_BYTES,
@@ -371,7 +372,7 @@ class AsyncSkillBundleIOService(_SkillBundleIOBase):
     ) -> ParsedSkillBundle:
         skill = await self._skills.a_get_by_name_or_raise(skill_name)
         root = Path(target_dir)
-        root.mkdir(parents=True, exist_ok=True)
+        await ensure_dir(root)
 
         semver = version or f"0.0.{skill.version or 1}"
         manifest = {
@@ -404,8 +405,8 @@ class AsyncSkillBundleIOService(_SkillBundleIOBase):
             },
         }
 
-        (root / "skill.toml").write_text(_to_toml(manifest), encoding="utf-8")
-        (root / SKILL_FILENAME).write_text(skill.procedure, encoding="utf-8")
+        await write_text(root / "skill.toml", _to_toml(manifest), encoding="utf-8")
+        await write_text(root / SKILL_FILENAME, skill.procedure, encoding="utf-8")
         return load_skill_bundle(root)
 
     async def _load_package_rows(

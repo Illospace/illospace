@@ -13,7 +13,6 @@ Run nightly via cron or manually:
 
 import argparse
 import asyncio
-import glob
 import json
 import os
 import re
@@ -26,6 +25,12 @@ from sqlalchemy import text
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))  # repo root
 import brain.kernel.config as config
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.async_io import (
+    glob_paths,
+    path_exists,
+    read_text as read_text_async,
+    write_text as write_text_async,
+)
 from brain.systems.memory.embeddings import (
     embed_document, embed_batch, embed_query,
     vec_to_pg,
@@ -67,14 +72,14 @@ async def phase_consolidation(target_date: date, org_id: str | None = None):
 
         # 1. Check for daily log
         daily_file = os.path.join(MEMORY_DIR, f"{target_date.isoformat()}.md")
-        if os.path.exists(daily_file):
+        if await path_exists(daily_file):
             print(f"[consolidate] Processing {daily_file}")
             memories_created += await import_daily_log(uow, daily_file, target_date)
         else:
             print(f"[consolidate] No daily log for {target_date}")
 
         # 2. Import domain files if they've changed
-        for md_file in glob.glob(os.path.join(MEMORY_DIR, "*.md")):
+        for md_file in await glob_paths(MEMORY_DIR, "*.md"):
             basename = os.path.basename(md_file)
             if re.match(r'\d{4}-\d{2}-\d{2}\.md', basename):
                 continue
@@ -134,8 +139,7 @@ async def phase_consolidation(target_date: date, org_id: str | None = None):
 
 async def import_daily_log(uow, filepath: str, log_date: date) -> int:
     """Import sections from a daily log into compressed memory nodes."""
-    with open(filepath) as f:
-        content = f.read()
+    content = await read_text_async(filepath)
 
     # Check if already imported
     source_tag = f"import:{os.path.basename(filepath)}"[:50]
@@ -184,8 +188,7 @@ async def import_daily_log(uow, filepath: str, log_date: date) -> int:
 
 async def import_domain_file(uow, filepath: str) -> int:
     """Import a domain knowledge file (architecture.md, lessons.md, etc.)."""
-    with open(filepath) as f:
-        content = f.read()
+    content = await read_text_async(filepath)
 
     filename = os.path.basename(filepath)
     source_tag = f"import:{filename}"[:50]
@@ -564,8 +567,7 @@ async def generate_index(output_path: str = None) -> str:
     index_text = "\n".join(lines)
 
     if output_path:
-        with open(output_path, 'w') as f:
-            f.write(index_text)
+        await write_text_async(output_path, index_text)
         print(f"[index] Written to {output_path}")
 
     return index_text

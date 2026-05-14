@@ -100,22 +100,22 @@ async def test_flush_ops_snapshot_broadcasts_scoped_snapshot_per_org():
     )
 
 
-def test_product_event_publish_drops_unscoped_product_event(monkeypatch):
+@pytest.mark.asyncio
+async def test_product_event_publish_drops_unscoped_product_event(monkeypatch):
     ws_manager = MagicMock()
     ws_manager.broadcast_product_event = AsyncMock(return_value=False)
     ws_manager.broadcast = AsyncMock()
-    loop = asyncio.new_event_loop()
+    loop = asyncio.get_running_loop()
     monkeypatch.setattr(api_main, "_main_loop", loop)
 
-    try:
-        with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
-            "brain.systems.cortex.events.resolve_event_org_id_async",
-            AsyncMock(return_value=None),
-        ):
-            api_main._schedule_product_event_publish("browser_session_frame", {"session_id": "session-1"})
-    finally:
-        loop.close()
-        monkeypatch.setattr(api_main, "_main_loop", None)
+    with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
+        "brain.systems.cortex.events.resolve_event_org_id_async",
+        AsyncMock(return_value=None),
+    ):
+        api_main._schedule_product_event_publish("browser_session_frame", {"session_id": "session-1"})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    monkeypatch.setattr(api_main, "_main_loop", None)
 
     ws_manager.broadcast_product_event.assert_awaited_once_with(
         "browser_session_frame",
@@ -126,23 +126,23 @@ def test_product_event_publish_drops_unscoped_product_event(monkeypatch):
     ws_manager.broadcast.assert_not_called()
 
 
-def test_product_event_publish_resolves_org_scope_before_fanout(monkeypatch):
+@pytest.mark.asyncio
+async def test_product_event_publish_resolves_org_scope_before_fanout(monkeypatch):
     ws_manager = MagicMock()
     ws_manager.broadcast_product_event = AsyncMock(return_value=True)
     resolve_org = AsyncMock(return_value="org-1")
 
-    loop = asyncio.new_event_loop()
+    loop = asyncio.get_running_loop()
     monkeypatch.setattr(api_main, "_main_loop", loop)
 
-    try:
-        with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
-            "brain.systems.cortex.events.resolve_event_org_id_async",
-            resolve_org,
-        ):
-            api_main._schedule_product_event_publish("browser_session_frame", {"idea_id": "idea-1"})
-    finally:
-        loop.close()
-        monkeypatch.setattr(api_main, "_main_loop", None)
+    with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
+        "brain.systems.cortex.events.resolve_event_org_id_async",
+        resolve_org,
+    ):
+        api_main._schedule_product_event_publish("browser_session_frame", {"idea_id": "idea-1"})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    monkeypatch.setattr(api_main, "_main_loop", None)
 
     ws_manager.broadcast_product_event.assert_awaited_once_with(
         "browser_session_frame",

@@ -80,9 +80,34 @@ def main(coro):
     matches = list(metrics.ast_matches(path, "brain/jobs/http.py", "jobs"))
     categories = [match.category for match in matches]
 
-    assert categories.count("sync_http_client_refs") == 3
+    assert categories.count("sync_io_edge_refs") == 3
     assert categories.count("asyncio_run_inner_refs") == 1
     assert categories.count("outer_async_runner_refs") == 1
+
+
+def test_metric_keeps_cancel_token_sync_boundary_narrow(tmp_path):
+    metrics = _load_metrics_module()
+    path = tmp_path / "runner.py"
+    path.write_text(
+        '''
+import asyncio
+
+class RunCancelToken:
+    def is_set(self):
+        return asyncio.run(self.a_is_set())
+
+class OtherToken:
+    def is_set(self):
+        return asyncio.run(self.a_is_set())
+''',
+        encoding="utf-8",
+    )
+
+    matches = list(metrics.ast_matches(path, "brain/systems/runs/cancel.py", "systems"))
+    categories = [match.category for match in matches]
+
+    assert categories.count("outer_async_runner_refs") == 1
+    assert categories.count("asyncio_run_inner_refs") == 1
 
 
 def test_metric_ignores_true_edges_and_isolated_sync_boundaries(tmp_path):
@@ -119,12 +144,20 @@ def test_metric_summary_separates_debt_from_isolated_boundaries():
             line_number=10,
             category="sync_http_client_refs",
             scope="api",
-            in_async_function=False,
+            in_async_function=True,
             line="requests.get(url)",
         ),
         metrics.Match(
             path="brain/app/api/routes.py",
             line_number=11,
+            category="sync_io_edge_refs",
+            scope="api",
+            in_async_function=False,
+            line="httpx.Client()",
+        ),
+        metrics.Match(
+            path="brain/app/api/routes.py",
+            line_number=12,
             category="isolated_sync_boundary_refs",
             scope="api",
             in_async_function=True,
@@ -137,4 +170,6 @@ def test_metric_summary_separates_debt_from_isolated_boundaries():
     assert summary["metrics"]["production_async_io_debt"] == 1
     assert summary["metrics"]["api_async_io_debt"] == 1
     assert summary["metrics"]["isolated_sync_boundary_refs"] == 1
+    assert summary["metrics"]["sync_io_edge_refs"] == 1
     assert summary["informational"]["isolated_sync_boundary_refs"] == 1
+    assert summary["informational"]["sync_io_edge_refs"] == 1

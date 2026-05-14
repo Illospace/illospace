@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))  # repo root
 import brain.kernel.config as config
+from brain.platform.async_io import write_text as write_text_async
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 WORKSPACE = str(config.WORKSPACE_ROOT)
 MEMORY_DIR = str(config.JOURNAL_DIR)  # illo-brain/journal/ — standalone
@@ -49,12 +50,14 @@ async def sync_lessons():
         lines.append(f"- **[#{mid} s:{salience} {date_str}]** {short}\n")
 
     path = os.path.join(MEMORY_DIR, "lessons.md")
-    with open(path, 'w') as f:
-        f.write('\n'.join(lines))
+    await write_text_async(path, '\n'.join(lines))
     print(f"Synced {len(rows)} lessons → {path}")
 
 
-
-if __name__ == '__main__':
+def main() -> None:
     asyncio.run(sync_lessons())
     print("Brain → files sync complete.")
+
+
+if __name__ == '__main__':
+    main()

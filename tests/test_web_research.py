@@ -25,31 +25,33 @@ class _FakeClient:
         self.response = response
         self.calls = []
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    def get(self, url, **kwargs):
+    async def get(self, url, **kwargs):
         self.calls.append(("get", url, kwargs))
         return self.response
 
-    def post(self, url, **kwargs):
+    async def post(self, url, **kwargs):
         self.calls.append(("post", url, kwargs))
         return self.response
 
 
-def test_web_fetch_blocks_private_hosts(monkeypatch):
+@pytest.mark.asyncio
+async def test_web_fetch_blocks_private_hosts(monkeypatch):
     from brain.app.web.research import WebResearchError, web_fetch
 
     monkeypatch.setattr("brain.app.web.research.socket.getaddrinfo", lambda host, port: [(None, None, None, None, ("127.0.0.1", 0))])
 
     with pytest.raises(WebResearchError, match="Blocked private or local host"):
-        web_fetch("http://localhost:8000")
+        await web_fetch("http://localhost:8000")
 
 
-def test_web_fetch_extracts_readable_text(monkeypatch):
+@pytest.mark.asyncio
+async def test_web_fetch_extracts_readable_text(monkeypatch):
     from brain.app.web.research import web_fetch
 
     html = """
@@ -67,14 +69,15 @@ def test_web_fetch_extracts_readable_text(monkeypatch):
     monkeypatch.setattr("brain.app.web.research._assert_safe_url", lambda url: url)
     monkeypatch.setattr("brain.app.web.research._http_client", lambda: _FakeClient(_FakeResponse(text=html)))
 
-    result = web_fetch("https://example.com/post", extract_mode="text", max_chars=5000)
+    result = await web_fetch("https://example.com/post", extract_mode="text", max_chars=5000)
 
     assert result["title"] in {"Test Article", "Headline", "Test Article Headline"}
     assert "First paragraph." in result["content"]
     assert result["final_url"] == "https://example.com"
 
 
-def test_web_search_uses_provider_and_caches(monkeypatch):
+@pytest.mark.asyncio
+async def test_web_search_uses_provider_and_caches(monkeypatch):
     from brain.app.web.research import _search_cache, web_search
 
     _search_cache.clear()
@@ -91,8 +94,8 @@ def test_web_search_uses_provider_and_caches(monkeypatch):
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
     monkeypatch.setattr("brain.app.web.research._http_client", lambda: client)
 
-    first = web_search("illo brain", provider="brave", limit=2)
-    second = web_search("illo brain", provider="brave", limit=2)
+    first = await web_search("illo brain", provider="brave", limit=2)
+    second = await web_search("illo brain", provider="brave", limit=2)
 
     assert first["provider"] == "brave"
     assert first["results"][0]["title"] == "Result A"
@@ -101,7 +104,8 @@ def test_web_search_uses_provider_and_caches(monkeypatch):
     assert len(client.calls) == 1
 
 
-def test_web_search_auto_skips_empty_provider_without_caching(monkeypatch):
+@pytest.mark.asyncio
+async def test_web_search_auto_skips_empty_provider_without_caching(monkeypatch):
     from brain.app.web.research import WebResearchError, _search_cache, web_search
 
     _search_cache.clear()
@@ -110,13 +114,13 @@ def test_web_search_auto_skips_empty_provider_without_caching(monkeypatch):
     monkeypatch.setattr("brain.app.web.research._duckduckgo_lite_search", lambda query, limit: {"provider": "duckduckgo-lite", "results": []})
 
     with pytest.raises(WebResearchError, match="No results returned"):
-        web_search("illo unstable", provider="auto", limit=1)
+        await web_search("illo unstable", provider="auto", limit=1)
 
     monkeypatch.setattr(
         "brain.app.web.research._duckduckgo_lite_search",
         lambda query, limit: {"provider": "duckduckgo-lite", "results": [{"title": "Now", "url": "https://now.test", "snippet": None}]},
     )
-    result = web_search("illo unstable", provider="auto", limit=1)
+    result = await web_search("illo unstable", provider="auto", limit=1)
 
     assert result["count"] == 1
     assert result["provider"] == "duckduckgo-lite"
@@ -124,7 +128,8 @@ def test_web_search_auto_skips_empty_provider_without_caching(monkeypatch):
     assert any(item["provider"] == "tavily" for item in result["provider_errors"])
 
 
-def test_duckduckgo_lite_normalizes_redirect_urls(monkeypatch):
+@pytest.mark.asyncio
+async def test_duckduckgo_lite_normalizes_redirect_urls(monkeypatch):
     from brain.app.web.research import _duckduckgo_lite_search
 
     html = """
@@ -134,7 +139,7 @@ def test_duckduckgo_lite_normalizes_redirect_urls(monkeypatch):
     """
     monkeypatch.setattr("brain.app.web.research._http_client", lambda: _FakeClient(_FakeResponse(text=html)))
 
-    result = _duckduckgo_lite_search("target", 1)
+    result = await _duckduckgo_lite_search("target", 1)
 
     assert result["results"] == [{
         "title": "Target title",

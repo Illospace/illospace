@@ -124,8 +124,9 @@ def _schedule_on_main_loop(coro, done_callback=None) -> bool:
         coro.close()
         return False
     if not _main_loop.is_running():
-        _main_loop.run_until_complete(coro)
-        return True
+        coro.close()
+        logger.warning("main_loop_not_running_for_scheduled_coroutine")
+        return False
 
     def _create_task() -> None:
         task = _main_loop.create_task(coro)
@@ -199,7 +200,7 @@ async def lifespan(app):
     set_publisher(_schedule_product_event_publish)
     await _ensure_starting_skill_bundle()
     if _should_start_run_event_consumer():
-        _run_event_consumer_task = asyncio.create_task(_run_event_consumer_loop())
+        _run_event_consumer_task = _main_loop.create_task(_run_event_consumer_loop())
         logger.info("run_event_consumer_started")
     else:
         logger.info("run_event_consumer_skipped", mode="disabled")

@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel import config as cfg
+from brain.platform.async_io import ensure_dir, run_blocking, write_text
 from brain.platform.db.models.agent_run import AgentRunRow
 
 from .schemas import RuntimeUpdateRead
@@ -64,7 +65,7 @@ async def async_start_runtime_update(
         raise HTTPException(status_code=409, detail=detail or "Illospace self-update is unavailable.")
 
     state_dir = _state_dir(root)
-    state_dir.mkdir(parents=True, exist_ok=True)
+    await ensure_dir(state_dir)
     existing = await async_get_runtime_update_status(session)
     if existing.status == "running":
         return RuntimeUpdateRead(
@@ -96,8 +97,10 @@ async def async_start_runtime_update(
         if requested_by:
             env["ILLO_SELF_UPDATE_REQUESTED_BY"] = requested_by
 
-        with log_path.open("ab") as handle:
-            process = subprocess.Popen(
+        handle = await run_blocking(log_path.open, "ab")
+        try:
+            process = await run_blocking(
+                subprocess.Popen,
                 command,
                 cwd=str(root),
                 stdin=subprocess.DEVNULL,
@@ -107,6 +110,8 @@ async def async_start_runtime_update(
                 start_new_session=True,
                 env=env,
             )
+        finally:
+            await run_blocking(handle.close)
 
         metadata = {
             "pid": process.pid,
@@ -114,8 +119,8 @@ async def async_start_runtime_update(
             "requested_by": requested_by,
             "root": str(root),
         }
-        (state_dir / _META_NAME).write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-        (state_dir / _PID_NAME).write_text(f"{process.pid}\n", encoding="utf-8")
+        await write_text(state_dir / _META_NAME, json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        await write_text(state_dir / _PID_NAME, f"{process.pid}\n", encoding="utf-8")
 
         active_runs = await _async_active_agent_run_count(session)
         detail = "Illospace update started."

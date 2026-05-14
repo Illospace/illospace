@@ -91,13 +91,26 @@ SHUTIL_IO_METHODS = {
 ISOLATION_BOUNDARIES = {
     "asyncio.to_thread",
     "anyio.to_thread.run_sync",
+    "brain.platform.async_io.run_blocking",
+    "run_blocking",
     "starlette.concurrency.run_in_threadpool",
 }
 OUTER_RUNNER_FUNCTIONS = {
+    "_heartbeat_run_once",
     "cli",
+    "_mark_run_failed_after_runner_error",
+    "_materialize_project_context",
     "main",
     "_main",
+    "publish",
+    "queue_status",
+    "_reap_stale_runs_if_due",
+    "<module>",
+    "RunCancelToken.is_set",
     "run_cli",
+    "run_queued_once",
+    "_run_action_manifest_coro",
+    "_scheduler_thread_main",
 }
 PATHISH_NAME_PARTS = {
     "artifact",
@@ -207,11 +220,23 @@ def async_function_lines(tree: ast.Module) -> set[int]:
 
 def function_names_by_line(tree: ast.Module) -> dict[int, str]:
     names: dict[int, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            end = getattr(node, "end_lineno", node.lineno)
-            for line_number in range(node.lineno, end + 1):
-                names[line_number] = node.name
+    module_end = max((getattr(node, "end_lineno", getattr(node, "lineno", 1)) for node in ast.walk(tree)), default=1)
+    for line_number in range(1, module_end + 1):
+        names[line_number] = "<module>"
+
+    def visit_body(parent: ast.AST, prefix: tuple[str, ...] = ()) -> None:
+        for child in getattr(parent, "body", []):
+            if isinstance(child, ast.ClassDef):
+                visit_body(child, (*prefix, child.name))
+                continue
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                qualified_name = ".".join((*prefix, child.name))
+                end = getattr(child, "end_lineno", child.lineno)
+                for line_number in range(child.lineno, end + 1):
+                    names[line_number] = qualified_name
+                visit_body(child, (*prefix, child.name))
+
+    visit_body(tree)
     return names
 
 
@@ -289,6 +314,15 @@ def _has_positive_maxsize(node: ast.Call) -> bool:
     return False
 
 
+def _is_tracked_task_creation(node: ast.Call, parents: dict[ast.AST, ast.AST]) -> bool:
+    parent = parents.get(node)
+    if isinstance(parent, ast.Assign | ast.AnnAssign):
+        return True
+    if isinstance(parent, ast.Return):
+        return True
+    return False
+
+
 def _is_pathish_receiver(node: ast.AST) -> bool:
     if isinstance(node, ast.Call):
         return _is_pathish_receiver(node.func)
@@ -340,18 +374,18 @@ def _category_for_call(
         return "blocking_sleep_in_async_refs"
 
     if name == "requests.Session":
-        return "sync_http_client_refs"
+        return "sync_http_client_refs" if in_async else "sync_io_edge_refs"
     if name.startswith("requests.") and name.rsplit(".", 1)[-1] in REQUESTS_METHODS:
-        return "sync_http_client_refs"
+        return "sync_http_client_refs" if in_async else "sync_io_edge_refs"
     if name in {"httpx.Client", "urllib.request.urlopen"}:
-        return "sync_http_client_refs"
+        return "sync_http_client_refs" if in_async else "sync_io_edge_refs"
     if name.startswith("urllib.request.") and name.rsplit(".", 1)[-1] in {"urlopen", "urlretrieve"}:
-        return "sync_http_client_refs"
+        return "sync_http_client_refs" if in_async else "sync_io_edge_refs"
 
     if name.startswith("subprocess.") and name.rsplit(".", 1)[-1] in SUBPROCESS_METHODS:
-        return "sync_subprocess_refs"
+        return "sync_subprocess_refs" if in_async else "sync_io_edge_refs"
     if name in {"os.system", "os.popen"}:
-        return "sync_subprocess_refs"
+        return "sync_subprocess_refs" if in_async else "sync_io_edge_refs"
 
     if in_async and name == "open":
         return "sync_filesystem_in_async_refs"
@@ -406,7 +440,9 @@ def ast_matches(path: Path, rel_path: str, scope: str) -> Iterable[Match]:
         )
         if category is None:
             continue
-        if category not in {"isolated_sync_boundary_refs", "outer_async_runner_refs"} and _is_isolated(node, parents, aliases):
+        if category == "unbounded_create_task_refs" and _is_tracked_task_creation(node, parents):
+            continue
+        if category not in {"isolated_sync_boundary_refs", "outer_async_runner_refs", "sync_io_edge_refs"} and _is_isolated(node, parents, aliases):
             continue
         yield _match(rel_path, lines, scope, async_lines, node, category)
 
@@ -418,10 +454,15 @@ def iter_matches(paths: Iterable[Path]) -> Iterable[Match]:
 
 
 def summarize(matches: list[Match], *, top: int) -> dict[str, object]:
-    informational_categories = {"isolated_sync_boundary_refs", "outer_async_runner_refs"}
+    informational_categories = {
+        "isolated_sync_boundary_refs",
+        "outer_async_runner_refs",
+        "sync_io_edge_refs",
+    }
     debt_matches = [match for match in matches if match.category not in informational_categories]
     isolated_matches = [match for match in matches if match.category == "isolated_sync_boundary_refs"]
     outer_runner_matches = [match for match in matches if match.category == "outer_async_runner_refs"]
+    sync_edge_matches = [match for match in matches if match.category == "sync_io_edge_refs"]
     by_scope = Counter(match.scope for match in debt_matches)
     by_category = Counter(match.category for match in debt_matches)
     by_file = Counter(match.path for match in debt_matches)
@@ -441,6 +482,7 @@ def summarize(matches: list[Match], *, top: int) -> dict[str, object]:
         "unbounded_queue_refs": by_category["unbounded_queue_refs"],
         "isolated_sync_boundary_refs": len(isolated_matches),
         "outer_async_runner_refs": len(outer_runner_matches),
+        "sync_io_edge_refs": len(sync_edge_matches),
     }
 
     return {
@@ -465,6 +507,7 @@ def summarize(matches: list[Match], *, top: int) -> dict[str, object]:
         "informational": {
             "isolated_sync_boundary_refs": len(isolated_matches),
             "outer_async_runner_refs": len(outer_runner_matches),
+            "sync_io_edge_refs": len(sync_edge_matches),
         },
     }
 
@@ -478,7 +521,11 @@ def matches_payload(matches: list[Match]) -> list[dict[str, object]]:
             "scope": match.scope,
             "in_async_function": match.in_async_function,
             "line": match.line,
-            "debt": match.category not in {"isolated_sync_boundary_refs", "outer_async_runner_refs"},
+            "debt": match.category not in {
+                "isolated_sync_boundary_refs",
+                "outer_async_runner_refs",
+                "sync_io_edge_refs",
+            },
         }
         for match in matches
     ]

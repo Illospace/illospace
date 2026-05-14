@@ -478,43 +478,54 @@ async def async_execute_parallel_tool_batch(
             )
         return
 
-    tasks = [
-        asyncio.create_task(
-            async_resolve_tool_call(
-                request,
-                agent_context=agent_context,
-                threadlocal_context=threadlocal_context,
-            )
-        )
-        for request in pending
-    ]
-    try:
-        for request, task in zip(pending, tasks, strict=True):
-            try:
-                resolved = await task
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("Tool %s failed: %s", request.tool_name, exc)
-                resolved = ResolvedToolCall(
-                    block_id=request.block_id,
-                    tool_name=request.tool_name,
-                    tool_input=request.tool_input,
-                    result_text=f"Error: {exc}",
-                    is_error=True,
+    parallelism = max(1, min(max_parallel_tool_calls, len(pending)))
+    for start in range(0, len(pending), parallelism):
+        chunk = pending[start:start + parallelism]
+        tasks: list[tuple[PendingToolCall, asyncio.Task[ResolvedToolCall]]] = []
+        for request in chunk:
+            task = asyncio.create_task(
+                async_resolve_tool_call(
+                    request,
+                    agent_context=agent_context,
+                    threadlocal_context=threadlocal_context,
                 )
-            await async_emit_resolved_tool_call(
-                resolved,
-                tool_results,
-                on_tool_call,
-                run_id,
-                idea_id,
-                tool_call_source,
             )
-    finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
+            tasks.append((request, task))
+        try:
+            for request, task in tasks:
+                try:
+                    resolved = await task
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Tool %s failed: %s", request.tool_name, exc)
+                    resolved = ResolvedToolCall(
+                        block_id=request.block_id,
+                        tool_name=request.tool_name,
+                        tool_input=request.tool_input,
+                        result_text=f"Error: {exc}",
+                        is_error=True,
+                    )
+                await async_emit_resolved_tool_call(
+                    resolved,
+                    tool_results,
+                    on_tool_call,
+                    run_id,
+                    idea_id,
+                    tool_call_source,
+                )
+        finally:
+            for _, task in tasks:
+                if not task.done():
+                    task.cancel()
+
+        for _, task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
 
 def execute_tool_calls(
