@@ -5,6 +5,8 @@ import {
   runActivitySteps,
   runWorkSummarySubtitle,
   runWorkSummaryTitle,
+  deriveCodeReviewFilesFromRun,
+  deriveCodeReviewFilesFromRuns,
   findActiveFastRun,
   hasLiveFastReply,
   shouldShowRunInTranscript,
@@ -247,4 +249,47 @@ test('terminal run snapshots settle without dropping live activity', () => {
   assert.equal(merged.status, 'completed');
   assert.deepEqual(merged.activity_trace.map((entry) => entry.activity), ['Using tool', 'Completed']);
   assert.equal(merged.work_summary.duration_sec, 32);
+});
+
+
+test('derives code review files from write and edit tool calls', () => {
+  const files = deriveCodeReviewFilesFromRun({
+    id: 42,
+    tool_calls: [
+      { tool: 'read_file', args: '{"path":"README.md"}', status: 'completed' },
+      { tool: 'write_file', args: '{"path":"src/new.ts","content":"x"}', status: 'completed' },
+      { tool: 'edit_file', args: '{"path":"src/existing.ts"}', status: 'completed' },
+    ],
+  });
+
+  assert.deepEqual(files.map((file) => file.path), ['src/existing.ts', 'src/new.ts']);
+  assert.equal(files[0].operation, 'changed');
+  assert.equal(files[1].operation, 'created or updated');
+});
+
+test('derives code review files from file artifacts and dedupes with tool calls', () => {
+  const files = deriveCodeReviewFilesFromRuns([
+    {
+      id: 7,
+      artifacts: [
+        {
+          artifact_type: 'file_observation',
+          payload: { type: 'file_observation', operation: 'read', path: 'src/read-only.ts' },
+        },
+        {
+          artifact_type: 'file',
+          created_at: '2026-05-03T22:00:00.000Z',
+          payload: { type: 'file', relative_path: 'src/changed.ts', status: 'edit' },
+        },
+      ],
+      tool_calls: [
+        { tool: 'edit_file', args: '{"path":"src/changed.ts"}', status: 'completed' },
+      ],
+    },
+  ]);
+
+  assert.equal(files.length, 1);
+  assert.equal(files[0].path, 'src/changed.ts');
+  assert.equal(files[0].source, 'artifact');
+  assert.equal(files[0].operation, 'edit');
 });

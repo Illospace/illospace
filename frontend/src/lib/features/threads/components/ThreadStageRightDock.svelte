@@ -49,6 +49,7 @@
     appsPane,
     vaultPane,
     cyclesPane,
+    codeReviewPane,
     empty,
   }: {
     activeTabId?: string | null;
@@ -70,6 +71,7 @@
     appsPane?: Snippet;
     vaultPane?: Snippet;
     cyclesPane?: Snippet;
+    codeReviewPane?: Snippet;
     empty?: Snippet;
   } = $props();
 
@@ -79,6 +81,7 @@
   const hasAppsPane = $derived(!!appsPane);
   const hasVaultPane = $derived(!!vaultPane);
   const hasCyclesPane = $derived(!!cyclesPane);
+  const hasCodeReviewPane = $derived(!!codeReviewPane);
   const availableTabs = $derived(
     tabs.filter((tab) => (
       tab.kind === 'browser'
@@ -93,7 +96,9 @@
                 ? hasVaultPane
                 : tab.kind === 'cycles'
                   ? hasCyclesPane
-                  : true
+                  : tab.kind === 'code-review'
+                    ? hasCodeReviewPane
+                    : true
     )),
   );
   const resolvedActiveTab = $derived(
@@ -197,6 +202,7 @@
     if (kind === 'activity') return 'activity';
     if (kind === 'vault') return 'vault';
     if (kind === 'cycles') return 'cycles';
+    if (kind === 'code-review') return 'code';
     return 'code';
   }
 
@@ -322,6 +328,10 @@
         {:else if resolvedActiveTab?.kind === 'cycles' && hasCyclesPane}
           <section class="right-dock-pane right-dock-cycles" aria-label="Cycles">
             {@render cyclesPane?.()}
+          </section>
+        {:else if resolvedActiveTab?.kind === 'code-review' && hasCodeReviewPane}
+          <section class="right-dock-pane right-dock-code-review" aria-label="Review changed files">
+            {@render codeReviewPane?.()}
           </section>
         {:else if hasEmptyState}
           <div class="right-dock-empty">

@@ -227,6 +227,140 @@ export function findActiveFastRun(runInfo: any, items: any[] | undefined | null)
   return (items || []).find((item: any) => item?.type === 'run' && isActiveRun(item) && isFastRun(item)) ?? null;
 }
 
+
+export interface CodeReviewFile {
+  path: string;
+  operation?: string;
+  status?: string;
+  source: 'artifact' | 'tool_call';
+  tool?: string;
+  runId?: string | number;
+  at?: string;
+}
+
+const CODE_REVIEW_FILE_TOOLS = new Set(['write_file', 'edit_file', 'apply_patch']);
+const NON_REVIEW_FILE_OPERATIONS = new Set(['read', 'observe', 'observed', 'search', 'list', 'summary']);
+
+function normalizeReviewPath(value: unknown): string {
+  return String(value ?? '').trim();
+}
+
+function normalizeReviewOperation(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function parseToolArgs(args: unknown): Record<string, any> {
+  if (!args) return {};
+  if (typeof args === 'object') return args as Record<string, any>;
+  if (typeof args !== 'string') return {};
+  const trimmed = args.trim();
+  if (!trimmedLooksLikeJson(trimmed)) return {};
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function trimmedLooksLikeJson(value: string): boolean {
+  return value.startsWith('{') && value.endsWith('}');
+}
+
+function reviewOperationForTool(tool: string): string {
+  if (tool === 'write_file') return 'created or updated';
+  if (tool === 'edit_file' || tool === 'apply_patch') return 'changed';
+  return 'changed';
+}
+
+function artifactPayload(artifact: any): Record<string, any> {
+  const payload = artifact?.payload;
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) return payload;
+  if (artifact && typeof artifact === 'object' && !Array.isArray(artifact)) return artifact;
+  return {};
+}
+
+function artifactReviewFile(artifact: any, runId: string | number | undefined): CodeReviewFile | null {
+  const payload = artifactPayload(artifact);
+  const type = String(payload.type ?? artifact?.artifact_type ?? '').trim();
+  if (type !== 'file' && type !== 'file_observation' && artifact?.artifact_type !== 'file_edit') return null;
+
+  const operation = normalizeReviewOperation(payload.operation ?? payload.status ?? artifact?.artifact_type);
+  if (operation && NON_REVIEW_FILE_OPERATIONS.has(operation)) return null;
+
+  const path = normalizeReviewPath(payload.relative_path ?? payload.path ?? artifact?.uri);
+  if (!path) return null;
+
+  return {
+    path,
+    operation: operation || 'changed',
+    status: normalizeReviewPath(payload.status ?? artifact?.visibility) || undefined,
+    source: 'artifact',
+    tool: normalizeReviewPath(payload.provenance?.operation ?? payload.provenance?.source) || undefined,
+    runId: runId ?? payload.run_id,
+    at: normalizeReviewPath(artifact?.created_at ?? payload.observed_at) || undefined,
+  };
+}
+
+function toolCallReviewFile(call: any, runId: string | number | undefined): CodeReviewFile | null {
+  const tool = normalizeReviewPath(call?.tool ?? call?.tool_name);
+  if (!CODE_REVIEW_FILE_TOOLS.has(tool)) return null;
+  const args = parseToolArgs(call?.args);
+  const path = normalizeReviewPath(args.path ?? args.file ?? args.file_path);
+  if (!path) return null;
+
+  return {
+    path,
+    operation: reviewOperationForTool(tool),
+    status: normalizeReviewPath(call?.status) || undefined,
+    source: 'tool_call',
+    tool,
+    runId,
+    at: normalizeReviewPath(call?.finished_at ?? call?.at) || undefined,
+  };
+}
+
+function reviewFileRank(source: CodeReviewFile['source']): number {
+  return source === 'artifact' ? 2 : 1;
+}
+
+export function deriveCodeReviewFilesFromRun(source: any): CodeReviewFile[] {
+  if (!source) return [];
+  const runId = source?.run_id ?? source?.id;
+  const byPath = new Map<string, CodeReviewFile>();
+
+  const add = (file: CodeReviewFile | null) => {
+    if (!file?.path) return;
+    const key = file.path;
+    const existing = byPath.get(key);
+    if (!existing || reviewFileRank(file.source) >= reviewFileRank(existing.source)) {
+      byPath.set(key, { ...existing, ...file });
+    }
+  };
+
+  for (const artifact of Array.isArray(source?.artifacts) ? source.artifacts : []) {
+    add(artifactReviewFile(artifact, runId));
+  }
+  for (const call of Array.isArray(source?.tool_calls) ? source.tool_calls : []) {
+    add(toolCallReviewFile(call, runId));
+  }
+
+  return Array.from(byPath.values()).sort((left, right) => left.path.localeCompare(right.path));
+}
+
+export function deriveCodeReviewFilesFromRuns(sources: Array<any | null | undefined>): CodeReviewFile[] {
+  const byPath = new Map<string, CodeReviewFile>();
+  for (const source of sources) {
+    for (const file of deriveCodeReviewFilesFromRun(source)) {
+      const existing = byPath.get(file.path);
+      if (!existing || reviewFileRank(file.source) >= reviewFileRank(existing.source)) {
+        byPath.set(file.path, { ...existing, ...file });
+      }
+    }
+  }
+  return Array.from(byPath.values()).sort((left, right) => left.path.localeCompare(right.path));
+}
+
 export interface AgentRunActivityStep {
   time?: string;
   label: string;
