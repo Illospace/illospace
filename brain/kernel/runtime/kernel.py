@@ -19,7 +19,7 @@ class AgentKernel:
     this class without changing callers that already pass a ``RunEnvelope``.
     """
 
-    def run(self, envelope: RunEnvelope) -> RunResult:
+    def run(self, envelope: RunEnvelope, **run_agent_overrides) -> RunResult:
         from brain.systems.runs.direct_agent import run_agent
 
         logger.info(
@@ -29,22 +29,24 @@ class AgentKernel:
             envelope.trace_id,
             envelope.session_id,
         )
-        result = run_agent(**envelope.to_run_agent_kwargs())
+        kwargs = envelope.to_run_agent_kwargs()
+        kwargs.update(run_agent_overrides)
+        result = run_agent(**kwargs)
         return RunResult.from_agent_result(envelope, result)
 
-    def invoke_agent_result(self, envelope: RunEnvelope):
+    def invoke_agent_result(self, envelope: RunEnvelope, **run_agent_overrides):
         """Run the kernel and return the AgentResult."""
-        return self.run(envelope).agent_result
+        return self.run(envelope, **run_agent_overrides).agent_result
 
 
 _DEFAULT_KERNEL = AgentKernel()
 
 
-def run_envelope(envelope: RunEnvelope) -> RunResult:
+def run_envelope(envelope: RunEnvelope, **run_agent_overrides) -> RunResult:
     """Execute a run envelope and return a structured kernel result."""
-    return _DEFAULT_KERNEL.run(envelope)
+    return _DEFAULT_KERNEL.run(envelope, **run_agent_overrides)
 
 
-def invoke_run_envelope(envelope: RunEnvelope):
+def invoke_run_envelope(envelope: RunEnvelope, **run_agent_overrides):
     """Execute a run envelope and return the AgentResult."""
-    return _DEFAULT_KERNEL.invoke_agent_result(envelope)
+    return _DEFAULT_KERNEL.invoke_agent_result(envelope, **run_agent_overrides)
