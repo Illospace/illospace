@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import Any
@@ -10,16 +9,11 @@ from typing import Any
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime, cancel_event_is_set
 from brain.systems.runs.tools import wrap_tool_handlers
 from brain.systems.runs.status import RunStatus
-from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent
+from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
 from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import workspace_root_from_ref
-from brain.systems.runs.recipes.threaded_invocation import (
-    invoke_direct_agent_threaded,
-    sync_on_loop,
-    thread_sync_tool_handlers,
-)
 from brain.systems.personality import soul_prompt_section
 
 logger = logging.getLogger(__name__)
@@ -108,10 +102,14 @@ class FastRecipe(BaseRunRecipe):
         )
         thinking = model_policy.get("thinking") or "high"
 
-        loop = asyncio.get_running_loop()
-        _activity = sync_on_loop(loop, lambda label: runtime.activity(label))
-        _delta = sync_on_loop(loop, lambda delta: runtime.text_delta(delta))
-        _guidance = sync_on_loop(loop, lambda: runtime.drain_steering())
+        async def _activity(label: str) -> None:
+            await runtime.activity(label)
+
+        async def _delta(delta: str) -> None:
+            await runtime.text_delta(delta)
+
+        async def _guidance() -> list[str]:
+            return await runtime.drain_steering()
 
         disabled_tools = _disabled_tool_names(runtime)
         raw_tool_handlers = build_tool_handlers(workspace_root=workspace_root)
@@ -119,14 +117,11 @@ class FastRecipe(BaseRunRecipe):
             raw_tool_handlers = {
                 name: handler for name, handler in raw_tool_handlers.items() if name not in disabled_tools
             }
-        tool_handlers = thread_sync_tool_handlers(
-            loop,
-            wrap_tool_handlers(
-                raw_tool_handlers,
-                executor=runtime.tool_executor(),
-                run_id=runtime.run.id,
-                root_run_id=runtime.run.root_run_id,
-            ),
+        tool_handlers = wrap_tool_handlers(
+            raw_tool_handlers,
+            executor=runtime.tool_executor(),
+            run_id=runtime.run.id,
+            root_run_id=runtime.run.root_run_id,
         )
 
         system_prompt = (
@@ -169,7 +164,7 @@ class FastRecipe(BaseRunRecipe):
             },
         )
         try:
-            result = await invoke_direct_agent_threaded(invoke_direct_agent, spec)
+            result = await invoke_direct_agent_async(spec)
         except Exception as exc:
             logger.exception("fast_recipe_failed", extra={"run_id": runtime.run.id})
             return RunRecipeResult(output=f"Fast run failed: {exc}", status=RunStatus.FAILED)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import Any
@@ -12,14 +11,9 @@ from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import workspace_root_from_ref
-from brain.systems.runs.recipes.threaded_invocation import (
-    invoke_direct_agent_threaded,
-    sync_on_loop,
-    thread_sync_tool_handlers,
-)
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.tools import AsyncRunToolExecutor, ToolRecord, ToolScope, wrap_tool_handlers
-from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent
+from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
 from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 
@@ -76,18 +70,14 @@ class WorkerRecipe(BaseRunRecipe):
         )
 
         tool_records: list[ToolRecord] = []
-        loop = asyncio.get_running_loop()
         executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
-        handlers = thread_sync_tool_handlers(
-            loop,
-            wrap_tool_handlers(
-                build_tool_handlers(workspace_root=workspace_root),
-                executor=executor,
-                run_id=runtime.run.id,
-                root_run_id=runtime.run.root_run_id,
-                scope=_tool_scope_from_assignment(assignment),
-                collector=tool_records,
-            ),
+        handlers = wrap_tool_handlers(
+            build_tool_handlers(workspace_root=workspace_root),
+            executor=executor,
+            run_id=runtime.run.id,
+            root_run_id=runtime.run.root_run_id,
+            scope=_tool_scope_from_assignment(assignment),
+            collector=tool_records,
         )
         model_policy = dict(runtime.request.model_policy or {})
         model = model_policy.get("model") or get_model_for_tier(
@@ -99,15 +89,18 @@ class WorkerRecipe(BaseRunRecipe):
         thinking = model_policy.get("thinking") or "high"
         streamed_output = False
 
-        _activity = sync_on_loop(loop, lambda label: runtime.activity(label))
+        async def _activity(label: str) -> None:
+            await runtime.activity(label)
 
         async def _record_delta(delta: str) -> None:
             nonlocal streamed_output
             streamed_output = True
             await runtime.text_delta(delta)
 
-        _delta = sync_on_loop(loop, _record_delta)
-        _guidance = sync_on_loop(loop, lambda: runtime.drain_steering())
+        _delta = _record_delta
+
+        async def _guidance() -> list[str]:
+            return await runtime.drain_steering()
 
         system_prompt = build_worker_prompt(
             assignment,
@@ -150,7 +143,7 @@ class WorkerRecipe(BaseRunRecipe):
             },
         )
         try:
-            result = await invoke_direct_agent_threaded(invoke_direct_agent, spec)
+            result = await invoke_direct_agent_async(spec)
         except Exception as exc:
             logger.exception("worker_recipe_failed", extra={"run_id": runtime.run.id})
             output = f"Worker failed: {exc}"

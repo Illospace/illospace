@@ -109,3 +109,10 @@ def invoke_direct_agent(spec: DirectAgentInvocationSpec):
     from brain.kernel.runtime.kernel import invoke_run_envelope
 
     return invoke_run_envelope(spec.to_run_envelope())
+
+
+async def invoke_direct_agent_async(spec: DirectAgentInvocationSpec):
+    """Execute a direct invocation spec through the native async agent loop."""
+    from brain.kernel.runtime.kernel import invoke_run_envelope_async
+
+    return await invoke_run_envelope_async(spec.to_run_envelope())

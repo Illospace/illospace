@@ -26,10 +26,10 @@ from brain.platform.integrations.providers import LLMRequest, _merge_streamed_ou
 from brain.systems.runs.direct_agent import (
     AgentResult,
     _invoke_tool_handler,
-    _record_api_call,
     _required_openai_auth_mode,
     _agent_context,
 )
+from brain.systems.runs.direct_loop.telemetry import record_api_call as _record_api_call
 from brain.platform.providers.model_policy import (
     DEFAULT_PROVIDER_MODEL_MAPS,
     HIGH_MODEL_TIER,

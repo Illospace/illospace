@@ -212,21 +212,21 @@ def _artifact_type(artifact):
 def _stub_phase_reviews(monkeypatch, decisions_by_node=None):
     decisions_by_node = decisions_by_node or {}
 
-    def fake_phase_review(spec):
+    async def fake_phase_review(spec):
         payload = json.loads(spec.message)
         node_id = payload["completed_phase"]["node"]["id"]
         decision = decisions_by_node.get(node_id) or {"summary": "Plan still fits.", "revisions": []}
         return SimpleNamespace(output=json.dumps(decision), success=True)
 
-    monkeypatch.setattr("brain.systems.runs.recipes.phase_barrier.invoke_direct_agent", fake_phase_review)
+    monkeypatch.setattr("brain.systems.runs.recipes.phase_barrier.invoke_direct_agent_async", fake_phase_review)
     _stub_deep_synthesis(monkeypatch)
 
 
 def _stub_deep_synthesis(monkeypatch, output="Deep completed using native AgentRun workers."):
-    def fake_deep_synthesis(spec):
+    async def fake_deep_synthesis(spec):
         return SimpleNamespace(output=output, success=True)
 
-    monkeypatch.setattr("brain.systems.runs.recipes.deep.invoke_direct_agent", fake_deep_synthesis)
+    monkeypatch.setattr("brain.systems.runs.recipes.deep.invoke_direct_agent_async", fake_deep_synthesis)
 
 
 def _runtime(recipe: str = "fast", *, message: str = "Read the README", store=None, workspace_ref=None):
@@ -350,12 +350,12 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
 
     captured = {}
 
-    def fake_invoke(spec):
+    async def fake_invoke(spec):
         captured["spec"] = spec
-        assert spec.live_guidance_loader() == ["Focus on setup steps."]
-        spec.on_stream_activity("Reading files")
-        assert spec.tool_handlers["read_file"](path="README.md")["content"] == "README contents"
-        spec.on_stream_delta("README contents")
+        assert await spec.live_guidance_loader() == ["Focus on setup steps."]
+        await spec.on_stream_activity("Reading files")
+        assert (await spec.tool_handlers["read_file"](path="README.md"))["content"] == "README contents"
+        await spec.on_stream_delta("README contents")
         return SimpleNamespace(output="README contents", success=True, error=None)
 
     monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda role: [{"name": role}])
@@ -363,7 +363,7 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
         "brain.systems.runs.recipes.fast.build_tool_handlers",
         lambda **kwargs: {"read_file": lambda **tool_args: {"content": "README contents", "path": tool_args["path"]}},
     )
-    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent", fake_invoke)
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
 
     runtime = _runtime("fast")
     result = await FastRecipe().execute(runtime)
@@ -380,109 +380,26 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert any(_artifact_type(artifact) == "file_observation" for artifact in runtime.store.artifacts)
 
 
-async def test_direct_agent_threaded_resolves_llm_before_blocking(monkeypatch):
+async def test_direct_agent_invocation_uses_async_kernel(monkeypatch):
     from brain.systems.runs.invocation import build_direct_agent_invocation
-    from brain.systems.runs.recipes import threaded_invocation
+    from brain.systems.runs.invocation import invoke_direct_agent_async
 
-    class FakeUnitOfWork:
-        session = object()
+    captured = {}
 
-        async def __aenter__(self):
-            return self
+    async def fake_invoke(envelope, **kwargs):
+        captured["envelope"] = envelope
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(output="ok", success=True, error=None)
 
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
+    monkeypatch.setattr("brain.kernel.runtime.kernel.invoke_run_envelope_async", fake_invoke)
 
-    resolved_llm = SimpleNamespace(provider="openai", client=object())
-    calls = {}
+    spec = build_direct_agent_invocation(message="hello", model="openai/gpt-5.5")
 
-    async def fake_model_for_tier(session, tier, **kwargs):
-        calls["model_for_tier"] = {"session": session, "tier": tier, **kwargs}
-        return "openai/gpt-5.5"
+    result = await invoke_direct_agent_async(spec)
 
-    async def fake_resolve_llm_client(**kwargs):
-        calls["resolve_llm_client"] = kwargs
-        return resolved_llm
-
-    monkeypatch.setattr(threaded_invocation, "UnitOfWork", FakeUnitOfWork)
-    monkeypatch.setattr(threaded_invocation, "async_get_model_for_tier", fake_model_for_tier)
-    monkeypatch.setattr(threaded_invocation, "async_resolve_llm_client", fake_resolve_llm_client)
-
-    spec = build_direct_agent_invocation(
-        message="hello",
-        model="high",
-        user_id="user-1",
-        metadata={"org_id": "org-1"},
-    )
-
-    resolved_spec, resolved_model, resolved = await threaded_invocation._resolve_direct_agent_runtime(spec)
-
-    assert resolved_spec is spec
-    assert resolved_model == "openai/gpt-5.5"
-    assert resolved is resolved_llm
-    assert calls["model_for_tier"]["session"] is FakeUnitOfWork.session
-    assert calls["model_for_tier"]["tier"] == "high"
-    assert calls["model_for_tier"]["include_provider_prefix"] is True
-    assert calls["resolve_llm_client"]["provider"] == "openai"
-    assert calls["resolve_llm_client"]["auth_mode"] == "chatgpt"
-    assert calls["resolve_llm_client"]["session"] is FakeUnitOfWork.session
-
-
-async def test_direct_agent_threaded_routes_db_callbacks_to_runner_loop(monkeypatch):
-    from brain.systems.runs.invocation import build_direct_agent_invocation
-    from brain.systems.runs.recipes import threaded_invocation
-
-    loop = asyncio.get_running_loop()
-    seen = []
-
-    async def fake_load_session(session_id, user_id=None):
-        seen.append(("load", id(asyncio.get_running_loop()), session_id, user_id))
-        return ([{"role": "user", "content": "stored"}], "system")
-
-    async def fake_load_handoff(session_id, user_id=None):
-        seen.append(("load_handoff", id(asyncio.get_running_loop()), session_id, user_id))
-        return {"message_count": 1}
-
-    async def fake_save_session(session_id, messages, system_prompt, *token_args, user_id=None):
-        seen.append((
-            "save",
-            id(asyncio.get_running_loop()),
-            session_id,
-            len(messages),
-            system_prompt,
-            token_args,
-            user_id,
-        ))
-
-    async def fake_save_handoff(session_id, payload, *, user_id=None):
-        seen.append(("save_handoff", id(asyncio.get_running_loop()), session_id, payload, user_id))
-
-    async def fake_cancelled():
-        seen.append(("cancel", id(asyncio.get_running_loop())))
-        return True
-
-    monkeypatch.setattr(threaded_invocation, "async_load_session", fake_load_session)
-    monkeypatch.setattr(threaded_invocation, "async_load_session_handoff", fake_load_handoff)
-    monkeypatch.setattr(threaded_invocation, "async_save_session", fake_save_session)
-    monkeypatch.setattr(threaded_invocation, "async_save_session_handoff", fake_save_handoff)
-
-    spec = build_direct_agent_invocation(
-        message="hello",
-        cancel_event=SimpleNamespace(a_is_set=fake_cancelled),
-    )
-    overrides = threaded_invocation._direct_agent_loop_overrides(loop, spec)
-
-    def call_from_agent_thread():
-        assert overrides["load_session"]("session-1") == ([{"role": "user", "content": "stored"}], "system")
-        assert overrides["load_session_handoff"]("session-1") == {"message_count": 1}
-        overrides["save_session"]("session-1", [{"role": "user", "content": "x"}], "system", 1, 2, 3, 4)
-        overrides["save_session_handoff"]("session-1", {"message_count": 2})
-        assert overrides["cancel_event"].is_set() is True
-
-    await asyncio.to_thread(call_from_agent_thread)
-
-    assert {entry[1] for entry in seen} == {id(loop)}
-    assert [entry[0] for entry in seen] == ["load", "load_handoff", "save", "save_handoff", "cancel"]
+    assert result.output == "ok"
+    assert captured["envelope"].task == "hello"
+    assert captured["envelope"].model == "openai/gpt-5.5"
 
 
 def test_fast_onboarding_tool_surface_uses_standard_fast_surface(monkeypatch):
@@ -598,13 +515,13 @@ async def test_fast_recipe_infers_workspace_root_from_project_context_snapshot(m
 
     captured = {}
 
-    def fake_invoke(spec):
+    async def fake_invoke(spec):
         captured["spec"] = spec
         return SimpleNamespace(output="ok", success=True, error=None)
 
     monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda role: [])
     monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **kwargs: {})
-    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent", fake_invoke)
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
 
     runtime = _runtime(
         "fast",
@@ -628,7 +545,7 @@ async def test_fast_recipe_applies_runtime_tool_policy(monkeypatch):
 
     captured = {}
 
-    def fake_invoke(spec):
+    async def fake_invoke(spec):
         captured["spec"] = spec
         return SimpleNamespace(output="ok", success=True, error=None)
 
@@ -640,7 +557,7 @@ async def test_fast_recipe_applies_runtime_tool_policy(monkeypatch):
         "brain.systems.runs.recipes.fast.build_tool_handlers",
         lambda **kwargs: {"manage_cycle": object(), "web_search": object()},
     )
-    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent", fake_invoke)
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
 
     runtime = _runtime("fast")
     runtime.request = replace(
@@ -774,11 +691,11 @@ async def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkey
     )
     captured = {}
 
-    def fake_deep_synthesis(spec):
+    async def fake_deep_synthesis(spec):
         captured["spec"] = spec
         return SimpleNamespace(output="Coordinator final answer.", success=True)
 
-    monkeypatch.setattr("brain.systems.runs.recipes.deep.invoke_direct_agent", fake_deep_synthesis)
+    monkeypatch.setattr("brain.systems.runs.recipes.deep.invoke_direct_agent_async", fake_deep_synthesis)
 
     class _ChildEngine:
         def __init__(self, session, **kwargs):
@@ -1383,16 +1300,16 @@ async def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_
 
     captured = {}
 
-    def fake_invoke(spec):
+    async def fake_invoke(spec):
         captured["spec"] = spec
         assert spec.run_id == 42
         assert spec.idea_id is None
         assert spec.workspace_root == "/tmp/work"
         assert "Inspect README setup steps" in spec.system_prompt
-        spec.on_stream_activity("Inspecting README.md")
-        read_result = spec.tool_handlers["read_file"](path="README.md")
+        await spec.on_stream_activity("Inspecting README.md")
+        read_result = await spec.tool_handlers["read_file"](path="README.md")
         assert read_result["content"] == "setup steps"
-        spec.on_stream_delta("Found setup steps")
+        await spec.on_stream_delta("Found setup steps")
         return SimpleNamespace(output="README setup documented", success=True, error=None)
 
     monkeypatch.setattr("brain.systems.runs.recipes.workers.build_agent_tools", lambda role: [{"name": "read_file"}])
@@ -1400,7 +1317,7 @@ async def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_
         "brain.systems.runs.recipes.workers.build_tool_handlers",
         lambda **kwargs: {"read_file": lambda **tool_args: {"content": "setup steps", "path": tool_args["path"]}},
     )
-    monkeypatch.setattr("brain.systems.runs.recipes.workers.invoke_direct_agent", fake_invoke)
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.invoke_direct_agent_async", fake_invoke)
 
     runtime = _runtime("worker")
     result = await WorkerRecipe().execute(runtime)
@@ -1422,13 +1339,13 @@ async def test_worker_recipe_infers_workspace_root_from_project_context_permissi
 
     captured = {}
 
-    def fake_invoke(spec):
+    async def fake_invoke(spec):
         captured["spec"] = spec
         return SimpleNamespace(output="ok", success=True, error=None)
 
     monkeypatch.setattr("brain.systems.runs.recipes.workers.build_agent_tools", lambda role: [])
     monkeypatch.setattr("brain.systems.runs.recipes.workers.build_tool_handlers", lambda **kwargs: {})
-    monkeypatch.setattr("brain.systems.runs.recipes.workers.invoke_direct_agent", fake_invoke)
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.invoke_direct_agent_async", fake_invoke)
 
     runtime = _runtime(
         "worker",

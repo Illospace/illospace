@@ -15,7 +15,7 @@ from brain.systems.runs.domain import AgentRun, AgentRunArtifact, ArtifactType, 
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
 from brain.systems.runs.events import run_event
 from brain.systems.runs.graph import DeepPlan, RunEdge, RunNode
-from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent
+from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.phase_barrier import (
     apply_phase_barrier_decision,
@@ -25,7 +25,6 @@ from brain.systems.runs.recipes.phase_barrier import (
 )
 from brain.systems.runs.recipes.scout import ScoutHandoff, scout_request
 from brain.systems.runs.recipes.shared import workspace_root_from_ref
-from brain.systems.runs.recipes.threaded_invocation import invoke_direct_agent_threaded
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.verification.evidence import (
     artifact_payloads,
@@ -568,7 +567,7 @@ class DeepRecipe(BaseRunRecipe):
                     "provider_operation_type": "coordinator",
                 },
             )
-            result = await invoke_direct_agent_threaded(invoke_direct_agent, spec)
+            result = await invoke_direct_agent_async(spec)
             success = bool(getattr(result, "success", False))
             output = str(getattr(result, "output", "") or "").strip()
             used_fallback = False
