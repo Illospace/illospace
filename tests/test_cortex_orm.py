@@ -82,6 +82,15 @@ def _make_skill(**kwargs):
 
 # ── Helper tests ───────────────────────────────────────────────
 
+def test_idea_list_load_columns_cover_idea_read_response_fields():
+    from brain.platform.db.repositories.ideas import IDEA_LIST_LOAD_COLUMNS
+
+    columns = {column.key for column in IDEA_LIST_LOAD_COLUMNS}
+
+    assert "active_agents" in columns
+    assert "attachments" in columns
+
+
 class TestRowToDict:
     def test_orm_object(self):
         from brain.app.api.routers.cortex import _row_to_dict

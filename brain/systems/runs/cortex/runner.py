@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import tempfile
 import threading
 import time
-from threading import Thread
 from typing import Any
 import uuid
 
@@ -55,7 +54,7 @@ def _run_cancel_token(run_id: int):
 _stop_event = threading.Event()
 _runner_lock = threading.Lock()
 _runner_supervisor_thread: threading.Thread | None = None
-_runner_slots: list[tuple[threading.Thread, threading.Event]] = []
+_runner_slots: list[tuple[asyncio.Task[None], asyncio.Event]] = []
 _runner_thread_index = 0
 _poll_interval_sec = 0.5
 _runner_reconcile_interval_sec = 2.0
@@ -116,8 +115,9 @@ def _runner_concurrency() -> int:
     ) or _default_runner_concurrency
 
 
-def _active_runner_threads() -> list[threading.Thread]:
-    return [thread for thread, stop_event in _runner_slots if thread.is_alive() and not stop_event.is_set()]
+def _active_runner_count() -> int:
+    with _runner_lock:
+        return sum(1 for task, stop_event in _runner_slots if not task.done() and not stop_event.is_set())
 
 
 def _int_value(value: Any) -> int | None:
@@ -517,14 +517,14 @@ async def reap_stale_active_runs(
     return reaped
 
 
-def _reap_stale_runs_if_due(*, force: bool = False) -> int:
+async def _reap_stale_runs_if_due_async(*, force: bool = False) -> int:
     global _last_stale_reconcile_monotonic
     now = time.monotonic()
     if not force and now - _last_stale_reconcile_monotonic < _stale_reconcile_interval_sec:
         return 0
     _last_stale_reconcile_monotonic = now
     try:
-        return asyncio.run(reap_stale_active_runs())
+        return await reap_stale_active_runs()
     except Exception:
         logger.exception("agent_run_stale_reconcile_failed")
         return 0
@@ -664,29 +664,32 @@ def run_queued_once(*, limit: int = 1) -> int:
     return asyncio.run(_run_queued_once_async(limit=limit))
 
 
-def _loop(slot_stop_event: threading.Event | None = None) -> None:
+async def _sleep_or_stop(delay: float, slot_stop_event: asyncio.Event | None = None) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, delay)
     while not _stop_event.is_set() and not (slot_stop_event and slot_stop_event.is_set()):
-        processed = run_queued_once()
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(0.1, remaining))
+
+
+async def _loop(slot_stop_event: asyncio.Event | None = None) -> None:
+    while not _stop_event.is_set() and not (slot_stop_event and slot_stop_event.is_set()):
+        processed = await _run_queued_once_async()
         if not processed:
-            if slot_stop_event:
-                if slot_stop_event.wait(_poll_interval_sec):
-                    break
-            else:
-                _stop_event.wait(_poll_interval_sec)
+            await _sleep_or_stop(_poll_interval_sec, slot_stop_event)
 
 
 def _start_runner_slot_locked() -> None:
     global _runner_thread_index
     _runner_thread_index += 1
-    slot_stop_event = threading.Event()
-    thread = Thread(
-        target=_loop,
-        args=(slot_stop_event,),
+    slot_stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        _loop(slot_stop_event),
         name=f"agent-runner-{_runner_thread_index}",
-        daemon=True,
     )
-    _runner_slots.append((thread, slot_stop_event))
-    thread.start()
+    _runner_slots.append((task, slot_stop_event))
 
 
 def reconcile_runner_pool(*, allow_start: bool = False) -> int:
@@ -697,38 +700,55 @@ def reconcile_runner_pool(*, allow_start: bool = False) -> int:
         return desired
     with _runner_lock:
         active_slots = [
-            (thread, stop_event)
-            for thread, stop_event in _runner_slots
-            if thread.is_alive() and not stop_event.is_set()
+            (task, stop_event)
+            for task, stop_event in _runner_slots
+            if not task.done() and not stop_event.is_set()
         ]
         retiring_slots = [
-            (thread, stop_event)
-            for thread, stop_event in _runner_slots
-            if thread.is_alive() and stop_event.is_set()
+            (task, stop_event)
+            for task, stop_event in _runner_slots
+            if not task.done() and stop_event.is_set()
         ]
         _runner_slots[:] = active_slots + retiring_slots
         if len(active_slots) > desired:
-            for _thread, stop_event in active_slots[desired:]:
+            for _task, stop_event in active_slots[desired:]:
                 stop_event.set()
             active_slots = active_slots[:desired]
         while len(active_slots) < desired:
             _start_runner_slot_locked()
             active_slots = [
-                (thread, stop_event)
-                for thread, stop_event in _runner_slots
-                if thread.is_alive() and not stop_event.is_set()
+                (task, stop_event)
+                for task, stop_event in _runner_slots
+                if not task.done() and not stop_event.is_set()
             ]
     return desired
 
 
+async def _supervisor_async_loop() -> None:
+    first_reconcile = True
+    try:
+        while not _stop_event.is_set():
+            try:
+                await _reap_stale_runs_if_due_async(force=first_reconcile)
+                first_reconcile = False
+                reconcile_runner_pool(allow_start=True)
+            except Exception:
+                logger.exception("agent_run_runner_reconcile_failed")
+            await _sleep_or_stop(_runner_reconcile_interval_sec)
+    finally:
+        with _runner_lock:
+            slots = list(_runner_slots)
+        for _task, stop_event in slots:
+            stop_event.set()
+        live_tasks = [task for task, _stop_event in slots if not task.done()]
+        if live_tasks:
+            await asyncio.gather(*live_tasks, return_exceptions=True)
+        with _runner_lock:
+            _runner_slots.clear()
+
+
 def _supervisor_loop() -> None:
-    while not _stop_event.is_set():
-        try:
-            _reap_stale_runs_if_due()
-            reconcile_runner_pool(allow_start=True)
-        except Exception:
-            logger.exception("agent_run_runner_reconcile_failed")
-        _stop_event.wait(_runner_reconcile_interval_sec)
+    asyncio.run(_supervisor_async_loop())
 
 
 def start_runner() -> None:
@@ -736,9 +756,8 @@ def start_runner() -> None:
     if _runner_supervisor_thread and _runner_supervisor_thread.is_alive():
         return
     _stop_event.clear()
-    _reap_stale_runs_if_due(force=True)
-    concurrency = reconcile_runner_pool(allow_start=True)
-    _runner_supervisor_thread = Thread(
+    concurrency = _runner_concurrency()
+    _runner_supervisor_thread = threading.Thread(
         target=_supervisor_loop,
         name="agent-runner-supervisor",
         daemon=True,
@@ -750,29 +769,14 @@ def start_runner() -> None:
 def stop_runner(*, drain_timeout_seconds: float | None = 2.0) -> None:
     global _runner_supervisor_thread
     _stop_event.set()
-    with _runner_lock:
-        for _thread, stop_event in _runner_slots:
-            stop_event.set()
 
     deadline = None
     if drain_timeout_seconds is not None:
         deadline = time.monotonic() + max(0.0, float(drain_timeout_seconds))
 
-    for thread in [thread for thread, _stop in list(_runner_slots)]:
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-        if thread.is_alive():
-            thread.join(timeout=remaining)
-            if deadline is not None and time.monotonic() >= deadline:
-                break
     if _runner_supervisor_thread and _runner_supervisor_thread.is_alive():
         remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
         _runner_supervisor_thread.join(timeout=remaining)
-    with _runner_lock:
-        _runner_slots[:] = [
-            (thread, stop_event)
-            for thread, stop_event in _runner_slots
-            if thread.is_alive()
-        ]
     if not (_runner_supervisor_thread and _runner_supervisor_thread.is_alive()):
         _runner_supervisor_thread = None
 
@@ -784,10 +788,10 @@ async def queue_status_async(*, consumer_running: bool | None = None, org_id: st
             stmt = stmt.where(AgentRunRow.org_id == org_id)
         result = await uow.session.execute(stmt)
         counts = {str(status): int(count) for status, count in result.all()}
-    active_threads = _active_runner_threads()
+    active_runner_count = _active_runner_count()
     return {
-        "runner_running": bool(active_threads),
-        "runner_concurrency": len(active_threads),
+        "runner_running": bool(active_runner_count),
+        "runner_concurrency": active_runner_count,
         "runner_configured_concurrency": _runner_concurrency(),
         "event_consumer_running": consumer_running,
         "counts": counts,
