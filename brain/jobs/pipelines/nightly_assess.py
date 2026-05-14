@@ -11,7 +11,6 @@ import argparse
 import asyncio
 import json
 import os
-import subprocess
 import sys
 from datetime import date, timedelta
 
@@ -19,6 +18,11 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 import brain.kernel.config as config
+from brain.platform.async_io import (
+    path_exists,
+    read_text as read_text_async,
+    run_subprocess,
+)
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.app.cli.memory import add_memory
 
@@ -94,9 +98,9 @@ async def gather_data(data_source: str) -> dict:
     if data_source == "skill_success_rates":
         return await _gather_skill_stats()
     elif data_source == "nightly_logs":
-        return _gather_nightly_log_stats()
+        return await _gather_nightly_log_stats()
     elif data_source == "test_results":
-        return _gather_test_results()
+        return await _gather_test_results()
     else:
         return {"available": False, "metrics": {}, "summary": f"Manual assessment needed for source: {data_source}"}
 
@@ -130,7 +134,7 @@ async def _gather_skill_stats() -> dict:
         return {"available": False, "metrics": {}, "summary": f"Error querying skills: {e}"}
 
 
-def _gather_nightly_log_stats() -> dict:
+async def _gather_nightly_log_stats() -> dict:
     """Check recent nightly logs for errors."""
     try:
         log_dir = LOG_DIR
@@ -139,9 +143,8 @@ def _gather_nightly_log_stats() -> dict:
         for delta in range(7):
             d = (date.today() - timedelta(days=delta)).isoformat()
             log_path = os.path.join(log_dir, f"nightly-{d}.log")
-            if os.path.exists(log_path):
-                with open(log_path) as f:
-                    lines = f.readlines()
+            if await path_exists(log_path):
+                lines = (await read_text_async(log_path)).splitlines()
                 total_lines += len(lines)
                 errors += sum(1 for l in lines if "ERROR" in l or "❌" in l or "Traceback" in l)
         if total_lines == 0:
@@ -155,10 +158,10 @@ def _gather_nightly_log_stats() -> dict:
         return {"available": False, "metrics": {}, "summary": f"Error reading logs: {e}"}
 
 
-def _gather_test_results() -> dict:
+async def _gather_test_results() -> dict:
     """Run pytest and check pass rate."""
     try:
-        r = subprocess.run(
+        r = await run_subprocess(
             ["bash", "-c", "source venv/bin/activate && python3 -m pytest tests/ -q --tb=no"],
             capture_output=True, text=True, timeout=120,
             cwd=PROJECT_ROOT,

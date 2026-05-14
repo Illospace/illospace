@@ -1,5 +1,6 @@
 """Embedding worker — Qwen3-Embedding-8B via SentenceTransformer."""
 
+import asyncio
 import logging
 import os
 import time
@@ -140,7 +141,7 @@ class EmbeddingWorker(BaseWorker):
                     raise
                 batch_size = max(1, batch_size // 2)
                 logger.warning("Embedding OOM — retrying request with batch_size=%s", batch_size)
-                time.sleep(1)
+                await asyncio.sleep(1)
             finally:
                 empty_device_cache(torch, self.device)
 

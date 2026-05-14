@@ -41,6 +41,7 @@ from brain.app.api.routers.ws import ws_manager
 from brain.app.api.authorization import require_org_context
 from brain.platform.db.repositories.ideas import IdeaConnectionRepository
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.async_io import ensure_dir, run_subprocess, write_bytes
 from brain.systems.cortex.title_generation import (
     generate_display_title,
 )
@@ -569,8 +570,8 @@ async def upload_file(
     if len(data) > max_size:
         raise HTTPException(status_code=400, detail=f"File too large ({len(data)} bytes)")
     filename = f"{uuid.uuid4().hex}.{ext}"
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    (UPLOAD_DIR / filename).write_bytes(data)
+    await ensure_dir(UPLOAD_DIR, parents=True, exist_ok=True)
+    await write_bytes(UPLOAD_DIR / filename, data)
     fallback_type = UPLOAD_FALLBACK_CONTENT_TYPES.get(ext, "application/octet-stream")
     content_type = file.content_type if file.content_type and file.content_type != "application/octet-stream" else fallback_type
     url = static_upload_url_for(filename)
@@ -935,8 +936,7 @@ async def audit_apply(
                 status_code=400,
                 detail="ILLO_GITHUB_REPO must be configured before propose_code can create issues",
             )
-        import subprocess
-        result = subprocess.run(
+        result = await run_subprocess(
             ["gh", "issue", "create",
              "--repo", repo,
              "--title", title,

@@ -86,7 +86,7 @@ async def websocket_endpoint(ws: WebSocket):
     if replay_cursors:
         await _replay_durable_events(ws, claims, replay_cursors)
 
-    ping_task = asyncio.create_task(_ping_loop(ws))
+    ping_task = asyncio.get_running_loop().create_task(_ping_loop(ws), name="ws-ping")
 
     try:
         while True:

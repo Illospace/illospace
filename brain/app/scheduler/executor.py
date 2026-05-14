@@ -17,6 +17,7 @@ from brain.kernel.common.time import ensure_utc
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.platform.async_io import run_blocking, run_subprocess
 from brain.platform.db.models.scheduler import (
     OWNER_MODE_SCHEDULER,
     SchedulerJob,
@@ -75,14 +76,14 @@ def _utcnow(now: datetime | None = None) -> datetime:
     return ensure_utc(now)
 
 
-def _run_command(
+async def _async_run_command(
     command: Sequence[str],
     *,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
     timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return await run_subprocess(
         list(command),
         cwd=str(cwd or REPO_ROOT),
         env=env,
@@ -362,7 +363,7 @@ def _commands_for_step(
     return []
 
 
-def _call_runner(
+def _call_sync_runner_with_fallback(
     runner: Runner,
     command: Sequence[str],
     *,
@@ -373,6 +374,31 @@ def _call_runner(
         return runner(command, cwd=REPO_ROOT, env=env, timeout_seconds=timeout_seconds)
     except TypeError:
         return runner(command, cwd=REPO_ROOT)
+
+
+async def _call_runner(
+    runner: Runner,
+    command: Sequence[str],
+    *,
+    env: dict[str, str],
+    timeout_seconds: int | None,
+) -> Any:
+    if inspect.iscoroutinefunction(runner):
+        try:
+            return await runner(command, cwd=REPO_ROOT, env=env, timeout_seconds=timeout_seconds)
+        except TypeError:
+            return await runner(command, cwd=REPO_ROOT)
+
+    result = await run_blocking(
+        _call_sync_runner_with_fallback,
+        runner,
+        command,
+        env=env,
+        timeout_seconds=timeout_seconds,
+    )
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def _retryable_failure_summary(
@@ -439,7 +465,7 @@ async def _async_run_step(
     env = _shell_env(job, run, step.step_key)
     results: list[dict[str, Any]] = []
     for command in commands:
-        proc = _call_runner(runner, command, env=env, timeout_seconds=job.timeout_seconds)
+        proc = await _call_runner(runner, command, env=env, timeout_seconds=job.timeout_seconds)
         summary = {"command": list(command), **_command_summary(proc)}
         results.append(summary)
         if int(getattr(proc, "returncode", 1)) != 0:
@@ -470,7 +496,7 @@ async def async_run_scheduler_run(
     run_id: int,
     *,
     owner_id: str | None = None,
-    runner: Runner = _run_command,
+    runner: Runner = _async_run_command,
     resume: bool = True,
     now: datetime | None = None,
 ) -> SchedulerRun:
@@ -805,7 +831,7 @@ async def async_run_scheduler_job(
     job_identifier: str,
     *,
     owner_id: str | None = None,
-    runner: Runner = _run_command,
+    runner: Runner = _async_run_command,
     now: datetime | None = None,
     allowed_owner_modes: tuple[str, ...] = (OWNER_MODE_SCHEDULER,),
 ) -> dict[str, Any]:
@@ -838,7 +864,7 @@ async def async_resume_scheduler_run(
     run_id: int,
     *,
     owner_id: str | None = None,
-    runner: Runner = _run_command,
+    runner: Runner = _async_run_command,
     now: datetime | None = None,
 ) -> SchedulerRun:
     return await async_run_scheduler_run(session, run_id, owner_id=owner_id, runner=runner, resume=True, now=now)
@@ -913,7 +939,7 @@ async def async_drain_scheduler(
     max_runs: int = 10,
     resume: bool = True,
     owner_id: str | None = None,
-    runner: Runner = _run_command,
+    runner: Runner = _async_run_command,
     now: datetime | None = None,
     allowed_owner_modes: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:

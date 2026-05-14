@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import inspect
 import ipaddress
 import json
 import logging
@@ -15,6 +16,8 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
+
+from brain.platform.async_io import run_blocking
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +104,8 @@ def _assert_safe_url(url: str) -> str:
     return normalized
 
 
-def _http_client() -> httpx.Client:
-    return httpx.Client(
+def _http_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(
         timeout=httpx.Timeout(_DEFAULT_TIMEOUT, connect=_DEFAULT_TIMEOUT),
         headers={
             "User-Agent": "illo-brain/1.0",
@@ -110,6 +113,12 @@ def _http_client() -> httpx.Client:
         },
         follow_redirects=True,
     )
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def _strip_html(text: str) -> str:
@@ -152,12 +161,12 @@ def _markdown_from_text(text: str) -> str:
     return "\n\n".join(lines)
 
 
-def _brave_search(query: str, limit: int) -> dict[str, Any]:
+async def _brave_search(query: str, limit: int) -> dict[str, Any]:
     api_key = os.environ.get("BRAVE_SEARCH_API_KEY")
     if not api_key:
         raise WebResearchError("BRAVE_SEARCH_API_KEY is not configured")
-    with _http_client() as client:
-        response = client.get(
+    async with _http_client() as client:
+        response = await client.get(
             "https://api.search.brave.com/res/v1/web/search",
             params={"q": query, "count": min(limit, 20)},
             headers={"X-Subscription-Token": api_key},
@@ -175,12 +184,12 @@ def _brave_search(query: str, limit: int) -> dict[str, Any]:
     return {"provider": "brave", "results": results}
 
 
-def _tavily_search(query: str, limit: int) -> dict[str, Any]:
+async def _tavily_search(query: str, limit: int) -> dict[str, Any]:
     api_key = os.environ.get("TAVILY_API_KEY")
     if not api_key:
         raise WebResearchError("TAVILY_API_KEY is not configured")
-    with _http_client() as client:
-        response = client.post(
+    async with _http_client() as client:
+        response = await client.post(
             "https://api.tavily.com/search",
             json={
                 "api_key": api_key,
@@ -203,9 +212,9 @@ def _tavily_search(query: str, limit: int) -> dict[str, Any]:
     return {"provider": "tavily", "results": results}
 
 
-def _duckduckgo_lite_search(query: str, limit: int) -> dict[str, Any]:
-    with _http_client() as client:
-        response = client.get(
+async def _duckduckgo_lite_search(query: str, limit: int) -> dict[str, Any]:
+    async with _http_client() as client:
+        response = await client.get(
             "https://lite.duckduckgo.com/lite/",
             params={"q": query},
         )
@@ -265,7 +274,7 @@ def _normalize_duckduckgo_result_url(value: str) -> str | None:
     return url if url.startswith(("http://", "https://")) else None
 
 
-def web_search(query: str, *, provider: str | None = None, limit: int = 5) -> dict[str, Any]:
+async def web_search(query: str, *, provider: str | None = None, limit: int = 5) -> dict[str, Any]:
     normalized_query = (query or "").strip()
     if not normalized_query:
         raise WebResearchError("Query is required")
@@ -292,7 +301,7 @@ def web_search(query: str, *, provider: str | None = None, limit: int = 5) -> di
             provider_errors.append({"provider": name, "error": f"Unsupported search provider: {name}"})
             continue
         try:
-            result = fn(normalized_query, limit)
+            result = await _maybe_await(fn(normalized_query, limit))
             results = list(result.get("results") or [])
             if auto_mode and not results:
                 provider_errors.append({"provider": result.get("provider", name), "error": "No results returned"})
@@ -317,8 +326,8 @@ def web_search(query: str, *, provider: str | None = None, limit: int = 5) -> di
     raise WebResearchError(detail or "No search provider returned results")
 
 
-def web_fetch(url: str, *, max_chars: int = 12000, extract_mode: str = "markdown") -> dict[str, Any]:
-    safe_url = _assert_safe_url(url)
+async def web_fetch(url: str, *, max_chars: int = 12000, extract_mode: str = "markdown") -> dict[str, Any]:
+    safe_url = await run_blocking(_assert_safe_url, url)
     extract_mode = (extract_mode or "markdown").strip().lower()
     if extract_mode not in {"markdown", "text", "html"}:
         raise WebResearchError(f"Unsupported extract_mode: {extract_mode}")
@@ -328,8 +337,8 @@ def web_fetch(url: str, *, max_chars: int = 12000, extract_mode: str = "markdown
     if cached is not None:
         return {**cached, "cached": True}
 
-    with _http_client() as client:
-        response = client.get(safe_url)
+    async with _http_client() as client:
+        response = await client.get(safe_url)
         response.raise_for_status()
         raw = response.content[:_MAX_FETCH_BYTES]
         content_type = response.headers.get("content-type", "")

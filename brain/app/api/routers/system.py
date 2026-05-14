@@ -6,7 +6,6 @@ import os
 import platform
 import re as _re
 import shutil
-import subprocess
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -33,6 +32,7 @@ from brain.platform.db.repositories.system import (
     DailyMetricsRepository,
     RetrievalLogRepository,
 )
+from brain.platform.async_io import path_exists, read_text, run_blocking, run_subprocess
 from brain.platform.providers.model_policy import (
     async_get_model_for_tier,
     async_get_provider_model_maps,
@@ -640,16 +640,16 @@ def _human_size(nbytes: float) -> str:
     return f"{nbytes:.1f} PB"
 
 
-def _get_uptime() -> str | None:
+async def _get_uptime() -> str | None:
     """Return system uptime as a human-readable string."""
     try:
         # Linux: /proc/uptime
         proc_uptime = Path("/proc/uptime")
-        if proc_uptime.exists():
-            secs = float(proc_uptime.read_text().split()[0])
+        if await path_exists(proc_uptime):
+            secs = float((await read_text(proc_uptime)).split()[0])
         else:
             # macOS: sysctl kern.boottime
-            result = subprocess.run(
+            result = await run_subprocess(
                 ["sysctl", "-n", "kern.boottime"],
                 capture_output=True, text=True, timeout=5,
             )
@@ -732,10 +732,10 @@ async def health_deep(
     )
 
 
-def _get_gpu_info() -> dict | None:
+async def _get_gpu_info() -> dict | None:
     """Return GPU info via nvidia-smi, or None if unavailable."""
     try:
-        result = subprocess.run(
+        result = await run_subprocess(
             [
                 "nvidia-smi",
                 "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu",
@@ -771,7 +771,7 @@ async def _get_embedding_info(db: AsyncSession) -> dict:
             result["model"] = emb_worker.model_path.rsplit("/", 1)[-1] if emb_worker else "unknown"
         except Exception:
             result["model"] = "unknown"
-        result["device"] = "cuda" if _get_gpu_info() is not None else "cpu"
+        result["device"] = "cuda" if await _get_gpu_info() is not None else "cpu"
     elif result.get("backend") == "cpu":
         result["device"] = "cpu"
     return result
@@ -849,10 +849,10 @@ async def system_info(
         "version": "6.0.0",
         "python": platform.python_version(),
         "platform": platform.system(),
-        "uptime": _safe(_get_uptime),
+        "uptime": await _safe_async(_get_uptime),
         "disk": _safe(_get_disk_info),
         "database": await _safe_async(_get_database_info, db),
-        "gpu": _safe(_get_gpu_info),
+        "gpu": await _safe_async(_get_gpu_info),
         "embedding": await _safe_async(_get_embedding_info, db),
         "llm": await _safe_async(_get_llm_info, user, db),
         "config": _safe(_get_config_info),
@@ -1223,6 +1223,25 @@ def _tail_text_lines(path: Path, line_count: int) -> list[str]:
     return text.split("\n")[-line_count:] if text else []
 
 
+def _cron_log_entries_sync(log_dirs: list[Path], *, job: str, lines: int, files: int) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for log_dir in log_dirs:
+        if not log_dir.exists():
+            continue
+        for item in sorted(log_dir.glob(f"*{job}*"), reverse=True)[:files]:
+            try:
+                stat = item.stat()
+                entries.append({
+                    "file": str(item),
+                    "lines": _tail_text_lines(item, lines),
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                })
+            except Exception:
+                continue
+    return entries
+
+
 @router.get("/system/cron-logs")
 async def cron_logs(
     job: str = Query("", description="Job name to filter logs for"),
@@ -1237,24 +1256,7 @@ async def cron_logs(
         Path.home() / ".local" / "share" / "illo" / "logs",
     ]
 
-    entries: list[dict] = []
-    for log_dir in log_dirs:
-        if not log_dir.exists():
-            continue
-        # Look for files matching the job name
-        for f in sorted(log_dir.glob(f"*{job}*"), reverse=True)[:files]:
-            try:
-                stat = f.stat()
-                entries.append({
-                    "file": str(f),
-                    "lines": _tail_text_lines(f, lines),
-                    "size": stat.st_size,
-                    "modified": stat.st_mtime,
-                })
-            except Exception:
-                continue
-
-    return entries
+    return await run_blocking(_cron_log_entries_sync, log_dirs, job=job, lines=lines, files=files)
 
 
 class SchedulerJobUpsertRequest(BaseModel):

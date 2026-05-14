@@ -12,11 +12,11 @@ Can be called from nightly cycle or on-demand:
 import json
 import logging
 import os
-import subprocess
 import sys
 import asyncio
 import uuid
 from datetime import datetime, timedelta
+from subprocess import TimeoutExpired
 
 import numpy as np
 
@@ -26,6 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel import config
+from brain.platform.async_io import run_subprocess
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.memory.embeddings import embed_document, embed_batch, vec_to_pg
 
@@ -229,7 +230,7 @@ async def _async_scan_error_patterns(session: AsyncSession) -> list[dict]:
 # Source: GitHub Issues
 # ---------------------------------------------------------------------------
 
-def _scan_github_issues() -> list[dict]:
+async def _async_scan_github_issues() -> list[dict]:
     """Poll configured GitHub repos for new issues if gh CLI is available."""
     candidates = []
     owner = os.environ.get("ILLO_GITHUB_ISSUE_OWNER", "").strip()
@@ -239,17 +240,20 @@ def _scan_github_issues() -> list[dict]:
 
     # Check gh CLI
     try:
-        result = subprocess.run(['gh', '--version'], capture_output=True, timeout=5)
+        result = await run_subprocess(['gh', '--version'], capture_output=True, timeout=5)
         if result.returncode != 0:
             log.info("gh CLI not available, skipping GitHub scan")
             return []
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except TimeoutExpired:
+        log.info("gh CLI not found, skipping GitHub scan")
+        return []
+    except FileNotFoundError:
         log.info("gh CLI not found, skipping GitHub scan")
         return []
 
     try:
         # Get recent issues from the configured owner.
-        result = subprocess.run(
+        result = await run_subprocess(
             ['gh', 'search', 'issues', '--owner', owner, '--state', 'open',
              '--created', f'>={( datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")}',
              '--json', 'title,body,url,repository,createdAt', '--limit', '20'],
@@ -365,7 +369,7 @@ async def async_run_emergence(session: AsyncSession) -> dict:
     all_candidates = []
     all_candidates.extend([(c, 'conversation') for c in await _async_scan_conversation_patterns(session, runtime_config)])
     all_candidates.extend([(c, 'error') for c in await _async_scan_error_patterns(session)])
-    all_candidates.extend([(c, 'github') for c in _scan_github_issues()])
+    all_candidates.extend([(c, 'github') for c in await _async_scan_github_issues()])
     all_candidates.extend([(c, 'nightly_insight') for c in await _async_scan_nightly_insights(session)])
 
     log.info("Total candidates: %s", len(all_candidates))
@@ -418,5 +422,9 @@ async def async_run_emergence(session: AsyncSession) -> dict:
     return {'created': created, 'skipped_dedup': skipped_dedup, 'skipped_confidence': skipped_confidence}
 
 
-if __name__ == '__main__':
+def main() -> None:
     asyncio.run(run_emergence())
+
+
+if __name__ == '__main__':
+    main()

@@ -179,5 +179,9 @@ async def async_run_optimization(session: AsyncSession) -> dict:
     return result
 
 
-if __name__ == '__main__':
+def main() -> None:
     asyncio.run(run_optimization())
+
+
+if __name__ == '__main__':
+    main()

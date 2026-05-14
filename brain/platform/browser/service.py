@@ -28,6 +28,7 @@ from brain.kernel.common.time import utcnow as _shared_utcnow
 from brain.systems.cortex.events import publish_safe
 from brain.systems.cortex.resources.telemetry import build_browser_resource_summary
 from brain.systems.cortex.upload_preview import public_static_upload_url, static_upload_url_for
+from brain.platform.async_io import copy_file, ensure_dir, glob_paths, iter_dir, path_exists, path_is_file, path_stat
 from brain.platform.db.models.browser import BrowserSession
 from brain.platform.db.models.idea import Idea, VisualBlock
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -255,8 +256,8 @@ class BrowserSessionRuntime:
     async def _configure_downloads(self) -> None:
         if not self.allow_downloads:
             return
-        self._harness_download_dir.mkdir(parents=True, exist_ok=True)
-        self._known_download_paths = self._download_snapshot()
+        await ensure_dir(self._harness_download_dir)
+        self._known_download_paths = await self._download_snapshot()
         await self._run_json(f"""
 from pathlib import Path
 DL = {json.dumps(str(self._harness_download_dir))}
@@ -265,45 +266,47 @@ cdp("Browser.setDownloadBehavior", behavior="allow", downloadPath=DL, eventsEnab
 result = page_info()
 """)
 
-    def _download_snapshot(self) -> set[str]:
-        if not self._harness_download_dir.exists():
+    async def _download_snapshot(self) -> set[str]:
+        if not await path_exists(self._harness_download_dir):
             return set()
-        return {
-            str(path.resolve())
-            for path in self._harness_download_dir.iterdir()
-            if path.is_file() and not path.name.endswith(".crdownload")
-        }
+        paths = await iter_dir(self._harness_download_dir)
+        snapshot: set[str] = set()
+        for path in paths:
+            if await path_is_file(path) and not path.name.endswith(".crdownload"):
+                snapshot.add(str(path.resolve()))
+        return snapshot
 
     async def _capture_new_downloads(self, *, wait_for_completion: bool = False) -> None:
         if not self.allow_downloads:
             return
-        self._harness_download_dir.mkdir(parents=True, exist_ok=True)
+        await ensure_dir(self._harness_download_dir)
         deadline = asyncio.get_running_loop().time() + (5.0 if wait_for_completion else 0.3)
-        current = self._download_snapshot()
+        current = await self._download_snapshot()
         while wait_for_completion and asyncio.get_running_loop().time() < deadline:
-            incomplete = list(self._harness_download_dir.glob("*.crdownload"))
-            current = self._download_snapshot()
+            incomplete = await glob_paths(self._harness_download_dir, "*.crdownload")
+            current = await self._download_snapshot()
             if current - self._known_download_paths and not incomplete:
                 break
             await asyncio.sleep(0.2)
         for raw_path in sorted(current - self._known_download_paths):
             source = Path(raw_path)
-            if not source.exists():
+            if not await path_exists(source):
                 continue
-            self._download_dir.mkdir(parents=True, exist_ok=True)
+            await ensure_dir(self._download_dir)
             filename = self._sanitize_download_filename(source.name)
             target = self._allocate_unique_path(self._download_dir, filename)
             try:
-                shutil.copy2(source, target)
+                await copy_file(source, target)
             except FileNotFoundError:
                 continue
             public_url = static_upload_url_for("browser-downloads", self.session_id, target.name)
             self._record_action("download", target.name)
+            stat = await path_stat(target)
             self._record_download(
                 filename=target.name,
                 url=public_url,
                 download_url=public_static_upload_url(public_url),
-                size=target.stat().st_size,
+                size=stat.st_size,
             )
             self._emit_state("download")
         self._known_download_paths = current
@@ -390,7 +393,10 @@ result = page_info()
         if self._stream_task and not self._stream_task.done():
             self._dirty.set()
             return
-        self._stream_task = asyncio.create_task(self._stream_loop(), name=f"browser-stream-{self.session_id}")
+        self._stream_task = asyncio.get_running_loop().create_task(
+            self._stream_loop(),
+            name=f"browser-stream-{self.session_id}",
+        )
         self._dirty.set()
 
     async def unsubscribe(self, user_id: str | None = None) -> None:
@@ -414,10 +420,10 @@ result = page_info()
                 "Browser Harness is not installed or not on PATH. "
                 "Install https://github.com/browser-use/browser-harness and ensure `browser-harness` is available."
             )
-        self._harness_root.mkdir(parents=True, exist_ok=True)
-        self._harness_ipc_dir.mkdir(parents=True, exist_ok=True)
-        self._harness_workspace.mkdir(parents=True, exist_ok=True)
-        self._harness_download_dir.mkdir(parents=True, exist_ok=True)
+        await ensure_dir(self._harness_root)
+        await ensure_dir(self._harness_ipc_dir)
+        await ensure_dir(self._harness_workspace)
+        await ensure_dir(self._harness_download_dir)
         await self._ensure_chrome_process()
         info = await self._page_info()
         await self._apply_page_info(info, status="ready")
@@ -804,17 +810,18 @@ result = page_info()
         async with self._action_lock:
             await self.start()
             self._record_action("save_screenshot", "full_page" if full_page else "viewport")
-            self._artifact_dir.mkdir(parents=True, exist_ok=True)
+            await ensure_dir(self._artifact_dir)
             target = self._allocate_unique_path(self._artifact_dir, self._artifact_filename("screenshot", "png"))
             await self._run_json(f"""
 capture_screenshot({json.dumps(str(target))}, full={bool(full_page)})
 result = {{"ok": True}}
 """)
+            stat = await path_stat(target) if await path_exists(target) else None
             artifact = self._record_artifact(
                 kind="screenshot",
                 filename=target.name,
                 url=static_upload_url_for("browser-artifacts", self.session_id, target.name),
-                size=target.stat().st_size if target.exists() else None,
+                size=stat.st_size if stat else None,
             )
             self._emit_state("artifact")
             return {"session_id": self.session_id, "artifact": artifact.__dict__, "state": self.state_payload()}
@@ -823,7 +830,7 @@ result = {{"ok": True}}
         async with self._action_lock:
             await self.start()
             self._record_action("print_pdf", "landscape" if landscape else "portrait")
-            self._artifact_dir.mkdir(parents=True, exist_ok=True)
+            await ensure_dir(self._artifact_dir)
             target = self._allocate_unique_path(self._artifact_dir, self._artifact_filename("page", "pdf"))
             await self._run_json(f"""
 payload = cdp("Page.printToPDF", printBackground=True, landscape={bool(landscape)})
@@ -831,11 +838,12 @@ import base64
 open({json.dumps(str(target))}, "wb").write(base64.b64decode(payload["data"]))
 result = {{"ok": True}}
 """)
+            stat = await path_stat(target) if await path_exists(target) else None
             artifact = self._record_artifact(
                 kind="pdf",
                 filename=target.name,
                 url=static_upload_url_for("browser-artifacts", self.session_id, target.name),
-                size=target.stat().st_size if target.exists() else None,
+                size=stat.st_size if stat else None,
             )
             self._emit_state("artifact")
             return {"session_id": self.session_id, "artifact": artifact.__dict__, "state": self.state_payload()}
@@ -949,7 +957,7 @@ result = {"image": base64.b64encode(data).decode("ascii"), "info": page_info()}
             self._cdp_port = self._allocate_port()
             self._cdp_url = f"http://127.0.0.1:{self._cdp_port}"
             self._chrome_executable = chrome
-            self._harness_chrome_dir.mkdir(parents=True, exist_ok=True)
+            await ensure_dir(self._harness_chrome_dir)
             self._ensure_chrome_sidecar_permissions(chrome)
             try:
                 self._chrome_process = await asyncio.create_subprocess_exec(
@@ -1462,7 +1470,7 @@ print({json.dumps(marker)} + json.dumps(result))
 
     def _schedule_idle_close(self) -> None:
         self._cancel_idle_close()
-        self._idle_close_task = asyncio.create_task(
+        self._idle_close_task = asyncio.get_running_loop().create_task(
             self._idle_close_after_delay(),
             name=f"browser-idle-close-{self.session_id}",
         )

@@ -19,6 +19,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 import brain.kernel.config as config
+from brain.platform.async_io import ensure_dir, write_text as write_text_async
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 PROJECT_ROOT = str(config.BRAIN_DIR)
@@ -175,17 +176,18 @@ async def _async_main(args) -> None:
     if not dream_output:
         print("❌ LLM call failed — no dream output")
         # Save prompt for debugging
-        os.makedirs(LOG_DIR, exist_ok=True)
+        await ensure_dir(LOG_DIR)
         prompt_path = os.path.join(LOG_DIR, f"dream-prompt-{target_date}.md")
-        with open(prompt_path, "w") as f:
-            f.write(prompt)
+        await write_text_async(prompt_path, prompt)
         print(f"Prompt saved to {prompt_path}")
         return
 
     # Save raw output
-    os.makedirs(LOG_DIR, exist_ok=True)
-    with open(os.path.join(LOG_DIR, f"dream-output-{target_date}.json"), "w") as f:
-        json.dump(dream_output, f, indent=2, default=str)
+    await ensure_dir(LOG_DIR)
+    await write_text_async(
+        os.path.join(LOG_DIR, f"dream-output-{target_date}.json"),
+        json.dumps(dream_output, indent=2, default=str),
+    )
 
     stored = await store_dream_memories(dream_output, target_date, dry_run)
     print(f"\n💭 Dream complete. Stored {stored} dream memories.")
