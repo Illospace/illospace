@@ -430,12 +430,7 @@ def _validate_thread_project_context(project_context: dict[str, Any] | None) -> 
 def _merge_project_context_into_idea(idea: Any, project_context: dict[str, Any] | None) -> None:
     if not project_context:
         return
-    if isinstance(idea.agent_details, dict):
-        existing = dict(idea.agent_details or {})
-    else:
-        existing = {}
-        if idea.agent_details not in (None, [], {}):
-            existing["legacy_agent_details"] = copy.deepcopy(idea.agent_details)
+    existing = dict(idea.agent_details or {}) if isinstance(idea.agent_details, dict) else {}
     existing["project_context"] = project_context
     idea.agent_details = existing
 
