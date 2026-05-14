@@ -27,7 +27,7 @@ from brain.systems.cortex.resources.telemetry import (
 )
 from brain.platform.db.models.resource_pool import BrowserPoolEntry, WorkspacePoolEntry
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.async_io import remove_tree
+from brain.platform.async_io import remove_tree, run_subprocess_sync
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def _probe_workspace_clone_support(probe_root: str) -> bool:
             (source / "nested").mkdir()
             (source / "nested" / "payload.txt").write_text("probe\n")
             target = Path(tmpdir) / "target"
-            result = subprocess.run(
+            result = run_subprocess_sync(
                 [*command, f"{source}/.", str(target)],
                 capture_output=True,
                 text=True,
@@ -556,7 +556,7 @@ class ResourcePoolManager:
             return False, "workspace pool key mismatch"
 
         try:
-            status = subprocess.run(
+            status = run_subprocess_sync(
                 ["git", "status", "--porcelain"],
                 cwd=str(base_path),
                 capture_output=True,
@@ -567,7 +567,7 @@ class ResourcePoolManager:
                 return False, f"workspace pool entry validation failed: {status.stderr.strip() or status.stdout.strip()}"
             if status.stdout.strip():
                 return False, "workspace pool entry is dirty"
-            head = subprocess.run(
+            head = run_subprocess_sync(
                 ["git", "rev-parse", "HEAD"],
                 cwd=str(base_path),
                 capture_output=True,
@@ -598,7 +598,7 @@ class ResourcePoolManager:
             mode = "copy"
         if mode in _WORKSPACE_ADVANCED_MODES:
             clone_command = ["cp", "-cR"] if platform.system() == "Darwin" else ["cp", "--reflink=always", "-R"]
-            result = subprocess.run(
+            result = run_subprocess_sync(
                 [*clone_command, f"{source}/.", str(target_path)],
                 capture_output=True,
                 text=True,

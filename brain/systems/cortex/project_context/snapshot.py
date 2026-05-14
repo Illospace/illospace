@@ -15,6 +15,7 @@ import subprocess
 from urllib.parse import urlsplit, urlunsplit
 from typing import Any
 
+from brain.platform.async_io import check_output_sync
 from brain.systems.cortex.project_context.permissions import (
     derive_project_permission_scope,
     normalize_project_path,
@@ -60,7 +61,7 @@ def _redact_remote(remote: str | None) -> str | None:
 
 def _run_git(path: str, *args: str) -> str | None:
     try:
-        return subprocess.check_output(
+        return check_output_sync(
             ["git", *args],
             cwd=path,
             text=True,

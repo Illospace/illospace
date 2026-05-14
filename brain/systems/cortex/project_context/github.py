@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from brain.platform.async_io import async_http_client, sync_http_client
+
 
 GITHUB_API_BASE = "https://api.github.com"
 GITHUB_REPO_PAGE_LIMIT = 10
@@ -124,7 +126,7 @@ def _merge_repos(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def connect_with_token(token: str) -> dict[str, Any]:
-    with httpx.Client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+    with sync_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
         user = _request(client, "GET", "/user", token=token)
         repos: list[dict[str, Any]] = []
         for page in range(1, GITHUB_REPO_PAGE_LIMIT + 1):
@@ -152,7 +154,7 @@ def connect_with_token(token: str) -> dict[str, Any]:
 
 
 async def async_connect_with_token(token: str) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
         user = await _async_request(client, "GET", "/user", token=token)
         repos: list[dict[str, Any]] = []
         for page in range(1, GITHUB_REPO_PAGE_LIMIT + 1):
@@ -181,7 +183,7 @@ async def async_connect_with_token(token: str) -> dict[str, Any]:
 
 def get_repo_by_slug(slug: str, *, token: str | None = None) -> dict[str, Any] | None:
     owner, repo = slug.split("/", 1)
-    with httpx.Client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+    with sync_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
         try:
             payload = _request(
                 client,
@@ -198,7 +200,7 @@ def get_repo_by_slug(slug: str, *, token: str | None = None) -> dict[str, Any] |
 
 async def async_get_repo_by_slug(slug: str, *, token: str | None = None) -> dict[str, Any] | None:
     owner, repo = slug.split("/", 1)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
         try:
             payload = await _async_request(
                 client,
@@ -234,7 +236,7 @@ def search_repos(query: str, *, token: str | None = None) -> dict[str, Any]:
             raise first_error
         return {"repos": [], "matched_exact": True}
 
-    with httpx.Client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+    with sync_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
         groups: list[list[dict[str, Any]]] = []
         errors: list[GitHubConnectorError] = []
         for token_candidate in ([token, None] if token else [None]):
@@ -277,7 +279,7 @@ async def async_search_repos(query: str, *, token: str | None = None) -> dict[st
             raise first_error
         return {"repos": [], "matched_exact": True}
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+    async with async_http_client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
         groups: list[list[dict[str, Any]]] = []
         errors: list[GitHubConnectorError] = []
         for token_candidate in ([token, None] if token else [None]):

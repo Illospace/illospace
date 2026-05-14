@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from brain.platform.async_io import run_subprocess_sync
 from brain.systems.memory.source_freshness import evaluate_source_freshness
 
 SUMMARY_SCHEMA_VERSION = "repo-summary/v1"
@@ -844,7 +845,7 @@ def _git_head(repo_root: Path) -> str | None:
 
 def _run_git(repo_root: Path, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(
+        return run_subprocess_sync(
             ["git", "-C", str(repo_root), *args],
             check=False,
             stdout=subprocess.PIPE,

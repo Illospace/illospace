@@ -8,10 +8,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import httpx
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.platform.async_io import http_get
 from brain.platform.db.models.run import AgentRun
 from brain.platform.provider_health import provider_health_snapshot
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
@@ -397,7 +397,7 @@ def _embedding_health_check() -> HealthCheck:
                 DEFAULT_GPU_HEALTH_TIMEOUT_SECONDS,
             )
             url = f"{cfg.GPU_SERVER_URL.rstrip('/')}/health"
-            response = httpx.get(url, timeout=timeout_s)
+            response = http_get(url, timeout=timeout_s)
             payload = response.json()
             details.update({
                 "gpu_server_url": cfg.GPU_SERVER_URL,

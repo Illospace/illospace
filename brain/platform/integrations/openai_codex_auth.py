@@ -32,6 +32,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
+from brain.platform.async_io import http_post
+
 _AUTH_FILENAME = "auth.json"
 _DEFAULT_CLI_HOME = ".codex"
 _DEFAULT_OAUTH_ISSUER = "https://auth.openai.com"
@@ -259,7 +261,7 @@ def refresh_codex_access_token(
     """
 
     token_url = f"{issuer.rstrip('/')}/oauth/token"
-    response = httpx.post(
+    response = http_post(
         token_url,
         json={
             "grant_type": "refresh_token",
@@ -385,7 +387,7 @@ def exchange_codex_authorization_code(
         raise ValueError("Missing PKCE code verifier")
 
     token_url = f"{issuer.rstrip('/')}/oauth/token"
-    response = httpx.post(
+    response = http_post(
         token_url,
         json={
             "grant_type": "authorization_code",

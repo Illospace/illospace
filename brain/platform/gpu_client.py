@@ -10,6 +10,8 @@ import logging
 import httpx
 import numpy as np
 
+from brain.platform.async_io import sync_http_client
+
 logger = logging.getLogger("brain.platform.gpu_client")
 
 _GPU_SERVER_URL = os.environ.get("GPU_SERVER_URL", "http://127.0.0.1:9800")
@@ -20,7 +22,7 @@ class GPUClient:
 
     def __init__(self, base_url: str = _GPU_SERVER_URL):
         self.base_url = base_url
-        self._session = httpx.Client(
+        self._session = sync_http_client(
             base_url=base_url,
             timeout=60.0,
             headers={"Content-Type": "application/json"},

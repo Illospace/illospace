@@ -7,12 +7,12 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
 from fastapi import HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel import config as cfg
+from brain.platform.async_io import http_post
 from brain.platform.db.models.org import User
 from brain.platform.db.models.vault import VaultConfig
 
@@ -291,9 +291,9 @@ def _sync_gpu_embedding_worker(backend: str) -> None:
     unload_url = f"{cfg.GPU_SERVER_URL}/models/embedding/unload"
     load_url = f"{cfg.GPU_SERVER_URL}/models/embedding/load"
     try:
-        httpx.post(unload_url, timeout=15)
+        http_post(unload_url, timeout=15)
         if backend == "gpu":
-            httpx.post(load_url, timeout=120)
+            http_post(load_url, timeout=120)
     except Exception as exc:  # pragma: no cover - worker may not be running locally.
         logger.info("Could not sync embedding worker after settings update: %s", exc)
 

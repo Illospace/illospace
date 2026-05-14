@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from brain.platform.async_io import async_http_client
 from brain.systems.workspace_apps.actions import (
     WorkspaceAppActionContext,
     WorkspaceAppActionContractError,
@@ -88,7 +89,10 @@ async def _request_json(
     await _apply_auth(headers, spec.get("auth"), context=context, payload=payload)
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0), follow_redirects=False) as client:
+        async with async_http_client(
+            timeout=httpx.Timeout(20.0, connect=5.0),
+            follow_redirects=False,
+        ) as client:
             response = await client.request(
                 method,
                 url,

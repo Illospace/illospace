@@ -16,6 +16,8 @@ import logging
 import subprocess
 import sys
 
+from brain.platform.async_io import run_subprocess_sync
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,7 +31,7 @@ def restart_dashboard() -> bool:
         True if restart succeeded, False otherwise.
     """
     try:
-        subprocess.run(
+        run_subprocess_sync(
             ["systemctl", "--user", "restart", "illo-dashboard"],
             check=True,
             capture_output=True,

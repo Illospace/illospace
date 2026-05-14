@@ -16,6 +16,7 @@ import httpx
 from brain.platform.gpu.config import ServerConfig, build_worker_manifests
 from brain.platform.gpu.vram import VRAMBookkeeper, query_gpu_total_mb
 from brain.platform.gpu.worker_manager import WorkerManager, FAILED_RECOVERY_INTERVAL, _backoff_seconds
+from brain.platform.async_io import sync_http_client
 
 logger = logging.getLogger("brain.platform.gpu")
 
@@ -133,7 +134,7 @@ class GPUServer:
         sock_path = w["socket_path"]
         try:
             transport = httpx.HTTPTransport(uds=sock_path)
-            with httpx.Client(transport=transport, timeout=timeout) as client:
+            with sync_http_client(transport=transport, timeout=timeout) as client:
                 resp = client.post(
                     "http://localhost/infer",
                     content=data,
