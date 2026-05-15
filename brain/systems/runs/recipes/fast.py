@@ -177,7 +177,11 @@ class FastRecipe(BaseRunRecipe):
             status = RunStatus.CANCELED
         if getattr(result, "error", None) and not output:
             output = str(result.error)
-        return RunRecipeResult(output=output, status=status)
+        return RunRecipeResult(
+            output=output,
+            status=status,
+            post_completion_tasks=tuple(getattr(result, "post_completion_tasks", ()) or ()),
+        )
 
 
 __all__ = ["FastRecipe"]

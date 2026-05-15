@@ -38,6 +38,9 @@ async def test_run_agent_async_basic_completion_uses_async_session_hooks(monkeyp
     provider_calls = []
     hook_calls = []
     loop_id = id(asyncio.get_running_loop())
+    handoff_started = asyncio.Event()
+    handoff_release = asyncio.Event()
+    handoff_completed = asyncio.Event()
 
     class FakeProvider:
         def create(self, request):
@@ -62,22 +65,28 @@ async def test_run_agent_async_basic_completion_uses_async_session_hooks(monkeyp
         hook_calls.append(("save_session", id(asyncio.get_running_loop()), session_id, len(messages), token_args, user_id))
 
     async def save_session_handoff(session_id, payload, *, user_id=None):
+        handoff_started.set()
+        await handoff_release.wait()
         hook_calls.append(("save_session_handoff", id(asyncio.get_running_loop()), session_id, payload, user_id))
+        handoff_completed.set()
 
     monkeypatch.setattr(direct_agent, "get_provider", lambda *_args, **_kwargs: FakeProvider())
 
     run_agent_async = getattr(direct_agent, "run_agent_async")
-    result = await run_agent_async(
-        message="Say hello",
-        model="claude-sonnet-4-6",
-        tools=[],
-        persist_session=True,
-        session_id="async-session",
-        resolved_llm=_FakeLLM(),
-        load_session=load_session,
-        load_session_handoff=load_session_handoff,
-        save_session=save_session,
-        save_session_handoff=save_session_handoff,
+    result = await asyncio.wait_for(
+        run_agent_async(
+            message="Say hello",
+            model="claude-sonnet-4-6",
+            tools=[],
+            persist_session=True,
+            session_id="async-session",
+            resolved_llm=_FakeLLM(),
+            load_session=load_session,
+            load_session_handoff=load_session_handoff,
+            save_session=save_session,
+            save_session_handoff=save_session_handoff,
+        ),
+        timeout=1,
     )
 
     assert result.success
@@ -88,8 +97,15 @@ async def test_run_agent_async_basic_completion_uses_async_session_hooks(monkeyp
         "load_session",
         "load_session_handoff",
         "save_session",
-        "save_session_handoff",
     ]
+    assert len(result.post_completion_tasks) == 1
+    handoff_task = asyncio.create_task(result.post_completion_tasks[0]())
+    await asyncio.wait_for(handoff_started.wait(), timeout=1)
+    assert not handoff_completed.is_set()
+    handoff_release.set()
+    await asyncio.wait_for(handoff_completed.wait(), timeout=1)
+    await handoff_task
+    assert hook_calls[-1][0] == "save_session_handoff"
 
 
 async def test_run_agent_async_honors_async_cancellation_without_sync_polling(monkeypatch):
