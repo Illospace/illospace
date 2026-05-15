@@ -16,6 +16,7 @@ import re as _re
 import sys
 import time
 import uuid
+import inspect
 
 from brain.kernel import config as brain_config
 from brain.systems.runs import actions as action_audit
@@ -390,13 +391,16 @@ def _wrap_brain_encode(original_fn):
                 pass
         if "visibility" not in kwargs:
             kwargs["visibility"] = "org" if kwargs.get("org_id") else "private"
-        return original_fn(**kwargs)
+        result = original_fn(**kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
     return wrapper
 
 
 def _wrap_brain_recall(original_fn):
     """Inject run viewer context into recall tool calls."""
-    def wrapper(**kwargs):
+    async def wrapper(**kwargs):
         execution_metadata = getattr(_agent_context, "execution_metadata", None)
         if kwargs.get("user_id") is None:
             kwargs["user_id"] = getattr(_agent_context, "user_id", None)
@@ -408,6 +412,8 @@ def _wrap_brain_recall(original_fn):
             if kwargs.get("org_id") is None:
                 kwargs["org_id"] = execution_metadata.get("org_id")
         result = original_fn(**kwargs)
+        if inspect.isawaitable(result):
+            result = await result
         _patched_private("_record_tool_evidence", _record_tool_evidence)(
             "brain_recall",
             kwargs,
@@ -624,8 +630,10 @@ def _record_tool_evidence(tool_name: str, args: dict | None, result: object) -> 
 
 def _wrap_tool_evidence(tool_name: str, handler):
     """Wrap a handler so successful backend tool output becomes evidence."""
-    def wrapper(*args, **kwargs):
+    async def wrapper(*args, **kwargs):
         result = handler(*args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
         evidence_args = dict(kwargs)
         if args:
             evidence_args["_args"] = list(args)

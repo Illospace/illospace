@@ -23,7 +23,6 @@ from brain.app.api.schemas.external_agents import (
     BridgeWorkspaceSearchRequest,
 )
 from brain.app.mentions import classify_mention_intent
-from brain.platform.db.session_tasks import run_external_agent_db
 from brain.platform.db.models.idea import Idea
 from brain.systems.external_agents import service as external_agents
 
@@ -52,17 +51,14 @@ def require_bridge_scope(required_scope: str) -> Callable[..., Any]:
     ) -> external_agents.AgentBridgePrincipal:
         token = _bearer_token(request, x_illo_bridge_token)
 
-        def _auth(sync_db):
-            try:
-                return external_agents.authenticate_bridge_token(
-                    sync_db,
-                    token,
-                    required_scope=required_scope,
-                )
-            except Exception as exc:
-                raise_external_agent_http_error(exc)
-
-        return await run_external_agent_db(db, _auth)
+        try:
+            return await external_agents.authenticate_bridge_token(
+                db,
+                token,
+                required_scope=required_scope,
+            )
+        except Exception as exc:
+            raise_external_agent_http_error(exc)
 
     return _dependency
 
@@ -168,17 +164,14 @@ async def heartbeat(
         require_bridge_scope(external_agents.SCOPE_CONNECTION_HEARTBEAT)
     ),
 ):
-    def _heartbeat(sync_db):
-        connection = external_agents.record_heartbeat(
-            sync_db,
-            principal,
-            status=payload.status,
-            capabilities=payload.capabilities,
-            metadata=payload.metadata,
-        )
-        return {"ok": True, "connection": external_agents.serialize_connection(connection)}
-
-    return await run_external_agent_db(db, _heartbeat)
+    connection = await external_agents.record_heartbeat(
+        db,
+        principal,
+        status=payload.status,
+        capabilities=payload.capabilities,
+        metadata=payload.metadata,
+    )
+    return {"ok": True, "connection": external_agents.serialize_connection(connection)}
 
 
 @router.post("/tasks/claim")
@@ -189,11 +182,8 @@ async def claim_tasks(
         require_bridge_scope(external_agents.SCOPE_TASK_CLAIM)
     ),
 ):
-    def _claim(sync_db):
-        rows = external_agents.claim_tasks(sync_db, principal, max_tasks=payload.max_tasks)
-        return {"tasks": [external_agents.serialize_task(row) for row in rows]}
-
-    return await run_external_agent_db(db, _claim)
+    rows = await external_agents.claim_tasks(db, principal, max_tasks=payload.max_tasks)
+    return {"tasks": [await external_agents.serialize_task(row) for row in rows]}
 
 
 @router.get("/tasks/{task_id}")
@@ -204,19 +194,16 @@ async def get_task(
         require_bridge_scope(external_agents.SCOPE_TASK_CLAIM)
     ),
 ):
-    def _get(sync_db):
-        try:
-            task = external_agents.require_task_for_principal(sync_db, principal, task_id)
-            return external_agents.serialize_task(
-                task,
-                include_events=True,
-                include_artifacts=True,
-                session=sync_db,
-            )
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
-
-    return await run_external_agent_db(db, _get)
+    try:
+        task = await external_agents.require_task_for_principal(db, principal, task_id)
+        return await external_agents.serialize_task(
+            task,
+            include_events=True,
+            include_artifacts=True,
+            session=db,
+        )
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
 
 
 @router.post("/tasks/{task_id}/events")
@@ -228,23 +215,20 @@ async def append_task_event(
         require_bridge_scope(external_agents.SCOPE_TASK_UPDATE)
     ),
 ):
-    def _event(sync_db):
-        try:
-            event = external_agents.update_task_event(
-                sync_db,
-                principal,
-                task_id=task_id,
-                event_type=payload.event_type,
-                status=payload.status,
-                message=payload.message,
-                payload=payload.payload,
-                remote_event_id=payload.remote_event_id,
-            )
-            return {"event": external_agents.serialize_event(event)}
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
-
-    return await run_external_agent_db(db, _event)
+    try:
+        event = await external_agents.update_task_event(
+            db,
+            principal,
+            task_id=task_id,
+            event_type=payload.event_type,
+            status=payload.status,
+            message=payload.message,
+            payload=payload.payload,
+            remote_event_id=payload.remote_event_id,
+        )
+        return {"event": external_agents.serialize_event(event)}
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
 
 
 @router.post("/tasks/{task_id}/artifacts")
@@ -256,26 +240,23 @@ async def append_task_artifact(
         require_bridge_scope(external_agents.SCOPE_ARTIFACT_WRITE)
     ),
 ):
-    def _artifact(sync_db):
-        try:
-            artifact = external_agents.append_artifact(
-                sync_db,
-                principal,
-                task_id=task_id,
-                kind=payload.kind,
-                title=payload.title,
-                mime_type=payload.mime_type,
-                content_text=payload.content_text,
-                content_json=payload.content_json,
-                uri=payload.uri,
-                upload_id=payload.upload_id,
-                metadata=payload.metadata,
-            )
-            return {"artifact": external_agents.serialize_artifact(artifact)}
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
-
-    return await run_external_agent_db(db, _artifact)
+    try:
+        artifact = await external_agents.append_artifact(
+            db,
+            principal,
+            task_id=task_id,
+            kind=payload.kind,
+            title=payload.title,
+            mime_type=payload.mime_type,
+            content_text=payload.content_text,
+            content_json=payload.content_json,
+            uri=payload.uri,
+            upload_id=payload.upload_id,
+            metadata=payload.metadata,
+        )
+        return {"artifact": external_agents.serialize_artifact(artifact)}
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
 
 
 @router.post("/tasks/{task_id}/complete")
@@ -287,24 +268,22 @@ async def complete_task(
         require_bridge_scope(external_agents.SCOPE_TASK_COMPLETE)
     ),
 ):
-    def _complete(sync_db):
-        try:
-            task, message = external_agents.complete_task(
-                sync_db,
-                principal,
-                task_id=task_id,
-                result_summary=payload.result_summary,
-                artifacts=[artifact.model_dump() for artifact in payload.artifacts],
-                payload=payload.payload,
-            )
-            return {
-                "task": external_agents.serialize_task(task, include_artifacts=True, session=sync_db),
-                "thread_message": external_agents.serialize_thread_message(message) if message else None,
-            }
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
+    try:
+        task, message = await external_agents.complete_task(
+            db,
+            principal,
+            task_id=task_id,
+            result_summary=payload.result_summary,
+            artifacts=[artifact.model_dump() for artifact in payload.artifacts],
+            payload=payload.payload,
+        )
+        result = {
+            "task": await external_agents.serialize_task(task, include_artifacts=True, session=db),
+            "thread_message": external_agents.serialize_thread_message(message) if message else None,
+        }
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
 
-    result = await run_external_agent_db(db, _complete)
     await _commit_for_live_fanout(db)
     await _broadcast_thread_result(result, org_id=principal.org_id)
     return result
@@ -319,23 +298,21 @@ async def fail_task(
         require_bridge_scope(external_agents.SCOPE_TASK_COMPLETE)
     ),
 ):
-    def _fail(sync_db):
-        try:
-            task, message = external_agents.fail_task(
-                sync_db,
-                principal,
-                task_id=task_id,
-                error=payload.error,
-                payload=payload.payload,
-            )
-            return {
-                "task": external_agents.serialize_task(task),
-                "thread_message": external_agents.serialize_thread_message(message) if message else None,
-            }
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
+    try:
+        task, message = await external_agents.fail_task(
+            db,
+            principal,
+            task_id=task_id,
+            error=payload.error,
+            payload=payload.payload,
+        )
+        result = {
+            "task": await external_agents.serialize_task(task),
+            "thread_message": external_agents.serialize_thread_message(message) if message else None,
+        }
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
 
-    result = await run_external_agent_db(db, _fail)
     await _commit_for_live_fanout(db)
     await _broadcast_thread_result(result, org_id=principal.org_id)
     return result
@@ -349,14 +326,11 @@ async def bridge_search_workspace(
         require_bridge_scope(external_agents.SCOPE_WORKSPACE_READ)
     ),
 ):
-    return await run_external_agent_db(
+    return await external_agents.search_workspace(
         db,
-        lambda sync_db: external_agents.search_workspace(
-            sync_db,
-            principal,
-            query=payload.query,
-            limit=payload.limit,
-        ),
+        principal,
+        query=payload.query,
+        limit=payload.limit,
     )
 
 
@@ -369,13 +343,10 @@ async def bridge_get_thread(
         require_bridge_scope(external_agents.SCOPE_WORKSPACE_READ)
     ),
 ):
-    def _get(sync_db):
-        try:
-            return external_agents.get_thread(sync_db, principal, idea_id=idea_id, limit=limit)
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
-
-    return await run_external_agent_db(db, _get)
+    try:
+        return await external_agents.get_thread(db, principal, idea_id=idea_id, limit=limit)
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
 
 
 @router.get("/workspace/team-members")
@@ -385,7 +356,7 @@ async def bridge_get_team_members(
         require_bridge_scope(external_agents.SCOPE_WORKSPACE_READ)
     ),
 ):
-    return await run_external_agent_db(db, lambda sync_db: external_agents.get_team_members(sync_db, principal))
+    return await external_agents.get_team_members(db, principal)
 
 
 @router.post("/illo/ask", status_code=202)
@@ -396,17 +367,14 @@ async def ask_illo(
         require_bridge_scope(external_agents.SCOPE_ILLO_ASK)
     ),
 ):
-    def _ask(sync_db):
-        task = external_agents.create_headless_ask(
-            sync_db,
-            principal,
-            question=payload.question,
-            context=payload.context,
-            metadata=payload.metadata,
-        )
-        return external_agents.serialize_task(task, include_events=True, session=sync_db)
-
-    return await run_external_agent_db(db, _ask)
+    task = await external_agents.create_headless_ask(
+        db,
+        principal,
+        question=payload.question,
+        context=payload.context,
+        metadata=payload.metadata,
+    )
+    return await external_agents.serialize_task(task, include_events=True, session=db)
 
 
 @router.get("/illo/ask/{ask_id}")
@@ -417,13 +385,10 @@ async def get_illo_ask(
         require_bridge_scope(external_agents.SCOPE_ILLO_ASK)
     ),
 ):
-    def _get(sync_db):
-        try:
-            return external_agents.get_headless_ask(sync_db, principal, ask_id=ask_id)
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
-
-    return await run_external_agent_db(db, _get)
+    try:
+        return await external_agents.get_headless_ask(db, principal, ask_id=ask_id)
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
 
 
 @router.post("/illo/threads", status_code=201)
@@ -435,27 +400,23 @@ async def create_illo_thread(
     ),
 ):
     should_trigger = bool(payload.trigger_illo or classify_mention_intent(payload.body).should_invoke_illo)
+    try:
+        metadata = {**payload.metadata, "trigger_illo": should_trigger}
+        idea, message, notified = await external_agents.create_thread_from_agent(
+            db,
+            principal,
+            title=payload.title,
+            body=payload.body,
+            teammate_user_ids=payload.teammate_user_ids,
+            artifacts=payload.artifacts,
+            trigger_illo=should_trigger,
+            metadata=metadata,
+        )
+        result = _thread_payload(idea, message, notified)
+        result["_trigger_idea"] = idea
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
 
-    def _create(sync_db):
-        try:
-            metadata = {**payload.metadata, "trigger_illo": should_trigger}
-            idea, message, notified = external_agents.create_thread_from_agent(
-                sync_db,
-                principal,
-                title=payload.title,
-                body=payload.body,
-                teammate_user_ids=payload.teammate_user_ids,
-                artifacts=payload.artifacts,
-                trigger_illo=should_trigger,
-                metadata=metadata,
-            )
-            response = _thread_payload(idea, message, notified)
-            response["_trigger_idea"] = idea
-            return response
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
-
-    result = await run_external_agent_db(db, _create)
     trigger_idea = result.pop("_trigger_idea", None)
     if trigger_idea is not None:
         result["trigger"] = await _run_trigger_if_requested(
@@ -487,27 +448,23 @@ async def post_illo_thread_message(
     ),
 ):
     should_trigger = bool(payload.trigger_illo or classify_mention_intent(payload.body).should_invoke_illo)
+    try:
+        metadata = {**payload.metadata, "trigger_illo": should_trigger}
+        idea, message, notified = await external_agents.post_thread_message_from_agent(
+            db,
+            principal,
+            idea_id=idea_id,
+            body=payload.body,
+            teammate_user_ids=payload.teammate_user_ids,
+            artifacts=payload.artifacts,
+            trigger_illo=should_trigger,
+            metadata=metadata,
+        )
+        result = _thread_payload(idea, message, notified)
+        result["_trigger_idea"] = idea
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
 
-    def _post(sync_db):
-        try:
-            metadata = {**payload.metadata, "trigger_illo": should_trigger}
-            idea, message, notified = external_agents.post_thread_message_from_agent(
-                sync_db,
-                principal,
-                idea_id=idea_id,
-                body=payload.body,
-                teammate_user_ids=payload.teammate_user_ids,
-                artifacts=payload.artifacts,
-                trigger_illo=should_trigger,
-                metadata=metadata,
-            )
-            response = _thread_payload(idea, message, notified)
-            response["_trigger_idea"] = idea
-            return response
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
-
-    result = await run_external_agent_db(db, _post)
     trigger_idea = result.pop("_trigger_idea", None)
     if trigger_idea is not None:
         result["trigger"] = await _run_trigger_if_requested(

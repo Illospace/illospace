@@ -209,7 +209,7 @@ def _apply_archival_fields(idea: Any, *, old_status: str | None, new_status: str
         idea.archived_at = None
 
 
-def _add_state_log(
+async def _add_state_log(
     session: Any,
     *,
     idea: Any,
@@ -229,7 +229,7 @@ def _add_state_log(
     )
 
 
-def _transition_thought_status_common(
+async def _transition_thought_status_common(
     session: Any,
     *,
     idea: Any,
@@ -245,7 +245,7 @@ def _transition_thought_status_common(
             now = command.changed_at or datetime.now(timezone.utc)
             idea.archived_at = now
             idea.updated_at = now
-            _add_state_log(
+            await _add_state_log(
                 session,
                 idea=idea,
                 old_status=old_status or None,
@@ -266,7 +266,7 @@ def _transition_thought_status_common(
     idea.status = new_status
     idea.updated_at = now
     _apply_archival_fields(idea, old_status=old_status, new_status=new_status, now=now)
-    _add_state_log(
+    await _add_state_log(
         session,
         idea=idea,
         old_status=old_status or None,
@@ -299,24 +299,12 @@ async def transition_thought_status(
     command: ThoughtStatusCommand,
     publish: ProductEventPublisher | None = None,
 ) -> ThoughtStatusResult:
-    result = _transition_thought_status_common(session, idea=idea, command=command, publish=publish)
+    result = await _transition_thought_status_common(session, idea=idea, command=command, publish=publish)
     await session.flush()
     return result
 
 
-def transition_thought_status_sync(
-    session: Any,
-    *,
-    idea: Any,
-    command: ThoughtStatusCommand,
-    publish: ProductEventPublisher | None = None,
-) -> ThoughtStatusResult:
-    result = _transition_thought_status_common(session, idea=idea, command=command, publish=publish)
-    session.flush()
-    return result
-
-
-def _create_thread_message(
+async def _create_thread_message(
     session: Any,
     *,
     idea_id: str,
@@ -475,7 +463,7 @@ async def post_thread_message(
 
     user_id = _actor_user_id(command)
     message_type = (parse_message_type or _default_message_type)(content, role)
-    thread_msg = _create_thread_message(
+    thread_msg = await _create_thread_message(
         session,
         idea_id=command.idea_id,
         role=role,
@@ -516,7 +504,7 @@ async def post_thread_message(
         current_status = getattr(idea, "status", None)
         new_status = _next_status_for_message(role, current_status)
         if new_status and new_status != current_status:
-            transition = _transition_thought_status_common(
+            transition = await _transition_thought_status_common(
                 session,
                 idea=idea,
                 command=ThoughtStatusCommand(
@@ -558,64 +546,6 @@ async def post_thread_message(
     )
 
 
-def post_thread_message_sync(
-    session: Any,
-    *,
-    idea: Any,
-    command: ThreadMessageCommand,
-    publish: ProductEventPublisher | None = None,
-    parse_message_type: MessageTypeParser | None = None,
-    apply_lifecycle: bool = True,
-    lifecycle_trigger: str | None = None,
-) -> ThreadMessageResult:
-    role = command.role
-    if role not in ("user", "assistant", "illo"):
-        raise ValueError("Role must be 'user', 'assistant', or 'illo'")
-    content = command.content.strip()
-    if not content:
-        raise ValueError("Content is required")
-
-    attachments = list(command.attachments or [])
-    metadata = dict(command.metadata) if isinstance(command.metadata, dict) else None
-    user_id = _actor_user_id(command)
-    message_type = (parse_message_type or _default_message_type)(content, role)
-    thread_msg = _create_thread_message(
-        session,
-        idea_id=command.idea_id,
-        role=role,
-        content=content,
-        attachments=attachments,
-        metadata=metadata,
-        user_id=user_id,
-        message_type=message_type,
-    )
-    session.flush()
-
-    status_change = None
-    if apply_lifecycle:
-        current_status = getattr(idea, "status", None)
-        new_status = _next_status_for_message(role, current_status)
-        if new_status and new_status != current_status:
-            status_change = transition_thought_status_sync(
-                session,
-                idea=idea,
-                command=ThoughtStatusCommand(
-                    to_status=new_status,
-                    trigger=lifecycle_trigger or f"auto_{role}_message",
-                    actor=command.actor,
-                ),
-                publish=publish,
-            ).status_change
-
-    return ThreadMessageResult(
-        message=thread_msg,
-        message_payload=_message_payload(thread_msg, actor=command.actor, user_id=user_id),
-        status_change=status_change,
-        notification_org_id=_actor_org_id(command, idea),
-        notification_user_ids=set(),
-    )
-
-
 def _final_answer_metadata(command: TerminalRunSettlementCommand) -> dict[str, Any]:
     return {
         "run_id": int(command.run_id),
@@ -633,7 +563,7 @@ async def mirror_run_final_answer(
     text = str(command.final_answer or "").strip()
     if not text:
         return None, None
-    thread_msg = _create_thread_message(
+    thread_msg = await _create_thread_message(
         session,
         idea_id=str(getattr(idea, "id", "") or ""),
         role="illo",
@@ -644,29 +574,6 @@ async def mirror_run_final_answer(
         message_type="agent_response",
     )
     await session.flush()
-    return thread_msg, _message_payload(thread_msg, actor={}, user_id=None)
-
-
-def mirror_run_final_answer_sync(
-    session: Any,
-    *,
-    idea: Any,
-    command: TerminalRunSettlementCommand,
-) -> tuple[IdeaThread | None, dict[str, Any] | None]:
-    text = str(command.final_answer or "").strip()
-    if not text:
-        return None, None
-    thread_msg = _create_thread_message(
-        session,
-        idea_id=str(getattr(idea, "id", "") or ""),
-        role="illo",
-        content=text,
-        attachments=[],
-        metadata=_final_answer_metadata(command),
-        user_id=None,
-        message_type="agent_response",
-    )
-    session.flush()
     return thread_msg, _message_payload(thread_msg, actor={}, user_id=None)
 
 
@@ -719,10 +626,7 @@ __all__ = [
     "ThoughtStatusResult",
     "compact_notification_text",
     "mirror_run_final_answer",
-    "mirror_run_final_answer_sync",
     "post_thread_message",
-    "post_thread_message_sync",
     "settle_terminal_run",
     "transition_thought_status",
-    "transition_thought_status_sync",
 ]

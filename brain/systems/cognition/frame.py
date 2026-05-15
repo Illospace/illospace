@@ -241,8 +241,8 @@ async def gather_frame_context(
 
     # ── Recall relevant memories ──
     try:
-        from brain.app.mcp.server import tool_brain_recall
-        memories = tool_brain_recall(
+        from brain.app.mcp.server import async_tool_brain_recall
+        memories = await async_tool_brain_recall(
             query=task,
             limit=memory_limit,
             user_id=user_id,
@@ -266,8 +266,8 @@ async def gather_frame_context(
 
     # ── Pre-fetch guardrails (deterministic — NOT optional) ──
     try:
-        from brain.app.mcp.server import tool_brain_guardrails
-        guardrails = tool_brain_guardrails(skill=skill_name)
+        from brain.app.mcp.server import async_tool_brain_guardrails
+        guardrails = await async_tool_brain_guardrails(skill=skill_name)
         if isinstance(guardrails, dict):
             # Collect all guardrail items into a flat list
             items = []

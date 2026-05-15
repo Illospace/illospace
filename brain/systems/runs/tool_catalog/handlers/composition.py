@@ -126,12 +126,12 @@ def _get_tool_handlers(
                        to this directory instead of the default WORKSPACE_ROOT.
     """
     from brain.app.mcp.server import (
-        tool_brain_recall,
-        tool_brain_guardrails,
-        tool_brain_skills,
-        tool_skill_view,
-        tool_skill_asset,
-        tool_brain_encode,
+        async_tool_brain_recall,
+        async_tool_brain_guardrails,
+        async_tool_brain_skills,
+        async_tool_skill_view,
+        async_tool_skill_asset,
+        async_tool_brain_encode,
         tool_brain_vault,
         tool_vault_secret_prompt,
         tool_runtime_settings,
@@ -140,12 +140,12 @@ def _get_tool_handlers(
 
     handlers = {
         # Brain tools (workspace-independent — always hit shared DB)
-        "brain_recall": _wrap_brain_recall(tool_brain_recall),
-        "brain_guardrails": tool_brain_guardrails,
-        "brain_skills": _wrap_tool_evidence("brain_skills", tool_brain_skills),
-        "skill_view": _wrap_tool_evidence("skill_view", tool_skill_view),
-        "skill_asset": tool_skill_asset,
-        "brain_encode": _wrap_brain_encode(tool_brain_encode),
+        "brain_recall": _wrap_brain_recall(async_tool_brain_recall),
+        "brain_guardrails": async_tool_brain_guardrails,
+        "brain_skills": _wrap_tool_evidence("brain_skills", async_tool_brain_skills),
+        "skill_view": _wrap_tool_evidence("skill_view", async_tool_skill_view),
+        "skill_asset": async_tool_skill_asset,
+        "brain_encode": _wrap_brain_encode(async_tool_brain_encode),
         "brain_vault": lambda key, reason=None: tool_brain_vault(
             key,
             reason=reason,

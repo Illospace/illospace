@@ -17,7 +17,7 @@ from brain.systems.cortex.project_context.snapshot import (
 from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
-from brain.systems.runs.store import AsyncAgentRunStore, SyncAgentRunStore
+from brain.systems.runs.store import AsyncAgentRunStore
 
 _VALID_MODEL_TIERS = {"low", "medium", "high"}
 _VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh"}
@@ -486,29 +486,6 @@ async def build_agent_run_request(
     )
 
 
-def build_agent_run_request_sync(
-    session: Any,
-    event: WorkIntakeEvent,
-) -> AgentRunRequest:
-    target = _event_target(event)
-    if target.get("kind") != "external_agent_headless_ask":
-        raise ValueError("Sync work intake only supports external agent headless asks")
-    metadata = _event_metadata(event)
-    message = _event_message(event)
-    producer = _event_producer(event)
-    idempotency_key = _event_idempotency_key(event)
-    priority = _event_priority(event)
-    return _build_external_agent_headless_request(
-        event,
-        target=target,
-        metadata=metadata,
-        message=message,
-        producer=producer,
-        idempotency_key=idempotency_key,
-        priority=priority,
-    )
-
-
 def _snapshot_for_project_context(project_context: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     if not project_context:
         return None, []
@@ -782,23 +759,9 @@ async def admit_work(
         return WorkIntakeResult(ok=False, skipped_reason=str(exc))
 
 
-def admit_work_sync(
-    session: Any,
-    event: WorkIntakeEvent,
-) -> WorkIntakeResult:
-    try:
-        request = build_agent_run_request_sync(session, event)
-        run = SyncAgentRunStore(session).create_run(request)
-        return WorkIntakeResult(ok=True, run_id=int(run.id))
-    except Exception as exc:
-        return WorkIntakeResult(ok=False, skipped_reason=str(exc))
-
-
 __all__ = [
     "build_agent_run_request",
-    "build_agent_run_request_sync",
     "admit_work",
-    "admit_work_sync",
     "model_policy_from_metadata",
     "profile_from_metadata",
     "recipe_for_profile",

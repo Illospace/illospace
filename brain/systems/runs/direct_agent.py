@@ -111,7 +111,6 @@ from brain.systems.runs.direct_loop.tool_execution import (
     PendingToolCall as _PendingToolCall,
     ResolvedToolCall as _ResolvedToolCall,
     async_execute_tool_calls as _runtime_async_execute_tool_calls,
-    invoke_tool_handler as _runtime_invoke_tool_handler,
     resolve_tool_call as _runtime_resolve_tool_call,
 )
 from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
@@ -1205,19 +1204,6 @@ async def _api_call_with_retry_async(
         make_cancelled_result=_make_result,
         degrade_betas=_degrade_betas,
         is_cancelled_result=lambda response: isinstance(response, AgentResult),
-    )
-
-
-# ── Tool Execution ───────────────────────────────────────────
-
-
-def _invoke_tool_handler(handler: Callable, tool_input: dict, threadlocal_context: dict | None = None):
-    """Execute a tool handler with optional propagated AgentRun context."""
-    return _runtime_invoke_tool_handler(
-        handler,
-        tool_input,
-        agent_context=_agent_context,
-        threadlocal_context=threadlocal_context,
     )
 
 

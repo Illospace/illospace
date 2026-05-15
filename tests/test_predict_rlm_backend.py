@@ -217,7 +217,7 @@ def test_instrument_predict_rlm_lm_records_internal_calls(monkeypatch):
             )
 
     monkeypatch.setattr(
-        "brain.systems.runs.predict_rlm_backend._record_api_call",
+        "brain.systems.runs.predict_rlm_backend._record_predict_rlm_api_call",
         lambda **kwargs: recorded.append(kwargs),
     )
 
@@ -316,7 +316,7 @@ def test_invoke_predict_rlm_agent_returns_internal_usage_totals(monkeypatch):
 
     monkeypatch.setattr("brain.systems.runs.predict_rlm_backend._build_predict_rlm_lm", fake_build_lm)
     monkeypatch.setattr(
-        "brain.systems.runs.predict_rlm_backend._record_api_call",
+        "brain.systems.runs.predict_rlm_backend._record_predict_rlm_api_call",
         lambda **kwargs: recorded.append(kwargs),
     )
 

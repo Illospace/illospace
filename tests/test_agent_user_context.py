@@ -9,7 +9,7 @@ Tests cover:
 
 After the ORM migration:
 - _add_attribution takes a SQLAlchemy session, not a cursor
-- tool_brain_encode uses UnitOfWork
+- async_tool_brain_encode uses UnitOfWork
 - enqueue uses UnitOfWork
 """
 from __future__ import annotations
@@ -87,9 +87,9 @@ class TestCrossUserAttribution:
 
 class TestBrainEncodeUserScoped:
 
-    def test_encode_stores_user_id_and_visibility(self):
+    async def test_encode_stores_user_id_and_visibility(self):
         """brain_encode should store user_id, org_id, and visibility."""
-        from brain.app.mcp.server import tool_brain_encode
+        from brain.app.mcp.server import async_tool_brain_encode
 
         mock_uow = MagicMock()
         mock_uow.__enter__ = MagicMock(return_value=mock_uow)
@@ -105,7 +105,7 @@ class TestBrainEncodeUserScoped:
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
              patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 2000):
-            result = tool_brain_encode(
+            result = await async_tool_brain_encode(
                 content="This is a test memory with enough content",
                 user_id=USER_A["id"],
                 org_id=USER_A["org_id"],
@@ -119,9 +119,9 @@ class TestBrainEncodeUserScoped:
         assert context.org_id == USER_A["org_id"]
         assert context.visibility == "org"
 
-    def test_encode_defaults_to_private(self):
+    async def test_encode_defaults_to_private(self):
         """brain_encode should default to private visibility."""
-        from brain.app.mcp.server import tool_brain_encode
+        from brain.app.mcp.server import async_tool_brain_encode
 
         mock_uow = MagicMock()
         mock_uow.__enter__ = MagicMock(return_value=mock_uow)
@@ -137,7 +137,7 @@ class TestBrainEncodeUserScoped:
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
              patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 2000):
-            result = tool_brain_encode(
+            result = await async_tool_brain_encode(
                 content="Another test memory long enough to pass",
                 user_id=USER_A["id"],
             )

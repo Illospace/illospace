@@ -31,7 +31,7 @@ from brain.systems.runs.project_execution_env import (
     prepare_project_execution_env,
     redact_sensitive_output,
 )
-from brain.platform.async_io import run_subprocess_sync
+from brain.platform.async_io import run_blocking, run_subprocess_sync
 
 logger = logging.getLogger("agent.tools")
 
@@ -236,15 +236,15 @@ EXTENDED_TOOLS = [
 
 # ── Tool Handlers ────────────────────────────────────────────
 
-def handle_semantic_search(query: str, scope: str = "both", limit: int = 5, workspace_root: str | None = None) -> dict:
+async def handle_semantic_search(query: str, scope: str = "both", limit: int = 5, workspace_root: str | None = None) -> dict:
     """Search using embedding similarity."""
     results = []
 
     # Memory search
     if scope in ("memories", "both"):
         try:
-            from brain.app.mcp.server import tool_brain_recall
-            memories = tool_brain_recall(query=query, limit=limit)
+            from brain.app.mcp.server import async_tool_brain_recall
+            memories = await async_tool_brain_recall(query=query, limit=limit)
             if isinstance(memories, dict) and "memories" in memories:
                 for m in memories["memories"]:
                     results.append({
@@ -1006,10 +1006,10 @@ def _fallback_file_answer(path: str, question: str, summary: dict, text: str) ->
     }
 
 
-def _reader_completion(prompt: str, *, user_id: str | None = None, org_id: str | None = None) -> dict | None:
+async def _reader_completion(prompt: str, *, user_id: str | None = None, org_id: str | None = None) -> dict | None:
     """Best-effort low-intelligence reader subcall. Returns parsed JSON or None."""
     from brain.platform.integrations.completions import simple_text_completion
-    from brain.systems.runs.direct_agent import _record_api_call
+    from brain.systems.runs.direct_loop.telemetry import async_record_api_call
     from brain.systems.runs.tool_handlers import _agent_context
 
     model = _reader_model(user_id=user_id, org_id=org_id)
@@ -1017,7 +1017,8 @@ def _reader_completion(prompt: str, *, user_id: str | None = None, org_id: str |
     response = None
     error = None
     try:
-        response = simple_text_completion(
+        response = await run_blocking(
+            simple_text_completion,
             prompt,
             model=model,
             max_tokens=700,
@@ -1037,7 +1038,7 @@ def _reader_completion(prompt: str, *, user_id: str | None = None, org_id: str |
         run = getattr(_agent_context, "run", None)
         run_id = getattr(run, "run_id", None)
         session_id = getattr(_agent_context, "session_id", None)
-        _record_api_call(
+        await async_record_api_call(
             session_id=session_id,
             run_id=run_id,
             turn=0,
@@ -1085,7 +1086,7 @@ def _record_reader_artifact(tool_name: str, payload: dict) -> None:
         existing.append(artifact)
 
 
-def handle_summarize_file_for_task(
+async def handle_summarize_file_for_task(
     path: str,
     question: str,
     focus: str | None = None,
@@ -1118,7 +1119,7 @@ def handle_summarize_file_for_task(
         f"{_build_file_outline(summary)}\n\n"
         f"CHUNK EXCERPTS:\n{excerpt}\n"
     )
-    llm_result = _reader_completion(prompt, user_id=user_id, org_id=org_id) if allow_llm else None
+    llm_result = await _reader_completion(prompt, user_id=user_id, org_id=org_id) if allow_llm else None
     if llm_result:
         llm_result.setdefault("key_symbols", [])
         llm_result.setdefault(
@@ -1150,7 +1151,7 @@ def handle_summarize_file_for_task(
     return result
 
 
-def handle_summarize_files_for_task(
+async def handle_summarize_files_for_task(
     paths: list[str],
     question: str,
     max_files: int = 8,
@@ -1213,7 +1214,7 @@ def handle_summarize_files_for_task(
         + "\n\n".join(prompt_files)
     )
 
-    llm_result = _reader_completion(prompt, user_id=user_id, org_id=org_id) if allow_llm else None
+    llm_result = await _reader_completion(prompt, user_id=user_id, org_id=org_id) if allow_llm else None
     if llm_result:
         llm_result.setdefault("files_ranked", [])
         llm_result.setdefault("cross_file_findings", [])

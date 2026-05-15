@@ -25,9 +25,7 @@ EXPECTED_WORK_INTAKE_API = {
     "WorkIntakeTarget",
     "WorkIntakePolicy",
     "build_agent_run_request",
-    "build_agent_run_request_sync",
     "admit_work",
-    "admit_work_sync",
 }
 
 REMOVED_WORK_INTAKE_BYPASSES = {
@@ -227,11 +225,12 @@ def test_work_intake_owns_run_profile_recipe_model_and_project_context_selection
     assert violations == []
 
 
-def test_external_headless_ask_uses_sync_work_intake_policy():
-    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request_sync
+@pytest.mark.asyncio
+async def test_external_headless_ask_uses_async_work_intake_policy():
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
 
-    request = build_agent_run_request_sync(
-        object(),
+    request = await build_agent_run_request(
+        _Session(),
         WorkIntakeEvent(
             source="external_agent",
             event_type="external_agent.headless_ask",
