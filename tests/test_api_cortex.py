@@ -481,6 +481,65 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     assert published == [("idea_created", {"idea_id": "idea-created", "title": "Check vault state"})]
 
 
+async def test_manage_idea_create_can_handoff_owner(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
+
+    session = MagicMock()
+    added = []
+    target_user = SimpleNamespace(id="target-user", org_id="org-1", name="JB")
+
+    def add(obj):
+        added.append(obj)
+
+    async def flush():
+        for obj in added:
+            if obj.__class__.__name__ == "Idea" and getattr(obj, "id", None) is None:
+                obj.id = "idea-created"
+            if obj.__class__.__name__ == "IdeaThread" and getattr(obj, "id", None) is None:
+                obj.id = 42
+
+    class FakeUnitOfWork:
+        def __init__(self):
+            self.session = session
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    session.add.side_effect = add
+    session.flush = AsyncMock(side_effect=flush)
+    session.scalar = AsyncMock(return_value=target_user)
+    session.execute = AsyncMock(return_value=SimpleNamespace(one_or_none=lambda: None))
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
+    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
+
+    async def serialize_idea(idea_arg, session_arg):
+        return {"id": str(idea_arg.id), "user_id": idea_arg.user_id}
+
+    monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
+
+    with bind_agent_context({"idea_id": "parent-idea", "org_id": "org-1", "user_id": "user-1"}):
+        payload = json.loads(
+            await idea_tools._handle_manage_idea(
+                action="create",
+                title="JB follow-up",
+                thread_message="Please take this follow-up.",
+                parent_id="parent-idea",
+                user_id="target-user",
+            )
+        )
+
+    idea_rows = [obj for obj in added if obj.__class__.__name__ == "Idea"]
+    thread_rows = [obj for obj in added if obj.__class__.__name__ == "IdeaThread"]
+    assert payload["created"] is True
+    assert payload["idea"]["user_id"] == "target-user"
+    assert idea_rows[0].user_id == "target-user"
+    assert thread_rows[0].user_id == "user-1"
+
+
 async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools

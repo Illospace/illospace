@@ -452,6 +452,9 @@ async def _handle_manage_idea(
                     parent_id=parent_id,
                     origin_ref=origin_ref,
                 )
+                if user_id is not None:
+                    await _apply_owner_handoff(idea, next_owner_id=user_id, actor=actor, session=uow.session)
+                    await uow.session.flush()
                 run_result = None
                 if should_start_run:
                     run_result = await _admit_created_idea_run(

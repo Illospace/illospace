@@ -25,9 +25,9 @@ from brain.platform.db.models.notification import (
     NOTIFICATION_KIND_WORKSPACE_MENTION,
     NOTIFICATION_KIND_WORKSPACE_THREAD_ATTENTION,
     NOTIFICATION_SOURCE_WORKSPACE,
+    NotificationEvent,
 )
 from brain.platform.db.models.org import User
-from brain.platform.db.repositories.notifications import NotificationEventRepository
 from brain.systems.runs.domain import AgentRunEvent, AgentRunRequest, EventVisibility, RunProfile, RunRecipe
 from brain.systems.runs.events import run_event
 from brain.systems.runs.ids import trace_id_for_run_id
@@ -56,6 +56,14 @@ DEFAULT_BRIDGE_SCOPES = (
     SCOPE_ILLO_ASK,
     SCOPE_ILLO_THREAD_CREATE,
     SCOPE_ILLO_THREAD_WRITE,
+)
+
+HEADLESS_ASK_BLOCKED_TOOLS = (
+    "cortex_reply",
+    "cortex_visual_reply",
+    "manage_idea",
+    "manage_workspace_app",
+    "post_chat_message",
 )
 
 TASK_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "canceled"}
@@ -1034,7 +1042,6 @@ def _notify_mentions(
     content: str,
 ) -> list[str]:
     notified: list[str] = []
-    repo = NotificationEventRepository(session)
     for user_id in dict.fromkeys(str(uid) for uid in mentioned_user_ids if uid):
         if user_id == str(actor_user_id):
             continue
@@ -1049,22 +1056,51 @@ def _notify_mentions(
                 thread_message_id=thread_message.id,
             )
         )
-        repo.create_or_coalesce(
-            org_id=str(org_id),
-            user_id=user_id,
-            source=NOTIFICATION_SOURCE_WORKSPACE,
-            kind=NOTIFICATION_KIND_WORKSPACE_MENTION,
-            actor_user_id=str(actor_user_id),
-            title=f"{principalish_user_name(session, actor_user_id)} shared a personal-agent thread with you",
-            body=_compact_text(content),
-            coalesce_key=f"workspace:external_agent_share:{user_id}:{idea.id}:{thread_message.id}",
-            payload={
-                "preview": _compact_text(content),
-                "idea_title": idea.title,
-                "thread_message_id": thread_message.id,
-            },
-            idea_id=str(idea.id),
-        )
+        coalesce_key = f"workspace:external_agent_share:{user_id}:{idea.id}:{thread_message.id}"
+        title = f"{principalish_user_name(session, actor_user_id)} shared a personal-agent thread with you"
+        body = _compact_text(content)
+        payload = {
+            "preview": _compact_text(content),
+            "idea_title": idea.title,
+            "thread_message_id": thread_message.id,
+        }
+        existing = session.scalars(
+            select(NotificationEvent)
+            .where(
+                NotificationEvent.user_id == user_id,
+                NotificationEvent.coalesce_key == coalesce_key,
+                NotificationEvent.read_at.is_(None),
+            )
+            .order_by(NotificationEvent.updated_at.desc(), NotificationEvent.id.desc())
+        ).first()
+        if existing is not None:
+            existing.org_id = str(org_id)
+            existing.source = NOTIFICATION_SOURCE_WORKSPACE
+            existing.kind = NOTIFICATION_KIND_WORKSPACE_MENTION
+            existing.actor_user_id = str(actor_user_id)
+            existing.idea_id = str(idea.id)
+            existing.title = title
+            existing.body = body
+            existing.payload = payload
+            existing.occurrence_count = max(1, int(existing.occurrence_count or 1)) + 1
+            existing.updated_at = utcnow()
+        else:
+            session.add(
+                NotificationEvent(
+                    org_id=str(org_id),
+                    user_id=user_id,
+                    source=NOTIFICATION_SOURCE_WORKSPACE,
+                    kind=NOTIFICATION_KIND_WORKSPACE_MENTION,
+                    actor_user_id=str(actor_user_id),
+                    idea_id=str(idea.id),
+                    title=title,
+                    body=body,
+                    payload=payload,
+                    coalesce_key=coalesce_key,
+                    occurrence_count=1,
+                    updated_at=utcnow(),
+                )
+            )
         notified.append(user_id)
     return notified
 
@@ -1324,12 +1360,7 @@ def create_headless_ask(
                 "headless": True,
                 "tool_policy": {
                     "mode": "read_mostly",
-                    "blocked_tools": [
-                        "cortex_reply",
-                        "cortex_visual_reply",
-                        "post_chat_message",
-                        "manage_workspace_app",
-                    ],
+                    "blocked_tools": list(HEADLESS_ASK_BLOCKED_TOOLS),
                 },
             },
         ),

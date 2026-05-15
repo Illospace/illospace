@@ -154,7 +154,10 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             (
                 "Ask Illo for private workspace context without creating a visible thread. "
                 "Use when the personal agent needs Illo's workspace knowledge, team memory, "
-                "or project context before doing work. Poll with illo_get_ask."
+                "or project context before doing work. This is read/context mode, not "
+                "team-visible coordination; create or post to a visible thread with "
+                "trigger_illo=true when Illo should coordinate or hand off work. Poll "
+                "with illo_get_ask."
             ),
             {
                 "question": {"type": "string", "description": "Question for Illo's headless context agent."},
@@ -279,9 +282,8 @@ def _tool_create_thread(sync_db, principal: external_agents.AgentBridgePrincipal
         trigger_illo=should_trigger,
         metadata=metadata,
     )
-    trigger_result = _run_trigger_if_requested(sync_db, idea=idea, body=body, metadata=metadata, principal=principal)
     result = _thread_payload(idea, message, notified)
-    result["trigger"] = trigger_result
+    result["_trigger_idea"] = idea
     return result
 
 
@@ -299,9 +301,8 @@ def _tool_post_thread_message(sync_db, principal: external_agents.AgentBridgePri
         trigger_illo=should_trigger,
         metadata=metadata,
     )
-    trigger_result = _run_trigger_if_requested(sync_db, idea=idea, body=body, metadata=metadata, principal=principal)
     result = _thread_payload(idea, message, notified)
-    result["trigger"] = trigger_result
+    result["_trigger_idea"] = idea
     return result
 
 
@@ -321,6 +322,31 @@ def _tool_get_ask(sync_db, principal: external_agents.AgentBridgePrincipal, argu
         sync_db,
         principal,
         ask_id=str(arguments.get("ask_id") or ""),
+    )
+
+
+async def _add_thread_trigger_result_if_needed(
+    db: AsyncSession,
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    tool_payload: dict[str, Any],
+    principal: external_agents.AgentBridgePrincipal,
+) -> None:
+    if tool_name not in {"illo_create_thread", "illo_post_thread_message"}:
+        return
+    trigger_idea = tool_payload.pop("_trigger_idea", None)
+    if trigger_idea is None:
+        return
+    body = str(arguments.get("body") or "")
+    should_trigger = bool(arguments.get("trigger_illo") or classify_mention_intent(body).should_invoke_illo)
+    metadata = _tool_metadata(arguments, tool_name=tool_name, trigger_illo=should_trigger)
+    tool_payload["trigger"] = await _run_trigger_if_requested(
+        db,
+        idea=trigger_idea,
+        body=body,
+        metadata=metadata,
+        principal=principal,
     )
 
 
@@ -408,10 +434,18 @@ async def _handle_mcp_request(
     try:
         tool_payload = await run_external_agent_db(db, _call)
         if spec.get("mutates_thread"):
+            await _add_thread_trigger_result_if_needed(
+                db,
+                tool_name=tool_name,
+                arguments=arguments,
+                tool_payload=tool_payload,
+                principal=principal,
+            )
             await _commit_for_live_fanout(db)
             await _broadcast_thread_result(tool_payload, org_id=principal.org_id)
         return _result(req_id, _tool_result(tool_payload))
     except Exception as exc:
+        await db.rollback()
         return _result(req_id, _tool_error(str(exc)))
 
 

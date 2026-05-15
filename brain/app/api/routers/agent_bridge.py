@@ -116,11 +116,18 @@ async def _broadcast_thread_result(result: dict[str, Any], *, org_id: str | None
     await _broadcast_status_if_present(result, org_id=org_id)
 
 
-def _run_trigger_if_requested(sync_db, *, idea: Idea, body: str, metadata: dict[str, Any], principal: external_agents.AgentBridgePrincipal):
+async def _run_trigger_if_requested(
+    db: AsyncSession,
+    *,
+    idea: Idea,
+    body: str,
+    metadata: dict[str, Any],
+    principal: external_agents.AgentBridgePrincipal,
+):
     if not metadata.get("trigger_illo"):
         return None
     from brain.app.triggers.adapters.internal import build_cortex_notify_trigger
-    from brain.app.triggers.router import route_trigger
+    from brain.app.triggers.router import async_route_trigger
 
     user = {
         "id": principal.owner_user_id,
@@ -139,7 +146,7 @@ def _run_trigger_if_requested(sync_db, *, idea: Idea, body: str, metadata: dict[
         effective_metadata=metadata,
         priority=0,
     )
-    return route_trigger(trigger, session=sync_db).to_response()
+    return (await async_route_trigger(trigger, session=db)).to_response()
 
 
 @router.post("/heartbeat")
@@ -431,20 +438,22 @@ async def create_illo_thread(
                 trigger_illo=should_trigger,
                 metadata=metadata,
             )
-            trigger_result = _run_trigger_if_requested(
-                sync_db,
-                idea=idea,
-                body=payload.body,
-                metadata=metadata,
-                principal=principal,
-            )
             response = _thread_payload(idea, message, notified)
-            response["trigger"] = trigger_result
+            response["_trigger_idea"] = idea
             return response
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
     result = await run_external_agent_db(db, _create)
+    trigger_idea = result.pop("_trigger_idea", None)
+    if trigger_idea is not None:
+        result["trigger"] = await _run_trigger_if_requested(
+            db,
+            idea=trigger_idea,
+            body=payload.body,
+            metadata={**payload.metadata, "trigger_illo": should_trigger},
+            principal=principal,
+        )
     await _commit_for_live_fanout(db)
     idea = result.get("idea") if isinstance(result, dict) else None
     if isinstance(idea, dict):
@@ -481,20 +490,22 @@ async def post_illo_thread_message(
                 trigger_illo=should_trigger,
                 metadata=metadata,
             )
-            trigger_result = _run_trigger_if_requested(
-                sync_db,
-                idea=idea,
-                body=payload.body,
-                metadata=metadata,
-                principal=principal,
-            )
             response = _thread_payload(idea, message, notified)
-            response["trigger"] = trigger_result
+            response["_trigger_idea"] = idea
             return response
         except Exception as exc:
             raise_external_agent_http_error(exc)
 
     result = await run_external_agent_db(db, _post)
+    trigger_idea = result.pop("_trigger_idea", None)
+    if trigger_idea is not None:
+        result["trigger"] = await _run_trigger_if_requested(
+            db,
+            idea=trigger_idea,
+            body=payload.body,
+            metadata={**payload.metadata, "trigger_illo": should_trigger},
+            principal=principal,
+        )
     await _commit_for_live_fanout(db)
     await _broadcast_thread_result(result, org_id=principal.org_id)
     return result

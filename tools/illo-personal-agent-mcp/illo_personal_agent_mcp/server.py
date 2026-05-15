@@ -363,7 +363,10 @@ TOOLS: dict[str, dict[str, Any]] = {
         "description": (
             "Ask Illo for private workspace context without creating a visible thread. "
             "Use when the personal agent needs Illo's workspace knowledge, team memory, "
-            "or project context before doing work. Poll with illo_get_ask."
+            "or project context before doing work. This is read/context mode, not "
+            "team-visible coordination; create or post to a visible thread with "
+            "trigger_illo=true when Illo should coordinate or hand off work. Poll "
+            "with illo_get_ask."
         ),
         "inputSchema": {
             "type": "object",
