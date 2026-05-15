@@ -27,6 +27,17 @@ class _AwaitableValue:
         return getattr(self.value, name)
 
 
+class _ScalarRows:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def first(self):
+        return self.rows[0] if self.rows else None
+
+    def all(self):
+        return list(self.rows)
+
+
 class _Store:
     def __init__(self):
         self.events = []
@@ -1620,12 +1631,19 @@ async def test_thread_binding_applies_explicit_model_override():
 async def test_runner_settles_root_run_idea_status():
     from brain.systems.runs.cortex.runner import _settle_idea_for_terminal_root_run_async
     from brain.platform.db.models.agent_run import AgentRunRow
-    from brain.platform.db.models.idea import Idea, IdeaStateLog
+    from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
 
     idea_id = str(uuid.uuid4())
     run = SimpleNamespace(id=42, parent_run_id=None, thread_id=idea_id, status="completed")
     idea = SimpleNamespace(id=idea_id, status="active", updated_at=None)
+    final_artifact = SimpleNamespace(
+        id=99,
+        run_id=42,
+        artifact_type="final_answer",
+        text="Done. I created the teammate handoffs.",
+    )
     added = []
+    scalar_calls = 0
 
     class FakeSession:
         async def get(self, model, key):
@@ -1637,6 +1655,13 @@ async def test_runner_settles_root_run_idea_status():
 
         def add(self, obj):
             added.append(obj)
+
+        async def scalars(self, stmt):
+            nonlocal scalar_calls
+            scalar_calls += 1
+            if scalar_calls == 1:
+                return _ScalarRows([final_artifact])
+            return _ScalarRows([])
 
         async def flush(self):
             pass
@@ -1651,6 +1676,54 @@ async def test_runner_settles_root_run_idea_status():
         "run_id": 42,
     }
     assert any(isinstance(obj, IdeaStateLog) for obj in added)
+    response = next(obj for obj in added if isinstance(obj, IdeaThread))
+    assert response.idea_id == idea_id
+    assert response.role == "illo"
+    assert response.message_type == "agent_response"
+    assert response.content == "Done. I created the teammate handoffs."
+    assert response.metadata_ == {
+        "run_id": 42,
+        "artifact_id": 99,
+        "source": "agent_run_final_answer",
+    }
+
+
+async def test_runner_does_not_duplicate_final_answer_thread_message():
+    from brain.systems.runs.cortex.runner import _settle_idea_for_terminal_root_run_async
+    from brain.platform.db.models.agent_run import AgentRunRow
+    from brain.platform.db.models.idea import Idea, IdeaThread
+
+    idea_id = str(uuid.uuid4())
+    run = SimpleNamespace(id=45, parent_run_id=None, thread_id=idea_id, status="completed")
+    idea = SimpleNamespace(id=idea_id, status="unread_reply", updated_at=None)
+    final_artifact = SimpleNamespace(id=100, run_id=45, artifact_type="final_answer", text="Already visible")
+    existing_message = SimpleNamespace(metadata_={"run_id": 45})
+    added = []
+    scalar_calls = 0
+
+    class FakeSession:
+        async def get(self, model, key):
+            if model is AgentRunRow and int(key) == 45:
+                return run
+            if model is Idea and str(key) == idea_id:
+                return idea
+            return None
+
+        def add(self, obj):
+            added.append(obj)
+
+        async def scalars(self, stmt):
+            nonlocal scalar_calls
+            scalar_calls += 1
+            if scalar_calls == 1:
+                return _ScalarRows([final_artifact])
+            return _ScalarRows([existing_message])
+
+        async def flush(self):
+            pass
+
+    assert await _settle_idea_for_terminal_root_run_async(FakeSession(), 45) is None
+    assert not any(isinstance(obj, IdeaThread) for obj in added)
 
 
 async def test_runner_does_not_settle_child_run_idea_status():
