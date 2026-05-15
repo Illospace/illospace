@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, Depends, Header, Request, Response
-from starlette.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import JSONResponse
 
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.routers.agent_bridge import (
@@ -19,14 +19,16 @@ from brain.app.api.routers.agent_bridge import (
 )
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.mentions import classify_mention_intent
-from brain.platform.db.session_tasks import run_external_agent_db
 from brain.systems.external_agents import service as external_agents
 
 
 router = APIRouter(tags=["agent-mcp"], dependencies=[Depends(rate_limit)])
 
 
-ToolHandler = Callable[[Any, external_agents.AgentBridgePrincipal, dict[str, Any]], dict[str, Any]]
+ToolHandler = Callable[
+    [AsyncSession, external_agents.AgentBridgePrincipal, dict[str, Any]],
+    Awaitable[dict[str, Any]],
+]
 
 
 def _tool_schema(description: str, properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -221,14 +223,10 @@ async def require_mcp_principal(
     db: AsyncSession = Depends(get_db),
 ) -> external_agents.AgentBridgePrincipal:
     token = _bearer_token(request, x_illo_bridge_token)
-
-    def _auth(sync_db):
-        try:
-            return external_agents.authenticate_bridge_token(sync_db, token)
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
-
-    return await run_external_agent_db(db, _auth)
+    try:
+        return await external_agents.authenticate_bridge_token(db, token)
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
 
 
 def _list_tools(principal: external_agents.AgentBridgePrincipal) -> list[dict[str, Any]]:
@@ -246,34 +244,50 @@ def _list_tools(principal: external_agents.AgentBridgePrincipal) -> list[dict[st
     return tools
 
 
-def _tool_search_workspace(sync_db, principal: external_agents.AgentBridgePrincipal, arguments: dict[str, Any]) -> dict[str, Any]:
-    return external_agents.search_workspace(
-        sync_db,
+async def _tool_search_workspace(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    return await external_agents.search_workspace(
+        db,
         principal,
         query=str(arguments.get("query") or ""),
         limit=int(arguments.get("limit") or 10),
     )
 
 
-def _tool_get_thread(sync_db, principal: external_agents.AgentBridgePrincipal, arguments: dict[str, Any]) -> dict[str, Any]:
-    return external_agents.get_thread(
-        sync_db,
+async def _tool_get_thread(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    return await external_agents.get_thread(
+        db,
         principal,
         idea_id=str(arguments.get("idea_id") or ""),
         limit=int(arguments.get("limit") or 100),
     )
 
 
-def _tool_get_team_members(sync_db, principal: external_agents.AgentBridgePrincipal, _arguments: dict[str, Any]) -> dict[str, Any]:
-    return external_agents.get_team_members(sync_db, principal)
+async def _tool_get_team_members(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    _arguments: dict[str, Any],
+) -> dict[str, Any]:
+    return await external_agents.get_team_members(db, principal)
 
 
-def _tool_create_thread(sync_db, principal: external_agents.AgentBridgePrincipal, arguments: dict[str, Any]) -> dict[str, Any]:
+async def _tool_create_thread(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
     body = str(arguments.get("body") or "")
     should_trigger = bool(arguments.get("trigger_illo") or classify_mention_intent(body).should_invoke_illo)
     metadata = _tool_metadata(arguments, tool_name="illo_create_thread", trigger_illo=should_trigger)
-    idea, message, notified = external_agents.create_thread_from_agent(
-        sync_db,
+    idea, message, notified = await external_agents.create_thread_from_agent(
+        db,
         principal,
         title=str(arguments.get("title") or ""),
         body=body,
@@ -287,12 +301,16 @@ def _tool_create_thread(sync_db, principal: external_agents.AgentBridgePrincipal
     return result
 
 
-def _tool_post_thread_message(sync_db, principal: external_agents.AgentBridgePrincipal, arguments: dict[str, Any]) -> dict[str, Any]:
+async def _tool_post_thread_message(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
     body = str(arguments.get("body") or "")
     should_trigger = bool(arguments.get("trigger_illo") or classify_mention_intent(body).should_invoke_illo)
     metadata = _tool_metadata(arguments, tool_name="illo_post_thread_message", trigger_illo=should_trigger)
-    idea, message, notified = external_agents.post_thread_message_from_agent(
-        sync_db,
+    idea, message, notified = await external_agents.post_thread_message_from_agent(
+        db,
         principal,
         idea_id=str(arguments.get("idea_id") or ""),
         body=body,
@@ -306,20 +324,28 @@ def _tool_post_thread_message(sync_db, principal: external_agents.AgentBridgePri
     return result
 
 
-def _tool_ask(sync_db, principal: external_agents.AgentBridgePrincipal, arguments: dict[str, Any]) -> dict[str, Any]:
-    task = external_agents.create_headless_ask(
-        sync_db,
+async def _tool_ask(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    task = await external_agents.create_headless_ask(
+        db,
         principal,
         question=str(arguments.get("question") or ""),
         context=_clean_dict(arguments.get("context")),
         metadata=_tool_metadata(arguments, tool_name="illo_ask"),
     )
-    return external_agents.serialize_task(task, include_events=True, session=sync_db)
+    return await external_agents.serialize_task(task, include_events=True, session=db)
 
 
-def _tool_get_ask(sync_db, principal: external_agents.AgentBridgePrincipal, arguments: dict[str, Any]) -> dict[str, Any]:
-    return external_agents.get_headless_ask(
-        sync_db,
+async def _tool_get_ask(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    return await external_agents.get_headless_ask(
+        db,
         principal,
         ask_id=str(arguments.get("ask_id") or ""),
     )
@@ -425,14 +451,11 @@ async def _handle_mcp_request(
     if not isinstance(arguments, dict):
         return _result(req_id, _tool_error("Tool arguments must be an object"))
 
-    def _call(sync_db):
+    try:
         try:
-            return TOOL_HANDLERS[tool_name](sync_db, principal, arguments)
+            tool_payload = await TOOL_HANDLERS[tool_name](db, principal, arguments)
         except Exception as exc:
             raise_external_agent_http_error(exc)
-
-    try:
-        tool_payload = await run_external_agent_db(db, _call)
         if spec.get("mutates_thread"):
             await _add_thread_trigger_result_if_needed(
                 db,

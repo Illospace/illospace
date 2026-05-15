@@ -27,7 +27,6 @@ TEST_ROOT = "tests"
 
 COMPAT_ISLANDS = {
     "brain/platform/db/legacy.py",
-    "brain/platform/db/session_tasks.py",
     "brain/platform/db/repositories/unit_of_work.py",
 }
 
@@ -390,8 +389,6 @@ def ast_matches(path: Path, rel_path: str, scope: str, async_lines: set[int]) ->
                 for category, name in SYNC_BRIDGE_PATTERNS.items():
                     if name in imported_names and category != "session_run_sync":
                         yield _match(rel_path, lines, scope, async_lines, node, category)
-            if module == "brain.platform.db.session_tasks" and "run_session_task" in imported_names:
-                yield _match(rel_path, lines, scope, async_lines, node, "run_session_task")
             if module == "brain.platform.async_bridge" and "run_async_from_sync" in imported_names:
                 yield _match(rel_path, lines, scope, async_lines, node, "run_async_from_sync")
             if module == "asgiref.sync" and "async_to_sync" in imported_names:

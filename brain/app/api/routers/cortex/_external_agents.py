@@ -16,8 +16,8 @@ from brain.app.api.routers.cortex._router import router
 from brain.app.api.routers.ws import ws_manager
 from brain.app.api.schemas.external_agents import CortexExternalAgentTaskCreate
 from brain.platform.db.models.external_agent import ExternalAgentTaskRow
-from brain.platform.db.session_tasks import run_external_agent_db
 from brain.systems.external_agents import service as external_agents
+
 
 @router.post("/ideas/{idea_id}/external-agent-tasks", status_code=201)
 async def create_cortex_external_agent_task(
@@ -29,29 +29,27 @@ async def create_cortex_external_agent_task(
     org_id = require_org_context(user)
     user_id = str(user.get("id"))
 
-    def _create(sync_db):
-        try:
-            task, thread_message = external_agents.create_external_task_for_idea(
-                sync_db,
-                org_id=org_id,
-                user_id=user_id,
-                idea_id=idea_id,
-                connection_id=payload.connection_id,
-                instructions=payload.instructions,
-                title=payload.title,
-                include_thread_context=payload.include_thread_context,
-                include_project_context=payload.include_project_context,
-                metadata=payload.metadata,
-                idempotency_key=payload.idempotency_key,
-            )
-            return {
-                "task": external_agents.serialize_task(task, include_events=True, session=sync_db),
-                "thread_message": external_agents.serialize_thread_message(thread_message),
-            }
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
+    try:
+        task, thread_message = await external_agents.create_external_task_for_idea(
+            db,
+            org_id=org_id,
+            user_id=user_id,
+            idea_id=idea_id,
+            connection_id=payload.connection_id,
+            instructions=payload.instructions,
+            title=payload.title,
+            include_thread_context=payload.include_thread_context,
+            include_project_context=payload.include_project_context,
+            metadata=payload.metadata,
+            idempotency_key=payload.idempotency_key,
+        )
+        result = {
+            "task": await external_agents.serialize_task(task, include_events=True, session=db),
+            "thread_message": external_agents.serialize_thread_message(thread_message),
+        }
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
 
-    result = await run_external_agent_db(db, _create)
     await db.commit()
     thread_message = result.get("thread_message") if isinstance(result, dict) else None
     if isinstance(thread_message, dict):
@@ -76,21 +74,19 @@ async def list_cortex_external_agent_tasks(
 ):
     org_id = require_org_context(user)
 
-    def _list(sync_db):
-        try:
-            external_agents.require_idea_for_org(sync_db, idea_id=idea_id, org_id=org_id)
-            stmt = (
-                select(ExternalAgentTaskRow)
-                .where(ExternalAgentTaskRow.source_idea_id == str(idea_id), ExternalAgentTaskRow.org_id == str(org_id))
-                .order_by(ExternalAgentTaskRow.created_at.desc(), ExternalAgentTaskRow.id.desc())
-            )
-            return {
-                "tasks": [
-                    external_agents.serialize_task(row, include_events=True, include_artifacts=True, session=sync_db)
-                    for row in sync_db.scalars(stmt).all()
-                ]
-            }
-        except Exception as exc:
-            raise_external_agent_http_error(exc)
-
-    return await run_external_agent_db(db, _list)
+    try:
+        await external_agents.require_idea_for_org(db, idea_id=idea_id, org_id=org_id)
+        stmt = (
+            select(ExternalAgentTaskRow)
+            .where(ExternalAgentTaskRow.source_idea_id == str(idea_id), ExternalAgentTaskRow.org_id == str(org_id))
+            .order_by(ExternalAgentTaskRow.created_at.desc(), ExternalAgentTaskRow.id.desc())
+        )
+        rows = (await db.scalars(stmt)).all()
+        return {
+            "tasks": [
+                await external_agents.serialize_task(row, include_events=True, include_artifacts=True, session=db)
+                for row in rows
+            ]
+        }
+    except Exception as exc:
+        raise_external_agent_http_error(exc)

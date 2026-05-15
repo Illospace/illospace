@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import ast
+import subprocess
+import sys
 
 
 DIRECT_SYNC_UOW = re.compile(r"^\s*with\s+UnitOfWork\s*\(")
@@ -13,7 +16,6 @@ BANNED_BRIDGES = (
 RUN_SYNC_REFERENCE = re.compile(r"getattr\([^#\n]+['\"]run_sync['\"]|\.\s*run_sync\s*\(")
 CENTRAL_SESSION_BRIDGES = {
     Path("brain/platform/db/repositories/unit_of_work.py"),
-    Path("brain/platform/db/session_tasks.py"),
 }
 REQUIRED_ALEMBIC_BRIDGES = {
     Path("brain/platform/db/alembic/env.py"),
@@ -27,9 +29,6 @@ SYNC_IMPORTS_BY_MODULE = {
     "brain.platform.db.repositories.unit_of_work": {
         "open_unit_of_work",
         "run_unit_of_work_task",
-    },
-    "brain.platform.db.session_tasks": {
-        "run_session_task",
     },
     "sqlalchemy.orm": {
         "Session",
@@ -154,6 +153,133 @@ def test_production_db_references_are_async_shaped():
         f"Found {len(offenders)} production sync-shaped DB references:\n"
         + "\n".join(offenders[:120])
     )
+
+
+def test_production_async_db_debt_metric_is_zero():
+    root = _repo_root()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/async_db_debt_metrics.py",
+            "--json",
+            "--target",
+            "production",
+        ],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    zero_target_metrics = {
+        "production_sync_shaped_refs",
+        "production_bridge_refs",
+        "api_sync_shaped_refs",
+        "direct_sync_unit_of_work_refs",
+        "sync_bridge_helper_refs",
+        "sync_sqlalchemy_surface_refs",
+    }
+    assert {
+        name: payload["metrics"].get(name)
+        for name in zero_target_metrics
+    } == {name: 0 for name in zero_target_metrics}
+
+
+def test_external_agent_sync_session_bridge_is_removed():
+    root = _repo_root()
+    assert not (root / "brain/platform/db/session_tasks.py").exists()
+
+    paths = [
+        root / "brain/app/api/routers/agent_bridge.py",
+        root / "brain/app/api/routers/agent_connections.py",
+        root / "brain/app/api/routers/agent_mcp.py",
+        root / "brain/app/api/routers/cortex/_external_agents.py",
+    ]
+    offenders = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        if "run_external_agent_db" in text or "brain.platform.db.session_tasks" in text:
+            offenders.append(str(path.relative_to(root)))
+
+    assert offenders == []
+
+
+def test_external_agent_service_db_boundary_is_native_async():
+    root = _repo_root()
+    path = root / "brain/systems/external_agents/service.py"
+    text = path.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+
+    assert "from sqlalchemy.orm import Session" not in text
+
+    db_boundary_functions = {
+        "_ensure_org_user",
+        "_require_connection",
+        "require_connection",
+        "require_connection_for_user",
+        "_require_task_for_principal",
+        "require_task_for_principal",
+        "serialize_task",
+        "create_connection",
+        "list_connections",
+        "mint_connection_token",
+        "authenticate_bridge_token",
+        "record_heartbeat",
+        "append_task_event",
+        "create_external_task_for_idea",
+        "claim_tasks",
+        "update_task_event",
+        "append_artifact",
+        "complete_task",
+        "fail_task",
+        "search_workspace",
+        "get_thread",
+        "get_team_members",
+        "create_thread_from_agent",
+        "post_thread_message_from_agent",
+        "create_headless_ask",
+        "get_headless_ask",
+    }
+    defs = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    offenders = [
+        name
+        for name in sorted(db_boundary_functions)
+        if not isinstance(defs.get(name), ast.AsyncFunctionDef)
+    ]
+
+    assert offenders == []
+
+
+def test_external_agent_repositories_expose_async_queries_only():
+    root = _repo_root()
+    path = root / "brain/platform/db/repositories/external_agents.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    sync_query_names = {
+        "get_by_hash",
+        "list_for_connection",
+        "list_for_idea",
+        "list_for_org",
+        "list_for_task",
+    }
+    async_query_names = {f"a_{name}" for name in sync_query_names}
+    sync_defs = []
+    async_defs = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if node.name in sync_query_names:
+            sync_defs.append(f"{node.name}:{node.lineno}")
+        if node.name in async_query_names and isinstance(node, ast.AsyncFunctionDef):
+            async_defs.add(node.name)
+
+    assert sync_defs == []
+    assert async_query_names.issubset(async_defs)
 
 
 def test_api_facing_boundaries_do_not_import_or_call_sync_db_apis():

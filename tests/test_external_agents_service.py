@@ -13,9 +13,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import event, select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.schema import CreateTable
 
 from brain.systems.external_agents import service
 from brain.platform.db.models.idea import Idea, IdeaThread, UserMention
@@ -54,19 +56,29 @@ def _register_sqlite_functions(dbapi_conn, _connection_record):
     dbapi_conn.create_function("gen_random_uuid", 0, lambda: str(uuid.uuid4()))
 
 
-def _sqlite_session() -> Session:
+async def _sqlite_session() -> tuple[AsyncSession, AsyncEngine]:
     _patch_sqlite_for_pg_types()
     sqlite3.register_adapter(list, lambda value: json.dumps(value))
     sqlite3.register_adapter(dict, lambda value: json.dumps(value))
-    engine = create_engine("sqlite://", echo=False)
-    event.listen(engine, "connect", _register_sqlite_functions)
-    Org.__table__.create(engine, checkfirst=True)
-    User.__table__.create(engine, checkfirst=True)
-    Idea.__table__.create(engine, checkfirst=True)
-    IdeaThread.__table__.create(engine, checkfirst=True)
-    UserMention.__table__.create(engine, checkfirst=True)
-    NotificationEvent.__table__.create(engine, checkfirst=True)
-    return Session(engine)
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    event.listen(engine.sync_engine, "connect", _register_sqlite_functions)
+    async with engine.begin() as connection:
+        for table in (
+            Org.__table__,
+            User.__table__,
+            Idea.__table__,
+            IdeaThread.__table__,
+            UserMention.__table__,
+            NotificationEvent.__table__,
+        ):
+            await connection.execute(CreateTable(table, if_not_exists=True))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    return factory(), engine
 
 
 def _load_bridge_module():
@@ -109,7 +121,8 @@ def test_headless_thread_ids_use_external_agent_namespace():
     assert f"external-agent:{principal.connection_id}:ask-1" == "external-agent:conn-1:ask-1"
 
 
-def test_headless_ask_blocks_thread_mutation_tools():
+@pytest.mark.asyncio
+async def test_headless_ask_blocks_thread_mutation_tools():
     class FakeSession:
         def __init__(self):
             self.added = []
@@ -118,10 +131,10 @@ def test_headless_ask_blocks_thread_mutation_tools():
         def add(self, row):
             self.added.append(row)
 
-        def flush(self):
+        async def flush(self):
             self.flush_count += 1
 
-        def scalar(self, _stmt):
+        async def scalar(self, _stmt):
             return None
 
     principal = service.AgentBridgePrincipal(
@@ -135,12 +148,12 @@ def test_headless_ask_blocks_thread_mutation_tools():
     )
     captured_requests = []
 
-    def fake_create_run(_session, request):
+    async def fake_create_run(_session, request):
         captured_requests.append(request)
         return SimpleNamespace(id=42)
 
     with patch("brain.systems.external_agents.service._create_agent_run", side_effect=fake_create_run):
-        task = service.create_headless_ask(
+        task = await service.create_headless_ask(
             FakeSession(),
             principal,
             question="What should I know before replying?",
@@ -152,43 +165,48 @@ def test_headless_ask_blocks_thread_mutation_tools():
     assert "post_chat_message" in blocked_tools
 
 
-def test_create_thread_from_agent_notifies_teammate_with_unified_notification():
-    db = _sqlite_session()
-    db.add(Org(id=ORG_ID, name="Test Org", slug="test-org"))
-    db.add(User(id=OWNER_ID, org_id=ORG_ID, name="Reda", email="reda@test.com"))
-    db.add(User(id=TEAMMATE_ID, org_id=ORG_ID, name="JB", email="jb@test.com"))
-    db.flush()
-    principal = service.AgentBridgePrincipal(
-        connection_id="conn-1",
-        org_id=ORG_ID,
-        owner_user_id=OWNER_ID,
-        token_id="token-1",
-        scopes=frozenset(service.DEFAULT_BRIDGE_SCOPES),
-        connection_display_name="Codex Desktop",
-        agent_kind="codex",
-    )
+@pytest.mark.asyncio
+async def test_create_thread_from_agent_notifies_teammate_with_unified_notification():
+    db, engine = await _sqlite_session()
+    try:
+        db.add(Org(id=ORG_ID, name="Test Org", slug="test-org"))
+        db.add(User(id=OWNER_ID, org_id=ORG_ID, name="Reda", email="reda@test.com"))
+        db.add(User(id=TEAMMATE_ID, org_id=ORG_ID, name="JB", email="jb@test.com"))
+        await db.flush()
+        principal = service.AgentBridgePrincipal(
+            connection_id="conn-1",
+            org_id=ORG_ID,
+            owner_user_id=OWNER_ID,
+            token_id="token-1",
+            scopes=frozenset(service.DEFAULT_BRIDGE_SCOPES),
+            connection_display_name="Codex Desktop",
+            agent_kind="codex",
+        )
 
-    idea, thread, notified = service.create_thread_from_agent(
-        db,
-        principal,
-        title="Install Illo MCP",
-        body="Please install the new MCP bridge.",
-        teammate_user_ids=[TEAMMATE_ID],
-    )
+        idea, thread, notified = await service.create_thread_from_agent(
+            db,
+            principal,
+            title="Install Illo MCP",
+            body="Please install the new MCP bridge.",
+            teammate_user_ids=[TEAMMATE_ID],
+        )
 
-    assert str(idea.id)
-    assert thread.message_type == "agent_share"
-    assert notified == [TEAMMATE_ID]
+        assert str(idea.id)
+        assert thread.message_type == "agent_share"
+        assert notified == [TEAMMATE_ID]
 
-    mention = db.scalars(select(UserMention)).one()
-    assert mention.user_id == TEAMMATE_ID
-    assert mention.thread_message_id == thread.id
+        mention = (await db.scalars(select(UserMention))).one()
+        assert mention.user_id == TEAMMATE_ID
+        assert mention.thread_message_id == thread.id
 
-    notification = db.scalars(select(NotificationEvent)).one()
-    assert notification.user_id == TEAMMATE_ID
-    assert notification.kind == NOTIFICATION_KIND_WORKSPACE_MENTION
-    assert notification.idea_id == str(idea.id)
-    assert notification.payload["thread_message_id"] == thread.id
+        notification = (await db.scalars(select(NotificationEvent))).one()
+        assert notification.user_id == TEAMMATE_ID
+        assert notification.kind == NOTIFICATION_KIND_WORKSPACE_MENTION
+        assert notification.idea_id == str(idea.id)
+        assert notification.payload["thread_message_id"] == thread.id
+    finally:
+        await db.close()
+        await engine.dispose()
 
 
 def test_fake_bridge_adapter_echoes_task_without_network():
