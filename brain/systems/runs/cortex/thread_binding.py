@@ -125,6 +125,21 @@ def _metadata_int(metadata: dict[str, Any], *keys: str) -> int | None:
     return None
 
 
+def _trigger_actor_user_id(metadata: dict[str, Any], *, org_id: str | None = None) -> str | None:
+    trigger = metadata.get("illo_trigger")
+    if not isinstance(trigger, dict):
+        return None
+    actor = trigger.get("actor")
+    if not isinstance(actor, dict):
+        return None
+    if actor.get("internal") is True:
+        return None
+    if org_id and str(actor.get("org_id") or "") not in {"", str(org_id)}:
+        return None
+    actor_id = str(actor.get("id") or "").strip()
+    return actor_id or None
+
+
 async def _a_latest_attached_project_context(session: Any, idea_id: str) -> dict[str, Any]:
     if not hasattr(session, "scalars"):
         return {}
@@ -228,9 +243,14 @@ async def a_build_run_request(
         )
         if thread_context:
             metadata["thread_context"] = thread_context
+    owner_user_id = (
+        _trigger_actor_user_id(metadata, org_id=str(getattr(idea, "org_id", "") or "") or None)
+        or user_id
+        or getattr(idea, "user_id", None)
+    )
     return AgentRunRequest(
         org_id=str(getattr(idea, "org_id", "") or "") or None,
-        user_id=user_id or getattr(idea, "user_id", None),
+        user_id=owner_user_id,
         thread_id=idea_id,
         message=message,
         profile=profile,
