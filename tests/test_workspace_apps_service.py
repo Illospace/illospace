@@ -896,6 +896,105 @@ async def test_workspace_app_action_generic_http_supports_templates_and_conditio
     assert second.data["status"] == "Done"
 
 
+async def test_workspace_app_action_generic_http_populates_required_title_field_from_sync_title(session):
+    service = AsyncDomainService(session)
+    domain = await service.create_domain(
+        ORG_ID,
+        name="Required Title Tickets",
+        slug="required-title-tickets",
+        objects=[
+            {
+                "key": "ticket",
+                "name": "Ticket",
+                "fields": [
+                    {"key": "external_id", "field_type": "text", "required": True},
+                    {"key": "title", "field_type": "text", "required": True},
+                    {"key": "status", "field_type": "enum", "options": ["Todo", "Done"]},
+                    {"key": "link", "field_type": "url"},
+                    {"key": "synced_at", "field_type": "datetime"},
+                ],
+            }
+        ],
+        actor_id=USER_ID,
+    )
+    manifest = {
+        "contract_version": 1,
+        "data_plan": {
+            "mode": "domain",
+            "bindings": {
+                "tickets": {
+                    "domain_id": domain.id,
+                    "object_key": "ticket",
+                    "fields": ["title", "external_id", "status", "link", "synced_at"],
+                    "operations": ["schema", "list", "create", "update"],
+                }
+            },
+        },
+        "design_contract": {
+            "kit": "constellation-app-kit",
+            "theme_modes": ["dark", "light"],
+        },
+        "actions": {
+            "tickets.syncExternal": {
+                "kind": "connector",
+                "effects": ["external.read", "domain.write"],
+                "executor": {"type": "registered", "key": "generic.http"},
+                "connector_spec": {
+                    "kind": "http_sync",
+                    "request": {"method": "GET", "url": "https://jsonplaceholder.typicode.com/todos"},
+                    "response": {"items_path": "$"},
+                    "sync": {
+                        "binding": "tickets",
+                        "remote_id": "id",
+                        "remote_id_field": "external_id",
+                        "title": "title",
+                        "fields": {
+                            "status": {
+                                "if": {"path": "completed", "equals": True},
+                                "then": "Done",
+                                "else": "Todo",
+                            },
+                            "link": {"template": "https://jsonplaceholder.typicode.com/todos/{id}"},
+                            "synced_at": {"now": True},
+                        },
+                    },
+                },
+            }
+        },
+    }
+    app = await a_create_app(
+        session,
+        org_id=ORG_ID,
+        key="generic-http-required-title-sync",
+        name="Generic HTTP Required Title Sync",
+        renderer_key="generated-ui-app",
+        source_kind="json",
+        source_code=json.dumps(VALID_GENERATED_UI_SPEC),
+        manifest=manifest,
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    with patch(
+        "brain.systems.workspace_apps.generic_http._request_json",
+        return_value=[{"id": 1, "title": "delectus aut autem", "completed": False}],
+    ), patch("brain.systems.workspace_apps.generic_http._utc_now_iso", return_value="2026-05-15T14:30:00Z"):
+        result = await async_run_workspace_app_action(
+            session,
+            org_id=ORG_ID,
+            app_id=app.id,
+            action_key="tickets.syncExternal",
+            payload={},
+            user_id=USER_ID,
+        )
+
+    assert result["ok"] is True
+    records = await service.list_records(ORG_ID, domain.id, object_key="ticket", limit=10)
+    assert len(records) == 1
+    assert records[0].title == "delectus aut autem"
+    assert records[0].data["title"] == "delectus aut autem"
+
+
 async def test_workspace_app_action_generic_http_supports_now_mapping(session):
     service = AsyncDomainService(session)
     domain = await service.create_domain(

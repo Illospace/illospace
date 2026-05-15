@@ -1445,6 +1445,34 @@ async def test_thread_binding_keeps_fast_high_intelligence_by_default():
     assert request.metadata["event"] == "thread_reply"
 
 
+async def test_thread_binding_prefers_cortex_trigger_actor_over_payload_user_id():
+    from brain.systems.runs.cortex.thread_binding import a_build_run_request
+
+    session = _async_thread_binding_session(
+        SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread")
+    )
+
+    request = await a_build_run_request(
+        session,
+        idea_id="idea-1",
+        event="idea_created",
+        message="Build a workspace app",
+        user_id="service-user",
+        metadata={
+            "illo_trigger": {
+                "actor": {
+                    "id": "u1",
+                    "org_id": "org-1",
+                    "internal": False,
+                    "principal_type": "human",
+                }
+            }
+        },
+    )
+
+    assert request.user_id == "u1"
+
+
 async def test_thread_binding_records_slash_skill_interest():
     from brain.systems.runs.cortex.thread_binding import a_build_run_request
 
