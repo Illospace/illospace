@@ -86,6 +86,18 @@ async def _handle_manage_cycle_async(
     if not user_id:
         return json.dumps({"error": "manage_cycle requires a user-scoped cortex run"})
 
+    def _optional_text(value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def _optional_update_text(value: str | None) -> str | None:
+        # Tool-call optional string fields often arrive as empty strings. Treat blanks
+        # as omitted for update-only fields so a schedule update is not derailed by
+        # an unrelated default like run_at="" or name="".
+        return _optional_text(value)
+
     def _cycle_scope():
         scope = [Cycle.deleted_at.is_(None)]
         if org_id:
@@ -126,18 +138,23 @@ async def _handle_manage_cycle_async(
                 cycles = [serialize_cycle(cycle) for cycle in result.all()]
             return json.dumps({"cycles": cycles}, default=str)
         elif action == "create":
-            if not name or not prompt or not timezone or (not schedule_expr and not run_at):
+            create_name = _optional_text(name)
+            create_prompt = _optional_text(prompt)
+            create_timezone = _optional_text(timezone)
+            create_run_at = _optional_text(run_at)
+            create_schedule_expr = _optional_text(schedule_expr)
+            if not create_name or not create_prompt or not create_timezone or (not create_schedule_expr and not create_run_at):
                 return json.dumps({"error": "create requires: name, prompt, timezone, and schedule_expr or run_at"})
-            tz_name = validate_timezone_name(timezone)
+            tz_name = validate_timezone_name(create_timezone)
             expr = (
-                build_one_time_schedule_expr(run_at, tz_name)
-                if run_at
-                else validate_schedule_expr(schedule_expr or "", tz_name)
+                build_one_time_schedule_expr(create_run_at, tz_name)
+                if create_run_at
+                else validate_schedule_expr(create_schedule_expr or "", tz_name)
             )
             mode = validate_execution_mode(execution_mode)
             thinking = validate_thinking_override(thinking_override)
-            normalized_name = validate_nonempty_trimmed(name, "name")
-            normalized_prompt = validate_nonempty_trimmed(prompt, "prompt")
+            normalized_name = validate_nonempty_trimmed(create_name, "name")
+            normalized_prompt = validate_nonempty_trimmed(create_prompt, "prompt")
             async with UnitOfWork() as uow:
                 if target_idea_id:
                     stmt = select(Idea.id).where(*_idea_scope(target_idea_id))
@@ -176,6 +193,15 @@ async def _handle_manage_cycle_async(
         elif action == "update":
             if not id:
                 return json.dumps({"error": "update requires: id"})
+            update_name = _optional_update_text(name)
+            update_prompt = _optional_update_text(prompt)
+            update_timezone = _optional_update_text(timezone)
+            update_run_at = _optional_update_text(run_at)
+            update_schedule_expr = _optional_update_text(schedule_expr)
+            update_model_override = model_override if model_override is not None else None
+            update_thinking_override = _optional_update_text(thinking_override)
+            update_execution_mode = _optional_update_text(execution_mode)
+            update_target_idea_id = _optional_update_text(target_idea_id)
             async with UnitOfWork() as uow:
                 stmt = select(Cycle).where(
                     Cycle.id == id,
@@ -185,34 +211,34 @@ async def _handle_manage_cycle_async(
                 cycle = result.first()
                 if not cycle:
                     return json.dumps({"error": f"Cycle {id} not found"})
-                if target_idea_id:
-                    idea_stmt = select(Idea.id).where(*_idea_scope(target_idea_id))
+                if update_target_idea_id:
+                    idea_stmt = select(Idea.id).where(*_idea_scope(update_target_idea_id))
                     result = await uow.session.execute(idea_stmt)
                     if not result.first():
                         return json.dumps({"error": "target_idea_id must belong to the current workspace"})
-                if name is not None:
-                    cycle.name = validate_nonempty_trimmed(name, "name")
-                if prompt is not None:
-                    cycle.prompt = validate_nonempty_trimmed(prompt, "prompt")
-                if timezone is not None:
-                    cycle.timezone = validate_timezone_name(timezone)
-                if run_at is not None:
-                    cycle.schedule_expr = build_one_time_schedule_expr(run_at, cycle.timezone)
-                if schedule_expr is not None:
-                    cycle.schedule_expr = validate_schedule_expr(schedule_expr, cycle.timezone)
+                if update_name is not None:
+                    cycle.name = validate_nonempty_trimmed(update_name, "name")
+                if update_prompt is not None:
+                    cycle.prompt = validate_nonempty_trimmed(update_prompt, "prompt")
+                if update_timezone is not None:
+                    cycle.timezone = validate_timezone_name(update_timezone)
+                if update_run_at is not None:
+                    cycle.schedule_expr = build_one_time_schedule_expr(update_run_at, cycle.timezone)
+                if update_schedule_expr is not None:
+                    cycle.schedule_expr = validate_schedule_expr(update_schedule_expr, cycle.timezone)
                 if enabled is not None:
                     cycle.enabled = enabled
-                if model_override is not None:
-                    cycle.model_override = (model_override or "").strip() or None
-                if thinking_override is not None:
-                    cycle.thinking_override = validate_thinking_override(thinking_override)
-                if execution_mode is not None:
-                    cycle.execution_mode = validate_execution_mode(execution_mode)
+                if update_model_override is not None:
+                    cycle.model_override = (update_model_override or "").strip() or None
+                if update_thinking_override is not None:
+                    cycle.thinking_override = validate_thinking_override(update_thinking_override)
+                if update_execution_mode is not None:
+                    cycle.execution_mode = validate_execution_mode(update_execution_mode)
                 if target_idea_id is not None:
-                    cycle.target_idea_id = target_idea_id
+                    cycle.target_idea_id = update_target_idea_id
                 if reopen_archived is not None:
                     cycle.reopen_archived = reopen_archived
-                elif execution_mode is not None:
+                elif update_execution_mode is not None:
                     cycle.reopen_archived = cycle_defaults(
                         execution_mode=cycle.execution_mode,
                         reopen_archived=None,
