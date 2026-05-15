@@ -135,7 +135,7 @@ def _trigger_actor_user_id(trigger_payload: dict[str, Any] | Any, *, org_id: str
     return actor_id or None
 
 
-def merge_trigger_metadata(
+def _merge_trigger_metadata(
     trigger_payload: dict[str, Any] | Any,
     metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -328,12 +328,12 @@ def _event_model_policy(event: WorkIntakeEvent, metadata: dict[str, Any]) -> dic
     return model_policy_from_metadata(metadata)
 
 
-def build_chat_agent_run_request(trigger_payload: dict[str, Any] | Any) -> AgentRunRequest:
+def _agent_run_request_for_chat(trigger_payload: dict[str, Any] | Any) -> AgentRunRequest:
     trigger = _trigger_dict(trigger_payload)
     target = _trigger_target(trigger)
     payload = _trigger_payload(trigger)
     policy = _trigger_policy(trigger)
-    metadata = merge_trigger_metadata(
+    metadata = _merge_trigger_metadata(
         trigger,
         payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
     )
@@ -372,29 +372,47 @@ def build_chat_agent_run_request(trigger_payload: dict[str, Any] | Any) -> Agent
     )
 
 
-def build_cortex_run_admission_kwargs(trigger_payload: dict[str, Any] | Any) -> dict[str, Any]:
-    trigger = _trigger_dict(trigger_payload)
-    target = _trigger_target(trigger)
-    payload = _trigger_payload(trigger)
-    policy = _trigger_policy(trigger)
-    idea_id = str(target.get("idea_id") or payload.get("idea_id") or "")
-    if not idea_id:
-        raise ValueError("Cortex run triggers require target.idea_id")
-    metadata = merge_trigger_metadata(
-        trigger,
-        payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
+def _external_agent_headless_thread_id(target: dict[str, Any]) -> str:
+    thread_id = str(target.get("thread_id") or "")
+    if thread_id:
+        return thread_id
+    connection_id = str(target.get("external_agent_connection_id") or "")
+    task_id = str(target.get("external_agent_task_id") or "")
+    if connection_id and task_id:
+        return f"external-agent:{connection_id}:{task_id}"
+    raise ValueError("External agent headless ask requires thread_id or connection/task ids")
+
+
+def _build_external_agent_headless_request(
+    event: WorkIntakeEvent,
+    *,
+    target: dict[str, Any],
+    metadata: dict[str, Any],
+    message: str,
+    producer: str,
+    idempotency_key: str | None,
+    priority: int,
+) -> AgentRunRequest:
+    profile = profile_from_metadata(metadata)
+    return AgentRunRequest(
+        org_id=str(event.org_id or "") or None,
+        user_id=_event_actor_user_id(event),
+        thread_id=_external_agent_headless_thread_id(target),
+        message=message,
+        profile=profile,
+        recipe=recipe_for_profile(profile, metadata),
+        target_ref=target,
+        workspace_ref=_event_workspace_ref(event),
+        model_policy=_event_model_policy(event, metadata),
+        metadata={
+            **metadata,
+            "event": _event_run_event(event),
+            "priority": priority,
+            "source": event.source,
+            "producer": producer,
+            "idempotency_key": idempotency_key,
+        },
     )
-    return {
-        "idea_id": idea_id,
-        "event": _run_event(trigger, policy),
-        "message": str(payload.get("run_message") or payload.get("message") or ""),
-        "priority": _priority(payload, policy),
-        "user_id": _payload_user_id(payload, trigger, org_id=str(trigger.get("org_id") or "") or None),
-        "metadata": metadata,
-        "source": f"trigger:{trigger.get('source')}",
-        "producer": "trigger",
-        "idempotency_key": trigger.get("idempotency_key"),
-    }
 
 
 async def build_agent_run_request(
@@ -426,7 +444,7 @@ async def build_agent_run_request(
                 "priority": priority,
             },
         }
-        request = build_chat_agent_run_request(trigger_payload)
+        request = _agent_run_request_for_chat(trigger_payload)
         return AgentRunRequest(
             **{
                 **request.__dict__,
@@ -441,38 +459,20 @@ async def build_agent_run_request(
         )
 
     if target.get("kind") == "external_agent_headless_ask":
-        thread_id = str(target.get("thread_id") or "")
-        if not thread_id:
-            connection_id = str(target.get("external_agent_connection_id") or "")
-            task_id = str(target.get("external_agent_task_id") or "")
-            thread_id = f"external-agent:{connection_id}:{task_id}" if connection_id and task_id else ""
-        if not thread_id:
-            raise ValueError("External agent headless ask requires thread_id or connection/task ids")
-        profile = profile_from_metadata(metadata)
-        return AgentRunRequest(
-            org_id=str(event.org_id or "") or None,
-            user_id=_event_actor_user_id(event),
-            thread_id=thread_id,
+        return _build_external_agent_headless_request(
+            event,
+            target=target,
+            metadata=metadata,
             message=message,
-            profile=profile,
-            recipe=recipe_for_profile(profile, metadata),
-            target_ref=target,
-            workspace_ref=_event_workspace_ref(event),
-            model_policy=_event_model_policy(event, metadata),
-            metadata={
-                **metadata,
-                "event": _event_run_event(event),
-                "priority": priority,
-                "source": event.source,
-                "producer": producer,
-                "idempotency_key": idempotency_key,
-            },
+            producer=producer,
+            idempotency_key=idempotency_key,
+            priority=priority,
         )
 
     idea_id = str(target.get("idea_id") or "")
     if not idea_id:
         raise ValueError("Work intake target requires idea_id for Cortex run admission")
-    return await build_cortex_agent_run_request(
+    return await _agent_run_request_for_cortex(
         session,
         idea_id=idea_id,
         event=_event_run_event(event),
@@ -484,24 +484,6 @@ async def build_agent_run_request(
         producer=producer,
         idempotency_key=idempotency_key,
     )
-
-
-def build_run_admission_request(event: WorkIntakeEvent) -> dict[str, Any]:
-    target = _event_target(event)
-    idea_id = str(target.get("idea_id") or "")
-    if not idea_id:
-        raise ValueError("Work intake target requires idea_id")
-    return {
-        "idea_id": idea_id,
-        "event": _event_run_event(event),
-        "message": _event_message(event),
-        "priority": _event_priority(event),
-        "user_id": _event_actor_user_id(event),
-        "metadata": _event_metadata(event),
-        "source": event.source,
-        "producer": _event_producer(event),
-        "idempotency_key": _event_idempotency_key(event),
-    }
 
 
 def build_agent_run_request_sync(
@@ -516,32 +498,14 @@ def build_agent_run_request_sync(
     producer = _event_producer(event)
     idempotency_key = _event_idempotency_key(event)
     priority = _event_priority(event)
-    thread_id = str(target.get("thread_id") or "")
-    if not thread_id:
-        connection_id = str(target.get("external_agent_connection_id") or "")
-        task_id = str(target.get("external_agent_task_id") or "")
-        thread_id = f"external-agent:{connection_id}:{task_id}" if connection_id and task_id else ""
-    if not thread_id:
-        raise ValueError("External agent headless ask requires thread_id or connection/task ids")
-    profile = profile_from_metadata(metadata)
-    return AgentRunRequest(
-        org_id=str(event.org_id or "") or None,
-        user_id=_event_actor_user_id(event),
-        thread_id=thread_id,
+    return _build_external_agent_headless_request(
+        event,
+        target=target,
+        metadata=metadata,
         message=message,
-        profile=profile,
-        recipe=recipe_for_profile(profile, metadata),
-        target_ref=target,
-        workspace_ref=_event_workspace_ref(event),
-        model_policy=_event_model_policy(event, metadata),
-        metadata={
-            **metadata,
-            "event": _event_run_event(event),
-            "priority": priority,
-            "source": event.source,
-            "producer": producer,
-            "idempotency_key": idempotency_key,
-        },
+        producer=producer,
+        idempotency_key=idempotency_key,
+        priority=priority,
     )
 
 
@@ -586,21 +550,6 @@ def _metadata_int(metadata: dict[str, Any], *keys: str) -> int | None:
         except (TypeError, ValueError):
             continue
     return None
-
-
-def _trigger_actor_user_id_from_metadata(metadata: dict[str, Any], *, org_id: str | None = None) -> str | None:
-    trigger = metadata.get("illo_trigger")
-    if not isinstance(trigger, dict):
-        return None
-    actor = trigger.get("actor")
-    if not isinstance(actor, dict):
-        return None
-    if actor.get("internal") is True:
-        return None
-    if org_id and str(actor.get("org_id") or "") not in {"", str(org_id)}:
-        return None
-    actor_id = str(actor.get("id") or "").strip()
-    return actor_id or None
 
 
 async def _a_latest_attached_project_context(session: Any, idea_id: str) -> dict[str, Any]:
@@ -709,7 +658,7 @@ async def _a_select_project_context(
     return {}, None, validation_errors
 
 
-async def build_cortex_agent_run_request(
+async def _agent_run_request_for_cortex(
     session: Any,
     *,
     idea_id: str,
@@ -764,14 +713,7 @@ async def build_cortex_agent_run_request(
         )
         if thread_context:
             metadata["thread_context"] = thread_context
-    owner_user_id = (
-        _trigger_actor_user_id_from_metadata(
-            metadata,
-            org_id=str(getattr(idea, "org_id", "") or "") or None,
-        )
-        or user_id
-        or getattr(idea, "user_id", None)
-    )
+    owner_user_id = user_id or getattr(idea, "user_id", None)
     return AgentRunRequest(
         org_id=str(getattr(idea, "org_id", "") or "") or None,
         user_id=owner_user_id,
@@ -853,15 +795,10 @@ def admit_work_sync(
 
 
 __all__ = [
-    "build_chat_agent_run_request",
     "build_agent_run_request",
     "build_agent_run_request_sync",
-    "build_cortex_agent_run_request",
-    "build_cortex_run_admission_kwargs",
-    "build_run_admission_request",
     "admit_work",
     "admit_work_sync",
-    "merge_trigger_metadata",
     "model_policy_from_metadata",
     "profile_from_metadata",
     "recipe_for_profile",

@@ -1468,10 +1468,13 @@ def test_run_stream_payload_is_the_single_cortex_projection():
     assert payload["model_policy"] == {"tier": "high", "thinking": "high"}
 
 
-def _async_thread_binding_session(idea, *, attachment=None):
+def _async_work_intake_session(idea, *, attachment=None):
     class _Session:
+        def __init__(self):
+            self.idea = idea
+
         async def get(self, model, idea_id):
-            return idea
+            return self.idea
 
         async def scalars(self, stmt):
             return SimpleNamespace(first=lambda: attachment)
@@ -1479,12 +1482,48 @@ def _async_thread_binding_session(idea, *, attachment=None):
     return _Session()
 
 
-async def test_thread_binding_keeps_fast_high_intelligence_by_default():
-    from brain.systems.runs.cortex.thread_binding import a_build_run_request
+async def _build_cortex_intake_run_request(
+    session,
+    *,
+    idea_id: str,
+    event: str,
+    message: str,
+    user_id: str | None,
+    metadata: dict | None = None,
+    priority: int = 0,
+    source: str = "cortex",
+    producer: str | None = None,
+    idempotency_key: str | None = None,
+):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
 
-    session = _async_thread_binding_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
+    idea = getattr(session, "idea", None)
+    org_id = str(getattr(idea, "org_id", "") or "")
+    actor = {"id": user_id, "org_id": org_id, "internal": False} if user_id else None
+    policy = {"priority": priority, "run_event": event}
+    if producer is not None:
+        policy["producer"] = producer
+    if idempotency_key is not None:
+        policy["idempotency_key"] = idempotency_key
+    return await build_agent_run_request(
+        session,
+        WorkIntakeEvent(
+            source=source,
+            event_type=f"cortex.{event}",
+            org_id=org_id,
+            actor=actor,
+            target={"kind": "cortex_idea", "idea_id": idea_id},
+            payload={"message": message, "metadata": metadata or {}},
+            policy=policy,
+        ),
+    )
 
-    request = await a_build_run_request(
+
+async def test_work_intake_keeps_fast_high_intelligence_by_default():
+
+    session = _async_work_intake_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
+
+    request = await _build_cortex_intake_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1499,40 +1538,26 @@ async def test_thread_binding_keeps_fast_high_intelligence_by_default():
     assert request.metadata["event"] == "thread_reply"
 
 
-async def test_thread_binding_prefers_cortex_trigger_actor_over_payload_user_id():
-    from brain.systems.runs.cortex.thread_binding import a_build_run_request
-
-    session = _async_thread_binding_session(
+async def test_work_intake_prefers_normalized_actor_over_idea_owner():
+    session = _async_work_intake_session(
         SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread")
     )
 
-    request = await a_build_run_request(
+    request = await _build_cortex_intake_run_request(
         session,
         idea_id="idea-1",
         event="idea_created",
         message="Build a workspace app",
-        user_id="service-user",
-        metadata={
-            "illo_trigger": {
-                "actor": {
-                    "id": "u1",
-                    "org_id": "org-1",
-                    "internal": False,
-                    "principal_type": "human",
-                }
-            }
-        },
+        user_id="u1",
     )
 
     assert request.user_id == "u1"
 
 
-async def test_thread_binding_records_slash_skill_interest():
-    from brain.systems.runs.cortex.thread_binding import a_build_run_request
+async def test_work_intake_records_slash_skill_interest():
+    session = _async_work_intake_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
 
-    session = _async_thread_binding_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
-
-    request = await a_build_run_request(
+    request = await _build_cortex_intake_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1545,9 +1570,7 @@ async def test_thread_binding_records_slash_skill_interest():
     assert request.metadata["slash_skill_commands"][0]["token"] == "/debug"
 
 
-async def test_thread_binding_inherits_project_context_from_idea():
-    from brain.systems.runs.cortex.thread_binding import a_build_run_request
-
+async def test_work_intake_inherits_project_context_from_idea():
     idea = SimpleNamespace(
         id="idea-1",
         org_id="org-1",
@@ -1560,9 +1583,9 @@ async def test_thread_binding_inherits_project_context_from_idea():
             },
         },
     )
-    session = _async_thread_binding_session(idea)
+    session = _async_work_intake_session(idea)
 
-    request = await a_build_run_request(
+    request = await _build_cortex_intake_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1576,9 +1599,7 @@ async def test_thread_binding_inherits_project_context_from_idea():
     assert request.workspace_ref["project_context_snapshot"]["resources"][0]["path"] == "projects/yc-application"
 
 
-async def test_thread_binding_skips_invalid_metadata_project_context_for_valid_idea_context():
-    from brain.systems.runs.cortex.thread_binding import a_build_run_request
-
+async def test_work_intake_skips_invalid_metadata_project_context_for_valid_idea_context():
     idea = SimpleNamespace(
         id="idea-1",
         org_id="org-1",
@@ -1591,9 +1612,9 @@ async def test_thread_binding_skips_invalid_metadata_project_context_for_valid_i
             },
         },
     )
-    session = _async_thread_binding_session(idea)
+    session = _async_work_intake_session(idea)
 
-    request = await a_build_run_request(
+    request = await _build_cortex_intake_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1612,9 +1633,7 @@ async def test_thread_binding_skips_invalid_metadata_project_context_for_valid_i
     ]
 
 
-async def test_thread_binding_drops_invalid_legacy_project_context_when_no_valid_fallback():
-    from brain.systems.runs.cortex.thread_binding import a_build_run_request
-
+async def test_work_intake_drops_invalid_legacy_project_context_when_no_valid_fallback():
     idea = SimpleNamespace(
         id="idea-1",
         org_id="org-1",
@@ -1622,9 +1641,9 @@ async def test_thread_binding_drops_invalid_legacy_project_context_when_no_valid
         title="Thread",
         agent_details={"project_context": {"name": "Legacy empty project", "resources": []}},
     )
-    session = _async_thread_binding_session(idea)
+    session = _async_work_intake_session(idea)
 
-    request = await a_build_run_request(
+    request = await _build_cortex_intake_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1644,9 +1663,7 @@ async def test_thread_binding_drops_invalid_legacy_project_context_when_no_valid
     ]
 
 
-async def test_thread_binding_falls_back_to_latest_project_attachment():
-    from brain.systems.runs.cortex.thread_binding import a_build_run_request
-
+async def test_work_intake_falls_back_to_latest_project_attachment():
     idea = SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread", agent_details={})
     attachment = SimpleNamespace(
         snapshot={
@@ -1654,9 +1671,9 @@ async def test_thread_binding_falls_back_to_latest_project_attachment():
             "resources": [{"type": "folder", "path": "attached/project"}],
         },
     )
-    session = _async_thread_binding_session(idea, attachment=attachment)
+    session = _async_work_intake_session(idea, attachment=attachment)
 
-    request = await a_build_run_request(
+    request = await _build_cortex_intake_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1669,12 +1686,10 @@ async def test_thread_binding_falls_back_to_latest_project_attachment():
     assert request.target_ref["project_context_snapshot"]["resources"][0]["path"] == "attached/project"
 
 
-async def test_thread_binding_applies_intelligence_and_effort_overrides():
-    from brain.systems.runs.cortex.thread_binding import a_build_run_request
+async def test_work_intake_applies_intelligence_and_effort_overrides():
+    session = _async_work_intake_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
 
-    session = _async_thread_binding_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
-
-    request = await a_build_run_request(
+    request = await _build_cortex_intake_run_request(
         session,
         idea_id="idea-1",
         event="thread_reply",
@@ -1688,12 +1703,10 @@ async def test_thread_binding_applies_intelligence_and_effort_overrides():
     assert request.model_policy == {"tier": "medium", "thinking": "xhigh"}
 
 
-async def test_thread_binding_applies_explicit_model_override():
-    from brain.systems.runs.cortex.thread_binding import a_build_run_request
+async def test_work_intake_applies_explicit_model_override():
+    session = _async_work_intake_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
 
-    session = _async_thread_binding_session(SimpleNamespace(id="idea-1", org_id="org-1", user_id="u1", title="Thread"))
-
-    request = await a_build_run_request(
+    request = await _build_cortex_intake_run_request(
         session,
         idea_id="idea-1",
         event="idea_created",

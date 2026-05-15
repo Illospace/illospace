@@ -26,9 +26,15 @@ EXPECTED_WORK_INTAKE_API = {
     "WorkIntakePolicy",
     "build_agent_run_request",
     "build_agent_run_request_sync",
-    "build_run_admission_request",
     "admit_work",
     "admit_work_sync",
+}
+
+REMOVED_WORK_INTAKE_BYPASSES = {
+    "build_chat_agent_run_request",
+    "build_cortex_agent_run_request",
+    "build_cortex_run_admission_kwargs",
+    "build_run_admission_request",
 }
 
 
@@ -103,9 +109,15 @@ def _run_creation_violations(path: str) -> list[str]:
 
 
 def test_work_intake_exposes_single_product_event_api():
-    missing = EXPECTED_WORK_INTAKE_API - _function_names(_tree(WORK_INTAKE_MODULE))
+    function_names = _function_names(_tree(WORK_INTAKE_MODULE))
+    missing = EXPECTED_WORK_INTAKE_API - function_names
 
     assert missing == set()
+    assert REMOVED_WORK_INTAKE_BYPASSES.isdisjoint(function_names)
+
+
+def test_cortex_thread_binding_compatibility_module_is_removed():
+    assert not (ROOT / "brain/systems/runs/cortex/thread_binding.py").exists()
 
 
 @pytest.mark.asyncio

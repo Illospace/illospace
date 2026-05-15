@@ -25,11 +25,14 @@ EXPECTED_THOUGHT_API = {
     "ThreadMessageCommand",
     "ThoughtStatusCommand",
     "TerminalRunSettlementCommand",
-    "ThoughtRunAdmissionCommand",
     "post_thread_message",
     "transition_thought_status",
     "mirror_run_final_answer",
     "settle_terminal_run",
+}
+
+REMOVED_THOUGHT_RUN_ADMISSION_API = {
+    "ThoughtRunAdmissionCommand",
     "admit_thought_run",
 }
 
@@ -145,9 +148,11 @@ def _called_names(path: str, function_name: str) -> set[str]:
 
 def test_thought_module_exposes_complete_lifecycle_api():
     tree = _tree(THOUGHT_MODULE)
-    missing = EXPECTED_THOUGHT_API - _function_names(tree)
+    function_names = _function_names(tree)
+    missing = EXPECTED_THOUGHT_API - function_names
 
     assert missing == set()
+    assert REMOVED_THOUGHT_RUN_ADMISSION_API.isdisjoint(function_names)
 
 
 @pytest.mark.asyncio

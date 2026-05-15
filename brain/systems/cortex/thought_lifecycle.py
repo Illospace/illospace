@@ -74,18 +74,6 @@ class TerminalRunSettlementResult:
     thread_message_payload: dict[str, Any] | None
 
 
-@dataclass(frozen=True)
-class ThoughtRunAdmissionCommand:
-    event: str
-    message: str
-    actor: Mapping[str, Any] = field(default_factory=dict)
-    metadata: dict[str, Any] | None = None
-    priority: int = 0
-    source: str | None = None
-    producer: str | None = None
-    idempotency_key: str | None = None
-
-
 def compact_notification_text(text: str | None, limit: int = 160) -> str | None:
     normalized = " ".join((text or "").split())
     if not normalized:
@@ -722,41 +710,13 @@ async def settle_terminal_run(
     )
 
 
-async def admit_thought_run(
-    session: Any,
-    *,
-    idea: Any,
-    command: ThoughtRunAdmissionCommand,
-) -> Any:
-    from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
-
-    return await admit_work(
-        session,
-        WorkIntakeEvent(
-            source=command.source or "cortex",
-            event_type=f"cortex.{command.event}",
-            org_id=str(getattr(idea, "org_id", "") or command.actor.get("org_id") or ""),
-            actor=dict(command.actor or {}),
-            target={"kind": "cortex_idea", "idea_id": str(getattr(idea, "id", "") or "")},
-            payload={"message": command.message, "metadata": dict(command.metadata or {})},
-            policy={
-                "priority": command.priority,
-                "producer": command.producer,
-                "idempotency_key": command.idempotency_key,
-            },
-        ),
-    )
-
-
 __all__ = [
     "ThreadMessageCommand",
     "ThreadMessageResult",
     "TerminalRunSettlementCommand",
     "TerminalRunSettlementResult",
-    "ThoughtRunAdmissionCommand",
     "ThoughtStatusCommand",
     "ThoughtStatusResult",
-    "admit_thought_run",
     "compact_notification_text",
     "mirror_run_final_answer",
     "mirror_run_final_answer_sync",
