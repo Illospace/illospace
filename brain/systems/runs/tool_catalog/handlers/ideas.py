@@ -54,6 +54,24 @@ def _idea_actor(*, org_id: str | None, actor_user_id: str | None) -> dict[str, A
     }
 
 
+def _caller_is_service_actor(actor: dict[str, Any]) -> bool:
+    from brain.app.api.routers.cortex._helpers import _caller_is_service_principal
+
+    return bool(_caller_is_service_principal(actor))
+
+
+def _actor_org_context(actor: dict[str, Any]) -> str:
+    from brain.app.api.authorization import require_org_context
+
+    return str(require_org_context(actor))
+
+
+async def _require_idea_for_actor(session, idea_id: str, actor: dict[str, Any]):
+    from brain.app.api.routers.cortex._helpers import _a_require_idea_for_user
+
+    return await _a_require_idea_for_user(session, idea_id, actor)
+
+
 def _target_idea_id(idea_id: str | None, thread_id: str | None, context_idea_id: str | None) -> str | None:
     return str(idea_id or thread_id or context_idea_id).strip() or None
 
@@ -115,6 +133,7 @@ async def _seed_created_idea_thread(
     idea,
     seed_content: str,
     actor_user_id: str | None,
+    owner_user_id: str | None,
     parent_id: str | None,
     origin_ref: str | None,
 ) -> Any | None:
@@ -125,12 +144,15 @@ async def _seed_created_idea_thread(
     source_run_id = _current_tool_run_id()
     thread_msg = IdeaThread(
         idea_id=str(idea.id),
-        role="user",
+        role="illo",
         content=seed_content,
-        user_id=actor_user_id,
-        message_type="trigger",
+        user_id=None,
+        message_type="agent_response",
         metadata_={
             "source": "manage_idea.create",
+            "author": "illo",
+            "requested_by_user_id": actor_user_id,
+            "owner_user_id": owner_user_id,
             "created_by_run_id": source_run_id,
             "parent_idea_id": parent_id,
             "origin_ref": origin_ref,
@@ -270,21 +292,42 @@ async def _restore_idea(idea, *, session) -> tuple[str, str]:
 
 
 async def _apply_owner_handoff(idea, *, next_owner_id: str, actor: dict[str, Any], session) -> None:
-    from brain.app.api.routers.cortex._helpers import _caller_is_service_principal
     from brain.app.api.routers.cortex._ideas import _freeze_display_author_for_handoff
-    from brain.app.api.authorization import require_org_context
     from brain.platform.db.models.org import User
 
     target_user = await session.scalar(select(User).where(User.id == str(next_owner_id)))
     if target_user is None:
         raise HTTPException(status_code=404, detail="Target owner not found")
-    if not _caller_is_service_principal(actor):
-        org_id = require_org_context(actor)
+    if not _caller_is_service_actor(actor):
+        org_id = _actor_org_context(actor)
         if str(target_user.org_id) != str(org_id):
             raise HTTPException(status_code=403, detail="Target owner is outside this org")
     if str(next_owner_id) != str(getattr(idea, "user_id", "")):
-            await _freeze_display_author_for_handoff(idea, session)
+        await _freeze_display_author_for_handoff(idea, session)
     idea.user_id = str(next_owner_id)
+
+
+async def _validated_create_owner_id(
+    *,
+    session,
+    requested_owner_id: str | None,
+    fallback_owner_id: str,
+    actor: dict[str, Any],
+) -> str:
+    from brain.platform.db.models.org import User
+
+    owner_id = str(requested_owner_id or fallback_owner_id)
+    if owner_id == str(fallback_owner_id):
+        return owner_id
+
+    target_user = await session.scalar(select(User).where(User.id == owner_id))
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="Target owner not found")
+    if not _caller_is_service_actor(actor):
+        org_id = _actor_org_context(actor)
+        if str(target_user.org_id) != str(org_id):
+            raise HTTPException(status_code=403, detail="Target owner is outside this org")
+    return owner_id
 
 
 async def _apply_idea_updates(
@@ -366,7 +409,7 @@ async def _handle_manage_idea(
     orbit_anchor_id: str | None = None,
     parent_id: str | None = None,
     user_id: str | None = None,
-    origin: str = "user_created",
+    origin: str = "illo_created",
     origin_ref: str | None = None,
     search: str | None = None,
     include_archived: bool = False,
@@ -376,7 +419,6 @@ async def _handle_manage_idea(
     if normalized_action in {"help", "schema"}:
         return _manage_tool_guide("manage_idea", operation)
 
-    from brain.app.api.routers.cortex._helpers import _a_require_idea_for_user
     from brain.systems.cortex.events import publish_safe
     from brain.platform.db.models.idea import Idea
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -412,14 +454,20 @@ async def _handle_manage_idea(
                 if should_start_run is None:
                     should_start_run = requested_status in _RUN_ADMISSION_CREATE_STATUSES
                 initial_status = "emerged" if should_start_run or requested_status in _RUN_ADMISSION_CREATE_STATUSES else requested_status
+                owner_user_id = await _validated_create_owner_id(
+                    session=uow.session,
+                    requested_owner_id=user_id,
+                    fallback_owner_id=actor_user_id,
+                    actor=actor,
+                )
                 idea = Idea(
                     title=title,
                     description=description,
                     status=initial_status,
-                    origin=origin or "user_created",
+                    origin=origin or "illo_created",
                     origin_ref=origin_ref,
                     parent_id=parent_id,
-                    user_id=actor_user_id,
+                    user_id=owner_user_id,
                     org_id=org_id,
                 )
                 if salience_score is not None:
@@ -449,12 +497,10 @@ async def _handle_manage_idea(
                     idea=idea,
                     seed_content=seed_content,
                     actor_user_id=actor_user_id,
+                    owner_user_id=owner_user_id,
                     parent_id=parent_id,
                     origin_ref=origin_ref,
                 )
-                if user_id is not None:
-                    await _apply_owner_handoff(idea, next_owner_id=user_id, actor=actor, session=uow.session)
-                    await uow.session.flush()
                 run_result = None
                 if should_start_run:
                     run_result = await _admit_created_idea_run(
@@ -479,7 +525,7 @@ async def _handle_manage_idea(
             else:
                 if not target_idea_id:
                     return json.dumps({"error": f"{normalized_action or 'action'} requires: idea_id when no current Cortex thread is bound"})
-                idea = await _a_require_idea_for_user(uow.session, target_idea_id, actor)
+                idea = await _require_idea_for_actor(uow.session, target_idea_id, actor)
 
                 if normalized_action == "get":
                     return json.dumps({"idea": await _serialize_idea(idea, uow.session)}, default=str)

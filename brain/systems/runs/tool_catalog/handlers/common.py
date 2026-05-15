@@ -198,7 +198,7 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         "create": {
             "required": ["title"],
             "optional": ["thread_message", "description", "status", "start_run", "parent_id", "user_id"],
-            "effect": "create a Cortex thought",
+            "effect": "create a Cortex thought with an Illo-authored seed message; user_id assigns the owner",
         },
         "update": {
             "required": ["idea_id unless a current thread is bound", "at least one changed field"],

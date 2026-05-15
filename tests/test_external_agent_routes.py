@@ -380,6 +380,10 @@ async def test_hosted_mcp_create_thread_routes_trigger_when_requested():
     assert trigger.event_type == "cortex.thread_reply"
     assert trigger.target["idea_id"] == "idea-1"
     assert "Please coordinate with JB and Axel" in trigger.payload["run_message"]
+    request_source = trigger.payload["metadata"]["request_source"]
+    assert request_source["surface"] == "mcp_personal_agent"
+    assert request_source["personal_agent"] == "Hermes"
+    assert request_source["visibility"] == "visible_team_thread"
     assert order[:2] == ["commit", "broadcast:thread_message"]
 
 

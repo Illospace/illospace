@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import Any
 
 from brain.systems.runs.skill_commands import parse_slash_skill_names
@@ -25,6 +26,14 @@ def _skill_names_from_metadata(metadata: dict[str, Any], message: str) -> list[s
     return names
 
 
+def _request_source_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    for key in ("request_source", "request_source_context"):
+        value = metadata.get(key)
+        if isinstance(value, dict):
+            return {str(k): v for k, v in value.items() if v not in (None, "", [], {})}
+    return {}
+
+
 @dataclass(frozen=True)
 class RunContext:
     thread_id: str
@@ -35,6 +44,7 @@ class RunContext:
     memory: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
     handoff: dict[str, Any] = field(default_factory=dict)
+    request_source: dict[str, Any] = field(default_factory=dict)
 
     def prompt_context(self) -> str:
         parts: list[str] = []
@@ -48,6 +58,11 @@ class RunContext:
             parts.append(f"Workspace: {self.workspace_ref}")
         if self.handoff:
             parts.append(f"Handoff: {self.handoff}")
+        if self.request_source:
+            parts.append(
+                "Request Source:\n"
+                + json.dumps(self.request_source, sort_keys=True, indent=2, default=str)
+            )
         if self.skills:
             skill_tokens = ", ".join(f"/{name.lstrip('/')}" for name in self.skills)
             parts.append(
@@ -81,6 +96,7 @@ class RunContextLoader:
             target_ref=dict(target_ref or {}),
             workspace_ref=dict(workspace_ref or {}),
             thread_context=dict(thread_context) if isinstance(thread_context, dict) else {},
+            request_source=_request_source_from_metadata(metadata),
             skills=_skill_names_from_metadata(metadata, message),
         )
 
