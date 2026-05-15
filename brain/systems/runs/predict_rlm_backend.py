@@ -25,11 +25,11 @@ from brain.platform.integrations.llm import _resolve_key_from_env, resolve_llm_c
 from brain.platform.integrations.providers import LLMRequest, _merge_streamed_output_into_response, get_provider
 from brain.systems.runs.direct_agent import (
     AgentResult,
-    _invoke_tool_handler,
     _required_openai_auth_mode,
     _agent_context,
 )
-from brain.systems.runs.direct_loop.telemetry import record_api_call as _record_api_call
+from brain.systems.runs.direct_loop.telemetry import async_record_api_call as _async_record_api_call
+from brain.systems.runs.direct_loop.tool_execution import async_invoke_tool_handler
 from brain.platform.providers.model_policy import (
     DEFAULT_PROVIDER_MODEL_MAPS,
     HIGH_MODEL_TIER,
@@ -47,6 +47,17 @@ from brain.platform.providers.model_policy import (
 )
 
 logger = logging.getLogger("agent_runtime")
+
+
+def _record_predict_rlm_api_call(**kwargs: Any) -> None:
+    """Bridge PredictRLM's sync callbacks to the async telemetry writer."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        with asyncio.Runner() as runner:
+            runner.run(_async_record_api_call(**kwargs))
+        return
+    loop.create_task(_async_record_api_call(**kwargs))
 
 
 @contextmanager
@@ -620,7 +631,7 @@ def _instrument_predict_rlm_lm(
             "turn_number": _next_turn(),
             "error": error,
         }
-        _record_api_call(
+        _record_predict_rlm_api_call(
             session_id=session_id,
             run_id=run_id,
             turn=metadata["turn_number"],
@@ -910,11 +921,11 @@ def _make_async_tool_wrapper(
 
     async def _run(**kwargs):
         try:
-            result = await run_blocking(
-                _invoke_tool_handler,
+            result = await async_invoke_tool_handler(
                 handler,
                 kwargs,
-                threadlocal_context,
+                agent_context=_agent_context,
+                threadlocal_context=threadlocal_context,
             )
         except Exception as exc:
             result_text = f"Error: {exc}"
@@ -1156,7 +1167,7 @@ def invoke_predict_rlm_agent(
             pass
 
     duration_ms = int((time.time() - start_time) * 1000)
-    _record_api_call(
+    _record_predict_rlm_api_call(
         session_id=spec.session_id,
         run_id=spec.run_id,
         turn=int(llm_call_counter.get("turn", 0)) + 1,

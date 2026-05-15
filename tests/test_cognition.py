@@ -116,8 +116,8 @@ class TestCognitiveFrames:
         # Confidence penalty is 0.3
         assert abs((frame_ok.confidence - frame_blind.confidence) - 0.3) < 0.01
 
-    @patch("brain.app.mcp.server.tool_brain_recall")
-    @patch("brain.app.mcp.server.tool_brain_guardrails")
+    @patch("brain.app.mcp.server.async_tool_brain_recall")
+    @patch("brain.app.mcp.server.async_tool_brain_guardrails")
     @patch("brain.systems.cognition.frame.observe_retrieval", new_callable=AsyncMock)
     async def test_gather_frame_context_serializes_guardrails(self, mock_observe, mock_guardrails, mock_recall):
         from brain.systems.cognition.frame import gather_frame_context
@@ -141,8 +141,8 @@ class TestCognitiveFrames:
 
     @patch("brain.systems.cognition.frame._lazy_load_enabled", return_value=True)
     @patch("brain.systems.cognition.frame.observe_retrieval", new_callable=AsyncMock)
-    @patch("brain.app.mcp.server.tool_brain_guardrails")
-    @patch("brain.app.mcp.server.tool_brain_recall")
+    @patch("brain.app.mcp.server.async_tool_brain_guardrails")
+    @patch("brain.app.mcp.server.async_tool_brain_recall")
     async def test_gather_frame_context_can_expand_lazy_loads(self, mock_recall, mock_guardrails, mock_observe, _mock_lazy_enabled):
         from brain.systems.cognition.frame import gather_frame_context
 

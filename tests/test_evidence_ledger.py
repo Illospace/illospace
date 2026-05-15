@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 def test_read_only_introspection_tool_calls_normalize_to_records():
@@ -157,12 +157,12 @@ def test_file_handlers_persist_read_only_evidence_records(tmp_path):
     json.dumps(evidence_records)
 
 
-def test_brain_recall_wrapper_persists_evidence_record():
+async def test_brain_recall_wrapper_persists_evidence_record():
     from brain.systems.runs import tool_handlers
 
     persisted: list[dict] = []
 
-    def fake_recall(**kwargs):
+    async def fake_recall(**kwargs):
         return {
             "memories": [{"id": 42, "type": "lesson"}],
             "count": 1,
@@ -175,7 +175,7 @@ def test_brain_recall_wrapper_persists_evidence_record():
         side_effect=lambda artifacts, run_id=None: persisted.extend(artifacts),
     ):
         wrapped = tool_handlers._wrap_brain_recall(fake_recall)
-        wrapped(query="run evidence", limit=1)
+        await wrapped(query="run evidence", limit=1)
 
     assert [record["source"] for record in persisted if record.get("type") == "evidence_record"] == [
         "tool:brain_recall"
@@ -183,23 +183,23 @@ def test_brain_recall_wrapper_persists_evidence_record():
     json.dumps(persisted)
 
 
-def test_brain_skill_handlers_persist_evidence_records():
+async def test_brain_skill_handlers_persist_evidence_records():
     from brain.systems.runs import tool_handlers
 
     persisted: list[dict] = []
 
     with (
-        patch("brain.app.mcp.server.tool_brain_skills", return_value={
+        patch("brain.app.mcp.server.async_tool_brain_skills", new=AsyncMock(return_value={
             "task": "inspect evidence",
             "strategy": "investigate_first",
             "recommended_skills": [{"name": "investigate"}],
             "guardrails": [],
-        }),
-        patch("brain.app.mcp.server.tool_skill_view", return_value={
+        })),
+        patch("brain.app.mcp.server.async_tool_skill_view", new=AsyncMock(return_value={
             "name": "investigate",
             "section": "procedure",
             "content": "Read carefully.",
-        }),
+        })),
         patch.object(
             tool_handlers,
             "_persist_execution_artifacts",
@@ -207,8 +207,8 @@ def test_brain_skill_handlers_persist_evidence_records():
         ),
     ):
         handlers = tool_handlers._get_tool_handlers()
-        handlers["brain_skills"](task="inspect evidence")
-        handlers["skill_view"](name="investigate", section="procedure")
+        await handlers["brain_skills"](task="inspect evidence")
+        await handlers["skill_view"](name="investigate", section="procedure")
 
     assert [record["source"] for record in persisted if record.get("type") == "evidence_record"] == [
         "tool:brain_skills",
