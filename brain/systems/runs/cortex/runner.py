@@ -29,8 +29,8 @@ from brain.systems.cortex.project_context.materializer import (
     materialize_project_context_workspaces,
     project_context_has_materializable_resources,
 )
-from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
-from brain.platform.db.models.idea import Idea, IdeaStateLog
+from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
+from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
 
 logger = logging.getLogger(__name__)
 UnitOfWork = None
@@ -212,6 +212,65 @@ _TERMINAL_RUN_IDEA_STATUS = {
 _PROTECTED_IDEA_STATUSES = {"archived", "resolved"}
 
 
+def _message_belongs_to_run(message: IdeaThread, run_id: int) -> bool:
+    metadata = getattr(message, "metadata_", None)
+    if not isinstance(metadata, dict):
+        return False
+    return str(metadata.get("run_id") or "") == str(run_id)
+
+
+async def _post_run_final_answer_to_thread_once_async(
+    session,
+    *,
+    run: AgentRunRow,
+    idea: Idea,
+) -> IdeaThread | None:
+    """Mirror a completed root run's final answer into the visible thread."""
+    artifact = (
+        await session.scalars(
+            select(AgentRunArtifactRow)
+            .where(
+                AgentRunArtifactRow.run_id == int(run.id),
+                AgentRunArtifactRow.artifact_type == "final_answer",
+            )
+            .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())
+            .limit(1)
+        )
+    ).first()
+    text = str(getattr(artifact, "text", None) or "").strip()
+    if not text:
+        return None
+
+    recent_responses = (
+        await session.scalars(
+            select(IdeaThread)
+            .where(
+                IdeaThread.idea_id == str(idea.id),
+                IdeaThread.role.in_(("illo", "assistant")),
+                IdeaThread.message_type == "agent_response",
+            )
+        )
+    ).all()
+    if any(_message_belongs_to_run(message, int(run.id)) for message in recent_responses):
+        return None
+
+    message = IdeaThread(
+        idea_id=str(idea.id),
+        role="illo",
+        content=text,
+        user_id=None,
+        message_type="agent_response",
+        metadata_={
+            "run_id": int(run.id),
+            "artifact_id": getattr(artifact, "id", None),
+            "source": "agent_run_final_answer",
+        },
+    )
+    session.add(message)
+    await session.flush()
+    return message
+
+
 async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict[str, Any] | None:
     run = await session.get(AgentRunRow, int(run_id))
     if run is None or run.parent_run_id is not None:
@@ -227,7 +286,10 @@ async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict
     if idea is None:
         return None
     old_status = str(idea.status or "")
-    if old_status in _PROTECTED_IDEA_STATUSES or old_status == target_status:
+    if old_status in _PROTECTED_IDEA_STATUSES:
+        return None
+    await _post_run_final_answer_to_thread_once_async(session, run=run, idea=idea)
+    if old_status == target_status:
         return None
 
     idea.status = target_status
