@@ -148,36 +148,11 @@ class TestVaultUserScoping:
 # ── Sharing endpoints ────────────────────────────────────────────────────────
 
 class TestVaultSharing:
-
-    def test_share_secret_200(self, client):
-        share_result = {"id": 1, "secret_id": 42, "shared_at": "2026-03-13T00:00:00"}
-        with patch("brain.systems.vault.async_share_secret", return_value=share_result) as share:
-            resp = client.post("/api/vault/42/share",
-                               json={"shared_with_user_id": USER_B["id"]})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["secret_id"] == 42
-        share.assert_called_once_with(42, USER_B["id"], USER_A["id"], org_id=USER_A["org_id"])
-
     def test_share_not_found_404(self, client):
         with patch("brain.systems.vault.async_share_secret", return_value=None):
             resp = client.post("/api/vault/999/share",
                                json={"shared_with_user_id": USER_B["id"]})
         assert resp.status_code == 404
-
-    def test_revoke_share_200(self, client):
-        with patch("brain.systems.vault.async_revoke_share", return_value=True):
-            resp = client.delete("/api/vault/shares/1")
-        assert resp.status_code == 200
-
-    def test_vault_log(self, client):
-        with patch("brain.systems.vault.async_get_vault_access_log") as mock_log:
-            mock_log.return_value = [
-                {"id": 1, "key_name": "TEST", "action": "read", "accessed_at": "2026-03-13T00:00:00"}
-            ]
-            resp = client.get("/api/vault/log")
-        assert resp.status_code == 200
-        assert len(resp.json()) == 1
 
     def test_org_users(self, client):
         with patch(

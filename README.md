@@ -173,7 +173,10 @@ configuration contract.
 ./illo uninstall    # Remove local runtime/config/local DB and reset next setup
 ./illo test         # Fast tests
 make test           # Fast pytest selection
-make test-all       # Full DB-backed suite via Docker
+make test-product   # Core user-facing journeys against API + DB
+make test-db        # DB-backed suite via Docker
+make test-frontend  # Frontend tests, Svelte check, and production build
+make survivability  # Capability Survivability Index
 ```
 
 ## Project structure

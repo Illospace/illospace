@@ -5,43 +5,6 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def test_provider_facade_reexports_transport_types():
-    from brain.platform.integrations import providers
-    from brain.platform.integrations.transports.base import (
-        ContentBlock,
-        ContentBlockType,
-        ImageContentBlock,
-        LLMRequest,
-        LLMResponse,
-        MessageRole,
-        Provider,
-        StopReason,
-        StreamContext,
-        StreamEvent,
-        TextContentBlock,
-        ThinkingContentBlock,
-        ToolResultContentBlock,
-        ToolUseContentBlock,
-        Usage,
-    )
-
-    assert providers.ContentBlock is ContentBlock
-    assert providers.ContentBlockType is ContentBlockType
-    assert providers.ImageContentBlock is ImageContentBlock
-    assert providers.LLMRequest is LLMRequest
-    assert providers.LLMResponse is LLMResponse
-    assert providers.MessageRole is MessageRole
-    assert providers.Provider is Provider
-    assert providers.StopReason is StopReason
-    assert providers.StreamContext is StreamContext
-    assert providers.StreamEvent is StreamEvent
-    assert providers.TextContentBlock is TextContentBlock
-    assert providers.ThinkingContentBlock is ThinkingContentBlock
-    assert providers.ToolResultContentBlock is ToolResultContentBlock
-    assert providers.ToolUseContentBlock is ToolUseContentBlock
-    assert providers.Usage is Usage
-
-
 def test_content_block_wrappers_round_trip_legacy_dicts():
     from brain.platform.integrations.transports.base import (
         ContentBlockType,

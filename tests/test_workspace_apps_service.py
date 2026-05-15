@@ -32,6 +32,7 @@ from brain.systems.workspace_apps.service import (
     a_list_archived_apps,
     a_restore_app,
     a_update_app,
+    a_update_state,
 )
 from brain.systems.workspace_apps.actions import (
     WorkspaceAppActionContractError,
@@ -263,18 +264,50 @@ async def test_domain_binding_accepts_generic_app_primitives(session):
     assert version.manifest["data_plan"]["bindings"]["todos"]["operations"] == operations
 
 
-async def test_valid_structured_generated_ui_app_saves(session):
+@pytest.mark.parametrize(
+    ("key", "name", "spec", "expected_view_type", "with_action"),
+    [
+        ("todo-notes-ui", "Todo Notes UI", VALID_GENERATED_UI_SPEC, "table", False),
+        (
+            "todo-board-ui",
+            "Todo Board UI",
+            {
+                "schema_version": 1,
+                "title": "Todo Board",
+                "primary_binding": "todos",
+                "actions": [{"key": "tickets.syncExternal", "label": "Sync external"}],
+                "views": [
+                    {
+                        "id": "todo-board",
+                        "type": "board",
+                        "title": "Todo board",
+                        "binding": "todos",
+                        "group_by": "completed",
+                        "groups": [
+                            {"label": "Open", "value": False},
+                            {"label": "Done", "value": True},
+                        ],
+                        "card": {"title": "title", "badges": ["notes"]},
+                    }
+                ],
+            },
+            "board",
+            True,
+        ),
+    ],
+)
+async def test_valid_structured_generated_ui_app_saves(session, key, name, spec, expected_view_type, with_action):
     domain = await _todo_domain(session)
 
     app = await a_create_app(
         session,
         org_id=ORG_ID,
-        key="todo-notes-ui",
-        name="Todo Notes UI",
+        key=key,
+        name=name,
         renderer_key="generated-ui-app",
         source_kind="json",
-        source_code=json.dumps(VALID_GENERATED_UI_SPEC),
-        manifest=_manifest(domain.id),
+        source_code=json.dumps(spec),
+        manifest=_manifest_with_action(domain.id) if with_action else _manifest(domain.id),
         visual_spec=VALID_VISUAL_SPEC,
         created_by_user_id=USER_ID,
     )
@@ -283,49 +316,10 @@ async def test_valid_structured_generated_ui_app_saves(session):
     assert version is not None
     assert version.renderer_key == "generated-ui-app"
     assert version.source_kind == "json"
-    assert json.loads(version.source_code)["views"][0]["type"] == "table"
-
-
-async def test_valid_structured_board_generated_ui_app_saves(session):
-    domain = await _todo_domain(session)
-    board_spec = {
-        "schema_version": 1,
-        "title": "Todo Board",
-        "primary_binding": "todos",
-        "actions": [{"key": "tickets.syncExternal", "label": "Sync external"}],
-        "views": [
-            {
-                "id": "todo-board",
-                "type": "board",
-                "title": "Todo board",
-                "binding": "todos",
-                "group_by": "completed",
-                "groups": [
-                    {"label": "Open", "value": False},
-                    {"label": "Done", "value": True},
-                ],
-                "card": {"title": "title", "badges": ["notes"]},
-            }
-        ],
-    }
-
-    app = await a_create_app(
-        session,
-        org_id=ORG_ID,
-        key="todo-board-ui",
-        name="Todo Board UI",
-        renderer_key="generated-ui-app",
-        source_kind="json",
-        source_code=json.dumps(board_spec),
-        manifest=_manifest_with_action(domain.id),
-        visual_spec=VALID_VISUAL_SPEC,
-        created_by_user_id=USER_ID,
-    )
-
-    version = await a_active_version(session, app.id)
-    assert version is not None
-    assert json.loads(version.source_code)["actions"][0]["key"] == "tickets.syncExternal"
-    assert json.loads(version.source_code)["views"][0]["type"] == "board"
+    source = json.loads(version.source_code)
+    assert source["views"][0]["type"] == expected_view_type
+    if with_action:
+        assert source["actions"][0]["key"] == "tickets.syncExternal"
 
 
 @pytest.mark.parametrize(
@@ -475,6 +469,42 @@ async def test_local_state_manifest_without_domain_bindings_still_saves(session)
 
     version = await a_active_version(session, app.id)
     assert version.manifest == _app_local_manifest()
+
+
+async def test_app_local_state_patch_preserves_nested_sibling_preferences(session):
+    app = await a_create_app(
+        session,
+        org_id=ORG_ID,
+        key="triage-view",
+        name="Triage View",
+        renderer_key="sandboxed-html-app",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=_app_local_manifest(state_key="default"),
+        visual_spec=VALID_VISUAL_SPEC,
+        initial_state={
+            "view": {
+                "density": "compact",
+                "filters": {"owner": "me", "status": "open"},
+            }
+        },
+    )
+
+    state = await a_update_state(
+        session,
+        org_id=ORG_ID,
+        app_id=app.id,
+        key="default",
+        data_patch={"view": {"filters": {"status": "done"}}},
+        user_id=USER_ID,
+    )
+
+    assert state.data == {
+        "view": {
+            "density": "compact",
+            "filters": {"owner": "me", "status": "done"},
+        }
+    }
 
 
 async def test_app_local_note_collections_are_record_like(session):

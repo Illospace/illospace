@@ -81,6 +81,7 @@ class TestSalienceCap:
         assert cap_salience(4.0, "research") == 4.0
 
 
+@pytest.mark.requires_db
 @pytest.mark.skipif(not _HAS_DB, reason="TEST_DB_URL not set — requires live database")
 class TestDeduplication:
     """Test near-duplicate detection at write time (requires live DB)."""

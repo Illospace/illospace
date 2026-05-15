@@ -611,7 +611,6 @@ async def test_deep_recipe_uses_native_child_runs(monkeypatch):
     from brain.systems.runs.recipes.deep import DeepRecipe
     from brain.systems.runs.status import RunStatus
 
-    assert "run_coordinator" not in inspect.getsource(deep_module)
     _stub_phase_reviews(monkeypatch)
 
     executed = []

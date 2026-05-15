@@ -253,21 +253,6 @@ class TestGraphAugmentedRecall:
         assert len(results) == 1
         assert results[0]["similarity"] == 0.0
 
-    async def test_session_execute_called_with_text(self):
-        """Session.execute should be called with text() wrapped SQL."""
-        from brain.systems.cognition.graph import graph_augmented_recall
-        from sqlalchemy import text
-
-        session = _mock_session_execute([[], ])
-
-        await graph_augmented_recall(session, "[0,0,0]", limit=5)
-        # First call should use text()
-        first_call_args = session.execute.call_args_list[0]
-        sql_arg = first_call_args[0][0]
-        # Should be a TextClause (from sqlalchemy.text())
-        assert hasattr(sql_arg, 'text'), "SQL should be wrapped in sqlalchemy.text()"
-
-
 class TestAutoLinkMemory:
     """Test automatic weak candidate creation for new memories."""
 

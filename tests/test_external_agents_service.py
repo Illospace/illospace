@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import re
 import sqlite3
 import sys
@@ -12,7 +11,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
 from sqlalchemy.orm import Session
@@ -316,29 +314,3 @@ def test_hermes_adapter_can_poll_runs_api(monkeypatch):
     assert result["artifacts"][0]["content_json"]["run_id"] == "run-1"
     assert calls[0]["url"] == "http://hermes.local/v1/runs"
     assert calls[1]["url"] == "http://hermes.local/v1/runs/run-1"
-
-
-@pytest.mark.live_provider
-def test_live_hermes_runs_adapter_smoke(monkeypatch):
-    if os.environ.get("ILLO_LIVE_HERMES_SMOKE") != "1":
-        pytest.skip("Set ILLO_LIVE_HERMES_SMOKE=1 with HERMES_BASE_URL and HERMES_API_KEY to run live Hermes smoke.")
-    if not os.environ.get("HERMES_BASE_URL"):
-        pytest.skip("HERMES_BASE_URL is required for live Hermes smoke.")
-
-    module = _load_bridge_module()
-    monkeypatch.setenv("HERMES_API_MODE", "runs")
-    monkeypatch.setenv("HERMES_RUN_POLL_INTERVAL", os.environ.get("HERMES_RUN_POLL_INTERVAL", "1"))
-    monkeypatch.setenv("PERSONAL_AGENT_TIMEOUT", os.environ.get("PERSONAL_AGENT_TIMEOUT", "180"))
-
-    result = module.HermesAdapter().run_task(
-        {
-            "id": "live-hermes-smoke",
-            "connection_id": "live-connection",
-            "title": "Hermes live bridge smoke",
-            "instructions": "Reply exactly with ILLO_HERMES_LIVE_OK and one short sentence.",
-            "source_surface": "ci_live_smoke",
-            "input_parts": [{"type": "smoke", "source": "pytest"}],
-        }
-    )
-
-    assert "ILLO_HERMES_LIVE_OK" in result["result_summary"]

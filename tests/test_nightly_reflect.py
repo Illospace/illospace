@@ -83,18 +83,6 @@ class TestGatherContext:
         assert "daily_log" not in ctx
 
 
-class TestGatherContextRegressions:
-    """Regression tests for known bugs in gather_context."""
-
-    def test_connection_uses_context_manager(self):
-        """Regression: must use a UnitOfWork/db connection context manager."""
-        import inspect
-        from brain.jobs.pipelines.nightly_reflect import gather_context
-        source = inspect.getsource(gather_context)
-        assert "async with UnitOfWork()" in source, \
-            "gather_context must use a context manager"
-
-
 class TestApplyReflection:
     """Test apply_reflection() with various reflection outputs."""
 
@@ -232,15 +220,6 @@ class TestApplyReflection:
         from brain.jobs.pipelines.nightly_reflect import apply_reflection
         applied = await apply_reflection({}, target)
         assert isinstance(applied, list)
-
-
-class TestApplyReflectionRegressions:
-    def test_apply_reflection_uses_context_manager(self):
-        import inspect
-        from brain.jobs.pipelines.nightly_reflect import apply_reflection
-        source = inspect.getsource(apply_reflection)
-        assert "async with UnitOfWork()" in source, \
-            "apply_reflection must use a context manager"
 
 
 class TestBuildReflectionPrompt:

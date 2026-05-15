@@ -122,13 +122,6 @@ def test_alembic_ini_exists():
     assert os.path.isfile(os.path.join(root, "alembic.ini"))
 
 
-def test_env_py_imports_brain_config():
-    """env.py must import brain.kernel.config for DB credentials."""
-    env_path = ALEMBIC_DIR / "env.py"
-    content = open(env_path).read()
-    assert "brain" in content and "config" in content
-
-
 def test_env_py_widens_alembic_version_column_for_long_revision_ids():
     """Postgres Alembic version tables must handle repo revision ids over 32 chars."""
     long_revision_ids: list[str] = []

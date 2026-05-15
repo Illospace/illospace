@@ -3,14 +3,12 @@
 Covers:
 - format_system_message() with various input combinations
 - get_context() with mocked DB (unit tests)
-- get_context() with real DB (integration test)
 
 Closes #33
 """
 
 import os
 import sys
-import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from contextlib import contextmanager
 
@@ -178,41 +176,6 @@ class TestGetContextMocked:
         assert len(result["guardrails"]) == 1
         assert result["guardrails"][0]["skill"] == "deploy"
 
-
-# ─── Integration test (real DB) ────────────────────────────────────────
-
-
-@pytest.mark.skipif(
-    not os.environ.get("BRAIN_DB_URL") or not os.environ.get("EMBEDDING_API_KEY"),
-    reason="No DB config or embedding API key available",
-)
-class TestGetContextIntegration:
-    """Integration tests using the real brain database."""
-
-    def test_real_query_returns_valid_structure(self):
-        """Query the real DB and verify result structure."""
-        result = get_context("How should I handle deployment failures?")
-        assert isinstance(result, dict)
-        assert "memories" in result
-        assert "guardrails" in result
-        assert "warnings" in result
-        # Should not have an error if DB is up
-        assert "error" not in result, f"DB error: {result.get('error')}"
-
-    def test_real_query_memories_have_required_fields(self):
-        result = get_context("testing and code quality")
-        for mem in result["memories"]:
-            assert "id" in mem
-            assert "content" in mem
-            assert "type" in mem
-            assert "salience" in mem
-            assert "similarity" in mem
-            assert mem["similarity"] > 0.45
-
-    def test_real_format_produces_string(self):
-        result = get_context("what are the engineering principles")
-        msg = format_system_message(result)
-        assert isinstance(msg, str)
         # If there are results, should have the header
         if result["memories"] or result["warnings"] or result["guardrails"]:
             assert "[Brain Context]" in msg

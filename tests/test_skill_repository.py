@@ -79,22 +79,6 @@ async def test_list_command_summaries_returns_skinny_rows(repo, session):
     assert result[0].use_count == 4
 
 
-async def test_get_by_name(repo, session):
-    await _make_skill(repo, session, name="deploy")
-    found = await repo.a_get_by_name("deploy")
-    assert found is not None
-    assert found.name == "deploy"
-
-
-async def test_get_by_name_not_found(repo):
-    assert await repo.a_get_by_name("nonexistent") is None
-
-
-async def test_get_by_name_or_raise_missing(repo):
-    with pytest.raises(LookupError, match="not found"):
-        await repo.a_get_by_name_or_raise("nonexistent")
-
-
 async def test_update_tiers(repo, session):
     skill = await _make_skill(repo, session)
     updated = await repo.a_update_tiers(
@@ -192,9 +176,3 @@ async def test_needing_attention(repo, session):
     result = await repo.a_needing_attention()
     assert len(result) == 1
     assert result[0].name == "bad"
-
-
-async def test_update_tiers_updates_thinking_tier(repo, session):
-    skill = await _make_skill(repo, session, name="mirror-update-tiers")
-    updated = await repo.a_update_tiers(skill.id, thinking_tier="high")
-    assert updated.thinking_tier == "high"

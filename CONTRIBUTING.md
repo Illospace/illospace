@@ -16,9 +16,24 @@ file-based overrides such as provider keys or custom database settings.
 For tests:
 
 ```bash
-make test       # fast suite, excludes DB-required tests
-make test-all   # full suite with Docker PostgreSQL + pgvector
+make test              # fast suite, excludes DB/browser/live-provider tests
+make test-product      # core user-facing journeys against API + DB
+make test-db           # DB-backed suite with Docker PostgreSQL + pgvector
+make test-frontend     # frontend unit tests, Svelte check, and production build
+make survivability-pr  # impacted capability survivability report for a PR diff
 ```
+
+Use `make survivability` to see the whole-repo Capability Survivability Index.
+That score measures whether product areas have the right evidence types for
+realistic change: invariants, contracts, real integration, user journeys,
+adversarial checks, and static guardrails.
+`make survivability-pr` fails on unmapped changed files, impacted capabilities
+below their configured threshold, or impacted survivability below the current
+ratchet.
+
+When normal product usage exposes a bug, add or extend a core product journey in
+`tests/test_core_product_journeys.py` before adding narrow unit coverage. The
+journey should describe the user promise that broke.
 
 ## Pull request guidelines
 

@@ -230,20 +230,3 @@ class TestDiscussVsTrigger:
         mentions = _extract_mentions(content)
         assert "alex" in mentions
         assert "illo" not in mentions
-
-
-class TestUserColorAssignment:
-    """User color is assigned on registration."""
-
-    def test_user_colors_palette_exists(self):
-        """The color palette has enough variety."""
-        from brain.systems.auth.users import _USER_COLORS
-        assert len(_USER_COLORS) >= 8
-        assert all(c.startswith('#') for c in _USER_COLORS)
-
-    def test_color_palette_is_used_in_registration(self):
-        """Registration code uses _USER_COLORS for color assignment."""
-        import inspect
-        from brain.systems.auth import users as users_mod
-        source = inspect.getsource(users_mod)
-        assert "_USER_COLORS" in source

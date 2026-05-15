@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -119,14 +118,3 @@ async def test_async_delete_secret_uses_native_async_uow(monkeypatch):
     assert repo.keys == [("user-1", "OPENAI_API_KEY")]
     assert session.deleted == [secret]
     assert audit[0][0][:4] == ("user-1", 12, "OPENAI_API_KEY", "delete")
-
-
-def test_async_vault_entrypoints_do_not_use_sync_uow_bridges():
-    assert not hasattr(vault, "run_unit_of_work_task")
-
-    for name, fn in inspect.getmembers(vault, inspect.iscoroutinefunction):
-        if not (name.startswith("async_") or name.startswith("_async_")):
-            continue
-        source = inspect.getsource(fn)
-        assert "run_unit_of_work_task" not in source, name
-        assert "open_unit_of_work" not in source, name

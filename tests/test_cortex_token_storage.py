@@ -10,44 +10,43 @@ def _mock_request(payload: dict):
     return req
 
 
-async def test_add_api_key_trusts_failed_setup_token_verification():
-    from brain.app.api.routers.cortex import add_api_key
+async def test_anthropic_setup_token_is_stored_even_when_live_verification_fails():
+    from brain.app.api.routers.cortex import add_api_key, set_org_main_key
 
-    request = _mock_request({"provider": "anthropic", "label": "default", "api_key": "sk-ant-oat01-test-token"})
-    user = {"id": "user-1"}
+    cases = [
+        (
+            add_api_key,
+            {"id": "user-1"},
+            {"provider": "anthropic", "label": "default", "api_key": "sk-ant-oat01-test-token"},
+            "stored",
+            lambda session: session.add.assert_called_once(),
+        ),
+        (
+            set_org_main_key,
+            {"id": "user-1", "org_id": "org-1", "role": "owner"},
+            {"provider": "anthropic", "api_key": "sk-ant-oat01-test-token"},
+            "org_key_stored",
+            lambda session: session.execute.assert_called_once(),
+        ),
+    ]
 
-    with patch("brain.app.api.routers.cortex._auth_keys._verify_provider_api_key", side_effect=RuntimeError("401 invalid x-api-key")), \
-         patch("brain.app.api.routers.cortex._auth_keys._should_trust_failed_key_verification", return_value=True), \
-         patch("brain.systems.vault._encrypt", return_value=b"enc"):
+    for handler, user, payload, expected_status, assert_persisted in cases:
         session = MagicMock()
         session.scalars.return_value.first.return_value = None
         session.add.side_effect = lambda key: setattr(key, "id", 42)
-        resp = await add_api_key(request, user, db=_AsyncSession(session))
+        with patch(
+            "brain.app.api.routers.cortex._auth_keys._verify_provider_api_key",
+            side_effect=RuntimeError("401 invalid x-api-key"),
+        ), patch(
+            "brain.app.api.routers.cortex._auth_keys._should_trust_failed_key_verification",
+            return_value=True,
+        ), patch("brain.systems.vault._encrypt", return_value=b"enc"):
+            resp = await handler(_mock_request(payload), user, db=_AsyncSession(session))
 
-    assert resp["id"] == 42
-    assert resp["status"] == "stored"
-    assert resp["verified"] is False
-    assert "401 invalid x-api-key" in resp["verify_error"]
-    session.add.assert_called_once()
-
-
-async def test_set_org_main_key_trusts_failed_setup_token_verification():
-    from brain.app.api.routers.cortex import set_org_main_key
-
-    request = _mock_request({"provider": "anthropic", "api_key": "sk-ant-oat01-test-token"})
-    user = {"id": "user-1", "org_id": "org-1", "role": "owner"}
-
-    mock_session = MagicMock()
-
-    with patch("brain.app.api.routers.cortex._auth_keys._verify_provider_api_key", side_effect=RuntimeError("401 invalid x-api-key")), \
-         patch("brain.app.api.routers.cortex._auth_keys._should_trust_failed_key_verification", return_value=True), \
-         patch("brain.systems.vault._encrypt", return_value=b"enc"):
-        resp = await set_org_main_key(request, user, db=_AsyncSession(mock_session))
-
-    assert resp["status"] == "org_key_stored"
-    assert resp["verified"] is False
-    assert "401 invalid x-api-key" in resp["verify_error"]
-    mock_session.execute.assert_called_once()
+        assert resp["status"] == expected_status
+        assert resp["verified"] is False
+        assert "401 invalid x-api-key" in resp["verify_error"]
+        assert_persisted(session)
 
 
 def test_parse_provider_connect_token_accepts_openai_codex_payload():

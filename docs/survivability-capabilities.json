@@ -1,0 +1,528 @@
+{
+  "version": 1,
+  "description": "Capability Survivability Index. Scores whether each product capability has the evidence types that catch realistic breakage, not raw line coverage.",
+  "category_weights": {
+    "critical_invariants": 0.3,
+    "contracts": 0.2,
+    "real_integration": 0.2,
+    "user_journeys": 0.15,
+    "adversarial": 0.1,
+    "static_safety": 0.05
+  },
+  "capabilities": [
+    {
+      "id": "auth_rbac",
+      "name": "Auth, Sessions, And RBAC",
+      "criticality": 5,
+      "paths": [
+        "brain/app/api/auth.py",
+        "brain/app/api/deps.py",
+        "brain/systems/auth/**",
+        "brain/platform/db/models/org.py",
+        "frontend/src/routes/login/**",
+        "frontend/src/routes/auth/**"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "tests/test_auth.py",
+          "tests/test_api_auth.py",
+          "tests/test_auth_users_orm.py",
+          "tests/test_session_security.py",
+          "tests/test_route_rbac.py"
+        ],
+        "contracts": [
+          "tests/test_api_authorization.py",
+          "tests/test_ws_auth.py",
+          "tests/test_security_headers.py"
+        ],
+        "real_integration": [
+          "tests/test_openai_user_auth_connect.py",
+          "tests/test_openai_codex_auth.py"
+        ],
+        "user_journeys": [
+          "tests/test_core_product_journeys.py::test_onboarding_journey_creates_first_workspace_owner",
+          "frontend/e2e/auth*.spec.ts"
+        ],
+        "adversarial": [
+          "tests/test_api_deps.py",
+          "tests/property/test_auth*.py"
+        ],
+        "static_safety": [
+          "tests/test_async_db_boundaries.py",
+          "tests/test_architecture_boundaries.py"
+        ]
+      }
+    },
+    {
+      "id": "vault_secrets",
+      "name": "Vault, Secrets, And Project Tokens",
+      "criticality": 5,
+      "paths": [
+        "brain/systems/vault/**",
+        "brain/app/api/routers/vault.py",
+        "brain/platform/db/models/vault.py",
+        "frontend/src/routes/vault/**"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "tests/test_vault.py",
+          "tests/test_vault_hardening.py",
+          "tests/test_vault_sharing.py",
+          "tests/test_vault_pin.py",
+          "tests/test_vault_project_tokens.py"
+        ],
+        "contracts": [
+          "tests/test_repo_vault.py",
+          "tests/test_api_key_management.py",
+          "tests/test_api_key_endpoints.py"
+        ],
+        "real_integration": [
+          "tests/test_vault_async.py",
+          "tests/test_vault_missing.py",
+          "tests/test_vault_agent_grants.py"
+        ],
+        "user_journeys": [
+          "frontend/e2e/vault*.spec.ts"
+        ],
+        "adversarial": [
+          "tests/property/test_vault*.py"
+        ],
+        "static_safety": [
+          "tests/test_route_rbac.py",
+          "tests/test_security_headers.py"
+        ]
+      }
+    },
+    {
+      "id": "cortex_runs",
+      "name": "Cortex Runs, Tools, And Worker Lifecycle",
+      "criticality": 5,
+      "paths": [
+        "brain/systems/runs/**",
+        "brain/app/api/routers/cortex/**",
+        "brain/app/api/routers/cortex_*.py",
+        "brain/jobs/evals/**",
+        "frontend/src/lib/features/cortex/**",
+        "frontend/src/lib/features/threads/**",
+        "frontend/src/routes/cortex/**"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "tests/test_agent_run_state_machine.py",
+          "tests/test_agent_run_runtime.py",
+          "tests/test_run_events.py",
+          "tests/test_cortex_worker.py",
+          "tests/test_worker_assignment.py"
+        ],
+        "contracts": [
+          "tests/test_api_cortex.py",
+          "tests/test_api_ws.py",
+          "tests/test_tool_policy.py",
+          "tests/test_tool_registry.py",
+          "tests/evals/test_backend_eval_harness.py"
+        ],
+        "real_integration": [
+          "tests/test_agent_coordination.py",
+          "tests/test_cross_channel.py"
+        ],
+        "user_journeys": [
+          "tests/test_core_product_journeys.py::test_workspace_thread_journey_survives_real_route_stack",
+          "tests/test_core_product_journeys.py::test_cortex_active_run_journey_streams_cancel_and_blocks_other_org",
+          "tests/test_core_product_journeys.py::test_project_context_upload_attach_list_journey_blocks_other_org",
+          "frontend/e2e/cortex*.spec.ts",
+          "frontend/e2e/run*.spec.ts"
+        ],
+        "adversarial": [
+          "tests/property/test_run*.py"
+        ],
+        "static_safety": [
+          "tests/test_async_db_boundaries.py",
+          "tests/test_architecture_boundaries.py"
+        ]
+      }
+    },
+    {
+      "id": "memory_recall",
+      "name": "Memory, Recall, And Truth Maintenance",
+      "criticality": 5,
+      "paths": [
+        "brain/systems/memory/**",
+        "brain/app/api/routers/memory.py",
+        "brain/platform/db/repositories/memories.py",
+        "frontend/src/routes/memory/**",
+        "frontend/src/lib/components/memory/**"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "tests/test_memory_lifecycle.py",
+          "tests/test_memory_visibility_policy.py",
+          "tests/test_memory_conflict_resolver.py",
+          "tests/test_memory_source_freshness.py",
+          "tests/test_memory_integrity.py"
+        ],
+        "contracts": [
+          "tests/test_models_memory.py",
+          "tests/test_memory_dag_models.py",
+          "tests/test_api_memory.py"
+        ],
+        "real_integration": [
+          "tests/test_retrieval.py",
+          "tests/test_retrieval_feedback.py",
+          "tests/test_retrieval_pools.py",
+          "tests/test_memory_dag_repos.py"
+        ],
+        "user_journeys": [
+          "frontend/e2e/memory*.spec.ts"
+        ],
+        "adversarial": [
+          "tests/property/test_memory*.py",
+          "tests/test_memory_conflict_resolver.py"
+        ],
+        "static_safety": [
+          "tests/test_schema_contract.py",
+          "tests/test_async_db_boundaries.py"
+        ]
+      }
+    },
+    {
+      "id": "chat_notifications",
+      "name": "Chat, Mentions, Notifications, And WebSockets",
+      "criticality": 4,
+      "paths": [
+        "brain/app/api/routers/chat.py",
+        "brain/app/api/routers/notifications.py",
+        "brain/app/api/routers/ws.py",
+        "brain/platform/db/models/chat.py",
+        "brain/platform/db/models/notification.py",
+        "frontend/src/lib/components/chat/**",
+        "frontend/src/lib/features/cortex/components/chat/**"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "tests/test_chat_api_routes.py",
+          "tests/test_notifications_api.py",
+          "tests/test_notify_routing.py",
+          "tests/test_ws_manager.py"
+        ],
+        "contracts": [
+          "tests/test_chat_ws_route.py",
+          "tests/test_chat_websocket.py",
+          "tests/test_api_ws.py"
+        ],
+        "real_integration": [
+          "tests/test_cross_channel.py",
+          "tests/test_multiplayer_cortex.py"
+        ],
+        "user_journeys": [
+          "tests/test_core_product_journeys.py::test_chat_dm_unread_journey_survives_real_route_stack",
+          "frontend/e2e/chat*.spec.ts",
+          "frontend/e2e/notifications*.spec.ts"
+        ],
+        "adversarial": [
+          "tests/property/test_chat*.py"
+        ],
+        "static_safety": [
+          "tests/test_route_rbac.py",
+          "tests/test_security_headers.py"
+        ]
+      }
+    },
+    {
+      "id": "skills_bundles",
+      "name": "Skills, Bundles, Routing, And Graduation",
+      "criticality": 4,
+      "paths": [
+        "brain/systems/skills/**",
+        "brain/systems/routing/**",
+        "brain/app/api/routers/skills.py",
+        "frontend/src/routes/skills/**"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "tests/test_skill_gate.py",
+          "tests/test_skill_graduation.py",
+          "tests/test_skill_routing_policy.py",
+          "tests/test_progressive_skill_loading.py"
+        ],
+        "contracts": [
+          "tests/test_skill_bundles.py",
+          "tests/test_skill_bundle_repository.py",
+          "tests/test_schemas_skill.py",
+          "tests/test_builtin_skill_suite.py"
+        ],
+        "real_integration": [
+          "tests/test_skill_bundle_io_service.py",
+          "tests/test_skill_io_service.py",
+          "tests/test_skill_bundle_evals.py"
+        ],
+        "user_journeys": [
+          "frontend/e2e/skills*.spec.ts"
+        ],
+        "adversarial": [
+          "tests/property/test_skill*.py",
+          "tests/test_skill_gap_tool.py"
+        ],
+        "static_safety": [
+          "tests/test_public_release_hygiene.py",
+          "tests/test_architecture_boundaries.py"
+        ]
+      }
+    },
+    {
+      "id": "workspace_apps",
+      "name": "Workspace Apps And Generated UI Contracts",
+      "criticality": 4,
+      "paths": [
+        "brain/systems/workspace_apps/**",
+        "brain/app/api/routers/workspace_apps.py",
+        "frontend/src/lib/features/workspace-apps/**",
+        "frontend/src/lib/features/workspace-scene/**"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "tests/test_workspace_apps_service.py",
+          "tests/test_workspace_app_contract.py",
+          "tests/test_workspace_app_compiler.py"
+        ],
+        "contracts": [
+          "tests/test_workspace_data_query.py",
+          "tests/test_theme_and_workspace_app_design_contracts.py",
+          "frontend/src/lib/utils/generatedWorkspaceAppContract.test.js"
+        ],
+        "real_integration": [
+          "tests/test_workspace_pins.py",
+          "tests/test_project_context_materializer.py"
+        ],
+        "user_journeys": [
+          "tests/test_core_product_journeys.py::test_workspace_app_journey_persists_state_and_blocks_other_org",
+          "frontend/e2e/workspace-app*.spec.ts"
+        ],
+        "adversarial": [
+          "tests/property/test_workspace_app*.py"
+        ],
+        "static_safety": [
+          "tests/test_architecture_boundaries.py",
+          "tests/test_async_db_boundaries.py"
+        ]
+      }
+    },
+    {
+      "id": "browser_sessions",
+      "name": "Browser Sessions, Attachments, And Runtime Harness",
+      "criticality": 4,
+      "paths": [
+        "brain/platform/browser/**",
+        "brain/app/api/routers/cortex/_browser.py",
+        "frontend/src/lib/features/browser-sessions/**",
+        "frontend/src/lib/utils/cortexBrowserSession*"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "tests/test_browser_sessions.py"
+        ],
+        "contracts": [
+          "frontend/src/lib/utils/cortexBrowserSession.test.js"
+        ],
+        "real_integration": [
+          "tests/test_upload_preview.py",
+          "tests/test_api_cortex.py",
+          "scripts/diagnostics/browser_harness_smoke.py"
+        ],
+        "user_journeys": [
+          "frontend/e2e/browser-session*.spec.ts"
+        ],
+        "adversarial": [
+          "tests/property/test_browser*.py"
+        ],
+        "static_safety": [
+          "tests/test_async_db_boundaries.py",
+          "tests/test_architecture_boundaries.py"
+        ]
+      }
+    },
+    {
+      "id": "db_schema",
+      "name": "Database Schema, Migrations, And Repository Contracts",
+      "criticality": 5,
+      "paths": [
+        "alembic.ini",
+        "brain/platform/db/**",
+        "brain/platform/db/migrations/**",
+        "brain/platform/db/models/**",
+        "brain/platform/db/repositories/**"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "tests/test_schema_contract.py",
+          "tests/test_db_engine.py",
+          "tests/test_async_unit_of_work.py"
+        ],
+        "contracts": [
+          "tests/test_alembic_config.py",
+          "tests/test_models_all.py",
+          "tests/test_repository_base.py"
+        ],
+        "real_integration": [
+          "tests/test_docker_db_smoke.py",
+          "tests/test_memory_dag_repos.py",
+          "tests/test_chat_api_routes.py"
+        ],
+        "user_journeys": [
+          "tests/test_core_product_journeys.py"
+        ],
+        "adversarial": [
+          "tests/property/test_db*.py",
+          "tests/test_db_raw_helper_guard.py"
+        ],
+        "static_safety": [
+          "tests/test_async_db_boundaries.py",
+          "tests/test_architecture_boundaries.py"
+        ]
+      }
+    },
+    {
+      "id": "frontend_workspace",
+      "name": "Frontend Workspace, Cortex UI, And Visual Shell",
+      "criticality": 4,
+      "paths": [
+        "frontend/e2e/**",
+        "frontend/package-lock.json",
+        "frontend/src/routes/**",
+        "frontend/src/lib/components/**",
+        "frontend/src/lib/features/**",
+        "frontend/src/lib/stores/**",
+        "frontend/src/lib/utils/*.ts",
+        "frontend/src/lib/styles/**"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "frontend/src/lib/utils/cortexRunStream.test.js",
+          "frontend/src/lib/utils/cortexRunActivity.test.js",
+          "frontend/src/lib/utils/cortexRunPresentation.test.js",
+          "frontend/src/lib/utils/readableMarkdown.test.js"
+        ],
+        "contracts": [
+          "frontend/src/lib/utils/generatedAppBridge.test.js",
+          "frontend/src/lib/utils/generatedWorkspaceAppContract.test.js"
+        ],
+        "real_integration": [
+          "frontend/src/lib/utils/projectContext.test.js",
+          "frontend/src/lib/utils/projectContextLocal.test.js"
+        ],
+        "user_journeys": [
+          "frontend/e2e/cortex*.spec.ts",
+          "frontend/e2e/memory*.spec.ts",
+          "frontend/e2e/vault*.spec.ts"
+        ],
+        "adversarial": [
+          "frontend/src/lib/**/*.property.test.js"
+        ],
+        "static_safety": [
+          "frontend/package.json",
+          "frontend/package-lock.json",
+          "frontend/vite.config.ts",
+          "frontend/playwright.config.ts"
+        ]
+      }
+    },
+    {
+      "id": "provider_integrations",
+      "name": "Provider Integrations, Model Policy, And Runtime Settings",
+      "criticality": 4,
+      "paths": [
+        "brain/platform/integrations/**",
+        "brain/platform/providers/**",
+        "brain/systems/runtime_settings/**",
+        "frontend/src/routes/system/**"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "tests/test_providers.py",
+          "tests/test_provider_transports.py",
+          "tests/test_model_policy.py",
+          "tests/test_runtime_settings.py"
+        ],
+        "contracts": [
+          "tests/test_openai_codex_client.py",
+          "tests/test_runtime_settings_oauth_start_route.py"
+        ],
+        "real_integration": [
+          "tests/evals/test_backend_eval_harness.py"
+        ],
+        "user_journeys": [
+          "frontend/e2e/system*.spec.ts"
+        ],
+        "adversarial": [
+          "tests/property/test_provider*.py",
+          "tests/test_anthropic_adapter.py"
+        ],
+        "static_safety": [
+          "tests/test_public_release_hygiene.py",
+          "docs/dependency-licensing.md"
+        ]
+      }
+    },
+    {
+      "id": "test_suite_operability",
+      "name": "Test Suite Operability, CI Shape, And Quality Gates",
+      "criticality": 4,
+      "threshold": 0.85,
+      "paths": [
+        ".github/workflows/**",
+        ".github/pull_request_template.md",
+        "CONTRIBUTING.md",
+        "Makefile",
+        "README.md",
+        "docs/survivability-*.json",
+        "docs/survivability-*.md",
+        "ops/test-with-db.sh",
+        "pytest.ini",
+        "scripts/diagnostics/**",
+        "scripts/survivability_index.py",
+        "brain/systems/quality/**",
+        "frontend/src/lib/**/*.test.js",
+        "frontend/src/lib/**/*.test.ts",
+        "tests/**",
+        "tools/personal-agent-bridge/README.md"
+      ],
+      "evidence": {
+        "critical_invariants": [
+          "tests/test_survivability_index.py::test_evidence_file_changes_impact_protected_capability",
+          "tests/test_survivability_index.py::test_survivability_supports_python_evidence_selectors",
+          "tests/test_core_product_journeys.py::test_onboarding_journey_creates_first_workspace_owner",
+          "tests/test_async_db_boundaries.py",
+          "tests/test_architecture_boundaries.py"
+        ],
+        "contracts": [
+          "pytest.ini",
+          "Makefile",
+          ".github/workflows/brain-ci.yml"
+        ],
+        "real_integration": [
+          "ops/test-with-db.sh",
+          ".github/workflows/brain-ci.yml"
+        ],
+        "user_journeys": [
+          "tests/test_core_product_journeys.py::test_workspace_thread_journey_survives_real_route_stack",
+          "CONTRIBUTING.md",
+          "README.md",
+          "docs/survivability-index.md"
+        ],
+        "adversarial": [
+          "tests/test_survivability_index.py::test_survivability_ignores_empty_evidence_files",
+          "tests/test_survivability_index.py::test_survivability_ignores_python_evidence_without_collectable_tests",
+          "tests/test_survivability_index.py::test_survivability_ignores_module_level_skipped_python_evidence",
+          "tests/test_async_db_debt_metrics.py",
+          "tests/test_async_io_debt_metrics.py"
+        ],
+        "static_safety": [
+          "tests/test_ci_quality_gates.py::test_ci_test_jobs_are_not_softened_with_continue_on_error",
+          "tests/test_ci_quality_gates.py::test_ci_runs_survivability_and_core_test_gates",
+          "tests/test_ci_quality_gates.py::test_pytest_config_makes_unexpected_xpass_failures_visible",
+          "scripts/survivability_index.py",
+          "brain/systems/quality/survivability.py"
+        ]
+      }
+    }
+  ]
+}

@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
-
-import pytest
 
 
 def _load_mcp_module():
@@ -118,15 +115,3 @@ def test_handle_request_reports_missing_config(monkeypatch):
 
     assert response["result"]["isError"] is True
     assert "ILLO_BASE_URL is required" in response["result"]["content"][0]["text"]
-
-
-@pytest.mark.live_provider
-def test_live_illo_personal_agent_mcp_smoke(monkeypatch):
-    module = _load_mcp_module()
-    if not os.environ.get("ILLO_LIVE_MCP_SMOKE"):
-        pytest.skip("Set ILLO_LIVE_MCP_SMOKE=1 with ILLO_BASE_URL and ILLO_BRIDGE_TOKEN to run live MCP smoke.")
-
-    monkeypatch.setenv("ILLO_MCP_TIMEOUT", "60")
-    result = module.tool_illo_get_team_members()
-
-    assert isinstance(result, dict)

@@ -83,9 +83,6 @@ async def _make_memory(session, **kwargs):
 
 
 class TestMemoryRepository:
-    def test_model_assignment(self):
-        assert MemoryRepository.model is Memory
-
     async def test_list_active(self, repo, session):
         await _make_memory(session, archived=False)
         await _make_memory(session, archived=True)
@@ -116,9 +113,6 @@ class TestMemoryRepository:
 
 
 class TestEdgeRepository:
-    def test_model_assignment(self):
-        assert EdgeRepository.model is Edge
-
     async def test_list_by_memory(self, edge_repo, session):
         m1 = await _make_memory(session, content="a")
         m2 = await _make_memory(session, content="b")

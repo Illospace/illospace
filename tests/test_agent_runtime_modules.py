@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -17,86 +16,7 @@ def test_agent_runtime_root_exports_canonical_run_profile_primitives():
     ).run_graph is True
 
 
-def test_retired_cortex_runtime_modules_stay_out_of_live_paths():
-    root = Path(__file__).resolve().parents[1]
-    retired_roots = [
-        root / "brain/systems/cortex/dispatch",
-        root / "brain/orchestration",
-    ]
-    for retired_root in retired_roots:
-        live_sources = [
-            path
-            for path in retired_root.rglob("*")
-            if path.suffix in {".py", ".ts", ".svelte"}
-        ] if retired_root.exists() else []
-        assert not live_sources, f"{retired_root.relative_to(root)} still has retired source files"
-
-    live_roots = [
-        root / "brain/systems/runs",
-        root / "brain/systems/runs/cortex",
-        root / "brain/app/api/routers/cortex",
-        root / "frontend/src/lib/stores",
-        root / "frontend/src/lib/api",
-    ]
-    forbidden = (
-        "brain.systems.cortex.dispatch",
-        "brain/orchestration",
-        "brain.orchestration",
-        "cortex/dispatch",
-        "agent_status",
-        "AGENT_STATUS",
-    )
-    allowed_tombstones = {
-        root / "brain/app/api/routers/cortex/_idea_ops.py",
-    }
-
-    for live_root in live_roots:
-        for path in live_root.rglob("*"):
-            if path.suffix not in {".py", ".ts", ".svelte"}:
-                continue
-            text = path.read_text(encoding="utf-8")
-            for marker in forbidden:
-                if path in allowed_tombstones and marker == "agent_status":
-                    assert 'publish("agent_status"' not in text
-                    assert "publish('agent_status'" not in text
-                    continue
-                assert marker not in text, f"{path.relative_to(root)} still references retired {marker}"
-
-
-def test_agent_result_runtime_is_facade_reexport():
-    from brain.systems.runs.direct_agent import AgentResult as FacadeAgentResult
-    from brain.systems.runs.direct_agent import _TokenAccumulator as FacadeTokenAccumulator
-    from brain.systems.runs.direct_agent import _make_result
-    from brain.systems.runs.direct_loop.result import AgentResult, _TokenAccumulator
-
-    tokens = _TokenAccumulator(input=10, output=5, cache_read=3, cache_creation=2)
-    result = _make_result(
-        "done",
-        True,
-        "session-1",
-        tokens,
-        0,
-        ["read_file"],
-        worker_results=[{"worker": "ok"}],
-    )
-
-    assert FacadeAgentResult is AgentResult
-    assert FacadeTokenAccumulator is _TokenAccumulator
-    assert result == AgentResult(
-        output="done",
-        success=True,
-        session_id="session-1",
-        tokens_input=10,
-        tokens_output=5,
-        tokens_cache_read=3,
-        tokens_cache_creation=2,
-        duration_sec=result.duration_sec,
-        tool_calls=["read_file"],
-        worker_results=[{"worker": "ok"}],
-    )
-
-
-def test_request_runtime_preserves_cache_policy_and_facade_wrappers():
+def test_request_runtime_preserves_cache_policy():
     from brain.systems.runs.direct_agent import (
         _apply_anthropic_cache_breakpoint,
         _apply_provider_system_cache_policy,

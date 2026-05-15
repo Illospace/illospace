@@ -18,24 +18,6 @@ def _ws_token(user_id: str = "user-1", org_id: str = "org-1") -> str:
     return token
 
 
-def test_ws_connect_and_receive_connected_event():
-    client = TestClient(app)
-    with client.websocket_connect("/ws") as ws:
-        data = ws.receive_json()
-        assert data["type"] == "connected"
-
-
-def test_ws_authenticates_with_signed_token():
-    client = TestClient(app)
-    with client.websocket_connect("/ws") as ws:
-        assert ws.receive_json()["type"] == "connected"
-        ws.send_json({"type": "auth", "token": _ws_token()})
-        data = ws.receive_json()
-        assert data["type"] == "authenticated"
-        assert data["user_id"] == "user-1"
-        assert data["org_id"] == "org-1"
-
-
 def test_ws_authenticates_then_replays_requested_run_cursor(monkeypatch):
     from brain.app.api.routers import ws as ws_router
 

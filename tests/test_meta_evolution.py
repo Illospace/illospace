@@ -7,7 +7,7 @@ no raw cursor is passed in.
 import os
 import sys
 from datetime import date, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -16,15 +16,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 
 class TestEvolutionMetrics:
     """Test evolution metrics dataclass and basic logic."""
-
-    def test_metrics_dataclass_fields(self):
-        from brain.systems.feedback.meta_evolution import EvolutionMetrics
-        m = EvolutionMetrics(period_start=date.today(), period_end=date.today())
-        assert hasattr(m, "prediction_accuracy")
-        assert hasattr(m, "heuristic_survival_rate")
-        assert hasattr(m, "strategy_success_rates")
-        assert hasattr(m, "skill_fitness_trend")
-        assert hasattr(m, "memory_retrieval_quality")
 
     def test_metrics_defaults(self):
         from brain.systems.feedback.meta_evolution import EvolutionMetrics
@@ -220,14 +211,6 @@ class TestComparePeriods:
 
         assert len(insights) == 0
 
-    def test_no_cursor_param(self):
-        """compare_periods() should not accept a cur parameter."""
-        import inspect
-        from brain.systems.feedback.meta_evolution import compare_periods
-        sig = inspect.signature(compare_periods)
-        assert "cur" not in sig.parameters
-
-
 class TestAutoTune:
     """Test automatic parameter tuning uses UnitOfWork."""
 
@@ -275,14 +258,6 @@ class TestAutoTune:
         )
         adjustments = await auto_tune_parameters([insight])
         assert adjustments == {}
-
-    def test_no_cursor_param(self):
-        """auto_tune_parameters() should not accept a cur parameter."""
-        import inspect
-        from brain.systems.feedback.meta_evolution import auto_tune_parameters
-        sig = inspect.signature(auto_tune_parameters)
-        assert "cur" not in sig.parameters
-
 
 class TestRunMetaEvolution:
     """Test full meta-evolution pipeline uses UnitOfWork."""
@@ -335,14 +310,6 @@ class TestRunMetaEvolution:
         assert stats["regressions"] == 0
         assert stats["adjustments"] == {}
 
-    def test_no_cursor_param(self):
-        """run_meta_evolution() should not accept a cur parameter."""
-        import inspect
-        from brain.systems.feedback.meta_evolution import run_meta_evolution
-        sig = inspect.signature(run_meta_evolution)
-        assert "cur" not in sig.parameters
-
-
 class TestGetTunedParameter:
     """Test parameter retrieval uses UnitOfWork."""
 
@@ -378,14 +345,6 @@ class TestGetTunedParameter:
         result = await get_tuned_parameter("missing_param", default=0.5)
         assert result == 0.5
 
-    def test_no_cursor_param(self):
-        """get_tuned_parameter() should not accept a cur parameter."""
-        import inspect
-        from brain.systems.feedback.meta_evolution import get_tuned_parameter
-        sig = inspect.signature(get_tuned_parameter)
-        assert "cur" not in sig.parameters
-
-
 class TestStoreParameter:
     """Test _store_parameter helper uses UnitOfWork."""
 
@@ -400,10 +359,3 @@ class TestStoreParameter:
 
         await _store_parameter("test_param", 0.42)
         mock_uow.session.execute.assert_called_once()
-
-    def test_no_cursor_param(self):
-        """_store_parameter() should not accept a cur parameter."""
-        import inspect
-        from brain.systems.feedback.meta_evolution import _store_parameter
-        sig = inspect.signature(_store_parameter)
-        assert "cur" not in sig.parameters

@@ -1,6 +1,5 @@
 """Tests for cortex router — ideas CRUD, threads."""
 import json
-import inspect
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -346,22 +345,6 @@ async def test_project_profile_resource_reorder_rejects_duplicates(tmp_path):
         )
 
     assert exc_info.value.status_code == 422
-
-
-def test_manage_project_tool_is_available_to_agents():
-    from brain.systems.runs.direct_agent import WORKER_TOOLS, _get_tool_handlers
-
-    assert "manage_project" in {tool["name"] for tool in WORKER_TOOLS}
-    assert "manage_project" in _get_tool_handlers()
-
-
-def test_manage_idea_tool_is_available_to_agents():
-    from brain.systems.runs.direct_agent import WORKER_TOOLS, _get_tool_handlers
-
-    tool = next(item for item in WORKER_TOOLS if item["name"] == "manage_idea")
-
-    assert "archive this thread" in tool["description"]
-    assert "manage_idea" in _get_tool_handlers()
 
 
 async def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
@@ -788,13 +771,6 @@ def test_unified_stream_run_work_events_query_is_bounded():
     assert "agent_run_events.run_id IN (7, 8)" in compiled
     assert f"event_rank <= {_RUN_WORK_EVENT_LIMIT_PER_RUN}" in compiled
 
-def test_cortex_exports_tenant_guard_helpers():
-    import brain.app.api.routers.cortex as cortex
-
-    assert callable(cortex._require_idea_for_user)
-    assert callable(cortex._require_worker_principal)
-
-
 def test_cortex_rest_routes_do_not_use_global_ws_broadcast():
     router_dir = Path(__file__).resolve().parents[1] / "brain" / "app" / "api" / "routers" / "cortex"
     offenders = [
@@ -804,13 +780,6 @@ def test_cortex_rest_routes_do_not_use_global_ws_broadcast():
     ]
 
     assert offenders == []
-
-
-def test_notify_route_uses_scoped_idea_guard():
-    import brain.app.api.routers.cortex._ideas as ideas_mod
-
-    source = inspect.getsource(ideas_mod.notify_illo)
-    assert "_require_idea_for_user" in source
 
 
 async def test_slash_commands_materializes_builtin_skills():
@@ -877,21 +846,6 @@ async def test_legacy_agent_status_endpoint_is_retired(client):
 
     assert resp.status_code == 410
     assert "AgentRun events" in resp.json()["detail"]
-
-
-@pytest.mark.asyncio
-async def test_list_ideas(client, mock_session_factory):
-    idea = _make_idea()
-    with patch(
-        "brain.app.api.routers.cortex._ideas.IdeaRepository"
-    ) as MockRepo:
-        MockRepo.return_value.a_list_active_for_org = AsyncMock(return_value=[idea])
-        resp = await client.get("/api/cortex/ideas")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert isinstance(data, list)
-    assert len(data) == 1
-    assert data[0]["title"] == "Test Idea"
 
 
 @pytest.mark.asyncio
@@ -1120,21 +1074,6 @@ async def test_create_idea_empty_title_422(client, mock_session_factory):
         json={"title": ""},
     )
     assert resp.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_create_thread_message(client, mock_session_factory):
-    msg = _make_thread_msg()
-    with patch(
-        "brain.app.api.routers.cortex._ideas.IdeaThreadRepository"
-    ) as MockRepo:
-        MockRepo.return_value.a_add_message = AsyncMock(return_value=msg)
-        resp = await client.post(
-            "/api/cortex/ideas/some-id/threads",
-            json={"content": "Hello", "role": "user"},
-        )
-    assert resp.status_code == 201
-    assert resp.json()["content"] == "Hello"
 
 
 @pytest.mark.asyncio

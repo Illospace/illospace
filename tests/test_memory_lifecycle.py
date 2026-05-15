@@ -56,54 +56,25 @@ class TestScratchpadPromote:
         assert result["total_entries"] == 3
         assert len(result["sections"]["findings"]) == 2
         assert len(result["sections"]["decisions"]) == 1
+        assert result["sections"]["findings"][0]["key"] == "bug-1"
         assert result["sections"]["findings"][0]["value"] == "Found null pointer"
         assert result["sections"]["findings"][0]["worker"] == "investigate"
-
-    async def test_promote_includes_key_and_worker(self):
-        from brain.platform.db.repositories.scratchpad import ScratchpadRepository
-        from brain.platform.db.models.scratchpad import SessionScratchpad
-
-        e = SessionScratchpad(
-            id=1, run_id="run-2", section="resources",
-            key="doc-link", value="https://example.com", worker_name="develop",
-        )
-        e.created_at = datetime.now(timezone.utc)
-
-        mock_session = MagicMock()
-        result = MagicMock()
-        result.scalars.return_value.all.return_value = [e]
-        mock_session.execute = AsyncMock(return_value=result)
-        repo = ScratchpadRepository(mock_session)
-        result = await repo.promote(run_id="run-2")
-
-        entry = result["sections"]["resources"][0]
-        assert entry["key"] == "doc-link"
-        assert entry["worker"] == "develop"
 
 
 class TestScratchpadClose:
     """Test the close method on ScratchpadRepository."""
 
-    async def test_close_returns_count(self):
+    @pytest.mark.parametrize(("rowcount", "expected"), [(5, 5), (0, 0)])
+    async def test_close_returns_count(self, rowcount, expected):
         from brain.platform.db.repositories.scratchpad import ScratchpadRepository
 
         mock_session = MagicMock()
-        mock_session.execute = AsyncMock(return_value=MagicMock(rowcount=5))
+        mock_session.execute = AsyncMock(return_value=MagicMock(rowcount=rowcount))
         mock_session.flush = AsyncMock()
         repo = ScratchpadRepository(mock_session)
         count = await repo.close(run_id="run-1")
-        assert count == 5
+        assert count == expected
         mock_session.flush.assert_awaited_once()
-
-    async def test_close_zero_entries(self):
-        from brain.platform.db.repositories.scratchpad import ScratchpadRepository
-
-        mock_session = MagicMock()
-        mock_session.execute = AsyncMock(return_value=MagicMock(rowcount=0))
-        mock_session.flush = AsyncMock()
-        repo = ScratchpadRepository(mock_session)
-        count = await repo.close(run_id="nonexistent")
-        assert count == 0
 
 
 class TestScratchpadCleanupExpired:
@@ -184,31 +155,6 @@ class TestSessionCloseHandler:
             assert result["entries_closed"] == 3
 
 
-# ── Tool Definition Tests ────────────────────────────────────
-
-
-class TestLifecycleToolDefinitions:
-    """Test that lifecycle tools are properly defined and included."""
-
-    def test_lifecycle_tools_exist(self):
-        from brain.systems.runs.tool_definitions import LIFECYCLE_TOOLS
-        names = [t["name"] for t in LIFECYCLE_TOOLS]
-        assert "session_promote" in names
-        assert "session_close" in names
-
-    def test_lifecycle_tools_in_coordinator(self):
-        from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS
-        names = [t["name"] for t in COORDINATOR_TOOLS]
-        assert "session_promote" in names
-        assert "session_close" in names
-
-    def test_lifecycle_tools_not_in_worker(self):
-        from brain.systems.runs.tool_definitions import WORKER_TOOLS
-        names = [t["name"] for t in WORKER_TOOLS]
-        assert "session_promote" not in names
-        assert "session_close" not in names
-
-
 # ── Model Tests ───────────────────────────────────────────────
 
 
@@ -232,33 +178,6 @@ class TestScratchpadModel:
             closed_at=now,
         )
         assert entry.closed_at == now
-
-
-# ── Builtin Skill Tests ──────────────────────────────────────
-
-
-class TestOrchestrateSkillProcedure:
-    """Test that the orchestrate skill includes memory lifecycle steps."""
-
-    def test_procedure_includes_session_promote(self):
-        from brain.systems.skills.builtin import BUILTIN_SKILLS
-        proc = BUILTIN_SKILLS["orchestrate"]["procedure"]
-        assert "session_promote" in proc
-
-    def test_procedure_includes_session_close(self):
-        from brain.systems.skills.builtin import BUILTIN_SKILLS
-        proc = BUILTIN_SKILLS["orchestrate"]["procedure"]
-        assert "session_close" in proc
-
-    def test_procedure_includes_brain_encode_at_start(self):
-        from brain.systems.skills.builtin import BUILTIN_SKILLS
-        proc = BUILTIN_SKILLS["orchestrate"]["procedure"]
-        assert "AgentRun graph started" in proc
-
-    def test_procedure_includes_brain_encode_at_end(self):
-        from brain.systems.skills.builtin import BUILTIN_SKILLS
-        proc = BUILTIN_SKILLS["orchestrate"]["procedure"]
-        assert "AgentRun graph completed/failed" in proc
 
 
 # -- Harvest Storage Contract Tests -----------------------------------------

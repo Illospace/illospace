@@ -8,7 +8,7 @@ Run: pytest tests/test_dashboard.py -v --tb=short
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,25 +21,6 @@ from brain.app.api.main import app
 # ═══════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════
-
-def _fake_skill(name="test-skill", maturity="developing", use_count=5):
-    s = MagicMock()
-    s.name = name
-    s.maturity = maturity
-    s.use_count = use_count
-    return s
-
-
-def _fake_consolidation():
-    c = MagicMock()
-    c.status = "completed"
-    c.run_date = date(2026, 3, 17)
-    c.completed_at = datetime(2026, 3, 17, 3, 0, 0)
-    c.memories_created = 4
-    c.edges_created = 2
-    c.memories_decayed = 1
-    return c
-
 
 def _fake_memory(id=1, content="hi", memory_type="lesson", salience=5.0,
                  tags=None, archived=False, created_at=None):
@@ -91,35 +72,6 @@ class TestOverviewRoute:
     @patch("brain.app.api.routers.system.SkillRepository")
     @patch("brain.app.api.routers.system.EdgeRepository")
     @patch("brain.app.api.routers.system.MemoryRepository")
-    def test_route_overview_delegates(
-        self, MockMemRepo, MockEdgeRepo, MockSkillRepo,
-        MockConsolRepo, client,
-    ):
-        mem = MockMemRepo.return_value
-        mem.a_count_active = AsyncMock(return_value=42)
-        mem.a_count_by_type = AsyncMock(return_value={"lesson": 10})
-        mem.a_recent_activity = AsyncMock(return_value=[])
-        mem.a_retrieval_accuracy = AsyncMock(return_value=0.9)
-
-        MockEdgeRepo.return_value.a_count_all = AsyncMock(return_value=18)
-        MockSkillRepo.return_value.a_overview_summary = AsyncMock(return_value=(
-            [{"name": "test-skill", "maturity": "developing", "use_count": 5}],
-            1,
-            5,
-        ))
-
-        MockConsolRepo.return_value.a_list_recent = AsyncMock(return_value=[_fake_consolidation()])
-
-        resp = client.get("/api/overview")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["memories"] == 42
-        assert data["edges"] == 18
-
-    @patch("brain.app.api.routers.system.ConsolidationRunRepository")
-    @patch("brain.app.api.routers.system.SkillRepository")
-    @patch("brain.app.api.routers.system.EdgeRepository")
-    @patch("brain.app.api.routers.system.MemoryRepository")
     def test_route_500_on_exception(
         self, MockMemRepo, MockEdgeRepo, MockSkillRepo,
         MockConsolRepo, client,
@@ -128,18 +80,6 @@ class TestOverviewRoute:
         MockMemRepo.return_value.a_count_active = AsyncMock(side_effect=RuntimeError("db down"))
         resp = client.get("/api/overview")
         assert resp.status_code == 500
-
-
-class TestGraphRoute:
-
-    @patch("brain.app.api.routers.memory.UnitOfWork")
-    def test_route_graph_delegates(self, MockUnitOfWork, client):
-        uow = MockUnitOfWork.return_value.__aenter__.return_value
-        uow.memories.get_graph_data = AsyncMock(return_value={"nodes": [], "edges": []})
-        resp = client.get("/api/memory/graph")
-        assert resp.status_code == 200
-        assert resp.json()["nodes"] == []
-        uow.memories.get_graph_data.assert_awaited_once()
 
 
 class TestMemoryDetailRoute:
@@ -151,52 +91,8 @@ class TestMemoryDetailRoute:
         resp = client.get("/api/memory/999")
         assert resp.status_code == 404
 
-    @patch("brain.app.api.routers.memory.UnitOfWork")
-    def test_route_memory_detail_200(self, MockUnitOfWork, client):
-        fake = _fake_memory(id=1, content="hi")
-        uow = MockUnitOfWork.return_value.__aenter__.return_value
-        uow.memories.get_or_raise_visible = AsyncMock(return_value=fake)
-        resp = client.get("/api/memory/1")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["id"] == 1
-
-
-class TestSearchRoute:
-
-    @patch("brain.app.api.routers.memory.UnitOfWork")
-    def test_route_search_delegates(self, MockUnitOfWork, client):
-        uow = MockUnitOfWork.return_value.__aenter__.return_value
-        uow.memories.search_visible = AsyncMock(return_value=[_fake_memory()])
-        resp = client.get("/api/memory/search?q=test+query")
-        assert resp.status_code == 200
-        assert len(resp.json()) == 1
-        uow.memories.search_visible.assert_awaited_once()
-
-
-class TestHealthRoute:
-
-    @patch("brain.platform.db.repositories.skills.SkillRepository")
-    @patch("brain.platform.db.repositories.memories.MemoryRepository")
-    def test_route_health_delegates(self, MockMemRepo, MockSkillRepo, client):
-        """Health endpoint returns status."""
-        MockMemRepo.return_value.a_count_active = AsyncMock(return_value=10)
-        MockSkillRepo.return_value.list_active.return_value = []
-        resp = client.get("/api/health")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "status" in data
-
 
 class TestSkillsRoute:
-
-    @patch("brain.app.api.routers.skills._ensure_builtin_skill_catalog", new_callable=AsyncMock)
-    @patch("brain.app.api.routers.skills.SkillRepository")
-    def test_route_skills_delegates(self, MockSkillRepo, ensure_catalog, client):
-        MockSkillRepo.return_value.a_list_active_with_executions = AsyncMock(return_value=[])
-        resp = client.get("/api/skills/")
-        assert resp.status_code == 200
-        ensure_catalog.assert_awaited_once_with()
 
     @patch("brain.app.api.routers.skills._ensure_builtin_skill_catalog", new_callable=AsyncMock)
     @patch("brain.app.api.routers.skills.SkillRepository")

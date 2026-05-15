@@ -2,7 +2,7 @@
 Live setup-token diagnostics for Anthropic transport changes.
 
 Run locally, without the frontend:
-    python3 tests/manual_setup_token_diagnostics.py
+    python3 scripts/diagnostics/setup_token_diagnostics.py
 
 Optional env vars:
     ILLO_TEST_ANTHROPIC_TOKEN   Use this token instead of loading the latest DB token

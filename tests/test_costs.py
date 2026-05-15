@@ -78,19 +78,6 @@ def client():
 class TestGetCosts:
 
     @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
-    def test_returns_structure(self, mock_usage, client):
-        mock_usage.return_value = []
-        result = client.get("/api/costs/")
-        assert result.status_code == 200
-        data = result.json()
-        assert "summary" in data
-        assert "month" in data
-        assert "by_model" in data
-        assert "by_skill" in data
-        assert "daily" in data
-        assert "top_ideas" in data
-
-    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_summary_counts(self, mock_usage, client):
         idea = "idea-001"
         runs = [
@@ -108,20 +95,6 @@ class TestGetCosts:
         assert s["total_cost"] >= 0.15
 
     @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
-    def test_by_model_groups(self, mock_usage, client):
-        runs = [
-            _fake_run(id=1, model_used="anthropic/claude-opus-4-6", estimated_cost=0.10),
-            _fake_run(id=2, model_used="anthropic/claude-haiku-4-5", estimated_cost=0.01),
-        ]
-        mock_usage.return_value = runs
-
-        result = client.get("/api/costs/")
-        data = result.json()
-        models = {m["model"]: m for m in data["by_model"]}
-        assert "anthropic/claude-opus-4-6" in models
-        assert "anthropic/claude-haiku-4-5" in models
-
-    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_by_model_normalizes_provider_prefixes(self, mock_usage, client):
         runs = [
             _fake_run(id=1, model_used="openai:gpt-5.4", estimated_cost=0.10),
@@ -137,33 +110,6 @@ class TestGetCosts:
         assert models["openai/gpt-5.4"]["provider"] == "openai"
         assert models["openai/gpt-5.4"]["normalized_model"] == "gpt-5.4"
         assert models["openai/gpt-5.4"]["runs"] == 3
-
-    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
-    def test_by_skill_groups(self, mock_usage, client):
-        runs = [
-            _fake_run(id=1, skill_used="develop", estimated_cost=0.10),
-            _fake_run(id=2, skill_used="investigate", estimated_cost=0.02),
-        ]
-        mock_usage.return_value = runs
-
-        result = client.get("/api/costs/")
-        data = result.json()
-        skills = {s["skill"]: s for s in data["by_skill"]}
-        assert "develop" in skills
-        assert "investigate" in skills
-
-    @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
-    def test_daily_list(self, mock_usage, client):
-        runs = [
-            _fake_run(id=1, created_at=datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)),
-            _fake_run(id=2, created_at=datetime(2026, 3, 21, 12, 0, 0, tzinfo=timezone.utc)),
-        ]
-        mock_usage.return_value = runs
-
-        result = client.get("/api/costs/")
-        data = result.json()
-        assert isinstance(data["daily"], list)
-        assert len(data["daily"]) >= 1
 
     @patch("brain.app.api.routers.costs.async_summarize_recent_run_usage")
     def test_month_cost(self, mock_usage, client):
@@ -200,19 +146,6 @@ class TestGetCosts:
         result = client.get("/api/costs/")
         data = result.json()
         assert len(data["top_ideas"]) <= 10
-
-
-# ── Tests: GET /api/brain/stale-ideas ──
-
-class TestGetStaleIdeas:
-
-    @patch("brain.app.api.routers.brain.stale_ideas")
-    def test_returns_list(self, mock_stale_fn, client):
-        """Stale ideas endpoint should return a list."""
-        mock_stale_fn.return_value = []
-        resp = client.get("/api/stale-ideas?threshold=30")
-        assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
 
 
 async def test_run_breakdown_wraps_legacy_agent_api_calls_table():

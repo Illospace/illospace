@@ -3,46 +3,31 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
 
 from brain.app.cli.skills import compute_maturity
 
 
-def test_maturity_emerging():
-    """< 3 uses → emerging."""
-    maturity, confidence = compute_maturity(0, 0.0)
-    assert maturity == "emerging"
-    assert confidence <= 0.3
-
-    maturity, confidence = compute_maturity(2, 1.0)
-    assert maturity == "emerging"
-
-
-def test_maturity_developing():
-    """3-9 uses → developing."""
-    maturity, confidence = compute_maturity(5, 0.6)
-    assert maturity == "developing"
-    assert 0.0 < confidence <= 0.6
-
-
-def test_maturity_proficient():
-    """10-24 uses with >= 70% success → proficient."""
-    maturity, confidence = compute_maturity(15, 0.8)
-    assert maturity == "proficient"
-    assert confidence <= 0.85
-
-
-def test_maturity_expert():
-    """25+ uses with >= 85% success → expert."""
-    maturity, confidence = compute_maturity(30, 0.9)
-    assert maturity == "expert"
-    assert confidence <= 1.0
-
-
-def test_maturity_developing_low_success():
-    """High use count but low success → developing."""
-    maturity, confidence = compute_maturity(30, 0.5)
-    assert maturity == "developing"
+@pytest.mark.parametrize(
+    ("use_count", "success_rate", "expected_maturity", "min_confidence", "max_confidence"),
+    [
+        (0, 0.0, "emerging", None, 0.3),
+        (2, 1.0, "emerging", None, None),
+        (5, 0.6, "developing", 0.0, 0.6),
+        (15, 0.8, "proficient", None, 0.85),
+        (30, 0.9, "expert", None, 1.0),
+        (30, 0.5, "developing", None, None),
+    ],
+)
+def test_maturity_thresholds(use_count, success_rate, expected_maturity, min_confidence, max_confidence):
+    maturity, confidence = compute_maturity(use_count, success_rate)
+    assert maturity == expected_maturity
+    if min_confidence is not None:
+        assert confidence > min_confidence
+    if max_confidence is not None:
+        assert confidence <= max_confidence
 
 
 def test_maturity_confidence_bounds():

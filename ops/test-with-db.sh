@@ -29,6 +29,7 @@ export DB_NAME=illo_test
 export DB_USER=illo_test
 export DB_PASSWORD=illo_test
 export TEST_DB_URL="postgresql://illo_test:illo_test@localhost:5433/illo_test"
+export CI_BRAIN_DB=1
 
 # --- Run migrations ---
 echo "Running migrations..."
@@ -37,6 +38,10 @@ python3 -m alembic upgrade head || {
     exit 1
 }
 
-# --- Run full test suite ---
+# --- Run requested tests (or the full suite when only pytest options are given) ---
 echo "Running tests..."
-python3 -m pytest tests/ "$@"
+if [[ $# -eq 0 || "${1:0:1}" == "-" ]]; then
+    python3 -m pytest tests/ "$@"
+else
+    python3 -m pytest "$@"
+fi

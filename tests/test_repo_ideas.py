@@ -124,9 +124,6 @@ async def _seed_org_user(session, org_id=ORG_2, user_id=USER_2):
 # ---------------------------------------------------------------------------
 
 class TestIdeaRepository:
-    def test_model_assignment(self):
-        assert IdeaRepository.model is Idea
-
     async def test_list_active(self, repo, session):
         await _make_idea(session)
         from datetime import datetime, timezone
@@ -211,9 +208,6 @@ class TestIdeaRepository:
 # ---------------------------------------------------------------------------
 
 class TestIdeaThreadRepository:
-    def test_model_assignment(self):
-        assert IdeaThreadRepository.model is IdeaThread
-
     async def test_add_and_list(self, thread_repo, session):
         idea = await _make_idea(session)
         await thread_repo.a_add_message(idea.id, "user", "Hello")
@@ -228,9 +222,6 @@ class TestIdeaThreadRepository:
 # ---------------------------------------------------------------------------
 
 class TestIdeaConnectionRepository:
-    def test_model_assignment(self):
-        assert IdeaConnectionRepository.model is IdeaConnection
-
     async def test_list_by_idea(self, conn_repo, session):
         a = await _make_idea(session)
         b = await _make_idea(session, title="Other")

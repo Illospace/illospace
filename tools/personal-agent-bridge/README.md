@@ -57,15 +57,6 @@ These tests cover:
 - Illo bridge routes and fanout commit ordering
 - fresh Alembic baseline replay for external-agent tables
 
-Live Hermes coverage is opt-in because it needs a running Hermes gateway and
-provider credentials:
-
-```bash
-ILLO_LIVE_HERMES_SMOKE=1 \
-HERMES_BASE_URL=http://127.0.0.1:8642 \
-HERMES_API_KEY=illo-hermes-local \
-venv/bin/python -m pytest tests/test_external_agents_service.py::test_live_hermes_runs_adapter_smoke -q
-```
-
-Use this in self-hosted CI, release gates, or manual smoke before deploying
-bridge changes. Public/default CI should leave `ILLO_LIVE_HERMES_SMOKE` unset.
+Live Hermes smoke checks need a running gateway and provider credentials, so
+keep them as operator diagnostics outside pytest collection. Public/default CI
+should rely on the deterministic bridge contract tests above.

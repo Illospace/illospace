@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -11,14 +10,8 @@ from brain.platform.db.repositories.unit_of_work import (
     UnitOfWork,
 )
 from brain.systems.runs import event_log as event_log_module
-from brain.systems.runs.cortex import runner as cortex_runner
 from brain.systems.runs.direct_loop import session_effects as session_effects_module
 from brain.systems.runs.direct_loop import telemetry as telemetry_module
-from brain.systems.runs import project_execution_env as project_execution_env_module
-from brain.systems.runs import store as run_store_module
-from brain.systems.runs.store import AsyncAgentRunStore
-from brain.app.scheduler import executor as scheduler_executor
-from brain.app.scheduler import runtime as scheduler_runtime
 
 
 class _SyncSession:
@@ -187,70 +180,6 @@ async def test_unit_of_work_async_lifecycle_rolls_back_on_error(monkeypatch):
     assert session.commits == 0
     assert session.rollbacks == 1
     assert session.closed is True
-
-
-def test_cortex_runner_exposes_async_db_boundaries_without_sync_bridge():
-    source = inspect.getsource(cortex_runner)
-
-    assert "_run_db" not in source
-    assert "_runner_unit_of_work" not in source
-
-
-def test_async_agent_run_store_uses_native_async_db_path():
-    source = inspect.getsource(run_store_module.AsyncAgentRunStore)
-
-    assert "run_session_task" not in source
-    assert ".run_sync(" not in source
-
-
-def test_async_event_log_uses_native_async_store():
-    source = inspect.getsource(event_log_module.async_record_run_event)
-
-    assert "._run(" not in source
-    assert "run_session_task" not in source
-    assert ".run_sync(" not in source
-
-
-def test_run_runtime_async_entrypoints_do_not_use_sync_bridges():
-    sources = [
-        inspect.getsource(event_log_module.async_record_run_event),
-        inspect.getsource(event_log_module.async_record_run_degraded_event),
-        inspect.getsource(telemetry_module.async_record_api_call),
-        inspect.getsource(session_effects_module.async_memory_org_for_user),
-        inspect.getsource(session_effects_module.async_auto_encode_if_needed),
-        inspect.getsource(session_effects_module.async_apply_agent_session_side_effects),
-        inspect.getsource(project_execution_env_module._async_current_run_target_context),
-        inspect.getsource(project_execution_env_module.async_current_project_bound_env),
-        inspect.getsource(project_execution_env_module.async_prepare_project_execution_env),
-    ]
-
-    forbidden = [
-        "open_unit_of_work",
-        "run_unit_of_work_task",
-        "run_session_task",
-        "run_async_from_sync",
-        "asyncio.run",
-        "asyncio.to_thread",
-        "threading.Thread",
-        "ThreadPoolExecutor",
-        ".run_sync(",
-    ]
-    for source in sources:
-        for pattern in forbidden:
-            assert pattern not in source
-
-
-def test_scheduler_async_helpers_are_native_async():
-    sources = [
-        inspect.getsource(scheduler_runtime.async_claim_run),
-        inspect.getsource(scheduler_runtime.async_claim_next_due_run),
-        inspect.getsource(scheduler_executor.async_execute_scheduler_run),
-        inspect.getsource(scheduler_executor.async_drain_scheduler),
-    ]
-
-    for source in sources:
-        assert "run_session_task" not in source
-        assert ".run_sync(" not in source
 
 
 @pytest.mark.asyncio

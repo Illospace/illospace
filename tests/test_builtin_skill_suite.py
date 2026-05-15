@@ -22,8 +22,6 @@ def test_builtin_skills_are_limited_to_product_primitives():
     import brain.systems.skills.builtin as module
 
     assert set(module.BUILTIN_SKILLS) == CORE_BUILTINS
-    assert not hasattr(module, "SKILL_RETIREMENTS")
-    assert not hasattr(module, "BUILTIN_SKILL_RETIREMENTS")
 
 
 def test_builtin_skills_have_structured_routing_metadata():

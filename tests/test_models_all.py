@@ -123,7 +123,3 @@ def test_all_tables_modeled():
 def test_no_extra_tables():
     extra = _modeled_tables() - EXPECTED_TABLES
     assert not extra, f"Unexpected tables registered: {extra}"
-
-
-def test_table_count():
-    assert len(_modeled_tables()) == len(EXPECTED_TABLES)

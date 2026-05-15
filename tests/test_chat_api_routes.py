@@ -168,22 +168,6 @@ def request_as(chat_db_session: AsyncSession) -> Callable[..., Awaitable[Respons
     return _request
 
 
-async def test_openapi_registers_chat_routes():
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/api/openapi.json")
-
-    assert response.status_code == 200
-    paths = response.json()["paths"]
-    assert "/api/chat/bootstrap" in paths
-    assert "/api/chat/conversations" in paths
-    assert "/api/chat/dms" in paths
-    assert "/api/chat/conversations/{conversation_id}/messages" in paths
-    assert "/api/chat/search" in paths
-    assert "/api/chat/messages/{message_id}/thread" in paths
-    assert "/api/chat/notifications" in paths
-
-
 async def test_bootstrap_creates_room_and_syncs_new_approved_members(
     chat_db_session: AsyncSession,
     request_as: Callable[..., object],

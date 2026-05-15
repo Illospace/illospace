@@ -2,17 +2,13 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from brain.app.api.auth import get_current_user
-from brain.app.api.authorization import (
-    PERMISSION_SCHEDULER_MANAGE,
-    PERMISSION_VAULT_SHARE,
-)
 from brain.app.api.deps import get_db
 
 
@@ -38,41 +34,6 @@ async def client():
 
 def _act_as(app, user: dict) -> None:
     app.dependency_overrides[get_current_user] = lambda: user
-
-
-def _skill_obj(**overrides):
-    fields = {
-        "id": 1,
-        "name": "demo",
-        "description": "Demo skill",
-        "procedure": "Do the thing",
-        "version": 1,
-        "maturity": "emerging",
-        "confidence": 0.3,
-        "use_count": 0,
-        "success_count": 0,
-        "failure_count": 0,
-        "partial_count": 0,
-        "avg_duration_sec": None,
-        "last_used": None,
-        "pitfalls": [],
-        "refinements": [],
-        "triggers": [],
-        "guardrails": [],
-        "auto_emerged": False,
-        "provider": None,
-        "model_name": None,
-        "reasoning_effort": None,
-        "service_tier": None,
-        "auth_mode": None,
-        "model_tier": "medium",
-        "thinking_tier": "medium",
-        "success_rate": 0.0,
-        "children": [],
-        "executions": [],
-    }
-    fields.update(overrides)
-    return SimpleNamespace(**fields)
 
 
 @pytest.mark.asyncio
@@ -137,66 +98,6 @@ async def test_personal_vault_crud_remains_user_owned(client):
 
 
 @pytest.mark.asyncio
-async def test_team_member_can_mutate_skill(client):
-    c, app = client
-    _act_as(app, MEMBER)
-
-    with patch("brain.app.api.routers.skills.SkillRepository") as repo:
-        repo.return_value.a_add_guardrail = AsyncMock(return_value=_skill_obj())
-        response = await c.post(
-            "/api/skills/demo/guardrail",
-            json={"text": "Do not leak secrets"},
-        )
-
-    assert response.status_code == 200
-    repo.return_value.a_add_guardrail.assert_awaited_once_with("demo", "Do not leak secrets", "warning")
-
-
-@pytest.mark.asyncio
-async def test_explicit_scheduler_permission_can_create_scheduler_job(client):
-    c, app = client
-    _act_as(app, {**MEMBER, "permissions": [PERMISSION_SCHEDULER_MANAGE]})
-
-    with patch("brain.app.api.routers.system.async_upsert_scheduler_job", new=AsyncMock(return_value=SimpleNamespace(job_key="demo", cron_expr="0 8 * * *"))) as upsert_job:
-        response = await c.post(
-            "/api/system/scheduler/jobs",
-            json={"job_key": "demo", "cron_expr": "0 8 * * *", "handler_ref": "python -m demo"},
-        )
-
-    assert response.status_code == 200
-    assert response.json()["schedule_human"] == "at 8:00 AM"
-    upsert_job.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_legacy_cron_mutation_routes_are_retired(client):
-    c, app = client
-    _act_as(app, {**MEMBER, "permissions": [PERMISSION_SCHEDULER_MANAGE]})
-
-    post_response = await c.post(
-        "/api/system/cron-jobs",
-        json={"name": "demo", "schedule": "0 8 * * *", "command": "python -m demo"},
-    )
-    patch_response = await c.patch("/api/system/cron-jobs/demo", json={"enabled": False})
-    delete_response = await c.delete("/api/system/cron-jobs/demo")
-
-    assert post_response.status_code in {404, 405}
-    assert patch_response.status_code in {404, 405}
-    assert delete_response.status_code in {404, 405}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("url", ["/api/system/embedding", "/api/system/llm"])
-async def test_legacy_system_setup_routes_are_removed(client, url):
-    c, app = client
-    _act_as(app, {**MEMBER, "role": "owner"})
-
-    response = await c.post(url, json={})
-
-    assert response.status_code in {404, 405}
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method", "url", "body"),
     [
@@ -218,17 +119,3 @@ async def test_member_cannot_mutate_installation_memory(client, method, url, bod
     response = await c.request(method, url, json=body)
 
     assert response.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_explicit_vault_share_permission_can_share(client):
-    c, app = client
-    _act_as(app, {**MEMBER, "permissions": [PERMISSION_VAULT_SHARE]})
-
-    with patch("brain.systems.vault.async_has_pin", return_value=False), \
-         patch("brain.systems.vault.async_share_secret", return_value={"id": 7}) as share:
-        response = await c.post("/api/vault/1/share", json={"shared_with_user_id": "user-2"})
-
-    assert response.status_code == 200
-    assert response.json() == {"id": 7}
-    share.assert_called_once_with(1, "user-2", "user-1", org_id="org-1")

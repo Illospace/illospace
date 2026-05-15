@@ -184,16 +184,6 @@ class TestPhaseReflection:
         captured = capsys.readouterr()
         assert "No data to reflect on" in captured.out or "Skipping" in captured.out
 
-    def test_reflection_uses_direct_api_not_subprocess(self):
-        """Regression: nightly_reflect must use core.agent.call_llm, not subprocess."""
-        import inspect
-        from brain.jobs.pipelines.nightly_reflect import run_reflection
-        source = inspect.getsource(run_reflection)
-        assert "subprocess.run" not in source, \
-            "nightly_reflect must use core.agent.call_llm, not subprocess"
-        assert "call_llm" in source
-
-
 # ---------------------------------------------------------------------------
 # Phase 3.5: Dream
 # ---------------------------------------------------------------------------
@@ -210,15 +200,6 @@ class TestPhaseDream:
                 dream_main()
         captured = capsys.readouterr()
         assert "No memories" in captured.out or "Skipping" in captured.out
-
-    def test_dream_uses_direct_api_not_subprocess(self):
-        """Regression: nightly_dream must use core.agent, not subprocess."""
-        import inspect
-        from brain.jobs.pipelines.nightly_dream import call_llm
-        source = inspect.getsource(call_llm)
-        assert "subprocess" not in source, \
-            "nightly_dream must use core.agent.call_llm, not subprocess"
-
 
 # ---------------------------------------------------------------------------
 # Phase 5: Brain -> Files Sync

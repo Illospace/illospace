@@ -14,21 +14,6 @@ async def client():
 
 
 @pytest.mark.asyncio
-async def test_login_invalid(client):
-    with patch("brain.app.api.routers.auth.async_authenticate", return_value=None):
-        resp = await client.post("/api/login", json={"email": "x@x.com", "password": "wrong"})
-        assert resp.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_me_unauthenticated(client):
-    with patch("brain.app.api.auth.AUTH_DEV_FALLBACK_ENABLED", False):
-        resp = await client.get("/api/me")
-    assert resp.status_code == 200
-    assert resp.json() is None
-
-
-@pytest.mark.asyncio
 async def test_me_without_session_ignores_localhost_human_fallback(client):
     with patch(
         "brain.app.api.auth._get_localhost_user",

@@ -299,7 +299,7 @@ class TestBaseWorker:
         assert hasattr(BaseWorker, "load_model")
         assert hasattr(BaseWorker, "unload_model")
         assert hasattr(BaseWorker, "handle_request")
-        assert inspect.isabstract(BaseWorker) or True
+        assert inspect.isabstract(BaseWorker)
 
     def test_worker_health_response(self):
         from brain.platform.gpu.worker_protocol import BaseWorker, WorkerState

@@ -1,3 +1,12 @@
+"""Manual browser harness diagnostic.
+
+Run with:
+    pytest scripts/diagnostics/browser_harness_smoke.py -q -m requires_browser
+
+This depends on a local Chrome/Chromium harness, so it stays outside the
+default pytest survivability signal.
+"""
+
 from __future__ import annotations
 
 import json

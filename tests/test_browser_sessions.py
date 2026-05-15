@@ -485,7 +485,7 @@ def test_ws_browser_command_rejects_cross_org_without_calling_command(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_browser_service_runs_wait_and_extract():
+async def test_browser_service_routes_runtime_commands():
     from brain.platform.browser.service import BrowserSessionService
 
     service = BrowserSessionService()
@@ -504,57 +504,71 @@ async def test_browser_service_runs_wait_and_extract():
             calls.append(("discover", kwargs))
             return {"elements": [{"suggested_selector": "button#submit"}]}
 
-    fake_runtime = FakeRuntime()
-
-    async def fake_get_or_restore(session_id: str):
-        assert session_id == "sess-10"
-        return fake_runtime
-
-    service.get_or_restore_runtime = fake_get_or_restore  # type: ignore[method-assign]
-
-    wait_result = await service.command("sess-10", "wait", {"selector": "#app", "timeout_ms": 5000})
-    extract_result = await service.command("sess-10", "extract", {"mode": "text", "max_chars": 100})
-    discover_result = await service.command("sess-10", "discover", {"max_results": 5})
-
-    assert wait_result["status"] == "ready"
-    assert extract_result["content"] == "hello"
-    assert discover_result["elements"][0]["suggested_selector"] == "button#submit"
-    assert calls == [
-        ("wait", {"selector": "#app", "timeout_ms": 5000, "wait_until": "load"}),
-        ("extract", {"selector": None, "mode": "text", "max_chars": 100}),
-        ("discover", {"selector": "a,button,input,textarea,select,[role='button']", "max_results": 5}),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_browser_service_runs_upload_attachment():
-    from brain.platform.browser.service import BrowserSessionService
-
-    service = BrowserSessionService()
-    calls = []
-
-    class FakeRuntime:
         async def upload_attachment(self, **kwargs):
             calls.append(("upload_attachment", kwargs))
             return {"status": "ready", "downloads": []}
 
-    fake_runtime = FakeRuntime()
+        async def save_screenshot(self, **kwargs):
+            calls.append(("save_screenshot", kwargs))
+            return {"artifact": {"kind": "screenshot", "filename": "shot.png"}}
+
+        async def print_pdf(self, **kwargs):
+            calls.append(("print_pdf", kwargs))
+            return {"artifact": {"kind": "pdf", "filename": "page.pdf"}}
+
+        async def new_tab(self, url=None):
+            calls.append(("new_tab", {"url": url}))
+            return {"current_tab_index": 1}
+
+        async def switch_tab(self, index: int):
+            calls.append(("switch_tab", {"index": index}))
+            return {"current_tab_index": index}
+
+        async def close_tab(self, index=None):
+            calls.append(("close_tab", {"index": index}))
+            return {"current_tab_index": 0}
+
+        async def list_tabs(self):
+            calls.append(("list_tabs", {}))
+            return {"tabs": [{"index": 0, "active": True}]}
 
     async def fake_get_or_restore(session_id: str):
-        assert session_id == "sess-upload"
-        return fake_runtime
+        assert session_id == "sess-command"
+        return FakeRuntime()
 
     service.get_or_restore_runtime = fake_get_or_restore  # type: ignore[method-assign]
 
-    result = await service.command(
-        "sess-upload",
-        "upload_attachment",
-        {"selector": "input[type='file']", "attachment_url": "/static/uploads/demo.txt"},
-    )
+    cases = [
+        ("wait", {"selector": "#app", "timeout_ms": 5000}, {"status": "ready"}),
+        ("extract", {"mode": "text", "max_chars": 100}, {"content": "hello"}),
+        ("discover", {"max_results": 5}, {"elements": [{"suggested_selector": "button#submit"}]}),
+        (
+            "upload_attachment",
+            {"selector": "input[type='file']", "attachment_url": "/static/uploads/demo.txt"},
+            {"status": "ready", "downloads": []},
+        ),
+        ("save_screenshot", {"full_page": False}, {"artifact": {"kind": "screenshot", "filename": "shot.png"}}),
+        ("print_pdf", {"landscape": True}, {"artifact": {"kind": "pdf", "filename": "page.pdf"}}),
+        ("new_tab", {"url": "https://example.com"}, {"current_tab_index": 1}),
+        ("switch_tab", {"index": 0}, {"current_tab_index": 0}),
+        ("list_tabs", {}, {"tabs": [{"index": 0, "active": True}]}),
+        ("close_tab", {}, {"current_tab_index": 0}),
+    ]
 
-    assert result["status"] == "ready"
+    for action, payload, expected in cases:
+        assert await service.command("sess-command", action, payload) == expected
+
     assert calls == [
+        ("wait", {"selector": "#app", "timeout_ms": 5000, "wait_until": "load"}),
+        ("extract", {"selector": None, "mode": "text", "max_chars": 100}),
+        ("discover", {"selector": "a,button,input,textarea,select,[role='button']", "max_results": 5}),
         ("upload_attachment", {"selector": "input[type='file']", "attachment_url": "/static/uploads/demo.txt"}),
+        ("save_screenshot", {"full_page": False}),
+        ("print_pdf", {"landscape": True}),
+        ("new_tab", {"url": "https://example.com"}),
+        ("switch_tab", {"index": 0}),
+        ("list_tabs", {}),
+        ("close_tab", {"index": None}),
     ]
 
 
@@ -621,6 +635,7 @@ async def test_browser_service_records_browser_harness_resource_summary(monkeypa
     assert browser_summary["reason"] == "browser harness dedicated Chrome session"
     assert browser_summary["browser_version"] == "browser-harness+chrome-cdp"
     assert browser_summary["context_mode"] == "ephemeral"
+    assert runtime.state_payload()["resource_summary"]["browser"] == browser_summary
 
 
 @pytest.mark.asyncio
@@ -968,41 +983,6 @@ async def test_browser_subscribe_requests_forced_stream_frame():
 
 
 @pytest.mark.asyncio
-async def test_browser_service_runs_export_commands():
-    from brain.platform.browser.service import BrowserSessionService
-
-    service = BrowserSessionService()
-    calls = []
-
-    class FakeRuntime:
-        async def save_screenshot(self, **kwargs):
-            calls.append(("save_screenshot", kwargs))
-            return {"artifact": {"kind": "screenshot", "filename": "shot.png"}}
-
-        async def print_pdf(self, **kwargs):
-            calls.append(("print_pdf", kwargs))
-            return {"artifact": {"kind": "pdf", "filename": "page.pdf"}}
-
-    fake_runtime = FakeRuntime()
-
-    async def fake_get_or_restore(session_id: str):
-        assert session_id == "sess-export"
-        return fake_runtime
-
-    service.get_or_restore_runtime = fake_get_or_restore  # type: ignore[method-assign]
-
-    screenshot = await service.command("sess-export", "save_screenshot", {"full_page": False})
-    pdf = await service.command("sess-export", "print_pdf", {"landscape": True})
-
-    assert screenshot["artifact"]["kind"] == "screenshot"
-    assert pdf["artifact"]["kind"] == "pdf"
-    assert calls == [
-        ("save_screenshot", {"full_page": False}),
-        ("print_pdf", {"landscape": True}),
-    ]
-
-
-@pytest.mark.asyncio
 async def test_browser_runtime_unsubscribe_schedules_idle_close(monkeypatch):
     from brain.platform.browser.service import BrowserSessionRuntime, BrowserSessionService
 
@@ -1056,29 +1036,6 @@ def test_browser_runtime_action_log_is_bounded():
     assert len(payload["actions"]) == 30
     assert payload["actions"][0]["detail"] == "item-5"
     assert payload["actions"][-1]["detail"] == "item-34"
-
-
-def test_browser_runtime_state_payload_includes_resource_summary():
-    from brain.platform.browser.service import BrowserSessionRuntime, BrowserSessionService
-
-    service = BrowserSessionService()
-    record = SimpleNamespace(
-        id="sess-resource",
-        idea_id="idea-resource",
-        user_id="user-123",
-        run_id=5,
-        viewport_width=1280,
-        viewport_height=800,
-        status="ready",
-        current_url=None,
-        page_title=None,
-        last_error=None,
-    )
-    runtime = BrowserSessionRuntime(service, record)
-
-    payload = runtime.state_payload()
-    assert payload["resource_summary"]["browser"]["mode"] == "cold"
-    assert payload["resource_summary"]["browser"]["warm_start_used"] is False
 
 
 def test_browser_runtime_artifacts_and_diagnostics_are_bounded():
@@ -1645,7 +1602,7 @@ def test_browser_runtime_stderr_summary_keeps_crash_root_cause():
     assert len(summary) < len(stderr)
 
 
-def test_ws_browser_history_commands(monkeypatch):
+def test_ws_browser_command_routing(monkeypatch):
     from brain.app.api.routers import ws as ws_router
 
     commands: list[tuple[str, str, dict]] = []
@@ -1655,6 +1612,12 @@ def test_ws_browser_history_commands(monkeypatch):
 
     async def fake_command(session_id: str, action: str, payload: dict):
         commands.append((session_id, action, payload))
+        if action in {"save_screenshot", "print_pdf"}:
+            return {"artifact": {"kind": action}}
+        if action == "discover":
+            return {"elements": [{"suggested_selector": "button#submit"}]}
+        if action == "extract":
+            return {"content": "page text"}
         return {"status": "ready"}
 
     monkeypatch.setattr(ws_router.browser_sessions, "subscribe", fake_subscribe)
@@ -1666,127 +1629,23 @@ def test_ws_browser_history_commands(monkeypatch):
         assert ws.receive_json()["type"] == "connected"
         ws.send_json({"type": "auth", "token": _ws_token()})
         assert ws.receive_json()["type"] == "authenticated"
-        ws.send_json({"type": "browser_back", "session_id": "sess-9"})
-        ws.send_json({"type": "browser_forward", "session_id": "sess-9"})
-        assert ws.receive_json()["type"] == "browser_session_delta"
-        assert ws.receive_json()["type"] == "browser_session_delta"
+        messages = [
+            {"type": "browser_back", "session_id": "sess-9"},
+            {"type": "browser_forward", "session_id": "sess-9"},
+            {"type": "browser_save_screenshot", "session_id": "sess-9", "full_page": False},
+            {"type": "browser_print_pdf", "session_id": "sess-9", "landscape": True},
+            {"type": "browser_discover", "session_id": "sess-9", "max_results": 5},
+            {"type": "browser_extract", "session_id": "sess-9", "mode": "text", "max_chars": 1000},
+        ]
+        for message in messages:
+            ws.send_json(message)
+            assert ws.receive_json()["type"] == "browser_session_delta"
 
     assert commands == [
         ("sess-9", "back", {}),
         ("sess-9", "forward", {}),
-    ]
-
-
-def test_ws_browser_export_commands(monkeypatch):
-    from brain.app.api.routers import ws as ws_router
-
-    commands: list[tuple[str, str, dict]] = []
-
-    async def fake_subscribe(session_id: str, user_id: str | None):
-        return {"id": session_id}
-
-    async def fake_command(session_id: str, action: str, payload: dict):
-        commands.append((session_id, action, payload))
-        return {"artifact": {"kind": "screenshot"}}
-
-    monkeypatch.setattr(ws_router.browser_sessions, "subscribe", fake_subscribe)
-    monkeypatch.setattr(ws_router.browser_sessions, "command", fake_command)
-    _allow_ws_browser_session(monkeypatch, ws_router)
-
-    client = TestClient(app)
-    with client.websocket_connect("/ws") as ws:
-        assert ws.receive_json()["type"] == "connected"
-        ws.send_json({"type": "auth", "token": _ws_token()})
-        assert ws.receive_json()["type"] == "authenticated"
-        ws.send_json({"type": "browser_save_screenshot", "session_id": "sess-9", "full_page": False})
-        ws.send_json({"type": "browser_print_pdf", "session_id": "sess-9", "landscape": True})
-        assert ws.receive_json()["type"] == "browser_session_delta"
-        assert ws.receive_json()["type"] == "browser_session_delta"
-
-    assert commands == [
         ("sess-9", "save_screenshot", {"full_page": False}),
         ("sess-9", "print_pdf", {"landscape": True}),
-    ]
-
-
-def test_ws_browser_inspection_commands(monkeypatch):
-    from brain.app.api.routers import ws as ws_router
-
-    commands: list[tuple[str, str, dict]] = []
-
-    async def fake_subscribe(session_id: str, user_id: str | None):
-        return {"id": session_id}
-
-    async def fake_command(session_id: str, action: str, payload: dict):
-        commands.append((session_id, action, payload))
-        if action == "discover":
-            return {"elements": [{"suggested_selector": "button#submit"}]}
-        return {"content": "page text"}
-
-    monkeypatch.setattr(ws_router.browser_sessions, "subscribe", fake_subscribe)
-    monkeypatch.setattr(ws_router.browser_sessions, "command", fake_command)
-    _allow_ws_browser_session(monkeypatch, ws_router)
-
-    client = TestClient(app)
-    with client.websocket_connect("/ws") as ws:
-        assert ws.receive_json()["type"] == "connected"
-        ws.send_json({"type": "auth", "token": _ws_token()})
-        assert ws.receive_json()["type"] == "authenticated"
-        ws.send_json({"type": "browser_discover", "session_id": "sess-9", "max_results": 5})
-        ws.send_json({"type": "browser_extract", "session_id": "sess-9", "mode": "text", "max_chars": 1000})
-        assert ws.receive_json()["type"] == "browser_session_delta"
-        assert ws.receive_json()["type"] == "browser_session_delta"
-
-    assert commands == [
         ("sess-9", "discover", {"max_results": 5}),
         ("sess-9", "extract", {"mode": "text", "max_chars": 1000}),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_browser_service_runs_tab_commands():
-    from brain.platform.browser.service import BrowserSessionService
-
-    service = BrowserSessionService()
-    calls = []
-
-    class FakeRuntime:
-        async def new_tab(self, url=None):
-            calls.append(("new_tab", {"url": url}))
-            return {"current_tab_index": 1}
-
-        async def switch_tab(self, index: int):
-            calls.append(("switch_tab", {"index": index}))
-            return {"current_tab_index": index}
-
-        async def close_tab(self, index=None):
-            calls.append(("close_tab", {"index": index}))
-            return {"current_tab_index": 0}
-
-        async def list_tabs(self):
-            calls.append(("list_tabs", {}))
-            return {"tabs": [{"index": 0, "active": True}]}
-
-    fake_runtime = FakeRuntime()
-
-    async def fake_get_or_restore(session_id: str):
-        assert session_id == "sess-tabs"
-        return fake_runtime
-
-    service.get_or_restore_runtime = fake_get_or_restore  # type: ignore[method-assign]
-
-    new_tab = await service.command("sess-tabs", "new_tab", {"url": "https://example.com"})
-    switched = await service.command("sess-tabs", "switch_tab", {"index": 0})
-    listed = await service.command("sess-tabs", "list_tabs", {})
-    closed = await service.command("sess-tabs", "close_tab", {})
-
-    assert new_tab["current_tab_index"] == 1
-    assert switched["current_tab_index"] == 0
-    assert listed["tabs"][0]["active"] is True
-    assert closed["current_tab_index"] == 0
-    assert calls == [
-        ("new_tab", {"url": "https://example.com"}),
-        ("switch_tab", {"index": 0}),
-        ("list_tabs", {}),
-        ("close_tab", {"index": None}),
     ]

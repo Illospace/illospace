@@ -61,32 +61,21 @@ def test_openai_oauth_start_accepts_valid_callback_mode_json():
     assert start.call_args.kwargs["callback_mode"] == "local_bridge"
 
 
-def test_openai_oauth_start_falls_back_for_unrecognized_body():
+def test_openai_oauth_start_falls_back_for_invalid_callback_payloads():
     cases = [
-        {"callback_mode": "server_callback"},
-        {"callback_mode": {"callback_mode": "server"}},
-        {"callback_mode": ["server"]},
-        {"callback_mode": True},
-        {"callback_mode": None},
-        {"callbackMode": "server"},
-        ["server"],
-        "server",
+        {"json": {"callback_mode": "server_callback"}},
+        {"json": {"callback_mode": {"callback_mode": "server"}}},
+        {"json": {"callback_mode": ["server"]}},
+        {"json": {"callback_mode": True}},
+        {"json": {"callback_mode": None}},
+        {"json": {"callbackMode": "server"}},
+        {"json": ["server"]},
+        {"json": "server"},
+        {"content": "{not json", "headers": {"Content-Type": "application/json"}},
     ]
-    for payload in cases:
+    for request_kwargs in cases:
         with patch("brain.systems.runtime_settings.router.start_openai_oauth", return_value=_oauth_response()) as start:
-            response = _client().post("/api/runtime-settings/connection/openai/oauth/start", json=payload)
+            response = _client().post("/api/runtime-settings/connection/openai/oauth/start", **request_kwargs)
 
         assert response.status_code == 200
         assert start.call_args.kwargs["callback_mode"] == "auto"
-
-
-def test_openai_oauth_start_falls_back_for_malformed_json():
-    with patch("brain.systems.runtime_settings.router.start_openai_oauth", return_value=_oauth_response()) as start:
-        response = _client().post(
-            "/api/runtime-settings/connection/openai/oauth/start",
-            content="{not json",
-            headers={"Content-Type": "application/json"},
-        )
-
-    assert response.status_code == 200
-    assert start.call_args.kwargs["callback_mode"] == "auto"

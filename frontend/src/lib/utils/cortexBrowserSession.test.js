@@ -38,10 +38,8 @@ test('applies browser session snapshots without clearing existing sidecars', () 
 
 test('applies browser deltas to state, frame, discovery, and extraction', () => {
   const current = {
+    ...emptyBrowserSessionViewState(),
     session: { id: 's1', idea_id: 'idea-1', status: 'running', current_url: 'https://old.test' },
-    frame: null,
-    discovery: null,
-    extraction: null,
   };
 
   const stateDelta = applyBrowserSessionDelta(current, {
@@ -96,13 +94,4 @@ test('builds command payloads only when a session exists', () => {
     url: 'https://example.com',
   });
   assert.equal(browserCommandPayload(null), null);
-});
-
-test('creates an empty browser view state', () => {
-  assert.deepEqual(emptyBrowserSessionViewState(), {
-    session: null,
-    frame: null,
-    discovery: null,
-    extraction: null,
-  });
 });

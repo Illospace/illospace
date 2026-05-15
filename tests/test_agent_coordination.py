@@ -11,6 +11,7 @@ from sqlalchemy import text
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
 
 pytestmark = [
+    pytest.mark.requires_db,
     pytest.mark.skipif(
         not os.environ.get("TEST_DB_URL"),
         reason="TEST_DB_URL not set — run via scripts/test-with-db.sh",

@@ -72,12 +72,6 @@ class TestGapDetection:
             {"description": "production deployment of hotfix", "skills_used": None},
         ]
         existing_skills = ["investigate", "test", "debug"]
-        gaps = meta_skills.detect_gaps(tasks, existing_skills)
-        # "deploy" appears in 2 tasks, "production" in 2 — but with stemming
-        # the word "deploy"/"deployment" should cluster. Use exact word match:
-        # deploy(2) + deployment(1) won't hit 3. Use "production" tasks instead:
-        assert len(gaps) >= 1 or True  # gap detection is best-effort keyword clustering
-        # More robust: test with exact word matches
         tasks2 = [
             {"description": "deploy the app", "skills_used": None},
             {"description": "deploy the service", "skills_used": None},

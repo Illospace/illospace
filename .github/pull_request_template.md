@@ -4,6 +4,8 @@
 
 ## Testing
 
+- [ ] Survivability:
+- [ ] Product journeys:
 - [ ] Backend tests:
 - [ ] Frontend checks/build:
 - [ ] Manual verification:

@@ -57,9 +57,3 @@ def test_eval_suite_returns_machine_readable_failures():
 def test_live_provider_eval_requires_explicit_backend():
     with pytest.raises(ValueError, match="explicit backend"):
         run_backend_eval_suite(live_provider=True)
-
-
-@pytest.mark.live_provider
-def test_live_provider_marker_is_opt_in_only():
-    # This marker exists so future live evals can be excluded from normal CI.
-    assert True

@@ -3,82 +3,101 @@ import assert from 'node:assert/strict';
 
 import { getRunDecision, getRunHint } from './backgroundRun.ts';
 
-test('plain text runs explicitly to Illo', () => {
-  const decision = getRunDecision('can you review this?');
-  assert.equal(decision.shouldRun, true);
-  assert.equal(decision.isExplicit, true);
-  assert.equal(decision.reason, 'message');
-});
+const runCases = [
+  {
+    name: 'plain request',
+    content: 'can you review this?',
+    decision: { shouldRun: true, isExplicit: true, reason: 'message' },
+    hint: 'Illo will respond',
+  },
+  {
+    name: 'leading slash command',
+    content: '/debug flaky test',
+    decision: { shouldRun: true, isExplicit: true, reason: 'slash_command' },
+    hint: 'Skill command',
+  },
+  {
+    name: 'inline slash command',
+    content: 'can you use /debug for this flaky test?',
+    decision: { shouldRun: true, isExplicit: true, reason: 'slash_command' },
+    hint: 'Skill command',
+  },
+  {
+    name: 'inline slash skill reference',
+    content: 'hey illo what does /manage-domains do?',
+    decision: { shouldRun: true, isExplicit: true, reason: 'slash_command' },
+    hint: 'Skill command',
+  },
+  {
+    name: 'inline slash explanation request',
+    content: 'can you explain /debug?',
+    decision: { shouldRun: true, isExplicit: true, reason: 'slash_command' },
+    hint: 'Skill command',
+  },
+  {
+    name: 'path-like slash text',
+    content: 'please inspect /api/foo',
+    decision: { shouldRun: true, isExplicit: true, reason: 'message' },
+    hint: 'Illo will respond',
+  },
+  {
+    name: 'question text',
+    content: 'How should we handle this edge case?',
+    decision: { shouldRun: true, isExplicit: true, reason: 'message' },
+    hint: 'Illo will respond',
+  },
+  {
+    name: 'legacy @illo mention',
+    content: '@illo can you review this?',
+    decision: { shouldRun: true, isExplicit: true, reason: 'message' },
+    hint: 'Illo will respond',
+  },
+  {
+    name: 'attachment only',
+    content: '',
+    attachments: 1,
+    decision: { shouldRun: false, isExplicit: false, reason: 'none' },
+    hint: 'Attachment ready',
+  },
+  {
+    name: 'plain note with attachment',
+    content: 'plain note',
+    attachments: 1,
+    decision: { shouldRun: true, isExplicit: true, reason: 'message' },
+    hint: 'Illo will respond',
+  },
+  {
+    name: 'explicit review request',
+    content: 'Please review this plan',
+    decision: { shouldRun: true, isExplicit: true, reason: 'message' },
+    hint: 'Illo will respond',
+  },
+  {
+    name: 'plain note',
+    content: 'noting progress from today',
+    decision: { shouldRun: true, isExplicit: true, reason: 'message' },
+    hint: 'Illo will respond',
+  },
+  {
+    name: 'human mention',
+    content: '@alex can you take a look?',
+    decision: { shouldRun: true, isExplicit: true, reason: 'message' },
+    hint: 'Illo will respond',
+  },
+];
 
-test('slash command still runs explicitly', () => {
-  const decision = getRunDecision('/debug flaky test');
-  assert.equal(decision.shouldRun, true);
-  assert.equal(decision.isExplicit, true);
-  assert.equal(decision.reason, 'slash_command');
-});
+for (const { name, content, attachments = 0, decision, hint } of runCases) {
+  test(`run decision: ${name}`, () => {
+    assert.deepEqual(getRunDecision(content), decision);
+    assert.equal(getRunHint(content, attachments), hint);
+  });
+}
 
-test('inline slash command runs as a skill command', () => {
-  const decision = getRunDecision('can you use /debug for this flaky test?');
-  assert.equal(decision.shouldRun, true);
-  assert.equal(decision.isExplicit, true);
-  assert.equal(decision.reason, 'slash_command');
-  assert.equal(getRunHint('can you use /debug for this flaky test?'), 'Skill command');
-});
-
-test('inline slash skill reference runs as a skill command', () => {
-  const decision = getRunDecision('hey illo what does /manage-domains do?');
-  assert.equal(decision.shouldRun, true);
-  assert.equal(decision.isExplicit, true);
-  assert.equal(decision.reason, 'slash_command');
-  assert.equal(getRunHint('hey illo what does /manage-domains do?'), 'Skill command');
-});
-
-test('inline slash skill explanation request runs as a skill command', () => {
-  const decision = getRunDecision('can you explain /debug?');
-  assert.equal(decision.shouldRun, true);
-  assert.equal(decision.reason, 'slash_command');
-  assert.equal(getRunHint('can you explain /debug?'), 'Skill command');
-});
-
-test('path-like slash text runs as a normal message', () => {
-  const decision = getRunDecision('please inspect /api/foo');
-  assert.equal(decision.shouldRun, true);
-  assert.equal(decision.isExplicit, true);
-  assert.equal(decision.reason, 'message');
-  assert.equal(getRunHint('please inspect /api/foo'), 'Illo will respond');
-});
-
-test('question text runs as a normal Illo message', () => {
-  const decision = getRunDecision('How should we handle this edge case?');
-  assert.equal(decision.shouldRun, true);
-  assert.equal(decision.isExplicit, true);
-  assert.equal(decision.reason, 'message');
-  assert.equal(getRunHint('How should we handle this edge case?'), 'Illo will respond');
-});
-
-test('legacy @illo mention is just normal text now', () => {
-  assert.equal(getRunHint('@illo can you review this?'), 'Illo will respond');
-});
-
-test('attachment-only hint stays neutral until the user writes to Illo', () => {
-  assert.equal(getRunHint('', 1), 'Attachment ready');
-  assert.equal(getRunHint('plain note', 1), 'Illo will respond');
-});
-
-test('request text runs to Illo', () => {
-  const decision = getRunDecision('Please review this plan');
-  assert.equal(decision.shouldRun, true);
-  assert.equal(decision.reason, 'message');
-});
-
-test('plain note runs to Illo', () => {
-  const decision = getRunDecision('noting progress from today');
-  assert.equal(decision.shouldRun, true);
-  assert.equal(decision.reason, 'message');
-});
-
-test('human mentions still run while mentions are resolved separately', () => {
-  const decision = getRunDecision('@alex can you take a look?');
-  assert.equal(decision.shouldRun, true);
-  assert.equal(decision.reason, 'message');
+test('empty message without attachments stays idle', () => {
+  assert.deepEqual(getRunDecision(''), {
+    shouldRun: false,
+    isExplicit: false,
+    reason: 'none',
+  });
+  assert.equal(getRunHint(''), '');
 });

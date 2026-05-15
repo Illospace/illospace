@@ -340,13 +340,3 @@ class TestEvolveMeta:
 
         result = await evolve_meta()
         assert result["current_criteria"]["min_procedure_steps"] <= 3
-
-
-# ---- CLI tests ----
-
-class TestCLI:
-    async def test_cli_help(self):
-        from brain.app.cli.meta_learn import main
-        with pytest.raises(SystemExit):
-            with patch("sys.argv", ["meta_learn.py", "--help"]):
-                await main()

@@ -1,5 +1,5 @@
 # tests/test_api_main.py
-"""Smoke tests for FastAPI app startup and health endpoint."""
+"""FastAPI app lifecycle and event fanout tests."""
 import asyncio
 
 import pytest
@@ -18,15 +18,6 @@ async def client():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
-
-
-@pytest.mark.asyncio
-async def test_health(client):
-    resp = await client.get("/api/health")
-    assert resp.status_code == 200
-    data = resp.json()
-    # Health endpoint returns status: "ok" when DB is up, "degraded" when DB is down
-    assert data["status"] in ("ok", "degraded")
 
 
 @pytest.mark.asyncio
@@ -58,13 +49,6 @@ async def test_health_includes_run_event_backbone(client):
     assert data["run_event_backbone"]["health"] == "lagging"
     assert data["run_event_backbone"]["lag"] == 2
     assert data["run_event_backbone"]["consumer_running"] is True
-
-
-@pytest.mark.asyncio
-async def test_openapi_spec(client):
-    resp = await client.get("/api/openapi.json")
-    assert resp.status_code == 200
-    assert "paths" in resp.json()
 
 
 @pytest.mark.asyncio

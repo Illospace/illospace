@@ -13,10 +13,13 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from sqlalchemy import text
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("TEST_DB_URL"),
-    reason="TEST_DB_URL not set — run via scripts/test-with-db.sh",
-)
+pytestmark = [
+    pytest.mark.requires_db,
+    pytest.mark.skipif(
+        not os.environ.get("TEST_DB_URL"),
+        reason="TEST_DB_URL not set — run via scripts/test-with-db.sh",
+    ),
+]
 
 from brain.systems.memory.retrieval_feedback import (
     analyze_missed_memories,
