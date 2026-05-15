@@ -60,6 +60,8 @@ def test_ops_deploy_drains_worker_instead_of_restarting_active_runs():
     assert "start_worker_handoff" in content
     assert "monitor_worker_handoff" in content
     assert "ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1" in content
+    service = (Path(__file__).resolve().parents[1] / "ops" / "cortex-worker.service").read_text()
+    assert service.count("ILLO_WORKER_DISABLE_CYCLE_SCHEDULER=1") == 1
     assert "systemctl --user kill --kill-who=main --signal=TERM cortex-worker" in content
     assert "active AgentRun(s); signaling drain instead of restart" in content
 
@@ -219,6 +221,7 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     assert "127.0.0.1:${ILLO_WEB_PORT:-8080}:8080" in compose
     assert "ILLO_SELF_UPDATE_REQUEST_FILE" in compose
     assert "ILLO_SELF_UPDATE_HEARTBEAT_FILE" in compose
+    assert 'ILLO_WORKER_DISABLE_CYCLE_SCHEDULER: "1"' in compose
     assert "deploy/docker/updater.Dockerfile" in compose
     assert "illo-self-update-healthcheck" in compose
     assert "/var/run/docker.sock:/var/run/docker.sock" in compose

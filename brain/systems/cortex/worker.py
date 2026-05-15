@@ -71,8 +71,11 @@ def _require_embedding_backend_ready() -> None:
 
 
 def _cycle_scheduler_enabled() -> bool:
-    raw = os.getenv("ILLO_WORKER_DISABLE_CYCLE_SCHEDULER", "").strip().lower()
-    return raw not in {"1", "true", "yes", "on"}
+    disabled = os.getenv("ILLO_WORKER_DISABLE_CYCLE_SCHEDULER", "").strip().lower()
+    if disabled in {"1", "true", "yes", "on"}:
+        return False
+    enabled = os.getenv("ILLO_WORKER_ENABLE_CYCLE_SCHEDULER", "").strip().lower()
+    return enabled in {"1", "true", "yes", "on"}
 
 
 def main() -> None:

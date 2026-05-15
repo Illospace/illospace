@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -1621,15 +1622,16 @@ async def test_runner_settles_root_run_idea_status():
     from brain.platform.db.models.agent_run import AgentRunRow
     from brain.platform.db.models.idea import Idea, IdeaStateLog
 
-    run = SimpleNamespace(id=42, parent_run_id=None, thread_id="idea-1", status="completed")
-    idea = SimpleNamespace(id="idea-1", status="active", updated_at=None)
+    idea_id = str(uuid.uuid4())
+    run = SimpleNamespace(id=42, parent_run_id=None, thread_id=idea_id, status="completed")
+    idea = SimpleNamespace(id=idea_id, status="active", updated_at=None)
     added = []
 
     class FakeSession:
         async def get(self, model, key):
             if model is AgentRunRow and int(key) == 42:
                 return run
-            if model is Idea and str(key) == "idea-1":
+            if model is Idea and str(key) == idea_id:
                 return idea
             return None
 
@@ -1643,7 +1645,7 @@ async def test_runner_settles_root_run_idea_status():
 
     assert idea.status == "unread_reply"
     assert payload == {
-        "idea_id": "idea-1",
+        "idea_id": idea_id,
         "old_status": "active",
         "new_status": "unread_reply",
         "run_id": 42,
@@ -1662,3 +1664,26 @@ async def test_runner_does_not_settle_child_run_idea_status():
             return run if model is AgentRunRow else None
 
     assert await _settle_idea_for_terminal_root_run_async(FakeSession(), 43) is None
+
+
+async def test_runner_does_not_settle_non_idea_thread_id():
+    from brain.systems.runs.cortex.runner import _settle_idea_for_terminal_root_run_async
+    from brain.platform.db.models.agent_run import AgentRunRow
+    from brain.platform.db.models.idea import Idea
+
+    run = SimpleNamespace(
+        id=44,
+        parent_run_id=None,
+        thread_id="external-agent:conn-1:ask-1",
+        status="completed",
+    )
+
+    class FakeSession:
+        async def get(self, model, key):
+            if model is AgentRunRow and int(key) == 44:
+                return run
+            if model is Idea:
+                raise AssertionError("synthetic external-agent thread id must not query ideas")
+            return None
+
+    assert await _settle_idea_for_terminal_root_run_async(FakeSession(), 44) is None

@@ -47,5 +47,24 @@ def test_cycle_scheduler_can_be_disabled_for_handoff_worker(monkeypatch):
     from brain.systems.cortex.worker import _cycle_scheduler_enabled
 
     monkeypatch.setenv("ILLO_WORKER_DISABLE_CYCLE_SCHEDULER", "1")
+    monkeypatch.setenv("ILLO_WORKER_ENABLE_CYCLE_SCHEDULER", "1")
 
     assert _cycle_scheduler_enabled() is False
+
+
+def test_cycle_scheduler_is_disabled_by_default_in_agent_worker(monkeypatch):
+    from brain.systems.cortex.worker import _cycle_scheduler_enabled
+
+    monkeypatch.delenv("ILLO_WORKER_DISABLE_CYCLE_SCHEDULER", raising=False)
+    monkeypatch.delenv("ILLO_WORKER_ENABLE_CYCLE_SCHEDULER", raising=False)
+
+    assert _cycle_scheduler_enabled() is False
+
+
+def test_cycle_scheduler_can_be_explicitly_enabled(monkeypatch):
+    from brain.systems.cortex.worker import _cycle_scheduler_enabled
+
+    monkeypatch.delenv("ILLO_WORKER_DISABLE_CYCLE_SCHEDULER", raising=False)
+    monkeypatch.setenv("ILLO_WORKER_ENABLE_CYCLE_SCHEDULER", "1")
+
+    assert _cycle_scheduler_enabled() is True

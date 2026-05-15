@@ -219,7 +219,11 @@ async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict
     target_status = _TERMINAL_RUN_IDEA_STATUS.get(str(run.status or ""))
     if not target_status or not run.thread_id:
         return None
-    idea = await session.get(Idea, str(run.thread_id))
+    try:
+        idea_id = str(uuid.UUID(str(run.thread_id)))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    idea = await session.get(Idea, idea_id)
     if idea is None:
         return None
     old_status = str(idea.status or "")
