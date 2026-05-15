@@ -154,30 +154,18 @@ class TestRunUserPassthrough:
 
     async def test_admit_run_stores_user_id(self):
         """async_admit_run() should pass user_id into run request construction."""
-        from types import SimpleNamespace
-
-        import brain.systems.runs.cortex as cortex
         from brain.systems.runs.cortex import RunAdmissionRequest, async_admit_run
+        from brain.systems.runs.work_intake import WorkIntakeResult
 
-        captured_kwargs = {}
-        captured_request = None
+        captured = {}
 
-        async def _build_request(session, **kwargs):
-            captured_kwargs.update(kwargs)
-            return SimpleNamespace(user_id=kwargs["user_id"], thread_id=kwargs["idea_id"])
+        async def _admit_work(session, event):
+            captured["session"] = session
+            captured["event"] = event
+            return WorkIntakeResult(ok=True, run_id=100)
 
-        class _Store:
-            def __init__(self, session):
-                self.session = session
-
-            async def create_run(self, run_request):
-                nonlocal captured_request
-                captured_request = run_request
-                return SimpleNamespace(id=100)
-
-        with patch.object(cortex, "a_build_run_request", side_effect=_build_request), \
-             patch.object(cortex, "AsyncAgentRunStore", _Store), \
-             patch.object(cortex, "_a_mark_idea_working_for_run_admission", new=AsyncMock(return_value=None)):
+        session = MagicMock()
+        with patch("brain.systems.runs.work_intake.admit_work", side_effect=_admit_work):
             result = await async_admit_run(
                 RunAdmissionRequest(
                     idea_id="idea-123",
@@ -185,12 +173,14 @@ class TestRunUserPassthrough:
                     message="test message",
                     user_id=USER_A["id"],
                 ),
-                session=MagicMock(),
+                session=session,
             )
 
         assert result.run_id == 100
-        assert captured_kwargs["user_id"] == USER_A["id"]
-        assert captured_kwargs["idea_id"] == "idea-123"
-        assert captured_kwargs["event"] == "thread_reply"
-        assert captured_request.user_id == USER_A["id"]
-        assert captured_request.thread_id == "idea-123"
+        assert captured["session"] is session
+        event = captured["event"]
+        assert event.actor["id"] == USER_A["id"]
+        assert event.target == {"kind": "cortex_idea", "idea_id": "idea-123"}
+        assert event.event_type == "cortex.thread_reply"
+        assert event.payload["message"] == "test message"
+        assert event.policy["run_event"] == "thread_reply"

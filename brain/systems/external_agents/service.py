@@ -20,7 +20,7 @@ from brain.platform.db.models.external_agent import (
     ExternalAgentTaskEventRow,
     ExternalAgentTaskRow,
 )
-from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread, UserMention
+from brain.platform.db.models.idea import Idea, IdeaThread, UserMention
 from brain.platform.db.models.notification import (
     NOTIFICATION_KIND_WORKSPACE_MENTION,
     NOTIFICATION_KIND_WORKSPACE_THREAD_ATTENTION,
@@ -28,7 +28,13 @@ from brain.platform.db.models.notification import (
     NotificationEvent,
 )
 from brain.platform.db.models.org import User
-from brain.systems.runs.domain import AgentRunEvent, AgentRunRequest, EventVisibility, RunProfile, RunRecipe
+from brain.systems.cortex.thought_lifecycle import (
+    ThoughtStatusCommand,
+    ThreadMessageCommand,
+    post_thread_message_sync,
+    transition_thought_status_sync,
+)
+from brain.systems.runs.domain import AgentRunEvent, AgentRunRequest as _AgentRunRequest, EventVisibility, RunProfile, RunRecipe
 from brain.systems.runs.events import run_event
 from brain.systems.runs.ids import trace_id_for_run_id
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
@@ -625,36 +631,35 @@ def create_external_task_for_idea(
         producer="illo",
     )
 
-    current_status = idea.status
-    if current_status in {"emerged", "needs_input", "unread_reply", "active"}:
-        idea.status = "working"
-        idea.updated_at = utcnow()
-        session.add(
-            IdeaStateLog(
-                idea_id=str(idea.id),
-                from_state=current_status,
-                to_state="working",
+    if idea.status in {"emerged", "needs_input", "unread_reply", "active"}:
+        transition_thought_status_sync(
+            session,
+            idea=idea,
+            command=ThoughtStatusCommand(
+                to_status="working",
                 trigger="external_agent_task_created",
-            )
+            ),
         )
 
-    status_message = IdeaThread(
-        idea_id=str(idea.id),
-        role="illo",
-        content=f"Delegated to {connection.display_name}: {str(instructions).strip()}",
-        user_id=None,
-        message_type="agent_status",
-        metadata_={
-            "external_agent_task_id": str(task.id),
-            "external_agent_connection_id": str(connection.id),
-            "external_agent_display_name": connection.display_name,
-        },
+    status_result = post_thread_message_sync(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="illo",
+            content=f"Delegated to {connection.display_name}: {str(instructions).strip()}",
+            metadata={
+                "external_agent_task_id": str(task.id),
+                "external_agent_connection_id": str(connection.id),
+                "external_agent_display_name": connection.display_name,
+            },
+        ),
+        parse_message_type=lambda _content, _role: "agent_status",
+        apply_lifecycle=False,
     )
-    session.add(status_message)
+    task.source_thread_message_id = status_result.message.id
     session.flush()
-    task.source_thread_message_id = status_message.id
-    session.flush()
-    return task, status_message
+    return task, status_result.message
 
 
 def claim_tasks(
@@ -795,29 +800,29 @@ def _add_external_agent_thread_message(
     idea = session.get(Idea, str(task.source_idea_id))
     if idea is None:
         return None
-    message = IdeaThread(
-        idea_id=str(idea.id),
-        role="illo",
-        content=str(content),
-        user_id=None,
-        message_type=message_type,
-        metadata_={
-            "external_agent_task_id": str(task.id),
-            "external_agent_connection_id": str(task.connection_id),
-        },
+    result = post_thread_message_sync(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="illo",
+            content=str(content),
+            metadata={
+                "external_agent_task_id": str(task.id),
+                "external_agent_connection_id": str(task.connection_id),
+            },
+        ),
+        parse_message_type=lambda _content, _role: message_type,
+        apply_lifecycle=False,
     )
-    session.add(message)
     if message_type == "agent_response" and idea.status != "resolved":
-        previous = idea.status
-        idea.status = "unread_reply"
-        idea.updated_at = utcnow()
-        session.add(
-            IdeaStateLog(
-                idea_id=str(idea.id),
-                from_state=previous,
-                to_state="unread_reply",
+        transition_thought_status_sync(
+            session,
+            idea=idea,
+            command=ThoughtStatusCommand(
+                to_status="unread_reply",
                 trigger="external_agent_task_completed",
-            )
+            ),
         )
         if idea.user_id and idea.org_id:
             NotificationEventRepository(session).create_or_coalesce(
@@ -837,7 +842,7 @@ def _add_external_agent_thread_message(
                 idea_id=str(idea.id),
             )
     session.flush()
-    return message
+    return result.message
 
 
 def complete_task(
@@ -1138,22 +1143,27 @@ def create_thread_from_agent(
     )
     session.add(idea)
     session.flush()
-    thread = IdeaThread(
-        idea_id=str(idea.id),
-        role="user",
-        content=str(body or ""),
-        user_id=principal.owner_user_id,
-        attachments=list(artifacts or []),
-        message_type="trigger" if trigger_illo else "agent_share",
-        metadata_={
-            "external_agent_connection_id": principal.connection_id,
-            "external_agent_display_name": principal.connection_display_name,
-            "trigger_illo": bool(trigger_illo),
-            **dict(metadata or {}),
-        },
+    thread_result = post_thread_message_sync(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="user",
+            content=str(body or ""),
+            actor={"user_id": principal.owner_user_id, "org_id": principal.org_id},
+            attachments=list(artifacts or []),
+            metadata={
+                "external_agent_connection_id": principal.connection_id,
+                "external_agent_display_name": principal.connection_display_name,
+                "trigger_illo": bool(trigger_illo),
+                **dict(metadata or {}),
+            },
+        ),
+        parse_message_type=lambda _content, _role: "trigger" if trigger_illo else "agent_share",
+        apply_lifecycle=bool(trigger_illo),
+        lifecycle_trigger="external_agent_thread_message",
     )
-    session.add(thread)
-    session.flush()
+    thread = thread_result.message
     notified = _notify_mentions(
         session,
         org_id=principal.org_id,
@@ -1179,34 +1189,27 @@ def post_thread_message_from_agent(
     metadata: Mapping[str, Any] | None = None,
 ) -> tuple[Idea, IdeaThread, list[str]]:
     idea = _idea_for_org(session, idea_id=str(idea_id), org_id=principal.org_id)
-    thread = IdeaThread(
-        idea_id=str(idea.id),
-        role="user",
-        content=str(body or ""),
-        user_id=principal.owner_user_id,
-        attachments=list(artifacts or []),
-        message_type="trigger" if trigger_illo else "agent_share",
-        metadata_={
-            "external_agent_connection_id": principal.connection_id,
-            "external_agent_display_name": principal.connection_display_name,
-            "trigger_illo": bool(trigger_illo),
-            **dict(metadata or {}),
-        },
+    thread_result = post_thread_message_sync(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="user",
+            content=str(body or ""),
+            actor={"user_id": principal.owner_user_id, "org_id": principal.org_id},
+            attachments=list(artifacts or []),
+            metadata={
+                "external_agent_connection_id": principal.connection_id,
+                "external_agent_display_name": principal.connection_display_name,
+                "trigger_illo": bool(trigger_illo),
+                **dict(metadata or {}),
+            },
+        ),
+        parse_message_type=lambda _content, _role: "trigger" if trigger_illo else "agent_share",
+        apply_lifecycle=bool(trigger_illo),
+        lifecycle_trigger="external_agent_thread_message",
     )
-    session.add(thread)
-    previous = idea.status
-    if previous in {"needs_input", "unread_reply", "emerged"}:
-        idea.status = "active"
-        idea.updated_at = utcnow()
-        session.add(
-            IdeaStateLog(
-                idea_id=str(idea.id),
-                from_state=previous,
-                to_state="active",
-                trigger="external_agent_thread_message",
-            )
-        )
-    session.flush()
+    thread = thread_result.message
     notified = _notify_mentions(
         session,
         org_id=principal.org_id,
@@ -1264,7 +1267,7 @@ def _append_run_event(session: Session, event: AgentRunEvent) -> AgentRunEventRo
     return row
 
 
-def _create_agent_run(session: Session, request: AgentRunRequest) -> AgentRunRow:
+def _create_agent_run(session: Session, request: _AgentRunRequest) -> AgentRunRow:
     profile = request.normalized_profile
     recipe = request.normalized_recipe
     row = AgentRunRow(
@@ -1339,7 +1342,7 @@ def create_headless_ask(
     session.flush()
     run = _create_agent_run(
         session,
-        AgentRunRequest(
+        _AgentRunRequest(
             org_id=principal.org_id,
             user_id=principal.owner_user_id,
             thread_id=f"external-agent:{principal.connection_id}:{task_id}",

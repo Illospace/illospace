@@ -36,14 +36,19 @@ from brain.systems.cortex.thread_attachments import (
     build_thread_attachment_context,
     project_context_from_text_attachments,
 )
-from brain.systems.cortex.thought_lifecycle import ThreadMessageCommand, post_thread_message
+from brain.systems.cortex.thought_lifecycle import (
+    ThoughtStatusCommand,
+    ThreadMessageCommand,
+    post_thread_message,
+    transition_thought_status,
+)
 from brain.systems.cortex.project_context.snapshot import (
     ProjectContextValidationError,
     validated_project_context_snapshot,
 )
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
 from brain.platform.db.models.run import AgentRun
-from brain.platform.db.models.idea import IdeaStateLog, IdeaThread
+from brain.platform.db.models.idea import IdeaThread
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
@@ -485,14 +490,16 @@ async def mark_read(idea_id: str, request: Request, user: dict[str, Any] = Depen
     async with UnitOfWork() as uow:
         idea = await _require_idea_for_user(uow.session, idea_id, user)
         if idea.status == "unread_reply":
-            idea.status = "needs_input"
             idea.read_at = datetime.now(timezone.utc)
-            uow.session.add(IdeaStateLog(
-                idea_id=idea_id,
-                from_state="unread_reply",
-                to_state="needs_input",
-                trigger="user_read",
-            ))
+            await transition_thought_status(
+                uow.session,
+                idea=idea,
+                command=ThoughtStatusCommand(
+                    to_status="needs_input",
+                    trigger="user_read",
+                    actor=user,
+                ),
+            )
         await uow.notifications.mark_read_for_idea(user_id=user_id, idea_id=idea_id)
     try:
         await _publish_notification_summary_updates(org_id=org_id, user_ids={user_id})

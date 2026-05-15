@@ -161,12 +161,9 @@ class TestCortexAPIStatuses:
 
     @pytest.mark.parametrize("status", API_STATUSES)
     @patch("brain.app.api.routers.cortex._ideas.IdeaRepository")
-    @patch("brain.app.api.routers.cortex._ideas.IdeaStateLog")
-    def test_update_idea_status(self, MockStateLog, MockIdeaRepo, client, status):
+    def test_update_idea_status(self, MockIdeaRepo, client, status):
         fake = _fake_idea(status="emerged")
         MockIdeaRepo.return_value.a_get = AsyncMock(return_value=fake)
-        # After update, the mock should reflect the new status
-        fake.status = status
 
         with patch("brain.app.api.routers.cortex._helpers.IdeaRepository") as MockHelperIdeaRepo:
             MockHelperIdeaRepo.return_value.a_get = AsyncMock(return_value=fake)

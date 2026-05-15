@@ -45,6 +45,47 @@ class ThreadMessageResult:
     notification_user_ids: set[str]
 
 
+@dataclass(frozen=True)
+class ThoughtStatusCommand:
+    to_status: str
+    trigger: str | None
+    actor: Mapping[str, Any] = field(default_factory=dict)
+    run_id: int | None = None
+    changed_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ThoughtStatusResult:
+    status_change: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class TerminalRunSettlementCommand:
+    run_id: int
+    run_status: str
+    final_answer: str | None = None
+    artifact_id: int | str | None = None
+
+
+@dataclass(frozen=True)
+class TerminalRunSettlementResult:
+    status_change: dict[str, Any] | None
+    thread_message: IdeaThread | None
+    thread_message_payload: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class ThoughtRunAdmissionCommand:
+    event: str
+    message: str
+    actor: Mapping[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] | None = None
+    priority: int = 0
+    source: str | None = None
+    producer: str | None = None
+    idempotency_key: str | None = None
+
+
 def compact_notification_text(text: str | None, limit: int = 160) -> str | None:
     normalized = " ".join((text or "").split())
     if not normalized:
@@ -149,6 +190,166 @@ def _message_payload(thread_msg: IdeaThread, *, actor: Mapping[str, Any], user_i
         payload["user_name"] = actor.get("name")
         payload["user_color"] = actor.get("color", "#6366f1")
     return payload
+
+
+def _status_change_payload(
+    idea: Any,
+    *,
+    old_status: str | None,
+    new_status: str,
+    run_id: int | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "idea_id": str(getattr(idea, "id", "") or ""),
+        "old_status": old_status,
+        "new_status": new_status,
+    }
+    org_id = str(getattr(idea, "org_id", None) or "") or None
+    if org_id:
+        payload["org_id"] = org_id
+    if run_id is not None:
+        payload["run_id"] = int(run_id)
+    return payload
+
+
+def _apply_archival_fields(idea: Any, *, old_status: str | None, new_status: str, now: datetime) -> None:
+    if not hasattr(idea, "archived_at"):
+        return
+    if new_status == "archived":
+        idea.archived_at = now
+    elif old_status == "archived":
+        idea.archived_at = None
+
+
+def _add_state_log(
+    session: Any,
+    *,
+    idea: Any,
+    old_status: str | None,
+    new_status: str,
+    trigger: str | None,
+    changed_at: datetime,
+) -> None:
+    session.add(
+        IdeaStateLog(
+            idea_id=str(getattr(idea, "id", "") or ""),
+            from_state=old_status,
+            to_state=new_status,
+            changed_at=changed_at,
+            trigger=trigger,
+        )
+    )
+
+
+def _transition_thought_status_common(
+    session: Any,
+    *,
+    idea: Any,
+    command: ThoughtStatusCommand,
+    publish: ProductEventPublisher | None = None,
+) -> ThoughtStatusResult:
+    old_status = str(getattr(idea, "status", "") or "")
+    new_status = str(command.to_status or "").strip()
+    if not new_status:
+        return ThoughtStatusResult(status_change=None)
+    if old_status == new_status:
+        if new_status == "archived" and hasattr(idea, "archived_at") and idea.archived_at is None:
+            now = command.changed_at or datetime.now(timezone.utc)
+            idea.archived_at = now
+            idea.updated_at = now
+            _add_state_log(
+                session,
+                idea=idea,
+                old_status=old_status or None,
+                new_status=new_status,
+                trigger=command.trigger,
+                changed_at=now,
+            )
+            return ThoughtStatusResult(
+                status_change=_status_change_payload(
+                    idea,
+                    old_status=old_status,
+                    new_status=new_status,
+                    run_id=command.run_id,
+                )
+            )
+        return ThoughtStatusResult(status_change=None)
+    now = command.changed_at or datetime.now(timezone.utc)
+    idea.status = new_status
+    idea.updated_at = now
+    _apply_archival_fields(idea, old_status=old_status, new_status=new_status, now=now)
+    _add_state_log(
+        session,
+        idea=idea,
+        old_status=old_status or None,
+        new_status=new_status,
+        trigger=command.trigger,
+        changed_at=now,
+    )
+    status_change = _status_change_payload(
+        idea,
+        old_status=old_status,
+        new_status=new_status,
+        run_id=command.run_id,
+    )
+    if publish is not None:
+        publish(
+            "status_change",
+            {
+                "idea_id": status_change["idea_id"],
+                "new_status": status_change["new_status"],
+                **({"run_id": command.run_id} if command.run_id is not None else {}),
+            },
+        )
+    return ThoughtStatusResult(status_change=status_change)
+
+
+async def transition_thought_status(
+    session: Any,
+    *,
+    idea: Any,
+    command: ThoughtStatusCommand,
+    publish: ProductEventPublisher | None = None,
+) -> ThoughtStatusResult:
+    result = _transition_thought_status_common(session, idea=idea, command=command, publish=publish)
+    await session.flush()
+    return result
+
+
+def transition_thought_status_sync(
+    session: Any,
+    *,
+    idea: Any,
+    command: ThoughtStatusCommand,
+    publish: ProductEventPublisher | None = None,
+) -> ThoughtStatusResult:
+    result = _transition_thought_status_common(session, idea=idea, command=command, publish=publish)
+    session.flush()
+    return result
+
+
+def _create_thread_message(
+    session: Any,
+    *,
+    idea_id: str,
+    role: str,
+    content: str,
+    attachments: list[dict[str, Any]] | None = None,
+    metadata: dict[str, Any] | None = None,
+    user_id: str | None = None,
+    message_type: str | None = None,
+) -> IdeaThread:
+    thread_msg = IdeaThread(
+        idea_id=str(idea_id),
+        role=role,
+        content=content,
+        attachments=list(attachments or []),
+        metadata_=metadata,
+        user_id=user_id,
+        message_type=message_type,
+    )
+    session.add(thread_msg)
+    return thread_msg
 
 
 async def _maybe_append_live_guidance(
@@ -259,6 +460,8 @@ async def post_thread_message(
     build_attachment_context: AttachmentContextBuilder | None = None,
     parse_message_type: MessageTypeParser | None = None,
     append_live_guidance: LiveGuidanceAppender | None = None,
+    apply_lifecycle: bool = True,
+    lifecycle_trigger: str | None = None,
 ) -> ThreadMessageResult:
     role = command.role
     if role not in ("user", "assistant", "illo"):
@@ -284,16 +487,16 @@ async def post_thread_message(
 
     user_id = _actor_user_id(command)
     message_type = (parse_message_type or _default_message_type)(content, role)
-    thread_msg = IdeaThread(
+    thread_msg = _create_thread_message(
+        session,
         idea_id=command.idea_id,
         role=role,
         content=content,
         attachments=attachments,
-        metadata_=metadata,
+        metadata=metadata,
         user_id=user_id,
         message_type=message_type,
     )
-    session.add(thread_msg)
     await session.flush()
 
     await _maybe_append_live_guidance(
@@ -320,52 +523,43 @@ async def post_thread_message(
         actor_user_id=user_id,
     )
 
-    current_status = getattr(idea, "status", None)
-    new_status = _next_status_for_message(role, current_status)
     status_change = None
-    if new_status and new_status != current_status:
-        now = datetime.now(timezone.utc)
-        idea.status = new_status
-        idea.updated_at = now
-        session.add(
-            IdeaStateLog(
-                idea_id=command.idea_id,
-                from_state=current_status,
-                to_state=new_status,
-                changed_at=now,
-                trigger=f"auto_{role}_message",
+    if apply_lifecycle:
+        current_status = getattr(idea, "status", None)
+        new_status = _next_status_for_message(role, current_status)
+        if new_status and new_status != current_status:
+            transition = _transition_thought_status_common(
+                session,
+                idea=idea,
+                command=ThoughtStatusCommand(
+                    to_status=new_status,
+                    trigger=lifecycle_trigger or f"auto_{role}_message",
+                    actor=command.actor,
+                ),
+                publish=publish,
             )
-        )
-        status_change = {
-            "idea_id": command.idea_id,
-            "old_status": current_status,
-            "new_status": new_status,
-        }
-        if notification_org_id:
-            status_change["org_id"] = notification_org_id
-        if publish is not None:
-            publish("status_change", status_change)
-        if new_status == "unread_reply" and notification_org_id and getattr(idea, "user_id", None):
-            owner_user_id = str(idea.user_id)
-            preview = compact_notification_text(content)
-            if notification_repo is not None:
-                await notification_repo.create_or_coalesce(
-                    org_id=notification_org_id,
-                    user_id=owner_user_id,
-                    source=NOTIFICATION_SOURCE_WORKSPACE,
-                    kind=NOTIFICATION_KIND_WORKSPACE_THREAD_ATTENTION,
-                    actor_user_id=None,
-                    title=f"Illo replied in {getattr(idea, 'title', '')}",
-                    body=preview,
-                    coalesce_key=f"workspace:thread_attention:{owner_user_id}:{command.idea_id}",
-                    payload={
-                        "preview": preview,
-                        "idea_title": getattr(idea, "title", None),
-                        "thread_message_id": thread_msg.id,
-                    },
-                    idea_id=str(command.idea_id),
-                )
-            notification_user_ids.add(owner_user_id)
+            status_change = transition.status_change
+            if new_status == "unread_reply" and notification_org_id and getattr(idea, "user_id", None):
+                owner_user_id = str(idea.user_id)
+                preview = compact_notification_text(content)
+                if notification_repo is not None:
+                    await notification_repo.create_or_coalesce(
+                        org_id=notification_org_id,
+                        user_id=owner_user_id,
+                        source=NOTIFICATION_SOURCE_WORKSPACE,
+                        kind=NOTIFICATION_KIND_WORKSPACE_THREAD_ATTENTION,
+                        actor_user_id=None,
+                        title=f"Illo replied in {getattr(idea, 'title', '')}",
+                        body=preview,
+                        coalesce_key=f"workspace:thread_attention:{owner_user_id}:{command.idea_id}",
+                        payload={
+                            "preview": preview,
+                            "idea_title": getattr(idea, "title", None),
+                            "thread_message_id": thread_msg.id,
+                        },
+                        idea_id=str(command.idea_id),
+                    )
+                notification_user_ids.add(owner_user_id)
 
     return ThreadMessageResult(
         message=thread_msg,
@@ -376,9 +570,199 @@ async def post_thread_message(
     )
 
 
+def post_thread_message_sync(
+    session: Any,
+    *,
+    idea: Any,
+    command: ThreadMessageCommand,
+    publish: ProductEventPublisher | None = None,
+    parse_message_type: MessageTypeParser | None = None,
+    apply_lifecycle: bool = True,
+    lifecycle_trigger: str | None = None,
+) -> ThreadMessageResult:
+    role = command.role
+    if role not in ("user", "assistant", "illo"):
+        raise ValueError("Role must be 'user', 'assistant', or 'illo'")
+    content = command.content.strip()
+    if not content:
+        raise ValueError("Content is required")
+
+    attachments = list(command.attachments or [])
+    metadata = dict(command.metadata) if isinstance(command.metadata, dict) else None
+    user_id = _actor_user_id(command)
+    message_type = (parse_message_type or _default_message_type)(content, role)
+    thread_msg = _create_thread_message(
+        session,
+        idea_id=command.idea_id,
+        role=role,
+        content=content,
+        attachments=attachments,
+        metadata=metadata,
+        user_id=user_id,
+        message_type=message_type,
+    )
+    session.flush()
+
+    status_change = None
+    if apply_lifecycle:
+        current_status = getattr(idea, "status", None)
+        new_status = _next_status_for_message(role, current_status)
+        if new_status and new_status != current_status:
+            status_change = transition_thought_status_sync(
+                session,
+                idea=idea,
+                command=ThoughtStatusCommand(
+                    to_status=new_status,
+                    trigger=lifecycle_trigger or f"auto_{role}_message",
+                    actor=command.actor,
+                ),
+                publish=publish,
+            ).status_change
+
+    return ThreadMessageResult(
+        message=thread_msg,
+        message_payload=_message_payload(thread_msg, actor=command.actor, user_id=user_id),
+        status_change=status_change,
+        notification_org_id=_actor_org_id(command, idea),
+        notification_user_ids=set(),
+    )
+
+
+def _final_answer_metadata(command: TerminalRunSettlementCommand) -> dict[str, Any]:
+    return {
+        "run_id": int(command.run_id),
+        "artifact_id": command.artifact_id,
+        "source": "agent_run_final_answer",
+    }
+
+
+async def mirror_run_final_answer(
+    session: Any,
+    *,
+    idea: Any,
+    command: TerminalRunSettlementCommand,
+) -> tuple[IdeaThread | None, dict[str, Any] | None]:
+    text = str(command.final_answer or "").strip()
+    if not text:
+        return None, None
+    thread_msg = _create_thread_message(
+        session,
+        idea_id=str(getattr(idea, "id", "") or ""),
+        role="illo",
+        content=text,
+        attachments=[],
+        metadata=_final_answer_metadata(command),
+        user_id=None,
+        message_type="agent_response",
+    )
+    await session.flush()
+    return thread_msg, _message_payload(thread_msg, actor={}, user_id=None)
+
+
+def mirror_run_final_answer_sync(
+    session: Any,
+    *,
+    idea: Any,
+    command: TerminalRunSettlementCommand,
+) -> tuple[IdeaThread | None, dict[str, Any] | None]:
+    text = str(command.final_answer or "").strip()
+    if not text:
+        return None, None
+    thread_msg = _create_thread_message(
+        session,
+        idea_id=str(getattr(idea, "id", "") or ""),
+        role="illo",
+        content=text,
+        attachments=[],
+        metadata=_final_answer_metadata(command),
+        user_id=None,
+        message_type="agent_response",
+    )
+    session.flush()
+    return thread_msg, _message_payload(thread_msg, actor={}, user_id=None)
+
+
+def _terminal_run_target_status(run_status: str) -> str | None:
+    return {
+        "completed": "unread_reply",
+        "failed": "failed",
+        "canceled": "failed",
+        "cancelled": "failed",
+    }.get(str(run_status or "").strip().lower())
+
+
+async def settle_terminal_run(
+    session: Any,
+    *,
+    idea: Any,
+    command: TerminalRunSettlementCommand,
+    publish: ProductEventPublisher | None = None,
+) -> TerminalRunSettlementResult:
+    thread_msg, thread_payload = await mirror_run_final_answer(session, idea=idea, command=command)
+    if publish is not None and thread_payload is not None:
+        publish("thread_message", {"idea_id": str(getattr(idea, "id", "") or ""), "message": thread_payload})
+    target_status = _terminal_run_target_status(command.run_status)
+    status_change = None
+    if target_status and str(getattr(idea, "status", "") or "") not in {"archived", "resolved"}:
+        transition = await transition_thought_status(
+            session,
+            idea=idea,
+            command=ThoughtStatusCommand(
+                to_status=target_status,
+                trigger=f"agent_run_{command.run_status}",
+                run_id=int(command.run_id),
+            ),
+            publish=publish,
+        )
+        status_change = transition.status_change
+    return TerminalRunSettlementResult(
+        status_change=status_change,
+        thread_message=thread_msg,
+        thread_message_payload=thread_payload,
+    )
+
+
+async def admit_thought_run(
+    session: Any,
+    *,
+    idea: Any,
+    command: ThoughtRunAdmissionCommand,
+) -> Any:
+    from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
+
+    return await admit_work(
+        session,
+        WorkIntakeEvent(
+            source=command.source or "cortex",
+            event_type=f"cortex.{command.event}",
+            org_id=str(getattr(idea, "org_id", "") or command.actor.get("org_id") or ""),
+            actor=dict(command.actor or {}),
+            target={"kind": "cortex_idea", "idea_id": str(getattr(idea, "id", "") or "")},
+            payload={"message": command.message, "metadata": dict(command.metadata or {})},
+            policy={
+                "priority": command.priority,
+                "producer": command.producer,
+                "idempotency_key": command.idempotency_key,
+            },
+        ),
+    )
+
+
 __all__ = [
     "ThreadMessageCommand",
     "ThreadMessageResult",
+    "TerminalRunSettlementCommand",
+    "TerminalRunSettlementResult",
+    "ThoughtRunAdmissionCommand",
+    "ThoughtStatusCommand",
+    "ThoughtStatusResult",
+    "admit_thought_run",
     "compact_notification_text",
+    "mirror_run_final_answer",
+    "mirror_run_final_answer_sync",
     "post_thread_message",
+    "post_thread_message_sync",
+    "settle_terminal_run",
+    "transition_thought_status",
+    "transition_thought_status_sync",
 ]

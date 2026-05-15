@@ -29,8 +29,9 @@ from brain.systems.cortex.project_context.materializer import (
     materialize_project_context_workspaces,
     project_context_has_materializable_resources,
 )
+from brain.systems.cortex.thought_lifecycle import TerminalRunSettlementCommand, settle_terminal_run
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
-from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
+from brain.platform.db.models.idea import Idea, IdeaThread
 
 logger = logging.getLogger(__name__)
 UnitOfWork = None
@@ -219,13 +220,7 @@ def _message_belongs_to_run(message: IdeaThread, run_id: int) -> bool:
     return str(metadata.get("run_id") or "") == str(run_id)
 
 
-async def _post_run_final_answer_to_thread_once_async(
-    session,
-    *,
-    run: AgentRunRow,
-    idea: Idea,
-) -> IdeaThread | None:
-    """Mirror a completed root run's final answer into the visible thread."""
+async def _latest_unmirrored_final_answer(session, *, run: AgentRunRow, idea: Idea) -> tuple[str | None, int | None]:
     artifact = (
         await session.scalars(
             select(AgentRunArtifactRow)
@@ -239,8 +234,7 @@ async def _post_run_final_answer_to_thread_once_async(
     ).first()
     text = str(getattr(artifact, "text", None) or "").strip()
     if not text:
-        return None
-
+        return None, None
     recent_responses = (
         await session.scalars(
             select(IdeaThread)
@@ -252,23 +246,8 @@ async def _post_run_final_answer_to_thread_once_async(
         )
     ).all()
     if any(_message_belongs_to_run(message, int(run.id)) for message in recent_responses):
-        return None
-
-    message = IdeaThread(
-        idea_id=str(idea.id),
-        role="illo",
-        content=text,
-        user_id=None,
-        message_type="agent_response",
-        metadata_={
-            "run_id": int(run.id),
-            "artifact_id": getattr(artifact, "id", None),
-            "source": "agent_run_final_answer",
-        },
-    )
-    session.add(message)
-    await session.flush()
-    return message
+        return None, None
+    return text, getattr(artifact, "id", None)
 
 
 async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict[str, Any] | None:
@@ -288,25 +267,18 @@ async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict
     old_status = str(idea.status or "")
     if old_status in _PROTECTED_IDEA_STATUSES:
         return None
-    await _post_run_final_answer_to_thread_once_async(session, run=run, idea=idea)
-    if old_status == target_status:
-        return None
-
-    idea.status = target_status
-    idea.updated_at = datetime.now(timezone.utc)
-    session.add(IdeaStateLog(
-        idea_id=str(idea.id),
-        from_state=old_status,
-        to_state=target_status,
-        trigger=f"agent_run_{run.status}",
-    ))
-    await session.flush()
-    return {
-        "idea_id": str(idea.id),
-        "old_status": old_status,
-        "new_status": target_status,
-        "run_id": int(run.id),
-    }
+    final_answer, artifact_id = await _latest_unmirrored_final_answer(session, run=run, idea=idea)
+    settlement = await settle_terminal_run(
+        session,
+        idea=idea,
+        command=TerminalRunSettlementCommand(
+            run_id=int(run.id),
+            run_status=str(run.status or ""),
+            final_answer=final_answer,
+            artifact_id=artifact_id,
+        ),
+    )
+    return settlement.status_change
 
 
 async def _finalize_cycle_run_if_needed_async(run_id: int, *, status: str, error: str | None = None) -> None:

@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
-from brain.systems.runs.domain import AgentRunRequest
 from brain.systems.runs.events import run_event
 from brain.systems.runs.skill_commands import iter_slash_skill_commands, parse_slash_skill_names
-from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.cortex.runner import queue_status, queue_status_async, start_runner, stop_runner
-from brain.systems.runs.cortex.thread_binding import a_build_run_request
-from brain.platform.db.models.idea import Idea, IdeaStateLog
+from brain.platform.db.models.idea import Idea
 
 UnitOfWork = None
 
@@ -76,6 +72,8 @@ def ensure_schema() -> None:
 
 
 async def _a_mark_idea_working_for_run_admission(session, idea_id: str, run_id: int) -> dict[str, Any] | None:
+    from brain.systems.cortex.thought_lifecycle import ThoughtStatusCommand, transition_thought_status
+
     idea = await session.get(Idea, str(idea_id))
     if idea is None:
         return None
@@ -92,24 +90,19 @@ async def _a_mark_idea_working_for_run_admission(session, idea_id: str, run_id: 
             "changed": False,
         }
 
-    now = datetime.now(timezone.utc)
-    idea.status = "working"
-    idea.updated_at = now
-    session.add(
-        IdeaStateLog(
-            idea_id=str(idea_id),
-            from_state=previous_status or None,
-            to_state="working",
-            changed_at=now,
+    result = await transition_thought_status(
+        session,
+        idea=idea,
+        command=ThoughtStatusCommand(
+            to_status="working",
             trigger="agent_run_admitted",
-        )
+            run_id=int(run_id),
+        ),
     )
-    await session.flush()
+    if result.status_change is None:
+        return None
     return {
-        "idea_id": str(idea_id),
-        "old_status": previous_status,
-        "new_status": "working",
-        "run_id": int(run_id),
+        **result.status_change,
         "changed": True,
     }
 
@@ -118,7 +111,9 @@ async def _record_adaptation(run_id: int, adaptation: dict[str, Any] | str, *, s
     """Record an adaptation as AgentRun metadata and as an append-only event."""
 
     async def _write(active_session) -> None:
-        store = AsyncAgentRunStore(active_session)
+        from brain.systems.runs.store import AsyncAgentRunStore as _AgentRunStore
+
+        store = _AgentRunStore(active_session)
         row = await store.require_run(int(run_id))
         payload = adaptation if isinstance(adaptation, dict) else {"message": str(adaptation)}
         current = row.adaptations
@@ -142,7 +137,9 @@ async def _record_adaptation(run_id: int, adaptation: dict[str, Any] | str, *, s
 
 async def _get_adaptation_history(run_id: int, *, session=None) -> list[dict[str, Any]]:
     async def _read(active_session) -> list[dict[str, Any]]:
-        row = await AsyncAgentRunStore(active_session).get_run(int(run_id))
+        from brain.systems.runs.store import AsyncAgentRunStore as _AgentRunStore
+
+        row = await _AgentRunStore(active_session).get_run(int(run_id))
         return row.adaptations if row else []
 
     if session is not None:
@@ -153,21 +150,30 @@ async def _get_adaptation_history(run_id: int, *, session=None) -> list[dict[str
 
 async def async_admit_run(request: RunAdmissionRequest, *, session=None) -> RunAdmissionResult:
     async def _admit(active_session) -> RunAdmissionResult:
-        run_request: AgentRunRequest = await a_build_run_request(
+        from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
+
+        result = await admit_work(
             active_session,
-            idea_id=request.idea_id,
-            event=request.event,
-            message=request.message,
-            user_id=request.user_id,
-            metadata=request.metadata or {},
-            priority=request.priority,
-            source=request.source,
-            producer=request.producer,
-            idempotency_key=request.idempotency_key,
+            WorkIntakeEvent(
+                source=request.source or "cortex",
+                event_type=f"cortex.{request.event}",
+                org_id=str((request.metadata or {}).get("org_id") or ""),
+                actor={"id": request.user_id, "org_id": (request.metadata or {}).get("org_id")},
+                target={"kind": "cortex_idea", "idea_id": request.idea_id},
+                payload={"message": request.message, "metadata": request.metadata or {}},
+                policy={
+                    "priority": request.priority,
+                    "producer": request.producer,
+                    "idempotency_key": request.idempotency_key,
+                    "run_event": request.event,
+                },
+            ),
         )
-        run = await AsyncAgentRunStore(active_session).create_run(run_request)
-        await _a_mark_idea_working_for_run_admission(active_session, request.idea_id, int(run.id))
-        return RunAdmissionResult(ok=True, run_id=run.id)
+        return RunAdmissionResult(
+            ok=result.ok,
+            run_id=result.run_id,
+            skipped_reason=result.skipped_reason,
+        )
 
     if session is not None:
         return await _admit(session)
@@ -182,7 +188,9 @@ async def async_cancel_runs_for_idea(idea_id: str) -> int:
 
     count = 0
     async with _unit_of_work_factory()() as uow:
-        store = AsyncAgentRunStore(uow.session)
+        from brain.systems.runs.store import AsyncAgentRunStore as _AgentRunStore
+
+        store = _AgentRunStore(uow.session)
         result = await uow.session.scalars(
             select(AgentRunRow).where(
                 AgentRunRow.thread_id == idea_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,10 +17,86 @@ from brain.systems.cortex.project_context.snapshot import (
 from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
+from brain.systems.runs.store import AsyncAgentRunStore
 
 _VALID_MODEL_TIERS = {"low", "medium", "high"}
 _VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh"}
 _VALID_MODEL_PROVIDERS = {"anthropic", "openai"}
+
+
+@dataclass(frozen=True)
+class WorkIntakeActor:
+    id: str | None = None
+    org_id: str | None = None
+    internal: bool = False
+    principal_type: str | None = None
+    name: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkIntakeTarget:
+    kind: str
+    idea_id: str | None = None
+    conversation_id: str | None = None
+    message_id: int | str | None = None
+    thread_root_message_id: int | str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WorkIntakePolicy:
+    priority: int = 0
+    producer: str | None = None
+    idempotency_key: str | None = None
+    run_event: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkIntakeEvent:
+    source: str
+    event_type: str
+    org_id: str
+    actor: dict[str, Any] | WorkIntakeActor | None
+    target: dict[str, Any] | WorkIntakeTarget
+    payload: dict[str, Any] = field(default_factory=dict)
+    policy: dict[str, Any] | WorkIntakePolicy = field(default_factory=dict)
+
+    @classmethod
+    def from_trigger_payload(cls, trigger_payload: dict[str, Any] | Any) -> "WorkIntakeEvent":
+        trigger = _trigger_dict(trigger_payload)
+        policy = _trigger_policy(trigger)
+        policy.setdefault("idempotency_key", trigger.get("idempotency_key"))
+        policy.setdefault("producer", "trigger")
+        return cls(
+            source=str(trigger.get("source") or ""),
+            event_type=str(trigger.get("event_type") or ""),
+            org_id=str(trigger.get("org_id") or ""),
+            actor=trigger.get("actor"),
+            target=_trigger_target(trigger),
+            payload=_trigger_payload(trigger),
+            policy=policy,
+        )
+
+
+@dataclass(frozen=True)
+class WorkIntakeResult:
+    ok: bool
+    run_id: int | None = None
+    skipped_reason: str | None = None
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if hasattr(value, "__dataclass_fields__"):
+        return {
+            key: item
+            for key, item in value.__dict__.items()
+            if item not in (None, "", {}, [])
+        }
+    return dict(value or {})
 
 
 def _trigger_dict(trigger_payload: dict[str, Any] | Any) -> dict[str, Any]:
@@ -180,6 +257,63 @@ def _payload_user_id(
     return _trigger_actor_user_id(trigger_payload, org_id=org_id)
 
 
+def _event_actor_user_id(event: WorkIntakeEvent) -> str | None:
+    actor = _as_mapping(event.actor)
+    if actor.get("internal") is True:
+        return None
+    actor_id = str(actor.get("id") or actor.get("user_id") or "").strip()
+    return actor_id or None
+
+
+def _event_target(event: WorkIntakeEvent) -> dict[str, Any]:
+    target = _as_mapping(event.target)
+    extra = target.pop("extra", None)
+    if isinstance(extra, dict):
+        target.update(extra)
+    return target
+
+
+def _event_policy(event: WorkIntakeEvent) -> dict[str, Any]:
+    return _as_mapping(event.policy)
+
+
+def _event_metadata(event: WorkIntakeEvent) -> dict[str, Any]:
+    payload = dict(event.payload or {})
+    metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
+    policy = _event_policy(event)
+    metadata["work_intake"] = {
+        "source": event.source,
+        "event_type": event.event_type,
+        "target": _event_target(event),
+        "policy": policy,
+        "actor": _as_mapping(event.actor),
+    }
+    return metadata
+
+
+def _event_message(event: WorkIntakeEvent) -> str:
+    payload = dict(event.payload or {})
+    return str(payload.get("run_message") or payload.get("message") or payload.get("thread_message") or "")
+
+
+def _event_priority(event: WorkIntakeEvent) -> int:
+    return _priority(dict(event.payload or {}), _event_policy(event))
+
+
+def _event_idempotency_key(event: WorkIntakeEvent) -> str | None:
+    policy = _event_policy(event)
+    return policy.get("idempotency_key") or policy.get("idempotencyKey")
+
+
+def _event_producer(event: WorkIntakeEvent) -> str:
+    return str(_event_policy(event).get("producer") or "work_intake")
+
+
+def _event_run_event(event: WorkIntakeEvent) -> str:
+    policy = _event_policy(event)
+    return str(policy.get("run_event") or event.event_type.split(".", 1)[-1] or event.event_type)
+
+
 def build_chat_agent_run_request(trigger_payload: dict[str, Any] | Any) -> AgentRunRequest:
     trigger = _trigger_dict(trigger_payload)
     target = _trigger_target(trigger)
@@ -246,6 +380,84 @@ def build_cortex_run_admission_kwargs(trigger_payload: dict[str, Any] | Any) -> 
         "source": f"trigger:{trigger.get('source')}",
         "producer": "trigger",
         "idempotency_key": trigger.get("idempotency_key"),
+    }
+
+
+async def build_agent_run_request(
+    session: Any,
+    event: WorkIntakeEvent,
+) -> AgentRunRequest:
+    target = _event_target(event)
+    metadata = _event_metadata(event)
+    message = _event_message(event)
+    producer = _event_producer(event)
+    idempotency_key = _event_idempotency_key(event)
+    priority = _event_priority(event)
+
+    if event.source == "chat" or target.get("kind") == "chat_message":
+        trigger_payload = {
+            "source": event.source,
+            "event_type": event.event_type,
+            "actor": _as_mapping(event.actor),
+            "org_id": event.org_id,
+            "target": target,
+            "payload": {
+                **dict(event.payload or {}),
+                "message": message,
+                "metadata": metadata,
+            },
+            "idempotency_key": idempotency_key,
+            "policy": {
+                **_event_policy(event),
+                "priority": priority,
+            },
+        }
+        request = build_chat_agent_run_request(trigger_payload)
+        return AgentRunRequest(
+            **{
+                **request.__dict__,
+                "metadata": {
+                    **request.metadata,
+                    "source": event.source,
+                    "producer": producer,
+                    "idempotency_key": idempotency_key,
+                    "work_intake": metadata["work_intake"],
+                },
+            }
+        )
+
+    idea_id = str(target.get("idea_id") or "")
+    if not idea_id:
+        raise ValueError("Work intake target requires idea_id for Cortex run admission")
+    return await build_cortex_agent_run_request(
+        session,
+        idea_id=idea_id,
+        event=_event_run_event(event),
+        message=message,
+        user_id=_event_actor_user_id(event),
+        metadata=metadata,
+        priority=priority,
+        source=event.source,
+        producer=producer,
+        idempotency_key=idempotency_key,
+    )
+
+
+def build_run_admission_request(event: WorkIntakeEvent) -> dict[str, Any]:
+    target = _event_target(event)
+    idea_id = str(target.get("idea_id") or "")
+    if not idea_id:
+        raise ValueError("Work intake target requires idea_id")
+    return {
+        "idea_id": idea_id,
+        "event": _event_run_event(event),
+        "message": _event_message(event),
+        "priority": _event_priority(event),
+        "user_id": _event_actor_user_id(event),
+        "metadata": _event_metadata(event),
+        "source": event.source,
+        "producer": _event_producer(event),
+        "idempotency_key": _event_idempotency_key(event),
     }
 
 
@@ -497,12 +709,67 @@ async def build_cortex_agent_run_request(
     )
 
 
+async def _mark_cortex_working_if_possible(
+    session: Any,
+    *,
+    request: AgentRunRequest,
+    run_id: int,
+) -> None:
+    target = request.target_ref if isinstance(request.target_ref, dict) else {}
+    if target.get("kind") != "cortex_idea" or not hasattr(session, "add"):
+        return
+    idea_id = str(target.get("idea_id") or request.thread_id or "")
+    if not idea_id or not hasattr(session, "get"):
+        return
+    try:
+        idea = await session.get(Idea, idea_id)
+    except Exception:
+        return
+    if idea is None:
+        return
+    previous_status = str(getattr(idea, "status", "") or "")
+    if previous_status in {"archived", "resolved", "working"}:
+        return
+    from brain.systems.cortex.thought_lifecycle import ThoughtStatusCommand, transition_thought_status
+
+    await transition_thought_status(
+        session,
+        idea=idea,
+        command=ThoughtStatusCommand(
+            to_status="working",
+            trigger="agent_run_admitted",
+            run_id=int(run_id),
+        ),
+    )
+
+
+async def admit_work(
+    session: Any,
+    event: WorkIntakeEvent,
+) -> WorkIntakeResult:
+    try:
+        request = await build_agent_run_request(session, event)
+        run = await AsyncAgentRunStore(session).create_run(request)
+        await _mark_cortex_working_if_possible(session, request=request, run_id=int(run.id))
+        return WorkIntakeResult(ok=True, run_id=int(run.id))
+    except Exception as exc:
+        return WorkIntakeResult(ok=False, skipped_reason=str(exc))
+
+
 __all__ = [
     "build_chat_agent_run_request",
+    "build_agent_run_request",
     "build_cortex_agent_run_request",
     "build_cortex_run_admission_kwargs",
+    "build_run_admission_request",
+    "admit_work",
     "merge_trigger_metadata",
     "model_policy_from_metadata",
     "profile_from_metadata",
     "recipe_for_profile",
+    "WorkIntakeActor",
+    "WorkIntakeEvent",
+    "WorkIntakePolicy",
+    "WorkIntakeResult",
+    "WorkIntakeTarget",
 ]

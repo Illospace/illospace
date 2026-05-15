@@ -1,7 +1,6 @@
 """Cortex ideas CRUD and notification endpoints."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import BackgroundTasks, Depends, HTTPException, Request
@@ -31,7 +30,7 @@ from brain.app.api.schemas.ideas import (
     ThreadMessageRead,
     VisualBlockRead,
 )
-from brain.platform.db.models.idea import IdeaStateLog, IdeaThread, VisualBlock
+from brain.platform.db.models.idea import IdeaThread, VisualBlock
 from brain.platform.db.models.org import User
 from brain.platform.db.models.workspace_pin import WorkspacePin
 from brain.platform.db.repositories.ideas import (
@@ -40,6 +39,12 @@ from brain.platform.db.repositories.ideas import (
     IdeaThreadRepository,
 )
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.cortex.thought_lifecycle import (
+    ThoughtStatusCommand,
+    ThreadMessageCommand,
+    post_thread_message,
+    transition_thought_status,
+)
 from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
 
 
@@ -538,18 +543,16 @@ async def _do_update_idea(
         raise HTTPException(status_code=400, detail="No fields to update")
     # Handle status change with state logging
     if "status" in updates:
-        old_status = idea.status
         new_status = updates.pop("status")
-        idea.status = new_status
-        if new_status == "archived":
-            idea.archived_at = datetime.now(timezone.utc)
-        if old_status != new_status:
-            log = IdeaStateLog(
-                idea_id=idea_id,
-                from_state=old_status,
-                to_state=new_status,
-            )
-            db.add(log)
+        await transition_thought_status(
+            db,
+            idea=idea,
+            command=ThoughtStatusCommand(
+                to_status=new_status,
+                trigger="idea_update",
+                actor=user,
+            ),
+        )
     # user_id is the Cortex owner. A handoff must stay inside the caller org and
     # must not implicitly archive, move orbit anchors, or recolor the thread.
     if "user_id" in updates:
@@ -630,11 +633,15 @@ async def archive_idea(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     idea = await _require_idea_for_user(db, idea_id, user)
-    old_status = idea.status
-    idea.archived_at = datetime.now(timezone.utc)
-    idea.status = "archived"
-    db.add(IdeaStateLog(idea_id=idea_id, from_state=old_status, to_state="archived", trigger="user_archive"))
-    await db.flush()
+    await transition_thought_status(
+        db,
+        idea=idea,
+        command=ThoughtStatusCommand(
+            to_status="archived",
+            trigger="user_archive",
+            actor=user,
+        ),
+    )
     archived = await _idea_read_with_author(idea, db)
     event_org_id = _product_event_org_id(idea, user)
     await db.commit()
@@ -653,12 +660,15 @@ async def restore_idea(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     idea = await _require_idea_for_user(db, idea_id, user)
-    old_status = idea.status
-    idea.archived_at = None
-    if old_status == "archived":
-        idea.status = "emerged"
-    db.add(IdeaStateLog(idea_id=idea_id, from_state=old_status, to_state=idea.status, trigger="user_restore"))
-    await db.flush()
+    await transition_thought_status(
+        db,
+        idea=idea,
+        command=ThoughtStatusCommand(
+            to_status="emerged" if str(getattr(idea, "status", "")) == "archived" else str(idea.status),
+            trigger="user_restore",
+            actor=user,
+        ),
+    )
     restored = await _idea_read_with_author(idea, db)
     event_org_id = _product_event_org_id(idea, user)
     await db.commit()
@@ -678,14 +688,15 @@ async def update_idea_status(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     idea = await _require_idea_for_user(db, idea_id, user)
-    old_status = idea.status
-    idea.status = body.status
-    db.add(IdeaStateLog(
-        idea_id=idea_id,
-        from_state=old_status,
-        to_state=body.status,
-        trigger=body.trigger,
-    ))
+    await transition_thought_status(
+        db,
+        idea=idea,
+        command=ThoughtStatusCommand(
+            to_status=body.status,
+            trigger=body.trigger,
+            actor=user,
+        ),
+    )
     updated = await _idea_read_with_author(idea, db)
     event_org_id = _product_event_org_id(idea, user)
     await db.commit()
@@ -731,24 +742,23 @@ async def create_thread_message(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     idea = await _require_idea_for_user(db, idea_id, user)
-    msg = await IdeaThreadRepository(db).a_add_message(
-        idea_id=idea_id,
-        role=body.role,
-        content=body.content,
-        user_id=user["id"],
+    result = await post_thread_message(
+        db,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=idea_id,
+            role=body.role,
+            content=body.content,
+            actor={
+                "user_id": user.get("id"),
+                "org_id": user.get("org_id"),
+                "name": user.get("name"),
+                "color": user.get("color"),
+            },
+        ),
     )
-    await db.flush()
-    message_payload = {
-        "id": str(msg.id),
-        "idea_id": idea_id,
-        "role": msg.role,
-        "content": msg.content,
-        "user_id": str(msg.user_id) if msg.user_id is not None else None,
-        "attachments": msg.attachments or [],
-        "message_type": getattr(msg, "message_type", None),
-        "created_at": msg.created_at.isoformat() if msg.created_at else None,
-    }
-    response = ThreadMessageRead.model_validate(msg)
+    message_payload = result.message_payload
+    response = ThreadMessageRead.model_validate(result.message)
     event_org_id = _product_event_org_id(idea, user)
     await db.commit()
     await ws_manager.broadcast_product_event(
@@ -790,7 +800,15 @@ async def notify_illo(request: Request, user: dict[str, Any] = Depends(get_curre
         async with UnitOfWork() as uow:
             idea = await _require_idea_for_user(uow.session, idea_id, user)
             if idea.status in ("emerged", "queued"):
-                idea.status = "active"
+                await transition_thought_status(
+                    uow.session,
+                    idea=idea,
+                    command=ThoughtStatusCommand(
+                        to_status="active",
+                        trigger="notify_idea_created",
+                        actor=user,
+                    ),
+                )
             effective_metadata = await _effective_notify_metadata(uow.session, idea_id, metadata)
             effective_thread_message = thread_message or str(effective_metadata.get("thread_message") or "")
             if not _message_should_invoke_illo(effective_thread_message):

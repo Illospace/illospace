@@ -7,6 +7,13 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 
+from brain.systems.cortex.thought_lifecycle import (
+    ThoughtStatusCommand,
+    ThreadMessageCommand,
+    post_thread_message,
+    transition_thought_status,
+)
+from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.runs.tool_catalog.handlers.common import *
 
 
@@ -118,27 +125,28 @@ async def _seed_created_idea_thread(
     parent_id: str | None,
     origin_ref: str | None,
 ) -> Any | None:
-    from brain.platform.db.models.idea import IdeaThread
-
     if not seed_content:
         return None
     source_run_id = _current_tool_run_id()
-    thread_msg = IdeaThread(
-        idea_id=str(idea.id),
-        role="user",
-        content=seed_content,
-        user_id=actor_user_id,
-        message_type="trigger",
-        metadata_={
-            "source": "manage_idea.create",
-            "created_by_run_id": source_run_id,
-            "parent_idea_id": parent_id,
-            "origin_ref": origin_ref,
-        },
+    result = await post_thread_message(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="user",
+            content=seed_content,
+            actor={"user_id": actor_user_id, "org_id": getattr(idea, "org_id", None)},
+            metadata={
+                "source": "manage_idea.create",
+                "created_by_run_id": source_run_id,
+                "parent_idea_id": parent_id,
+                "origin_ref": origin_ref,
+            },
+        ),
+        parse_message_type=lambda _content, _role: "trigger",
+        apply_lifecycle=False,
     )
-    session.add(thread_msg)
-    await session.flush()
-    return thread_msg
+    return result.message
 
 
 async def _admit_created_idea_run(
@@ -151,31 +159,35 @@ async def _admit_created_idea_run(
     origin_ref: str | None,
     thread_message_id: int | None,
 ):
-    from brain.systems.runs.cortex import RunAdmissionRequest, async_admit_run
-
     source_run_id = _current_tool_run_id()
-    result = await async_admit_run(
-        RunAdmissionRequest(
-            idea_id=str(idea.id),
-            event="idea_created",
-            message=_created_idea_run_message(idea, seed_content),
-            user_id=actor_user_id,
-            metadata={
-                "created_by_tool": "manage_idea",
-                "created_by_run_id": source_run_id,
-                "parent_idea_id": parent_id,
-                "origin_ref": origin_ref,
-                "thread_message_id": thread_message_id,
+    result = await admit_work(
+        session,
+        WorkIntakeEvent(
+            source="tool",
+            event_type="tool.idea_created",
+            org_id=str(getattr(idea, "org_id", "") or ""),
+            actor={"id": actor_user_id, "org_id": getattr(idea, "org_id", None)},
+            target={"kind": "cortex_idea", "idea_id": str(idea.id)},
+            payload={
+                "message": _created_idea_run_message(idea, seed_content),
+                "metadata": {
+                    "created_by_tool": "manage_idea",
+                    "created_by_run_id": source_run_id,
+                    "parent_idea_id": parent_id,
+                    "origin_ref": origin_ref,
+                    "thread_message_id": thread_message_id,
+                },
             },
-            source="tool:manage_idea",
-            producer="agent_tool",
-            idempotency_key=(
-                f"manage_idea:create:{source_run_id}:{idea.id}"
-                if source_run_id is not None
-                else f"manage_idea:create:{idea.id}"
-            ),
+            policy={
+                "producer": "agent_tool",
+                "idempotency_key": (
+                    f"manage_idea:create:{source_run_id}:{idea.id}"
+                    if source_run_id is not None
+                    else f"manage_idea:create:{idea.id}"
+                ),
+                "run_event": "idea_created",
+            },
         ),
-        session=session,
     )
     if not result.ok:
         raise RuntimeError(result.skipped_reason or "Failed to admit AgentRun for created idea")
@@ -228,43 +240,32 @@ async def _list_ideas(
 
 
 async def _status_change(idea, next_status: str, *, trigger: str, session) -> tuple[str, str] | None:
-    from brain.platform.db.models.idea import IdeaStateLog
-
     if next_status not in _IDEA_STATUSES:
         raise ValueError(f"Unsupported idea status: {next_status}")
     old_status = str(idea.status or "")
     if old_status == next_status and (next_status != "archived" or idea.archived_at is not None):
         return None
-    idea.status = next_status
-    idea.updated_at = datetime.now(timezone.utc)
-    if next_status == "archived":
-        idea.archived_at = datetime.now(timezone.utc)
-    session.add(
-        IdeaStateLog(
-            idea_id=str(idea.id),
-            from_state=old_status,
-            to_state=next_status,
+    await transition_thought_status(
+        session,
+        idea=idea,
+        command=ThoughtStatusCommand(
+            to_status=next_status,
             trigger=trigger,
-        )
+        ),
     )
     return old_status, next_status
 
 
 async def _restore_idea(idea, *, session) -> tuple[str, str]:
-    from brain.platform.db.models.idea import IdeaStateLog
-
     old_status = str(idea.status or "")
-    idea.archived_at = None
-    if old_status == "archived":
-        idea.status = "emerged"
-    idea.updated_at = datetime.now(timezone.utc)
-    session.add(
-        IdeaStateLog(
-            idea_id=str(idea.id),
-            from_state=old_status,
-            to_state=str(idea.status or ""),
+    next_status = "emerged" if old_status == "archived" else old_status
+    await transition_thought_status(
+        session,
+        idea=idea,
+        command=ThoughtStatusCommand(
+            to_status=next_status,
             trigger="agent_restore",
-        )
+        ),
     )
     return old_status, str(idea.status or "")
 
