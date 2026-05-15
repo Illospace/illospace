@@ -91,8 +91,8 @@ async def test_agent_visible_context_matches_prior_visible_thread(session):
     assert [message["role"] for message in context["messages"]] == ["user", "illo"]
 
 
-async def test_thread_binding_attaches_prior_visible_context_without_current_message(session):
-    from brain.systems.runs.cortex.thread_binding import a_build_run_request
+async def test_work_intake_attaches_prior_visible_context_without_current_message(session):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
 
     now = datetime(2026, 5, 6, 18, 0, tzinfo=timezone.utc)
     session.add(
@@ -123,13 +123,20 @@ async def test_thread_binding_attaches_prior_visible_context_without_current_mes
     )
     await session.flush()
 
-    request = await a_build_run_request(
+    request = await build_agent_run_request(
         session,
-        idea_id=IDEA_ID,
-        event="thread_reply",
-        message="fantastic I added it do you see it now?",
-        user_id=USER_ID,
-        metadata={"run_profile": "fast", "thread_message_id": 13},
+        WorkIntakeEvent(
+            source="cortex",
+            event_type="cortex.thread_reply",
+            org_id=ORG_ID,
+            actor={"id": USER_ID, "org_id": ORG_ID, "internal": False},
+            target={"kind": "cortex_idea", "idea_id": IDEA_ID},
+            payload={
+                "message": "fantastic I added it do you see it now?",
+                "metadata": {"run_profile": "fast", "thread_message_id": 13},
+            },
+            policy={"run_event": "thread_reply"},
+        ),
     )
 
     assert request.message == "fantastic I added it do you see it now?"

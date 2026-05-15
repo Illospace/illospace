@@ -93,8 +93,8 @@ def test_trigger_rejects_actor_cross_org():
 @pytest.mark.asyncio
 async def test_async_router_sends_cortex_trigger_through_run_queue():
     from brain.app.triggers.adapters.internal import build_cortex_notify_trigger
-    from brain.systems.runs.cortex import RunAdmissionResult
     from brain.app.triggers.router import async_route_trigger
+    from brain.systems.runs.work_intake import WorkIntakeResult
 
     trigger = build_cortex_notify_trigger(
         event="idea_created",
@@ -108,27 +108,25 @@ async def test_async_router_sends_cortex_trigger_through_run_queue():
 
     session = object()
     with patch(
-        "brain.app.triggers.router.async_admit_run",
-        AsyncMock(return_value=RunAdmissionResult(ok=True, run_id=123)),
+        "brain.app.triggers.router.admit_work",
+        AsyncMock(return_value=WorkIntakeResult(ok=True, run_id=123)),
     ) as mock_admit:
         result = await async_route_trigger(trigger, session=session)
 
     assert result.ok is True
     assert result.route == "run"
     assert result.run_id == 123
-    request = mock_admit.call_args.args[0]
-    assert request.idea_id == "idea-1"
-    assert request.event == "idea_created"
-    assert request.message == '[Idea: "Build triggers" | idea-1]\n\n/hello4 hello'
-    assert request.priority == 1
-    assert request.user_id == "user-1"
-    assert request.source == "trigger:cortex"
-    assert request.producer == "trigger"
-    assert request.idempotency_key == trigger.idempotency_key
-    assert request.metadata["target"]["repo"] == "illo-brain"
-    assert mock_admit.call_args.kwargs["session"] is session
-    assert request.metadata["illo_trigger"]["event_type"] == "cortex.idea_created"
-    assert request.metadata["illo_trigger"]["idempotency_key"] == trigger.idempotency_key
+    assert mock_admit.call_args.args[0] is session
+    event = mock_admit.call_args.args[1]
+    assert event.source == "cortex"
+    assert event.event_type == "cortex.idea_created"
+    assert event.target["idea_id"] == "idea-1"
+    assert event.payload["run_message"] == '[Idea: "Build triggers" | idea-1]\n\n/hello4 hello'
+    assert event.payload["metadata"]["target"]["repo"] == "illo-brain"
+    assert event.policy["priority"] == 1
+    assert event.policy["producer"] == "trigger"
+    assert event.policy["idempotency_key"] == trigger.idempotency_key
+    assert event.actor["id"] == "user-1"
 
 
 def test_internal_adapter_builds_chat_thread_trigger():
@@ -165,6 +163,7 @@ def test_internal_adapter_builds_chat_thread_trigger():
 async def test_router_sends_chat_trigger_through_run_queue():
     from brain.app.triggers.adapters.internal import build_chat_mention_trigger
     from brain.app.triggers.router import async_route_trigger
+    from brain.systems.runs.work_intake import WorkIntakeResult
 
     conversation = SimpleNamespace(id="conv-1", org_id="org-1", type="room")
     message = SimpleNamespace(
@@ -179,29 +178,31 @@ async def test_router_sends_chat_trigger_through_run_queue():
         message=message,
         user=_user(),
     )
-    with patch("brain.app.triggers.router.AsyncAgentRunStore") as store_cls:
-        store_instance = store_cls.return_value
-        store_instance.create_run = AsyncMock(return_value=SimpleNamespace(id=456))
-        result = await async_route_trigger(trigger, session=object())
+    session = object()
+    with patch(
+        "brain.app.triggers.router.admit_work",
+        AsyncMock(return_value=WorkIntakeResult(ok=True, run_id=456)),
+    ) as mock_admit:
+        result = await async_route_trigger(trigger, session=session)
 
     assert result.ok is True
     assert result.route == "run"
     assert result.run_id == 456
-    store_instance.create_run.assert_awaited_once()
-    request = store_instance.create_run.call_args.args[0]
-    assert request.thread_id == "chat:conv-1:22"
-    assert request.user_id == "user-1"
-    assert request.org_id == "org-1"
-    assert request.target_ref["kind"] == "chat_message"
-    assert request.target_ref["chat_trigger"]["message_id"] == 22
-    assert request.metadata["illo_trigger"]["event_type"] == "chat.room_message_mention"
+    assert mock_admit.call_args.args[0] is session
+    event = mock_admit.call_args.args[1]
+    assert event.source == "chat"
+    assert event.event_type == "chat.room_message_mention"
+    assert event.org_id == "org-1"
+    assert event.actor["id"] == "user-1"
+    assert event.target["kind"] == "chat_message"
+    assert event.payload["metadata"]["chat_trigger"]["message_id"] == 22
 
 
 @pytest.mark.asyncio
 async def test_router_reports_run_admission_failure():
     from brain.app.triggers.adapters.internal import build_cortex_notify_trigger
-    from brain.systems.runs.cortex import RunAdmissionResult
     from brain.app.triggers.router import async_route_trigger
+    from brain.systems.runs.work_intake import WorkIntakeResult
 
     trigger = build_cortex_notify_trigger(
         event="thread_reply",
@@ -212,8 +213,8 @@ async def test_router_reports_run_admission_failure():
     )
 
     with patch(
-        "brain.app.triggers.router.async_admit_run",
-        AsyncMock(return_value=RunAdmissionResult(ok=False, skipped_reason="idea_running")),
+        "brain.app.triggers.router.admit_work",
+        AsyncMock(return_value=WorkIntakeResult(ok=False, skipped_reason="idea_running")),
     ):
         result = await async_route_trigger(trigger)
 

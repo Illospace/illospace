@@ -388,15 +388,15 @@ async def test_async_run_cycle_now_uses_native_uow_without_sync_bridges(monkeypa
 
 @pytest.mark.asyncio
 async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
-    from brain.systems.runs.cortex import RunAdmissionResult
+    from brain.systems.runs.work_intake import WorkIntakeResult
 
     calls = []
 
-    async def fake_admit(request, *, session=None):
-        calls.append((request, session))
-        return RunAdmissionResult(ok=True, run_id=77)
+    async def fake_admit(session, event):
+        calls.append((session, event))
+        return WorkIntakeResult(ok=True, run_id=77)
 
-    monkeypatch.setattr(service, "async_admit_run", fake_admit)
+    monkeypatch.setattr(service, "admit_work", fake_admit)
     session = object()
 
     run_id = await service._async_admit_cycle_run(
@@ -410,13 +410,16 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
     )
 
     assert run_id == 77
-    request, passed_session = calls[0]
+    passed_session, event = calls[0]
     assert passed_session is session
-    assert request.source == "cycle"
-    assert request.producer == "cycle"
-    assert request.idempotency_key == "cycle_run:12"
-    assert request.metadata["source"] == "cycle"
-    assert request.metadata["cycle_run_id"] == 12
+    assert event.source == "cycle"
+    assert event.event_type == "cycle.due_run"
+    assert event.target == {"kind": "cortex_idea", "idea_id": "idea-1"}
+    assert event.payload["metadata"]["source"] == "cycle"
+    assert event.payload["metadata"]["cycle_run_id"] == 12
+    assert event.policy["producer"] == "cycle"
+    assert event.policy["idempotency_key"] == "cycle_run:12"
+    assert event.policy["run_event"] == "thread_reply"
 
 
 @pytest.mark.asyncio
