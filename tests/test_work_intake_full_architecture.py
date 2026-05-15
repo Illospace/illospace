@@ -25,8 +25,10 @@ EXPECTED_WORK_INTAKE_API = {
     "WorkIntakeTarget",
     "WorkIntakePolicy",
     "build_agent_run_request",
+    "build_agent_run_request_sync",
     "build_run_admission_request",
     "admit_work",
+    "admit_work_sync",
 }
 
 
@@ -211,6 +213,47 @@ def test_work_intake_owns_run_profile_recipe_model_and_project_context_selection
             violations.append(f"{path} defines policy/context internals: {sorted(defined)}")
 
     assert violations == []
+
+
+def test_external_headless_ask_uses_sync_work_intake_policy():
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request_sync
+
+    request = build_agent_run_request_sync(
+        object(),
+        WorkIntakeEvent(
+            source="external_agent",
+            event_type="external_agent.headless_ask",
+            org_id="org-1",
+            actor={"id": "owner-1", "org_id": "org-1"},
+            target={
+                "kind": "external_agent_headless_ask",
+                "external_agent_connection_id": "conn-1",
+                "external_agent_task_id": "task-1",
+                "thread_id": "external-agent:conn-1:task-1",
+            },
+            payload={
+                "message": "Answer the personal agent.",
+                "workspace_ref": {"source": "external_agent_bridge", "mode": "headless"},
+                "model_policy": {"tier": "standard", "thinking": "medium"},
+                "metadata": {
+                    "execution_profile": "fast",
+                    "recipe": "fast",
+                    "tool_policy": {"blocked_tools": ["manage_idea"]},
+                },
+            },
+            policy={"producer": "external_agent", "idempotency_key": "ask:task-1"},
+        ),
+    )
+
+    assert request.thread_id == "external-agent:conn-1:task-1"
+    assert request.user_id == "owner-1"
+    assert request.target_ref["kind"] == "external_agent_headless_ask"
+    assert request.workspace_ref == {"source": "external_agent_bridge", "mode": "headless"}
+    assert request.model_policy == {"tier": "standard", "thinking": "medium"}
+    assert request.metadata["producer"] == "external_agent"
+    assert request.metadata["idempotency_key"] == "ask:task-1"
+    assert request.metadata["tool_policy"]["blocked_tools"] == ["manage_idea"]
+    assert request.metadata["work_intake"]["source"] == "external_agent"
 
 
 @pytest.mark.asyncio

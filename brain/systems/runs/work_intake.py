@@ -17,7 +17,7 @@ from brain.systems.cortex.project_context.snapshot import (
 from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
-from brain.systems.runs.store import AsyncAgentRunStore
+from brain.systems.runs.store import AsyncAgentRunStore, SyncAgentRunStore
 
 _VALID_MODEL_TIERS = {"low", "medium", "high"}
 _VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh"}
@@ -314,6 +314,20 @@ def _event_run_event(event: WorkIntakeEvent) -> str:
     return str(policy.get("run_event") or event.event_type.split(".", 1)[-1] or event.event_type)
 
 
+def _event_workspace_ref(event: WorkIntakeEvent) -> dict[str, Any]:
+    payload = dict(event.payload or {})
+    workspace_ref = payload.get("workspace_ref")
+    return dict(workspace_ref or {}) if isinstance(workspace_ref, dict) else {}
+
+
+def _event_model_policy(event: WorkIntakeEvent, metadata: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(event.payload or {})
+    model_policy = payload.get("model_policy")
+    if isinstance(model_policy, dict):
+        return dict(model_policy)
+    return model_policy_from_metadata(metadata)
+
+
 def build_chat_agent_run_request(trigger_payload: dict[str, Any] | Any) -> AgentRunRequest:
     trigger = _trigger_dict(trigger_payload)
     target = _trigger_target(trigger)
@@ -426,6 +440,35 @@ async def build_agent_run_request(
             }
         )
 
+    if target.get("kind") == "external_agent_headless_ask":
+        thread_id = str(target.get("thread_id") or "")
+        if not thread_id:
+            connection_id = str(target.get("external_agent_connection_id") or "")
+            task_id = str(target.get("external_agent_task_id") or "")
+            thread_id = f"external-agent:{connection_id}:{task_id}" if connection_id and task_id else ""
+        if not thread_id:
+            raise ValueError("External agent headless ask requires thread_id or connection/task ids")
+        profile = profile_from_metadata(metadata)
+        return AgentRunRequest(
+            org_id=str(event.org_id or "") or None,
+            user_id=_event_actor_user_id(event),
+            thread_id=thread_id,
+            message=message,
+            profile=profile,
+            recipe=recipe_for_profile(profile, metadata),
+            target_ref=target,
+            workspace_ref=_event_workspace_ref(event),
+            model_policy=_event_model_policy(event, metadata),
+            metadata={
+                **metadata,
+                "event": _event_run_event(event),
+                "priority": priority,
+                "source": event.source,
+                "producer": producer,
+                "idempotency_key": idempotency_key,
+            },
+        )
+
     idea_id = str(target.get("idea_id") or "")
     if not idea_id:
         raise ValueError("Work intake target requires idea_id for Cortex run admission")
@@ -459,6 +502,47 @@ def build_run_admission_request(event: WorkIntakeEvent) -> dict[str, Any]:
         "producer": _event_producer(event),
         "idempotency_key": _event_idempotency_key(event),
     }
+
+
+def build_agent_run_request_sync(
+    session: Any,
+    event: WorkIntakeEvent,
+) -> AgentRunRequest:
+    target = _event_target(event)
+    if target.get("kind") != "external_agent_headless_ask":
+        raise ValueError("Sync work intake only supports external agent headless asks")
+    metadata = _event_metadata(event)
+    message = _event_message(event)
+    producer = _event_producer(event)
+    idempotency_key = _event_idempotency_key(event)
+    priority = _event_priority(event)
+    thread_id = str(target.get("thread_id") or "")
+    if not thread_id:
+        connection_id = str(target.get("external_agent_connection_id") or "")
+        task_id = str(target.get("external_agent_task_id") or "")
+        thread_id = f"external-agent:{connection_id}:{task_id}" if connection_id and task_id else ""
+    if not thread_id:
+        raise ValueError("External agent headless ask requires thread_id or connection/task ids")
+    profile = profile_from_metadata(metadata)
+    return AgentRunRequest(
+        org_id=str(event.org_id or "") or None,
+        user_id=_event_actor_user_id(event),
+        thread_id=thread_id,
+        message=message,
+        profile=profile,
+        recipe=recipe_for_profile(profile, metadata),
+        target_ref=target,
+        workspace_ref=_event_workspace_ref(event),
+        model_policy=_event_model_policy(event, metadata),
+        metadata={
+            **metadata,
+            "event": _event_run_event(event),
+            "priority": priority,
+            "source": event.source,
+            "producer": producer,
+            "idempotency_key": idempotency_key,
+        },
+    )
 
 
 def _snapshot_for_project_context(project_context: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -756,13 +840,27 @@ async def admit_work(
         return WorkIntakeResult(ok=False, skipped_reason=str(exc))
 
 
+def admit_work_sync(
+    session: Any,
+    event: WorkIntakeEvent,
+) -> WorkIntakeResult:
+    try:
+        request = build_agent_run_request_sync(session, event)
+        run = SyncAgentRunStore(session).create_run(request)
+        return WorkIntakeResult(ok=True, run_id=int(run.id))
+    except Exception as exc:
+        return WorkIntakeResult(ok=False, skipped_reason=str(exc))
+
+
 __all__ = [
     "build_chat_agent_run_request",
     "build_agent_run_request",
+    "build_agent_run_request_sync",
     "build_cortex_agent_run_request",
     "build_cortex_run_admission_kwargs",
     "build_run_admission_request",
     "admit_work",
+    "admit_work_sync",
     "merge_trigger_metadata",
     "model_policy_from_metadata",
     "profile_from_metadata",

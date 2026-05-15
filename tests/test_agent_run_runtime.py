@@ -296,16 +296,26 @@ def _runtime(recipe: str = "fast", *, message: str = "Read the README", store=No
     )
 
 
-async def test_run_admission_marks_idea_working_without_worker_details():
-    from brain.systems.runs.cortex import _a_mark_idea_working_for_run_admission
+async def test_run_admission_marks_idea_working_without_worker_details(monkeypatch):
     from brain.platform.db.models.idea import Idea, IdeaStateLog
+    from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
     idea = SimpleNamespace(id="idea-1", status="idle", updated_at=None, active_agents=7)
     added = []
 
+    class FakeStore:
+        def __init__(self, _session):
+            pass
+
+        async def create_run(self, _request):
+            return SimpleNamespace(id=123)
+
     class FakeSession:
         async def get(self, model, key):
             return idea if model is Idea and key == "idea-1" else None
+
+        async def scalars(self, *_args, **_kwargs):
+            return SimpleNamespace(first=lambda: None)
 
         def add(self, row):
             added.append(row)
@@ -313,15 +323,29 @@ async def test_run_admission_marks_idea_working_without_worker_details():
         async def flush(self):
             return None
 
-    payload = await _a_mark_idea_working_for_run_admission(FakeSession(), "idea-1", 123)
+    async def empty_thread_context(*_args, **_kwargs):
+        return {}
 
-    assert payload == {
-        "idea_id": "idea-1",
-        "old_status": "idle",
-        "new_status": "working",
-        "run_id": 123,
-        "changed": True,
-    }
+    monkeypatch.setattr("brain.systems.runs.work_intake.AsyncAgentRunStore", FakeStore)
+    monkeypatch.setattr(
+        "brain.systems.runs.work_intake.async_build_agent_visible_thread_context",
+        empty_thread_context,
+    )
+
+    result = await admit_work(
+        FakeSession(),
+        WorkIntakeEvent(
+            source="cortex",
+            event_type="cortex.thread_reply",
+            org_id="org-1",
+            actor={"id": "user-1", "org_id": "org-1"},
+            target={"kind": "cortex_idea", "idea_id": "idea-1"},
+            payload={"message": "continue"},
+        ),
+    )
+
+    assert result.ok is True
+    assert result.run_id == 123
     assert idea.status == "working"
     assert idea.active_agents == 7
     assert isinstance(idea.updated_at, datetime)
@@ -332,16 +356,26 @@ async def test_run_admission_marks_idea_working_without_worker_details():
     assert added[0].trigger == "agent_run_admitted"
 
 
-async def test_run_admission_preserves_protected_idea_statuses():
-    from brain.systems.runs.cortex import _a_mark_idea_working_for_run_admission
+async def test_run_admission_preserves_protected_idea_statuses(monkeypatch):
     from brain.platform.db.models.idea import Idea
+    from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
     idea = SimpleNamespace(id="idea-1", status="archived", updated_at=None)
     added = []
 
+    class FakeStore:
+        def __init__(self, _session):
+            pass
+
+        async def create_run(self, _request):
+            return SimpleNamespace(id=123)
+
     class FakeSession:
         async def get(self, model, key):
             return idea if model is Idea and key == "idea-1" else None
+
+        async def scalars(self, *_args, **_kwargs):
+            return SimpleNamespace(first=lambda: None)
 
         def add(self, row):
             added.append(row)
@@ -349,9 +383,29 @@ async def test_run_admission_preserves_protected_idea_statuses():
         async def flush(self):
             return None
 
-    payload = await _a_mark_idea_working_for_run_admission(FakeSession(), "idea-1", 123)
+    async def empty_thread_context(*_args, **_kwargs):
+        return {}
 
-    assert payload is None
+    monkeypatch.setattr("brain.systems.runs.work_intake.AsyncAgentRunStore", FakeStore)
+    monkeypatch.setattr(
+        "brain.systems.runs.work_intake.async_build_agent_visible_thread_context",
+        empty_thread_context,
+    )
+
+    result = await admit_work(
+        FakeSession(),
+        WorkIntakeEvent(
+            source="cortex",
+            event_type="cortex.thread_reply",
+            org_id="org-1",
+            actor={"id": "user-1", "org_id": "org-1"},
+            target={"kind": "cortex_idea", "idea_id": "idea-1"},
+            payload={"message": "continue"},
+        ),
+    )
+
+    assert result.ok is True
+    assert result.run_id == 123
     assert idea.status == "archived"
     assert idea.updated_at is None
     assert added == []

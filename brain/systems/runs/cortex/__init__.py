@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from brain.systems.runs.events import run_event
 from brain.systems.runs.skill_commands import iter_slash_skill_commands, parse_slash_skill_names
 from brain.systems.runs.cortex.runner import queue_status, queue_status_async, start_runner, stop_runner
-from brain.platform.db.models.idea import Idea
 
 UnitOfWork = None
 
@@ -20,29 +18,6 @@ def _unit_of_work_factory():
 
         UnitOfWork = _UnitOfWork
     return UnitOfWork
-
-
-
-@dataclass(frozen=True)
-class RunAdmissionRequest:
-    idea_id: str
-    event: str
-    message: str
-    priority: int = 0
-    user_id: str | None = None
-    metadata: dict[str, Any] | None = None
-    source: str | None = None
-    producer: str | None = None
-    idempotency_key: str | None = None
-
-
-@dataclass(frozen=True)
-class RunAdmissionResult:
-    ok: bool
-    run_id: int | None = None
-    skipped_reason: str | None = None
-
-
 
 def _parse_skill_mentions(message: str) -> list[str]:
     return parse_slash_skill_names(message)
@@ -68,44 +43,6 @@ def ensure_schema() -> None:
     runtime does not perform production DDL.
     """
     return None
-
-
-
-async def _a_mark_idea_working_for_run_admission(session, idea_id: str, run_id: int) -> dict[str, Any] | None:
-    from brain.systems.cortex.thought_lifecycle import ThoughtStatusCommand, transition_thought_status
-
-    idea = await session.get(Idea, str(idea_id))
-    if idea is None:
-        return None
-
-    previous_status = str(getattr(idea, "status", "") or "")
-    if previous_status in {"archived", "resolved"}:
-        return None
-    if previous_status == "working":
-        return {
-            "idea_id": str(idea_id),
-            "old_status": previous_status,
-            "new_status": "working",
-            "run_id": int(run_id),
-            "changed": False,
-        }
-
-    result = await transition_thought_status(
-        session,
-        idea=idea,
-        command=ThoughtStatusCommand(
-            to_status="working",
-            trigger="agent_run_admitted",
-            run_id=int(run_id),
-        ),
-    )
-    if result.status_change is None:
-        return None
-    return {
-        **result.status_change,
-        "changed": True,
-    }
-
 
 async def _record_adaptation(run_id: int, adaptation: dict[str, Any] | str, *, session=None) -> None:
     """Record an adaptation as AgentRun metadata and as an append-only event."""
@@ -146,41 +83,6 @@ async def _get_adaptation_history(run_id: int, *, session=None) -> list[dict[str
         return await _read(session)
     async with _unit_of_work_factory()() as uow:
         return await _read(uow.session)
-
-
-async def async_admit_run(request: RunAdmissionRequest, *, session=None) -> RunAdmissionResult:
-    async def _admit(active_session) -> RunAdmissionResult:
-        from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
-
-        result = await admit_work(
-            active_session,
-            WorkIntakeEvent(
-                source=request.source or "cortex",
-                event_type=f"cortex.{request.event}",
-                org_id=str((request.metadata or {}).get("org_id") or ""),
-                actor={"id": request.user_id, "org_id": (request.metadata or {}).get("org_id")},
-                target={"kind": "cortex_idea", "idea_id": request.idea_id},
-                payload={"message": request.message, "metadata": request.metadata or {}},
-                policy={
-                    "priority": request.priority,
-                    "producer": request.producer,
-                    "idempotency_key": request.idempotency_key,
-                    "run_event": request.event,
-                },
-            ),
-        )
-        return RunAdmissionResult(
-            ok=result.ok,
-            run_id=result.run_id,
-            skipped_reason=result.skipped_reason,
-        )
-
-    if session is not None:
-        return await _admit(session)
-    async with _unit_of_work_factory()() as uow:
-        return await _admit(uow.session)
-
-
 async def async_cancel_runs_for_idea(idea_id: str) -> int:
     from sqlalchemy import select
     from brain.systems.runs.status import RunStatus
@@ -222,14 +124,10 @@ supersede_runs_for_idea = async_cancel_runs_for_idea
 
 
 __all__ = [
-    "RunAdmissionRequest",
-    "RunAdmissionResult",
     "_get_adaptation_history",
-    "_a_mark_idea_working_for_run_admission",
     "_parse_skill_mentions",
     "_parse_skill_override",
     "_record_adaptation",
-    "async_admit_run",
     "cancel_idea_runs",
     "async_cancel_runs_for_idea",
     "async_idea_run_history",
