@@ -1,5 +1,4 @@
 """Tests for cortex router — ideas CRUD, threads."""
-import asyncio
 import json
 import inspect
 import uuid
@@ -17,14 +16,35 @@ class _AsyncSession:
     def __init__(self, sync_session):
         self.sync_session = sync_session
 
+    def add(self, *args, **kwargs):
+        return self.sync_session.add(*args, **kwargs)
+
+    async def get(self, *args, **kwargs):
+        return self.sync_session.get(*args, **kwargs)
+
+    async def refresh(self, *args, **kwargs):
+        return self.sync_session.refresh(*args, **kwargs)
+
+    async def scalar(self, *args, **kwargs):
+        return self.sync_session.scalar(*args, **kwargs)
+
+    async def scalars(self, *args, **kwargs):
+        return self.sync_session.scalars(*args, **kwargs)
+
+    async def execute(self, *args, **kwargs):
+        return self.sync_session.execute(*args, **kwargs)
+
     async def run_sync(self, fn):
         return fn(self.sync_session)
 
+    async def flush(self):
+        return self.sync_session.flush()
+
     async def commit(self):
-        return None
+        return self.sync_session.commit()
 
     async def rollback(self):
-        return None
+        return self.sync_session.rollback()
 
     async def close(self):
         return None
@@ -38,11 +58,7 @@ def mock_session_factory():
     def _async_factory():
         return _AsyncSession(session)
 
-    def _legacy_factory():
-        return session
-
-    with patch("brain.app.api.deps.SessionFactory", _async_factory), \
-         patch("brain.platform.db.legacy.legacy_session_factory", _legacy_factory):
+    with patch("brain.app.api.deps.SessionFactory", _async_factory):
         yield session
 
 
@@ -212,7 +228,18 @@ def test_project_context_merge_into_idea_agent_details():
     assert idea.agent_details["project_context"] == snapshot
 
 
-def test_notify_metadata_preserves_thread_project_context():
+def test_project_context_merge_drops_non_dict_agent_details():
+    from brain.app.api.routers.cortex._idea_ops import _merge_project_context_into_idea
+
+    idea = _make_idea(agent_details=[{"old": True}])
+    snapshot = {"validation_status": "client_validated", "resources": [{"path": "brain"}]}
+
+    _merge_project_context_into_idea(idea, snapshot)
+
+    assert idea.agent_details == {"project_context": snapshot}
+
+
+async def test_notify_metadata_preserves_thread_project_context():
     from brain.app.api.routers.cortex._ideas import _effective_notify_metadata
 
     snapshot = {"resources": [{"path": "/workspace/context.md"}]}
@@ -222,13 +249,14 @@ def test_notify_metadata_preserves_thread_project_context():
         "execution_profile": "deep",
     }
 
-    result = _effective_notify_metadata(db, "idea-1", {"execution_profile": "fast"})
+    async_db = _AsyncSession(db)
+    result = await _effective_notify_metadata(async_db, "idea-1", {"execution_profile": "fast"})
 
     assert result["project_context"] == snapshot
     assert result["execution_profile"] == "fast"
 
 
-def test_project_profile_resource_endpoints_mutate_context(tmp_path):
+async def test_project_profile_resource_endpoints_mutate_context(tmp_path):
     from brain.app.api.routers.cortex import _project_context
     from brain.systems.cortex.project_context.schemas import (
         ProjectResourcesCreate,
@@ -257,31 +285,27 @@ def test_project_profile_resource_endpoints_mutate_context(tmp_path):
     db = _AsyncSession(session)
     user = {"id": "user-1", "org_id": "test-org", "role": "owner"}
 
-    asyncio.run(
-        _project_context.add_project_resources(
-            "project-1",
-            ProjectResourcesCreate(resources=[{"kind": "file", "path": str(second), "name": "brief"}]),
-            db=db,
-            user=user,
-        )
+    await _project_context.add_project_resources(
+        "project-1",
+        ProjectResourcesCreate(resources=[{"kind": "file", "path": str(second), "name": "brief"}]),
+        db=db,
+        user=user,
     )
 
     assert [resource["path"] for resource in profile.project_context["resources"]] == [str(first), str(second)]
     added_id = profile.project_context["resources"][1]["id"]
 
-    asyncio.run(
-        _project_context.reorder_project_resources(
-            "project-1",
-            ProjectResourcesReorder(resource_ids=[added_id, "r1"]),
-            db=db,
-            user=user,
-        )
+    await _project_context.reorder_project_resources(
+        "project-1",
+        ProjectResourcesReorder(resource_ids=[added_id, "r1"]),
+        db=db,
+        user=user,
     )
 
     assert [resource["id"] for resource in profile.project_context["resources"]] == [added_id, "r1"]
 
 
-def test_project_profile_resource_reorder_rejects_duplicates(tmp_path):
+async def test_project_profile_resource_reorder_rejects_duplicates(tmp_path):
     from fastapi import HTTPException
 
     from brain.app.api.routers.cortex import _project_context
@@ -314,13 +338,11 @@ def test_project_profile_resource_reorder_rejects_duplicates(tmp_path):
     db = _AsyncSession(session)
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(
-            _project_context.reorder_project_resources(
-                "project-1",
-                ProjectResourcesReorder(resource_ids=["r1", "r1"]),
-                db=db,
-                user={"id": "user-1", "org_id": "test-org", "role": "owner"},
-            )
+        await _project_context.reorder_project_resources(
+            "project-1",
+            ProjectResourcesReorder(resource_ids=["r1", "r1"]),
+            db=db,
+            user={"id": "user-1", "org_id": "test-org", "role": "owner"},
         )
 
     assert exc_info.value.status_code == 422
@@ -342,7 +364,7 @@ def test_manage_idea_tool_is_available_to_agents():
     assert "manage_idea" in _get_tool_handlers()
 
 
-def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
+async def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
 
@@ -355,36 +377,38 @@ def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
             self.session = session
             self.notifications = MagicMock()
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
             return None
 
-    def require_idea(session_arg, idea_id, actor):
+    async def require_idea(session_arg, idea_id, actor):
         assert session_arg is session
         assert idea_id == "idea-1"
         assert actor["org_id"] == "org-1"
         return idea
 
+    session.flush = AsyncMock()
+
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
-    monkeypatch.setattr("brain.app.api.routers.cortex._helpers._require_idea_for_user", require_idea)
-    monkeypatch.setattr(
-        idea_tools,
-        "_serialize_idea",
-        lambda idea_arg, session_arg: {
+    monkeypatch.setattr("brain.app.api.routers.cortex._helpers._a_require_idea_for_user", require_idea)
+
+    async def serialize_idea(idea_arg, session_arg):
+        return {
             "id": str(idea_arg.id),
             "status": idea_arg.status,
             "archived_at": idea_arg.archived_at.isoformat() if idea_arg.archived_at else None,
-        },
-    )
+        }
+
+    monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
     monkeypatch.setattr(
         "brain.systems.cortex.events.publish_safe",
         lambda event_type, data: published.append((event_type, data)),
     )
 
     with bind_agent_context({"idea_id": "idea-1", "org_id": "org-1", "user_id": "user-1"}):
-        payload = json.loads(idea_tools._handle_manage_idea(action="archive"))
+        payload = json.loads(await idea_tools._handle_manage_idea(action="archive"))
 
     assert payload["ok"] is True
     assert payload["archived"] is True
@@ -394,7 +418,7 @@ def test_manage_idea_archive_defaults_to_current_thread(monkeypatch):
     assert published == [("idea_archived", {"idea_id": "idea-1", "idea": payload["idea"]})]
 
 
-def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
+async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
 
@@ -405,7 +429,7 @@ def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     def add(obj):
         added.append(obj)
 
-    def flush():
+    async def flush():
         for obj in added:
             if obj.__class__.__name__ == "Idea" and getattr(obj, "id", None) is None:
                 obj.id = "idea-created"
@@ -416,20 +440,20 @@ def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
         def __init__(self):
             self.session = session
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
             return None
 
     session.add.side_effect = add
-    session.flush.side_effect = flush
+    session.flush = AsyncMock(side_effect=flush)
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
-    monkeypatch.setattr(
-        idea_tools,
-        "_serialize_idea",
-        lambda idea_arg, session_arg: {"id": str(idea_arg.id), "status": idea_arg.status},
-    )
+
+    async def serialize_idea(idea_arg, session_arg):
+        return {"id": str(idea_arg.id), "status": idea_arg.status}
+
+    monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
     monkeypatch.setattr(
         "brain.systems.cortex.events.publish_safe",
         lambda event_type, data: published.append((event_type, data)),
@@ -437,7 +461,7 @@ def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
 
     with bind_agent_context({"idea_id": "parent-idea", "org_id": "org-1", "user_id": "user-1", "execution_metadata": {"run_id": 7}}):
         payload = json.loads(
-            idea_tools._handle_manage_idea(
+            await idea_tools._handle_manage_idea(
                 action="create",
                 title="Check vault state",
                 description="Inspect vault and AWS credential handoff path.",
@@ -457,7 +481,7 @@ def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
     assert published == [("idea_created", {"idea_id": "idea-created", "title": "Check vault state"})]
 
 
-def test_manage_idea_create_can_handoff_owner(monkeypatch):
+async def test_manage_idea_create_can_handoff_owner(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
 
@@ -468,7 +492,7 @@ def test_manage_idea_create_can_handoff_owner(monkeypatch):
     def add(obj):
         added.append(obj)
 
-    def flush():
+    async def flush():
         for obj in added:
             if obj.__class__.__name__ == "Idea" and getattr(obj, "id", None) is None:
                 obj.id = "idea-created"
@@ -479,26 +503,27 @@ def test_manage_idea_create_can_handoff_owner(monkeypatch):
         def __init__(self):
             self.session = session
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
             return None
 
     session.add.side_effect = add
-    session.flush.side_effect = flush
-    session.scalar.return_value = target_user
+    session.flush = AsyncMock(side_effect=flush)
+    session.scalar = AsyncMock(return_value=target_user)
+    session.execute = AsyncMock(return_value=SimpleNamespace(one_or_none=lambda: None))
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
     monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
-    monkeypatch.setattr(
-        idea_tools,
-        "_serialize_idea",
-        lambda idea_arg, session_arg: {"id": str(idea_arg.id), "user_id": idea_arg.user_id},
-    )
+
+    async def serialize_idea(idea_arg, session_arg):
+        return {"id": str(idea_arg.id), "user_id": idea_arg.user_id}
+
+    monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
 
     with bind_agent_context({"idea_id": "parent-idea", "org_id": "org-1", "user_id": "user-1"}):
         payload = json.loads(
-            idea_tools._handle_manage_idea(
+            await idea_tools._handle_manage_idea(
                 action="create",
                 title="JB follow-up",
                 thread_message="Please take this follow-up.",
@@ -515,7 +540,7 @@ def test_manage_idea_create_can_handoff_owner(monkeypatch):
     assert thread_rows[0].user_id == "user-1"
 
 
-def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch):
+async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch):
     from brain.systems.runs.execution_context import bind_agent_context
     from brain.systems.runs.tool_catalog.handlers import ideas as idea_tools
 
@@ -526,14 +551,14 @@ def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch
     def add(obj):
         added.append(obj)
 
-    def flush():
+    async def flush():
         for obj in added:
             if obj.__class__.__name__ == "Idea" and getattr(obj, "id", None) is None:
                 obj.id = "idea-created"
             if obj.__class__.__name__ == "IdeaThread" and getattr(obj, "id", None) is None:
                 obj.id = 43
 
-    def admit(session_arg, *, idea, seed_content, actor_user_id, parent_id, origin_ref, thread_message_id):
+    async def admit(session_arg, *, idea, seed_content, actor_user_id, parent_id, origin_ref, thread_message_id):
         assert session_arg is session
         assert idea.status == "emerged"
         assert seed_content == "Do the theme color work."
@@ -549,26 +574,26 @@ def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch
         def __init__(self):
             self.session = session
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
             return None
 
     session.add.side_effect = add
-    session.flush.side_effect = flush
+    session.flush = AsyncMock(side_effect=flush)
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", FakeUnitOfWork)
     monkeypatch.setattr("brain.systems.cortex.events.publish_safe", lambda *_: None)
     monkeypatch.setattr(idea_tools, "_admit_created_idea_run", admit)
-    monkeypatch.setattr(
-        idea_tools,
-        "_serialize_idea",
-        lambda idea_arg, session_arg: {"id": str(idea_arg.id), "status": idea_arg.status},
-    )
+
+    async def serialize_idea(idea_arg, session_arg):
+        return {"id": str(idea_arg.id), "status": idea_arg.status}
+
+    monkeypatch.setattr(idea_tools, "_serialize_idea", serialize_idea)
 
     with bind_agent_context({"idea_id": "parent-idea", "org_id": "org-1", "user_id": "user-1"}):
         payload = json.loads(
-            idea_tools._handle_manage_idea(
+            await idea_tools._handle_manage_idea(
                 action="create",
                 title="Fix streaming color",
                 description="Do the theme color work.",
@@ -788,7 +813,7 @@ def test_notify_route_uses_scoped_idea_guard():
     assert "_require_idea_for_user" in source
 
 
-def test_slash_commands_materializes_builtin_skills():
+async def test_slash_commands_materializes_builtin_skills():
     from brain.app.api.routers.cortex import _analytics as analytics_mod
 
     skill = SimpleNamespace(
@@ -815,7 +840,7 @@ def test_slash_commands_materializes_builtin_skills():
         patch("brain.systems.skills.builtin.ensure_builtin_skills_cached", new=AsyncMock()) as ensure_builtin,
         patch.object(analytics_mod, "UnitOfWork", return_value=mock_uow),
     ):
-        result = asyncio.run(analytics_mod.api_slash_commands(user={"id": "user-1"}))
+        result = await analytics_mod.api_slash_commands(user={"id": "user-1"})
 
     ensure_builtin.assert_awaited_once_with()
     assert result[0]["name"] == "develop"
@@ -860,7 +885,7 @@ async def test_list_ideas(client, mock_session_factory):
     with patch(
         "brain.app.api.routers.cortex._ideas.IdeaRepository"
     ) as MockRepo:
-        MockRepo.return_value.list_active_for_org.return_value = [idea]
+        MockRepo.return_value.a_list_active_for_org = AsyncMock(return_value=[idea])
         resp = await client.get("/api/cortex/ideas")
     assert resp.status_code == 200
     data = resp.json()
@@ -895,9 +920,9 @@ async def test_cortex_bootstrap_core_preserves_existing_payload_shapes(client):
     }
 
     with (
-        patch.object(bootstrap_mod, "list_ideas_payload", return_value=[idea]),
-        patch.object(bootstrap_mod, "list_connections_payload", return_value=[connection]),
-        patch.object(bootstrap_mod, "list_members_payload", return_value=[member]),
+        patch.object(bootstrap_mod, "list_ideas_payload", AsyncMock(return_value=[idea])),
+        patch.object(bootstrap_mod, "list_connections_payload", AsyncMock(return_value=[connection])),
+        patch.object(bootstrap_mod, "list_members_payload", AsyncMock(return_value=[member])),
     ):
         resp = await client.get("/api/cortex/bootstrap")
 
@@ -917,8 +942,8 @@ async def test_cortex_bootstrap_can_skip_team_members_for_direct_threads(client)
     from brain.app.api.routers.cortex import _bootstrap as bootstrap_mod
 
     with (
-        patch.object(bootstrap_mod, "list_ideas_payload", return_value=[]),
-        patch.object(bootstrap_mod, "list_connections_payload", return_value=[]),
+        patch.object(bootstrap_mod, "list_ideas_payload", AsyncMock(return_value=[])),
+        patch.object(bootstrap_mod, "list_connections_payload", AsyncMock(return_value=[])),
         patch.object(bootstrap_mod, "list_members_payload") as list_members,
     ):
         resp = await client.get("/api/cortex/bootstrap?include=ideas,connections")
@@ -946,8 +971,8 @@ async def test_cortex_bootstrap_direct_thread_reuses_stream_payload(client):
     ]
 
     with (
-        patch.object(bootstrap_mod, "list_ideas_payload", return_value=[]),
-        patch.object(bootstrap_mod, "list_connections_payload", return_value=[]),
+        patch.object(bootstrap_mod, "list_ideas_payload", AsyncMock(return_value=[])),
+        patch.object(bootstrap_mod, "list_connections_payload", AsyncMock(return_value=[])),
         patch.object(bootstrap_mod, "unified_stream_payload", return_value=stream) as stream_payload,
     ):
         resp = await client.get("/api/cortex/bootstrap?include=ideas,connections,direct_thread&idea_id=idea-1")
@@ -978,7 +1003,7 @@ async def test_cortex_bootstrap_direct_thread_can_return_selected_idea_without_g
     ]
 
     with (
-        patch.object(bootstrap_mod, "_require_idea_for_user", return_value=idea) as require_idea,
+        patch.object(bootstrap_mod, "_require_idea_for_user", AsyncMock(return_value=idea)) as require_idea,
         patch.object(bootstrap_mod, "list_ideas_payload") as list_ideas,
         patch.object(bootstrap_mod, "list_connections_payload") as list_connections,
         patch.object(bootstrap_mod, "unified_stream_payload", return_value=stream),
@@ -992,7 +1017,7 @@ async def test_cortex_bootstrap_direct_thread_can_return_selected_idea_without_g
     assert data["selected_idea"]["id"] == "idea-1"
     assert data["selected_idea"]["title"] == "Selected Thread"
     assert data["direct_thread"] == {"idea_id": "idea-1", "stream": stream}
-    require_idea.assert_called_once()
+    require_idea.assert_awaited_once()
     list_ideas.assert_not_called()
     list_connections.assert_not_called()
 
@@ -1003,10 +1028,10 @@ async def test_list_ideas_with_status_filter(client, mock_session_factory):
     with patch(
         "brain.app.api.routers.cortex._ideas.IdeaRepository"
     ) as MockRepo:
-        MockRepo.return_value.list_by_status_for_org.return_value = [idea]
+        MockRepo.return_value.a_list_by_status_for_org = AsyncMock(return_value=[idea])
         resp = await client.get("/api/cortex/ideas?status=working")
     assert resp.status_code == 200
-    MockRepo.return_value.list_by_status_for_org.assert_called_once_with("working", ANY)
+    MockRepo.return_value.a_list_by_status_for_org.assert_awaited_once_with("working", ANY)
 
 
 @pytest.mark.asyncio
@@ -1016,13 +1041,13 @@ async def test_list_archived_ideas(client, mock_session_factory):
     with patch(
         "brain.app.api.routers.cortex._ideas.IdeaRepository"
     ) as MockRepo:
-        MockRepo.return_value.list_archived_for_org.return_value = [idea]
+        MockRepo.return_value.a_list_archived_for_org = AsyncMock(return_value=[idea])
         resp = await client.get("/api/cortex/ideas/archived?limit=5")
 
     assert resp.status_code == 200, resp.text
     payload = resp.json()
     assert payload[0]["archived_at"] is not None
-    MockRepo.return_value.list_archived_for_org.assert_called_once_with(ANY, limit=5)
+    MockRepo.return_value.a_list_archived_for_org.assert_awaited_once_with(ANY, limit=5)
 
 
 @pytest.mark.asyncio
@@ -1038,12 +1063,12 @@ async def test_empty_archived_ideas(client, mock_session_factory):
         "brain.app.api.routers.cortex._ideas.ws_manager.broadcast_product_event",
         side_effect=_broadcast,
     ):
-        MockRepo.return_value.hard_delete_archived_for_org.return_value = 3
+        MockRepo.return_value.a_hard_delete_archived_for_org = AsyncMock(return_value=3)
         resp = await client.delete("/api/cortex/ideas/archived")
 
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"deleted": 3}
-    MockRepo.return_value.hard_delete_archived_for_org.assert_called_once_with("test-org")
+    MockRepo.return_value.a_hard_delete_archived_for_org.assert_awaited_once_with("test-org")
     mock_session_factory.commit.assert_called()
     assert broadcasts == [
         ("idea_archive_emptied", {"deleted": 3}, {"org_id": "test-org"}),
@@ -1066,7 +1091,7 @@ async def test_create_idea(client, mock_session_factory):
     ), patch(
         "brain.app.api.routers.cortex._ideas.generate_and_store_idea_display_title"
     ) as mock_generate_title:
-        MockRepo.return_value.create.return_value = idea
+        MockRepo.return_value.a_create = AsyncMock(return_value=idea)
         resp = await client.post(
             "/api/cortex/ideas",
             json={"title": "New Idea"},
@@ -1103,7 +1128,7 @@ async def test_create_thread_message(client, mock_session_factory):
     with patch(
         "brain.app.api.routers.cortex._ideas.IdeaThreadRepository"
     ) as MockRepo:
-        MockRepo.return_value.add_message.return_value = msg
+        MockRepo.return_value.a_add_message = AsyncMock(return_value=msg)
         resp = await client.post(
             "/api/cortex/ideas/some-id/threads",
             json={"content": "Hello", "role": "user"},
@@ -1123,9 +1148,9 @@ async def test_create_thread_message_commits_before_broadcast(client, mock_sessi
         order.append("broadcast")
 
     with patch("brain.app.api.routers.cortex._ideas.IdeaThreadRepository") as MockRepo, \
-         patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea), \
+         patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)), \
          patch("brain.app.api.routers.cortex._ideas.ws_manager.broadcast_product_event", side_effect=_broadcast):
-        MockRepo.return_value.add_message.return_value = msg
+        MockRepo.return_value.a_add_message = AsyncMock(return_value=msg)
         resp = await client.post(
             "/api/cortex/ideas/some-id/threads",
             json={"content": "Hello", "role": "user"},
@@ -1146,7 +1171,7 @@ async def test_update_idea_status_commits_before_broadcast(client, mock_session_
     async def _broadcast(*_args, **_kwargs):
         order.append("broadcast")
 
-    with patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea), \
+    with patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)), \
          patch("brain.app.api.routers.cortex._ideas.ws_manager.broadcast_product_event", side_effect=_broadcast):
         resp = await client.patch(
             "/api/cortex/ideas/status-idea/status",
@@ -1164,7 +1189,7 @@ async def test_restore_archived_idea(client, mock_session_factory):
     archived_at = datetime.now(timezone.utc)
     idea = _make_idea(id="restore-id", status="archived", archived_at=archived_at)
 
-    with patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea):
+    with patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)):
         resp = await client.post(f"/api/cortex/ideas/{idea.id}/restore")
 
     assert resp.status_code == 200, resp.text
@@ -1196,7 +1221,7 @@ async def test_update_idea_user_id_handoff_same_org(client, mock_session_factory
     mock_session_factory.execute.return_value.one_or_none.return_value = None
 
     with (
-        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea),
+        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)),
         patch("brain.app.api.routers.cortex._ideas.require_org_context", return_value=org_id),
     ):
         resp = await client.put(f"/api/cortex/ideas/{idea.id}", json={"user_id": target_id})
@@ -1225,7 +1250,7 @@ async def test_update_idea_user_id_handoff_rejects_cross_org(client, mock_sessio
     mock_session_factory.scalar.return_value = target_user
 
     with (
-        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea),
+        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)),
         patch("brain.app.api.routers.cortex._ideas.require_org_context", return_value=org_id),
     ):
         resp = await client.patch(f"/api/cortex/ideas/{idea.id}", json={"user_id": target_id})
@@ -1257,7 +1282,7 @@ async def test_update_idea_user_id_handoff_preserves_previous_owner_color_withou
     ]
 
     with (
-        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea),
+        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)),
         patch("brain.app.api.routers.cortex._ideas.require_org_context", return_value=org_id),
     ):
         resp = await client.put(f"/api/cortex/ideas/{idea.id}", json={"user_id": target_id})
@@ -1285,7 +1310,7 @@ async def test_update_idea_orbit_anchor_pin_keeps_owner(client, mock_session_fac
     mock_session_factory.execute.return_value.one_or_none.return_value = None
 
     with (
-        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", return_value=idea),
+        patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)),
         patch("brain.app.api.routers.cortex._ideas.require_org_context", return_value=org_id),
     ):
         resp = await client.patch(
@@ -1316,7 +1341,7 @@ async def test_list_ideas_uses_last_human_thread_author_color(client, mock_sessi
     last_author.color = "#abcdef"
 
     with patch("brain.app.api.routers.cortex._ideas.IdeaRepository") as MockRepo:
-        MockRepo.return_value.list_active_for_org.return_value = [idea]
+        MockRepo.return_value.a_list_active_for_org = AsyncMock(return_value=[idea])
         mock_session_factory.execute.return_value.all.return_value = [
             SimpleNamespace(
                 idea_id="color-id",
@@ -1512,8 +1537,8 @@ async def test_create_project_profile_rejects_invalid_context(client, mock_sessi
 @pytest.mark.asyncio
 async def test_project_context_github_connect_uses_server_side_vault_token(client):
     with (
-        patch("brain.systems.cortex.project_context.vault.github_token_from_vault", return_value="ghp_secret") as token_from_vault,
-        patch("brain.app.api.routers.cortex._project_context.connect_with_token", return_value={
+        patch("brain.systems.cortex.project_context.vault.async_github_token_from_vault", AsyncMock(return_value="ghp_secret")) as token_from_vault,
+        patch("brain.app.api.routers.cortex._project_context.async_connect_with_token", AsyncMock(return_value={
             "login": "alex",
             "repos": [
                 {
@@ -1523,7 +1548,7 @@ async def test_project_context_github_connect_uses_server_side_vault_token(clien
                     "permissions": {"push": True},
                 }
             ],
-        }) as connect,
+        })) as connect,
     ):
         resp = await client.post(
             "/api/cortex/project-context/github/connect",
@@ -1535,19 +1560,19 @@ async def test_project_context_github_connect_uses_server_side_vault_token(clien
     assert payload["login"] == "alex"
     assert payload["repos"][0]["full_name"] == "example-org/example-repo"
     assert "ghp_secret" not in str(payload)
-    token_from_vault.assert_called_once()
-    connect.assert_called_once_with("ghp_secret")
+    token_from_vault.assert_awaited_once()
+    connect.assert_awaited_once_with("ghp_secret")
 
 
 @pytest.mark.asyncio
 async def test_project_context_github_connect_logs_vault_read_as_api_actor(client):
     with (
-        patch("brain.systems.cortex.project_context.vault.has_pin", return_value=False),
-        patch("brain.systems.cortex.project_context.vault.get_secret", return_value="ghp_secret") as get_secret,
-        patch("brain.app.api.routers.cortex._project_context.connect_with_token", return_value={
+        patch("brain.systems.cortex.project_context.vault.async_has_pin", AsyncMock(return_value=False)),
+        patch("brain.systems.cortex.project_context.vault.async_get_secret", AsyncMock(return_value="ghp_secret")) as get_secret,
+        patch("brain.app.api.routers.cortex._project_context.async_connect_with_token", AsyncMock(return_value={
             "login": "alex",
             "repos": [],
-        }),
+        })),
     ):
         resp = await client.post(
             "/api/cortex/project-context/github/connect",
@@ -1555,7 +1580,7 @@ async def test_project_context_github_connect_logs_vault_read_as_api_actor(clien
         )
 
     assert resp.status_code == 200
-    get_secret.assert_called_once_with(
+    get_secret.assert_awaited_once_with(
         "GITHUB_TOKEN",
         user_id="user-1",
         org_id="test-org",
@@ -1565,7 +1590,7 @@ async def test_project_context_github_connect_logs_vault_read_as_api_actor(clien
 
 @pytest.mark.asyncio
 async def test_project_context_github_search_supports_public_without_vault(client):
-    with patch("brain.app.api.routers.cortex._project_context.search_repos", return_value={
+    with patch("brain.app.api.routers.cortex._project_context.async_search_repos", AsyncMock(return_value={
         "matched_exact": True,
         "repos": [
             {
@@ -1575,7 +1600,7 @@ async def test_project_context_github_search_supports_public_without_vault(clien
                 "permissions": {},
             }
         ],
-    }) as search:
+    })) as search:
         resp = await client.post(
             "/api/cortex/project-context/github/search",
             json={"query": "rtk-ai/rtk"},
@@ -1583,7 +1608,7 @@ async def test_project_context_github_search_supports_public_without_vault(clien
 
     assert resp.status_code == 200
     assert resp.json()["matched_exact"] is True
-    search.assert_called_once_with("rtk-ai/rtk", token=None)
+    search.assert_awaited_once_with("rtk-ai/rtk", token=None)
 
 
 @pytest.mark.asyncio
@@ -1605,9 +1630,9 @@ async def test_project_context_github_bind_token_verifies_repo_and_binds_owned_v
         "permissions": {"push": True},
     }
     with (
-        patch("brain.systems.cortex.project_context.vault.github_token_from_vault", return_value="ghp_secret") as token_from_vault,
-        patch("brain.app.api.routers.cortex._project_context.get_repo_by_slug", return_value=repo) as get_repo,
-        patch("brain.systems.vault.bind_project_secret_by_key", return_value=binding) as bind,
+        patch("brain.systems.cortex.project_context.vault.async_github_token_from_vault", AsyncMock(return_value="ghp_secret")) as token_from_vault,
+        patch("brain.app.api.routers.cortex._project_context.async_get_repo_by_slug", AsyncMock(return_value=repo)) as get_repo,
+        patch("brain.systems.vault.async_bind_project_secret_by_key", AsyncMock(return_value=binding)) as bind,
     ):
         resp = await client.post(
             "/api/cortex/project-context/github/bind-token",
@@ -1620,14 +1645,14 @@ async def test_project_context_github_bind_token_verifies_repo_and_binds_owned_v
     assert payload["env_name"] == "GH_TOKEN"
     assert payload["write_access"] is True
     assert "ghp_secret" not in str(payload)
-    token_from_vault.assert_called_once_with(
+    token_from_vault.assert_awaited_once_with(
         "GITHUB_TOKEN",
         user=ANY,
         unlock_token=None,
         allow_shared=False,
     )
-    get_repo.assert_called_once_with("example-org/example-repo", token="ghp_secret")
-    bind.assert_called_once_with(
+    get_repo.assert_awaited_once_with("example-org/example-repo", token="ghp_secret")
+    bind.assert_awaited_once_with(
         "GITHUB_TOKEN",
         user_id="user-1",
         org_id="test-org",
@@ -1639,9 +1664,9 @@ async def test_project_context_github_bind_token_verifies_repo_and_binds_owned_v
 @pytest.mark.asyncio
 async def test_project_context_github_bind_token_rejects_repos_not_visible_to_token(client):
     with (
-        patch("brain.systems.cortex.project_context.vault.github_token_from_vault", return_value="ghp_secret"),
-        patch("brain.app.api.routers.cortex._project_context.get_repo_by_slug", return_value=None),
-        patch("brain.systems.vault.bind_project_secret_by_key") as bind,
+        patch("brain.systems.cortex.project_context.vault.async_github_token_from_vault", AsyncMock(return_value="ghp_secret")),
+        patch("brain.app.api.routers.cortex._project_context.async_get_repo_by_slug", AsyncMock(return_value=None)),
+        patch("brain.systems.vault.async_bind_project_secret_by_key", AsyncMock()) as bind,
     ):
         resp = await client.post(
             "/api/cortex/project-context/github/bind-token",
@@ -1649,7 +1674,7 @@ async def test_project_context_github_bind_token_rejects_repos_not_visible_to_to
         )
 
     assert resp.status_code == 404
-    bind.assert_not_called()
+    bind.assert_not_awaited()
 
 
 @pytest.mark.asyncio

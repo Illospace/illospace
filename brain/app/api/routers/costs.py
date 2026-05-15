@@ -9,13 +9,11 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.db_utils import run_db
 from brain.systems.runs.cortex.recording import trace_id_for_run_id
-from brain.systems.runs.token_usage import summarize_recent_run_usage
+from brain.systems.runs.token_usage import async_summarize_recent_run_usage
 
 router = APIRouter(
     prefix="/api/costs",
@@ -75,7 +73,7 @@ def _cost_org_scope(user: dict[str, Any]) -> str | None:
     return str(org_id) if org_id else None
 
 
-def _fetch_agent_api_call_rows(db: Session, run_id: int) -> list[dict[str, Any]]:
+async def _fetch_agent_api_call_rows(db: AsyncSession, run_id: int) -> list[dict[str, Any]]:
     """Read optional LLM call telemetry while tolerating legacy/missing tables."""
     base_columns = (
         "turn_number, session_id, model, tokens_input, tokens_output, "
@@ -83,28 +81,30 @@ def _fetch_agent_api_call_rows(db: Session, run_id: int) -> list[dict[str, Any]]
         "status, stop_reason, latency_ms, error, created_at "
     )
     try:
-        rows = db.execute(sa_text(
+        result = await db.execute(sa_text(
             "SELECT trace_id, " + base_columns +
             "FROM agent_api_calls WHERE run_id = :did "
             "ORDER BY created_at, turn_number"
-        ), {"did": run_id}).mappings().all()
+        ), {"did": run_id})
+        rows = result.mappings().all()
         return [dict(row) for row in rows]
     except SQLAlchemyError:
         try:
-            db.rollback()
+            await db.rollback()
         except Exception:
             pass
 
     try:
-        rows = db.execute(sa_text(
+        result = await db.execute(sa_text(
             "SELECT " + base_columns +
             "FROM agent_api_calls WHERE run_id = :did "
             "ORDER BY created_at, turn_number"
-        ), {"did": run_id}).mappings().all()
+        ), {"did": run_id})
+        rows = result.mappings().all()
         return [dict(row) for row in rows]
     except SQLAlchemyError:
         try:
-            db.rollback()
+            await db.rollback()
         except Exception:
             pass
         return []
@@ -149,115 +149,103 @@ async def run_breakdown(
     input/output/cache tokens, context size, latency, and which session
     (coordinator vs worker) made the call.
     """
-    def _breakdown(sync_db: Session):
-        rows = _fetch_agent_api_call_rows(sync_db, run_id)
+    rows = await _fetch_agent_api_call_rows(db, run_id)
 
-        if not rows:
-            return {
-                "run_id": run_id,
-                "trace_id": trace_id_for_run_id(run_id),
-                "turns": [],
-                "summary": None,
-            }
-
-        # Group by session to identify coordinator vs workers
-        sessions: dict[str, list] = defaultdict(list)
-        for r in rows:
-            sessions[r["session_id"]].append(dict(r))
-
-        turns = []
-        totals = {
-            "input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
-            "api_calls": 0, "total_latency_ms": 0,
-        }
-
-        for r in rows:
-            input_tok = r["tokens_input"] or 0
-            output_tok = r["tokens_output"] or 0
-            cr = r["cache_read"] or 0
-            cw = r["cache_write"] or 0
-
-            totals["input"] += input_tok
-            totals["output"] += output_tok
-            totals["cache_read"] += cr
-            totals["cache_write"] += cw
-            totals["api_calls"] += 1
-            totals["total_latency_ms"] += r["latency_ms"] or 0
-
-            provider, normalized_model, provider_model = _provider_model_key(r["model"])
-            turns.append({
-                "turn": r["turn_number"],
-                "trace_id": r.get("trace_id") or trace_id_for_run_id(run_id),
-                "session_id": r["session_id"],
-                "model": r["model"],
-                "provider": provider,
-                "normalized_model": normalized_model,
-                "provider_model": provider_model,
-                "input": input_tok,
-                "output": output_tok,
-                "cache_read": cr,
-                "cache_write": cw,
-                "context_messages": r["context_messages"],
-                "system_prompt_chars": r["system_prompt_chars"],
-                "status": r["status"],
-                "stop_reason": r["stop_reason"],
-                "latency_ms": r["latency_ms"],
-                "error": r["error"],
-                "timestamp": r["created_at"].isoformat() if r["created_at"] else None,
-            })
-
-        # Identify coordinator (usually first session, or has "coordinator" in id)
-        session_ids = list(sessions.keys())
-        coordinator_id = next(
-            (s for s in session_ids if "coordinator" in s), session_ids[0] if session_ids else None
-        )
-
-        # Per-session summaries
-        session_summaries = []
-        for sid, calls in sessions.items():
-            s_input = sum(c["tokens_input"] or 0 for c in calls)
-            s_output = sum(c["tokens_output"] or 0 for c in calls)
-            s_cr = sum(c["cache_read"] or 0 for c in calls)
-            s_cw = sum(c["cache_write"] or 0 for c in calls)
-
-            # Context growth: first vs last turn
-            first_ctx = calls[0].get("context_messages") or 0
-            last_ctx = calls[-1].get("context_messages") or 0
-
-            role = "coordinator" if sid == coordinator_id else "worker"
-            session_summaries.append({
-                "session_id": sid,
-                "role": role,
-                "api_calls": len(calls),
-                "input": s_input,
-                "output": s_output,
-                "cache_read": s_cr,
-                "cache_write": s_cw,
-                "cache_hit_rate": round(s_cr / max(s_input + s_cr, 1), 3),
-                "context_growth": f"{first_ctx} -> {last_ctx} messages",
-                "total_latency_ms": sum(c["latency_ms"] or 0 for c in calls),
-            })
-
-        # Sort: biggest token consumer first
-        session_summaries.sort(key=lambda x: x["input"] + x["output"], reverse=True)
-
-        cache_hit_rate = round(
-            totals["cache_read"] / max(totals["input"] + totals["cache_read"], 1), 3
-        )
-
+    if not rows:
         return {
             "run_id": run_id,
-            "trace_id": rows[0].get("trace_id") or trace_id_for_run_id(run_id),
-            "summary": {
-                **totals,
-                "total_tokens": totals["input"] + totals["output"],
-                "cache_hit_rate": cache_hit_rate,
-            },
-            "sessions": session_summaries,
-            "turns": turns,
+            "trace_id": trace_id_for_run_id(run_id),
+            "turns": [],
+            "summary": None,
         }
 
-    return await run_db(db, _breakdown)
+    sessions: dict[str, list] = defaultdict(list)
+    for row in rows:
+        sessions[row["session_id"]].append(dict(row))
+
+    turns = []
+    totals = {
+        "input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
+        "api_calls": 0, "total_latency_ms": 0,
+    }
+
+    for row in rows:
+        input_tok = row["tokens_input"] or 0
+        output_tok = row["tokens_output"] or 0
+        cr = row["cache_read"] or 0
+        cw = row["cache_write"] or 0
+
+        totals["input"] += input_tok
+        totals["output"] += output_tok
+        totals["cache_read"] += cr
+        totals["cache_write"] += cw
+        totals["api_calls"] += 1
+        totals["total_latency_ms"] += row["latency_ms"] or 0
+
+        provider, normalized_model, provider_model = _provider_model_key(row["model"])
+        turns.append({
+            "turn": row["turn_number"],
+            "trace_id": row.get("trace_id") or trace_id_for_run_id(run_id),
+            "session_id": row["session_id"],
+            "model": row["model"],
+            "provider": provider,
+            "normalized_model": normalized_model,
+            "provider_model": provider_model,
+            "input": input_tok,
+            "output": output_tok,
+            "cache_read": cr,
+            "cache_write": cw,
+            "context_messages": row["context_messages"],
+            "system_prompt_chars": row["system_prompt_chars"],
+            "status": row["status"],
+            "stop_reason": row["stop_reason"],
+            "latency_ms": row["latency_ms"],
+            "error": row["error"],
+            "timestamp": row["created_at"].isoformat() if row["created_at"] else None,
+        })
+
+    session_ids = list(sessions.keys())
+    coordinator_id = next(
+        (s for s in session_ids if "coordinator" in s), session_ids[0] if session_ids else None
+    )
+
+    session_summaries = []
+    for sid, calls in sessions.items():
+        s_input = sum(call["tokens_input"] or 0 for call in calls)
+        s_output = sum(call["tokens_output"] or 0 for call in calls)
+        s_cr = sum(call["cache_read"] or 0 for call in calls)
+        s_cw = sum(call["cache_write"] or 0 for call in calls)
+        first_ctx = calls[0].get("context_messages") or 0
+        last_ctx = calls[-1].get("context_messages") or 0
+        role = "coordinator" if sid == coordinator_id else "worker"
+        session_summaries.append({
+            "session_id": sid,
+            "role": role,
+            "api_calls": len(calls),
+            "input": s_input,
+            "output": s_output,
+            "cache_read": s_cr,
+            "cache_write": s_cw,
+            "cache_hit_rate": round(s_cr / max(s_input + s_cr, 1), 3),
+            "context_growth": f"{first_ctx} -> {last_ctx} messages",
+            "total_latency_ms": sum(call["latency_ms"] or 0 for call in calls),
+        })
+
+    session_summaries.sort(key=lambda x: x["input"] + x["output"], reverse=True)
+    cache_hit_rate = round(
+        totals["cache_read"] / max(totals["input"] + totals["cache_read"], 1), 3
+    )
+    return {
+        "run_id": run_id,
+        "trace_id": rows[0].get("trace_id") or trace_id_for_run_id(run_id),
+        "summary": {
+            **totals,
+            "total_tokens": totals["input"] + totals["output"],
+            "cache_hit_rate": cache_hit_rate,
+        },
+        "sessions": session_summaries,
+        "turns": turns,
+    }
 
 
 def _build_cost_payload(runs: list[Any]) -> dict[str, Any]:
@@ -401,8 +389,5 @@ async def list_costs(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _list(sync_db: Session):
-        runs = summarize_recent_run_usage(sync_db, limit=limit, org_id=_cost_org_scope(user))
-        return _build_cost_payload(runs)
-
-    return await run_db(db, _list)
+    runs = await async_summarize_recent_run_usage(db, limit=limit, org_id=_cost_org_scope(user))
+    return _build_cost_payload(runs)

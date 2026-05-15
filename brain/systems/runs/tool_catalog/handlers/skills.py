@@ -116,6 +116,15 @@ def _resolve_skill(repo: Any, *, skill_id: int | None = None, skill_name: str | 
     raise ValueError("skill_id or skill_name is required")
 
 
+async def _async_resolve_skill(repo: Any, *, skill_id: int | None = None, skill_name: str | None = None) -> Any:
+    if skill_id is not None:
+        return await repo.a_get_or_raise(int(skill_id))
+    name = str(skill_name or "").strip()
+    if name:
+        return await repo.a_get_by_name_or_raise(name)
+    raise ValueError("skill_id or skill_name is required")
+
+
 def _validate_skill_tiers(fields: dict[str, Any]) -> dict[str, Any]:
     if "model_tier" in fields:
         model_tier = _MODEL_TIER_ALIASES.get(str(fields["model_tier"]), fields["model_tier"])
@@ -130,7 +139,7 @@ def _validate_skill_tiers(fields: dict[str, Any]) -> dict[str, Any]:
     return fields
 
 
-def _handle_create_skill(
+async def _handle_create_skill(
     name: str,
     description: str,
     procedure: str,
@@ -186,12 +195,14 @@ def _handle_create_skill(
 
         # Atomic upsert — INSERT ... ON CONFLICT avoids race conditions
         from sqlalchemy import text as sa_text
+        from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
+        from brain.platform.db.repositories.skills import SkillRepository
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        from brain.platform.db.services.skill_bundle_io import SkillBundleIOService
+        from brain.platform.db.services.skill_bundle_io import AsyncSkillBundleIOService
 
         asset_specs = assets or []
-        with UnitOfWork() as uow:
-            row = uow.session.execute(sa_text("""
+        async with UnitOfWork() as uow:
+            row = (await uow.session.execute(sa_text("""
                 INSERT INTO skills
                     (name, description, procedure, level, model_tier, thinking_tier,
                      provisional, auto_emerged, embedding,
@@ -213,7 +224,7 @@ def _handle_create_skill(
                 "guardrails": json.dumps(guardrails or []),
                 "pitfalls": json.dumps(pitfalls or []),
                 "refinements": json.dumps(refinements or []),
-            }).mappings().first()
+            })).mappings().first()
             if row is None:
                 return {
                     "created": False,
@@ -222,8 +233,11 @@ def _handle_create_skill(
                 }
             skill_id = row["id"]
             if create_as_package or asset_specs:
-                service = SkillBundleIOService(uow.skills, uow.skill_bundles)
-                service.ensure_skill_bundle(
+                service = AsyncSkillBundleIOService(
+                    SkillRepository(uow.session),
+                    SkillBundleRepository(uow.session),
+                )
+                await service.ensure_skill_bundle(
                     skill_id,
                     namespace="local",
                     user_id=getattr(_agent_context, "user_id", None),
@@ -235,7 +249,7 @@ def _handle_create_skill(
                 for asset in asset_specs:
                     if not isinstance(asset, dict):
                         raise ValueError("Each skill asset must be an object")
-                    service.upsert_skill_asset(
+                    await service.upsert_skill_asset(
                         skill_id,
                         path=str(asset.get("path") or ""),
                         content=str(asset.get("content") or ""),
@@ -273,7 +287,7 @@ def _handle_create_skill(
         return {"created": False, "error": str(e)}
 
 
-def _handle_manage_skill_asset(
+async def _handle_manage_skill_asset(
     skill_name: str,
     path: str,
     action: str = "upsert",
@@ -288,16 +302,20 @@ def _handle_manage_skill_asset(
         return {"ok": False, "error": "action must be 'upsert' or 'delete'"}
 
     try:
+        from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
+        from brain.platform.db.repositories.skills import SkillRepository
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        from brain.platform.db.services.skill_bundle_io import SkillBundleIOService
+        from brain.platform.db.services.skill_bundle_io import AsyncSkillBundleIOService
 
-        with UnitOfWork() as uow:
-            skill = uow.skills.get_by_name(skill_name)
+        async with UnitOfWork() as uow:
+            skills = SkillRepository(uow.session)
+            bundles = SkillBundleRepository(uow.session)
+            skill = await skills.a_get_by_name(skill_name)
             if skill is None:
                 return {"ok": False, "error": f"Skill '{skill_name}' not found"}
-            service = SkillBundleIOService(uow.skills, uow.skill_bundles)
+            service = AsyncSkillBundleIOService(skills, bundles)
             if action == "delete":
-                updated = service.delete_skill_asset(
+                updated = await service.delete_skill_asset(
                     skill.id,
                     path=path,
                     user_id=getattr(_agent_context, "user_id", None),
@@ -313,7 +331,7 @@ def _handle_manage_skill_asset(
                     "bundle_version_id": updated.bundle_version_id,
                     "effective_digest": updated.effective_digest,
                 }
-            asset = service.upsert_skill_asset(
+            asset = await service.upsert_skill_asset(
                 skill.id,
                 path=path,
                 content=content,
@@ -340,7 +358,7 @@ def _handle_manage_skill_asset(
         return {"ok": False, "error": str(e)}
 
 
-def _handle_manage_skill(
+async def _handle_manage_skill(
     action: str,
     operation: str | None = None,
     skill_id: int | None = None,
@@ -383,7 +401,7 @@ def _handle_manage_skill(
             return _skill_error("create requires: name", action=normalized)
         if procedure is None:
             return _skill_error("create requires: procedure", action=normalized)
-        result = _handle_create_skill(
+        result = await _handle_create_skill(
             name=name,
             description=description or "",
             procedure=procedure,
@@ -400,13 +418,17 @@ def _handle_manage_skill(
         return json.dumps({"ok": bool(result.get("created")), "action": normalized, **result}, default=str)
 
     try:
+        from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
+        from brain.platform.db.repositories.skills import SkillRepository
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
-        from brain.platform.db.services.skill_bundle_io import SkillBundleIOService
+        from brain.platform.db.services.skill_bundle_io import AsyncSkillBundleIOService
 
-        with UnitOfWork() as uow:
+        async with UnitOfWork() as uow:
+            skills = SkillRepository(uow.session)
+            bundles = SkillBundleRepository(uow.session)
             if normalized == "list":
                 list_limit = _coerce_limit(limit)
-                rows = uow.skills.list_all(limit=list_limit) if include_archived else uow.skills.list_active()
+                rows = await skills.a_list_all(limit=list_limit) if include_archived else await skills.a_list_active()
                 skills = [
                     _skill_payload(skill, include_procedure=False)
                     for skill in list(rows)[:list_limit]
@@ -423,14 +445,14 @@ def _handle_manage_skill(
                 )
 
             if normalized == "get":
-                skill = _resolve_skill(uow.skills, skill_id=skill_id, skill_name=skill_name)
+                skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
                 return json.dumps(
                     {"ok": True, "action": normalized, "skill": _skill_payload(skill)},
                     default=str,
                 )
 
             if normalized in {"update", "edit"}:
-                skill = _resolve_skill(uow.skills, skill_id=skill_id, skill_name=skill_name)
+                skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
                 raw_fields = {
                     "name": name,
                     "description": description,
@@ -453,15 +475,15 @@ def _handle_manage_skill(
                         action=normalized,
                     )
                 _validate_skill_tiers(updates)
-                updated = uow.skills.update_full(skill.id, **updates)
+                updated = await skills.a_update_full(skill.id, **updates)
                 return json.dumps(
                     {"ok": True, "action": normalized, "skill": _skill_payload(updated)},
                     default=str,
                 )
 
             if normalized in {"archive", "delete"}:
-                skill = _resolve_skill(uow.skills, skill_id=skill_id, skill_name=skill_name)
-                archived = uow.skills.archive(skill.id)
+                skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
+                archived = await skills.a_archive(skill.id)
                 return json.dumps(
                     {
                         "ok": True,
@@ -473,9 +495,9 @@ def _handle_manage_skill(
                 )
 
             if normalized == "convert_to_bundle":
-                skill = _resolve_skill(uow.skills, skill_id=skill_id, skill_name=skill_name)
-                service = SkillBundleIOService(uow.skills, uow.skill_bundles)
-                converted = service.ensure_skill_bundle(
+                skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
+                service = AsyncSkillBundleIOService(skills, bundles)
+                converted = await service.ensure_skill_bundle(
                     skill.id,
                     namespace="local",
                     user_id=getattr(_agent_context, "user_id", None),
@@ -488,9 +510,9 @@ def _handle_manage_skill(
                 )
 
             if normalized == "list_assets":
-                skill = _resolve_skill(uow.skills, skill_id=skill_id, skill_name=skill_name)
-                service = SkillBundleIOService(uow.skills, uow.skill_bundles)
-                _, version, _, asset_rows = service._load_package_rows(skill)
+                skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
+                service = AsyncSkillBundleIOService(skills, bundles)
+                _, version, _, asset_rows = await service._load_package_rows(skill)
                 asset_limit = _coerce_limit(limit)
                 assets_payload = [_asset_payload(asset) for asset in asset_rows[:asset_limit]]
                 return json.dumps(
@@ -506,10 +528,10 @@ def _handle_manage_skill(
                 )
 
             if normalized == "get_asset":
-                skill = _resolve_skill(uow.skills, skill_id=skill_id, skill_name=skill_name)
+                skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
                 safe_path = _safe_skill_asset_path(path)
-                service = SkillBundleIOService(uow.skills, uow.skill_bundles)
-                _, version, _, asset_rows = service._load_package_rows(skill)
+                service = AsyncSkillBundleIOService(skills, bundles)
+                _, version, _, asset_rows = await service._load_package_rows(skill)
                 if version is None:
                     return _skill_error("Skill is not backed by a bundle", action=normalized)
                 asset = next((item for item in asset_rows if item.path == safe_path), None)
@@ -527,10 +549,10 @@ def _handle_manage_skill(
                 )
 
             if normalized == "upsert_asset":
-                skill = _resolve_skill(uow.skills, skill_id=skill_id, skill_name=skill_name)
+                skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
                 safe_path = _safe_skill_asset_path(path)
-                service = SkillBundleIOService(uow.skills, uow.skill_bundles)
-                asset = service.upsert_skill_asset(
+                service = AsyncSkillBundleIOService(skills, bundles)
+                asset = await service.upsert_skill_asset(
                     skill.id,
                     path=safe_path,
                     content=content,
@@ -554,10 +576,10 @@ def _handle_manage_skill(
                 )
 
             if normalized == "delete_asset":
-                skill = _resolve_skill(uow.skills, skill_id=skill_id, skill_name=skill_name)
+                skill = await _async_resolve_skill(skills, skill_id=skill_id, skill_name=skill_name)
                 safe_path = _safe_skill_asset_path(path)
-                service = SkillBundleIOService(uow.skills, uow.skill_bundles)
-                updated = service.delete_skill_asset(
+                service = AsyncSkillBundleIOService(skills, bundles)
+                updated = await service.delete_skill_asset(
                     skill.id,
                     path=safe_path,
                     namespace="local",

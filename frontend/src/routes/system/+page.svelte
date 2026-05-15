@@ -318,8 +318,7 @@
     if (oauthState && data.status === 'success' && !data.state) return;
 
     if (data.status === 'callback' && data.callback) {
-      oauthCallback = data.callback;
-      void completeCodexSignIn(data.callback);
+      captureManualCodexCallback(data.callback);
       return;
     }
 
@@ -360,6 +359,16 @@
         detail: data.detail || 'Start the sign-in again.',
       };
     }
+  }
+
+  function captureManualCodexCallback(callback: string) {
+    oauthCallback = callback.trim();
+    savingConnection = false;
+    notice = {
+      tone: 'info',
+      title: 'Callback URL captured.',
+      detail: 'Press Finish to complete Codex sign-in.',
+    };
   }
 
   function isTrustedOAuthOrigin(origin: string) {

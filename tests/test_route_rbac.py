@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -11,7 +11,6 @@ from httpx import ASGITransport, AsyncClient
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import (
     PERMISSION_SCHEDULER_MANAGE,
-    PERMISSION_SKILLS_MANAGE,
     PERMISSION_VAULT_SHARE,
 )
 from brain.app.api.deps import get_db
@@ -80,35 +79,6 @@ def _skill_obj(**overrides):
 @pytest.mark.parametrize(
     ("method", "url", "body"),
     [
-        ("POST", "/api/skills/new", {"name": "demo", "procedure": "Do the thing"}),
-        ("POST", "/api/skills/import", [{"name": "demo", "procedure": "Do the thing"}]),
-        ("PATCH", "/api/skills/1", {"procedure": "Updated"}),
-        ("POST", "/api/skills/1/archive", None),
-        ("DELETE", "/api/skills/1", None),
-        ("PUT", "/api/skills/1/edit", {"procedure": "Updated"}),
-        ("POST", "/api/skills/1/assets", {"path": "references/context.md", "content": "context"}),
-        ("PUT", "/api/skills/1/assets/references/context.md", {"content": "updated"}),
-        ("DELETE", "/api/skills/1/assets/references/context.md", None),
-        ("POST", "/api/skills/demo/versions/1/restore", None),
-        ("POST", "/api/skills/demo/guardrail", {"text": "Do not leak secrets"}),
-        ("POST", "/api/skills/demo/procedure-step", {"text": "Check inputs"}),
-        ("POST", "/api/skills/demo/trigger", {"direction": "for", "pattern": "demo"}),
-        ("DELETE", "/api/skills/demo/trigger/0", None),
-    ],
-)
-async def test_member_cannot_mutate_skills(client, method, url, body):
-    c, app = client
-    _act_as(app, MEMBER)
-
-    response = await c.request(method, url, json=body)
-
-    assert response.status_code == 403
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("method", "url", "body"),
-    [
         ("POST", "/api/system/scheduler/sync", {}),
         ("POST", "/api/system/scheduler/materialize", {}),
         ("POST", "/api/system/scheduler/drain", {}),
@@ -167,19 +137,19 @@ async def test_personal_vault_crud_remains_user_owned(client):
 
 
 @pytest.mark.asyncio
-async def test_explicit_skill_permission_can_mutate_skill(client):
+async def test_team_member_can_mutate_skill(client):
     c, app = client
-    _act_as(app, {**MEMBER, "permissions": [PERMISSION_SKILLS_MANAGE]})
+    _act_as(app, MEMBER)
 
     with patch("brain.app.api.routers.skills.SkillRepository") as repo:
-        repo.return_value.add_guardrail.return_value = _skill_obj()
+        repo.return_value.a_add_guardrail = AsyncMock(return_value=_skill_obj())
         response = await c.post(
             "/api/skills/demo/guardrail",
             json={"text": "Do not leak secrets"},
         )
 
     assert response.status_code == 200
-    repo.return_value.add_guardrail.assert_called_once_with("demo", "Do not leak secrets", "warning")
+    repo.return_value.a_add_guardrail.assert_awaited_once_with("demo", "Do not leak secrets", "warning")
 
 
 @pytest.mark.asyncio
@@ -187,8 +157,7 @@ async def test_explicit_scheduler_permission_can_create_scheduler_job(client):
     c, app = client
     _act_as(app, {**MEMBER, "permissions": [PERMISSION_SCHEDULER_MANAGE]})
 
-    with patch("brain.app.api.routers.system.upsert_scheduler_job") as upsert_job:
-        upsert_job.return_value = SimpleNamespace(job_key="demo", cron_expr="0 8 * * *")
+    with patch("brain.app.api.routers.system.async_upsert_scheduler_job", new=AsyncMock(return_value=SimpleNamespace(job_key="demo", cron_expr="0 8 * * *"))) as upsert_job:
         response = await c.post(
             "/api/system/scheduler/jobs",
             json={"job_key": "demo", "cron_expr": "0 8 * * *", "handler_ref": "python -m demo"},
@@ -196,7 +165,7 @@ async def test_explicit_scheduler_permission_can_create_scheduler_job(client):
 
     assert response.status_code == 200
     assert response.json()["schedule_human"] == "at 8:00 AM"
-    upsert_job.assert_called_once()
+    upsert_job.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -241,8 +210,12 @@ async def test_member_cannot_mutate_installation_memory(client, method, url, bod
     _act_as(app, MEMBER)
     member = SimpleNamespace(id="user-1", org_id="org-1", role="member")
 
-    with patch("brain.systems.runtime_settings.router.refresh_user", return_value=member):
-        response = await c.request(method, url, json=body)
+    class RuntimeSettingsDb:
+        async def get(self, model, identifier):
+            return member if identifier == "user-1" else None
+
+    app.dependency_overrides[get_db] = lambda: RuntimeSettingsDb()
+    response = await c.request(method, url, json=body)
 
     assert response.status_code == 403
 

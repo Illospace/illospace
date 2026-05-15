@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 
-def test_thread_message_live_guidance_appends_run_steering(monkeypatch):
+async def test_thread_message_live_guidance_appends_run_steering(monkeypatch):
     from brain.app.api.routers.cortex import _idea_ops
 
     appended: dict[str, object] = {}
@@ -15,7 +15,7 @@ def test_thread_message_live_guidance_appends_run_steering(monkeypatch):
         def __init__(self, session):
             self.session = session
 
-        def append_steering(self, run_id, content, *, user_id=None, thread_message_id=None):
+        async def append_steering(self, run_id, content, *, user_id=None, thread_message_id=None):
             appended.update({
                 "run_id": run_id,
                 "content": content,
@@ -25,16 +25,16 @@ def test_thread_message_live_guidance_appends_run_steering(monkeypatch):
             return SimpleNamespace(id=88)
 
     class _Session:
-        def get(self, model, run_id):
+        async def get(self, model, run_id):
             return SimpleNamespace(id=run_id, thread_id="idea-1", status="running")
 
-        def flush(self):
+        async def flush(self):
             appended["flushed"] = True
 
-    monkeypatch.setattr(_idea_ops, "AgentRunStore", _Store)
+    monkeypatch.setattr(_idea_ops, "AsyncAgentRunStore", _Store)
     thread_msg = SimpleNamespace(id=9, metadata_={})
 
-    event_id = _idea_ops._append_live_guidance_from_thread_message(
+    event_id = await _idea_ops._append_live_guidance_from_thread_message(
         session=_Session(),
         idea_id="idea-1",
         role="user",
@@ -56,15 +56,15 @@ def test_thread_message_live_guidance_appends_run_steering(monkeypatch):
     assert thread_msg.metadata_["steering_event_id"] == 88
 
 
-def test_thread_message_live_guidance_rejects_terminal_run():
+async def test_thread_message_live_guidance_rejects_terminal_run():
     from brain.app.api.routers.cortex import _idea_ops
 
     class _Session:
-        def get(self, model, run_id):
+        async def get(self, model, run_id):
             return SimpleNamespace(id=run_id, thread_id="idea-1", status="completed")
 
     with pytest.raises(HTTPException) as exc:
-        _idea_ops._append_live_guidance_from_thread_message(
+        await _idea_ops._append_live_guidance_from_thread_message(
             session=_Session(),
             idea_id="idea-1",
             role="user",

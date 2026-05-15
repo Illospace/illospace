@@ -870,10 +870,9 @@ class TestModelMap:
 # ── LLM Client (OpenAI path) ─────────────────────────────────────
 
 class TestLLMClientOpenAI:
-    @patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(None, "none"))
     @patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=("sk-test-key", "env"))
     @patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=None)
-    def test_resolve_openai_client(self, mock_codex, mock_env, mock_db):
+    def test_resolve_openai_client(self, mock_codex, mock_env):
         from brain.platform.integrations.llm import resolve_llm_client
         mock_openai = MagicMock()
         mock_openai.OpenAI.return_value = MagicMock()
@@ -883,11 +882,10 @@ class TestLLMClientOpenAI:
             assert result.is_oauth is False
             assert result.source == "env"
 
-    @patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(None, "none"))
     @patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=("sk-test-key", "env"))
     @patch("brain.platform.integrations.llm._import_openai_sdk", side_effect=RuntimeError("missing openai"))
     @patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=None)
-    def test_resolve_openai_missing_sdk_raises_cleanly(self, mock_codex, mock_sdk, mock_env, mock_db):
+    def test_resolve_openai_missing_sdk_raises_cleanly(self, mock_codex, mock_sdk, mock_env):
         from brain.platform.integrations.llm import resolve_llm_client
 
         with pytest.raises(RuntimeError, match="missing openai"):
@@ -895,11 +893,10 @@ class TestLLMClientOpenAI:
 
     def test_resolve_openai_no_key_raises(self):
         from brain.platform.integrations.llm import resolve_llm_client
-        with patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(None, "none")):
-            with patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=(None, "none")):
-                with patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=None):
-                    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
-                        resolve_llm_client(provider="openai")
+        with patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=(None, "none")):
+            with patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=None):
+                with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+                    resolve_llm_client(provider="openai")
 
     def test_resolve_openai_from_codex_cache(self):
         from brain.platform.integrations.llm import resolve_llm_client
@@ -913,8 +910,7 @@ class TestLLMClientOpenAI:
         )
         mock_client = MagicMock()
 
-        with patch("brain.platform.integrations.llm._resolve_key_from_db", return_value=(None, "none")), \
-             patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=codex_auth), \
+        with patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=codex_auth), \
              patch("brain.platform.integrations.llm.OpenAICodexClient", return_value=mock_client):
             result = resolve_llm_client(provider="openai")
 

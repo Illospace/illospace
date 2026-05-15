@@ -6,7 +6,6 @@ import os
 import platform
 import re as _re
 import shutil
-import subprocess
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -19,12 +18,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session, load_only
+from sqlalchemy.orm import load_only
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import can_manage_run, can_manage_scheduler
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.db_utils import run_db
 from brain.app.api.routers.costs import _fetch_agent_api_call_rows, _provider_model_key
 from brain.app.api.schemas.system import ConsolidationRunRead, DailyMetricsRead
 from brain.platform.db.repositories.memories import EdgeRepository, MemoryRepository
@@ -34,32 +32,42 @@ from brain.platform.db.repositories.system import (
     DailyMetricsRepository,
     RetrievalLogRepository,
 )
+from brain.platform.async_io import path_exists, read_text, run_blocking, run_subprocess
+from brain.platform.providers.model_policy import (
+    async_get_model_for_tier,
+    async_get_provider_model_maps,
+    async_resolve_default_provider,
+)
 from brain.systems.runs.cortex.recording import trace_id_for_run_id, trace_id_for_scheduler_run_id
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow as AgentRun
 from brain.platform.db.models.idea import Idea, IdeaThread
+from brain.platform.db.models.org import Org, User
 from brain.platform.db.models.scheduler import SchedulerRun, SchedulerRunStep
-from brain.platform.db.repositories.unit_of_work import use_sync_session
-from brain.systems.runs.predict_rlm_backend import get_agent_worker_backend_settings
+from brain.systems.runs.predict_rlm_backend import async_get_agent_worker_backend_settings
 from brain.app.ops.health import (
     deep_health_snapshot,
     liveness_health_snapshot,
     readiness_health_snapshot,
 )
 from brain.app.scheduler.catalog import (
-    list_scheduler_jobs,
-    retire_scheduler_job,
-    sync_scheduler_catalog,
-    upsert_scheduler_job,
+    async_list_scheduler_jobs,
+    async_retire_scheduler_job,
+    async_sync_scheduler_catalog,
+    async_upsert_scheduler_job,
 )
-from brain.app.scheduler.daemon import scheduler_daemon_tick, scheduler_health_snapshot
+from brain.app.scheduler.daemon import (
+    async_scheduler_daemon_tick,
+    async_scheduler_health_snapshot,
+)
 from brain.app.scheduler.executor import (
-    retry_scheduler_run,
-    resume_scheduler_run,
-    set_scheduler_job_load_shed as set_scheduler_job_load_shed_state,
-    set_scheduler_job_owner_mode as set_scheduler_job_owner_mode_state,
-    set_scheduler_job_paused,
+    async_retry_scheduler_run,
+    async_resume_scheduler_run,
+    async_set_scheduler_job_load_shed as async_set_scheduler_job_load_shed_state,
+    async_set_scheduler_job_owner_mode as async_set_scheduler_job_owner_mode_state,
+    async_set_scheduler_job_paused,
 )
-from brain.app.scheduler.planner import materialize_due_runs
+from brain.app.scheduler.planner import async_materialize_due_runs
+from brain.systems.runtime_settings.memory import async_get_embedding_info
 
 logger = logging.getLogger(__name__)
 
@@ -89,26 +97,26 @@ def _trace_iso(value: Any) -> str | None:
     return value.isoformat() if isinstance(value, datetime) else None
 
 
-def _rollback_quietly(db: Session) -> None:
+async def _rollback_quietly(db: AsyncSession) -> None:
     try:
-        db.rollback()
+        await db.rollback()
     except Exception:
         pass
 
 
-def _safe_scalars(db: Session, stmt) -> list[Any]:
+async def _safe_scalars(db: AsyncSession, stmt) -> list[Any]:
     try:
-        return list(db.scalars(stmt).all())
+        return list((await db.scalars(stmt)).all())
     except SQLAlchemyError:
-        _rollback_quietly(db)
+        await _rollback_quietly(db)
         return []
 
 
-def _safe_scalar(db: Session, stmt) -> Any | None:
+async def _safe_scalar(db: AsyncSession, stmt) -> Any | None:
     try:
-        return db.scalar(stmt)
+        return await db.scalar(stmt)
     except SQLAlchemyError:
-        _rollback_quietly(db)
+        await _rollback_quietly(db)
         return None
 
 
@@ -128,7 +136,7 @@ def _caller_has_global_trace_visibility(user: dict[str, Any] | None) -> bool:
     return bool(user and user.get("internal") and can_manage_run(user))
 
 
-def _idea_visible_to_user(db: Session, idea_id: str | None, user: dict[str, Any] | None) -> bool:
+async def _idea_visible_to_user(db: AsyncSession, idea_id: str | None, user: dict[str, Any] | None) -> bool:
     if _caller_has_global_trace_visibility(user):
         return True
     if not idea_id:
@@ -136,25 +144,25 @@ def _idea_visible_to_user(db: Session, idea_id: str | None, user: dict[str, Any]
     org_id = str(user.get("org_id")) if user and user.get("org_id") else None
     if not org_id:
         return False
-    idea_org_id = _safe_scalar(
+    idea_org_id = await _safe_scalar(
         db,
         select(Idea.org_id).where(Idea.id == str(idea_id)),
     )
     return bool(idea_org_id and str(idea_org_id) == org_id)
 
 
-def _run_visible_to_user(db: Session, run: AgentRun, user: dict[str, Any] | None) -> bool:
+async def _run_visible_to_user(db: AsyncSession, run: AgentRun, user: dict[str, Any] | None) -> bool:
     if _caller_has_global_trace_visibility(user):
         return True
     user_id = str(user.get("id")) if user and user.get("id") else None
     if user_id and getattr(run, "user_id", None) and str(run.user_id) == user_id:
         return True
     idea_id = getattr(run, "thread_id", None) or getattr(run, "idea_id", None)
-    return _idea_visible_to_user(db, idea_id, user)
+    return await _idea_visible_to_user(db, idea_id, user)
 
 
-def _require_trace_run(
-    db: Session,
+async def _require_trace_run(
+    db: AsyncSession,
     *,
     user: dict[str, Any] | None,
     trace_id: str | None = None,
@@ -162,16 +170,16 @@ def _require_trace_run(
 ) -> AgentRun:
     load_options = [load_only(*_TRACE_RUN_LOAD_COLUMNS)]
     run = (
-        db.get(AgentRun, run_id, options=load_options)
+        await db.get(AgentRun, run_id, options=load_options)
         if run_id is not None
         else None
     )
     if run is None:
         parsed_run_id = _trace_lookup_run_id(trace_id)
         if parsed_run_id is not None:
-            run = db.get(AgentRun, parsed_run_id, options=load_options)
+            run = await db.get(AgentRun, parsed_run_id, options=load_options)
     if run is None and trace_id:
-        run = _safe_scalar(
+        run = await _safe_scalar(
             db,
             select(AgentRun)
             .options(load_only(*_TRACE_RUN_LOAD_COLUMNS))
@@ -179,7 +187,7 @@ def _require_trace_run(
         )
     if run is None:
         raise HTTPException(status_code=404, detail="Trace not found")
-    if not _run_visible_to_user(db, run, user):
+    if not await _run_visible_to_user(db, run, user):
         raise HTTPException(status_code=404, detail="Trace not found")
     return run
 
@@ -262,29 +270,31 @@ def _trace_tool_summary(tool_calls: list[Any]) -> dict[str, Any]:
     }
 
 
-def _trace_llm_summary_for_run(db: Session, run_id: int) -> dict[str, Any]:
+async def _trace_llm_summary_for_run(db: AsyncSession, run_id: int) -> dict[str, Any]:
     try:
-        rows = db.execute(
-            text(
-                """
-                SELECT
-                    model,
-                    COUNT(*) AS calls,
-                    COALESCE(SUM(tokens_input), 0) AS input_tokens,
-                    COALESCE(SUM(tokens_output), 0) AS output_tokens,
-                    COALESCE(SUM(cache_read), 0) AS cache_read,
-                    COALESCE(SUM(cache_write), 0) AS cache_write,
-                    COALESCE(SUM(latency_ms), 0) AS latency_ms
-                FROM agent_api_calls
-                WHERE run_id = :run_id
-                GROUP BY model
-                """
-            ),
-            {"run_id": run_id},
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT
+                        model,
+                        COUNT(*) AS calls,
+                        COALESCE(SUM(tokens_input), 0) AS input_tokens,
+                        COALESCE(SUM(tokens_output), 0) AS output_tokens,
+                        COALESCE(SUM(cache_read), 0) AS cache_read,
+                        COALESCE(SUM(cache_write), 0) AS cache_write,
+                        COALESCE(SUM(latency_ms), 0) AS latency_ms
+                    FROM agent_api_calls
+                    WHERE run_id = :run_id
+                    GROUP BY model
+                    """
+                ),
+                {"run_id": run_id},
+            )
         ).mappings().all()
     except SQLAlchemyError:
-        _rollback_quietly(db)
-        return _trace_llm_summary(_fetch_agent_api_call_rows(db, run_id))
+        await _rollback_quietly(db)
+        return _trace_llm_summary(await _fetch_agent_api_call_rows(db, run_id))
 
     totals = {
         "input_tokens": 0,
@@ -327,22 +337,24 @@ def _trace_llm_summary_for_run(db: Session, run_id: int) -> dict[str, Any]:
     }
 
 
-def _trace_tool_summary_for_run(
-    db: Session,
+async def _trace_tool_summary_for_run(
+    db: AsyncSession,
     *,
     trace_id: str,
     run_id: int,
 ) -> dict[str, Any]:
     try:
-        rows = db.execute(
-            select(AgentRunEventRow.payload)
-            .where(
-                AgentRunEventRow.run_id == run_id,
-                AgentRunEventRow.event_type.in_(["run.tool_started", "run.tool_completed", "run.tool_failed"]),
+        rows = (
+            await db.execute(
+                select(AgentRunEventRow.payload)
+                .where(
+                    AgentRunEventRow.run_id == run_id,
+                    AgentRunEventRow.event_type.in_(["run.tool_started", "run.tool_completed", "run.tool_failed"]),
+                )
             )
         ).all()
     except SQLAlchemyError:
-        _rollback_quietly(db)
+        await _rollback_quietly(db)
         return _trace_tool_summary([])
 
     counts: dict[tuple[str, str], int] = defaultdict(int)
@@ -383,27 +395,29 @@ def _trace_verifier_summary(rows: list[Any]) -> dict[str, Any]:
     return {"count": len(rows), "statuses": dict(statuses), "latest": latest}
 
 
-def _trace_verifier_summary_for_run(
-    db: Session,
+async def _trace_verifier_summary_for_run(
+    db: AsyncSession,
     *,
     trace_id: str,
     run_id: int,
 ) -> dict[str, Any]:
     try:
-        rows = db.execute(
-            select(AgentRunEventRow.payload)
-            .where(
-                AgentRunEventRow.run_id == run_id,
-                AgentRunEventRow.event_type.in_([
-                    "run.verifier_completed",
-                    "run.verification_completed",
-                    "run.verification_result",
-                    "run.gate_completed",
-                ]),
+        rows = (
+            await db.execute(
+                select(AgentRunEventRow.payload)
+                .where(
+                    AgentRunEventRow.run_id == run_id,
+                    AgentRunEventRow.event_type.in_([
+                        "run.verifier_completed",
+                        "run.verification_completed",
+                        "run.verification_result",
+                        "run.gate_completed",
+                    ]),
+                )
             )
         ).all()
     except SQLAlchemyError:
-        _rollback_quietly(db)
+        await _rollback_quietly(db)
         return {"count": 0, "statuses": {}, "latest": []}
 
     statuses: dict[str, int] = defaultdict(int)
@@ -436,17 +450,17 @@ def _trace_verifier_summary_for_run(
     return {"count": total, "statuses": dict(statuses), "latest": latest}
 
 
-def _trace_recording_versions(db: Session, run_id: int) -> tuple[Any | None, Any | None]:
+async def _trace_recording_versions(db: AsyncSession, run_id: int) -> tuple[Any | None, Any | None]:
     return None, None
 
 
-def _trace_artifact_summary(
-    db: Session,
+async def _trace_artifact_summary(
+    db: AsyncSession,
     run_id: int,
     *,
     output_type: str | None,
 ) -> dict[str, Any]:
-    rows = _safe_scalars(
+    rows = await _safe_scalars(
         db,
         select(AgentRunArtifactRow.artifact_type).where(AgentRunArtifactRow.run_id == run_id),
     )
@@ -461,14 +475,14 @@ def _trace_artifact_summary(
     }
 
 
-def _build_trace_summary(
-    db: Session,
+async def _build_trace_summary(
+    db: AsyncSession,
     *,
     user: dict[str, Any] | None,
     trace_id: str | None = None,
     run_id: int | None = None,
 ) -> dict[str, Any]:
-    run = _require_trace_run(
+    run = await _require_trace_run(
         db,
         user=user,
         trace_id=trace_id,
@@ -476,7 +490,7 @@ def _build_trace_summary(
     )
     resolved_trace_id = run.trace_id or trace_id_for_run_id(run.id)
 
-    scheduler_runs = _safe_scalars(
+    scheduler_runs = await _safe_scalars(
         db,
         select(SchedulerRun)
         .options(load_only(
@@ -499,7 +513,7 @@ def _build_trace_summary(
     scheduler_run_ids = [run.id for run in scheduler_runs]
     scheduler_steps = []
     if scheduler_run_ids:
-        scheduler_steps = _safe_scalars(
+        scheduler_steps = await _safe_scalars(
             db,
             select(SchedulerRunStep)
             .options(load_only(
@@ -517,19 +531,19 @@ def _build_trace_summary(
             .order_by(SchedulerRunStep.run_id.asc(), SchedulerRunStep.sequence_no.asc()),
         )
 
-    llm_summary = _trace_llm_summary_for_run(db, run.id)
-    tool_summary = _trace_tool_summary_for_run(
+    llm_summary = await _trace_llm_summary_for_run(db, run.id)
+    tool_summary = await _trace_tool_summary_for_run(
         db,
         trace_id=resolved_trace_id,
         run_id=run.id,
     )
-    verifier_summary = _trace_verifier_summary_for_run(
+    verifier_summary = await _trace_verifier_summary_for_run(
         db,
         trace_id=resolved_trace_id,
         run_id=run.id,
     )
-    run_summary_version, flight_recorder_version = _trace_recording_versions(db, run.id)
-    artifact_summary = _trace_artifact_summary(
+    run_summary_version, flight_recorder_version = await _trace_recording_versions(db, run.id)
+    artifact_summary = await _trace_artifact_summary(
         db,
         run.id,
         output_type="reply",
@@ -626,16 +640,16 @@ def _human_size(nbytes: float) -> str:
     return f"{nbytes:.1f} PB"
 
 
-def _get_uptime() -> str | None:
+async def _get_uptime() -> str | None:
     """Return system uptime as a human-readable string."""
     try:
         # Linux: /proc/uptime
         proc_uptime = Path("/proc/uptime")
-        if proc_uptime.exists():
-            secs = float(proc_uptime.read_text().split()[0])
+        if await path_exists(proc_uptime):
+            secs = float((await read_text(proc_uptime)).split()[0])
         else:
             # macOS: sysctl kern.boottime
-            result = subprocess.run(
+            result = await run_subprocess(
                 ["sysctl", "-n", "kern.boottime"],
                 capture_output=True, text=True, timeout=5,
             )
@@ -687,7 +701,7 @@ def _run_event_consumer_running() -> bool | None:
 
 
 @router.get("/health/live")
-def health_live():
+async def health_live():
     """Cheap liveness probe: process is up, no dependency checks."""
     return liveness_health_snapshot()
 
@@ -697,12 +711,9 @@ async def health_ready(
     db: AsyncSession = Depends(get_db),
 ):
     """Readiness probe: DB, Alembic head, and event backbone are usable."""
-    snapshot = await run_db(
-        db,
-        lambda sync_db: readiness_health_snapshot(
-            consumer_running=_run_event_consumer_running(),
-            session=sync_db,
-        )
+    snapshot = await readiness_health_snapshot(
+        consumer_running=_run_event_consumer_running(),
+        session=db,
     )
     return JSONResponse(
         status_code=200 if snapshot["ready"] else 503,
@@ -715,19 +726,16 @@ async def health_deep(
     db: AsyncSession = Depends(get_db),
 ):
     """Deep product health snapshot for operators."""
-    return await run_db(
-        db,
-        lambda sync_db: deep_health_snapshot(
-            consumer_running=_run_event_consumer_running(),
-            session=sync_db,
-        )
+    return await deep_health_snapshot(
+        consumer_running=_run_event_consumer_running(),
+        session=db,
     )
 
 
-def _get_gpu_info() -> dict | None:
+async def _get_gpu_info() -> dict | None:
     """Return GPU info via nvidia-smi, or None if unavailable."""
     try:
-        result = subprocess.run(
+        result = await run_subprocess(
             [
                 "nvidia-smi",
                 "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu",
@@ -753,41 +761,23 @@ def _get_gpu_info() -> dict | None:
         return None
 
 
-def _get_embedding_info() -> dict:
+async def _get_embedding_info(db: AsyncSession) -> dict:
     """Return embedding backend status and config."""
-    from brain.kernel.config import EMBEDDING_BACKEND, EMBEDDING_DIM, EMBEDDING_API_PROVIDER, EMBEDDING_API_MODEL, EMBEDDING_CPU_MODEL
-    from brain.systems.memory.embeddings import server_health
-
-    try:
-        health = server_health()
-    except Exception:
-        health = None
-    result = {
-        "backend": EMBEDDING_BACKEND,
-        "dimensions": EMBEDDING_DIM,
-        "status": (health.get("status", "unknown") if isinstance(health, dict) else "not_running"),
-        "server_health": health if isinstance(health, dict) else None,
-    }
-    if EMBEDDING_BACKEND == "gpu":
+    result = await async_get_embedding_info(db)
+    if result.get("backend") == "gpu":
         try:
             from brain.platform.gpu.config import build_worker_manifests
             emb_worker = next((w for w in build_worker_manifests() if w.name == "embedding"), None)
             result["model"] = emb_worker.model_path.rsplit("/", 1)[-1] if emb_worker else "unknown"
         except Exception:
             result["model"] = "unknown"
-        result["device"] = "cuda" if _get_gpu_info() is not None else "cpu"
-    elif EMBEDDING_BACKEND == "cpu":
-        result["model"] = EMBEDDING_CPU_MODEL
+        result["device"] = "cuda" if await _get_gpu_info() is not None else "cpu"
+    elif result.get("backend") == "cpu":
         result["device"] = "cpu"
-    elif EMBEDDING_BACKEND == "api":
-        result["provider"] = EMBEDDING_API_PROVIDER
-        result["model"] = EMBEDDING_API_MODEL
-        from brain.kernel.config import EMBEDDING_API_KEY
-        result["api_key_set"] = bool(EMBEDDING_API_KEY)
     return result
 
 
-def _get_database_info(db: Session) -> dict:
+async def _get_database_info(db: AsyncSession) -> dict:
     """Return database status and stats."""
     try:
         mem_repo = MemoryRepository(db)
@@ -795,8 +785,10 @@ def _get_database_info(db: Session) -> dict:
 
         # DB size via pg_database_size
         try:
-            row = db.execute(
+            row = (
+                await db.execute(
                 text("SELECT pg_size_pretty(pg_database_size(current_database())) AS s")
+                )
             ).fetchone()
             db_size = row[0] if row else "unknown"
         except Exception:
@@ -805,9 +797,9 @@ def _get_database_info(db: Session) -> dict:
         return {
             "status": "ok",
             "size": db_size,
-            "memory_count": mem_repo.count_active(),
-            "archived_count": mem_repo.count_archived(),
-            "edge_count": edge_repo.count_all(),
+            "memory_count": await mem_repo.a_count_active(),
+            "archived_count": await mem_repo.a_count_archived(),
+            "edge_count": await edge_repo.a_count_all(),
         }
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
@@ -841,27 +833,30 @@ async def system_info(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _info(sync_db: Session):
-        def _safe(fn, *args):
-            try:
-                return fn(*args)
-            except Exception as e:
-                return {"status": "error", "error": str(e)}
+    def _safe(fn, *args):
+        try:
+            return fn(*args)
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
 
-        return {
-            "version": "6.0.0",
-            "python": platform.python_version(),
-            "platform": platform.system(),
-            "uptime": _safe(_get_uptime),
-            "disk": _safe(_get_disk_info),
-            "database": _safe(_get_database_info, sync_db),
-            "gpu": _safe(_get_gpu_info),
-            "embedding": _safe(_get_embedding_info),
-            "llm": _safe(_get_llm_info, user, sync_db),
-            "config": _safe(_get_config_info),
-        }
+    async def _safe_async(fn, *args):
+        try:
+            return await fn(*args)
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
 
-    return await run_db(db, _info)
+    return {
+        "version": "6.0.0",
+        "python": platform.python_version(),
+        "platform": platform.system(),
+        "uptime": await _safe_async(_get_uptime),
+        "disk": _safe(_get_disk_info),
+        "database": await _safe_async(_get_database_info, db),
+        "gpu": await _safe_async(_get_gpu_info),
+        "embedding": await _safe_async(_get_embedding_info, db),
+        "llm": await _safe_async(_get_llm_info, user, db),
+        "config": _safe(_get_config_info),
+    }
 
 
 @router.get("/system/traces/by-run/{run_id}")
@@ -871,7 +866,7 @@ async def trace_summary_by_run(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return a privacy-filtered execution skeleton for one run trace."""
-    return await run_db(db, lambda sync_db: _build_trace_summary(sync_db, user=user, run_id=run_id))
+    return await _build_trace_summary(db, user=user, run_id=run_id)
 
 
 @router.get("/system/traces/by-reply/{thread_id}")
@@ -881,23 +876,20 @@ async def trace_summary_by_reply(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Resolve a user-visible Cortex reply to its run trace skeleton."""
-    def _summary(sync_db: Session):
-        thread = sync_db.get(IdeaThread, thread_id)
-        if not thread or not _idea_visible_to_user(sync_db, thread.idea_id, user):
-            raise HTTPException(status_code=404, detail="Reply not found")
-        metadata = thread.metadata_ if isinstance(thread.metadata_, dict) else {}
-        run_id = metadata.get("run_id")
-        if run_id is not None:
-            try:
-                return _build_trace_summary(sync_db, user=user, run_id=int(run_id))
-            except (TypeError, ValueError):
-                pass
-        trace_id = metadata.get("trace_id")
-        if isinstance(trace_id, str) and trace_id.strip():
-            return _build_trace_summary(sync_db, user=user, trace_id=trace_id.strip())
-        raise HTTPException(status_code=404, detail="Reply has no trace metadata")
-
-    return await run_db(db, _summary)
+    thread = await db.get(IdeaThread, thread_id)
+    if not thread or not await _idea_visible_to_user(db, thread.idea_id, user):
+        raise HTTPException(status_code=404, detail="Reply not found")
+    metadata = thread.metadata_ if isinstance(thread.metadata_, dict) else {}
+    run_id = metadata.get("run_id")
+    if run_id is not None:
+        try:
+            return await _build_trace_summary(db, user=user, run_id=int(run_id))
+        except (TypeError, ValueError):
+            pass
+    trace_id = metadata.get("trace_id")
+    if isinstance(trace_id, str) and trace_id.strip():
+        return await _build_trace_summary(db, user=user, trace_id=trace_id.strip())
+    raise HTTPException(status_code=404, detail="Reply has no trace metadata")
 
 
 @router.get("/system/traces/{trace_id}")
@@ -907,55 +899,48 @@ async def trace_summary(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return a privacy-filtered execution skeleton for one trace key."""
-    return await run_db(db, lambda sync_db: _build_trace_summary(sync_db, user=user, trace_id=trace_id))
+    return await _build_trace_summary(db, user=user, trace_id=trace_id)
 
 
-def _get_llm_info(user: dict, db: Session | None = None) -> dict | None:
+async def _get_llm_info(user: dict, db: AsyncSession | None = None) -> dict | None:
     """Return provider/model runtime config for system introspection."""
     org_id = user.get("org_id")
     if not org_id or db is None:
         return None
     try:
-        from brain.platform.providers.model_policy import (
-            get_model_for_tier,
-            get_provider_model_maps,
-            resolve_default_provider,
-        )
         from brain.platform.provider_health import provider_health_snapshot
-        def _build() -> dict | None:
-            from brain.platform.db.models.org import Org
-            from brain.platform.db.models.org import User
 
-            org = db.get(Org, org_id)
-            db_user = db.get(User, user.get("id")) if user.get("id") else None
-            if not org:
-                return None
-            config = org.memory_model_config or {}
-            org_default = config.get("default_provider") or resolve_default_provider(user_id=user.get("id"), org_id=org_id)
-            user_default = getattr(db_user, "default_provider", None) if db_user else None
-            low_model = _normalize_llm_model_value(
-                get_model_for_tier(
-                    "low",
-                    include_provider_prefix=False,
-                    user_id=user.get("id"),
-                    org_id=org_id,
-                )
+        org = await db.get(Org, org_id)
+        db_user = await db.get(User, user.get("id")) if user.get("id") else None
+        if not org:
+            return None
+        config = org.memory_model_config or {}
+        effective_provider = await async_resolve_default_provider(db, user_id=user.get("id"), org_id=org_id)
+        org_default = config.get("default_provider") or effective_provider
+        user_default = getattr(db_user, "default_provider", None) if db_user else None
+        low_model = _normalize_llm_model_value(
+            await async_get_model_for_tier(
+                db,
+                "low",
+                include_provider_prefix=False,
+                user_id=user.get("id"),
+                org_id=org_id,
             )
-            backend_settings = get_agent_worker_backend_settings(user_id=user.get("id"), org_id=org_id).to_dict()
-            return {
-                "default_provider": org_default,
-                "org_default_provider": org_default,
-                "user_default_provider": user_default,
-                "effective_provider": resolve_default_provider(user_id=user.get("id"), org_id=org_id),
-                "harvest_model": low_model,
-                "consolidation_model": low_model,
-                "provider_model_mappings": get_provider_model_maps(user_id=user.get("id"), org_id=org_id),
-                "provider_health": provider_health_snapshot(),
-                **backend_settings,
-            }
-
-        with use_sync_session(db):
-            return _build()
+        )
+        backend_settings = (
+            await async_get_agent_worker_backend_settings(db, user_id=user.get("id"), org_id=org_id)
+        ).to_dict()
+        return {
+            "default_provider": org_default,
+            "org_default_provider": org_default,
+            "user_default_provider": user_default,
+            "effective_provider": effective_provider,
+            "harvest_model": low_model,
+            "consolidation_model": low_model,
+            "provider_model_mappings": await async_get_provider_model_maps(db, user_id=user.get("id"), org_id=org_id),
+            "provider_health": provider_health_snapshot(),
+            **backend_settings,
+        }
     except Exception:
         return None
 
@@ -965,56 +950,55 @@ async def overview(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _overview(sync_db: Session):
-        mem_repo = MemoryRepository(sync_db)
-        edge_repo = EdgeRepository(sync_db)
-        consol_repo = ConsolidationRunRepository(sync_db)
+    mem_repo = MemoryRepository(db)
+    edge_repo = EdgeRepository(db)
+    consol_repo = ConsolidationRunRepository(db)
 
-        skill_summary, skill_count, executions = SkillRepository(sync_db).overview_summary(limit=10)
-        skill_summary = [
-            {"name": row["name"], "maturity": row["maturity"]}
-            for row in skill_summary
-        ]
+    skill_summary, skill_count, executions = await SkillRepository(db).a_overview_summary(limit=10)
+    skill_summary = [
+        {"name": row["name"], "maturity": row["maturity"]}
+        for row in skill_summary
+    ]
 
-        recent_consols = consol_repo.list_recent(limit=1)
-        last_consolidation = None
-        if recent_consols:
-            c = recent_consols[0]
-            last_consolidation = {
-                "status": c.status,
-                "run_date": c.run_date.isoformat() if c.run_date else None,
-                "completed_at": c.completed_at.isoformat() if c.completed_at else None,
-                "memories_created": c.memories_created,
-                "edges_created": c.edges_created,
-                "memories_decayed": c.memories_decayed,
-            }
+    recent_consols = await consol_repo.a_list_recent(limit=1)
+    last_consolidation = None
+    if recent_consols:
+        c = recent_consols[0]
+        last_consolidation = {
+            "status": c.status,
+            "run_date": c.run_date.isoformat() if c.run_date else None,
+            "completed_at": c.completed_at.isoformat() if c.completed_at else None,
+            "memories_created": c.memories_created,
+            "edges_created": c.edges_created,
+            "memories_decayed": c.memories_decayed,
+        }
 
-        memory_trend = []
-        try:
-            rows = sync_db.execute(text(
+    memory_trend = []
+    try:
+        rows = (
+            await db.execute(text(
                 "SELECT d::date AS day, COUNT(m.id) AS c "
                 "FROM generate_series(CURRENT_DATE - INTERVAL '13 days', CURRENT_DATE, '1 day') AS d "
                 "LEFT JOIN memories m ON m.created_at::date = d::date AND NOT m.archived "
                 "GROUP BY d::date ORDER BY d::date"
-            )).mappings().all()
-            memory_trend = [{"date": r["day"].isoformat(), "count": r["c"]} for r in rows]
-        except Exception:
-            logger.debug("memory_trend query failed", exc_info=True)
+            ))
+        ).mappings().all()
+        memory_trend = [{"date": r["day"].isoformat(), "count": r["c"]} for r in rows]
+    except Exception:
+        logger.debug("memory_trend query failed", exc_info=True)
 
-        return {
-            "memories": mem_repo.count_active(),
-            "edges": edge_repo.count_all(),
-            "skills": skill_count,
-            "executions": executions,
-            "memory_types": mem_repo.count_by_type(),
-            "skill_summary": skill_summary,
-            "recent_activity": mem_repo.recent_activity(),
-            "last_consolidation": last_consolidation,
-            "retrieval_accuracy": mem_repo.retrieval_accuracy(),
-            "memory_trend": memory_trend,
-        }
-
-    return await run_db(db, _overview)
+    return {
+        "memories": await mem_repo.a_count_active(),
+        "edges": await edge_repo.a_count_all(),
+        "skills": skill_count,
+        "executions": executions,
+        "memory_types": await mem_repo.a_count_by_type(),
+        "skill_summary": skill_summary,
+        "recent_activity": await mem_repo.a_recent_activity(),
+        "last_consolidation": last_consolidation,
+        "retrieval_accuracy": await mem_repo.a_retrieval_accuracy(),
+        "memory_trend": memory_trend,
+    }
 
 
 @router.get("/metrics", response_model=list[DailyMetricsRead])
@@ -1022,7 +1006,7 @@ async def list_metrics(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(db, lambda sync_db: DailyMetricsRepository(sync_db).list_recent())
+    return await DailyMetricsRepository(db).a_list_recent()
 
 
 @router.get("/consolidations", response_model=list[ConsolidationRunRead])
@@ -1030,7 +1014,7 @@ async def list_consolidations(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(db, lambda sync_db: ConsolidationRunRepository(sync_db).list_recent())
+    return await ConsolidationRunRepository(db).a_list_recent()
 
 
 @router.get("/retrieval")
@@ -1038,11 +1022,7 @@ async def retrieval_stats(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(db, lambda sync_db: RetrievalLogRepository(sync_db).list_recent())
-
-
-def _scheduler_snapshot(db: Session) -> dict[str, Any]:
-    return scheduler_health_snapshot(db)
+    return await RetrievalLogRepository(db).a_list_recent()
 
 
 @router.get("/system/scheduler")
@@ -1051,7 +1031,7 @@ async def scheduler_state(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return the DB-backed scheduler state."""
-    return await run_db(db, _scheduler_snapshot)
+    return await async_scheduler_health_snapshot(db)
 
 
 @router.get("/system/scheduler/health")
@@ -1060,7 +1040,7 @@ async def scheduler_health(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Return the scheduler health snapshot."""
-    return await run_db(db, _scheduler_snapshot)
+    return await async_scheduler_health_snapshot(db)
 
 
 class SchedulerSyncRequest(BaseModel):
@@ -1079,13 +1059,10 @@ async def sync_scheduler_state(
         raise HTTPException(status_code=403, detail="Permission denied")
     owner_mode = (data.owner_mode if data else "scheduler") or "scheduler"
     job_keys = tuple((data.job_keys if data else []) or [])
-    def _sync(sync_db: Session):
-        try:
-            return sync_scheduler_catalog(sync_db, owner_mode=owner_mode, job_keys=job_keys)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return await run_db(db, _sync)
+    try:
+        return await async_sync_scheduler_catalog(db, owner_mode=owner_mode, job_keys=job_keys)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class SchedulerMaterializeRequest(BaseModel):
@@ -1106,15 +1083,12 @@ async def materialize_scheduler_runs(
     if owner_mode != "scheduler":
         raise HTTPException(status_code=400, detail="Legacy cron/mirror owner modes are retired")
     job_keys = tuple((data.job_keys if data else []) or [])
-    def _materialize(sync_db: Session):
-        runs = materialize_due_runs(
-            sync_db,
-            allowed_owner_modes=(owner_mode,),
-            job_keys=job_keys or None,
-        )
-        return {"recorded": len(runs), "runs": [run.id for run in runs]}
-
-    return await run_db(db, _materialize)
+    runs = await async_materialize_due_runs(
+        db,
+        allowed_owner_modes=(owner_mode,),
+        job_keys=job_keys or None,
+    )
+    return {"recorded": len(runs), "runs": [run.id for run in runs]}
 
 
 class SchedulerDrainRequest(BaseModel):
@@ -1136,15 +1110,12 @@ async def drain_scheduler_runs(
     payload = data or SchedulerDrainRequest()
     if payload.owner_mode != "scheduler":
         raise HTTPException(status_code=400, detail="Legacy cron/mirror owner modes are retired")
-    return await run_db(
+    return await async_scheduler_daemon_tick(
         db,
-        lambda sync_db: scheduler_daemon_tick(
-            sync_db,
-            owner_mode=payload.owner_mode,
-            job_key=payload.job_key,
-            max_runs=payload.max_runs,
-            resume=payload.resume,
-        )
+        owner_mode=payload.owner_mode,
+        job_key=payload.job_key,
+        max_runs=payload.max_runs,
+        resume=payload.resume,
     )
 
 
@@ -1204,32 +1175,29 @@ async def list_cron_jobs(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Compatibility view backed by scheduler jobs, not OS crontab."""
-    def _list(sync_db: Session):
-        jobs = []
-        for job in list_scheduler_jobs(sync_db):
-            payload = job.get("default_payload") or {}
-            jobs.append(
-                {
-                    "id": job["id"],
-                    "name": payload.get("name") or job["job_key"],
-                    "description": payload.get("description") or "",
-                    "schedule": job["cron_expr"],
-                    "script_path": payload.get("script_path"),
-                    "command": payload.get("command") or job["handler_ref"],
-                    "phases": payload.get("phases") or [],
-                    "enabled": job["enabled"],
-                    "created_by": payload.get("created_by") or "scheduler",
-                    "owner_mode": job["owner_mode"],
-                    "schedule_human": _human_schedule(job["cron_expr"]),
-                    "last_run": {
-                        "started_at": job["last_started_at"],
-                        "finished_at": job["last_finished_at"],
-                    },
-                }
-            )
-        return jobs
-
-    return await run_db(db, _list)
+    jobs = []
+    for job in await async_list_scheduler_jobs(db):
+        payload = job.get("default_payload") or {}
+        jobs.append(
+            {
+                "id": job["id"],
+                "name": payload.get("name") or job["job_key"],
+                "description": payload.get("description") or "",
+                "schedule": job["cron_expr"],
+                "script_path": payload.get("script_path"),
+                "command": payload.get("command") or job["handler_ref"],
+                "phases": payload.get("phases") or [],
+                "enabled": job["enabled"],
+                "created_by": payload.get("created_by") or "scheduler",
+                "owner_mode": job["owner_mode"],
+                "schedule_human": _human_schedule(job["cron_expr"]),
+                "last_run": {
+                    "started_at": job["last_started_at"],
+                    "finished_at": job["last_finished_at"],
+                },
+            }
+        )
+    return jobs
 
 
 def _tail_text_lines(path: Path, line_count: int) -> list[str]:
@@ -1255,8 +1223,27 @@ def _tail_text_lines(path: Path, line_count: int) -> list[str]:
     return text.split("\n")[-line_count:] if text else []
 
 
+def _cron_log_entries_sync(log_dirs: list[Path], *, job: str, lines: int, files: int) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for log_dir in log_dirs:
+        if not log_dir.exists():
+            continue
+        for item in sorted(log_dir.glob(f"*{job}*"), reverse=True)[:files]:
+            try:
+                stat = item.stat()
+                entries.append({
+                    "file": str(item),
+                    "lines": _tail_text_lines(item, lines),
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                })
+            except Exception:
+                continue
+    return entries
+
+
 @router.get("/system/cron-logs")
-def cron_logs(
+async def cron_logs(
     job: str = Query("", description="Job name to filter logs for"),
     lines: int = Query(100, ge=1, le=500, description="Number of tail lines per file"),
     files: int = Query(5, ge=1, le=25, description="Maximum files per log directory"),
@@ -1269,24 +1256,7 @@ def cron_logs(
         Path.home() / ".local" / "share" / "illo" / "logs",
     ]
 
-    entries: list[dict] = []
-    for log_dir in log_dirs:
-        if not log_dir.exists():
-            continue
-        # Look for files matching the job name
-        for f in sorted(log_dir.glob(f"*{job}*"), reverse=True)[:files]:
-            try:
-                stat = f.stat()
-                entries.append({
-                    "file": str(f),
-                    "lines": _tail_text_lines(f, lines),
-                    "size": stat.st_size,
-                    "modified": stat.st_mtime,
-                })
-            except Exception:
-                continue
-
-    return entries
+    return await run_blocking(_cron_log_entries_sync, log_dirs, job=job, lines=lines, files=files)
 
 
 class SchedulerJobUpsertRequest(BaseModel):
@@ -1323,33 +1293,30 @@ async def upsert_scheduler_job_route(
     payload.setdefault("name", data.job_key)
     if data.description:
         payload.setdefault("description", data.description)
-    def _upsert(sync_db: Session):
-        try:
-            job = upsert_scheduler_job(
-                sync_db,
-                job_key=data.job_key,
-                family=data.family,
-                program_key=data.program_key,
-                handler_kind=data.handler_kind,
-                handler_ref=data.handler_ref,
-                cron_expr=data.cron_expr,
-                timezone_name=data.timezone,
-                default_payload=payload,
-                task_contract=data.task_contract,
-                enabled=data.enabled,
-                priority=data.priority,
-                max_concurrency=data.max_concurrency,
-                timeout_seconds=data.timeout_seconds,
-                retry_policy=data.retry_policy,
-                misfire_policy=data.misfire_policy,
-                load_shed_policy=data.load_shed_policy,
-                target_binding_selector=data.target_binding_selector,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"ok": True, "job_key": job.job_key, "schedule_human": _human_schedule(job.cron_expr)}
-
-    return await run_db(db, _upsert)
+    try:
+        job = await async_upsert_scheduler_job(
+            db,
+            job_key=data.job_key,
+            family=data.family,
+            program_key=data.program_key,
+            handler_kind=data.handler_kind,
+            handler_ref=data.handler_ref,
+            cron_expr=data.cron_expr,
+            timezone_name=data.timezone,
+            default_payload=payload,
+            task_contract=data.task_contract,
+            enabled=data.enabled,
+            priority=data.priority,
+            max_concurrency=data.max_concurrency,
+            timeout_seconds=data.timeout_seconds,
+            retry_policy=data.retry_policy,
+            misfire_policy=data.misfire_policy,
+            load_shed_policy=data.load_shed_policy,
+            target_binding_selector=data.target_binding_selector,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "job_key": job.job_key, "schedule_human": _human_schedule(job.cron_expr)}
 
 
 @router.delete("/system/scheduler/jobs/{job_key}")
@@ -1361,13 +1328,10 @@ async def retire_scheduler_job_route(
     """Retire a scheduler job without deleting historical runs."""
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    def _retire(sync_db: Session):
-        job = retire_scheduler_job(sync_db, job_key, reason="retired via scheduler API")
-        if job is None:
-            raise HTTPException(status_code=404, detail=f"Scheduler job '{job_key}' not found")
-        return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
-
-    return await run_db(db, _retire)
+    job = await async_retire_scheduler_job(db, job_key, reason="retired via scheduler API")
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Scheduler job '{job_key}' not found")
+    return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
 
 
 class SchedulerJobPauseRequest(BaseModel):
@@ -1395,14 +1359,11 @@ async def pause_scheduler_job(
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    def _pause(sync_db: Session):
-        try:
-            job = set_scheduler_job_paused(sync_db, job_key, paused=True, reason=(data.reason if data else None))
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
-
-    return await run_db(db, _pause)
+    try:
+        job = await async_set_scheduler_job_paused(db, job_key, paused=True, reason=(data.reason if data else None))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
 
 
 @router.patch("/system/scheduler/jobs/{job_key}/resume")
@@ -1414,14 +1375,11 @@ async def resume_scheduler_job(
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    def _resume(sync_db: Session):
-        try:
-            job = set_scheduler_job_paused(sync_db, job_key, paused=False, reason=None)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
-
-    return await run_db(db, _resume)
+    try:
+        job = await async_set_scheduler_job_paused(db, job_key, paused=False, reason=None)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "job_key": job.job_key, "enabled": job.enabled, "pause_reason": job.pause_reason}
 
 
 @router.patch("/system/scheduler/jobs/{job_key}/owner-mode")
@@ -1434,14 +1392,11 @@ async def set_scheduler_job_owner_mode_endpoint(
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    def _set(sync_db: Session):
-        try:
-            job = set_scheduler_job_owner_mode_state(sync_db, job_key, owner_mode=data.owner_mode)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"ok": True, "job_key": job.job_key, "owner_mode": job.owner_mode}
-
-    return await run_db(db, _set)
+    try:
+        job = await async_set_scheduler_job_owner_mode_state(db, job_key, owner_mode=data.owner_mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "job_key": job.job_key, "owner_mode": job.owner_mode}
 
 
 @router.patch("/system/scheduler/jobs/{job_key}/load-shed")
@@ -1454,26 +1409,23 @@ async def set_scheduler_job_load_shed_endpoint(
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    def _set(sync_db: Session):
-        try:
-            job = set_scheduler_job_load_shed_state(
-                sync_db,
-                job_key,
-                load_shed_policy=data.load_shed_policy or None,
-                max_concurrency=data.max_concurrency,
-                pause_new_runs=data.pause_new_runs,
-                reason=data.reason,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {
-            "ok": True,
-            "job_key": job.job_key,
-            "max_concurrency": job.max_concurrency,
-            "load_shed_policy": job.load_shed_policy or {},
-        }
-
-    return await run_db(db, _set)
+    try:
+        job = await async_set_scheduler_job_load_shed_state(
+            db,
+            job_key,
+            load_shed_policy=data.load_shed_policy or None,
+            max_concurrency=data.max_concurrency,
+            pause_new_runs=data.pause_new_runs,
+            reason=data.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "job_key": job.job_key,
+        "max_concurrency": job.max_concurrency,
+        "load_shed_policy": job.load_shed_policy or {},
+    }
 
 
 @router.post("/system/scheduler/runs/{run_id}/resume")
@@ -1484,14 +1436,11 @@ async def resume_scheduler_run_route(
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    def _resume(sync_db: Session):
-        try:
-            run = resume_scheduler_run(sync_db, run_id, owner_id=f"api:{user.get('id', 'owner')}")
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return {"ok": True, "run": run.id, "status": run.status}
-
-    return await run_db(db, _resume)
+    try:
+        run = await async_resume_scheduler_run(db, run_id, owner_id=f"api:{user.get('id', 'owner')}")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "run": run.id, "status": run.status}
 
 
 @router.post("/system/scheduler/runs/{run_id}/retry")
@@ -1502,11 +1451,8 @@ async def retry_scheduler_run_route(
 ):
     if not can_manage_scheduler(user):
         raise HTTPException(status_code=403, detail="Permission denied")
-    def _retry(sync_db: Session):
-        try:
-            run = retry_scheduler_run(sync_db, run_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return {"ok": True, "run": run.id, "status": run.status, "parent_run_id": run.parent_run_id}
-
-    return await run_db(db, _retry)
+    try:
+        run = await async_retry_scheduler_run(db, run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "run": run.id, "status": run.status, "parent_run_id": run.parent_run_id}

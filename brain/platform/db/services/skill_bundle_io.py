@@ -18,6 +18,7 @@ from brain.platform.db.models.skill_bundle import (
 )
 from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
 from brain.platform.db.repositories.skills import SkillRepository
+from brain.platform.async_io import ensure_dir, write_text
 from brain.systems.skills.bundles import (
     ASSET_KINDS,
     MAX_INLINE_TEXT_BYTES,
@@ -30,7 +31,7 @@ from brain.systems.skills.bundles import (
 )
 
 
-class SkillBundleIOService:
+class _SkillBundleIOBase:
     """Install filesystem bundles into DB-backed runtime skill projections."""
 
     def __init__(
@@ -41,7 +42,66 @@ class SkillBundleIOService:
         self._skills = skill_repo
         self._bundles = bundle_repo
 
-    def import_bundle(
+    def _asset_payloads_for_revision(self, assets: list[SkillAsset]) -> dict[str, dict[str, Any]]:
+        payloads: dict[str, dict[str, Any]] = {}
+        for asset in assets:
+            if asset.path == SKILL_FILENAME:
+                continue
+            payloads[asset.path] = {
+                "path": asset.path,
+                "asset_kind": asset.asset_kind,
+                "mime_type": asset.mime_type,
+                "size_bytes": asset.size_bytes,
+                "content_digest": asset.content_digest,
+                "storage_kind": asset.storage_kind,
+                "storage_uri": asset.storage_uri,
+                "content_text": asset.content_text,
+                "loading_budget_tokens": asset.loading_budget_tokens,
+                "metadata": dict(asset.metadata_ or {}),
+            }
+        return payloads
+
+    def _manifest_for_revision(
+        self,
+        skill: Skill,
+        bundle: SkillBundleModel,
+        current_version: SkillBundleVersion,
+        semver: str,
+        payloads: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        manifest = dict(current_version.manifest or {})
+        manifest["schema_version"] = int(manifest.get("schema_version") or 1)
+        manifest["name"] = bundle.name or skill.name
+        manifest["display_name"] = bundle.display_name or skill.name.replace("-", " ").title()
+        manifest["version"] = semver
+        manifest["description"] = bundle.description or skill.description or "Skill package"
+        manifest["source"] = bundle.source_kind or skill.source_kind or "local"
+        manifest["visibility"] = bundle.visibility or skill.trust_level or "private_local"
+
+        routing = dict(manifest.get("routing") or {})
+        routing["triggers"] = skill.triggers or routing.get("triggers") or []
+        routing.setdefault("embedding_text", f"{skill.name}: {skill.description or ''}".strip())
+        manifest["routing"] = routing
+
+        runtime = dict(manifest.get("runtime") or {})
+        runtime["default_model_tier"] = skill.model_tier
+        runtime["default_thinking_tier"] = skill.thinking_tier
+        manifest["runtime"] = runtime
+
+        loading = dict(manifest.get("loading") or {})
+        loading.setdefault("summary", f"{SKILL_FILENAME}#summary")
+        loading["procedure"] = f"{SKILL_FILENAME}#procedure"
+        for payload in payloads.values():
+            root = payload["path"].split("/", 1)[0]
+            if root in ASSET_KINDS:
+                loading[root] = f"{root}/"
+        manifest["loading"] = loading
+        return manifest
+
+class AsyncSkillBundleIOService(_SkillBundleIOBase):
+    """Async DB variant for request paths that mutate skill bundles."""
+
+    async def import_bundle(
         self,
         bundle_dir: str | Path,
         *,
@@ -56,7 +116,6 @@ class SkillBundleIOService:
         source_kind: str | None = None,
         auto_bump_conflicting_semver: bool = False,
     ) -> dict[str, Any]:
-        """Import a portable bundle and return installed row identifiers."""
         parsed = load_skill_bundle(bundle_dir)
         bundle_payload = parsed.to_db_bundle_payload(namespace=namespace)
         if trust_level is not None:
@@ -64,11 +123,11 @@ class SkillBundleIOService:
         if source_kind is not None:
             bundle_payload["source_kind"] = source_kind
 
-        bundle = self._bundles.get_or_create_bundle(**bundle_payload)
+        bundle = await self._bundles.a_get_or_create_bundle(**bundle_payload)
         version_payload = parsed.to_db_version_payload(asset_root=str(parsed.root))
         version_was_existing = False
         version = (
-            self._bundles.get_version_by_digest(bundle.id, parsed.content_digest)
+            await self._bundles.a_get_version_by_digest(bundle.id, parsed.content_digest)
             if auto_bump_conflicting_semver
             else None
         )
@@ -76,14 +135,14 @@ class SkillBundleIOService:
             version_was_existing = True
         else:
             requested_semver = parsed.manifest.semver
-            existing_semver = self._bundles.get_version(bundle.id, requested_semver)
+            existing_semver = await self._bundles.a_get_version(bundle.id, requested_semver)
             if existing_semver is not None:
                 if existing_semver.content_digest == parsed.content_digest:
                     version = existing_semver
                     version_was_existing = True
                 elif auto_bump_conflicting_semver:
                     version_payload = dict(version_payload)
-                    version_payload["semver"] = self._next_semver(bundle.id, requested_semver)
+                    version_payload["semver"] = await self._next_semver(bundle.id, requested_semver)
                     version_payload["provenance"] = {
                         **dict(version_payload.get("provenance") or {}),
                         "declared_semver": requested_semver,
@@ -91,23 +150,23 @@ class SkillBundleIOService:
                         "auto_bumped_reason": "semver_digest_conflict",
                     }
             if version is None:
-                version = self._bundles.create_version(
+                version = await self._bundles.a_create_version(
                     bundle,
                     **version_payload,
                     status=review_status,
                     created_by_user_id=installed_by_user_id,
                     validate_manifest=True,
                 )
-        self._add_missing_assets(version.id, parsed)
+        await self._add_missing_assets(version.id, parsed)
 
-        skill = self._materialize_skill_projection(
+        skill = await self._materialize_skill_projection(
             parsed,
             bundle_version_id=version.id,
             source_kind=bundle.source_kind,
             trust_level=bundle.trust_level,
         )
-        self._skills._session.flush()
-        installation = self._upsert_installation(
+        await self._skills._session.flush()
+        installation = await self._upsert_installation(
             version.id,
             bundle.id,
             skill_id=skill.id,
@@ -150,10 +209,10 @@ class SkillBundleIOService:
                 "installed_digest": installation.installed_digest,
                 "rollback_bundle_version_id": installation.rollback_bundle_version_id,
             },
-            "assets": len(self._bundles.list_assets(version.id)),
+            "assets": len(await self._bundles.a_list_assets(version.id)),
         }
 
-    def ensure_skill_bundle(
+    async def ensure_skill_bundle(
         self,
         skill_id: int,
         *,
@@ -167,14 +226,13 @@ class SkillBundleIOService:
         trust_level: str = "private_local",
         source_kind: str = "local",
     ) -> Skill:
-        """Convert a legacy DB skill into a local bundle-backed projection if needed."""
-        skill = self._skills.get_or_raise(skill_id)
+        skill = await self._skills.a_get_or_raise(skill_id)
         if skill.bundle_version_id or skill.skill_installation_id:
             return skill
 
         with TemporaryDirectory(prefix="illo-skill-bundle-") as tmp:
             target = Path(tmp) / skill.name
-            self.export_skill_bundle(
+            await self.export_skill_bundle(
                 skill.name,
                 target,
                 version=f"0.0.{skill.version or 1}",
@@ -182,7 +240,7 @@ class SkillBundleIOService:
                 source=source_kind,
                 visibility=trust_level,
             )
-            result = self.import_bundle(
+            result = await self.import_bundle(
                 target,
                 namespace=namespace,
                 org_id=org_id,
@@ -195,9 +253,9 @@ class SkillBundleIOService:
                 source_kind=source_kind,
             )
         converted_id = result.get("skill", {}).get("id") or skill_id
-        return self._skills.get_or_raise(converted_id)
+        return await self._skills.a_get_or_raise(converted_id)
 
-    def upsert_skill_asset(
+    async def upsert_skill_asset(
         self,
         skill_id: int,
         *,
@@ -211,7 +269,6 @@ class SkillBundleIOService:
         user_id: str | None = None,
         installed_by_user_id: str | None = None,
     ) -> SkillAsset:
-        """Add or replace a text asset by publishing a new local bundle version."""
         safe_path = _writable_asset_path(path)
         resolved_kind = _asset_kind_for_path(safe_path, asset_kind)
         resolved_mime = mime_type or _guess_asset_mime_type(safe_path)
@@ -219,14 +276,14 @@ class SkillBundleIOService:
         if len(data) > MAX_INLINE_TEXT_BYTES:
             raise ValueError(f"Skill asset content exceeds {MAX_INLINE_TEXT_BYTES} bytes")
 
-        skill = self.ensure_skill_bundle(
+        skill = await self.ensure_skill_bundle(
             skill_id,
             namespace=namespace,
             org_id=org_id,
             user_id=user_id,
             installed_by_user_id=installed_by_user_id,
         )
-        installation, version, bundle, assets = self._load_package_rows(skill)
+        installation, version, bundle, assets = await self._load_package_rows(skill)
         if version is None or bundle is None:
             raise LookupError("Skill package rows were not created")
 
@@ -255,7 +312,7 @@ class SkillBundleIOService:
             "loading_budget_tokens": loading_budget_tokens,
             "metadata": {},
         }
-        new_version = self._publish_asset_revision(
+        new_version = await self._publish_asset_revision(
             skill,
             bundle=bundle,
             current_version=version,
@@ -263,11 +320,11 @@ class SkillBundleIOService:
             payloads=payloads,
         )
         created = next(
-            asset for asset in self._bundles.list_assets(new_version.id) if asset.path == safe_path
+            asset for asset in await self._bundles.a_list_assets(new_version.id) if asset.path == safe_path
         )
         return created
 
-    def delete_skill_asset(
+    async def delete_skill_asset(
         self,
         skill_id: int,
         *,
@@ -277,16 +334,15 @@ class SkillBundleIOService:
         user_id: str | None = None,
         installed_by_user_id: str | None = None,
     ) -> Skill:
-        """Remove a package asset by publishing a new local bundle version."""
         safe_path = _writable_asset_path(path)
-        skill = self.ensure_skill_bundle(
+        skill = await self.ensure_skill_bundle(
             skill_id,
             namespace=namespace,
             org_id=org_id,
             user_id=user_id,
             installed_by_user_id=installed_by_user_id,
         )
-        installation, version, bundle, assets = self._load_package_rows(skill)
+        installation, version, bundle, assets = await self._load_package_rows(skill)
         if version is None or bundle is None:
             raise LookupError("Skill package rows were not created")
         if not any(asset.path == safe_path for asset in assets):
@@ -294,7 +350,7 @@ class SkillBundleIOService:
 
         payloads = self._asset_payloads_for_revision(assets)
         payloads.pop(safe_path, None)
-        self._publish_asset_revision(
+        await self._publish_asset_revision(
             skill,
             bundle=bundle,
             current_version=version,
@@ -303,7 +359,7 @@ class SkillBundleIOService:
         )
         return skill
 
-    def export_skill_bundle(
+    async def export_skill_bundle(
         self,
         skill_name: str,
         target_dir: str | Path,
@@ -314,10 +370,9 @@ class SkillBundleIOService:
         source: str = "local",
         visibility: str = "private_local",
     ) -> ParsedSkillBundle:
-        """Export an existing DB skill as a portable filesystem bundle."""
-        skill = self._skills.get_by_name_or_raise(skill_name)
+        skill = await self._skills.a_get_by_name_or_raise(skill_name)
         root = Path(target_dir)
-        root.mkdir(parents=True, exist_ok=True)
+        await ensure_dir(root)
 
         semver = version or f"0.0.{skill.version or 1}"
         manifest = {
@@ -350,18 +405,18 @@ class SkillBundleIOService:
             },
         }
 
-        (root / "skill.toml").write_text(_to_toml(manifest), encoding="utf-8")
-        (root / SKILL_FILENAME).write_text(skill.procedure, encoding="utf-8")
+        await write_text(root / "skill.toml", _to_toml(manifest), encoding="utf-8")
+        await write_text(root / SKILL_FILENAME, skill.procedure, encoding="utf-8")
         return load_skill_bundle(root)
 
-    def _load_package_rows(
+    async def _load_package_rows(
         self,
         skill: Skill,
     ) -> tuple[SkillInstallation | None, SkillBundleVersion | None, SkillBundleModel | None, list[SkillAsset]]:
         session = self._skills._session
         installation = None
         if skill.skill_installation_id:
-            installation = session.get(SkillInstallation, skill.skill_installation_id)
+            installation = await session.get(SkillInstallation, skill.skill_installation_id)
         if installation is None and skill.bundle_version_id and skill.id:
             from sqlalchemy import select
 
@@ -373,35 +428,16 @@ class SkillBundleIOService:
                 )
                 .order_by(SkillInstallation.id.desc())
             )
-            installation = session.scalars(stmt).first()
+            installation = (await session.scalars(stmt)).first()
 
         version_id = skill.bundle_version_id or (installation.bundle_version_id if installation else None)
-        version = session.get(SkillBundleVersion, version_id) if version_id else None
+        version = await session.get(SkillBundleVersion, version_id) if version_id else None
         bundle_id = version.bundle_id if version else (installation.bundle_id if installation else None)
-        bundle = session.get(SkillBundleModel, bundle_id) if bundle_id else None
-        assets = list(self._bundles.list_assets(version.id)) if version is not None else []
+        bundle = await session.get(SkillBundleModel, bundle_id) if bundle_id else None
+        assets = list(await self._bundles.a_list_assets(version.id)) if version is not None else []
         return installation, version, bundle, assets
 
-    def _asset_payloads_for_revision(self, assets: list[SkillAsset]) -> dict[str, dict[str, Any]]:
-        payloads: dict[str, dict[str, Any]] = {}
-        for asset in assets:
-            if asset.path == SKILL_FILENAME:
-                continue
-            payloads[asset.path] = {
-                "path": asset.path,
-                "asset_kind": asset.asset_kind,
-                "mime_type": asset.mime_type,
-                "size_bytes": asset.size_bytes,
-                "content_digest": asset.content_digest,
-                "storage_kind": asset.storage_kind,
-                "storage_uri": asset.storage_uri,
-                "content_text": asset.content_text,
-                "loading_budget_tokens": asset.loading_budget_tokens,
-                "metadata": dict(asset.metadata_ or {}),
-            }
-        return payloads
-
-    def _publish_asset_revision(
+    async def _publish_asset_revision(
         self,
         skill: Skill,
         *,
@@ -410,7 +446,7 @@ class SkillBundleIOService:
         installation: SkillInstallation | None,
         payloads: dict[str, dict[str, Any]],
     ) -> SkillBundleVersion:
-        semver = self._next_semver(bundle.id, current_version.semver)
+        semver = await self._next_semver(bundle.id, current_version.semver)
         manifest = self._manifest_for_revision(skill, bundle, current_version, semver, payloads)
         parsed_manifest = validate_skill_bundle_manifest_payload(manifest)
         procedure = skill.procedure or ""
@@ -429,7 +465,7 @@ class SkillBundleIOService:
         ]
         content_digest = f"sha256:{compute_bundle_digest(parsed_manifest, procedure_sha, digest_assets)}"
 
-        version = self._bundles.create_version(
+        version = await self._bundles.a_create_version(
             bundle,
             semver=semver,
             content_digest=content_digest,
@@ -449,7 +485,7 @@ class SkillBundleIOService:
             status=current_version.status or "approved",
             validate_manifest=True,
         )
-        self._bundles.add_asset(
+        await self._bundles.a_add_asset(
             version.id,
             path=SKILL_FILENAME,
             asset_kind="procedure",
@@ -460,7 +496,7 @@ class SkillBundleIOService:
             content_text=procedure,
         )
         for payload in sorted(payloads.values(), key=lambda item: item["path"]):
-            self._bundles.add_asset(version.id, **payload)
+            await self._bundles.a_add_asset(version.id, **payload)
 
         skill.bundle_version_id = version.id
         skill.bundle_digest = version.content_digest
@@ -478,47 +514,10 @@ class SkillBundleIOService:
             installation.installed_digest = version.content_digest
             skill.skill_installation_id = installation.id
 
-        self._skills._session.flush()
+        await self._skills._session.flush()
         return version
 
-    def _manifest_for_revision(
-        self,
-        skill: Skill,
-        bundle: SkillBundleModel,
-        current_version: SkillBundleVersion,
-        semver: str,
-        payloads: dict[str, dict[str, Any]],
-    ) -> dict[str, Any]:
-        manifest = dict(current_version.manifest or {})
-        manifest["schema_version"] = int(manifest.get("schema_version") or 1)
-        manifest["name"] = bundle.name or skill.name
-        manifest["display_name"] = bundle.display_name or skill.name.replace("-", " ").title()
-        manifest["version"] = semver
-        manifest["description"] = bundle.description or skill.description or "Skill package"
-        manifest["source"] = bundle.source_kind or skill.source_kind or "local"
-        manifest["visibility"] = bundle.visibility or skill.trust_level or "private_local"
-
-        routing = dict(manifest.get("routing") or {})
-        routing["triggers"] = skill.triggers or routing.get("triggers") or []
-        routing.setdefault("embedding_text", f"{skill.name}: {skill.description or ''}".strip())
-        manifest["routing"] = routing
-
-        runtime = dict(manifest.get("runtime") or {})
-        runtime["default_model_tier"] = skill.model_tier
-        runtime["default_thinking_tier"] = skill.thinking_tier
-        manifest["runtime"] = runtime
-
-        loading = dict(manifest.get("loading") or {})
-        loading.setdefault("summary", f"{SKILL_FILENAME}#summary")
-        loading["procedure"] = f"{SKILL_FILENAME}#procedure"
-        for payload in payloads.values():
-            root = payload["path"].split("/", 1)[0]
-            if root in ASSET_KINDS:
-                loading[root] = f"{root}/"
-        manifest["loading"] = loading
-        return manifest
-
-    def _next_semver(self, bundle_id: int, current_semver: str | None) -> str:
+    async def _next_semver(self, bundle_id: int, current_semver: str | None) -> str:
         base = current_semver or "0.0.0"
         match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$", base)
         if match:
@@ -527,16 +526,16 @@ class SkillBundleIOService:
             major, minor, patch = 0, 0, 0
         for offset in range(1, 1000):
             candidate = f"{major}.{minor}.{patch + offset}"
-            if self._bundles.get_version(bundle_id, candidate) is None:
+            if await self._bundles.a_get_version(bundle_id, candidate) is None:
                 return candidate
         raise ValueError("Unable to allocate a new skill package version")
 
-    def _add_missing_assets(self, version_id: int, parsed: ParsedSkillBundle) -> None:
+    async def _add_missing_assets(self, version_id: int, parsed: ParsedSkillBundle) -> None:
         existing_paths = {
-            asset.path for asset in self._bundles.list_assets(version_id)
+            asset.path for asset in await self._bundles.a_list_assets(version_id)
         }
         if SKILL_FILENAME not in existing_paths:
-            self._bundles.add_asset(
+            await self._bundles.a_add_asset(
                 version_id,
                 path=SKILL_FILENAME,
                 asset_kind="procedure",
@@ -551,9 +550,9 @@ class SkillBundleIOService:
         for asset_payload in parsed.to_db_asset_payloads():
             if asset_payload["path"] in existing_paths:
                 continue
-            self._bundles.add_asset(version_id, **asset_payload)
+            await self._bundles.a_add_asset(version_id, **asset_payload)
 
-    def _materialize_skill_projection(
+    async def _materialize_skill_projection(
         self,
         parsed: ParsedSkillBundle,
         *,
@@ -561,9 +560,9 @@ class SkillBundleIOService:
         source_kind: str,
         trust_level: str,
     ) -> Skill:
-        skill = self._skills.get_by_name(parsed.manifest.name)
+        skill = await self._skills.a_get_by_name(parsed.manifest.name)
         if skill is None:
-            skill = self._skills.create(
+            skill = await self._skills.a_create(
                 name=parsed.manifest.name,
                 description=parsed.manifest.description,
                 procedure=parsed.skill_markdown,
@@ -597,7 +596,7 @@ class SkillBundleIOService:
             skill.thinking_tier = parsed.manifest.runtime.default_thinking_tier
         return skill
 
-    def _upsert_installation(
+    async def _upsert_installation(
         self,
         bundle_version_id: int,
         bundle_id: int,
@@ -611,14 +610,14 @@ class SkillBundleIOService:
         update_policy: str,
         review_status: str,
     ) -> SkillInstallation:
-        existing = self._bundles.get_active_installation(
+        existing = await self._bundles.a_get_active_installation(
             bundle_id,
             org_id=org_id,
             user_id=user_id,
             enabled_scope=enabled_scope,
         )
         if existing is None:
-            return self._bundles.create_installation(
+            return await self._bundles.a_create_installation(
                 bundle_version_id,
                 org_id=org_id,
                 user_id=user_id,

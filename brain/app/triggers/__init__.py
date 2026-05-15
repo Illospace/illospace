@@ -7,13 +7,13 @@ from brain.app.triggers.contracts import (
     TriggerRouteResult,
     stable_idempotency_key,
 )
-from brain.app.triggers.router import route_trigger
+from brain.app.triggers.router import async_route_trigger
 
 __all__ = [
     "ILLO_NATIVE_EVENTS",
     "ILLO_NATIVE_SOURCES",
     "IlloTrigger",
     "TriggerRouteResult",
-    "route_trigger",
+    "async_route_trigger",
     "stable_idempotency_key",
 ]

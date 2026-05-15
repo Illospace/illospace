@@ -54,7 +54,7 @@ class MetaInsight:
     suggested_action: str | None = None
 
 
-def compute_evolution_metrics(period_end: date | None = None, window_days: int = 7) -> EvolutionMetrics:
+async def compute_evolution_metrics(period_end: date | None = None, window_days: int = 7) -> EvolutionMetrics:
     """Compute rolling evolution metrics for a time window.
 
     Args:
@@ -66,11 +66,11 @@ def compute_evolution_metrics(period_end: date | None = None, window_days: int =
 
     metrics = EvolutionMetrics(period_start=start, period_end=end)
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         session = uow.session
 
         # ── Prediction artifact accuracy ──
-        result = session.execute(text("""
+        result = await session.execute(text("""
             SELECT
                 COUNT(*) as total,
                 AVG(CAST(payload->>'prediction_error' AS FLOAT)) as avg_error,
@@ -88,7 +88,7 @@ def compute_evolution_metrics(period_end: date | None = None, window_days: int =
             metrics.total_runs = pred["total"]
 
         # ── Strategy success rates ──
-        result = session.execute(text("""
+        result = await session.execute(text("""
             SELECT payload->>'strategy' as strategy, COUNT(*) as total,
                    AVG(CASE WHEN payload->>'success' IN ('true', '1', 'completed') THEN 1.0 ELSE 0.0 END) as success_rate,
                    AVG(CAST(payload->>'tokens_used' AS FLOAT)) as avg_tokens
@@ -102,7 +102,7 @@ def compute_evolution_metrics(period_end: date | None = None, window_days: int =
             metrics.strategy_token_efficiency[row["strategy"]] = int(row["avg_tokens"] or 0)
 
         # ── Heuristic health ──
-        result = session.execute(text("""
+        result = await session.execute(text("""
             SELECT
                 COUNT(*) FILTER (WHERE active) as active_count,
                 COUNT(*) as total_count,
@@ -122,7 +122,7 @@ def compute_evolution_metrics(period_end: date | None = None, window_days: int =
                 metrics.heuristic_survival_rate = 1.0
 
         # ── Skill fitness trend ──
-        result = session.execute(text("""
+        result = await session.execute(text("""
             SELECT COUNT(*) as total, AVG(fitness_score) as avg_fitness
             FROM skills WHERE NOT archived
         """))
@@ -130,19 +130,19 @@ def compute_evolution_metrics(period_end: date | None = None, window_days: int =
         metrics.total_skills_active = skills["total"] if skills else 0
 
         # Compare with fitness 7 days ago (from daily_metrics if available)
-        result = session.execute(text("""
+        result = await session.execute(text("""
             SELECT AVG(fitness_score) as prev_fitness
             FROM skills WHERE NOT archived
         """))
         # We'll compute trend from run strategy-observation events instead.
-        result = session.execute(text("""
+        result = await session.execute(text("""
             SELECT AVG(CASE WHEN payload->>'success' IN ('true', '1', 'completed') THEN 1.0 ELSE 0.0 END) as recent_sr
             FROM agent_run_events
             WHERE created_at::date BETWEEN :start AND :end
               AND event_type = 'run.learning.strategy_observed'
         """), {"start": start, "end": end})
         recent = result.mappings().first()
-        result = session.execute(text("""
+        result = await session.execute(text("""
             SELECT AVG(CASE WHEN payload->>'success' IN ('true', '1', 'completed') THEN 1.0 ELSE 0.0 END) as prev_sr
             FROM agent_run_events
             WHERE created_at::date BETWEEN :start AND :end
@@ -154,7 +154,7 @@ def compute_evolution_metrics(period_end: date | None = None, window_days: int =
             metrics.skill_fitness_trend = round(float(recent["recent_sr"]) - float(previous["prev_sr"]), 3)
 
         # ── Memory retrieval quality ──
-        result = session.execute(text("""
+        result = await session.execute(text("""
             SELECT COUNT(*) as total,
                    COUNT(*) FILTER (WHERE feedback = 'hit') as hits
             FROM retrieval_log
@@ -167,14 +167,14 @@ def compute_evolution_metrics(period_end: date | None = None, window_days: int =
     return metrics
 
 
-def compare_periods(current_end: date | None = None, window_days: int = 7) -> list[MetaInsight]:
+async def compare_periods(current_end: date | None = None, window_days: int = 7) -> list[MetaInsight]:
     """Compare current period metrics with previous period to detect trends.
 
     Returns list of MetaInsight objects highlighting regressions and improvements.
     """
     end = current_end or date.today()
-    current = compute_evolution_metrics(period_end=end, window_days=window_days)
-    previous = compute_evolution_metrics(
+    current = await compute_evolution_metrics(period_end=end, window_days=window_days)
+    previous = await compute_evolution_metrics(
         period_end=end - timedelta(days=window_days), window_days=window_days,
     )
 
@@ -268,7 +268,7 @@ def compare_periods(current_end: date | None = None, window_days: int = 7) -> li
     return insights
 
 
-def auto_tune_parameters(insights: list[MetaInsight]) -> dict:
+async def auto_tune_parameters(insights: list[MetaInsight]) -> dict:
     """Auto-adjust system parameters based on meta-insights.
 
     Currently tunes:
@@ -285,7 +285,7 @@ def auto_tune_parameters(insights: list[MetaInsight]) -> dict:
             if insight.metric_name == "heuristic_survival_rate" and insight.current_value < 0.5:
                 # Store adjusted threshold
                 new_threshold = 0.15  # relaxed from 0.2
-                _store_parameter("heuristic_prune_threshold", new_threshold)
+                await _store_parameter("heuristic_prune_threshold", new_threshold)
                 adjustments["heuristic_prune_threshold"] = {
                     "old": 0.2, "new": new_threshold, "reason": insight.message,
                 }
@@ -293,7 +293,7 @@ def auto_tune_parameters(insights: list[MetaInsight]) -> dict:
         elif insight.category == "strategy" and insight.severity == "regression":
             # If a strategy is failing, lower its escalation bar
             strategy = insight.metric_name.replace("strategy_", "").replace("_success", "")
-            _store_parameter(f"strategy_{strategy}_escalate_sensitivity", 0.55)
+            await _store_parameter(f"strategy_{strategy}_escalate_sensitivity", 0.55)
             adjustments[f"strategy_{strategy}_escalate_sensitivity"] = {
                 "old": 0.50, "new": 0.55, "reason": insight.message,
             }
@@ -301,7 +301,7 @@ def auto_tune_parameters(insights: list[MetaInsight]) -> dict:
     return adjustments
 
 
-def run_meta_evolution() -> dict:
+async def run_meta_evolution() -> dict:
     """Run full meta-evolution pipeline. Called nightly.
 
     1. Compute current + previous period metrics
@@ -311,13 +311,13 @@ def run_meta_evolution() -> dict:
 
     Returns summary dict.
     """
-    insights = compare_periods()
+    insights = await compare_periods()
 
     # Auto-tune based on insights
     adjustments = {}
     regression_count = sum(1 for i in insights if i.severity in ("regression", "warning"))
     if regression_count > 0:
-        adjustments = auto_tune_parameters(insights)
+        adjustments = await auto_tune_parameters(insights)
 
     # Store insights as brain memories
     stored_count = 0
@@ -328,8 +328,8 @@ def run_meta_evolution() -> dict:
                     f"[meta-evolution/{insight.category}] {insight.message}"
                     + (f" Suggested: {insight.suggested_action}" if insight.suggested_action else "")
                 )
-                with UnitOfWork() as uow:
-                    uow.session.execute(text("""
+                async with UnitOfWork() as uow:
+                    await uow.session.execute(text("""
                         INSERT INTO memories (content, memory_type, salience, source, tags, decay_eligible)
                         VALUES (:content, 'insight', :salience, 'meta_evolution', :tags, TRUE)
                     """), {
@@ -342,7 +342,7 @@ def run_meta_evolution() -> dict:
                 logger.debug(f"Failed to store meta-insight: {e}")
 
     # Compute current metrics for the summary
-    current_metrics = compute_evolution_metrics()
+    current_metrics = await compute_evolution_metrics()
 
     stats = {
         "insights_total": len(insights),
@@ -368,15 +368,15 @@ def run_meta_evolution() -> dict:
 
 # ── Helpers ──────────────────────────────────────────────────
 
-def _store_parameter(name: str, value: float) -> None:
+async def _store_parameter(name: str, value: float) -> None:
     """Store an auto-tuned parameter value.
 
     Uses the daily_metrics reflection_notes field for now.
     In the future, could use a dedicated parameters table.
     """
     try:
-        with UnitOfWork() as uow:
-            uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            await uow.session.execute(text("""
                 INSERT INTO memories (content, memory_type, salience, source, tags, decay_eligible)
                 VALUES (:content, 'decision', 7.0, 'auto_tune', :tags, FALSE)
             """), {
@@ -387,14 +387,14 @@ def _store_parameter(name: str, value: float) -> None:
         logger.debug(f"Failed to store parameter: {e}")
 
 
-def get_tuned_parameter(name: str, default: float) -> float:
+async def get_tuned_parameter(name: str, default: float) -> float:
     """Retrieve the most recent auto-tuned value for a parameter.
 
     Falls back to default if no tuned value exists.
     """
     try:
-        with UnitOfWork() as uow:
-            result = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            result = await uow.session.execute(text("""
                 SELECT content FROM memories
                 WHERE source = 'auto_tune' AND tags @> ARRAY[:name]
                   AND NOT archived

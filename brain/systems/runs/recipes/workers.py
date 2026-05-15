@@ -12,8 +12,8 @@ from brain.systems.runs.engine import RunRecipeResult, RunRuntime
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import workspace_root_from_ref
 from brain.systems.runs.status import RunStatus
-from brain.systems.runs.tools import RunToolExecutor, ToolRecord, ToolScope, wrap_tool_handlers
-from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent
+from brain.systems.runs.tools import AsyncRunToolExecutor, ToolRecord, ToolScope, wrap_tool_handlers
+from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
 from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 
@@ -51,7 +51,7 @@ def _thread_attachment_context(runtime: RunRuntime) -> dict[str, Any] | None:
 class WorkerRecipe(BaseRunRecipe):
     name = "worker"
 
-    def execute(self, runtime: RunRuntime) -> RunRecipeResult:
+    async def execute(self, runtime: RunRuntime) -> RunRecipeResult:
         assignment = worker_assignment_from_runtime(runtime)
         context = runtime.context_loader.load(
             thread_id=runtime.request.thread_id,
@@ -61,7 +61,7 @@ class WorkerRecipe(BaseRunRecipe):
             metadata=runtime.request.metadata,
         )
         workspace_root = _workspace_root(runtime.request.workspace_ref)
-        runtime.activity(
+        await runtime.activity(
             "Reading worker assignment",
             assignment_id=assignment.id,
             role=assignment.role,
@@ -70,7 +70,7 @@ class WorkerRecipe(BaseRunRecipe):
         )
 
         tool_records: list[ToolRecord] = []
-        executor = RunToolExecutor(runtime.store, stream=runtime.stream)
+        executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
         handlers = wrap_tool_handlers(
             build_tool_handlers(workspace_root=workspace_root),
             executor=executor,
@@ -89,16 +89,18 @@ class WorkerRecipe(BaseRunRecipe):
         thinking = model_policy.get("thinking") or "high"
         streamed_output = False
 
-        def _activity(label: str) -> None:
-            runtime.activity(label)
+        async def _activity(label: str) -> None:
+            await runtime.activity(label)
 
-        def _delta(delta: str) -> None:
+        async def _record_delta(delta: str) -> None:
             nonlocal streamed_output
             streamed_output = True
-            runtime.text_delta(delta)
+            await runtime.text_delta(delta)
 
-        def _guidance() -> list[str]:
-            return runtime.drain_steering()
+        _delta = _record_delta
+
+        async def _guidance() -> list[str]:
+            return await runtime.drain_steering()
 
         system_prompt = build_worker_prompt(
             assignment,
@@ -107,7 +109,7 @@ class WorkerRecipe(BaseRunRecipe):
             context=context.prompt_context(),
             evidence_so_far=runtime.request.metadata.get("evidence") or runtime.request.metadata.get("parent_evidence"),
         )
-        runtime.activity("Starting scoped worker", workspace_root=workspace_root)
+        await runtime.activity("Starting scoped worker", workspace_root=workspace_root)
         spec = build_direct_agent_invocation(
             message=runtime.request.message,
             system_prompt=system_prompt,
@@ -141,7 +143,7 @@ class WorkerRecipe(BaseRunRecipe):
             },
         )
         try:
-            result = invoke_direct_agent(spec)
+            result = await invoke_direct_agent_async(spec)
         except Exception as exc:
             logger.exception("worker_recipe_failed", extra={"run_id": runtime.run.id})
             output = f"Worker failed: {exc}"
@@ -152,7 +154,7 @@ class WorkerRecipe(BaseRunRecipe):
             if getattr(result, "error", None) and not output:
                 output = str(result.error)
         if output and not streamed_output:
-            runtime.text_delta(output)
+            await runtime.text_delta(output)
         worker_result = worker_result_artifact(
             runtime.run.id,
             assignment=assignment,

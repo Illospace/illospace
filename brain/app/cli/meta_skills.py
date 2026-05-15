@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -205,7 +206,7 @@ def propose_skill_from_gap(gap: dict) -> Optional[dict]:
     }
 
 
-def create_skill_in_db(skill_data: dict) -> Optional[int]:
+async def create_skill_in_db(skill_data: dict) -> Optional[int]:
     """Insert an auto-emerged skill into the database.
 
     Enforces the centralized skill-creator gate before insertion.
@@ -228,15 +229,15 @@ def create_skill_in_db(skill_data: dict) -> Optional[int]:
     emb_text = f"{skill_data['name']}: {skill_data['description']}"
     embedding = embed_document(emb_text)
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # Check if exists
-        existing = uow.session.execute(text(
+        existing = (await uow.session.execute(text(
             "SELECT id FROM skills WHERE name = :name"
-        ), {"name": skill_data["name"]}).mappings().first()
+        ), {"name": skill_data["name"]})).mappings().first()
         if existing:
             return None  # already exists
 
-        row = uow.session.execute(text("""
+        row = (await uow.session.execute(text("""
             INSERT INTO skills (name, description, procedure, level, auto_emerged, embedding)
             VALUES (:name, :description, :procedure, :level, :auto_emerged, CAST(:embedding AS vector))
             RETURNING id
@@ -246,7 +247,7 @@ def create_skill_in_db(skill_data: dict) -> Optional[int]:
             "level": skill_data.get("level", "cognitive"),
             "auto_emerged": skill_data.get("auto_emerged", True),
             "embedding": vec_to_pg(embedding),
-        }).mappings().first()
+        })).mappings().first()
         return row["id"]
 
 
@@ -285,9 +286,9 @@ def compute_meta_metrics(skills: list[dict], tasks_total: int, tasks_with_skill:
 # Full Analysis (DB-connected)
 # ============================================================
 
-def _load_recent_task_inputs(session, days: int) -> list[dict]:
+async def _load_recent_task_inputs(session, days: int) -> list[dict]:
     """Load recent task-like prompts from agent_runs.input_message."""
-    rows = session.execute(text("""
+    rows = (await session.execute(text("""
         SELECT input_message AS description,
                COALESCE(metadata->>'task_type', recipe) AS task_type,
                CASE
@@ -299,25 +300,25 @@ def _load_recent_task_inputs(session, days: int) -> list[dict]:
         WHERE input_message IS NOT NULL
           AND created_at >= NOW() - CAST(:days_interval AS interval)
         ORDER BY created_at DESC
-    """), {"days_interval": f"{days} days"}).mappings().all()
+    """), {"days_interval": f"{days} days"})).mappings().all()
     return [dict(r) for r in rows]
 
 
-def run_full_analysis(days: int = 7) -> dict:
+async def run_full_analysis(days: int = 7) -> dict:
     """Run the complete meta-skill analysis against the database."""
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # Load all skills
-        skill_rows = uow.session.execute(text("""
+        skill_rows = (await uow.session.execute(text("""
             SELECT id, name, description, maturity, confidence, use_count,
                    success_count, failure_count, partial_count, pitfalls,
                    last_used, auto_emerged
             FROM skills WHERE NOT archived
-        """)).mappings().all()
+        """))).mappings().all()
         skills = [dict(r) for r in skill_rows]
         skill_names = [s["name"] for s in skills]
 
         # Load recent task-like prompts from agent_runs.
-        tasks = _load_recent_task_inputs(uow.session, days)
+        tasks = await _load_recent_task_inputs(uow.session, days)
 
         # Task coverage counts
         tasks_total = len(tasks)
@@ -327,12 +328,12 @@ def run_full_analysis(days: int = 7) -> dict:
         skill_failures = {}
         for s in skills:
             if s["failure_count"] > 0:
-                fail_rows = uow.session.execute(text("""
+                fail_rows = (await uow.session.execute(text("""
                     SELECT task_description, error_analysis, outcome
                     FROM skill_executions
                     WHERE skill_id = :skill_id AND outcome = 'failure'
                     ORDER BY started_at DESC LIMIT 10
-                """), {"skill_id": s["id"]}).mappings().all()
+                """), {"skill_id": s["id"]})).mappings().all()
                 skill_failures[s["name"]] = [dict(r) for r in fail_rows]
 
     # Run analyses
@@ -375,15 +376,15 @@ def run_full_analysis(days: int = 7) -> dict:
     }
 
 
-def run_auto_create(days: int = 7, dry_run: bool = False) -> list[dict]:
+async def run_auto_create(days: int = 7, dry_run: bool = False) -> list[dict]:
     """Detect gaps and auto-create skills."""
-    with UnitOfWork() as uow:
-        name_rows = uow.session.execute(text(
+    async with UnitOfWork() as uow:
+        name_rows = (await uow.session.execute(text(
             "SELECT name FROM skills WHERE NOT archived"
-        )).mappings().all()
+        ))).mappings().all()
         skill_names = [r["name"] for r in name_rows]
 
-        tasks = _load_recent_task_inputs(uow.session, days)
+        tasks = await _load_recent_task_inputs(uow.session, days)
 
     gaps = detect_gaps(tasks, skill_names)
     created = []
@@ -394,7 +395,7 @@ def run_auto_create(days: int = 7, dry_run: bool = False) -> list[dict]:
             if dry_run:
                 created.append({"proposed": proposal, "created": False})
             else:
-                skill_id = create_skill_in_db(proposal)
+                skill_id = await create_skill_in_db(proposal)
                 created.append({
                     "proposed": proposal,
                     "created": skill_id is not None,
@@ -408,9 +409,9 @@ def run_auto_create(days: int = 7, dry_run: bool = False) -> list[dict]:
 # Nightly Integration
 # ============================================================
 
-def nightly_meta_analysis() -> str:
+async def nightly_meta_analysis() -> str:
     """Run meta-analysis as part of nightly cycle. Returns summary string."""
-    analysis = run_full_analysis(days=7)
+    analysis = await run_full_analysis(days=7)
 
     lines = ["## Meta-Skill Analysis"]
     m = analysis["meta_metrics"]
@@ -447,7 +448,7 @@ def nightly_meta_analysis() -> str:
 # CLI
 # ============================================================
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Illo Meta-Skill Analyzer")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -468,30 +469,30 @@ def main():
     args = parser.parse_args()
 
     if args.command == "analyze":
-        result = run_full_analysis(args.days)
+        result = await run_full_analysis(args.days)
         print(json.dumps(result, indent=2, default=str))
 
     elif args.command == "weaknesses":
-        with UnitOfWork() as uow:
-            rows = uow.session.execute(text(
+        async with UnitOfWork() as uow:
+            rows = (await uow.session.execute(text(
                 "SELECT name, maturity, confidence, use_count, success_count, failure_count, partial_count, pitfalls, last_used FROM skills WHERE NOT archived"
-            )).mappings().all()
+            ))).mappings().all()
             skills = [dict(r) for r in rows]
         result = analyze_weaknesses(skills)
         print(json.dumps(result, indent=2, default=str))
 
     elif args.command == "gaps":
-        with UnitOfWork() as uow:
-            name_rows = uow.session.execute(text(
+        async with UnitOfWork() as uow:
+            name_rows = (await uow.session.execute(text(
                 "SELECT name FROM skills WHERE NOT archived"
-            )).mappings().all()
+            ))).mappings().all()
             skill_names = [r["name"] for r in name_rows]
-            tasks = _load_recent_task_inputs(uow.session, args.days)
+            tasks = await _load_recent_task_inputs(uow.session, args.days)
         result = detect_gaps(tasks, skill_names)
         print(json.dumps(result, indent=2, default=str))
 
     elif args.command == "auto-create":
-        result = run_auto_create(args.days, args.dry_run)
+        result = await run_auto_create(args.days, args.dry_run)
         print(json.dumps(result, indent=2, default=str))
 
     else:
@@ -499,4 +500,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

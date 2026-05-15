@@ -6,6 +6,7 @@
   import { workspaceApps } from '$lib/stores/workspaceApps.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import {
+    deriveCodeReviewFilesFromRuns,
     findActiveFastRun,
     hasLiveFastReply as streamHasLiveFastReply,
     isActiveRun,
@@ -66,6 +67,7 @@
   import SkillMentionOverlay from '$lib/features/composer/components/SkillMentionOverlay.svelte';
   import SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
   import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
+  import ThreadCodeReviewPane from '$lib/features/threads/components/ThreadCodeReviewPane.svelte';
   import ThreadStageShell, { type ThreadPeripherySignal } from '$lib/features/threads/components/ThreadStageShell.svelte';
   import ThreadUtilityContent from '$lib/features/threads/components/ThreadUtilityContent.svelte';
   import WorkspaceComposerAdapter from '$lib/features/composer/components/WorkspaceComposerAdapter.svelte';
@@ -137,6 +139,7 @@
   let lastAutoOpenedBrowserSessionId = $state<string | null>(null);
   let lastAutoOpenedVaultPromptId = $state<string | null>(null);
   let lastAutoOpenedCycleSignal = $state<number | null>(null);
+  let lastAutoOpenedCodeReviewSignature = $state<string | null>(null);
   let lastAutoSelectedAppId = $state<string | null>(null);
   let dockPreviewAttachment = $state<CortexThreadStageImageAttachment | CortexThreadStageFileAttachment | null>(null);
   let teamMembers = $state<any[]>([]);
@@ -220,6 +223,13 @@
   const activeVaultSecretPrompt = $derived(
     String(cortex.vaultSecretPrompt?.idea_id ?? '') === String(idea?.id ?? '') ? cortex.vaultSecretPrompt : null,
   );
+  const codeReviewFiles = $derived.by(() =>
+    deriveCodeReviewFilesFromRuns(
+      visibleStreamItems.filter((item: any) => item?.type === 'run'),
+    ),
+  );
+  const codeReviewSignature = $derived.by(() => codeReviewFiles.map((file) => file.path).join('|'));
+
 
   function ideaDisplayTitle(source: { display_title?: string | null; title?: string | null }): string {
     return source.display_title?.trim() || source.title?.trim() || 'Untitled thread';
@@ -822,6 +832,10 @@
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'cycles'));
   }
 
+  function openCodeReviewTab() {
+    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'code-review'));
+  }
+
   function openPreviewTab(attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment) {
     dockPreviewAttachment = attachment;
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'preview'));
@@ -868,6 +882,10 @@
     }
     if (item.kind === 'cycles') {
       openCyclesTab();
+      return;
+    }
+    if (item.kind === 'code-review') {
+      openCodeReviewTab();
       return;
     }
     if (item.kind === 'preview') {
@@ -919,6 +937,23 @@
     openCyclesTab();
   });
 
+  $effect(() => {
+    const currentIdeaId = idea?.id ?? null;
+    if (!currentIdeaId) {
+      lastAutoOpenedCodeReviewSignature = null;
+      return;
+    }
+    const signature = codeReviewSignature;
+    if (!signature) {
+      lastAutoOpenedCodeReviewSignature = null;
+      return;
+    }
+    const scopedSignature = `${currentIdeaId}:${signature}`;
+    if (scopedSignature === lastAutoOpenedCodeReviewSignature) return;
+    lastAutoOpenedCodeReviewSignature = scopedSignature;
+    openCodeReviewTab();
+  });
+
   let pendingInitialScrollIdeaId = $state<string | null>(null);
   let lastSelectedIdeaId = $state<string | null>(null);
 
@@ -945,6 +980,7 @@
       ideaProjectContextLoadedForIdeaId = null;
       ideaProjectContextLoadingForIdeaId = null;
       dockPreviewAttachment = null;
+      lastAutoOpenedCodeReviewSignature = null;
       if (currentIdeaId) void loadIdeaProjectContext(currentIdeaId);
     }
   });
@@ -1160,6 +1196,10 @@
     />
   {/snippet}
 
+  {#snippet codeReviewPane()}
+    <ThreadCodeReviewPane files={codeReviewFiles} latestRunStatus={latestRun?.status ?? null} />
+  {/snippet}
+
   {#snippet vaultPane()}
     <div class="thread-vault-surface">
       <VaultPage
@@ -1241,6 +1281,7 @@
               appsPane={appsPane}
               vaultPane={vaultPane}
               cyclesPane={cyclesPane}
+              codeReviewPane={codeReviewPane}
             />
           </div>
         {/if}

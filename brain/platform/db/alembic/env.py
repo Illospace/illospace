@@ -1,10 +1,12 @@
 """Alembic env.py — uses SQLAlchemy models for autogenerate."""
 
+import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import create_engine, text
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import AsyncConnection, async_engine_from_config
 
 from brain.kernel import config as brain_config
 from brain.platform.db.base import Base
@@ -21,7 +23,7 @@ if alembic_cfg.config_file_name is not None:
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode — emit SQL to stdout."""
     context.configure(
-        url=brain_config.DB_SYNC_URL,
+        url=brain_config.DB_URL,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -30,12 +32,12 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def _ensure_alembic_version_capacity(connection: Connection) -> None:
+async def _ensure_alembic_version_capacity(connection: AsyncConnection) -> None:
     """Allow long revision ids on existing Postgres databases."""
     if connection.dialect.name != "postgresql":
         return
 
-    connection.execute(
+    await connection.execute(
         text(
             """
             CREATE TABLE IF NOT EXISTS alembic_version (
@@ -47,20 +49,20 @@ def _ensure_alembic_version_capacity(connection: Connection) -> None:
         )
     )
 
-    current_length = connection.execute(
+    current_length = (await connection.execute(
         text(
             """
             SELECT character_maximum_length
             FROM information_schema.columns
             WHERE table_schema = current_schema()
               AND table_name = 'alembic_version'
-              AND column_name = 'version_num'
+                AND column_name = 'version_num'
             """
         )
-    ).scalar_one_or_none()
+    )).scalar_one_or_none()
 
     if current_length is not None and current_length < ALEMBIC_VERSION_NUM_MAX_LENGTH:
-        connection.execute(
+        await connection.execute(
             text(
                 "ALTER TABLE alembic_version "
                 f"ALTER COLUMN version_num TYPE VARCHAR({ALEMBIC_VERSION_NUM_MAX_LENGTH})"
@@ -68,23 +70,40 @@ def _ensure_alembic_version_capacity(connection: Connection) -> None:
         )
 
     if connection.in_transaction():
-        connection.commit()
+        await connection.commit()
+
+
+def do_run_migrations(connection: Connection) -> None:
+    """Run Alembic's synchronous migration context on an async connection."""
+
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_async_migrations() -> None:
+    """Run migrations against a live database using the async runtime URL."""
+
+    connectable = async_engine_from_config(
+        {"sqlalchemy.url": brain_config.DB_URL},
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+    try:
+        async with connectable.connect() as connection:
+            await _ensure_alembic_version_capacity(connection)
+            await connection.run_sync(do_run_migrations)
+    finally:
+        await connectable.dispose()
 
 
 def run_migrations_online() -> None:
     """Run migrations against a live database."""
-    connectable = create_engine(brain_config.DB_SYNC_URL)
-    try:
-        with connectable.connect() as connection:
-            _ensure_alembic_version_capacity(connection)
-            context.configure(
-                connection=connection,
-                target_metadata=target_metadata,
-            )
-            with context.begin_transaction():
-                context.run_migrations()
-    finally:
-        connectable.dispose()
+
+    asyncio.run(run_async_migrations())
 
 
 if context.is_offline_mode():

@@ -11,7 +11,7 @@ Closes #33
 import os
 import sys
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from contextlib import contextmanager
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
@@ -114,6 +114,8 @@ class TestGetContextMocked:
         uow = MagicMock()
         uow.__enter__ = MagicMock(return_value=uow)
         uow.__exit__ = MagicMock(return_value=False)
+        uow.__aenter__ = AsyncMock(return_value=uow)
+        uow.__aexit__ = AsyncMock(return_value=False)
 
         call_idx = [0]
         def execute_side_effect(*args, **kwargs):

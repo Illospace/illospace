@@ -5,7 +5,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.authorization import (
@@ -14,7 +13,6 @@ from brain.app.api.authorization import (
     require_org_context,
 )
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.db_utils import run_db
 from brain.app.api.schemas.domains import (
     DomainCreate,
     DomainEventRead,
@@ -31,7 +29,7 @@ from brain.app.api.schemas.domains import (
     DomainSchemaRead,
     DomainSummaryRead,
 )
-from brain.systems.user_domains.service import DomainError, DomainNotFound, DomainService
+from brain.systems.user_domains.service import AsyncDomainService, DomainError, DomainNotFound
 
 router = APIRouter(
     prefix="/api/domains",
@@ -40,12 +38,8 @@ router = APIRouter(
 )
 
 
-def _service(db: Session) -> DomainService:
-    return DomainService(db)
-
-
-async def _run_db(db: AsyncSession, fn):
-    return await run_db(db, fn)
+def _service(db: AsyncSession) -> AsyncDomainService:
+    return AsyncDomainService(db)
 
 
 def _domain_error(exc: Exception) -> HTTPException:
@@ -72,12 +66,9 @@ async def list_domains(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _list(sync_db: Session):
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        return [service.serialize_domain_summary(domain) for domain in service.list_domains(org_id)]
-
-    return await _run_db(db, _list)
+    org_id = require_org_context(user)
+    service = _service(db)
+    return [await service.serialize_domain_summary(domain) for domain in await service.list_domains(org_id)]
 
 
 @router.post("", response_model=DomainSchemaRead, status_code=201, include_in_schema=False)
@@ -87,27 +78,23 @@ async def create_domain(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _create(sync_db: Session):
-        _require_domain_manage(user)
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            domain = service.create_domain(
-                org_id,
-                name=body.name,
-                slug=body.slug,
-                description=body.description,
-                objects=[obj.model_dump() for obj in body.objects],
-                relations=[relation.model_dump() for relation in body.relations],
-                actor_id=str(user.get("id")) if user.get("id") else None,
-                actor_kind="human",
-            )
-            sync_db.flush()
-            return service.serialize_domain_schema(domain)
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _create)
+    _require_domain_manage(user)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        domain = await service.create_domain(
+            org_id,
+            name=body.name,
+            slug=body.slug,
+            description=body.description,
+            objects=[obj.model_dump() for obj in body.objects],
+            relations=[relation.model_dump() for relation in body.relations],
+            actor_id=str(user.get("id")) if user.get("id") else None,
+            actor_kind="human",
+        )
+        return await service.serialize_domain_schema(domain)
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.get("/{domain_id}", response_model=DomainSchemaRead)
@@ -116,15 +103,12 @@ async def get_domain_schema(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _get(sync_db: Session):
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            return service.serialize_domain_schema(service.get_domain(org_id, domain_id))
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _get)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        return await service.serialize_domain_schema(await service.get_domain(org_id, domain_id))
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.delete("/{domain_id}")
@@ -135,23 +119,20 @@ async def remove_domain(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _remove(sync_db: Session):
-        _require_domain_manage(user)
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        selected_mode = mode or (body.mode if body else "archive")
-        try:
-            return service.remove_domain(
-                org_id,
-                domain_id,
-                mode=selected_mode,
-                actor_id=str(user.get("id")) if user.get("id") else None,
-                actor_kind="human",
-            )
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _remove)
+    _require_domain_manage(user)
+    org_id = require_org_context(user)
+    service = _service(db)
+    selected_mode = mode or (body.mode if body else "archive")
+    try:
+        return await service.remove_domain(
+            org_id,
+            domain_id,
+            mode=selected_mode,
+            actor_id=str(user.get("id")) if user.get("id") else None,
+            actor_kind="human",
+        )
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.post("/{domain_id}/objects", response_model=DomainSchemaRead)
@@ -161,23 +142,19 @@ async def add_domain_object(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _add(sync_db: Session):
-        _require_domain_manage(user)
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            domain = service.get_domain(org_id, domain_id)
-            service.add_object_type(
-                domain,
-                body.model_dump(),
-                actor_id=str(user.get("id")) if user.get("id") else None,
-            )
-            sync_db.flush()
-            return service.serialize_domain_schema(domain)
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _add)
+    _require_domain_manage(user)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        domain = await service.get_domain(org_id, domain_id)
+        await service.add_object_type(
+            domain,
+            body.model_dump(),
+            actor_id=str(user.get("id")) if user.get("id") else None,
+        )
+        return await service.serialize_domain_schema(domain)
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.post("/{domain_id}/objects/{object_key}/fields", response_model=DomainSchemaRead)
@@ -188,20 +165,16 @@ async def add_domain_field(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _add(sync_db: Session):
-        _require_domain_manage(user)
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            domain = service.get_domain(org_id, domain_id)
-            obj = service.get_object_type(domain.id, object_key)
-            service.add_field_definition(obj, body.model_dump())
-            sync_db.flush()
-            return service.serialize_domain_schema(domain)
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _add)
+    _require_domain_manage(user)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        domain = await service.get_domain(org_id, domain_id)
+        obj = await service.get_object_type(domain.id, object_key)
+        await service.add_field_definition(obj, body.model_dump())
+        return await service.serialize_domain_schema(domain)
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.post("/{domain_id}/relation-types", response_model=DomainSchemaRead)
@@ -211,23 +184,19 @@ async def add_domain_relation_type(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _add(sync_db: Session):
-        _require_domain_manage(user)
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            domain = service.get_domain(org_id, domain_id)
-            service.add_relation_type(
-                domain,
-                body.model_dump(),
-                actor_id=str(user.get("id")) if user.get("id") else None,
-            )
-            sync_db.flush()
-            return service.serialize_domain_schema(domain)
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _add)
+    _require_domain_manage(user)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        domain = await service.get_domain(org_id, domain_id)
+        await service.add_relation_type(
+            domain,
+            body.model_dump(),
+            actor_id=str(user.get("id")) if user.get("id") else None,
+        )
+        return await service.serialize_domain_schema(domain)
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.get("/{domain_id}/records", response_model=list[DomainRecordRead])
@@ -240,25 +209,22 @@ async def list_domain_records(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _list(sync_db: Session):
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            return [
-                service.serialize_record(record)
-                for record in service.list_records(
-                    org_id,
-                    domain_id,
-                    object_key=object_key,
-                    search=search,
-                    include_archived=include_archived,
-                    limit=limit,
-                )
-            ]
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _list)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        return [
+            await service.serialize_record(record)
+            for record in await service.list_records(
+                org_id,
+                domain_id,
+                object_key=object_key,
+                search=search,
+                include_archived=include_archived,
+                limit=limit,
+            )
+        ]
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.post("/{domain_id}/objects/{object_key}/records", response_model=DomainRecordRead, status_code=201)
@@ -269,26 +235,22 @@ async def create_domain_record(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _create(sync_db: Session):
-        _require_domain_write(user)
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            record = service.create_record(
-                org_id,
-                domain_id,
-                object_key,
-                data=body.data,
-                title=body.title,
-                actor_id=str(user.get("id")) if user.get("id") else None,
-                actor_kind="human",
-            )
-            sync_db.flush()
-            return service.serialize_record(record)
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _create)
+    _require_domain_write(user)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        record = await service.create_record(
+            org_id,
+            domain_id,
+            object_key,
+            data=body.data,
+            title=body.title,
+            actor_id=str(user.get("id")) if user.get("id") else None,
+            actor_kind="human",
+        )
+        return await service.serialize_record(record)
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.get("/{domain_id}/records/{record_id}", response_model=DomainRecordRead)
@@ -298,15 +260,12 @@ async def get_domain_record(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _get(sync_db: Session):
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            return service.serialize_record(service.get_record(org_id, domain_id, record_id))
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _get)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        return await service.serialize_record(await service.get_record(org_id, domain_id, record_id))
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.patch("/{domain_id}/records/{record_id}", response_model=DomainRecordRead)
@@ -317,27 +276,23 @@ async def update_domain_record(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _update(sync_db: Session):
-        _require_domain_write(user)
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            record = service.update_record(
-                org_id,
-                domain_id,
-                record_id,
-                data_patch=body.data_patch,
-                title=body.title,
-                expected_version=body.expected_version,
-                actor_id=str(user.get("id")) if user.get("id") else None,
-                actor_kind="human",
-            )
-            sync_db.flush()
-            return service.serialize_record(record)
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _update)
+    _require_domain_write(user)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        record = await service.update_record(
+            org_id,
+            domain_id,
+            record_id,
+            data_patch=body.data_patch,
+            title=body.title,
+            expected_version=body.expected_version,
+            actor_id=str(user.get("id")) if user.get("id") else None,
+            actor_kind="human",
+        )
+        return await service.serialize_record(record)
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.delete("/{domain_id}/records/{record_id}")
@@ -349,24 +304,21 @@ async def remove_domain_record(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _remove(sync_db: Session):
-        _require_domain_write(user)
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        selected_mode = mode or (body.mode if body else "archive")
-        try:
-            return service.remove_record(
-                org_id,
-                domain_id,
-                record_id,
-                mode=selected_mode,
-                actor_id=str(user.get("id")) if user.get("id") else None,
-                actor_kind="human",
-            )
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _remove)
+    _require_domain_write(user)
+    org_id = require_org_context(user)
+    service = _service(db)
+    selected_mode = mode or (body.mode if body else "archive")
+    try:
+        return await service.remove_record(
+            org_id,
+            domain_id,
+            record_id,
+            mode=selected_mode,
+            actor_id=str(user.get("id")) if user.get("id") else None,
+            actor_kind="human",
+        )
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.post("/{domain_id}/relations", response_model=DomainRelationRead, status_code=201)
@@ -376,27 +328,23 @@ async def create_domain_relation(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _create(sync_db: Session):
-        _require_domain_write(user)
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            relation = service.create_relation(
-                org_id,
-                domain_id,
-                body.relation_key,
-                source_record_id=body.source_record_id,
-                target_record_id=body.target_record_id,
-                properties=body.properties,
-                actor_id=str(user.get("id")) if user.get("id") else None,
-                actor_kind="human",
-            )
-            sync_db.flush()
-            return service.serialize_relation(relation)
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _create)
+    _require_domain_write(user)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        relation = await service.create_relation(
+            org_id,
+            domain_id,
+            body.relation_key,
+            source_record_id=body.source_record_id,
+            target_record_id=body.target_record_id,
+            properties=body.properties,
+            actor_id=str(user.get("id")) if user.get("id") else None,
+            actor_kind="human",
+        )
+        return await service.serialize_relation(relation)
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.get("/{domain_id}/relations", response_model=list[DomainRelationRead])
@@ -410,26 +358,23 @@ async def list_domain_relations(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _list(sync_db: Session):
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            return [
-                service.serialize_relation(relation)
-                for relation in service.list_relations(
-                    org_id,
-                    domain_id,
-                    relation_key=relation_key,
-                    source_record_id=source_record_id,
-                    target_record_id=target_record_id,
-                    include_archived=include_archived,
-                    limit=limit,
-                )
-            ]
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _list)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        return [
+            await service.serialize_relation(relation)
+            for relation in await service.list_relations(
+                org_id,
+                domain_id,
+                relation_key=relation_key,
+                source_record_id=source_record_id,
+                target_record_id=target_record_id,
+                include_archived=include_archived,
+                limit=limit,
+            )
+        ]
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.delete("/{domain_id}/relations/{relation_id}")
@@ -440,23 +385,20 @@ async def remove_domain_relation(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _remove(sync_db: Session):
-        _require_domain_write(user)
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            return service.remove_relation(
-                org_id,
-                domain_id,
-                relation_id,
-                mode=mode,
-                actor_id=str(user.get("id")) if user.get("id") else None,
-                actor_kind="human",
-            )
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _remove)
+    _require_domain_write(user)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        return await service.remove_relation(
+            org_id,
+            domain_id,
+            relation_id,
+            mode=mode,
+            actor_id=str(user.get("id")) if user.get("id") else None,
+            actor_kind="human",
+        )
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc
 
 
 @router.get("/{domain_id}/events", response_model=list[DomainEventRead])
@@ -467,15 +409,12 @@ async def list_domain_events(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _list(sync_db: Session):
-        org_id = require_org_context(user)
-        service = _service(sync_db)
-        try:
-            return [
-                service.serialize_event(event)
-                for event in service.list_events(org_id, domain_id, record_id=record_id, limit=limit)
-            ]
-        except (DomainError, DomainNotFound) as exc:
-            raise _domain_error(exc) from exc
-
-    return await _run_db(db, _list)
+    org_id = require_org_context(user)
+    service = _service(db)
+    try:
+        return [
+            service.serialize_event(event)
+            for event in await service.list_events(org_id, domain_id, record_id=record_id, limit=limit)
+        ]
+    except (DomainError, DomainNotFound) as exc:
+        raise _domain_error(exc) from exc

@@ -13,14 +13,6 @@ from brain.app.api.deps import get_db
 app = api_main.app
 
 
-class _AsyncSession:
-    def __init__(self, session):
-        self.session = session
-
-    async def run_sync(self, fn):
-        return fn(self.session)
-
-
 @pytest_asyncio.fixture
 async def client():
     transport = ASGITransport(app=app)
@@ -40,31 +32,29 @@ async def test_health(client):
 @pytest.mark.asyncio
 async def test_health_includes_run_event_backbone(client):
     mock_db = MagicMock()
-
-    def fake_get_db():
-        yield mock_db
+    mock_db.scalar = AsyncMock(return_value=2)
 
     mock_mem_repo = MagicMock()
-    mock_mem_repo.count_active.return_value = 3
-    mock_skill_repo = MagicMock()
-    mock_skill_repo.list_active.return_value = [1, 2]
+    mock_mem_repo.a_count_active = AsyncMock(return_value=3)
 
-    app.dependency_overrides[get_db] = lambda: _AsyncSession(mock_db)
+    app.dependency_overrides[get_db] = lambda: mock_db
     try:
         with patch("brain.platform.db.repositories.memories.MemoryRepository", return_value=mock_mem_repo), \
-        patch("brain.platform.db.repositories.skills.SkillRepository", return_value=mock_skill_repo), \
-        patch("brain.systems.runs.event_log.run_event_backbone_status", return_value={
+        patch("brain.app.ops.health._apply_statement_timeout", new=AsyncMock()), \
+        patch("brain.systems.runs.event_log.async_run_event_backbone_status", new=AsyncMock(return_value={
             "consumer_name": "api.websocket_fanout",
             "health": "lagging",
             "lag": 2,
             "consumer_running": True,
-        }):
+        })):
             resp = await client.get("/api/health")
     finally:
         app.dependency_overrides.pop(get_db, None)
 
     assert resp.status_code == 200
     data = resp.json()
+    assert data["memory_count"] == 3
+    assert data["skill_count"] == 2
     assert data["run_event_backbone"]["health"] == "lagging"
     assert data["run_event_backbone"]["lag"] == 2
     assert data["run_event_backbone"]["consumer_running"] is True
@@ -110,22 +100,22 @@ async def test_flush_ops_snapshot_broadcasts_scoped_snapshot_per_org():
     )
 
 
-def test_product_event_publish_drops_unscoped_product_event(monkeypatch):
+@pytest.mark.asyncio
+async def test_product_event_publish_drops_unscoped_product_event(monkeypatch):
     ws_manager = MagicMock()
     ws_manager.broadcast_product_event = AsyncMock(return_value=False)
     ws_manager.broadcast = AsyncMock()
-    loop = asyncio.new_event_loop()
+    loop = asyncio.get_running_loop()
     monkeypatch.setattr(api_main, "_main_loop", loop)
 
-    try:
-        with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
-            "brain.systems.cortex.events.resolve_event_org_id_async",
-            AsyncMock(return_value=None),
-        ):
-            api_main._schedule_product_event_publish("browser_session_frame", {"session_id": "session-1"})
-    finally:
-        loop.close()
-        monkeypatch.setattr(api_main, "_main_loop", None)
+    with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
+        "brain.systems.cortex.events.resolve_event_org_id_async",
+        AsyncMock(return_value=None),
+    ):
+        api_main._schedule_product_event_publish("browser_session_frame", {"session_id": "session-1"})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    monkeypatch.setattr(api_main, "_main_loop", None)
 
     ws_manager.broadcast_product_event.assert_awaited_once_with(
         "browser_session_frame",
@@ -136,23 +126,23 @@ def test_product_event_publish_drops_unscoped_product_event(monkeypatch):
     ws_manager.broadcast.assert_not_called()
 
 
-def test_product_event_publish_resolves_org_scope_before_fanout(monkeypatch):
+@pytest.mark.asyncio
+async def test_product_event_publish_resolves_org_scope_before_fanout(monkeypatch):
     ws_manager = MagicMock()
     ws_manager.broadcast_product_event = AsyncMock(return_value=True)
     resolve_org = AsyncMock(return_value="org-1")
 
-    loop = asyncio.new_event_loop()
+    loop = asyncio.get_running_loop()
     monkeypatch.setattr(api_main, "_main_loop", loop)
 
-    try:
-        with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
-            "brain.systems.cortex.events.resolve_event_org_id_async",
-            resolve_org,
-        ):
-            api_main._schedule_product_event_publish("browser_session_frame", {"idea_id": "idea-1"})
-    finally:
-        loop.close()
-        monkeypatch.setattr(api_main, "_main_loop", None)
+    with patch("brain.app.api.routers.ws.ws_manager", ws_manager), patch(
+        "brain.systems.cortex.events.resolve_event_org_id_async",
+        resolve_org,
+    ):
+        api_main._schedule_product_event_publish("browser_session_frame", {"idea_id": "idea-1"})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    monkeypatch.setattr(api_main, "_main_loop", None)
 
     ws_manager.broadcast_product_event.assert_awaited_once_with(
         "browser_session_frame",

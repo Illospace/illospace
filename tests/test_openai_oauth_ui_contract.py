@@ -11,6 +11,8 @@ def test_onboarding_shows_manual_callback_escape_hatch_while_oauth_is_pending():
     assert "const showManualCallback = $derived(Boolean(status !== 'connected' && oauthPending));" in source
     assert 'href={oauthUrl}' in source
     assert 'target="_blank"' in source
+    assert "captureManualCallback(data.callback);" in source
+    assert "await completeOpenAI(data.callback);" not in source
     assert "!oauthCallbackAvailable &&" not in source
     assert "window.location.assign(oauthUrl)" not in source
 
@@ -27,7 +29,17 @@ def test_system_access_card_expands_manual_callback_while_oauth_is_pending():
 def test_system_oauth_start_keeps_page_open_when_popup_is_blocked():
     source = (ROOT / "frontend/src/routes/system/+page.svelte").read_text()
 
+    assert "captureManualCodexCallback(data.callback);" in source
+    assert "void completeCodexSignIn(data.callback);" not in source
     assert "window.location.assign(oauthUrl)" not in source
+
+
+def test_openai_callback_page_does_not_auto_open_cortex():
+    source = (ROOT / "frontend/src/routes/auth/OpenAIOAuthCallback.svelte").read_text()
+
+    assert "Opening Cortex" not in source
+    assert "window.location.assign" not in source
+    assert "schedulePopupClose();" in source
 
 
 def test_onboarding_routes_require_personal_openai_connection():

@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from brain.systems.runs import AgentRunRequest, RunRecipe, run_execution_profile
-from brain.systems.runs.cortex import RunAdmissionRequest, admit_run
-from brain.systems.runs.store import AgentRunStore
+from brain.systems.runs.cortex import RunAdmissionRequest, async_admit_run
+from brain.systems.runs.store import AsyncAgentRunStore
 from brain.app.triggers.contracts import IlloTrigger, TriggerRouteResult
 
 _CORTEX_TRIGGER_EVENTS = {"cortex.idea_created", "cortex.thread_reply"}
@@ -85,10 +85,10 @@ def _chat_thread_id(chat_trigger: dict[str, Any], target: dict[str, Any]) -> str
     return f"chat:{conversation_id}:{message_id}"
 
 
-def _route_chat_trigger(trigger: IlloTrigger, *, session: Any | None = None) -> TriggerRouteResult:
+async def _async_route_chat_trigger(trigger: IlloTrigger, *, session: Any | None = None) -> TriggerRouteResult:
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
-    def _admit(active_session: Any) -> TriggerRouteResult:
+    async def _admit(active_session: Any) -> TriggerRouteResult:
         target = dict(trigger.target or {})
         payload = dict(trigger.payload or {})
         policy = dict(trigger.policy or {})
@@ -120,7 +120,7 @@ def _route_chat_trigger(trigger: IlloTrigger, *, session: Any | None = None) -> 
             "idempotency_key": trigger.idempotency_key,
             "org_id": trigger.org_id,
         }
-        run = AgentRunStore(active_session).create_run(
+        run = await AsyncAgentRunStore(active_session).create_run(
             AgentRunRequest(
                 org_id=trigger.org_id,
                 user_id=str(user_id) if user_id else None,
@@ -137,15 +137,15 @@ def _route_chat_trigger(trigger: IlloTrigger, *, session: Any | None = None) -> 
         return TriggerRouteResult(ok=True, route="run", run_id=run.id)
 
     if session is not None:
-        return _admit(session)
-    with UnitOfWork() as uow:
-        return _admit(uow.session)
+        return await _admit(session)
+    async with UnitOfWork() as uow:
+        return await _admit(uow.session)
 
 
-def route_trigger(trigger: IlloTrigger, *, session: Any | None = None) -> TriggerRouteResult:
-    """Route a normalized trigger through the current product admission path."""
+async def async_route_trigger(trigger: IlloTrigger, *, session: Any | None = None) -> TriggerRouteResult:
+    """Async trigger routing for request handlers that already own an AsyncSession."""
     if trigger.event_type in _CHAT_TRIGGER_EVENTS:
-        return _route_chat_trigger(trigger, session=session)
+        return await _async_route_chat_trigger(trigger, session=session)
     if trigger.event_type not in _CORTEX_TRIGGER_EVENTS:
         return TriggerRouteResult(
             ok=False,
@@ -170,7 +170,7 @@ def route_trigger(trigger: IlloTrigger, *, session: Any | None = None) -> Trigge
         trigger,
         payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
     )
-    result = admit_run(
+    result = await async_admit_run(
         RunAdmissionRequest(
             idea_id=idea_id,
             event=str(run_event),

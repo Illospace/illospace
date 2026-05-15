@@ -8,26 +8,19 @@ Tests cover:
 - promote_memory function
 - memory update/promote endpoints via FastAPI
 
-After the ORM migration:
-- patch_memory / promote_memory are now FastAPI endpoint functions in brain.app.api.routers.memory
-- graph_augmented_recall still uses a raw cursor (psycopg2)
-- API endpoints use SQLAlchemy session via dependency injection
+After the ORM migration, API endpoints use SQLAlchemy sessions via dependency
+injection and direct repository/unit-of-work seams in tests.
 """
 from __future__ import annotations
 
 import json
 import os
 import sys
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-
-def _run(awaitable):
-    return asyncio.run(awaitable)
 
 
 # -- Fixtures ---------------------------------------------------------------
@@ -64,73 +57,90 @@ ORG_MEMORY = {
 @pytest.fixture(autouse=True)
 def mock_session_factory():
     session = MagicMock()
+    yield session
 
-    def _factory():
-        return session
 
-    with patch("brain.platform.db.legacy.legacy_session_factory", _factory):
-        yield session
+def _async_execute_session(results_sequence):
+    session = MagicMock()
+    session.execute = AsyncMock()
+    call_results = []
+    for item in results_sequence:
+        result_mock = MagicMock()
+        mappings_mock = MagicMock()
+        if isinstance(item, list):
+            mappings_mock.all.return_value = item
+            mappings_mock.first.return_value = item[0] if item else None
+        else:
+            mappings_mock.first.return_value = item
+            mappings_mock.all.return_value = [item] if item else []
+        result_mock.mappings.return_value = mappings_mock
+        call_results.append(result_mock)
+    session.execute.side_effect = call_results
+    return session
 
 
 # -- Recall visibility filtering ---------------------------------------------
 
 class TestRecallVisibilityFilter:
 
-    def test_no_user_context_denies_global_memory_recall(self):
+    async def test_no_user_context_denies_global_memory_recall(self):
         from brain.systems.cognition.graph import graph_augmented_recall
-        session = MagicMock()
-        result_mock = MagicMock()
-        result_mock.mappings.return_value.all.return_value = []
-        session.execute.return_value = result_mock
-        graph_augmented_recall(session, "test", limit=3)
+        session = _async_execute_session([[]])
+        await graph_augmented_recall(session, "test", limit=3)
         sql_arg = session.execute.call_args[0][0]
         query_text = sql_arg.text if hasattr(sql_arg, 'text') else str(sql_arg)
         assert "AND FALSE" in query_text
 
-    def test_with_user_and_org_applies_visibility_clause(self):
+    async def test_with_user_and_org_applies_visibility_clause(self):
         from brain.systems.cognition.graph import graph_augmented_recall
-        session = MagicMock()
-        result_mock = MagicMock()
-        result_mock.mappings.return_value.all.return_value = []
-        session.execute.return_value = result_mock
-        graph_augmented_recall(session, "test", limit=3,
-                               user_id=USER_A["id"], org_id=USER_A["org_id"])
+        session = _async_execute_session([[]])
+        await graph_augmented_recall(
+            session,
+            "test",
+            limit=3,
+            user_id=USER_A["id"],
+            org_id=USER_A["org_id"],
+        )
         sql_arg = session.execute.call_args[0][0]
         query_text = sql_arg.text if hasattr(sql_arg, 'text') else str(sql_arg)
         assert "visibility" in query_text
         assert "private" in query_text
 
-    def test_params_include_user_and_org_ids(self):
+    async def test_params_include_user_and_org_ids(self):
         from brain.systems.cognition.graph import graph_augmented_recall
-        session = MagicMock()
-        result_mock = MagicMock()
-        result_mock.mappings.return_value.all.return_value = []
-        session.execute.return_value = result_mock
-        graph_augmented_recall(session, "test", limit=3,
-                               user_id=USER_A["id"], org_id=USER_A["org_id"])
+        session = _async_execute_session([[]])
+        await graph_augmented_recall(
+            session,
+            "test",
+            limit=3,
+            user_id=USER_A["id"],
+            org_id=USER_A["org_id"],
+        )
         params = session.execute.call_args[0][1]
         assert USER_A["id"] in params.values()
         assert USER_A["org_id"] in params.values()
 
-    def test_graph_traversal_also_filters_visibility(self):
+    async def test_graph_traversal_also_filters_visibility(self):
         """Graph hop must re-apply visibility filter to prevent private memory leakage."""
         from brain.systems.cognition.graph import graph_augmented_recall
-        session = MagicMock()
+        session = _async_execute_session([
+            [
+                {"id": 1, "content": "seed", "memory_type": "lesson", "salience": 5,
+                 "emotion_label": None, "memory_tier": "episodic", "visibility": "org",
+                 "similarity": 0.8}
+            ],
+            [],
+            None,
+            None,
+        ])
 
-        # First execute: vector search returns results; subsequent: graph traversal, updates
-        vector_result = MagicMock()
-        vector_result.mappings.return_value.all.return_value = [
-            {"id": 1, "content": "seed", "memory_type": "lesson", "salience": 5,
-             "emotion_label": None, "memory_tier": "episodic", "visibility": "org",
-             "similarity": 0.8}
-        ]
-        graph_result = MagicMock()
-        graph_result.mappings.return_value.all.return_value = []
-        update_result = MagicMock()
-        session.execute.side_effect = [vector_result, graph_result, update_result, update_result]
-
-        graph_augmented_recall(session, "test", limit=3,
-                               user_id=USER_A["id"], org_id=USER_A["org_id"])
+        await graph_augmented_recall(
+            session,
+            "test",
+            limit=3,
+            user_id=USER_A["id"],
+            org_id=USER_A["org_id"],
+        )
         # The second execute call (graph traversal) should include visibility filter
         graph_sql = session.execute.call_args_list[1][0][0]
         graph_query = graph_sql.text if hasattr(graph_sql, 'text') else str(graph_sql)
@@ -165,7 +175,7 @@ class TestCrossUserIsolation:
 
 class TestPatchMemoryVisibility:
 
-    def test_update_memory_sets_visibility(self, mock_session_factory):
+    async def test_update_memory_sets_visibility(self, mock_session_factory):
         from brain.app.api.routers.memory import update_memory
         from brain.app.api.schemas.memories import MemoryUpdate
 
@@ -178,14 +188,14 @@ class TestPatchMemoryVisibility:
             uow.memories.get_or_raise_visible = AsyncMock(return_value=mock_mem)
             uow.session.flush = AsyncMock()
             body = MemoryUpdate(visibility="team")
-            result = _run(update_memory(1, body, user={
-                "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}))
+            result = await update_memory(1, body, user={
+                "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"})
 
         assert mock_mem.visibility == "team"
         assert result == mock_mem
         uow.session.flush.assert_awaited_once()
 
-    def test_update_memory_not_found_raises_404(self, mock_session_factory):
+    async def test_update_memory_not_found_raises_404(self, mock_session_factory):
         from brain.app.api.routers.memory import update_memory
         from brain.app.api.schemas.memories import MemoryUpdate
         from fastapi import HTTPException
@@ -195,8 +205,8 @@ class TestPatchMemoryVisibility:
             uow.memories.get_or_raise_visible = AsyncMock(side_effect=LookupError)
             body = MemoryUpdate(visibility="team")
             with pytest.raises(HTTPException) as exc_info:
-                _run(update_memory(999, body, user={
-                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}))
+                await update_memory(999, body, user={
+                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"})
             assert exc_info.value.status_code == 404
 
 
@@ -204,7 +214,7 @@ class TestPatchMemoryVisibility:
 
 class TestPromoteMemory:
 
-    def test_promote_sets_visibility(self, mock_session_factory):
+    async def test_promote_sets_visibility(self, mock_session_factory):
         from brain.app.api.routers.memory import promote_memory
         from brain.app.api.schemas.memories import MemoryPromote
 
@@ -217,14 +227,14 @@ class TestPromoteMemory:
             uow.memories.get_or_raise_visible = AsyncMock(return_value=mock_mem)
             uow.session.flush = AsyncMock()
             body = MemoryPromote(visibility="org")
-            result = _run(promote_memory(1, body, user={
-                "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}))
+            result = await promote_memory(1, body, user={
+                "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"})
 
         assert mock_mem.visibility == "org"
         assert result == mock_mem
         uow.session.flush.assert_awaited_once()
 
-    def test_promote_invalid_target_raises_400(self, mock_session_factory):
+    async def test_promote_invalid_target_raises_400(self, mock_session_factory):
         from brain.app.api.routers.memory import promote_memory
         from brain.app.api.schemas.memories import MemoryPromote
         from fastapi import HTTPException
@@ -237,11 +247,11 @@ class TestPromoteMemory:
             uow.memories.get_or_raise_visible = AsyncMock(return_value=mock_mem)
             body = MemoryPromote(visibility="public")
             with pytest.raises(HTTPException) as exc_info:
-                _run(promote_memory(1, body, user={
-                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}))
+                await promote_memory(1, body, user={
+                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"})
             assert exc_info.value.status_code == 400
 
-    def test_promote_not_found_raises_404(self, mock_session_factory):
+    async def test_promote_not_found_raises_404(self, mock_session_factory):
         from brain.app.api.routers.memory import promote_memory
         from brain.app.api.schemas.memories import MemoryPromote
         from fastapi import HTTPException
@@ -251,8 +261,8 @@ class TestPromoteMemory:
             uow.memories.get_or_raise_visible = AsyncMock(side_effect=LookupError)
             body = MemoryPromote(visibility="org")
             with pytest.raises(HTTPException) as exc_info:
-                _run(promote_memory(1, body, user={
-                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"}))
+                await promote_memory(1, body, user={
+                    "id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"})
             assert exc_info.value.status_code == 404
 
 
@@ -260,7 +270,7 @@ class TestPromoteMemory:
 
 class TestOrgMemoriesEndpoint:
 
-    def test_returns_org_memories(self, mock_session_factory):
+    async def test_returns_org_memories(self, mock_session_factory):
         from brain.app.api.routers.memory import list_org_memories
         mock_mem = MagicMock()
         mock_mem.id = 2
@@ -268,19 +278,19 @@ class TestOrgMemoriesEndpoint:
         with patch("brain.app.api.routers.memory.UnitOfWork") as MockUnitOfWork:
             uow = MockUnitOfWork.return_value.__aenter__.return_value
             uow.memories.list_org_memories = AsyncMock(return_value=[mock_mem])
-            result = _run(list_org_memories(
+            result = await list_org_memories(
                 limit=50, offset=0,
                 user={"id": USER_A["id"], "org_id": USER_A["org_id"], "role": "owner"},
-            ))
+            )
         assert len(result) == 1
         uow.memories.list_org_memories.assert_awaited_once()
 
-    def test_returns_empty_without_org_id(self, mock_session_factory):
+    async def test_returns_empty_without_org_id(self, mock_session_factory):
         from brain.app.api.routers.memory import list_org_memories
         with patch("brain.app.api.routers.memory.UnitOfWork") as MockUnitOfWork:
-            result = _run(list_org_memories(
+            result = await list_org_memories(
                 limit=50, offset=0,
                 user={"id": USER_A["id"], "role": "owner"},
-            ))
+            )
         assert result == []
         MockUnitOfWork.assert_not_called()

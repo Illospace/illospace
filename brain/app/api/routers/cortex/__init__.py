@@ -58,6 +58,5 @@ from brain.app.api.routers.cortex._auth_keys import (  # noqa: F401
     add_api_key,
     set_org_main_key,
 )
-from brain.app.api.routers.cortex._run import _serialize_active_runs  # noqa: F401
 from brain.app.api.routers.cortex._misc import auth_status  # noqa: F401
 from brain.app.api.routers.cortex import _project_context as _project_context  # noqa: F401,E402

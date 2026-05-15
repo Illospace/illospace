@@ -1,8 +1,31 @@
 """Tests for the shadow attention controller."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+class _FakeScalarResult:
+    def __init__(self, value=None, values=None):
+        self.value = value
+        self.values = values
+
+    def first(self):
+        return self.value
+
+    def all(self):
+        if self.values is not None:
+            return self.values
+        if self.value is None:
+            return []
+        return [self.value]
+
+
+def _make_async_uow(mock_uow):
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    mock_uow.session.flush = AsyncMock()
+    return mock_uow
 
 
 class TestAttentionRanking:
@@ -26,11 +49,12 @@ class TestAttentionRanking:
 
 
 class TestAttentionLogging:
-    def test_observe_retrieval_requires_user_or_service_context(self):
+    @pytest.mark.asyncio
+    async def test_observe_retrieval_requires_user_or_service_context(self):
         from brain.systems.memory.attention_controller import observe_retrieval
 
         with pytest.raises(ValueError, match="requires user_id"):
-            observe_retrieval(
+            await observe_retrieval(
                 stage="brain_recall",
                 query_text="database issues",
                 candidates=[],
@@ -99,15 +123,16 @@ class TestAttentionLogging:
         )
         assert selection.suppressed == []
 
-    def test_observe_retrieval_persists_decision_and_feedback_rows(self, mock_uow):
+    @pytest.mark.asyncio
+    async def test_observe_retrieval_persists_decision_and_feedback_rows(self, mock_uow):
         from brain.systems.memory.attention_controller import observe_retrieval
         from brain.platform.db.models.system import RetrievalDecision, RetrievalItemFeedback
 
+        mock_uow = _make_async_uow(mock_uow)
         mock_uow.session.add = MagicMock()
-        mock_uow.session.flush = MagicMock()
 
         with patch("brain.systems.memory.attention_controller.UnitOfWork", return_value=mock_uow):
-            decision = observe_retrieval(
+            decision = await observe_retrieval(
                 stage="brain_recall",
                 query_text="database issues",
                 user_id="user-1",
@@ -147,15 +172,16 @@ class TestAttentionLogging:
         assert decision_row.org_id == "org-1"
         assert all(row.user_id == "user-1" and row.org_id == "org-1" for row in feedback_rows)
 
-    def test_observe_retrieval_marks_lazy_load_eligible_candidates(self, mock_uow):
+    @pytest.mark.asyncio
+    async def test_observe_retrieval_marks_lazy_load_eligible_candidates(self, mock_uow):
         from brain.systems.memory.attention_controller import observe_retrieval
         from brain.platform.db.models.system import RetrievalItemFeedback
 
+        mock_uow = _make_async_uow(mock_uow)
         mock_uow.session.add = MagicMock()
-        mock_uow.session.flush = MagicMock()
 
         with patch("brain.systems.memory.attention_controller.UnitOfWork", return_value=mock_uow):
-            decision = observe_retrieval(
+            decision = await observe_retrieval(
                 stage="brain_recall",
                 query_text="database issues",
                 user_id="user-1",
@@ -182,7 +208,8 @@ class TestAttentionLogging:
         assert any(row.lazy_load_eligible for row in feedback_rows)
         assert any(row.preload_decision is False and row.lazy_load_eligible is True for row in feedback_rows)
 
-    def test_record_usefulness_updates_existing_feedback_row(self, mock_uow):
+    @pytest.mark.asyncio
+    async def test_record_usefulness_updates_existing_feedback_row(self, mock_uow):
         from brain.systems.memory.attention_controller import AttentionController
         from brain.platform.db.models.system import RetrievalItemFeedback
 
@@ -193,11 +220,12 @@ class TestAttentionLogging:
             user_id="user-1",
             org_id="org-1",
         )
-        mock_uow.session.scalars.return_value.first.return_value = feedback_row
+        mock_uow = _make_async_uow(mock_uow)
+        mock_uow.session.scalars = AsyncMock(return_value=_FakeScalarResult(feedback_row))
 
         with patch("brain.systems.memory.attention_controller.UnitOfWork", return_value=mock_uow):
             controller = AttentionController()
-            ok = controller.record_usefulness(
+            ok = await controller.record_usefulness(
                 retrieval_decision_id=17,
                 user_id="user-1",
                 org_id="org-1",
@@ -222,7 +250,8 @@ class TestAttentionLogging:
         assert "retrieval_item_feedback.user_id" in str(stmt)
         assert "retrieval_item_feedback.org_id" in str(stmt)
 
-    def test_record_lazy_load_updates_existing_feedback_row(self, mock_uow):
+    @pytest.mark.asyncio
+    async def test_record_lazy_load_updates_existing_feedback_row(self, mock_uow):
         from brain.systems.memory.attention_controller import AttentionController
         from brain.platform.db.models.system import RetrievalItemFeedback
 
@@ -233,11 +262,12 @@ class TestAttentionLogging:
             user_id="user-1",
             org_id="org-1",
         )
-        mock_uow.session.scalars.return_value.first.return_value = feedback_row
+        mock_uow = _make_async_uow(mock_uow)
+        mock_uow.session.scalars = AsyncMock(return_value=_FakeScalarResult(feedback_row))
 
         with patch("brain.systems.memory.attention_controller.UnitOfWork", return_value=mock_uow):
             controller = AttentionController()
-            ok = controller.record_lazy_load(
+            ok = await controller.record_lazy_load(
                 retrieval_decision_id=18,
                 user_id="user-1",
                 org_id="org-1",
@@ -248,7 +278,8 @@ class TestAttentionLogging:
         assert feedback_row.lazy_loaded is True
         assert feedback_row.feedback_at is not None
 
-    def test_record_attention_usefulness_helper_updates_existing_feedback_row(self, mock_uow):
+    @pytest.mark.asyncio
+    async def test_record_attention_usefulness_helper_updates_existing_feedback_row(self, mock_uow):
         from brain.platform.db.models.system import RetrievalItemFeedback
         from brain.systems.memory.retrieval_feedback import record_attention_usefulness
 
@@ -259,10 +290,11 @@ class TestAttentionLogging:
             user_id="user-1",
             org_id="org-1",
         )
-        mock_uow.session.scalars.return_value.first.return_value = feedback_row
+        mock_uow = _make_async_uow(mock_uow)
+        mock_uow.session.scalars = AsyncMock(return_value=_FakeScalarResult(feedback_row))
 
         with patch("brain.systems.memory.attention_controller.UnitOfWork", return_value=mock_uow):
-            ok = record_attention_usefulness(
+            ok = await record_attention_usefulness(
                 19,
                 user_id="user-1",
                 org_id="org-1",
@@ -285,7 +317,8 @@ class TestAttentionLogging:
         assert feedback_row.verifier_helped is True
         assert feedback_row.user_feedback_signal == "helpful"
 
-    def test_load_lazy_candidates_fetches_and_marks_loaded(self, mock_uow):
+    @pytest.mark.asyncio
+    async def test_load_lazy_candidates_fetches_and_marks_loaded(self, mock_uow):
         from brain.platform.db.models.system import RetrievalItemFeedback
         from brain.systems.memory.attention_controller import AttentionController
 
@@ -308,12 +341,13 @@ class TestAttentionLogging:
         lazy_memory.user_id = "user-1"
         lazy_memory.org_id = "org-1"
 
-        mock_uow.session.scalars.return_value.all.return_value = [feedback_row]
-        mock_uow.session.get.side_effect = lambda model, pk: lazy_memory if pk == 42 else None
+        mock_uow = _make_async_uow(mock_uow)
+        mock_uow.session.scalars = AsyncMock(return_value=_FakeScalarResult(values=[feedback_row]))
+        mock_uow.session.get = AsyncMock(side_effect=lambda model, pk: lazy_memory if pk == 42 else None)
 
         with patch("brain.systems.memory.attention_controller.UnitOfWork", return_value=mock_uow):
             controller = AttentionController()
-            loaded = controller.load_lazy_candidates(
+            loaded = await controller.load_lazy_candidates(
                 retrieval_decision_id=21,
                 user_id="user-1",
                 org_id="org-1",
@@ -326,7 +360,8 @@ class TestAttentionLogging:
         assert feedback_row.lazy_loaded is True
         assert feedback_row.feedback_at is not None
 
-    def test_lazy_load_cannot_expose_another_users_private_memory(self, mock_uow):
+    @pytest.mark.asyncio
+    async def test_lazy_load_cannot_expose_another_users_private_memory(self, mock_uow):
         from brain.platform.db.models.system import RetrievalItemFeedback
         from brain.systems.memory.attention_controller import AttentionController
 
@@ -349,12 +384,13 @@ class TestAttentionLogging:
         lazy_memory.user_id = "user-2"
         lazy_memory.org_id = "org-1"
 
-        mock_uow.session.scalars.return_value.all.return_value = [feedback_row]
-        mock_uow.session.get.side_effect = lambda model, pk: lazy_memory if pk == 43 else None
+        mock_uow = _make_async_uow(mock_uow)
+        mock_uow.session.scalars = AsyncMock(return_value=_FakeScalarResult(values=[feedback_row]))
+        mock_uow.session.get = AsyncMock(side_effect=lambda model, pk: lazy_memory if pk == 43 else None)
 
         with patch("brain.systems.memory.attention_controller.UnitOfWork", return_value=mock_uow):
             controller = AttentionController()
-            loaded = controller.load_lazy_candidates(
+            loaded = await controller.load_lazy_candidates(
                 retrieval_decision_id=22,
                 user_id="user-1",
                 org_id="org-1",

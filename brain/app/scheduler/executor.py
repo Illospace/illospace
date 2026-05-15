@@ -16,12 +16,8 @@ from brain.kernel.common.time import ensure_utc
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
-from brain.systems.runs.cortex.recording import (
-    trace_id_for_run_id,
-    trace_id_for_scheduler_run_id,
-)
+from brain.platform.async_io import run_blocking, run_subprocess
 from brain.platform.db.models.scheduler import (
     OWNER_MODE_SCHEDULER,
     SchedulerJob,
@@ -31,7 +27,7 @@ from brain.platform.db.models.scheduler import (
 )
 from brain.app.scheduler.catalog import normalize_owner_mode
 from brain.app.scheduler.contracts import validate_scheduler_run_contract
-from brain.app.scheduler.planner import materialize_due_runs
+from brain.app.scheduler.planner import async_materialize_due_runs
 from brain.app.scheduler.programs import NIGHTLY_SLEEP_STEP_KEYS, WRAPPER_STEP_KEY, build_scheduler_step_plan
 from brain.app.scheduler.runtime import (
     LEASE_TTL_SECONDS,
@@ -42,20 +38,22 @@ from brain.app.scheduler.runtime import (
     RUN_STATUS_RUNNING,
     RUN_STATUS_SETTLED_FAILURE,
     RUN_STATUS_SETTLED_SUCCESS,
-    claim_next_due_run,
-    claim_run,
-    ensure_run_steps,
-    finish_run,
-    find_scheduler_job,
-    heartbeat_lease,
+    async_claim_next_due_run,
+    async_claim_run,
+    async_ensure_run_steps,
+    async_finish_run,
+    async_find_scheduler_job,
+    async_heartbeat_lease,
+    async_retry_run,
+    async_set_scheduler_job_load_shed as async_set_scheduler_job_load_shed_state,
+    async_set_scheduler_job_owner_mode as async_set_scheduler_job_owner_mode_state,
+    async_set_scheduler_job_pause_state,
+    async_update_run_step,
     normalize_retry_policy,
     retry_available,
     retry_available_at,
-    retry_run,
-    set_scheduler_job_load_shed as set_scheduler_job_load_shed_state,
-    set_scheduler_job_owner_mode as set_scheduler_job_owner_mode_state,
-    set_scheduler_job_pause_state,
-    update_run_step,
+    trace_id_for_run_id,
+    trace_id_for_scheduler_run_id,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -78,14 +76,14 @@ def _utcnow(now: datetime | None = None) -> datetime:
     return ensure_utc(now)
 
 
-def _run_command(
+async def _async_run_command(
     command: Sequence[str],
     *,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
     timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return await run_subprocess(
         list(command),
         cwd=str(cwd or REPO_ROOT),
         env=env,
@@ -211,8 +209,8 @@ def _final_status_from_handler_result(result: dict[str, Any]) -> str:
     return RUN_STATUS_SETTLED_SUCCESS
 
 
-def _block_invalid_contract_run(
-    session: Session,
+async def _async_block_invalid_contract_run(
+    session: AsyncSession,
     run: SchedulerRun,
     *,
     contract: dict[str, Any],
@@ -220,7 +218,7 @@ def _block_invalid_contract_run(
     now: datetime,
 ) -> SchedulerRun:
     run.task_contract = contract
-    finish_run(
+    await async_finish_run(
         session,
         run,
         status="blocked",
@@ -365,7 +363,7 @@ def _commands_for_step(
     return []
 
 
-def _call_runner(
+def _call_sync_runner_with_fallback(
     runner: Runner,
     command: Sequence[str],
     *,
@@ -376,6 +374,31 @@ def _call_runner(
         return runner(command, cwd=REPO_ROOT, env=env, timeout_seconds=timeout_seconds)
     except TypeError:
         return runner(command, cwd=REPO_ROOT)
+
+
+async def _call_runner(
+    runner: Runner,
+    command: Sequence[str],
+    *,
+    env: dict[str, str],
+    timeout_seconds: int | None,
+) -> Any:
+    if inspect.iscoroutinefunction(runner):
+        try:
+            return await runner(command, cwd=REPO_ROOT, env=env, timeout_seconds=timeout_seconds)
+        except TypeError:
+            return await runner(command, cwd=REPO_ROOT)
+
+    result = await run_blocking(
+        _call_sync_runner_with_fallback,
+        runner,
+        command,
+        env=env,
+        timeout_seconds=timeout_seconds,
+    )
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def _retryable_failure_summary(
@@ -398,8 +421,8 @@ def _retryable_failure_summary(
     return RUN_STATUS_SETTLED_FAILURE, retry_summary
 
 
-def _run_step(
-    session: Session,
+async def _async_run_step(
+    session: AsyncSession,
     run: SchedulerRun,
     job: SchedulerJob,
     step: SchedulerRunStep,
@@ -417,9 +440,9 @@ def _run_step(
     else:
         step.attempt = int(step.attempt or 1) + 1
 
-    update_run_step(session, step, status=RUN_STATUS_RUNNING, started_at=step.started_at or now)
+    await async_update_run_step(session, step, status=RUN_STATUS_RUNNING, started_at=step.started_at or now)
     if run.lease_id is not None:
-        heartbeat_lease(
+        await async_heartbeat_lease(
             session,
             run.lease_id,
             lease_ttl_seconds=max(60, int(job.timeout_seconds or LEASE_TTL_SECONDS)),
@@ -429,7 +452,7 @@ def _run_step(
     commands = _commands_for_step(job, run, step.step_key, step_spec)
     if not commands:
         error_text = f"No command found for scheduler step '{step.step_key}'"
-        update_run_step(
+        await async_update_run_step(
             session,
             step,
             status=RUN_STATUS_RETRYABLE,
@@ -442,12 +465,12 @@ def _run_step(
     env = _shell_env(job, run, step.step_key)
     results: list[dict[str, Any]] = []
     for command in commands:
-        proc = _call_runner(runner, command, env=env, timeout_seconds=job.timeout_seconds)
+        proc = await _call_runner(runner, command, env=env, timeout_seconds=job.timeout_seconds)
         summary = {"command": list(command), **_command_summary(proc)}
         results.append(summary)
         if int(getattr(proc, "returncode", 1)) != 0:
             error_text = summary["stderr_tail"] or summary["stdout_tail"] or "step failed"
-            update_run_step(
+            await async_update_run_step(
                 session,
                 step,
                 status=RUN_STATUS_RETRYABLE,
@@ -457,7 +480,7 @@ def _run_step(
             )
             return {"ok": False, "step_key": step.step_key, "results": results, "error": error_text}
 
-    update_run_step(
+    await async_update_run_step(
         session,
         step,
         status=RUN_STATUS_SETTLED_SUCCESS,
@@ -468,17 +491,17 @@ def _run_step(
     return {"ok": True, "step_key": step.step_key, "results": results}
 
 
-def run_scheduler_run(
-    session: Session,
+async def async_run_scheduler_run(
+    session: AsyncSession,
     run_id: int,
     *,
     owner_id: str | None = None,
-    runner: Runner = _run_command,
+    runner: Runner = _async_run_command,
     resume: bool = True,
     now: datetime | None = None,
 ) -> SchedulerRun:
     now = _utcnow(now)
-    run = session.get(SchedulerRun, run_id)
+    run = await session.get(SchedulerRun, run_id)
     if run is None:
         raise ValueError(f"Scheduler run {run_id} not found")
     if run.status == RUN_STATUS_PAUSED:
@@ -486,13 +509,13 @@ def run_scheduler_run(
     if run.status == RUN_STATUS_SETTLED_SUCCESS:
         return run
 
-    job = session.get(SchedulerJob, run.job_id)
+    job = await session.get(SchedulerJob, run.job_id)
     if job is None:
         raise ValueError(f"Scheduler job {run.job_id} not found")
 
     contract, contract_errors = validate_scheduler_run_contract(job, run)
     if contract_errors:
-        return _block_invalid_contract_run(
+        return await _async_block_invalid_contract_run(
             session,
             run,
             contract=contract,
@@ -503,7 +526,7 @@ def run_scheduler_run(
 
     lease_ttl_seconds = max(60, int(job.timeout_seconds or LEASE_TTL_SECONDS))
     if run.status not in {RUN_STATUS_CLAIMED, RUN_STATUS_RUNNING} or run.lease_id is None:
-        run, _lease = claim_run(
+        run, _lease = await async_claim_run(
             session,
             run.id,
             owner_id=owner_id,
@@ -511,14 +534,14 @@ def run_scheduler_run(
             now=now,
         )
     else:
-        lease = heartbeat_lease(
+        lease = await async_heartbeat_lease(
             session,
             run.lease_id,
             lease_ttl_seconds=lease_ttl_seconds,
             now=now,
         )
         if lease is None:
-            run, _lease = claim_run(
+            run, _lease = await async_claim_run(
                 session,
                 run.id,
                 owner_id=owner_id,
@@ -527,20 +550,20 @@ def run_scheduler_run(
             )
 
     step_plan = build_scheduler_step_plan(job)
-    steps = ensure_run_steps(session, run, step_plan)
+    steps = await async_ensure_run_steps(session, run, step_plan)
     step_by_key = {step.step_key: step for step in steps}
 
     run.status = RUN_STATUS_RUNNING
     if run.started_at is None:
         run.started_at = now
     job.last_started_at = now
-    session.flush()
+    await session.flush()
 
     step_results: list[dict[str, Any]] = []
     for step_spec in sorted(step_plan, key=lambda item: int(item.get("sequence_no", 0))):
         step_key = str(step_spec["step_key"])
         step = step_by_key[step_key]
-        result = _run_step(
+        result = await _async_run_step(
             session,
             run,
             job,
@@ -562,7 +585,7 @@ def run_scheduler_run(
                 },
                 now=now,
             )
-            finish_run(
+            await async_finish_run(
                 session,
                 run,
                 status=failure_status,
@@ -572,7 +595,7 @@ def run_scheduler_run(
             )
             return run
 
-    finish_run(
+    await async_finish_run(
         session,
         run,
         status=RUN_STATUS_SETTLED_SUCCESS,
@@ -583,8 +606,8 @@ def run_scheduler_run(
     return run
 
 
-def claim_scheduler_run(
-    session: Session,
+async def async_claim_scheduler_run(
+    session: AsyncSession,
     run_id: int,
     *,
     owner_id: str,
@@ -593,20 +616,20 @@ def claim_scheduler_run(
     lease_seconds: int = 60,
     now: datetime | None = None,
 ) -> SchedulerLease | None:
-    """Claim a scheduler run for handler-based execution."""
+    """Claim a scheduler run for handler-based execution using an async session."""
     now = _utcnow(now)
-    run = session.get(SchedulerRun, run_id)
+    run = await session.get(SchedulerRun, run_id)
     if run is None:
         return None
     if run.status in _FINAL_RUN_STATUSES:
-        return session.get(SchedulerLease, run.lease_id) if run.lease_id else None
+        return await session.get(SchedulerLease, run.lease_id) if run.lease_id else None
 
     if run.lease_id:
-        existing = session.get(SchedulerLease, run.lease_id)
+        existing = await session.get(SchedulerLease, run.lease_id)
         if existing is not None and existing.released_at is None and existing.expires_at > now:
             return existing
 
-    _run, lease = claim_run(
+    _run, lease = await async_claim_run(
         session,
         run.id,
         owner_id=owner_id,
@@ -617,12 +640,12 @@ def claim_scheduler_run(
         lease.owner_host = owner_host
     if owner_pid is not None:
         lease.owner_pid = owner_pid
-    session.flush()
+    await session.flush()
     return lease
 
 
-def release_scheduler_lease(
-    session: Session,
+async def async_release_scheduler_lease(
+    session: AsyncSession,
     lease: SchedulerLease | None,
     *,
     reason: str,
@@ -635,12 +658,12 @@ def release_scheduler_lease(
     if lease.released_at is None:
         lease.released_at = now
         lease.release_reason = reason
-        session.flush()
+        await session.flush()
     return lease
 
 
-def execute_scheduler_run(
-    session: Session,
+async def async_execute_scheduler_run(
+    session: AsyncSession,
     run_id: int,
     *,
     owner_id: str,
@@ -651,7 +674,7 @@ def execute_scheduler_run(
 ) -> SchedulerRun | None:
     """Execute callable scheduler runs without bypassing the scheduler control plane."""
     now = _utcnow(now)
-    run = session.get(SchedulerRun, run_id)
+    run = await session.get(SchedulerRun, run_id)
     if run is None:
         return None
     if run.status in _FINAL_RUN_STATUSES:
@@ -659,17 +682,17 @@ def execute_scheduler_run(
     if run.status == RUN_STATUS_PAUSED:
         raise ValueError(f"Scheduler run {run_id} is paused")
 
-    job = session.get(SchedulerJob, run.job_id)
+    job = await session.get(SchedulerJob, run.job_id)
     if job is None:
         run.status = RUN_STATUS_SETTLED_FAILURE
         run.error_text = "Scheduler job not found"
         run.finished_at = now
-        session.flush()
+        await session.flush()
         return run
 
     contract, contract_errors = validate_scheduler_run_contract(job, run)
     if contract_errors:
-        return _block_invalid_contract_run(
+        return await _async_block_invalid_contract_run(
             session,
             run,
             contract=contract,
@@ -679,9 +702,9 @@ def execute_scheduler_run(
     run.task_contract = contract
 
     if not _is_callable_handler(job):
-        return run_scheduler_run(session, run_id, owner_id=owner_id, now=now)
+        return await async_run_scheduler_run(session, run_id, owner_id=owner_id, now=now)
 
-    lease = claim_scheduler_run(
+    lease = await async_claim_scheduler_run(
         session,
         run.id,
         owner_id=owner_id,
@@ -693,7 +716,7 @@ def execute_scheduler_run(
     if lease is None:
         return run
 
-    step = session.scalar(
+    step = await session.scalar(
         select(SchedulerRunStep).where(
             SchedulerRunStep.run_id == run.id,
             SchedulerRunStep.step_key == "handler_execute",
@@ -715,7 +738,7 @@ def execute_scheduler_run(
         step.status = RUN_STATUS_RUNNING
         step.started_at = step.started_at or now
         step.attempt = max(1, int(step.attempt or 1))
-    session.flush()
+    await session.flush()
 
     run.status = "executing"
     if not run.trace_id:
@@ -797,29 +820,29 @@ def execute_scheduler_run(
     finally:
         run.finished_at = now
         job.last_finished_at = now
-        release_scheduler_lease(session, lease, reason=f"run_{run.status}", now=now)
-        session.flush()
+        await async_release_scheduler_lease(session, lease, reason=f"run_{run.status}", now=now)
+        await session.flush()
 
     return run
 
 
-def run_scheduler_job(
-    session: Session,
+async def async_run_scheduler_job(
+    session: AsyncSession,
     job_identifier: str,
     *,
     owner_id: str | None = None,
-    runner: Runner = _run_command,
+    runner: Runner = _async_run_command,
     now: datetime | None = None,
     allowed_owner_modes: tuple[str, ...] = (OWNER_MODE_SCHEDULER,),
 ) -> dict[str, Any]:
     now = _utcnow(now)
-    materialize_due_runs(
+    await async_materialize_due_runs(
         session,
         now=now,
         allowed_owner_modes=allowed_owner_modes,
         job_keys=(job_identifier,),
     )
-    claimed = claim_next_due_run(
+    claimed = await async_claim_next_due_run(
         session,
         now=now,
         allowed_owner_modes=allowed_owner_modes,
@@ -831,104 +854,53 @@ def run_scheduler_job(
         return {"ok": False, "job_key": job_identifier, "reason": "no due run"}
 
     run, _lease = claimed
-    run_scheduler_run(session, run.id, owner_id=owner_id, runner=runner, now=now)
-    session.flush()
+    await async_run_scheduler_run(session, run.id, owner_id=owner_id, runner=runner, now=now)
+    await session.flush()
     return {"ok": True, "job_key": job_identifier, "run_id": run.id, "status": run.status}
 
 
-def drain_scheduler(
-    session: Session,
-    *,
-    owner_mode: str = OWNER_MODE_SCHEDULER,
-    job_key: str | None = None,
-    max_runs: int = 10,
-    resume: bool = True,
-    owner_id: str | None = None,
-    runner: Runner = _run_command,
-    now: datetime | None = None,
-    allowed_owner_modes: tuple[str, ...] | None = None,
-) -> dict[str, Any]:
-    """Materialize due runs, then claim and execute them."""
-    now = _utcnow(now)
-    modes = allowed_owner_modes or (normalize_owner_mode(owner_mode),)
-
-    materialize_due_runs(
-        session,
-        now=now,
-        allowed_owner_modes=modes,
-        job_keys=(job_key,) if job_key else None,
-    )
-
-    results: list[dict[str, Any]] = []
-    executed = 0
-    while executed < max_runs:
-        candidate = claim_next_due_run(
-            session,
-            allowed_owner_modes=modes,
-            job_keys=(job_key,) if job_key else None,
-            owner_id=owner_id,
-            lease_ttl_seconds=LEASE_TTL_SECONDS,
-            now=now,
-        )
-        if candidate is None:
-            break
-        run, _lease = candidate
-        run_scheduler_run(session, run.id, owner_id=owner_id, runner=runner, resume=resume, now=now)
-        results.append(
-            {
-                "run_id": run.id,
-                "job_id": run.job_id,
-                "status": run.status,
-                "error_text": run.error_text,
-            }
-        )
-        executed += 1
-    session.flush()
-    return {"ok": True, "executed": executed, "results": results}
-
-
-def resume_scheduler_run(
-    session: Session,
+async def async_resume_scheduler_run(
+    session: AsyncSession,
     run_id: int,
     *,
     owner_id: str | None = None,
-    runner: Runner = _run_command,
+    runner: Runner = _async_run_command,
     now: datetime | None = None,
 ) -> SchedulerRun:
-    return run_scheduler_run(session, run_id, owner_id=owner_id, runner=runner, resume=True, now=now)
+    return await async_run_scheduler_run(session, run_id, owner_id=owner_id, runner=runner, resume=True, now=now)
 
 
-def retry_scheduler_run(
-    session: Session,
+async def async_retry_scheduler_run(
+    session: AsyncSession,
     run_id: int,
     *,
     now: datetime | None = None,
 ) -> SchedulerRun:
-    return retry_run(session, run_id, now=now)
+    return await async_retry_run(session, run_id, now=now)
 
 
-def set_scheduler_job_paused(
-    session: Session,
+async def async_set_scheduler_job_paused(
+    session: AsyncSession,
     identifier: str,
     *,
     paused: bool,
     reason: str | None = None,
     now: datetime | None = None,
 ) -> SchedulerJob:
-    return set_scheduler_job_pause_state(session, identifier, paused=paused, reason=reason, now=now)
+    return await async_set_scheduler_job_pause_state(session, identifier, paused=paused, reason=reason, now=now)
 
 
-def set_scheduler_job_owner_mode(
-    session: Session,
+async def async_set_scheduler_job_owner_mode(
+    session: AsyncSession,
     identifier: str,
     *,
     owner_mode: str,
 ) -> SchedulerJob:
-    return set_scheduler_job_owner_mode_state(session, identifier, owner_mode=owner_mode)
+    return await async_set_scheduler_job_owner_mode_state(session, identifier, owner_mode=owner_mode)
 
 
-def set_scheduler_job_load_shed(
-    session: Session,
+async def async_set_scheduler_job_load_shed(
+    session: AsyncSession,
     identifier: str,
     *,
     load_shed_policy: dict[str, Any] | None = None,
@@ -936,7 +908,7 @@ def set_scheduler_job_load_shed(
     pause_new_runs: bool | None = None,
     reason: str | None = None,
 ) -> SchedulerJob:
-    job = find_scheduler_job(session, identifier)
+    job = await async_find_scheduler_job(session, identifier)
     if job is None:
         raise ValueError(f"Scheduler job '{identifier}' not found")
 
@@ -954,73 +926,9 @@ def set_scheduler_job_load_shed(
     if reason is not None:
         policy["reason"] = reason
 
-    updated = set_scheduler_job_load_shed_state(session, identifier, load_shed_policy=policy)
-    session.flush()
+    updated = await async_set_scheduler_job_load_shed_state(session, identifier, load_shed_policy=policy)
+    await session.flush()
     return updated
-
-
-def set_scheduler_job_owner_mode_control(
-    session: Session,
-    identifier: str,
-    *,
-    owner_mode: str,
-) -> SchedulerJob:
-    return set_scheduler_job_owner_mode(session, identifier, owner_mode=owner_mode)
-
-
-def set_scheduler_job_load_shed_control(
-    session: Session,
-    identifier: str,
-    *,
-    load_shed_policy: dict[str, Any],
-) -> SchedulerJob:
-    return set_scheduler_job_load_shed(session, identifier, load_shed_policy=load_shed_policy)
-
-
-async def async_claim_scheduler_run(
-    session: AsyncSession,
-    run_id: int,
-    *,
-    owner_id: str,
-    owner_host: str | None = None,
-    owner_pid: int | None = None,
-    lease_seconds: int = 60,
-    now: datetime | None = None,
-) -> SchedulerLease | None:
-    return await session.run_sync(
-        lambda sync_session: claim_scheduler_run(
-            sync_session,
-            run_id,
-            owner_id=owner_id,
-            owner_host=owner_host,
-            owner_pid=owner_pid,
-            lease_seconds=lease_seconds,
-            now=now,
-        )
-    )
-
-
-async def async_execute_scheduler_run(
-    session: AsyncSession,
-    run_id: int,
-    *,
-    owner_id: str,
-    owner_host: str | None = None,
-    owner_pid: int | None = None,
-    lease_seconds: int = 60,
-    now: datetime | None = None,
-) -> SchedulerRun | None:
-    return await session.run_sync(
-        lambda sync_session: execute_scheduler_run(
-            sync_session,
-            run_id,
-            owner_id=owner_id,
-            owner_host=owner_host,
-            owner_pid=owner_pid,
-            lease_seconds=lease_seconds,
-            now=now,
-        )
-    )
 
 
 async def async_drain_scheduler(
@@ -1031,20 +939,43 @@ async def async_drain_scheduler(
     max_runs: int = 10,
     resume: bool = True,
     owner_id: str | None = None,
-    runner: Runner = _run_command,
+    runner: Runner = _async_run_command,
     now: datetime | None = None,
     allowed_owner_modes: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    return await session.run_sync(
-        lambda sync_session: drain_scheduler(
-            sync_session,
-            owner_mode=owner_mode,
-            job_key=job_key,
-            max_runs=max_runs,
-            resume=resume,
-            owner_id=owner_id,
-            runner=runner,
-            now=now,
-            allowed_owner_modes=allowed_owner_modes,
-        )
+    now = _utcnow(now)
+    modes = allowed_owner_modes or (normalize_owner_mode(owner_mode),)
+
+    await async_materialize_due_runs(
+        session,
+        now=now,
+        allowed_owner_modes=modes,
+        job_keys=(job_key,) if job_key else None,
     )
+
+    results: list[dict[str, Any]] = []
+    executed = 0
+    while executed < max_runs:
+        candidate = await async_claim_next_due_run(
+            session,
+            allowed_owner_modes=modes,
+            job_keys=(job_key,) if job_key else None,
+            owner_id=owner_id,
+            lease_ttl_seconds=LEASE_TTL_SECONDS,
+            now=now,
+        )
+        if candidate is None:
+            break
+        run, _lease = candidate
+        await async_run_scheduler_run(session, run.id, owner_id=owner_id, runner=runner, resume=resume, now=now)
+        results.append(
+            {
+                "run_id": run.id,
+                "job_id": run.job_id,
+                "status": run.status,
+                "error_text": run.error_text,
+            }
+        )
+        executed += 1
+    await session.flush()
+    return {"ok": True, "executed": executed, "results": results}

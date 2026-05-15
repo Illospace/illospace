@@ -97,19 +97,19 @@ class TestDeduplication:
         vec[index] = 1.0
         return vec
 
-    def _ensure_principal(self, db_session, *, org_id: str, user_id: str, slug: str, email: str) -> None:
-        db_session.execute(text("""
+    async def _ensure_principal(self, db_session, *, org_id: str, user_id: str, slug: str, email: str) -> None:
+        await db_session.execute(text("""
             INSERT INTO orgs (id, name, slug)
             VALUES (:org_id, :name, :slug)
             ON CONFLICT (id) DO NOTHING
         """), {"org_id": org_id, "name": slug, "slug": slug})
-        db_session.execute(text("""
+        await db_session.execute(text("""
             INSERT INTO users (id, org_id, name, email, role, approved)
             VALUES (:user_id, :org_id, :name, :email, 'owner', TRUE)
             ON CONFLICT (id) DO NOTHING
         """), {"user_id": user_id, "org_id": org_id, "name": email, "email": email})
 
-    def _insert_memory(
+    async def _insert_memory(
         self,
         db_session,
         *,
@@ -119,7 +119,7 @@ class TestDeduplication:
         org_id: str,
         visibility: str = "private",
     ) -> int:
-        row = db_session.execute(text("""
+        result = await db_session.execute(text("""
             INSERT INTO memories (
                 content, memory_type, salience, source, tags,
                 semantic_embedding, user_id, org_id, visibility
@@ -135,19 +135,20 @@ class TestDeduplication:
             "user_id": user_id,
             "org_id": org_id,
             "visibility": visibility,
-        }).mappings().first()
+        })
+        row = result.mappings().first()
         return row["id"]
 
     @pytest.fixture
-    def scoped_memory(self, db_session):
-        self._ensure_principal(
+    async def scoped_memory(self, db_session):
+        await self._ensure_principal(
             db_session,
             org_id=self.ORG_ID,
             user_id=self.USER_ID,
             slug="quality-test",
             email="quality-test@example.com",
         )
-        self._ensure_principal(
+        await self._ensure_principal(
             db_session,
             org_id=self.OTHER_ORG_ID,
             user_id=self.OTHER_USER_ID,
@@ -156,21 +157,21 @@ class TestDeduplication:
         )
         content = "A scoped duplicate memory should only match visible tenant memories."
         embedding = self._embedding(0)
-        memory_id = self._insert_memory(
+        memory_id = await self._insert_memory(
             db_session,
             content=content,
             embedding=embedding,
             user_id=self.USER_ID,
             org_id=self.ORG_ID,
         )
-        db_session.flush()
+        await db_session.flush()
         return {"id": memory_id, "content": content, "embedding": embedding}
 
-    def test_exact_duplicate_detected(self, scoped_memory, unit_of_work_for_session):
+    async def test_exact_duplicate_detected(self, scoped_memory, unit_of_work_for_session):
         """An exact copy of an existing memory should be flagged as duplicate."""
         from brain.systems.quality.checks import check_duplicate
         with patch("brain.systems.quality.checks.UnitOfWork", unit_of_work_for_session):
-            is_dupe, details = check_duplicate(
+            is_dupe, details = await check_duplicate(
                 scoped_memory["content"],
                 embedding=scoped_memory["embedding"],
                 user_id=self.USER_ID,
@@ -180,11 +181,11 @@ class TestDeduplication:
             assert "similar_id" in details
             assert details["similarity"] > 0.85
 
-    def test_unique_content_not_flagged(self, scoped_memory, unit_of_work_for_session):
+    async def test_unique_content_not_flagged(self, scoped_memory, unit_of_work_for_session):
         """Genuinely unique content should not be flagged."""
         from brain.systems.quality.checks import check_duplicate
         with patch("brain.systems.quality.checks.UnitOfWork", unit_of_work_for_session):
-            is_dupe, details = check_duplicate(
+            is_dupe, details = await check_duplicate(
                 "This is a completely unique test memory about quantum flamingos "
                 "dancing on the surface of Mars during a solar eclipse in the year 3042.",
                 embedding=self._embedding(1),
@@ -193,12 +194,12 @@ class TestDeduplication:
             )
         assert not is_dupe
 
-    def test_duplicate_check_is_tenant_scoped(self, db_session, scoped_memory, unit_of_work_for_session):
+    async def test_duplicate_check_is_tenant_scoped(self, db_session, scoped_memory, unit_of_work_for_session):
         """An identical hidden memory in another org should not block this tenant."""
         from brain.systems.quality.checks import check_duplicate
 
         same_embedding = self._embedding(2)
-        self._insert_memory(
+        await self._insert_memory(
             db_session,
             content="Same vector in another tenant should stay isolated.",
             embedding=same_embedding,
@@ -206,10 +207,10 @@ class TestDeduplication:
             org_id=self.OTHER_ORG_ID,
             visibility="org",
         )
-        db_session.flush()
+        await db_session.flush()
 
         with patch("brain.systems.quality.checks.UnitOfWork", unit_of_work_for_session):
-            is_dupe, _details = check_duplicate(
+            is_dupe, _details = await check_duplicate(
                 "Same vector in another tenant should stay isolated.",
                 embedding=same_embedding,
                 user_id=self.USER_ID,
@@ -217,12 +218,12 @@ class TestDeduplication:
             )
         assert not is_dupe
 
-    def test_validate_memory_rejects_duplicate(self, scoped_memory, unit_of_work_for_session):
+    async def test_validate_memory_rejects_duplicate(self, scoped_memory, unit_of_work_for_session):
         """Full validation pipeline should reject near-duplicates."""
         from brain.systems.quality.checks import validate_memory
         with patch("brain.systems.quality.checks.UnitOfWork", unit_of_work_for_session), \
              patch("brain.systems.quality.checks.embed_document", return_value=scoped_memory["embedding"]):
-            accepted, reason, details = validate_memory(
+            accepted, reason, details = await validate_memory(
                 scoped_memory["content"],
                 user_id=self.USER_ID,
                 org_id=self.ORG_ID,

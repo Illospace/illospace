@@ -6,11 +6,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
-from brain.app.api.db_utils import run_db
 from brain.app.api.schemas.notifications import (
     NotificationPreferencesRead,
     NotificationPreferencesUpdate,
@@ -45,7 +43,7 @@ async def get_notification_summary(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(db, lambda sync_db: NotificationService(sync_db, user).summary())
+    return await NotificationService(db, user).summary()
 
 
 @router.get("/preferences", response_model=NotificationPreferencesRead)
@@ -53,7 +51,7 @@ async def get_notification_preferences(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(db, lambda sync_db: NotificationService(sync_db, user).preferences())
+    return await NotificationService(db, user).preferences()
 
 
 @router.patch("/preferences", response_model=NotificationPreferencesRead)
@@ -62,13 +60,9 @@ async def update_notification_preferences(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _update(sync_db: Session):
-        service = NotificationService(sync_db, user)
-        preferences = service.update_preferences(body)
-        sync_db.commit()
-        return preferences
-
-    return await run_db(db, _update)
+    preferences = await NotificationService(db, user).update_preferences(body)
+    await db.commit()
+    return preferences
 
 
 @router.get("", response_model=list[NotificationRead])
@@ -78,12 +72,9 @@ async def list_notifications(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    return await run_db(
-        db,
-        lambda sync_db: NotificationService(sync_db, user).list_notifications(
-            unread_only=status != "all",
-            limit=limit,
-        )
+    return await NotificationService(db, user).list_notifications(
+        unread_only=status != "all",
+        limit=limit,
     )
 
 
@@ -93,13 +84,8 @@ async def mark_notification_read(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _mark(sync_db: Session):
-        service = NotificationService(sync_db, user)
-        summary = service.mark_read(notification_id)
-        sync_db.commit()
-        return summary
-
-    summary = await run_db(db, _mark)
+    summary = await NotificationService(db, user).mark_read(notification_id)
+    await db.commit()
     try:
         await _publish_notification_summary(user_id=str(user["id"]), summary=summary)
     except Exception as exc:
@@ -112,13 +98,8 @@ async def mark_all_notifications_read(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    def _mark(sync_db: Session):
-        service = NotificationService(sync_db, user)
-        summary = service.mark_all_read()
-        sync_db.commit()
-        return summary
-
-    summary = await run_db(db, _mark)
+    summary = await NotificationService(db, user).mark_all_read()
+    await db.commit()
     try:
         await _publish_notification_summary(user_id=str(user["id"]), summary=summary)
     except Exception as exc:

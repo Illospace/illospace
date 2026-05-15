@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 from cryptography.fernet import Fernet
 
@@ -13,6 +13,27 @@ TEST_KEY = Fernet.generate_key().decode()
 @pytest.fixture(autouse=True)
 def set_vault_key(monkeypatch):
     monkeypatch.setenv("VAULT_MASTER_KEY", TEST_KEY)
+
+
+def _make_awaitable_attr(obj, name: str) -> None:
+    current = getattr(obj, name)
+    if isinstance(current, AsyncMock):
+        return
+    replacement = AsyncMock()
+    replacement.return_value = current.return_value
+    replacement.side_effect = current.side_effect
+    setattr(obj, name, replacement)
+
+
+def _async_uow(mock_uow):
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
+    _make_awaitable_attr(mock_uow.vault, "get_by_key")
+    _make_awaitable_attr(mock_uow.session, "scalars")
+    _make_awaitable_attr(mock_uow.session, "execute")
+    mock_uow.session.flush = AsyncMock()
+    mock_uow.session.delete = AsyncMock()
+    return mock_uow
 
 
 def test_encrypt_decrypt_roundtrip():
@@ -29,16 +50,17 @@ def test_encrypt_decrypt_special_chars():
     assert _decrypt(_encrypt(value)) == value
 
 
-def test_set_secret(mock_uow):
+async def test_set_secret(mock_uow):
     from brain.systems.vault import set_secret
     mock_uow.vault.get_by_key.return_value = None
+    _async_uow(mock_uow)
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        set_secret("MY_KEY", "my_value", user_id="user-1", description="test", category="api")
+        await set_secret("MY_KEY", "my_value", user_id="user-1", description="test", category="api")
     # Should add the Secret and the VaultAccessLog
     assert mock_uow.session.add.call_count >= 1
 
 
-def test_get_secret_found(mock_uow):
+async def test_get_secret_found(mock_uow):
     from brain.systems.vault import get_secret, _encrypt
     encrypted = _encrypt("found_value")
     mock_secret = MagicMock()
@@ -47,12 +69,13 @@ def test_get_secret_found(mock_uow):
     mock_secret.last_accessed_at = None
     mock_secret.access_count = 0
     mock_uow.vault.get_by_key.return_value = mock_secret
+    _async_uow(mock_uow)
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = get_secret("MY_KEY", user_id="user-1")
+        result = await get_secret("MY_KEY", user_id="user-1")
     assert result == "found_value"
 
 
-def test_get_secret_normalizes_integration_access_actor(mock_uow):
+async def test_get_secret_normalizes_integration_access_actor(mock_uow):
     from brain.platform.db.models.vault import VaultAccessLog
     from brain.systems.vault import get_secret, _encrypt
 
@@ -63,9 +86,10 @@ def test_get_secret_normalizes_integration_access_actor(mock_uow):
     mock_secret.last_accessed_at = None
     mock_secret.access_count = 0
     mock_uow.vault.get_by_key.return_value = mock_secret
+    _async_uow(mock_uow)
 
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = get_secret("GITHUB_EXAMPLE_TOKEN", user_id="user-1", accessed_by="github_connector")
+        result = await get_secret("GITHUB_EXAMPLE_TOKEN", user_id="user-1", accessed_by="github_connector")
 
     assert result == "github-token"
     access_logs = [
@@ -77,86 +101,94 @@ def test_get_secret_normalizes_integration_access_actor(mock_uow):
     assert access_logs[0].accessed_by == "api"
 
 
-def test_get_secret_not_found_fallback_env(mock_uow, monkeypatch):
+async def test_get_secret_not_found_fallback_env(mock_uow, monkeypatch):
     from brain.systems.vault import get_secret
     mock_uow.vault.get_by_key.return_value = None
     mock_uow.session.scalars.return_value.first.return_value = None
     monkeypatch.setenv("FALLBACK_KEY", "env_value")
+    _async_uow(mock_uow)
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow), \
-         patch("brain.systems.vault._record_missing"):
-        result = get_secret("FALLBACK_KEY", user_id="user-1", allow_env_fallback=True)
+         patch("brain.systems.vault._async_record_missing", new=AsyncMock()):
+        result = await get_secret("FALLBACK_KEY", user_id="user-1", allow_env_fallback=True)
     assert result == "env_value"
 
 
-def test_get_secret_missing_returns_none(mock_uow):
+async def test_get_secret_missing_returns_none(mock_uow):
     from brain.systems.vault import get_secret
     mock_uow.vault.get_by_key.return_value = None
     mock_uow.session.scalars.return_value.first.return_value = None
+    _async_uow(mock_uow)
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow), \
-         patch("brain.systems.vault._record_missing") as record_missing:
-        result = get_secret("NONEXISTENT_KEY_XYZ", user_id="user-1", org_id="org-1")
+         patch("brain.systems.vault._async_record_missing", new=AsyncMock()) as record_missing:
+        result = await get_secret("NONEXISTENT_KEY_XYZ", user_id="user-1", org_id="org-1")
     assert result is None
-    record_missing.assert_called_once_with("NONEXISTENT_KEY_XYZ", user_id="user-1", org_id="org-1")
+    record_missing.assert_awaited_once_with("NONEXISTENT_KEY_XYZ", user_id="user-1", org_id="org-1")
 
 
-def test_delete_secret_existed(mock_uow):
+async def test_delete_secret_existed(mock_uow):
     from brain.systems.vault import delete_secret
     mock_secret = MagicMock()
     mock_secret.id = 1
     mock_uow.vault.get_by_key.return_value = mock_secret
+    _async_uow(mock_uow)
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        assert delete_secret("MY_KEY", user_id="user-1") is True
+        assert await delete_secret("MY_KEY", user_id="user-1") is True
 
 
-def test_delete_secret_not_found(mock_uow):
+async def test_delete_secret_not_found(mock_uow):
     from brain.systems.vault import delete_secret
     mock_uow.vault.get_by_key.return_value = None
+    _async_uow(mock_uow)
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        assert delete_secret("NOPE", user_id="user-1") is False
+        assert await delete_secret("NOPE", user_id="user-1") is False
 
 
-def test_list_secrets_no_values(mock_uow):
+async def test_list_secrets_no_values(mock_uow):
     from brain.systems.vault import list_secrets
     mock_uow.session.scalars.return_value.all.return_value = []
     mock_uow.session.execute.return_value.all.return_value = []
+    _async_uow(mock_uow)
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = list_secrets(user_id="user-1")
+        result = await list_secrets(user_id="user-1")
     assert isinstance(result, list)
 
 
-def test_list_secrets_with_category_filter(mock_uow):
+async def test_list_secrets_with_category_filter(mock_uow):
     from brain.systems.vault import list_secrets
     mock_uow.session.scalars.return_value.all.return_value = []
+    _async_uow(mock_uow)
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = list_secrets(user_id="user-1", category="api")
+        result = await list_secrets(user_id="user-1", category="api")
     assert isinstance(result, list)
 
 
-def test_list_secrets_no_category(mock_uow):
+async def test_list_secrets_no_category(mock_uow):
     from brain.systems.vault import list_secrets
     mock_uow.session.scalars.return_value.all.return_value = []
+    _async_uow(mock_uow)
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = list_secrets(user_id="user-1")
+        result = await list_secrets(user_id="user-1")
     assert isinstance(result, list)
 
 
-def test_set_secret_upsert(mock_uow):
+async def test_set_secret_upsert(mock_uow):
     """set_secret should upsert via ORM."""
     from brain.systems.vault import set_secret
     # First call: no existing
     mock_uow.vault.get_by_key.return_value = None
+    _async_uow(mock_uow)
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        set_secret("KEY", "val1", user_id="user-1")
+        await set_secret("KEY", "val1", user_id="user-1")
     # Second call: existing
     existing = MagicMock()
     mock_uow.vault.get_by_key.return_value = existing
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        set_secret("KEY", "val2", user_id="user-1")
+        await set_secret("KEY", "val2", user_id="user-1")
     # Existing should have been updated
     assert existing.encrypted_value is not None
 
 
-def test_reveal_secret_calls_get_secret(mock_uow):
+async def test_reveal_secret_calls_get_secret(mock_uow):
     from brain.systems.vault import reveal_secret, _encrypt
     encrypted = _encrypt("revealed")
     mock_secret = MagicMock()
@@ -165,8 +197,9 @@ def test_reveal_secret_calls_get_secret(mock_uow):
     mock_secret.last_accessed_at = None
     mock_secret.access_count = 0
     mock_uow.vault.get_by_key.return_value = mock_secret
+    _async_uow(mock_uow)
     with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = reveal_secret("MY_KEY", user_id="user-1")
+        result = await reveal_secret("MY_KEY", user_id="user-1")
     assert result == "revealed"
 
 

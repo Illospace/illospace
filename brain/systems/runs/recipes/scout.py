@@ -42,11 +42,11 @@ def scout_request(message: str) -> ScoutHandoff:
 class ScoutRecipe(BaseRunRecipe):
     name = "scout"
 
-    def execute(self, runtime: RunRuntime) -> RunRecipeResult:
-        runtime.activity("Scouting")
+    async def execute(self, runtime: RunRuntime) -> RunRecipeResult:
+        await runtime.activity("Scouting")
         handoff = scout_request(runtime.request.message)
         output = handoff.summary
-        runtime.text_delta(output)
+        await runtime.text_delta(output)
         return RunRecipeResult(output=output)
 
 

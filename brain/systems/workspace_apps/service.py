@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Sequence
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from brain.platform.db.models.domain import Domain, DomainFieldDefinition, DomainObjectType
 from brain.platform.db.models.workspace_app import WorkspaceApp, WorkspaceAppState, WorkspaceAppVersion
 from brain.systems.workspace_apps.contracts import (
     CONTRACT_VERSION,
@@ -150,8 +151,8 @@ def _string_list(alias: str, value: Any, field_name: str) -> list[str] | None:
     return items
 
 
-def validate_domain_bindings(
-    session: Session,
+async def a_validate_domain_bindings(
+    session: AsyncSession,
     org_id: str,
     manifest: dict[str, Any] | None,
 ) -> None:
@@ -161,9 +162,6 @@ def validate_domain_bindings(
     if not requires_domain:
         return
 
-    from brain.systems.user_domains.service import DomainNotFound, DomainService
-
-    service = DomainService(session)
     binding_field_keys: dict[str, set[str]] = {}
     for alias, binding in bindings.items():
         alias_text = str(alias).strip() or "<empty>"
@@ -175,59 +173,40 @@ def validate_domain_bindings(
         if not object_key:
             raise _binding_error(alias_text, "requires object_key")
 
-        try:
-            domain = service.get_domain(org_id, domain_id, include_archived=True)
-        except DomainNotFound as exc:
-            raise _binding_error(alias_text, f"references missing Domain {domain_id}") from exc
+        domain = (
+            await session.scalars(
+                select(Domain).where(Domain.id == domain_id, Domain.org_id == org_id)
+            )
+        ).first()
+        if domain is None:
+            raise _binding_error(alias_text, f"references missing Domain {domain_id}")
         if domain.archived_at is not None:
             raise _binding_error(alias_text, f"references archived Domain {domain_id}")
 
-        domain_slug = str(binding.get("domain_slug") or "").strip()
-        if domain_slug and domain.slug != domain_slug:
-            raise _binding_error(
-                alias_text,
-                f"domain_slug '{domain_slug}' does not match Domain {domain.id} slug '{domain.slug}'",
+        obj = (
+            await session.scalars(
+                select(DomainObjectType).where(
+                    DomainObjectType.domain_id == domain.id,
+                    DomainObjectType.key == object_key,
+                )
             )
-
-        try:
-            obj = service.get_object_type(domain.id, object_key)
-        except DomainNotFound as exc:
+        ).first()
+        if obj is None:
             raise _binding_error(
                 alias_text,
                 f"references missing object_key '{object_key}' in Domain {domain.id}",
-            ) from exc
-
-        fields = service.list_fields(obj.id)
-        field_keys = {field.key for field in fields}
-        binding_field_keys[alias_text] = field_keys
-        bindable_field_keys = set(field_keys)
-        bindable_field_keys.add("title")
-        declared_fields = _string_list(alias_text, binding.get("fields"), "fields")
-        if declared_fields is not None:
-            unknown = sorted(set(declared_fields) - bindable_field_keys)
-            if unknown:
-                raise _binding_error(alias_text, f"declares missing field(s): {', '.join(unknown)}")
-            required = sorted(
-                field.key
-                for field in fields
-                if field.required and field.default_value is None
             )
-            omitted = [field for field in required if field not in declared_fields]
-            if omitted:
-                raise _binding_error(
-                    alias_text,
-                    f"omits required field(s): {', '.join(omitted)}",
-                )
 
-        operations = _string_list(alias_text, binding.get("operations"), "operations")
-        if operations is not None:
-            unknown_ops = sorted(set(operations) - ALLOWED_DOMAIN_BINDING_OPERATIONS)
-            if unknown_ops:
-                allowed = ", ".join(sorted(ALLOWED_DOMAIN_BINDING_OPERATIONS))
-                raise _binding_error(
-                    alias_text,
-                    f"declares unsupported operation(s): {', '.join(unknown_ops)}; allowed: {allowed}",
+        fields = (
+            await session.scalars(
+                select(DomainFieldDefinition).where(
+                    DomainFieldDefinition.object_type_id == obj.id
                 )
+            )
+        ).all()
+        binding_field_keys[alias_text] = {field.key for field in fields}
+        _validate_domain_binding_objects(alias_text, binding, domain, fields)
+
     _validate_generic_http_domain_sync_fields(manifest or {}, binding_field_keys)
 
 
@@ -305,18 +284,62 @@ def _executor_key(action: dict[str, Any]) -> str:
     return str(executor.get("key") or "").strip()
 
 
-def active_version(session: Session, app_id: str) -> WorkspaceAppVersion | None:
+def _validate_domain_binding_objects(
+    alias_text: str,
+    binding: dict[str, Any],
+    domain: Domain,
+    fields: Sequence[DomainFieldDefinition],
+) -> None:
+    domain_slug = str(binding.get("domain_slug") or "").strip()
+    if domain_slug and domain.slug != domain_slug:
+        raise _binding_error(
+            alias_text,
+            f"domain_slug '{domain_slug}' does not match Domain {domain.id} slug '{domain.slug}'",
+        )
+
+    field_keys = {field.key for field in fields}
+    bindable_field_keys = set(field_keys)
+    bindable_field_keys.add("title")
+    declared_fields = _string_list(alias_text, binding.get("fields"), "fields")
+    if declared_fields is not None:
+        unknown = sorted(set(declared_fields) - bindable_field_keys)
+        if unknown:
+            raise _binding_error(alias_text, f"declares missing field(s): {', '.join(unknown)}")
+        required = sorted(
+            field.key
+            for field in fields
+            if field.required and field.default_value is None
+        )
+        omitted = [field for field in required if field not in declared_fields]
+        if omitted:
+            raise _binding_error(
+                alias_text,
+                f"omits required field(s): {', '.join(omitted)}",
+            )
+
+    operations = _string_list(alias_text, binding.get("operations"), "operations")
+    if operations is not None:
+        unknown_ops = sorted(set(operations) - ALLOWED_DOMAIN_BINDING_OPERATIONS)
+        if unknown_ops:
+            allowed = ", ".join(sorted(ALLOWED_DOMAIN_BINDING_OPERATIONS))
+            raise _binding_error(
+                alias_text,
+                f"declares unsupported operation(s): {', '.join(unknown_ops)}; allowed: {allowed}",
+            )
+
+
+async def a_active_version(session: AsyncSession, app_id: str) -> WorkspaceAppVersion | None:
     stmt = (
         select(WorkspaceAppVersion)
         .where(WorkspaceAppVersion.app_id == app_id)
         .order_by(WorkspaceAppVersion.version.desc(), WorkspaceAppVersion.id.desc())
         .limit(1)
     )
-    return session.scalars(stmt).first()
+    return (await session.scalars(stmt)).first()
 
 
-def active_versions_for_apps(
-    session: Session,
+async def a_active_versions_for_apps(
+    session: AsyncSession,
     app_ids: list[str],
 ) -> dict[str, WorkspaceAppVersion]:
     normalized_ids = [str(app_id) for app_id in app_ids if app_id]
@@ -341,7 +364,7 @@ def active_versions_for_apps(
         .join(ranked, WorkspaceAppVersion.id == ranked.c.id)
         .where(ranked.c.rank == 1)
     )
-    return {str(version.app_id): version for version in session.scalars(stmt).all()}
+    return {str(version.app_id): version for version in (await session.scalars(stmt)).all()}
 
 
 def serialize_version(version: WorkspaceAppVersion | None) -> dict[str, Any] | None:
@@ -360,13 +383,13 @@ def serialize_version(version: WorkspaceAppVersion | None) -> dict[str, Any] | N
     }
 
 
-def serialize_app(
-    session: Session,
+async def a_serialize_app(
+    session: AsyncSession,
     app: WorkspaceApp,
     *,
     version: WorkspaceAppVersion | None | object = _VERSION_MISSING,
 ) -> dict[str, Any]:
-    resolved_version = active_version(session, app.id) if version is _VERSION_MISSING else version
+    resolved_version = await a_active_version(session, app.id) if version is _VERSION_MISSING else version
     return {
         "id": app.id,
         "org_id": app.org_id,
@@ -386,10 +409,10 @@ def serialize_app(
     }
 
 
-def serialize_apps(session: Session, apps: list[WorkspaceApp]) -> list[dict[str, Any]]:
-    versions_by_app_id = active_versions_for_apps(session, [str(app.id) for app in apps])
+async def a_serialize_apps(session: AsyncSession, apps: list[WorkspaceApp]) -> list[dict[str, Any]]:
+    versions_by_app_id = await a_active_versions_for_apps(session, [str(app.id) for app in apps])
     return [
-        serialize_app(session, app, version=versions_by_app_id.get(str(app.id)))
+        await a_serialize_app(session, app, version=versions_by_app_id.get(str(app.id)))
         for app in apps
     ]
 
@@ -408,8 +431,8 @@ def serialize_state(state: WorkspaceAppState) -> dict[str, Any]:
     }
 
 
-def list_apps(
-    session: Session,
+async def a_list_apps(
+    session: AsyncSession,
     org_id: str,
     *,
     include_archived: bool = False,
@@ -419,14 +442,14 @@ def list_apps(
     if not include_archived:
         stmt = stmt.where(WorkspaceApp.archived_at.is_(None))
     stmt = stmt.order_by(WorkspaceApp.updated_at.desc(), WorkspaceApp.created_at.desc())
-    apps = list(session.scalars(stmt).all())
+    apps = list((await session.scalars(stmt)).all())
     if include_prototypes:
         return apps
     return [app for app in apps if not _is_prototype_app(app)]
 
 
-def list_archived_apps(
-    session: Session,
+async def a_list_archived_apps(
+    session: AsyncSession,
     org_id: str,
     *,
     limit: int = 12,
@@ -439,14 +462,14 @@ def list_archived_apps(
         .order_by(WorkspaceApp.archived_at.desc(), WorkspaceApp.updated_at.desc())
         .limit(capped_limit)
     )
-    apps = list(session.scalars(stmt).all())
+    apps = list((await session.scalars(stmt)).all())
     if include_prototypes:
         return apps
     return [app for app in apps if not _is_prototype_app(app)]
 
 
-def get_app(
-    session: Session,
+async def a_get_app(
+    session: AsyncSession,
     org_id: str,
     app_id: str | None = None,
     *,
@@ -462,17 +485,19 @@ def get_app(
         stmt = stmt.where(WorkspaceApp.key == key)
     if not include_archived:
         stmt = stmt.where(WorkspaceApp.archived_at.is_(None))
-    app = session.scalars(stmt).first()
+    app = (await session.scalars(stmt)).first()
     if app is None or _is_prototype_app(app):
         raise WorkspaceAppNotFound("Workspace app not found")
     return app
 
 
-def _app_for_key(session: Session, org_id: str, key: str) -> WorkspaceApp | None:
-    return session.scalars(
-        select(WorkspaceApp).where(
-            WorkspaceApp.org_id == org_id,
-            WorkspaceApp.key == key,
+async def _a_app_for_key(session: AsyncSession, org_id: str, key: str) -> WorkspaceApp | None:
+    return (
+        await session.scalars(
+            select(WorkspaceApp).where(
+                WorkspaceApp.org_id == org_id,
+                WorkspaceApp.key == key,
+            )
         )
     ).first()
 
@@ -544,8 +569,8 @@ def _validate_contract_state_payload_or_raise(
     )
 
 
-def create_app(
-    session: Session,
+async def a_create_app(
+    session: AsyncSession,
     *,
     org_id: str,
     name: str,
@@ -564,7 +589,7 @@ def create_app(
 ) -> WorkspaceApp:
     normalized_name = validate_nonempty_trimmed(name, "name")
     normalized_key = normalize_key(key, fallback_name=normalized_name)
-    existing = _app_for_key(session, org_id, normalized_key)
+    existing = await _a_app_for_key(session, org_id, normalized_key)
     if existing is not None and not _is_prototype_app(existing):
         raise WorkspaceAppConflict(f"Workspace app key '{normalized_key}' already exists")
 
@@ -575,7 +600,7 @@ def create_app(
     normalized_visual_spec = visual_spec or {}
     normalized_metadata = metadata or {}
 
-    validate_domain_bindings(session, org_id, normalized_manifest)
+    await a_validate_domain_bindings(session, org_id, normalized_manifest)
     _validate_app_contract_or_raise(
         renderer_key=normalized_renderer,
         source_kind=normalized_source_kind,
@@ -609,9 +634,9 @@ def create_app(
             anchor_user_id=anchor_user_id or created_by_user_id,
         )
         session.add(app)
-        session.flush()
+        await session.flush()
 
-    current = active_version(session, app.id)
+    current = await a_active_version(session, app.id)
     session.add(
         WorkspaceAppVersion(
             app_id=app.id,
@@ -624,7 +649,7 @@ def create_app(
         )
     )
     if initial_state is not None:
-        state = get_or_create_state(
+        state = await a_get_or_create_state(
             session,
             org_id=org_id,
             app_id=app.id,
@@ -633,12 +658,12 @@ def create_app(
         )
         state.data = initial_state
         state.updated_by_user_id = created_by_user_id
-    session.flush()
+    await session.flush()
     return app
 
 
-def update_app(
-    session: Session,
+async def a_update_app(
+    session: AsyncSession,
     *,
     org_id: str,
     app_id: str | None = None,
@@ -654,8 +679,8 @@ def update_app(
     anchor_user_id: str | None = None,
     updated_by_user_id: str | None = None,
 ) -> WorkspaceApp:
-    app = get_app(session, org_id, app_id, key=key)
-    current = active_version(session, app.id)
+    app = await a_get_app(session, org_id, app_id, key=key)
+    current = await a_active_version(session, app.id)
     next_renderer = normalize_renderer_key(renderer_key) if renderer_key is not None else app.renderer_key
     next_source_kind = normalize_source_kind(source_kind or (current.source_kind if current else None))
     next_source = source_code if source_code is not None else (current.source_code if current else "")
@@ -667,7 +692,7 @@ def update_app(
         for value in (renderer_key, source_kind, source_code, manifest, visual_spec, metadata)
     )
     if contract_inputs_changed:
-        validate_domain_bindings(session, org_id, next_manifest)
+        await a_validate_domain_bindings(session, org_id, next_manifest)
         _validate_app_contract_or_raise(
             renderer_key=next_renderer,
             source_kind=next_source_kind,
@@ -704,25 +729,25 @@ def update_app(
                 created_by_user_id=updated_by_user_id,
             )
         )
-    session.flush()
+    await session.flush()
     return app
 
 
-def archive_app(
-    session: Session,
+async def a_archive_app(
+    session: AsyncSession,
     *,
     org_id: str,
     app_id: str | None = None,
     key: str | None = None,
 ) -> dict[str, Any]:
-    app = get_app(session, org_id, app_id, key=key)
+    app = await a_get_app(session, org_id, app_id, key=key)
     app.archived_at = datetime.now(timezone.utc)
-    session.flush()
+    await session.flush()
     return {"archived": {"id": app.id, "key": app.key}}
 
 
-def delete_archived_apps(
-    session: Session,
+async def a_delete_archived_apps(
+    session: AsyncSession,
     org_id: str,
     *,
     include_prototypes: bool = False,
@@ -731,7 +756,7 @@ def delete_archived_apps(
         select(WorkspaceApp)
         .where(WorkspaceApp.org_id == org_id, WorkspaceApp.archived_at.is_not(None))
     )
-    apps = list(session.scalars(stmt).all())
+    apps = list((await session.scalars(stmt)).all())
     app_ids = [
         str(app.id)
         for app in apps
@@ -740,40 +765,40 @@ def delete_archived_apps(
     if not app_ids:
         return 0
 
-    session.execute(
+    await session.execute(
         delete(WorkspaceAppState)
         .where(WorkspaceAppState.app_id.in_(app_ids))
         .execution_options(synchronize_session=False)
     )
-    session.execute(
+    await session.execute(
         delete(WorkspaceAppVersion)
         .where(WorkspaceAppVersion.app_id.in_(app_ids))
         .execution_options(synchronize_session=False)
     )
-    session.execute(
+    await session.execute(
         delete(WorkspaceApp)
         .where(WorkspaceApp.id.in_(app_ids))
         .execution_options(synchronize_session=False)
     )
-    session.flush()
+    await session.flush()
     return len(app_ids)
 
 
-def restore_app(
-    session: Session,
+async def a_restore_app(
+    session: AsyncSession,
     *,
     org_id: str,
     app_id: str | None = None,
     key: str | None = None,
 ) -> WorkspaceApp:
-    app = get_app(session, org_id, app_id, key=key, include_archived=True)
+    app = await a_get_app(session, org_id, app_id, key=key, include_archived=True)
     app.archived_at = None
-    session.flush()
+    await session.flush()
     return app
 
 
-def get_or_create_state(
-    session: Session,
+async def a_get_or_create_state(
+    session: AsyncSession,
     *,
     org_id: str,
     app_id: str,
@@ -781,12 +806,14 @@ def get_or_create_state(
     user_id: str | None,
 ) -> WorkspaceAppState:
     state_key = key or DEFAULT_STATE_KEY
-    state = session.scalars(
-        select(WorkspaceAppState).where(
-            WorkspaceAppState.org_id == org_id,
-            WorkspaceAppState.app_id == app_id,
-            WorkspaceAppState.scope == "org",
-            WorkspaceAppState.key == state_key,
+    state = (
+        await session.scalars(
+            select(WorkspaceAppState).where(
+                WorkspaceAppState.org_id == org_id,
+                WorkspaceAppState.app_id == app_id,
+                WorkspaceAppState.scope == "org",
+                WorkspaceAppState.key == state_key,
+            )
         )
     ).first()
     if state is not None:
@@ -801,24 +828,24 @@ def get_or_create_state(
         updated_by_user_id=user_id,
     )
     session.add(state)
-    session.flush()
+    await session.flush()
     return state
 
 
-def get_state(
-    session: Session,
+async def a_get_state(
+    session: AsyncSession,
     *,
     org_id: str,
     app_id: str,
     key: str = DEFAULT_STATE_KEY,
     user_id: str | None = None,
 ) -> WorkspaceAppState:
-    app = get_app(session, org_id, app_id)
-    return get_or_create_state(session, org_id=org_id, app_id=app.id, key=key, user_id=user_id)
+    app = await a_get_app(session, org_id, app_id)
+    return await a_get_or_create_state(session, org_id=org_id, app_id=app.id, key=key, user_id=user_id)
 
 
-def update_state(
-    session: Session,
+async def a_update_state(
+    session: AsyncSession,
     *,
     org_id: str,
     app_id: str,
@@ -827,14 +854,14 @@ def update_state(
     data_patch: dict[str, Any] | None = None,
     user_id: str | None = None,
 ) -> WorkspaceAppState:
-    app = get_app(session, org_id=org_id, app_id=app_id)
-    state = get_or_create_state(session, org_id=org_id, app_id=app.id, key=key, user_id=user_id)
+    app = await a_get_app(session, org_id=org_id, app_id=app_id)
+    state = await a_get_or_create_state(session, org_id=org_id, app_id=app.id, key=key, user_id=user_id)
     if data_patch is not None:
         next_data = {**(state.data or {}), **data_patch}
     else:
         next_data = data or {}
-    _validate_contract_state_payload_or_raise(app, active_version(session, app.id), next_data)
+    _validate_contract_state_payload_or_raise(app, await a_active_version(session, app.id), next_data)
     state.data = next_data
     state.updated_by_user_id = user_id
-    session.flush()
+    await session.flush()
     return state

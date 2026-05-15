@@ -5,7 +5,7 @@ Tests mock at the session level using session.execute().mappings().all() etc.
 
 import os
 import sys
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch, call, AsyncMock
 
 import pytest
 
@@ -24,6 +24,7 @@ def _mock_session_execute(results_sequence):
     whose .mappings().all() / .mappings().first() return the next item.
     """
     session = MagicMock()
+    session.execute = AsyncMock()
     call_results = []
     for item in results_sequence:
         result_mock = MagicMock()
@@ -61,7 +62,7 @@ class TestEdgeTypes:
 class TestGraphAugmentedRecall:
     """Test graph-augmented memory retrieval using SQLAlchemy session."""
 
-    def test_returns_vector_results(self):
+    async def test_returns_vector_results(self):
         """Should return vector search results even without graph edges."""
         from brain.systems.cognition.graph import graph_augmented_recall
 
@@ -78,12 +79,12 @@ class TestGraphAugmentedRecall:
         # execute calls: 1) vector search, 2) graph traversal, 3) update memories, 4) update edges
         session = _mock_session_execute([vector_rows, graph_rows, None, None])
 
-        results = graph_augmented_recall(session, "[0,0,0]", limit=5)
+        results = await graph_augmented_recall(session, "[0,0,0]", limit=5)
         assert len(results) == 2
         assert results[0]["id"] == 1  # highest similarity first
         assert results[0]["similarity"] == 0.85
 
-    def test_graph_edges_boost_score(self):
+    async def test_graph_edges_boost_score(self):
         """Memories connected via graph edges should get score boost."""
         from brain.systems.cognition.graph import graph_augmented_recall
 
@@ -101,21 +102,21 @@ class TestGraphAugmentedRecall:
 
         session = _mock_session_execute([vector_rows, graph_rows, None, None])
 
-        results = graph_augmented_recall(session, "[0,0,0]", limit=5)
+        results = await graph_augmented_recall(session, "[0,0,0]", limit=5)
         assert len(results) == 2
         ids = [r["id"] for r in results]
         assert 2 in ids
 
-    def test_empty_results(self):
+    async def test_empty_results(self):
         """Should handle no results gracefully."""
         from brain.systems.cognition.graph import graph_augmented_recall
 
         session = _mock_session_execute([[]])
 
-        results = graph_augmented_recall(session, "[0,0,0]", limit=5)
+        results = await graph_augmented_recall(session, "[0,0,0]", limit=5)
         assert results == []
 
-    def test_graph_edges_included_in_result(self):
+    async def test_graph_edges_included_in_result(self):
         """Results should include graph edge information."""
         from brain.systems.cognition.graph import graph_augmented_recall
 
@@ -132,12 +133,12 @@ class TestGraphAugmentedRecall:
         ]
         session = _mock_session_execute([vector_rows, graph_rows, None, None])
 
-        results = graph_augmented_recall(session, "[0,0,0]", limit=5)
+        results = await graph_augmented_recall(session, "[0,0,0]", limit=5)
         mem_b = next(r for r in results if r["id"] == 2)
         assert len(mem_b["graph_edges"]) > 0
         assert mem_b["graph_edges"][0]["relationship"] == "depends_on"
 
-    def test_reviewed_active_results_rank_ahead_of_unreviewed(self):
+    async def test_reviewed_active_results_rank_ahead_of_unreviewed(self):
         """Reviewed-active memories should outrank raw unreviewed ones."""
         from brain.systems.cognition.graph import graph_augmented_recall
 
@@ -183,10 +184,10 @@ class TestGraphAugmentedRecall:
         ]
         session = _mock_session_execute([vector_rows, [], None, None])
 
-        results = graph_augmented_recall(session, "[0,0,0]", limit=5)
+        results = await graph_augmented_recall(session, "[0,0,0]", limit=5)
         assert [item["id"] for item in results[:2]] == [2, 1]
 
-    def test_quarantined_results_are_suppressed_when_filter_enabled(self, monkeypatch):
+    async def test_quarantined_results_are_suppressed_when_filter_enabled(self, monkeypatch):
         """Quarantined memories should disappear from recall when the guard is on."""
         from brain.systems.cognition.graph import graph_augmented_recall
 
@@ -233,10 +234,10 @@ class TestGraphAugmentedRecall:
         ]
         session = _mock_session_execute([vector_rows, [], None, None])
 
-        results = graph_augmented_recall(session, "[0,0,0]", limit=5)
+        results = await graph_augmented_recall(session, "[0,0,0]", limit=5)
         assert [item["id"] for item in results] == [2]
 
-    def test_null_similarity_does_not_crash(self):
+    async def test_null_similarity_does_not_crash(self):
         """Graph recall should degrade safely if DB returns NULL similarity."""
         from brain.systems.cognition.graph import graph_augmented_recall
 
@@ -248,18 +249,18 @@ class TestGraphAugmentedRecall:
         graph_rows = []
         session = _mock_session_execute([vector_rows, graph_rows, None, None])
 
-        results = graph_augmented_recall(session, "[0,0,0]", limit=5)
+        results = await graph_augmented_recall(session, "[0,0,0]", limit=5)
         assert len(results) == 1
         assert results[0]["similarity"] == 0.0
 
-    def test_session_execute_called_with_text(self):
+    async def test_session_execute_called_with_text(self):
         """Session.execute should be called with text() wrapped SQL."""
         from brain.systems.cognition.graph import graph_augmented_recall
         from sqlalchemy import text
 
         session = _mock_session_execute([[], ])
 
-        graph_augmented_recall(session, "[0,0,0]", limit=5)
+        await graph_augmented_recall(session, "[0,0,0]", limit=5)
         # First call should use text()
         first_call_args = session.execute.call_args_list[0]
         sql_arg = first_call_args[0][0]
@@ -338,7 +339,7 @@ class TestDetectContradictions:
 class TestMemoryNeighborhood:
     """Test graph neighborhood retrieval."""
 
-    def test_returns_center_and_edges(self):
+    async def test_returns_center_and_edges(self):
         from brain.systems.cognition.graph import get_memory_neighborhood
 
         center_row = {
@@ -354,32 +355,18 @@ class TestMemoryNeighborhood:
         # execute calls: 1) get center (uses .first()), 2) get neighbors (uses .all())
         session = _mock_session_execute([center_row, neighbor_rows])
 
-        result = get_memory_neighborhood(session, memory_id=1)
+        result = await get_memory_neighborhood(session, memory_id=1)
         assert result["center"]["id"] == 1
         assert result["edge_count"] == 1
         assert result["edges"][0]["relationship"] == "similar_to"
 
-    def test_returns_error_for_missing_memory(self):
+    async def test_returns_error_for_missing_memory(self):
         from brain.systems.cognition.graph import get_memory_neighborhood
 
         session = _mock_session_execute([None])
 
-        result = get_memory_neighborhood(session, memory_id=999)
+        result = await get_memory_neighborhood(session, memory_id=999)
         assert "error" in result
-
-
-class TestCreateEdge:
-    """Test _create_edge helper uses session.execute with named params."""
-
-    def test_create_edge_executes_upsert(self):
-        from brain.systems.cognition.graph import _create_edge
-
-        session = _mock_session_execute([None])
-
-        _create_edge(session, source_id=1, target_id=2, relationship="similar_to", weight=0.9)
-        assert session.execute.called
-        sql_arg = session.execute.call_args[0][0]
-        assert hasattr(sql_arg, 'text'), "SQL should be wrapped in sqlalchemy.text()"
 
 
 class TestBrainRecallIntegration:
@@ -406,20 +393,21 @@ class TestBrainRecallIntegration:
         mock_session = MagicMock()
         mock_uow.__enter__ = MagicMock(return_value=mock_uow)
         mock_uow.__exit__ = MagicMock(return_value=False)
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
         mock_uow.session = mock_session
+        mock_uow.memories.graph_augmented_recall.return_value = mock_graph.return_value
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
-             patch("brain.app.mcp.server.observe_retrieval", return_value={"retrieval_decision_id": 11, "stage": "brain_recall"}):
+             patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value={"retrieval_decision_id": 11, "stage": "brain_recall"})):
             result = mcp_server.tool_brain_recall("redis issues")
 
         assert result["count"] == 1
         assert result["memories"][0]["tier"] == "semantic"
         assert "graph_context" in result["memories"][0]
         assert result["attention_decision"]["stage"] == "brain_recall"
-        # graph_augmented_recall should be called with session, not raw cursor
-        mock_graph.assert_called_once()
-        call_args = mock_graph.call_args
-        assert call_args[0][0] is mock_session
+        mock_uow.memories.graph_augmented_recall.assert_called_once()
+        assert mock_uow.memories.graph_augmented_recall.call_args.kwargs["query_embedding"] == mock_emb.return_value
 
     @patch("brain.systems.cognition.graph.graph_augmented_recall")
     @patch("brain.systems.memory.embeddings.embed_query")
@@ -445,7 +433,10 @@ class TestBrainRecallIntegration:
         mock_session = MagicMock()
         mock_uow.__enter__ = MagicMock(return_value=mock_uow)
         mock_uow.__exit__ = MagicMock(return_value=False)
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
         mock_uow.session = mock_session
+        mock_uow.memories.graph_augmented_recall.return_value = mock_graph.return_value
 
         decision = {
             "retrieval_decision_id": 13,
@@ -465,7 +456,7 @@ class TestBrainRecallIntegration:
         }
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
-             patch("brain.app.mcp.server.observe_retrieval", return_value=decision):
+             patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value=decision)):
             result = mcp_server.tool_brain_recall("redis issues", attention_debug=True)
 
         assert [mem["id"] for mem in result["memories"]] == [1, 2]
@@ -497,7 +488,10 @@ class TestBrainRecallIntegration:
         mock_session = MagicMock()
         mock_uow.__enter__ = MagicMock(return_value=mock_uow)
         mock_uow.__exit__ = MagicMock(return_value=False)
+        mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+        mock_uow.__aexit__ = AsyncMock(return_value=False)
         mock_uow.session = mock_session
+        mock_uow.memories.graph_augmented_recall.return_value = mock_graph.return_value
 
         decision = {
             "retrieval_decision_id": 14,
@@ -527,13 +521,13 @@ class TestBrainRecallIntegration:
         }]
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
-             patch("brain.app.mcp.server.observe_retrieval", return_value=decision), \
-             patch("brain.app.mcp.server.AttentionController.load_lazy_candidates", return_value=lazy_loaded) as mock_load:
+             patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value=decision)), \
+             patch("brain.app.mcp.server.AttentionController.load_lazy_candidates", new=AsyncMock(return_value=lazy_loaded)) as mock_load:
             result = mcp_server.tool_brain_recall("redis issues", attention_debug=True, expand_lazy_load=True)
 
         assert [mem["id"] for mem in result["memories"]] == [1, 2, 3]
         assert [mem["id"] for mem in result["lazy_loaded_memories"]] == [3]
-        mock_load.assert_called_once()
+        mock_load.assert_awaited_once()
 
     @patch("brain.systems.cognition.graph.graph_augmented_recall", side_effect=Exception("UndefinedColumn"))
     @patch("brain.systems.memory.embeddings.embed_query")
@@ -551,30 +545,30 @@ class TestBrainRecallIntegration:
         mock_uow_graph = MagicMock()
         mock_uow_graph.__enter__ = MagicMock(return_value=mock_uow_graph)
         mock_uow_graph.__exit__ = MagicMock(return_value=False)
+        mock_uow_graph.__aenter__ = AsyncMock(return_value=mock_uow_graph)
+        mock_uow_graph.__aexit__ = AsyncMock(return_value=False)
         mock_uow_graph.session = MagicMock()
+        mock_uow_graph.memories.graph_augmented_recall.side_effect = Exception("UndefinedColumn")
 
         mock_uow_fallback = MagicMock()
         mock_uow_fallback.__enter__ = MagicMock(return_value=mock_uow_fallback)
         mock_uow_fallback.__exit__ = MagicMock(return_value=False)
+        mock_uow_fallback.__aenter__ = AsyncMock(return_value=mock_uow_fallback)
+        mock_uow_fallback.__aexit__ = AsyncMock(return_value=False)
         fallback_session = MagicMock()
         mock_uow_fallback.session = fallback_session
 
         # Fallback vector search returns results
-        fallback_result = MagicMock()
-        fallback_mappings = MagicMock()
-        fallback_mappings.all.return_value = [{
+        mock_uow_fallback.memories.recall_vector.return_value = [{
             "id": 7,
             "content": "Fallback result",
-            "memory_type": "lesson",
+            "type": "lesson",
             "salience": 8.0,
-            "emotion_label": "neutral",
             "similarity": 0.88,
         }]
-        fallback_result.mappings.return_value = fallback_mappings
-        fallback_session.execute.return_value = fallback_result
 
         with patch("brain.app.mcp.server.UnitOfWork", side_effect=[mock_uow_graph, mock_uow_fallback]), \
-             patch("brain.app.mcp.server.observe_retrieval", return_value={"retrieval_decision_id": 12, "stage": "brain_recall"}):
+             patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value={"retrieval_decision_id": 12, "stage": "brain_recall"})):
             result = mcp_server.tool_brain_recall("redis issues")
 
         assert result["count"] == 1

@@ -25,8 +25,8 @@ from sqlalchemy import text
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.memory.truth_maintenance import (
+    async_record_memory_review,
     build_consolidation_truth_fields,
-    record_memory_review,
 )
 
 logger = logging.getLogger("cognition.consolidate")
@@ -172,14 +172,14 @@ def _summary_owner_id(scope: ConsolidationScope, children: Sequence[Any]) -> str
     return SYSTEM_USER_ID
 
 
-def _discover_consolidation_scopes(
+async def _discover_consolidation_scopes(
     *,
     org_id: str | None = None,
     limit: int = 500,
 ) -> list[ConsolidationScope]:
     """Discover concrete memory scopes so consolidation never runs globally."""
-    with UnitOfWork() as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             SELECT DISTINCT
                    COALESCE(visibility, 'private') AS visibility,
                    org_id,
@@ -219,7 +219,7 @@ def _discover_consolidation_scopes(
     return scopes
 
 
-def _single_or_discovered_scopes(
+async def _single_or_discovered_scopes(
     *,
     scope: ConsolidationScope | None = None,
     org_id: str | None = None,
@@ -235,7 +235,7 @@ def _single_or_discovered_scopes(
             user_id=user_id,
             visibility=visibility,
         )]
-    return _discover_consolidation_scopes()
+    return await _discover_consolidation_scopes()
 
 
 def _sum_counts(target: dict[str, int], source: Mapping[str, Any], keys: Iterable[str]) -> None:
@@ -243,7 +243,7 @@ def _sum_counts(target: dict[str, int], source: Mapping[str, Any], keys: Iterabl
         target[key] = int(target.get(key, 0)) + int(source.get(key, 0) or 0)
 
 
-def cluster_episodes(
+async def cluster_episodes(
     limit: int = 200,
     *,
     scope: ConsolidationScope | None = None,
@@ -266,9 +266,9 @@ def cluster_episodes(
     )
     scope_clause, scope_params = _scope_sql(scoped, alias="m")
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # Fetch unconsolidated episodic memories
-        result = uow.session.execute(text(f"""
+        result = await uow.session.execute(text(f"""
             SELECT id, content, semantic_embedding, user_id, org_id, visibility
             FROM memories m
             WHERE NOT archived AND NOT consolidated
@@ -334,7 +334,7 @@ def cluster_episodes(
     return clusters
 
 
-def extract_semantic(
+async def extract_semantic(
     cluster_ids: list[int],
     user_id: str | None = None,
     *,
@@ -357,9 +357,9 @@ def extract_semantic(
     )
     scope_clause, scope_params = _scope_sql(scoped, alias="m")
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # Fetch episode contents
-        result = uow.session.execute(text(f"""
+        result = await uow.session.execute(text(f"""
             SELECT id, content, memory_type, salience, tags, user_id, org_id, visibility
             FROM memories m
             WHERE id = ANY(:cluster_ids)
@@ -431,7 +431,7 @@ def extract_semantic(
             )
 
             # Create semantic memory
-            ins_result = uow.session.execute(text("""
+            ins_result = await uow.session.execute(text("""
                 INSERT INTO memories (
                     content, memory_type, memory_tier, semantic_embedding,
                     salience, source, tags,
@@ -460,7 +460,7 @@ def extract_semantic(
             })
             new_id = ins_result.mappings().first()["id"]
 
-            record_memory_review(
+            await async_record_memory_review(
                 uow.session,
                 memory_id=new_id,
                 action="promote",
@@ -473,7 +473,7 @@ def extract_semantic(
             )
 
             # Mark source episodes as consolidated
-            uow.session.execute(text(f"""
+            await uow.session.execute(text(f"""
                 UPDATE memories m SET consolidated = TRUE
                 WHERE id = ANY(:cluster_ids)
                   {scope_clause}
@@ -481,7 +481,7 @@ def extract_semantic(
 
             # Create lineage edges
             for eid in cluster_ids:
-                uow.session.execute(text("""
+                await uow.session.execute(text("""
                     INSERT INTO edges (source_id, target_id, relationship, weight, auto_generated)
                     VALUES (:source_id, :target_id, 'consolidated_from', 1.0, TRUE)
                     ON CONFLICT (source_id, target_id, relationship) DO NOTHING
@@ -495,7 +495,7 @@ def extract_semantic(
             return None
 
 
-def crystallize_procedural(
+async def crystallize_procedural(
     skill_name: str,
     user_id: str | None = None,
     *,
@@ -518,9 +518,9 @@ def crystallize_procedural(
     )
     scope_clause, scope_params = _scope_sql(scoped, alias="m")
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # Find semantic memories related to this skill
-        result = uow.session.execute(text(f"""
+        result = await uow.session.execute(text(f"""
             SELECT id, content, salience, user_id, org_id, visibility
             FROM memories m
             WHERE NOT archived AND memory_tier = 'semantic'
@@ -545,7 +545,7 @@ def crystallize_procedural(
             return None
 
         # Check if we already have a procedural memory for this skill
-        existing_result = uow.session.execute(text(f"""
+        existing_result = await uow.session.execute(text(f"""
             SELECT id FROM memories m
             WHERE NOT archived AND memory_tier = 'procedural'
               AND COALESCE(truth_status, 'unknown') NOT IN ('quarantined', 'expired', 'superseded')
@@ -595,7 +595,7 @@ def crystallize_procedural(
 
             if existing:
                 # Update existing procedural memory
-                uow.session.execute(text("""
+                await uow.session.execute(text("""
                     UPDATE memories SET
                         content = :content,
                         semantic_embedding = CAST(:semantic_emb AS vector),
@@ -631,7 +631,7 @@ def crystallize_procedural(
                 logger.info(f"Updated procedural memory {proc_id} for skill '{skill_name}'")
             else:
                 # Create new procedural memory
-                ins_result = uow.session.execute(text("""
+                ins_result = await uow.session.execute(text("""
                     INSERT INTO memories (
                         content, memory_type, memory_tier, semantic_embedding,
                         salience, source, tags,
@@ -661,7 +661,7 @@ def crystallize_procedural(
                 proc_id = ins_result.mappings().first()["id"]
                 logger.info(f"Created procedural memory {proc_id} for skill '{skill_name}'")
 
-            record_memory_review(
+            await async_record_memory_review(
                 uow.session,
                 memory_id=proc_id,
                 action="promote",
@@ -675,7 +675,7 @@ def crystallize_procedural(
 
             # Create lineage edges
             for sid in source_ids:
-                uow.session.execute(text("""
+                await uow.session.execute(text("""
                     INSERT INTO edges (source_id, target_id, relationship, weight, auto_generated)
                     VALUES (:source_id, :target_id, 'crystallized_from', 1.0, TRUE)
                     ON CONFLICT (source_id, target_id, relationship) DO NOTHING
@@ -688,7 +688,7 @@ def crystallize_procedural(
             return None
 
 
-def apply_forgetting_curve(
+async def apply_forgetting_curve(
     *,
     scope: ConsolidationScope | None = None,
     org_id: str | None = None,
@@ -715,9 +715,9 @@ def apply_forgetting_curve(
     if scoped is not None:
         scope_clause, scope_params = _scope_sql(scoped, alias="m")
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         # Decay episodic memories
-        result_ep = uow.session.execute(text(f"""
+        result_ep = await uow.session.execute(text(f"""
             UPDATE memories m SET
                 salience = GREATEST(:archive_threshold, salience * POWER(:decay_rate,
                     EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 - :grace_days
@@ -740,7 +740,7 @@ def apply_forgetting_curve(
 
         # Decay semantic memories (slower: sqrt of decay rate)
         semantic_decay = DECAY_RATE ** 0.5  # slower decay
-        result_sem = uow.session.execute(text(f"""
+        result_sem = await uow.session.execute(text(f"""
             UPDATE memories m SET
                 salience = GREATEST(:archive_threshold, salience * POWER(:decay_rate,
                     EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 - :grace_days
@@ -762,7 +762,7 @@ def apply_forgetting_curve(
         semantic_decayed = result_sem.rowcount
 
         # Archive memories below threshold
-        result_arch = uow.session.execute(text(f"""
+        result_arch = await uow.session.execute(text(f"""
             UPDATE memories m SET archived = TRUE
             WHERE NOT archived AND decay_eligible
               AND salience <= :archive_threshold
@@ -782,7 +782,7 @@ def apply_forgetting_curve(
     return stats
 
 
-def run_dag_compaction(
+async def run_dag_compaction(
     *,
     org_id: str | None = None,
     user_id: str | None = None,
@@ -810,7 +810,7 @@ def run_dag_compaction(
             visibility=visibility,
         )]
     else:
-        scopes = _discover_consolidation_scopes(org_id=org_id)
+        scopes = await _discover_consolidation_scopes(org_id=org_id)
 
     stats = {
         "leaf_passes": 0,
@@ -819,7 +819,7 @@ def run_dag_compaction(
         "scopes_processed": 0,
     }
     for scoped in scopes:
-        scope_stats = _run_dag_compaction_for_scope(scoped)
+        scope_stats = await _run_dag_compaction_for_scope(scoped)
         stats["leaf_passes"] += scope_stats.get("leaf_passes", 0)
         stats["cascade_passes"] += scope_stats.get("cascade_passes", 0)
         stats["summaries_created"] += scope_stats.get("summaries_created", 0)
@@ -829,7 +829,7 @@ def run_dag_compaction(
     return stats
 
 
-def _run_dag_compaction_for_scope(
+async def _run_dag_compaction_for_scope(
     scope: ConsolidationScope,
 ) -> dict:
     """Run one DAG compaction pass inside a single tenant/visibility scope."""
@@ -851,7 +851,7 @@ def _run_dag_compaction_for_scope(
     cascade_model = low_model
 
     try:
-        with UnitOfWork() as uow:
+        async with UnitOfWork() as uow:
             # ── Phase 1: Leaf compaction ──────────────────────────
             # Find episodic memories not yet in any summary (no SummaryLineage row)
             from sqlalchemy import select
@@ -883,7 +883,7 @@ def _run_dag_compaction_for_scope(
                 leaf_stmt = leaf_stmt.where(Memory.user_id == scope.user_id)
 
             leaf_memories = [
-                memory for memory in uow.session.scalars(leaf_stmt).all()
+                memory for memory in (await uow.session.scalars(leaf_stmt)).all()
                 if _memory_matches_scope(memory, scope)
             ]
 
@@ -926,11 +926,14 @@ def _run_dag_compaction_for_scope(
                         visibility=scope.visibility,
                     )
                     uow.session.add(summary)
-                    uow.session.flush()
+                    await uow.session.flush()
 
                     # Create SummaryLineage entries
                     for mem in chunk:
-                        uow.memory_summaries.add_child_memory(summary.id, mem.id)
+                        await uow.session.execute(text("""
+                            INSERT INTO summary_lineage (summary_id, child_memory_id)
+                            VALUES (:summary_id, :child_memory_id)
+                        """), {"summary_id": summary.id, "child_memory_id": mem.id})
 
                     stats["leaf_passes"] += 1
                     stats["summaries_created"] += 1
@@ -941,14 +944,23 @@ def _run_dag_compaction_for_scope(
             MAX_DEPTH = 5
             for depth in range(0, MAX_DEPTH):
                 try:
-                    summaries_at_depth = uow.memory_summaries.list_by_depth_min_count(
-                        depth=depth,
-                        min_count=4,
-                        org_id=scope.org_id,
-                        user_id=scope.user_id,
-                        visibility=scope.visibility,
+                    from brain.platform.db.models.memory_dag import MemorySummary
+
+                    summary_stmt = (
+                        select(MemorySummary)
+                        .where(MemorySummary.depth == depth)
+                        .where(MemorySummary.stale_at.is_(None))
+                        .where(MemorySummary.visibility == scope.visibility)
+                        .order_by(MemorySummary.id)
                     )
+                    if scope.org_id is not None:
+                        summary_stmt = summary_stmt.where(MemorySummary.org_id == scope.org_id)
+                    if scope.user_id is not None:
+                        summary_stmt = summary_stmt.where(MemorySummary.user_id == scope.user_id)
+                    summaries_at_depth = (await uow.session.scalars(summary_stmt)).all()
                     if not summaries_at_depth:
+                        continue
+                    if len(summaries_at_depth) < 4:
                         continue
 
                     contents = [s.content for s in summaries_at_depth]
@@ -986,13 +998,17 @@ def _run_dag_compaction_for_scope(
                         visibility=scope.visibility,
                     )
                     uow.session.add(cascade_summary)
-                    uow.session.flush()
+                    await uow.session.flush()
 
                     # Link child summaries
                     for child_summary in summaries_at_depth:
-                        uow.memory_summaries.add_child_summary(
-                            cascade_summary.id, child_summary.id
-                        )
+                        await uow.session.execute(text("""
+                            INSERT INTO summary_lineage (summary_id, child_summary_id)
+                            VALUES (:summary_id, :child_summary_id)
+                        """), {
+                            "summary_id": cascade_summary.id,
+                            "child_summary_id": child_summary.id,
+                        })
 
                     stats["cascade_passes"] += 1
                     stats["summaries_created"] += 1
@@ -1005,7 +1021,7 @@ def _run_dag_compaction_for_scope(
 
     # Post-compaction integrity checks (non-fatal)
     try:
-        run_all_checks(org_id=scope.org_id)
+        await run_all_checks(org_id=scope.org_id)
     except Exception as e:
         logger.debug("Post-compaction integrity checks failed: %s", e)
 
@@ -1013,7 +1029,7 @@ def _run_dag_compaction_for_scope(
     return stats
 
 
-def run_consolidation(
+async def run_consolidation(
     *,
     org_id: str | None = None,
     user_id: str | None = None,
@@ -1037,7 +1053,7 @@ def run_consolidation(
         "scopes_processed": 0,
     }
 
-    scopes = _single_or_discovered_scopes(
+    scopes = await _single_or_discovered_scopes(
         scope=scope,
         org_id=org_id,
         user_id=user_id,
@@ -1059,33 +1075,33 @@ def run_consolidation(
         stats["scopes_processed"] += 1
 
         # Step 1+2: Cluster and extract inside one concrete scope.
-        clusters = cluster_episodes(scope=scoped)
+        clusters = await cluster_episodes(scope=scoped)
         stats["clusters_found"] += len(clusters)
 
         for cluster in clusters:
-            new_id = extract_semantic(cluster, user_id=scoped.user_id, scope=scoped)
+            new_id = await extract_semantic(cluster, user_id=scoped.user_id, scope=scoped)
             if new_id:
                 stats["semantic_created"] += 1
 
         # Step 3: Crystallize for active skills inside the same scope.
-        with UnitOfWork() as uow:
-            result = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            result = await uow.session.execute(text("""
                 SELECT DISTINCT name FROM skills
                 WHERE NOT archived AND use_count >= 3
             """))
             skills = [r["name"] for r in result.mappings().all()]
 
         for skill_name in skills:
-            proc_id = crystallize_procedural(skill_name, user_id=scoped.user_id, scope=scoped)
+            proc_id = await crystallize_procedural(skill_name, user_id=scoped.user_id, scope=scoped)
             if proc_id:
                 stats["procedural_created"] += 1
 
         # Step 4: Forgetting curve
-        _sum_counts(forgetting_totals, apply_forgetting_curve(scope=scoped), forgetting_totals.keys())
+        _sum_counts(forgetting_totals, await apply_forgetting_curve(scope=scoped), forgetting_totals.keys())
 
         # Step 5: DAG compaction (memory-DAG integration)
         try:
-            dag_stats = run_dag_compaction(scope=scoped)
+            dag_stats = await run_dag_compaction(scope=scoped)
             _sum_counts(dag_totals, dag_stats, dag_totals.keys())
         except Exception as e:
             logger.error("DAG compaction failed for %s (non-fatal): %s", scoped.key, e)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -12,25 +12,26 @@ class _FakeUOW:
     def __init__(self, session):
         self.session = session
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type, exc, tb):
         return False
 
 
-class _FakeQuery:
+class _FakeScalarResult:
     def __init__(self, entry=None):
         self.entry = entry
 
-    def filter(self, *args, **kwargs):
-        return self
-
-    def order_by(self, *args, **kwargs):
-        return self
-
     def first(self):
         return self.entry
+
+    def all(self):
+        if self.entry is None:
+            return []
+        if isinstance(self.entry, list):
+            return self.entry
+        return [self.entry]
 
 
 class _FakeSession:
@@ -38,51 +39,52 @@ class _FakeSession:
         self.entry = entry
         self.added = []
 
-    def query(self, *args, **kwargs):
-        return _FakeQuery(self.entry)
+    async def scalars(self, *args, **kwargs):
+        return _FakeScalarResult(self.entry)
 
-    def get(self, model, row_id):
+    async def get(self, model, row_id):
         return self.entry
 
     def add(self, obj):
         self.added.append(obj)
 
-    def flush(self):
+    async def flush(self):
         return None
 
     def refresh(self, obj):
         return None
 
 
-def test_resource_lease_manager_acquire_and_release(monkeypatch):
+@pytest.mark.asyncio
+async def test_resource_lease_manager_acquire_and_release(monkeypatch):
     import brain.systems.cortex.resources.leases as leases_mod
     from brain.systems.cortex.resources.leases import ResourceLeaseManager
 
     session = MagicMock()
-    query = MagicMock()
-    query.filter.return_value = query
-    query.order_by.return_value = query
-
     captured = {}
+    scalar_calls = 0
 
-    def first_side_effect():
-        return captured.get("lease")
+    async def scalars_side_effect(*args, **kwargs):
+        nonlocal scalar_calls
+        scalar_calls += 1
+        if scalar_calls <= 2:
+            return _FakeScalarResult(None)
+        return _FakeScalarResult(captured.get("lease"))
 
     def add_side_effect(obj):
         captured["lease"] = obj
         obj.id = 7
 
-    query.first.side_effect = first_side_effect
-    session.query.return_value = query
+    session.scalars = AsyncMock(side_effect=scalars_side_effect)
     session.add.side_effect = add_side_effect
-    session.flush.side_effect = lambda: None
+    session.flush = AsyncMock()
 
     fake_uow = _FakeUOW(session)
     monkeypatch.setattr(leases_mod, "UnitOfWork", lambda: fake_uow)
     monkeypatch.setattr(leases_mod, "publish_safe", lambda *args, **kwargs: None)
 
     manager = ResourceLeaseManager(default_ttl_seconds=60)
-    decision = manager.acquire_lease(
+    decision = await manager.acquire_lease(
         "workspace",
         "repo-root:head:runtime",
         owner_run_id=11,
@@ -96,16 +98,17 @@ def test_resource_lease_manager_acquire_and_release(monkeypatch):
     assert captured["lease"].resource_type == "workspace"
     assert captured["lease"].resource_id == "repo-root:head:runtime"
 
-    released = manager.release_lease("lease-123", release_reason="test_complete")
+    released = await manager.release_lease("lease-123", release_reason="test_complete")
 
     assert released is True
     assert captured["lease"].released_at is not None
     assert captured["lease"].release_reason == "test_complete"
 
 
-def test_resource_lease_manager_reclaims_expired_lease_before_reacquiring(monkeypatch):
+@pytest.mark.asyncio
+async def test_resource_lease_manager_reclaims_expired_lease_before_reacquiring(monkeypatch):
     import brain.systems.cortex.resources.leases as leases_mod
-    from brain.systems.cortex.resources.leases import LeaseDecision, ResourceLeaseManager
+    from brain.systems.cortex.resources.leases import ResourceLeaseManager
 
     expired = SimpleNamespace(
         id=3,
@@ -122,23 +125,20 @@ def test_resource_lease_manager_reclaims_expired_lease_before_reacquiring(monkey
     )
     captured = {}
     session = _FakeSession()
-    query = MagicMock()
-    query.filter.return_value = query
-    query.order_by.return_value = query
-    query.first.side_effect = [expired, None]
-    session.query = MagicMock(return_value=query)
+    session.scalars = AsyncMock(side_effect=[_FakeScalarResult(expired), _FakeScalarResult(None)])
 
     def add_side_effect(obj):
         captured["lease"] = obj
         obj.id = 9
 
     session.add = MagicMock(side_effect=add_side_effect)
+    session.flush = AsyncMock()
     fake_uow = _FakeUOW(session)
     monkeypatch.setattr(leases_mod, "UnitOfWork", lambda: fake_uow)
     monkeypatch.setattr(leases_mod, "publish_safe", lambda *args, **kwargs: None)
 
     manager = ResourceLeaseManager(default_ttl_seconds=60)
-    decision = manager.acquire_lease(
+    decision = await manager.acquire_lease(
         "workspace",
         "repo-root:head:runtime",
         owner_run_id=11,
@@ -153,11 +153,12 @@ def test_resource_lease_manager_reclaims_expired_lease_before_reacquiring(monkey
     assert captured["lease"].id == 9
 
 
-def test_workspace_pool_plan_falls_back_to_cold_when_disabled(monkeypatch):
+@pytest.mark.asyncio
+async def test_workspace_pool_plan_falls_back_to_cold_when_disabled(monkeypatch):
     from brain.systems.cortex.resources.pools import WorkspacePoolManager
 
     monkeypatch.delenv("CORTEX_WARM_WORKSPACE_POOL_ENABLED", raising=False)
-    plan = WorkspacePoolManager().plan(
+    plan = await WorkspacePoolManager().plan(
         repo_root="/repo",
         base_commit="abc123",
         runtime_fingerprint="host:sha:venv",
@@ -171,7 +172,8 @@ def test_workspace_pool_plan_falls_back_to_cold_when_disabled(monkeypatch):
     assert plan.summary["workspace"]["mode"] == "cold"
 
 
-def test_workspace_pool_plan_acquires_warm_candidate_and_materializes_copy(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_workspace_pool_plan_acquires_warm_candidate_and_materializes_copy(monkeypatch, tmp_path):
     import brain.systems.cortex.resources.pools as pools_mod
     from brain.systems.cortex.resources.pools import WorkspacePoolManager
     from brain.systems.cortex.resources.leases import LeaseDecision
@@ -217,18 +219,21 @@ def test_workspace_pool_plan_acquires_warm_candidate_and_materializes_copy(monke
     monkeypatch.setattr(pools_mod.subprocess, "run", fake_run)
 
     manager = WorkspacePoolManager()
-    manager.lease_manager.acquire_lease = lambda *args, **kwargs: LeaseDecision(
-        acquired=True,
-        resource_type="workspace_pool_entry",
-        resource_id="1",
-        lease_token="lease-1",
-        owner_run_id=kwargs.get("owner_run_id"),
-        owner_worker_id=kwargs.get("owner_worker_id"),
-        expires_at=pools_mod._utcnow(),
-        lease_id=55,
-    )
+    async def acquire_lease(*args, **kwargs):
+        return LeaseDecision(
+            acquired=True,
+            resource_type="workspace_pool_entry",
+            resource_id="1",
+            lease_token="lease-1",
+            owner_run_id=kwargs.get("owner_run_id"),
+            owner_worker_id=kwargs.get("owner_worker_id"),
+            expires_at=pools_mod._utcnow(),
+            lease_id=55,
+        )
 
-    plan = manager.plan(
+    manager.lease_manager.acquire_lease = AsyncMock(side_effect=acquire_lease)
+
+    plan = await manager.plan(
         repo_root=entry.repo_root,
         base_commit=entry.base_commit,
         runtime_fingerprint=entry.runtime_fingerprint,
@@ -247,7 +252,8 @@ def test_workspace_pool_plan_acquires_warm_candidate_and_materializes_copy(monke
 
 
 @pytest.mark.parametrize("mode", ["reflink", "snapshot"])
-def test_workspace_pool_plan_downgrades_unsupported_advanced_modes_to_copy(monkeypatch, tmp_path, mode):
+@pytest.mark.asyncio
+async def test_workspace_pool_plan_downgrades_unsupported_advanced_modes_to_copy(monkeypatch, tmp_path, mode):
     import brain.systems.cortex.resources.pools as pools_mod
     from brain.systems.cortex.resources.pools import WorkspacePoolManager
     from brain.systems.cortex.resources.leases import LeaseDecision
@@ -296,18 +302,21 @@ def test_workspace_pool_plan_downgrades_unsupported_advanced_modes_to_copy(monke
     monkeypatch.setattr(pools_mod.subprocess, "run", fake_run)
 
     manager = WorkspacePoolManager()
-    manager.lease_manager.acquire_lease = lambda *args, **kwargs: LeaseDecision(
-        acquired=True,
-        resource_type="workspace_pool_entry",
-        resource_id="4",
-        lease_token="lease-4",
-        owner_run_id=kwargs.get("owner_run_id"),
-        owner_worker_id=kwargs.get("owner_worker_id"),
-        expires_at=pools_mod._utcnow(),
-        lease_id=77,
-    )
+    async def acquire_lease(*args, **kwargs):
+        return LeaseDecision(
+            acquired=True,
+            resource_type="workspace_pool_entry",
+            resource_id="4",
+            lease_token="lease-4",
+            owner_run_id=kwargs.get("owner_run_id"),
+            owner_worker_id=kwargs.get("owner_worker_id"),
+            expires_at=pools_mod._utcnow(),
+            lease_id=77,
+        )
 
-    plan = manager.plan(
+    manager.lease_manager.acquire_lease = AsyncMock(side_effect=acquire_lease)
+
+    plan = await manager.plan(
         repo_root=entry.repo_root,
         base_commit=entry.base_commit,
         runtime_fingerprint=entry.runtime_fingerprint,
@@ -325,7 +334,8 @@ def test_workspace_pool_plan_downgrades_unsupported_advanced_modes_to_copy(monke
     assert all(command[:2] != ["cp", "-cR"] for command in commands)
 
 
-def test_workspace_pool_plan_uses_clone_mode_when_supported(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_workspace_pool_plan_uses_clone_mode_when_supported(monkeypatch, tmp_path):
     import brain.systems.cortex.resources.pools as pools_mod
     from brain.systems.cortex.resources.pools import WorkspacePoolManager
     from brain.systems.cortex.resources.leases import LeaseDecision
@@ -386,18 +396,21 @@ def test_workspace_pool_plan_uses_clone_mode_when_supported(monkeypatch, tmp_pat
     monkeypatch.setattr(pools_mod.subprocess, "run", fake_run)
 
     manager = WorkspacePoolManager()
-    manager.lease_manager.acquire_lease = lambda *args, **kwargs: LeaseDecision(
-        acquired=True,
-        resource_type="workspace_pool_entry",
-        resource_id="5",
-        lease_token="lease-5",
-        owner_run_id=kwargs.get("owner_run_id"),
-        owner_worker_id=kwargs.get("owner_worker_id"),
-        expires_at=pools_mod._utcnow(),
-        lease_id=78,
-    )
+    async def acquire_lease(*args, **kwargs):
+        return LeaseDecision(
+            acquired=True,
+            resource_type="workspace_pool_entry",
+            resource_id="5",
+            lease_token="lease-5",
+            owner_run_id=kwargs.get("owner_run_id"),
+            owner_worker_id=kwargs.get("owner_worker_id"),
+            expires_at=pools_mod._utcnow(),
+            lease_id=78,
+        )
 
-    plan = manager.plan(
+    manager.lease_manager.acquire_lease = AsyncMock(side_effect=acquire_lease)
+
+    plan = await manager.plan(
         repo_root=entry.repo_root,
         base_commit=entry.base_commit,
         runtime_fingerprint=entry.runtime_fingerprint,
@@ -419,7 +432,8 @@ def test_workspace_pool_plan_uses_clone_mode_when_supported(monkeypatch, tmp_pat
     )
 
 
-def test_workspace_pool_validation_failure_destroys_suspicious_candidate(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_workspace_pool_validation_failure_destroys_suspicious_candidate(monkeypatch, tmp_path):
     import brain.systems.cortex.resources.pools as pools_mod
     from brain.systems.cortex.resources.pools import WorkspacePoolManager
 
@@ -459,9 +473,9 @@ def test_workspace_pool_validation_failure_destroys_suspicious_candidate(monkeyp
     monkeypatch.setattr(pools_mod.subprocess, "run", dirty_run)
 
     manager = WorkspacePoolManager()
-    manager.lease_manager.acquire_lease = MagicMock()
+    manager.lease_manager.acquire_lease = AsyncMock()
 
-    plan = manager.plan(
+    plan = await manager.plan(
         repo_root=entry.repo_root,
         base_commit=entry.base_commit,
         runtime_fingerprint=entry.runtime_fingerprint,
@@ -475,4 +489,4 @@ def test_workspace_pool_validation_failure_destroys_suspicious_candidate(monkeyp
     assert plan.reason == "no safe warm workspace candidate available"
     assert entry.status == "destroyed"
     assert not source.exists()
-    manager.lease_manager.acquire_lease.assert_not_called()
+    manager.lease_manager.acquire_lease.assert_not_awaited()

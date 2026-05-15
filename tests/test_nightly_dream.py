@@ -31,16 +31,16 @@ class TestBuildDreamPrompt:
 
 
 class TestStoreDreamMemories:
-    def test_dry_run_no_db(self):
+    async def test_dry_run_no_db(self):
         dream = {
             "connections": [
                 {"insight": "A connects to B", "why_it_matters": "synergy"}
             ],
             "counterfactual": {"scenario": "what if X", "potential_outcome": "Y"}
         }
-        stored = store_dream_memories(dream, date(2026, 3, 4), dry_run=True)
+        stored = await store_dream_memories(dream, date(2026, 3, 4), dry_run=True)
         assert stored == 2  # 1 connection + 1 counterfactual
 
-    def test_empty_dream(self):
-        stored = store_dream_memories({}, date(2026, 3, 4), dry_run=True)
+    async def test_empty_dream(self):
+        stored = await store_dream_memories({}, date(2026, 3, 4), dry_run=True)
         assert stored == 0

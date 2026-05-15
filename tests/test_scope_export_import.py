@@ -202,13 +202,13 @@ class TestImportParsing:
         result = _parse_markdown_sections(str(md), 'lesson')
         assert len(result) == 0
 
-    def test_import_from_workspace_dry_run(self, tmp_workspace):
+    async def test_import_from_workspace_dry_run(self, tmp_workspace):
         from brain.app.cli.brain_import import import_from_workspace
-        stats = import_from_workspace(str(tmp_workspace), dry_run=True)
+        stats = await import_from_workspace(str(tmp_workspace), dry_run=True)
         assert stats['total'] > 0
         assert stats['universal'] + stats['personal'] == stats['total']
 
-    def test_import_from_export_dry_run(self, tmp_path):
+    async def test_import_from_export_dry_run(self, tmp_path):
         from brain.app.cli.brain_import import import_from_export
 
         # Create a minimal export
@@ -231,6 +231,6 @@ class TestImportParsing:
             'triggers': [],
         }]))
 
-        stats = import_from_export(str(tmp_path), dry_run=True)
+        stats = await import_from_export(str(tmp_path), dry_run=True)
         # dry_run for memories prints but doesn't count (no add_memory call)
         assert stats['skills'] == 1

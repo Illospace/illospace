@@ -2256,10 +2256,13 @@
   let renderOwnerWarningIssued = false;
   let workspaceMotionSuspended = false;
   let _isDragging = false;
+  let lastOrbitTickAt = 0;
   const PREVIEW_MEMBER_PREFIX = '__cortex-preview-user__';
   const PREVIEW_IDEA_PREFIX = '__cortex-preview-idea__';
   const PRIMITIVE_SYNC_INTERVAL_MS = 16;
   const SIMULATION_PAINT_INTERVAL_MS = 16;
+  const ORBIT_WAKE_CHECK_INTERVAL_MS = 4_000;
+  const ORBIT_STALE_AFTER_MS = 6_500;
 
   type SimulationPerformanceProfile = {
     alphaDecay: number;
@@ -2401,6 +2404,7 @@
     cancelRenderFrames();
     primitiveSyncLastAt = 0;
     simulationPaintLastAt = 0;
+    lastOrbitTickAt = 0;
     coreGroup = undefined as any;
   }
 
@@ -3680,6 +3684,7 @@
     simulation.on('tick', () => {
       if (renderToken !== renderGeneration) return;
       const now = performance.now();
+      lastOrbitTickAt = now;
       if (simulationPaintLastAt && now - simulationPaintLastAt < simulationPaintIntervalMs()) return;
       simulationPaintLastAt = now;
       if (linkSel) linkSel.attr('d', curvedLinkPath);
@@ -3754,6 +3759,7 @@
   let paused = false;
   let flowState = $state(false);
   let flowCheckInterval: any = null;
+  let orbitWakeCheckInterval: ReturnType<typeof setInterval> | null = null;
 
   function checkFlowState() {
     const panelOpen = cortex.panelOpen;
@@ -3784,6 +3790,30 @@
       stopActiveSimulation();
     } else {
       renderCanvas({ preserveViewport: true });
+    }
+  }
+
+  function ensureOrbitMotionActive() {
+    if (!simulation || paused || workspaceMotionSuspended) return;
+    const nodes = simulation.nodes() as OrbitNode[];
+    clearAttractionCache(nodes);
+    simulation
+      .alphaTarget(idleOrbitAlphaTarget())
+      .alpha(Math.max(simulation.alpha(), 0.14))
+      .restart();
+    schedulePrimitiveOrbitVisuals(nodes);
+  }
+
+  function handleVisibilityChange() {
+    if (document.visibilityState !== 'visible') return;
+    ensureOrbitMotionActive();
+  }
+
+  function checkOrbitMotionHealth() {
+    if (!simulation || paused || workspaceMotionSuspended || document.visibilityState === 'hidden') return;
+    const now = performance.now();
+    if (!lastOrbitTickAt || now - lastOrbitTickAt > ORBIT_STALE_AFTER_MS) {
+      ensureOrbitMotionActive();
     }
   }
 
@@ -3895,7 +3925,9 @@
     initialIdeaHydrationComplete = !cortex.loading || initialIdeas.length > 0;
     window.addEventListener('cortex-fit-view', handleFitView);
     window.addEventListener('cortex-toggle-pause', handleTogglePause);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     flowCheckInterval = setInterval(checkFlowState, 2000);
+    orbitWakeCheckInterval = setInterval(checkOrbitMotionHealth, ORBIT_WAKE_CHECK_INTERVAL_MS);
   });
 
   // Re-initialize attractors when teamMembers loads or user-owned cluster loads change.
@@ -4079,14 +4111,8 @@
   $effect(() => {
     const panelOpen = cortex.panelOpen;
     const selectedId = cortex.selectedIdeaId;
-    if (!svg) return;
-
-    if (panelOpen && selectedId) {
-      suspendWorkspaceMotion();
-      return;
-    }
-
-    resumeWorkspaceMotion();
+    if (!svg || !simulation || !panelOpen || !selectedId) return;
+    ensureOrbitMotionActive();
   });
 
   // Track node properties for change detection
@@ -4242,9 +4268,11 @@
     resetArchiveDragInteraction();
     resetRenderRuntime();
     if (flowCheckInterval) clearInterval(flowCheckInterval);
+    if (orbitWakeCheckInterval) clearInterval(orbitWakeCheckInterval);
     cortex.setBirthContext(null);
     window.removeEventListener('cortex-fit-view', handleFitView);
     window.removeEventListener('cortex-toggle-pause', handleTogglePause);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
   });
 </script>
 
@@ -4263,7 +4291,6 @@
     pinVisuals={primitivePinVisuals}
     appVisuals={primitiveAppVisuals}
     blobVisuals={primitiveBlobVisuals}
-    panelOpen={cortex.panelOpen}
     {semanticZoomLevel}
     themeMode={theme.mode}
     movingPinId={primitivePinDragState?.pinId ?? null}

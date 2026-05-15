@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -15,29 +15,31 @@ import pytest
 class TestScratchpadRepository:
     """Test the repository layer with a mock session."""
 
-    def test_write_creates_entry(self):
+    async def test_write_creates_entry(self):
         from brain.platform.db.repositories.scratchpad import ScratchpadRepository
         from brain.platform.db.models.scratchpad import SessionScratchpad
 
         mock_session = MagicMock()
+        mock_session.flush = AsyncMock()
         repo = ScratchpadRepository(mock_session)
-        entry = repo.write(
+        entry = await repo.write(
             run_id="abc123", section="findings",
             value="Found a bug", key="bug-1", worker_name="develop",
         )
         mock_session.add.assert_called_once()
-        mock_session.flush.assert_called_once()
+        mock_session.flush.assert_awaited_once()
         assert isinstance(entry, SessionScratchpad)
         assert entry.run_id == "abc123"
         assert entry.section == "findings"
         assert entry.key == "bug-1"
 
-    def test_write_without_key(self):
+    async def test_write_without_key(self):
         from brain.platform.db.repositories.scratchpad import ScratchpadRepository
 
         mock_session = MagicMock()
+        mock_session.flush = AsyncMock()
         repo = ScratchpadRepository(mock_session)
-        entry = repo.write(
+        entry = await repo.write(
             run_id="abc123", section="decisions",
             value="Use approach A",
         )
@@ -60,22 +62,22 @@ class TestSessionToolHandlers:
         from brain.systems.runs.tool_handlers import _agent_context
         _agent_context.run = None
 
-    def test_session_write_no_context(self):
+    async def test_session_write_no_context(self):
         from brain.systems.runs.tool_handlers import _handle_session_write
         self._clear_agent_context()
-        result = json.loads(_handle_session_write(section="findings", value="test"))
+        result = json.loads(await _handle_session_write(section="findings", value="test"))
         assert "error" in result
         assert "No active AgentRun" in result["error"]
 
-    def test_session_write_invalid_section(self):
+    async def test_session_write_invalid_section(self):
         from brain.systems.runs.tool_handlers import _handle_session_write
         self._set_agent_context()
-        result = json.loads(_handle_session_write(section="invalid", value="test"))
+        result = json.loads(await _handle_session_write(section="invalid", value="test"))
         assert "error" in result
         assert "Invalid section" in result["error"]
         self._clear_agent_context()
 
-    def test_session_write_success(self):
+    async def test_session_write_success(self):
         from brain.systems.runs.tool_handlers import _handle_session_write
         from brain.platform.db.models.scratchpad import SessionScratchpad
 
@@ -88,35 +90,35 @@ class TestSessionToolHandlers:
         mock_entry.id = 42
 
         mock_uow = MagicMock()
-        mock_uow.scratchpad.write.return_value = mock_entry
+        mock_uow.scratchpad.write = AsyncMock(return_value=mock_entry)
 
-        with patch("brain.platform.db.repositories.unit_of_work.UnitOfWork.__enter__", return_value=mock_uow), \
-             patch("brain.platform.db.repositories.unit_of_work.UnitOfWork.__exit__", return_value=False), \
+        with patch("brain.platform.db.repositories.unit_of_work.UnitOfWork.__aenter__", AsyncMock(return_value=mock_uow)), \
+             patch("brain.platform.db.repositories.unit_of_work.UnitOfWork.__aexit__", AsyncMock(return_value=False)), \
              patch("brain.platform.db.repositories.unit_of_work.UnitOfWork.__init__", return_value=None):
-            result = json.loads(_handle_session_write(section="findings", value="test value", key="k1"))
+            result = json.loads(await _handle_session_write(section="findings", value="test value", key="k1"))
 
         assert result["written"] is True
         assert result["id"] == 42
         assert result["section"] == "findings"
         self._clear_agent_context()
 
-    def test_session_read_no_context(self):
+    async def test_session_read_no_context(self):
         from brain.systems.runs.tool_handlers import _handle_session_read
         self._clear_agent_context()
-        result = json.loads(_handle_session_read())
+        result = json.loads(await _handle_session_read())
         assert "error" in result
 
-    def test_session_append_delegates_to_write(self):
+    async def test_session_append_delegates_to_write(self):
         from brain.systems.runs.tool_handlers import _handle_session_append
         self._clear_agent_context()
         # Without context, should still return error (same as write)
-        result = json.loads(_handle_session_append(section="findings", value="test"))
+        result = json.loads(await _handle_session_append(section="findings", value="test"))
         assert "error" in result
 
-    def test_session_list_no_context(self):
+    async def test_session_list_no_context(self):
         from brain.systems.runs.tool_handlers import _handle_session_list
         self._clear_agent_context()
-        result = json.loads(_handle_session_list())
+        result = json.loads(await _handle_session_list())
         assert "error" in result
 
 

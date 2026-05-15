@@ -8,7 +8,6 @@ from typing import Any
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.systems.runs.domain import (
     AgentRun,
@@ -57,12 +56,61 @@ def _event_lock(run_id: int) -> threading.RLock:
         return lock
 
 
-class AgentRunStore:
-    def __init__(self, session: Session, *, auto_commit: bool = False):
+
+def to_domain(row: AgentRunRow) -> AgentRun:
+    return AgentRun(
+        id=_row_value(row, "id"),
+        trace_id=_row_value(row, "trace_id") or trace_id_for_run_id(_row_value(row, "id")) or "",
+        org_id=_row_value(row, "org_id"),
+        user_id=_row_value(row, "user_id"),
+        thread_id=_row_value(row, "thread_id"),
+        parent_run_id=_row_value(row, "parent_run_id"),
+        root_run_id=_row_value(row, "root_run_id"),
+        profile=RunProfile(_row_value(row, "profile")),
+        recipe=RunRecipe(_row_value(row, "recipe")),
+        status=coerce_run_status(_row_value(row, "status"), default=RunStatus.FAILED),
+        input_message=_row_value(row, "input_message"),
+        target_ref=dict(_row_value(row, "target_ref") or {}),
+        workspace_ref=dict(_row_value(row, "workspace_ref") or {}),
+        model_policy=dict(_row_value(row, "model_policy") or {}),
+        context_summary=_row_value(row, "context_summary"),
+        metadata=dict(_row_value(row, "metadata_") or {}),
+        created_at=_row_value(row, "created_at"),
+        started_at=_row_value(row, "started_at"),
+        paused_at=_row_value(row, "paused_at"),
+        completed_at=_row_value(row, "completed_at"),
+        failed_at=_row_value(row, "failed_at"),
+        canceled_at=_row_value(row, "canceled_at"),
+        updated_at=_row_value(row, "updated_at"),
+    )
+
+
+def _row_value(row: AgentRunRow, key: str) -> Any:
+    return row.__dict__.get(key)
+
+
+def _deferred_run_target_id(row: AgentRunRow) -> int | None:
+    metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
+    for key in _DEFERRED_RUN_TARGET_METADATA_KEYS:
+        raw = metadata.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            target_id = int(str(raw))
+        except (TypeError, ValueError):
+            continue
+        return target_id if target_id != int(row.id) else None
+    return None
+
+
+class AsyncAgentRunStore:
+    """Async persistence boundary for agent runs."""
+
+    def __init__(self, session: AsyncSession, *, auto_commit: bool = False):
         self.session = session
         self.auto_commit = bool(auto_commit)
 
-    def create_run(self, request: AgentRunRequest) -> AgentRun:
+    async def create_run(self, request: AgentRunRequest) -> AgentRun:
         profile = request.normalized_profile
         recipe = request.normalized_recipe
         row = AgentRunRow(
@@ -81,12 +129,12 @@ class AgentRunStore:
             metadata_=dict(request.metadata or {}),
         )
         self.session.add(row)
-        self.session.flush()
+        await self.session.flush()
         row.trace_id = trace_id_for_run_id(row.id)
         if row.root_run_id is None:
             row.root_run_id = row.id
-        self.session.flush()
-        self.append_event(
+        await self.session.flush()
+        await self.append_event(
             run_event(
                 row.id,
                 "run.created",
@@ -94,46 +142,48 @@ class AgentRunStore:
                 root_run_id=row.root_run_id,
             )
         )
-        return self.to_domain(row)
+        return to_domain(row)
 
-    def create_child_run(
-        self,
-        parent: AgentRun | AgentRunRow,
-        *,
-        recipe: RunRecipe | str,
-        message: str,
-        profile: RunProfile | str | None = None,
-        step_key: str | None = None,
-        target_ref: dict[str, Any] | None = None,
-        workspace_ref: dict[str, Any] | None = None,
-        model_policy: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> AgentRun:
-        parent_run = parent if isinstance(parent, AgentRunRow) else self.require_run(parent.id)
+    async def create_child_run(self, parent: AgentRun | AgentRunRow, **kwargs: Any) -> AgentRun:
+        parent_run = parent if isinstance(parent, AgentRunRow) else await self.require_run(parent.id)
+        recipe = kwargs["recipe"]
         recipe_value = recipe.value if isinstance(recipe, RunRecipe) else str(recipe)
-        metadata_payload = dict(metadata or {})
+        step_key = kwargs.get("step_key")
+        metadata_payload = dict(kwargs.get("metadata") or {})
         if step_key:
             metadata_payload["parent_step_key"] = step_key
-            existing = self.child_run_for_step(parent_run.id, step_key)
+            existing = await self.child_run_for_step(parent_run.id, step_key)
             if existing is not None:
-                return self.to_domain(existing)
-        child = self.create_run(
+                return to_domain(existing)
+        child = await self.create_run(
             AgentRunRequest(
                 org_id=parent_run.org_id,
                 user_id=parent_run.user_id,
                 thread_id=parent_run.thread_id,
                 parent_run_id=parent_run.id,
                 root_run_id=parent_run.root_run_id or parent_run.id,
-                profile=profile or parent_run.profile,
+                profile=kwargs.get("profile") or parent_run.profile,
                 recipe=recipe_value,
-                message=message,
-                target_ref=dict(target_ref if target_ref is not None else parent_run.target_ref or {}),
-                workspace_ref=dict(workspace_ref if workspace_ref is not None else parent_run.workspace_ref or {}),
-                model_policy=dict(model_policy if model_policy is not None else parent_run.model_policy or {}),
+                message=kwargs["message"],
+                target_ref=dict(
+                    kwargs["target_ref"]
+                    if kwargs.get("target_ref") is not None
+                    else parent_run.target_ref or {}
+                ),
+                workspace_ref=dict(
+                    kwargs["workspace_ref"]
+                    if kwargs.get("workspace_ref") is not None
+                    else parent_run.workspace_ref or {}
+                ),
+                model_policy=dict(
+                    kwargs["model_policy"]
+                    if kwargs.get("model_policy") is not None
+                    else parent_run.model_policy or {}
+                ),
                 metadata=metadata_payload,
             )
         )
-        self.append_event(
+        await self.append_event(
             run_event(
                 parent_run.id,
                 "run.child_created",
@@ -143,11 +193,13 @@ class AgentRunStore:
         )
         return child
 
-    def child_run_for_step(self, parent_run_id: int, step_key: str) -> AgentRunRow | None:
-        rows = self.session.scalars(
-            select(AgentRunRow)
-            .where(AgentRunRow.parent_run_id == int(parent_run_id))
-            .order_by(AgentRunRow.id.asc())
+    async def child_run_for_step(self, parent_run_id: int, step_key: str) -> AgentRunRow | None:
+        rows = (
+            await self.session.scalars(
+                select(AgentRunRow)
+                .where(AgentRunRow.parent_run_id == int(parent_run_id))
+                .order_by(AgentRunRow.id.asc())
+            )
         ).all()
         for row in rows:
             metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
@@ -155,40 +207,30 @@ class AgentRunStore:
                 return row
         return None
 
-    def child_runs(self, parent_run_id: int) -> list[AgentRunRow]:
-        return list(
-            self.session.scalars(
-                select(AgentRunRow)
-                .where(AgentRunRow.parent_run_id == int(parent_run_id))
-                .order_by(AgentRunRow.id.asc())
-            )
+    async def child_runs(self, parent_run_id: int) -> list[AgentRunRow]:
+        result = await self.session.scalars(
+            select(AgentRunRow)
+            .where(AgentRunRow.parent_run_id == int(parent_run_id))
+            .order_by(AgentRunRow.id.asc())
         )
+        return list(result)
 
-    def get_child_run(self, parent_run_id: int, child_run_id: int) -> AgentRunRow | None:
-        row = self.get_run(child_run_id)
+    async def get_child_run(self, parent_run_id: int, child_run_id: int) -> AgentRunRow | None:
+        row = await self.get_run(child_run_id)
         if row is None or row.parent_run_id != int(parent_run_id):
             return None
         return row
 
-    def get_run(self, run_id: int) -> AgentRunRow | None:
-        return self.session.get(AgentRunRow, run_id)
-
-    def require_run(self, run_id: int) -> AgentRunRow:
-        row = self.get_run(run_id)
-        if row is None:
-            raise LookupError(f"Run {run_id} not found")
-        return row
-
-    def claim_next_run_ids(self, *, limit: int = 1) -> list[int]:
+    async def claim_next_run_ids(self, *, limit: int = 1) -> list[int]:
         ids: list[int] = []
         for _ in range(max(0, int(limit))):
-            claimed = self.claim_next()
+            claimed = await self.claim_next()
             if claimed is None:
                 break
             ids.append(int(claimed.id))
         return ids
 
-    def claim_next(self) -> AgentRun | None:
+    async def claim_next(self) -> AgentRun | None:
         batch_size = 25
         seen_ids: list[int] = []
         while True:
@@ -202,72 +244,42 @@ class AgentRunStore:
                 stmt = stmt.where(~AgentRunRow.id.in_(seen_ids))
             if self._dialect_name() == "postgresql":
                 stmt = stmt.with_for_update(skip_locked=True)
-            rows = self.session.scalars(stmt).all()
+            rows = (await self.session.scalars(stmt)).all()
             if not rows:
                 return None
             for row in rows:
-                if self._deferred_run_dependency_active(row):
+                if await self._deferred_run_dependency_active(row):
                     seen_ids.append(int(row.id))
                     continue
-                return self.set_status(row.id, RunStatus.STARTING, reason="claimed")
+                return await self.set_status(row.id, RunStatus.STARTING, reason="claimed")
 
-    def _deferred_run_target_id(self, row: AgentRunRow) -> int | None:
-        metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
-        for key in _DEFERRED_RUN_TARGET_METADATA_KEYS:
-            raw = metadata.get(key)
-            if raw in (None, ""):
-                continue
-            try:
-                target_id = int(str(raw))
-            except (TypeError, ValueError):
-                continue
-            return target_id if target_id != int(row.id) else None
-        return None
-
-    def _deferred_run_dependency_active(self, row: AgentRunRow) -> bool:
-        target_id = self._deferred_run_target_id(row)
-        if target_id is None:
-            return False
-
-        target_status = self.session.scalar(
-            select(AgentRunRow.status).where(AgentRunRow.id == int(target_id)).limit(1)
-        )
-        if str(target_status or "").lower() in _DEFERRED_RUN_ACTIVE_STATUS_VALUES:
-            return True
-
-        if not row.thread_id:
-            return False
-        older_active = self.session.scalar(
-            select(AgentRunRow.id)
-            .where(
-                AgentRunRow.thread_id == row.thread_id,
-                AgentRunRow.parent_run_id.is_(None),
-                AgentRunRow.id < int(row.id),
-                AgentRunRow.status.in_(sorted(_DEFERRED_RUN_ACTIVE_STATUS_VALUES)),
-            )
-            .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
-            .limit(1)
-        )
-        return older_active is not None
-
-    def claim_run(self, run_id: int) -> AgentRun | None:
-        row = self._locked_run(run_id)
+    async def claim_run(self, run_id: int) -> AgentRun | None:
+        row = await self._locked_run(run_id)
         if row.status != RunStatus.QUEUED.value:
             return None
-        return self.set_status(row.id, RunStatus.STARTING, reason="claimed")
+        return await self.set_status(row.id, RunStatus.STARTING, reason="claimed")
 
-    def metadata_for_run(self, run_id: int) -> dict[str, Any]:
-        return dict(self.require_run(run_id).metadata_ or {})
+    async def get_run(self, run_id: int) -> AgentRunRow | None:
+        return await self.session.get(AgentRunRow, int(run_id))
 
-    def update_metadata(self, run_id: int, patch: dict[str, Any]) -> dict[str, Any]:
-        row = self.require_run(run_id)
+    async def require_run(self, run_id: int) -> AgentRunRow:
+        row = await self.get_run(run_id)
+        if row is None:
+            raise LookupError(f"Run {run_id} not found")
+        return row
+
+    async def metadata_for_run(self, run_id: int) -> dict[str, Any]:
+        return dict((await self.require_run(run_id)).metadata_ or {})
+
+    async def update_metadata(self, run_id: int, patch: dict[str, Any]) -> dict[str, Any]:
+        row = await self.require_run(run_id)
         metadata = dict(row.metadata_ or {})
         metadata.update(dict(patch or {}))
         row.metadata_ = metadata
-        self.session.flush()
+        await self.session.flush()
         return metadata
 
-    def heartbeat_run(
+    async def heartbeat_run(
         self,
         run_id: int,
         *,
@@ -276,8 +288,7 @@ class AgentRunStore:
         min_interval_seconds: float = 0.0,
         now: datetime | None = None,
     ) -> bool:
-        """Refresh the runner-owned liveness marker without creating UI noise."""
-        row = self.require_run(run_id)
+        row = await self.require_run(run_id)
         status = coerce_run_status(row.status, default=RunStatus.FAILED)
         if status not in _RUNNER_HEARTBEAT_STATUSES:
             return False
@@ -297,40 +308,41 @@ class AgentRunStore:
             "reason": reason or previous.get("reason") or "running",
         }
         row.metadata_ = metadata
-        self.session.flush()
+        await self.session.flush()
         return True
 
-    def cursor_for_run(self, run_id: int) -> dict[str, Any]:
-        metadata = self.metadata_for_run(run_id)
+    async def cursor_for_run(self, run_id: int) -> dict[str, Any]:
+        metadata = await self.metadata_for_run(run_id)
         cursor = metadata.get("cursor")
         return dict(cursor) if isinstance(cursor, dict) else {"completed_steps": {}}
 
-    def set_cursor(self, run_id: int, cursor: dict[str, Any]) -> dict[str, Any]:
-        metadata = self.metadata_for_run(run_id)
+    async def set_cursor(self, run_id: int, cursor: dict[str, Any]) -> dict[str, Any]:
+        metadata = await self.metadata_for_run(run_id)
         metadata["cursor"] = dict(cursor or {})
-        self.require_run(run_id).metadata_ = metadata
-        self.session.flush()
+        row = await self.require_run(run_id)
+        row.metadata_ = metadata
+        await self.session.flush()
         return metadata["cursor"]
 
-    def start_step(self, run_id: int, step_key: str) -> None:
-        cursor = self.cursor_for_run(run_id)
+    async def start_step(self, run_id: int, step_key: str) -> None:
+        cursor = await self.cursor_for_run(run_id)
         cursor["current_step"] = step_key
-        self.set_cursor(run_id, cursor)
-        run = self.require_run(run_id)
-        self.append_event(
+        await self.set_cursor(run_id, cursor)
+        run = await self.require_run(run_id)
+        await self.append_event(
             run_event(run_id, "run.step_started", {"step": step_key, "step_key": step_key}, root_run_id=run.root_run_id)
         )
 
-    def complete_step(self, run_id: int, step_key: str, result: Any = None) -> Any:
-        cursor = self.cursor_for_run(run_id)
+    async def complete_step(self, run_id: int, step_key: str, result: Any = None) -> Any:
+        cursor = await self.cursor_for_run(run_id)
         completed = dict(cursor.get("completed_steps") or {})
         completed[step_key] = {"result": _jsonable(result), "completed_at": datetime.now(timezone.utc).isoformat()}
         cursor["completed_steps"] = completed
         if cursor.get("current_step") == step_key:
             cursor.pop("current_step", None)
-        self.set_cursor(run_id, cursor)
-        run = self.require_run(run_id)
-        self.append_event(
+        await self.set_cursor(run_id, cursor)
+        run = await self.require_run(run_id)
+        await self.append_event(
             run_event(
                 run_id,
                 "run.step_completed",
@@ -340,10 +352,10 @@ class AgentRunStore:
         )
         return result
 
-    def fail_step(self, run_id: int, step_key: str, error: str) -> None:
-        self.update_metadata(run_id, {"last_failed_step": step_key})
-        run = self.require_run(run_id)
-        self.append_event(
+    async def fail_step(self, run_id: int, step_key: str, error: str) -> None:
+        await self.update_metadata(run_id, {"last_failed_step": step_key})
+        run = await self.require_run(run_id)
+        await self.append_event(
             run_event(
                 run_id,
                 "run.step_failed",
@@ -352,14 +364,14 @@ class AgentRunStore:
             )
         )
 
-    def skip_step(self, run_id: int, step_key: str) -> None:
-        run = self.require_run(run_id)
-        self.append_event(
+    async def skip_step(self, run_id: int, step_key: str) -> None:
+        run = await self.require_run(run_id)
+        await self.append_event(
             run_event(run_id, "run.step_skipped", {"step": step_key, "step_key": step_key}, root_run_id=run.root_run_id)
         )
 
-    def step_result(self, run_id: int, step_key: str) -> Any | None:
-        completed = self.cursor_for_run(run_id).get("completed_steps") or {}
+    async def step_result(self, run_id: int, step_key: str) -> Any | None:
+        completed = (await self.cursor_for_run(run_id)).get("completed_steps") or {}
         if step_key not in completed:
             return None
         entry = completed.get(step_key)
@@ -367,14 +379,14 @@ class AgentRunStore:
             return entry.get("result")
         return entry
 
-    def step_completed(self, run_id: int, step_key: str) -> bool:
-        return step_key in (self.cursor_for_run(run_id).get("completed_steps") or {})
+    async def step_completed(self, run_id: int, step_key: str) -> bool:
+        return step_key in ((await self.cursor_for_run(run_id)).get("completed_steps") or {})
 
-    def set_status(self, run_id: int, status: RunStatus | str, *, reason: str | None = None) -> AgentRun:
-        row = self.require_run(run_id)
+    async def set_status(self, run_id: int, status: RunStatus | str, *, reason: str | None = None) -> AgentRun:
+        row = await self.require_run(run_id)
         current, target = ensure_run_transition(row.status, status)
         if current == target:
-            return self.to_domain(row)
+            return to_domain(row)
         now = datetime.now(timezone.utc)
         row.status = target.value
         if target == RunStatus.STARTING:
@@ -387,7 +399,7 @@ class AgentRunStore:
             row.failed_at = now
         elif target == RunStatus.CANCELED:
             row.canceled_at = now
-        self.append_event(
+        await self.append_event(
             status_changed_event(
                 row.id,
                 from_status=current.value,
@@ -396,9 +408,9 @@ class AgentRunStore:
                 reason=reason,
             )
         )
-        return self.to_domain(row)
+        return to_domain(row)
 
-    def append_steering(
+    async def append_steering(
         self,
         run_id: int,
         content: str,
@@ -406,14 +418,14 @@ class AgentRunStore:
         user_id: str | None = None,
         thread_message_id: int | None = None,
     ) -> AgentRunEventRow:
-        run = self.require_run(run_id)
+        run = await self.require_run(run_id)
         message = SteeringMessage(run_id=run.id, content=content, user_id=user_id).normalized()
         if not message.content:
             raise ValueError("Steering content is required")
         payload: dict[str, Any] = {"content": message.content, "user_id": message.user_id}
         if thread_message_id is not None:
             payload["thread_message_id"] = int(thread_message_id)
-        return self.append_event(
+        return await self.append_event(
             run_event(
                 run.id,
                 _STEERING_SUBMITTED_EVENT,
@@ -423,36 +435,38 @@ class AgentRunStore:
             )
         )
 
-    def drain_steering(self, run_id: int) -> list[SteeringMessage]:
-        run = self.require_run(run_id)
+    async def drain_steering(self, run_id: int) -> list[SteeringMessage]:
+        run = await self.require_run(run_id)
         metadata = dict(run.metadata_ or {})
         cursor = _coerce_int(metadata.get(_STEERING_CURSOR_METADATA_KEY), default=0)
-        rows = self.session.scalars(
-            select(AgentRunEventRow)
-            .where(
-                AgentRunEventRow.run_id == int(run_id),
-                AgentRunEventRow.event_type == _STEERING_SUBMITTED_EVENT,
-                AgentRunEventRow.sequence_no > cursor,
+        rows = (
+            await self.session.scalars(
+                select(AgentRunEventRow)
+                .where(
+                    AgentRunEventRow.run_id == int(run_id),
+                    AgentRunEventRow.event_type == _STEERING_SUBMITTED_EVENT,
+                    AgentRunEventRow.sequence_no > cursor,
+                )
+                .order_by(AgentRunEventRow.sequence_no.asc(), AgentRunEventRow.id.asc())
             )
-            .order_by(AgentRunEventRow.sequence_no.asc(), AgentRunEventRow.id.asc())
         ).all()
         if not rows:
             if self.auto_commit:
-                self.session.rollback()
+                await self.session.rollback()
             return []
 
-        run = self._locked_run(run_id)
+        run = await self._locked_run(run_id)
         metadata = dict(run.metadata_ or {})
         cursor = _coerce_int(metadata.get(_STEERING_CURSOR_METADATA_KEY), default=0)
         rows = [row for row in rows if int(row.sequence_no) > cursor]
         if not rows:
             if self.auto_commit:
-                self.session.rollback()
+                await self.session.rollback()
             return []
 
         metadata[_STEERING_CURSOR_METADATA_KEY] = int(rows[-1].sequence_no)
         run.metadata_ = metadata
-        self.session.flush()
+        await self.session.flush()
 
         messages: list[SteeringMessage] = []
         for row in rows:
@@ -466,17 +480,20 @@ class AgentRunStore:
             if message.content:
                 messages.append(message)
         if self.auto_commit:
-            self.session.commit()
+            await self.session.commit()
         return messages
 
-    def append_event(self, event: AgentRunEvent) -> AgentRunEventRow:
+    async def append_event(self, event: AgentRunEvent) -> AgentRunEventRow:
         with _event_lock(int(event.run_id)):
             if self._dialect_name() == "postgresql":
-                self.session.execute(text("SELECT pg_advisory_xact_lock(:run_id)"), {"run_id": int(event.run_id)})
+                await self.session.execute(
+                    text("SELECT pg_advisory_xact_lock(:run_id)"),
+                    {"run_id": int(event.run_id)},
+                )
             sequence_no = event.sequence_no
             if sequence_no is None:
                 sequence_no = int(
-                    self.session.scalar(
+                    await self.session.scalar(
                         select(func.coalesce(func.max(AgentRunEventRow.sequence_no), 0)).where(
                             AgentRunEventRow.run_id == event.run_id
                         )
@@ -495,22 +512,12 @@ class AgentRunStore:
                 ),
             )
             self.session.add(row)
-            self.session.flush()
+            await self.session.flush()
             if self.auto_commit:
-                self.session.commit()
+                await self.session.commit()
             return row
 
-    def has_event_type(self, run_id: int, event_type: str) -> bool:
-        return self.session.scalar(
-            select(AgentRunEventRow.id)
-            .where(
-                AgentRunEventRow.run_id == int(run_id),
-                AgentRunEventRow.event_type == str(event_type),
-            )
-            .limit(1)
-        ) is not None
-
-    def append_artifact(self, artifact: AgentRunArtifact) -> AgentRunArtifactRow:
+    async def append_artifact(self, artifact: AgentRunArtifact) -> AgentRunArtifactRow:
         artifact_type = (
             artifact.artifact_type.value
             if isinstance(artifact.artifact_type, ArtifactType)
@@ -531,8 +538,8 @@ class AgentRunStore:
             ),
         )
         self.session.add(row)
-        self.session.flush()
-        self.append_event(
+        await self.session.flush()
+        await self.append_event(
             run_event(
                 artifact.run_id,
                 "run.artifact_created",
@@ -542,7 +549,7 @@ class AgentRunStore:
         )
         return row
 
-    def append_final_answer_once(
+    async def append_final_answer_once(
         self,
         run_id: int,
         text_value: str,
@@ -552,76 +559,94 @@ class AgentRunStore:
         text_value = str(text_value or "")
         if not text_value:
             return None
-        existing = self.session.scalars(
-            select(AgentRunArtifactRow)
-            .where(
-                AgentRunArtifactRow.run_id == int(run_id),
-                AgentRunArtifactRow.artifact_type == ArtifactType.FINAL_ANSWER.value,
-                AgentRunArtifactRow.text == text_value,
+        existing = (
+            await self.session.scalars(
+                select(AgentRunArtifactRow)
+                .where(
+                    AgentRunArtifactRow.run_id == int(run_id),
+                    AgentRunArtifactRow.artifact_type == ArtifactType.FINAL_ANSWER.value,
+                    AgentRunArtifactRow.text == text_value,
+                )
+                .order_by(AgentRunArtifactRow.id.asc())
+                .limit(1)
             )
-            .order_by(AgentRunArtifactRow.id.asc())
-            .limit(1)
         ).first()
         if existing is not None:
             return existing
         from brain.systems.runs.artifacts import final_answer_artifact
 
-        return self.append_artifact(final_answer_artifact(run_id, text_value, root_run_id=root_run_id))
+        return await self.append_artifact(final_answer_artifact(run_id, text_value, root_run_id=root_run_id))
 
-    def latest_artifact_text(self, run_id: int, artifact_type: ArtifactType | str = ArtifactType.FINAL_ANSWER) -> str:
+    async def latest_artifact_text(self, run_id: int, artifact_type: ArtifactType | str = ArtifactType.FINAL_ANSWER) -> str:
         artifact_type_value = artifact_type.value if isinstance(artifact_type, ArtifactType) else str(artifact_type)
-        row = self.session.scalars(
-            select(AgentRunArtifactRow)
-            .where(
-                AgentRunArtifactRow.run_id == int(run_id),
-                AgentRunArtifactRow.artifact_type == artifact_type_value,
+        row = (
+            await self.session.scalars(
+                select(AgentRunArtifactRow)
+                .where(
+                    AgentRunArtifactRow.run_id == int(run_id),
+                    AgentRunArtifactRow.artifact_type == artifact_type_value,
+                )
+                .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())
+                .limit(1)
             )
-            .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())
-            .limit(1)
         ).first()
         return str(getattr(row, "text", None) or "") if row is not None else ""
 
-    def list_artifacts(self, run_id: int) -> list[AgentRunArtifactRow]:
-        return list(
-            self.session.scalars(
-                select(AgentRunArtifactRow)
-                .where(AgentRunArtifactRow.run_id == int(run_id))
-                .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
+    async def list_artifacts(self, run_id: int) -> list[AgentRunArtifactRow]:
+        result = await self.session.scalars(
+            select(AgentRunArtifactRow)
+            .where(AgentRunArtifactRow.run_id == int(run_id))
+            .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
+        )
+        return list(result)
+
+    async def has_event_type(self, run_id: int, event_type: str) -> bool:
+        return (
+            await self.session.scalar(
+                select(AgentRunEventRow.id)
+                .where(
+                    AgentRunEventRow.run_id == int(run_id),
+                    AgentRunEventRow.event_type == str(event_type),
+                )
+                .limit(1)
             )
-        )
+        ) is not None
 
-    def to_domain(self, row: AgentRunRow) -> AgentRun:
-        return AgentRun(
-            id=row.id,
-            trace_id=row.trace_id or trace_id_for_run_id(row.id) or "",
-            org_id=row.org_id,
-            user_id=row.user_id,
-            thread_id=row.thread_id,
-            parent_run_id=row.parent_run_id,
-            root_run_id=row.root_run_id,
-            profile=RunProfile(row.profile),
-            recipe=RunRecipe(row.recipe),
-            status=coerce_run_status(row.status, default=RunStatus.FAILED),
-            input_message=row.input_message,
-            target_ref=dict(row.target_ref or {}),
-            workspace_ref=dict(row.workspace_ref or {}),
-            model_policy=dict(row.model_policy or {}),
-            context_summary=row.context_summary,
-            metadata=dict(row.metadata_ or {}),
-            created_at=row.created_at,
-            started_at=row.started_at,
-            paused_at=row.paused_at,
-            completed_at=row.completed_at,
-            failed_at=row.failed_at,
-            canceled_at=row.canceled_at,
-            updated_at=row.updated_at,
-        )
+    @staticmethod
+    def to_domain(row: AgentRunRow) -> AgentRun:
+        return to_domain(row)
 
-    def _locked_run(self, run_id: int) -> AgentRunRow:
+    async def _deferred_run_dependency_active(self, row: AgentRunRow) -> bool:
+        target_id = _deferred_run_target_id(row)
+        if target_id is None:
+            return False
+
+        target_status = await self.session.scalar(
+            select(AgentRunRow.status).where(AgentRunRow.id == int(target_id)).limit(1)
+        )
+        if str(target_status or "").lower() in _DEFERRED_RUN_ACTIVE_STATUS_VALUES:
+            return True
+
+        if not row.thread_id:
+            return False
+        older_active = await self.session.scalar(
+            select(AgentRunRow.id)
+            .where(
+                AgentRunRow.thread_id == row.thread_id,
+                AgentRunRow.parent_run_id.is_(None),
+                AgentRunRow.id < int(row.id),
+                AgentRunRow.status.in_(sorted(_DEFERRED_RUN_ACTIVE_STATUS_VALUES)),
+            )
+            .order_by(AgentRunRow.created_at.asc(), AgentRunRow.id.asc())
+            .limit(1)
+        )
+        return older_active is not None
+
+    async def _locked_run(self, run_id: int) -> AgentRunRow:
         stmt = select(AgentRunRow).where(AgentRunRow.id == int(run_id)).limit(1)
         if self._dialect_name() == "postgresql":
             stmt = stmt.with_for_update()
-        row = self.session.scalars(stmt).first()
+        row = (await self.session.scalars(stmt)).first()
         if row is None:
             raise LookupError(f"Run {run_id} not found")
         return row
@@ -631,48 +656,7 @@ class AgentRunStore:
         return str(getattr(getattr(bind, "dialect", None), "name", "") or "")
 
 
-class AsyncAgentRunStore:
-    """Async facade for the agent-run store.
-
-    Each method runs the existing synchronous domain operation inside
-    ``AsyncSession.run_sync``. Callers should open a short-lived async session,
-    perform the persistence operation, then commit before any long-running
-    model, tool, browser, or connector I/O.
-    """
-
-    def __init__(self, session: AsyncSession, *, auto_commit: bool = False):
-        self.session = session
-        self.auto_commit = bool(auto_commit)
-
-    async def _run(self, fn):
-        def _invoke(sync_session: Session):
-            return fn(AgentRunStore(sync_session, auto_commit=self.auto_commit))
-
-        return await self.session.run_sync(_invoke)
-
-    async def create_run(self, request: AgentRunRequest) -> AgentRun:
-        return await self._run(lambda store: store.create_run(request))
-
-    async def create_child_run(self, parent: AgentRun | AgentRunRow, **kwargs: Any) -> AgentRun:
-        return await self._run(lambda store: store.create_child_run(parent, **kwargs))
-
-    async def claim_next(self) -> AgentRun | None:
-        return await self._run(lambda store: store.claim_next())
-
-    async def claim_run(self, run_id: int) -> AgentRun | None:
-        return await self._run(lambda store: store.claim_run(run_id))
-
-    async def set_status(self, run_id: int, status: RunStatus | str, *, reason: str | None = None) -> AgentRun:
-        return await self._run(lambda store: store.set_status(run_id, status, reason=reason))
-
-    async def append_event(self, event: AgentRunEvent) -> AgentRunEventRow:
-        return await self._run(lambda store: store.append_event(event))
-
-    async def append_artifact(self, artifact: AgentRunArtifact) -> AgentRunArtifactRow:
-        return await self._run(lambda store: store.append_artifact(artifact))
-
-
-__all__ = ["AgentRunStore", "AsyncAgentRunStore"]
+__all__ = ["AsyncAgentRunStore", "to_domain"]
 
 
 def _jsonable(value: Any) -> Any:

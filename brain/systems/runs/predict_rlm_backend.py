@@ -11,26 +11,33 @@ import os
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from brain.systems.runs.events import record_tool_call
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from brain.platform.async_io import run_blocking
+from brain.systems.runs.events import async_record_tool_call
 from brain.platform.db.models.org import Org, User
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.integrations.llm import _resolve_key_from_db, _resolve_key_from_env, resolve_llm_client
+from brain.platform.integrations.llm import _resolve_key_from_env, resolve_llm_client
 from brain.platform.integrations.providers import LLMRequest, _merge_streamed_output_into_response, get_provider
 from brain.systems.runs.direct_agent import (
     AgentResult,
     _invoke_tool_handler,
-    _record_api_call,
     _required_openai_auth_mode,
     _agent_context,
 )
+from brain.systems.runs.direct_loop.telemetry import record_api_call as _record_api_call
 from brain.platform.providers.model_policy import (
     DEFAULT_PROVIDER_MODEL_MAPS,
     HIGH_MODEL_TIER,
     LOW_MODEL_TIER,
     MEDIUM_MODEL_TIER,
+    async_get_model_for_tier,
+    async_get_provider_model_map,
+    async_resolve_default_provider,
     get_model_for_tier,
     get_provider_model_map,
     infer_provider_from_model,
@@ -40,6 +47,13 @@ from brain.platform.providers.model_policy import (
 )
 
 logger = logging.getLogger("agent_runtime")
+
+
+@contextmanager
+def _predict_rlm_unit_of_work():
+    factory = UnitOfWork.blocking if getattr(UnitOfWork, "__name__", "") == "UnitOfWork" else UnitOfWork
+    with factory() as uow:
+        yield uow
 
 _SUPPORTED_BACKENDS = {"auto", "native", "predict_rlm"}
 _DEFAULT_BACKEND = os.environ.get("AGENT_WORKER_BACKEND", "auto").strip().lower() or "auto"
@@ -103,7 +117,7 @@ def _load_org_memory_model_config(
     org_id: str | None = None,
 ) -> dict[str, Any]:
     try:
-        with UnitOfWork() as uow:
+        with _predict_rlm_unit_of_work() as uow:
             resolved_org_id = org_id
             if not resolved_org_id and user_id:
                 db_user = uow.session.get(User, user_id)
@@ -112,6 +126,25 @@ def _load_org_memory_model_config(
                 return {}
             org = uow.session.get(Org, resolved_org_id)
             return dict(org.memory_model_config or {}) if org else {}
+    except Exception:
+        return {}
+
+
+async def _async_load_org_memory_model_config(
+    session: AsyncSession,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict[str, Any]:
+    try:
+        resolved_org_id = org_id
+        if not resolved_org_id and user_id:
+            db_user = await session.get(User, user_id)
+            resolved_org_id = getattr(db_user, "org_id", None)
+        if not resolved_org_id:
+            return {}
+        org = await session.get(Org, resolved_org_id)
+        return dict(org.memory_model_config or {}) if org else {}
     except Exception:
         return {}
 
@@ -184,6 +217,71 @@ def get_agent_worker_backend_settings(
         predict_rlm_ready=support["ready"],
         predict_rlm_version=support["version"],
         predict_rlm_sub_lm=_resolve_predict_rlm_sub_lm(
+            raw_sub_lm,
+            provider=selected_provider,
+            user_id=user_id,
+            org_id=org_id,
+        ),
+        predict_rlm_max_iterations=_normalize_positive_int(
+            config.get("predict_rlm_max_iterations", os.environ.get("PREDICT_RLM_MAX_ITERATIONS")),
+            _DEFAULT_MAX_ITERATIONS,
+        ),
+        predict_rlm_max_llm_calls=_normalize_positive_int(
+            config.get("predict_rlm_max_llm_calls", os.environ.get("PREDICT_RLM_MAX_LLM_CALLS")),
+            _DEFAULT_MAX_LLM_CALLS,
+        ),
+        fallback_reason=fallback_reason,
+    )
+
+
+async def async_get_agent_worker_backend_settings(
+    session: AsyncSession,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+    provider: str | None = None,
+) -> WorkerBackendSettings:
+    """Resolve worker-backend config plus local runtime availability using an async session."""
+    config = await _async_load_org_memory_model_config(session, user_id=user_id, org_id=org_id)
+    support = _predict_rlm_support()
+    selected_provider = (
+        provider
+        or await async_resolve_default_provider(session, user_id=user_id, org_id=org_id)
+    )
+    selected_provider = normalize_runtime_provider(str(selected_provider or "").strip().lower())
+    raw_sub_lm = (config.get("predict_rlm_sub_lm") or os.environ.get("PREDICT_RLM_SUB_LM") or "").strip() or None
+
+    requested_backend = _normalize_backend(config.get("agent_worker_backend"))
+    if requested_backend == "auto":
+        effective_backend = "predict_rlm" if support["ready"] else "native"
+    elif requested_backend == "predict_rlm":
+        effective_backend = "predict_rlm" if support["ready"] else "native"
+    else:
+        effective_backend = "native"
+
+    fallback_reason = None
+    if requested_backend == "predict_rlm" and effective_backend != "predict_rlm":
+        if not support["package_available"]:
+            fallback_reason = "predict-rlm package is not installed"
+        elif not support["deno_available"]:
+            fallback_reason = "deno is not installed on the server"
+        else:
+            fallback_reason = "predict-rlm runtime is unavailable"
+    elif requested_backend == "auto" and effective_backend != "predict_rlm":
+        if not support["package_available"]:
+            fallback_reason = "predict-rlm package missing; auto fell back to native"
+        elif not support["deno_available"]:
+            fallback_reason = "deno missing; auto fell back to native"
+
+    return WorkerBackendSettings(
+        requested_backend=requested_backend,
+        effective_backend=effective_backend,
+        predict_rlm_package_available=support["package_available"],
+        predict_rlm_deno_available=support["deno_available"],
+        predict_rlm_ready=support["ready"],
+        predict_rlm_version=support["version"],
+        predict_rlm_sub_lm=await _async_resolve_predict_rlm_sub_lm(
+            session,
             raw_sub_lm,
             provider=selected_provider,
             user_id=user_id,
@@ -279,6 +377,45 @@ def _tier_for_model_override(
     return None
 
 
+async def _async_tier_for_model_override(
+    session: AsyncSession,
+    model: str | None,
+    *,
+    user_id: str | None,
+    org_id: str | None,
+) -> str | None:
+    bare = _strip_known_provider_prefix(model)
+    if not bare:
+        return None
+    checked: set[str] = set()
+    for provider in DEFAULT_PROVIDER_MODEL_MAPS:
+        if provider in checked:
+            continue
+        checked.add(provider)
+        try:
+            model_map = await async_get_provider_model_map(session, provider, user_id=user_id, org_id=org_id)
+        except Exception:
+            model_map = DEFAULT_PROVIDER_MODEL_MAPS.get(provider, {})
+        for tier, mapped_model in model_map.items():
+            if bare == _strip_known_provider_prefix(mapped_model):
+                return normalize_model_tier(tier, default=None)
+
+    lowered = bare.lower()
+    if lowered.startswith("claude-") and "opus" in lowered:
+        return HIGH_MODEL_TIER
+    if lowered.startswith("claude-") and "haiku" in lowered:
+        return LOW_MODEL_TIER
+    if lowered.startswith("claude-") and "sonnet" in lowered:
+        return MEDIUM_MODEL_TIER
+    if "pro" in lowered:
+        return HIGH_MODEL_TIER
+    if "mini" in lowered or "nano" in lowered:
+        return LOW_MODEL_TIER
+    if lowered.startswith("claude-") or lowered.startswith("gpt-") or lowered.startswith(("o1", "o3", "o4")):
+        return MEDIUM_MODEL_TIER
+    return None
+
+
 def _resolve_predict_rlm_sub_lm(
     configured_model: str | None,
     *,
@@ -316,6 +453,47 @@ def _resolve_predict_rlm_sub_lm(
     return _canonical_model_name(_strip_known_provider_prefix(configured), provider=selected_provider)
 
 
+async def _async_resolve_predict_rlm_sub_lm(
+    session: AsyncSession,
+    configured_model: str | None,
+    *,
+    provider: str,
+    user_id: str | None,
+    org_id: str | None,
+) -> str:
+    """Resolve PredictRLM's helper LM inside the selected provider boundary using async DB access."""
+    selected_provider = normalize_runtime_provider(
+        provider or await async_resolve_default_provider(session, user_id=user_id, org_id=org_id)
+    )
+    configured = (configured_model or "").strip()
+    if not configured:
+        return await _async_default_sub_lm(session, provider=selected_provider, user_id=user_id, org_id=org_id)
+
+    configured_provider = _explicit_provider_from_model(configured)
+    if configured_provider and configured_provider != selected_provider:
+        tier = await _async_tier_for_model_override(session, configured, user_id=user_id, org_id=org_id) or LOW_MODEL_TIER
+        if tier == "local":
+            tier = LOW_MODEL_TIER
+        remapped = await async_get_model_for_tier(
+            session,
+            tier,
+            provider=selected_provider,
+            include_provider_prefix=False,
+            user_id=user_id,
+            org_id=org_id,
+        )
+        logger.info(
+            "PredictRLM sub_lm provider override remapped from %s to %s/%s for selected provider %s",
+            configured,
+            selected_provider,
+            remapped,
+            selected_provider,
+        )
+        return _canonical_model_name(remapped, provider=selected_provider)
+
+    return _canonical_model_name(_strip_known_provider_prefix(configured), provider=selected_provider)
+
+
 def _default_sub_lm(
     *,
     provider: str,
@@ -326,6 +504,27 @@ def _default_sub_lm(
         get_model_for_tier(
             LOW_MODEL_TIER,
             provider=provider or resolve_default_provider(user_id=user_id, org_id=org_id),
+            include_provider_prefix=False,
+            user_id=user_id,
+            org_id=org_id,
+        ),
+        provider=provider,
+    )
+
+
+async def _async_default_sub_lm(
+    session: AsyncSession,
+    *,
+    provider: str,
+    user_id: str | None,
+    org_id: str | None,
+) -> str:
+    resolved_provider = provider or await async_resolve_default_provider(session, user_id=user_id, org_id=org_id)
+    return _canonical_model_name(
+        await async_get_model_for_tier(
+            session,
+            LOW_MODEL_TIER,
+            provider=resolved_provider,
             include_provider_prefix=False,
             user_id=user_id,
             org_id=org_id,
@@ -625,7 +824,7 @@ def _build_openai_illo_dspy_lm(
             messages: list[dict[str, Any]] | None = None,
             **kwargs: Any,
         ):
-            return await asyncio.to_thread(
+            return await run_blocking(
                 self.forward,
                 prompt,
                 messages,
@@ -655,9 +854,7 @@ def _build_predict_rlm_lm(
         )
 
     if provider == "anthropic":
-        token, _ = _resolve_key_from_db(user_id=user_id, org_id=org_id, provider="anthropic")
-        if not token:
-            token, _ = _resolve_key_from_env(provider="anthropic")
+        token, _ = _resolve_key_from_env(provider="anthropic")
         if not token:
             raise RuntimeError(
                 "PredictRLM requires an Anthropic API key. "
@@ -713,7 +910,7 @@ def _make_async_tool_wrapper(
 
     async def _run(**kwargs):
         try:
-            result = await asyncio.to_thread(
+            result = await run_blocking(
                 _invoke_tool_handler,
                 handler,
                 kwargs,
@@ -725,7 +922,7 @@ def _make_async_tool_wrapper(
             if on_tool_call:
                 on_tool_call(tool_name, kwargs, safe_result_text)
             if run_id and idea_id:
-                record_tool_call(
+                await async_record_tool_call(
                     run_id,
                     idea_id,
                     tool_name,
@@ -740,7 +937,7 @@ def _make_async_tool_wrapper(
         if on_tool_call:
             on_tool_call(tool_name, kwargs, safe_result_text)
         if run_id and idea_id:
-            record_tool_call(
+            await async_record_tool_call(
                 run_id,
                 idea_id,
                 tool_name,

@@ -9,9 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import create_engine, event
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-from sqlalchemy.orm import Session
 
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaThread
@@ -23,37 +21,31 @@ IDEA_ID = "33333333-3333-3333-3333-333333333333"
 
 
 @pytest.fixture
-def session() -> Session:
+async def session(async_sqlite_session_factory):
     _patch_sqlite_for_pg_types()
     sqlite3.register_adapter(dict, lambda value: json.dumps(value))
     sqlite3.register_adapter(list, lambda value: json.dumps(value))
-    engine = create_engine("sqlite://", echo=False)
-    event.listen(engine, "connect", _register_sqlite_functions)
-    for table in [
-        Org.__table__,
-        User.__table__,
-        Idea.__table__,
-        IdeaThread.__table__,
-        AgentRunRow.__table__,
-        AgentRunArtifactRow.__table__,
-    ]:
-        table.create(engine, checkfirst=True)
-
-    db = Session(engine)
+    db = await async_sqlite_session_factory(
+        [
+            Org.__table__,
+            User.__table__,
+            Idea.__table__,
+            IdeaThread.__table__,
+            AgentRunRow.__table__,
+            AgentRunArtifactRow.__table__,
+        ],
+        connect_listener=_register_sqlite_functions,
+    )
     org = Org(id=ORG_ID, name="Example", slug="example")
     user = User(id=USER_ID, org_id=ORG_ID, name="Alex", email="alex@example.test")
     idea = Idea(id=IDEA_ID, title="Example API skill", user_id=USER_ID, org_id=ORG_ID)
     db.add_all([org, user, idea])
-    db.flush()
-    try:
-        yield db
-    finally:
-        db.close()
-        engine.dispose()
+    await db.flush()
+    return db
 
 
-def test_agent_visible_context_matches_prior_visible_thread(session: Session):
-    from brain.systems.cortex.thread_context import build_agent_visible_thread_context
+async def test_agent_visible_context_matches_prior_visible_thread(session):
+    from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
 
     now = datetime(2026, 5, 6, 18, 0, tzinfo=timezone.utc)
     session.add(
@@ -66,7 +58,7 @@ def test_agent_visible_context_matches_prior_visible_thread(session: Session):
             created_at=now,
         )
     )
-    _add_run_final_answer(
+    await _add_run_final_answer(
         session,
         run_id=7,
         text="Yep, I created the use-example-api skill. Name the secret EXAMPLE_API_KEY.",
@@ -82,9 +74,9 @@ def test_agent_visible_context_matches_prior_visible_thread(session: Session):
             created_at=now + timedelta(seconds=40),
         )
     )
-    session.flush()
+    await session.flush()
 
-    context = build_agent_visible_thread_context(
+    context = await async_build_agent_visible_thread_context(
         session,
         IDEA_ID,
         current_thread_message_id=2,
@@ -99,8 +91,8 @@ def test_agent_visible_context_matches_prior_visible_thread(session: Session):
     assert [message["role"] for message in context["messages"]] == ["user", "illo"]
 
 
-def test_thread_binding_attaches_prior_visible_context_without_current_message(session: Session):
-    from brain.systems.runs.cortex.thread_binding import build_run_request
+async def test_thread_binding_attaches_prior_visible_context_without_current_message(session):
+    from brain.systems.runs.cortex.thread_binding import a_build_run_request
 
     now = datetime(2026, 5, 6, 18, 0, tzinfo=timezone.utc)
     session.add(
@@ -113,7 +105,7 @@ def test_thread_binding_attaches_prior_visible_context_without_current_message(s
             created_at=now,
         )
     )
-    _add_run_final_answer(
+    await _add_run_final_answer(
         session,
         run_id=12,
         text="Done. The skill is use-example-api and the key should be EXAMPLE_API_KEY.",
@@ -129,9 +121,9 @@ def test_thread_binding_attaches_prior_visible_context_without_current_message(s
             created_at=now + timedelta(seconds=30),
         )
     )
-    session.flush()
+    await session.flush()
 
-    request = build_run_request(
+    request = await a_build_run_request(
         session,
         idea_id=IDEA_ID,
         event="thread_reply",
@@ -166,8 +158,8 @@ def test_run_context_prompt_includes_thread_context():
     assert "Illo: earlier answer" in prompt_context
 
 
-def _add_run_final_answer(
-    session: Session,
+async def _add_run_final_answer(
+    session,
     *,
     run_id: int,
     text: str,
@@ -192,7 +184,7 @@ def _add_run_final_answer(
             completed_at=created_at,
         )
     )
-    session.flush()
+    await session.flush()
     session.add(
         AgentRunArtifactRow(
             run_id=run_id,

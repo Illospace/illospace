@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from brain.systems.cortex.project_context.snapshot import (
     ProjectContextValidationError,
@@ -13,7 +12,7 @@ from brain.systems.cortex.project_context.snapshot import (
 )
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
-from brain.systems.cortex.thread_context import build_agent_visible_thread_context
+from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
 from brain.platform.db.models.idea import Idea, IdeaProjectAttachment
 
 
@@ -126,26 +125,27 @@ def _metadata_int(metadata: dict[str, Any], *keys: str) -> int | None:
     return None
 
 
-def _latest_attached_project_context(session: Session, idea_id: str) -> dict[str, Any]:
+async def _a_latest_attached_project_context(session: Any, idea_id: str) -> dict[str, Any]:
     if not hasattr(session, "scalars"):
         return {}
     try:
-        attachment = session.scalars(
+        result = await session.scalars(
             select(IdeaProjectAttachment)
             .where(
                 IdeaProjectAttachment.idea_id == idea_id,
                 IdeaProjectAttachment.status != "invalid",
             )
             .order_by(IdeaProjectAttachment.created_at.desc(), IdeaProjectAttachment.id.desc())
-        ).first()
+        )
+        attachment = result.first()
     except Exception:
         return {}
     snapshot = getattr(attachment, "snapshot", None)
     return dict(snapshot) if isinstance(snapshot, dict) else {}
 
 
-def _select_project_context(
-    session: Session,
+async def _a_select_project_context(
+    session: Any,
     *,
     idea: Idea,
     idea_id: str,
@@ -163,7 +163,7 @@ def _select_project_context(
             return candidate, snapshot, validation_errors
         validation_errors.append({"source": source, "errors": errors})
 
-    candidate = _latest_attached_project_context(session, idea_id)
+    candidate = await _a_latest_attached_project_context(session, idea_id)
     if candidate:
         snapshot, errors = _snapshot_for_project_context(candidate)
         if snapshot:
@@ -173,8 +173,8 @@ def _select_project_context(
     return {}, None, validation_errors
 
 
-def build_run_request(
-    session: Session,
+async def a_build_run_request(
+    session: Any,
     *,
     idea_id: str,
     event: str,
@@ -186,13 +186,13 @@ def build_run_request(
     producer: str | None = None,
     idempotency_key: str | None = None,
 ) -> AgentRunRequest:
-    idea = session.get(Idea, idea_id)
+    idea = await session.get(Idea, idea_id)
     if idea is None:
         raise LookupError(f"Idea {idea_id} not found")
     metadata = annotate_metadata_with_slash_skill_commands(metadata, message)
     profile = _profile_from_metadata(metadata)
     recipe = _recipe_for_profile(profile, metadata)
-    project_context, project_context_snapshot, project_context_validation_errors = _select_project_context(
+    project_context, project_context_snapshot, project_context_validation_errors = await _a_select_project_context(
         session,
         idea=idea,
         idea_id=idea_id,
@@ -216,7 +216,7 @@ def build_run_request(
         metadata.pop("project_context", None)
         metadata.pop("project_context_snapshot", None)
     if not isinstance(metadata.get("thread_context"), dict):
-        thread_context = build_agent_visible_thread_context(
+        thread_context = await async_build_agent_visible_thread_context(
             session,
             idea_id,
             current_thread_message_id=_metadata_int(
@@ -249,4 +249,4 @@ def build_run_request(
     )
 
 
-__all__ = ["build_run_request"]
+__all__ = ["a_build_run_request"]

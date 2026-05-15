@@ -12,7 +12,6 @@ from brain.kernel.common.time import ensure_utc
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from brain.platform.db.models.scheduler import (
     OWNER_MODE_CRON,
@@ -23,11 +22,6 @@ from brain.platform.db.models.scheduler import (
     SchedulerRun,
     SchedulerRunStep,
 )
-from brain.systems.runs.cortex.recording import (
-    trace_id_for_run_id,
-    trace_id_for_scheduler_run_id,
-)
-
 RUN_STATUS_RECORDED = "recorded"
 RUN_STATUS_SHELVED = "shelved"
 RUN_STATUS_PAUSED = "paused"
@@ -51,6 +45,18 @@ _OWNER_MODES = {
     OWNER_MODE_MIRROR,
     OWNER_MODE_SCHEDULER,
 }
+
+
+def trace_id_for_run_id(run_id: int | str | None) -> str | None:
+    try:
+        value = int(run_id)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return f"run:{value}"
+
+
+def trace_id_for_scheduler_run_id(run_id: int | str | None) -> str | None:
+    return None if run_id is None else f"scheduler-run:{run_id}"
 
 
 def _slugify(value: str) -> str:
@@ -124,15 +130,15 @@ def retry_available_at(job: SchedulerJob, run: SchedulerRun, *, now: datetime) -
     return now + timedelta(seconds=policy["backoff_seconds"])
 
 
-def active_lease_count(
-    session: Session,
+async def async_active_lease_count(
+    session: AsyncSession,
     job_id: int,
     *,
     now: datetime | None = None,
 ) -> int:
     now = _utcnow(now)
     return int(
-        session.scalar(
+        await session.scalar(
             select(func.count())
             .select_from(SchedulerLease)
             .join(SchedulerRun, SchedulerLease.run_id == SchedulerRun.id)
@@ -165,8 +171,9 @@ def job_matches_identifier(job: SchedulerJob, identifier: str) -> bool:
     return identifier in aliases or needle in aliases or _slugify(job.job_key) == needle
 
 
-def find_scheduler_job(session: Session, identifier: str) -> SchedulerJob | None:
-    for job in session.scalars(select(SchedulerJob)).all():
+async def async_find_scheduler_job(session: AsyncSession, identifier: str) -> SchedulerJob | None:
+    result = await session.scalars(select(SchedulerJob))
+    for job in result.all():
         if job_matches_identifier(job, identifier):
             return job
     return None
@@ -179,8 +186,8 @@ def _lease_payload(owner_id: str | None = None) -> tuple[str, str, int]:
     return owner_id, host, pid
 
 
-def claim_run(
-    session: Session,
+async def async_claim_run(
+    session: AsyncSession,
     run_id: int,
     *,
     owner_id: str | None = None,
@@ -188,7 +195,7 @@ def claim_run(
     now: datetime | None = None,
 ) -> tuple[SchedulerRun, SchedulerLease]:
     now = _utcnow(now)
-    run = session.get(SchedulerRun, run_id)
+    run = await session.get(SchedulerRun, run_id)
     if run is None:
         raise ValueError(f"Scheduler run {run_id} not found")
     if run.status in {RUN_STATUS_SETTLED_SUCCESS, RUN_STATUS_SETTLED_FAILURE}:
@@ -198,7 +205,7 @@ def claim_run(
     previous_status = normalize_run_status(run.status)
 
     if run.lease_id:
-        lease = session.get(SchedulerLease, run.lease_id)
+        lease = await session.get(SchedulerLease, run.lease_id)
         if lease is not None and lease.released_at is None and lease.expires_at > now:
             raise ValueError(f"Scheduler run {run_id} is already leased")
         if lease is not None and lease.released_at is None:
@@ -206,7 +213,7 @@ def claim_run(
             lease.release_reason = "reclaimed after expiry"
 
     owner_id, host, pid = _lease_payload(owner_id)
-    lease = session.scalar(select(SchedulerLease).where(SchedulerLease.run_id == run.id))
+    lease = await session.scalar(select(SchedulerLease).where(SchedulerLease.run_id == run.id))
     if lease is None:
         lease = SchedulerLease(
             run_id=run.id,
@@ -227,7 +234,7 @@ def claim_run(
         lease.expires_at = now + timedelta(seconds=lease_ttl_seconds)
         lease.released_at = None
         lease.release_reason = None
-    session.flush()
+    await session.flush()
 
     run.lease_id = lease.id
     run.status = RUN_STATUS_CLAIMED
@@ -240,15 +247,15 @@ def claim_run(
         run.finished_at = None
     if run.started_at is None:
         run.started_at = now
-    job = session.get(SchedulerJob, run.job_id)
+    job = await session.get(SchedulerJob, run.job_id)
     if job is not None:
         job.last_started_at = now
-    session.flush()
+    await session.flush()
     return run, lease
 
 
-def claim_next_due_run(
-    session: Session,
+async def async_claim_next_due_run(
+    session: AsyncSession,
     *,
     now: datetime | None = None,
     allowed_owner_modes: tuple[str, ...] = (OWNER_MODE_SCHEDULER,),
@@ -261,37 +268,41 @@ def claim_next_due_run(
         return None
 
     requested_job_keys = tuple(job_keys or ())
-    jobs = session.scalars(
-        select(SchedulerJob)
-        .where(
-            SchedulerJob.enabled.is_(True),
-            SchedulerJob.owner_mode.in_(allowed_owner_modes),
+    jobs = (
+        await session.scalars(
+            select(SchedulerJob)
+            .where(
+                SchedulerJob.enabled.is_(True),
+                SchedulerJob.owner_mode.in_(allowed_owner_modes),
+            )
+            .order_by(SchedulerJob.priority.desc(), SchedulerJob.id.asc())
         )
-        .order_by(SchedulerJob.priority.desc(), SchedulerJob.id.asc())
     ).all()
 
     for job in jobs:
         if requested_job_keys and not any(job_matches_identifier(job, key) for key in requested_job_keys):
             continue
-        if active_lease_count(session, job.id, now=now) >= max(int(job.max_concurrency or 1), 1):
+        if await async_active_lease_count(session, job.id, now=now) >= max(int(job.max_concurrency or 1), 1):
             continue
 
-        candidates = session.scalars(
-            select(SchedulerRun)
-            .where(
-                SchedulerRun.job_id == job.id,
-                SchedulerRun.lease_id.is_(None),
-                SchedulerRun.status.in_(
-                    [
-                        RUN_STATUS_RECORDED,
-                        RUN_STATUS_RETRYABLE,
-                        RUN_STATUS_EXPIRED,
-                        "shed",
-                    ]
-                ),
-                SchedulerRun.scheduled_for <= now,
+        candidates = (
+            await session.scalars(
+                select(SchedulerRun)
+                .where(
+                    SchedulerRun.job_id == job.id,
+                    SchedulerRun.lease_id.is_(None),
+                    SchedulerRun.status.in_(
+                        [
+                            RUN_STATUS_RECORDED,
+                            RUN_STATUS_RETRYABLE,
+                            RUN_STATUS_EXPIRED,
+                            "shed",
+                        ]
+                    ),
+                    SchedulerRun.scheduled_for <= now,
+                )
+                .order_by(SchedulerRun.scheduled_for.asc(), SchedulerRun.id.asc())
             )
-            .order_by(SchedulerRun.scheduled_for.asc(), SchedulerRun.id.asc())
         ).all()
         run = None
         for candidate in candidates:
@@ -307,7 +318,7 @@ def claim_next_due_run(
                 break
         if run is None:
             continue
-        return claim_run(
+        return await async_claim_run(
             session,
             run.id,
             owner_id=owner_id,
@@ -317,60 +328,62 @@ def claim_next_due_run(
     return None
 
 
-def heartbeat_lease(
-    session: Session,
+async def async_heartbeat_lease(
+    session: AsyncSession,
     lease_id: int,
     *,
     lease_ttl_seconds: int = LEASE_TTL_SECONDS,
     now: datetime | None = None,
 ) -> SchedulerLease | None:
     now = _utcnow(now)
-    lease = session.get(SchedulerLease, lease_id)
+    lease = await session.get(SchedulerLease, lease_id)
     if lease is None or lease.released_at is not None:
         return None
     lease.heartbeat_at = now
     lease.expires_at = now + timedelta(seconds=lease_ttl_seconds)
-    session.flush()
+    await session.flush()
     return lease
 
 
-def release_lease(
-    session: Session,
+async def async_release_lease(
+    session: AsyncSession,
     lease_id: int,
     *,
     reason: str,
     now: datetime | None = None,
 ) -> SchedulerLease | None:
     now = _utcnow(now)
-    lease = session.get(SchedulerLease, lease_id)
+    lease = await session.get(SchedulerLease, lease_id)
     if lease is None:
         return None
     if lease.released_at is None:
         lease.released_at = now
         lease.release_reason = reason
-    run = session.get(SchedulerRun, lease.run_id)
+    run = await session.get(SchedulerRun, lease.run_id)
     if run is not None and run.lease_id == lease.id:
         run.lease_id = None
-    session.flush()
+    await session.flush()
     return lease
 
 
-def reclaim_expired_leases(
-    session: Session,
+async def async_reclaim_expired_leases(
+    session: AsyncSession,
     *,
     now: datetime | None = None,
 ) -> list[SchedulerRun]:
     now = _utcnow(now)
-    expired_leases = session.scalars(
-        select(SchedulerLease).where(
-            SchedulerLease.released_at.is_(None),
-            SchedulerLease.expires_at <= now,
+    expired_leases = (
+        await session.scalars(
+            select(SchedulerLease).where(
+                SchedulerLease.released_at.is_(None),
+                SchedulerLease.expires_at <= now,
+            )
         )
     ).all()
 
     reclaimed: list[SchedulerRun] = []
     for lease in expired_leases:
-        run = session.get(SchedulerRun, lease.run_id)
+        run = await session.get(SchedulerRun, lease.run_id)
         if run is None:
             continue
         lease.released_at = now
@@ -382,7 +395,7 @@ def reclaim_expired_leases(
             run.finished_at = now
             if run.error_text is None:
                 run.error_text = "lease expired"
-            job = session.get(SchedulerJob, run.job_id)
+            job = await session.get(SchedulerJob, run.job_id)
             if job is not None and retry_available(job, run):
                 retry_at = retry_available_at(job, run, now=now)
                 run.result_summary = {
@@ -393,12 +406,12 @@ def reclaim_expired_leases(
                 }
             reclaimed.append(run)
 
-    session.flush()
+    await session.flush()
     return reclaimed
 
 
-def ensure_run_steps(
-    session: Session,
+async def async_ensure_run_steps(
+    session: AsyncSession,
     run: SchedulerRun,
     step_defs: list[dict[str, Any]],
 ) -> list[SchedulerRunStep]:
@@ -406,7 +419,7 @@ def ensure_run_steps(
     for index, spec in enumerate(step_defs, start=1):
         step_key = str(spec["step_key"])
         sequence_no = int(spec.get("sequence_no", index))
-        step = session.scalar(
+        step = await session.scalar(
             select(SchedulerRunStep).where(
                 SchedulerRunStep.run_id == run.id,
                 SchedulerRunStep.step_key == step_key,
@@ -425,49 +438,43 @@ def ensure_run_steps(
             step.sequence_no = sequence_no
         steps.append(step)
 
-    session.flush()
+    await session.flush()
     steps.sort(key=lambda step: step.sequence_no)
     return steps
 
 
-def update_run_step(
-    session: Session,
+async def async_update_run_step(
+    session: AsyncSession,
     step: SchedulerRunStep,
-    *,
-    status: str,
-    started_at: datetime | None = None,
-    finished_at: datetime | None = None,
-    result_summary: dict[str, Any] | None = None,
-    error_text: str | None = None,
-    agent_run_id: int | None = None,
+    **kwargs: Any,
 ) -> SchedulerRunStep:
-    if started_at is not None:
-        step.started_at = started_at
-    if finished_at is not None:
-        step.finished_at = finished_at
-    if result_summary is not None:
-        step.result_summary = result_summary
-    if error_text is not None:
-        step.error_text = error_text
-    if agent_run_id is not None:
-        step.agent_run_id = agent_run_id
-    linked_agent_run_id = agent_run_id if agent_run_id is not None else step.agent_run_id
+    if kwargs.get("started_at") is not None:
+        step.started_at = kwargs["started_at"]
+    if kwargs.get("finished_at") is not None:
+        step.finished_at = kwargs["finished_at"]
+    if kwargs.get("result_summary") is not None:
+        step.result_summary = kwargs["result_summary"]
+    if kwargs.get("error_text") is not None:
+        step.error_text = kwargs["error_text"]
+    if kwargs.get("agent_run_id") is not None:
+        step.agent_run_id = kwargs["agent_run_id"]
+    linked_agent_run_id = kwargs.get("agent_run_id") if kwargs.get("agent_run_id") is not None else step.agent_run_id
     if linked_agent_run_id is not None:
         step.trace_id = trace_id_for_run_id(linked_agent_run_id)
     elif not step.trace_id:
-        run = session.get(SchedulerRun, step.run_id)
+        run = await session.get(SchedulerRun, step.run_id)
         step.trace_id = (
             getattr(run, "trace_id", None)
             if run is not None
             else None
         ) or trace_id_for_scheduler_run_id(step.run_id)
-    step.status = status
-    session.flush()
+    step.status = kwargs["status"]
+    await session.flush()
     return step
 
 
-def finish_run(
-    session: Session,
+async def async_finish_run(
+    session: AsyncSession,
     run: SchedulerRun,
     *,
     status: str,
@@ -484,25 +491,25 @@ def finish_run(
         run.trace_id = trace_id_for_run_id(run.agent_run_id)
     elif not run.trace_id:
         run.trace_id = trace_id_for_scheduler_run_id(run.id)
-    job = session.get(SchedulerJob, run.job_id)
+    job = await session.get(SchedulerJob, run.job_id)
     if job is not None:
         job.last_finished_at = now
         if status == RUN_STATUS_SETTLED_SUCCESS:
             job.pause_reason = None if job.enabled else job.pause_reason
     if run.lease_id:
-        release_lease(session, run.lease_id, reason=f"run {status}", now=now)
-    session.flush()
+        await async_release_lease(session, run.lease_id, reason=f"run {status}", now=now)
+    await session.flush()
     return run
 
 
-def retry_run(
-    session: Session,
+async def async_retry_run(
+    session: AsyncSession,
     run_id: int,
     *,
     now: datetime | None = None,
 ) -> SchedulerRun:
-    now = _utcnow(now)
-    run = session.get(SchedulerRun, run_id)
+    _utcnow(now)
+    run = await session.get(SchedulerRun, run_id)
     if run is None:
         raise ValueError(f"Scheduler run {run_id} not found")
     if run.status == RUN_STATUS_SETTLED_SUCCESS:
@@ -521,12 +528,12 @@ def retry_run(
         parent_run_id=run.id,
     )
     session.add(clone)
-    session.flush()
+    await session.flush()
     return clone
 
 
-def set_scheduler_job_pause_state(
-    session: Session,
+async def async_set_scheduler_job_pause_state(
+    session: AsyncSession,
     identifier: str,
     *,
     paused: bool,
@@ -534,7 +541,7 @@ def set_scheduler_job_pause_state(
     now: datetime | None = None,
 ) -> SchedulerJob:
     now = _utcnow(now)
-    job = find_scheduler_job(session, identifier)
+    job = await async_find_scheduler_job(session, identifier)
     if job is None:
         raise ValueError(f"Scheduler job '{identifier}' not found")
 
@@ -550,133 +557,36 @@ def set_scheduler_job_pause_state(
                 job.next_run_at = next_run_after(job.cron_expr, job.timezone, now)
             except Exception:
                 job.next_run_at = None
-    session.flush()
+    await session.flush()
     return job
 
 
-def set_scheduler_job_owner_mode(
-    session: Session,
+async def async_set_scheduler_job_owner_mode(
+    session: AsyncSession,
     identifier: str,
     *,
     owner_mode: str,
 ) -> SchedulerJob:
-    job = find_scheduler_job(session, identifier)
+    job = await async_find_scheduler_job(session, identifier)
     if job is None:
         raise ValueError(f"Scheduler job '{identifier}' not found")
     normalized = normalize_owner_mode(owner_mode)
     if normalized != OWNER_MODE_SCHEDULER:
         raise ValueError("Legacy cron/mirror owner modes are retired; scheduler is the only writable owner mode")
     job.owner_mode = normalized
-    session.flush()
+    await session.flush()
     return job
 
 
-def set_scheduler_job_load_shed(
-    session: Session,
+async def async_set_scheduler_job_load_shed(
+    session: AsyncSession,
     identifier: str,
     *,
     load_shed_policy: dict[str, Any],
 ) -> SchedulerJob:
-    job = find_scheduler_job(session, identifier)
+    job = await async_find_scheduler_job(session, identifier)
     if job is None:
         raise ValueError(f"Scheduler job '{identifier}' not found")
     job.load_shed_policy = load_shed_policy or {}
-    session.flush()
+    await session.flush()
     return job
-
-
-async def _run_scheduler_sync(session: AsyncSession, fn):
-    return await session.run_sync(fn)
-
-
-async def async_claim_run(
-    session: AsyncSession,
-    run_id: int,
-    *,
-    owner_id: str | None = None,
-    lease_ttl_seconds: int = LEASE_TTL_SECONDS,
-    now: datetime | None = None,
-) -> tuple[SchedulerRun, SchedulerLease]:
-    return await _run_scheduler_sync(
-        session,
-        lambda sync_session: claim_run(
-            sync_session,
-            run_id,
-            owner_id=owner_id,
-            lease_ttl_seconds=lease_ttl_seconds,
-            now=now,
-        ),
-    )
-
-
-async def async_claim_next_due_run(
-    session: AsyncSession,
-    *,
-    now: datetime | None = None,
-    allowed_owner_modes: tuple[str, ...] = (OWNER_MODE_SCHEDULER,),
-    job_keys: tuple[str, ...] | None = None,
-    owner_id: str | None = None,
-    lease_ttl_seconds: int = LEASE_TTL_SECONDS,
-) -> tuple[SchedulerRun, SchedulerLease] | None:
-    return await _run_scheduler_sync(
-        session,
-        lambda sync_session: claim_next_due_run(
-            sync_session,
-            now=now,
-            allowed_owner_modes=allowed_owner_modes,
-            job_keys=job_keys,
-            owner_id=owner_id,
-            lease_ttl_seconds=lease_ttl_seconds,
-        ),
-    )
-
-
-async def async_heartbeat_lease(
-    session: AsyncSession,
-    lease_id: int,
-    *,
-    lease_ttl_seconds: int = LEASE_TTL_SECONDS,
-    now: datetime | None = None,
-) -> SchedulerLease | None:
-    return await _run_scheduler_sync(
-        session,
-        lambda sync_session: heartbeat_lease(
-            sync_session,
-            lease_id,
-            lease_ttl_seconds=lease_ttl_seconds,
-            now=now,
-        ),
-    )
-
-
-async def async_update_run_step(
-    session: AsyncSession,
-    step: SchedulerRunStep,
-    **kwargs: Any,
-) -> SchedulerRunStep:
-    return await _run_scheduler_sync(
-        session,
-        lambda sync_session: update_run_step(sync_session, step, **kwargs),
-    )
-
-
-async def async_finish_run(
-    session: AsyncSession,
-    run: SchedulerRun,
-    *,
-    status: str,
-    result_summary: dict[str, Any] | None = None,
-    error_text: str | None = None,
-    now: datetime | None = None,
-) -> SchedulerRun:
-    return await _run_scheduler_sync(
-        session,
-        lambda sync_session: finish_run(
-            sync_session,
-            run,
-            status=status,
-            result_summary=result_summary,
-            error_text=error_text,
-            now=now,
-        ),
-    )

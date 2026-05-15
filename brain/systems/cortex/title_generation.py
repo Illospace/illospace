@@ -1,6 +1,7 @@
 """Cortex display-title generation."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -155,6 +156,47 @@ def _generate_with_provider_title_model(
         return None
 
 
+async def _async_generate_with_provider_title_model(
+    raw_text: str,
+    *,
+    provider: str,
+    model: str,
+    user_id: str | None,
+    org_id: str | None,
+) -> str | None:
+    try:
+        from brain.platform.integrations.llm import async_resolve_llm_client
+        from brain.platform.integrations.providers import LLMRequest, get_provider
+
+        llm = await async_resolve_llm_client(
+            user_id=user_id,
+            org_id=org_id,
+            provider=provider,
+        )
+        provider_client = get_provider(llm.provider, llm.client)
+        response = await asyncio.to_thread(
+            provider_client.create,
+            LLMRequest(
+                model=_strip_provider_prefix(model),
+                max_output_tokens=TITLE_MAX_TOKENS,
+                messages=[{"role": "user", "content": _title_generation_user_prompt(raw_text)}],
+                system=TITLE_GENERATION_SYSTEM_PROMPT,
+                reasoning_effort=TITLE_REASONING_EFFORT,
+                extra_headers=llm.build_request_headers() or None,
+                operation_type="title_generation",
+            ),
+        )
+        text_parts = [
+            block.text
+            for block in getattr(response, "content", None) or []
+            if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+        ]
+        return normalize_generated_title("\n".join(text_parts))
+    except Exception as exc:
+        logger.warning("Provider title generation failed: %s", exc)
+        return None
+
+
 def generate_display_title(
     raw_text: str,
     *,
@@ -191,11 +233,51 @@ def generate_display_title(
     )
 
 
+async def async_generate_display_title(
+    raw_text: str,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> str | None:
+    """Async display-title generation that can resolve DB-backed provider auth."""
+    if not (raw_text or "").strip():
+        return None
+
+    try:
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork
+        from brain.platform.providers.model_policy import async_get_model_for_tier, async_resolve_default_provider
+
+        async with UnitOfWork() as uow:
+            provider = await async_resolve_default_provider(uow.session, user_id=user_id, org_id=org_id)
+            model = await async_get_model_for_tier(
+                uow.session,
+                TITLE_MODEL_TIER,
+                provider=provider,
+                include_provider_prefix=False,
+                user_id=user_id,
+                org_id=org_id,
+            )
+    except Exception as exc:
+        logger.warning("Title model resolution failed: %s", exc)
+        return None
+
+    if is_local_title_model(model):
+        return await asyncio.to_thread(_generate_with_local_title_model, raw_text)
+
+    return await _async_generate_with_provider_title_model(
+        raw_text,
+        provider=provider,
+        model=_provider_model_spec(provider, model),
+        user_id=user_id,
+        org_id=org_id,
+    )
+
+
 def _blank(value: str | None) -> bool:
     return not str(value or "").strip()
 
 
-def _idea_title_source(
+async def _idea_title_source(
     idea_id: str,
     *,
     user_id: str | None,
@@ -205,8 +287,8 @@ def _idea_title_source(
     from brain.platform.db.models.idea import Idea
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
-    with UnitOfWork() as uow:
-        idea = uow.session.get(Idea, str(idea_id))
+    async with UnitOfWork() as uow:
+        idea = await uow.session.get(Idea, str(idea_id))
         if idea is None:
             return None, "missing"
         if getattr(idea, "archived_at", None) is not None:
@@ -226,7 +308,7 @@ def _idea_title_source(
         return title, None
 
 
-def _store_generated_display_title(
+async def _store_generated_display_title(
     idea_id: str,
     *,
     source_title: str,
@@ -239,7 +321,7 @@ def _store_generated_display_title(
     from brain.platform.db.models.idea import Idea
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         stmt = (
             update(Idea)
             .where(
@@ -255,7 +337,7 @@ def _store_generated_display_title(
         elif user_id:
             stmt = stmt.where(Idea.user_id == str(user_id))
 
-        result = uow.session.execute(stmt)
+        result = await uow.session.execute(stmt)
         return int(getattr(result, "rowcount", 0) or 0) == 1
 
 
@@ -273,7 +355,7 @@ def _publish_generated_display_title(
     publish("title_generated", payload)
 
 
-def generate_and_store_idea_display_title(
+async def generate_and_store_idea_display_title(
     idea_id: str,
     *,
     user_id: str | None = None,
@@ -282,7 +364,7 @@ def generate_and_store_idea_display_title(
     publish_update: bool = True,
 ) -> StoredDisplayTitle:
     """Generate, store, and publish a display title for an idea if it still needs one."""
-    source_title, skipped_reason = _idea_title_source(
+    source_title, skipped_reason = await _idea_title_source(
         idea_id,
         user_id=user_id,
         org_id=org_id,
@@ -291,11 +373,11 @@ def generate_and_store_idea_display_title(
     if skipped_reason or not source_title:
         return StoredDisplayTitle(idea_id=str(idea_id), skipped_reason=skipped_reason or "empty_title")
 
-    title = generate_display_title(source_title, user_id=user_id, org_id=org_id)
+    title = await async_generate_display_title(source_title, user_id=user_id, org_id=org_id)
     if not title:
         return StoredDisplayTitle(idea_id=str(idea_id), skipped_reason="generation_failed")
 
-    updated = _store_generated_display_title(
+    updated = await _store_generated_display_title(
         idea_id,
         source_title=source_title,
         display_title=title,

@@ -9,17 +9,25 @@ Usage:
     python3 -m brain.jobs.pipelines.nightly_implement [--date 2026-03-04] [--dry-run]
 """
 import argparse
+import asyncio
 import json
 import os
-import subprocess
 import sys
 from datetime import date, datetime
 from pathlib import Path
+from subprocess import TimeoutExpired
 
 from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 import brain.kernel.config as config
+from brain.platform.async_io import (
+    ensure_dir,
+    path_exists,
+    rename_path,
+    run_blocking,
+    run_subprocess,
+)
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 PROJECT_ROOT = str(config.BRAIN_DIR)
@@ -35,7 +43,7 @@ def _log(msg: str, log_lines: list):
     log_lines.append(f"[{datetime.now().isoformat()}] {msg}")
 
 
-def _run(cmd: str | list, cwd: str | None = None, timeout: int = 60) -> tuple[bool, str]:
+async def _run(cmd: str | list, cwd: str | None = None, timeout: int = 60) -> tuple[bool, str]:
     """Run a command, return (success, output).
 
     Accepts a list (safe) or a string. Strings with shell metacharacters
@@ -49,10 +57,15 @@ def _run(cmd: str | list, cwd: str | None = None, timeout: int = 60) -> tuple[bo
             args = ["bash", "-c", cmd]
         else:
             args = shlex.split(cmd)
-        r = subprocess.run(args, capture_output=True, text=True,
-                           timeout=timeout, cwd=cwd or PROJECT_ROOT)
+        r = await run_subprocess(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd or PROJECT_ROOT,
+        )
         return r.returncode == 0, (r.stdout + r.stderr).strip()
-    except subprocess.TimeoutExpired:
+    except TimeoutExpired:
         return False, f"TIMEOUT after {timeout}s"
 
 
@@ -64,33 +77,43 @@ def _is_safe_path(filepath: str) -> bool:
 
 def _get_processed_ids() -> set:
     """Load set of already-processed memory IDs."""
-    if os.path.exists(PROCESSING_LOG):
+    path = Path(PROCESSING_LOG)
+    if path.exists():
         try:
-            data = json.loads(Path(PROCESSING_LOG).read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             return set(data.get("processed_memory_ids", []))
         except (json.JSONDecodeError, KeyError):
             pass
     return set()
 
 
+async def _async_get_processed_ids() -> set:
+    return await run_blocking(_get_processed_ids)
+
+
 def _save_processed_ids(ids: set):
     """Save processed memory IDs."""
-    os.makedirs(LOG_DIR, exist_ok=True)
+    Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
+    path = Path(PROCESSING_LOG)
     existing = {}
-    if os.path.exists(PROCESSING_LOG):
+    if path.exists():
         try:
-            existing = json.loads(Path(PROCESSING_LOG).read_text())
+            existing = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, KeyError):
             existing = {}
     existing["processed_memory_ids"] = sorted(ids)
     existing["last_updated"] = datetime.now().isoformat()
-    Path(PROCESSING_LOG).write_text(json.dumps(existing, indent=2))
+    path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
 
 
-def gather_improvement_memories(target_date: date, processed_ids: set) -> list[dict]:
+async def _async_save_processed_ids(ids: set) -> None:
+    await run_blocking(_save_processed_ids, ids)
+
+
+async def gather_improvement_memories(target_date: date, processed_ids: set) -> list[dict]:
     """Query unprocessed improvement memories."""
-    with UnitOfWork() as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             SELECT id, content, salience, tags, created_at
             FROM memories
             WHERE memory_type = 'improvement'
@@ -104,17 +127,21 @@ def gather_improvement_memories(target_date: date, processed_ids: set) -> list[d
 
 def load_pending_reflection() -> list[dict]:
     """Load proposals from PENDING_REFLECTION.json."""
-    if not os.path.exists(PENDING_PATH):
+    path = Path(PENDING_PATH)
+    if not path.exists():
         return []
     try:
-        with open(PENDING_PATH) as f:
-            data = json.load(f)
+        data = json.loads(path.read_text(encoding="utf-8"))
         # Could be a single dict or a list
         if isinstance(data, dict):
             return [data] if data else []
         return data if isinstance(data, list) else []
     except (json.JSONDecodeError, TypeError):
         return []
+
+
+async def _async_load_pending_reflection() -> list[dict]:
+    return await run_blocking(load_pending_reflection)
 
 
 def classify_proposal(content: str) -> dict | None:
@@ -189,10 +216,10 @@ def mirror_implement_proposal(proposal: dict, *, source: str | None = None):
     return None, None
 
 
-def run_tests(log_lines: list) -> bool:
+async def run_tests(log_lines: list) -> bool:
     """Run the test suite. Returns True if all pass."""
     _log("  🧪 Running tests...", log_lines)
-    ok, output = _run(
+    ok, output = await _run(
         "source venv/bin/activate && python3 -m pytest tests/ -v --tb=short -q",
         timeout=120,
     )
@@ -203,12 +230,12 @@ def run_tests(log_lines: list) -> bool:
     return ok
 
 
-def fetch_nightly_issues(log_lines: list) -> list[dict]:
+async def fetch_nightly_issues(log_lines: list) -> list[dict]:
     """Fetch configured GitHub issues labeled 'nightly'."""
     if not REPO:
         _log("  ⚠️ ILLO_GITHUB_REPO not configured; skipping nightly issue fetch", log_lines)
         return []
-    ok, out = _run(
+    ok, out = await _run(
         f'gh issue list --repo {REPO} --label nightly --state open '
         f'--json number,title,body --limit 10',
         timeout=30,
@@ -225,12 +252,7 @@ def fetch_nightly_issues(log_lines: list) -> list[dict]:
         return []
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Nightly self-improvement")
-    parser.add_argument("--date", help="Target date (YYYY-MM-DD)")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
-    args = parser.parse_args()
-
+async def _async_main(args) -> None:
     target_date = date.fromisoformat(args.date) if args.date else date.today()
     dry_run = args.dry_run
     log_lines = []
@@ -241,14 +263,14 @@ def main():
     _log("Direct writes and nightly PR automation are disabled; proposal mirroring is removed.", log_lines)
 
     # Gather items to process
-    processed_ids = _get_processed_ids()
-    improvements = gather_improvement_memories(target_date, processed_ids)
-    pending = load_pending_reflection()
+    processed_ids = await _async_get_processed_ids()
+    improvements = await gather_improvement_memories(target_date, processed_ids)
+    pending = await _async_load_pending_reflection()
 
     total = len(improvements) + len(pending)
     if total == 0:
         _log("No improvement items to process.", log_lines)
-        _write_log(target_date, log_lines)
+        await _write_log(target_date, log_lines)
         return
 
     _log(f"Found {len(improvements)} improvement memories, {len(pending)} pending proposals", log_lines)
@@ -298,7 +320,7 @@ def main():
 
     # Process GitHub issues labeled 'nightly'
     _log("\n--- GITHUB ISSUES (label: nightly) ---", log_lines)
-    nightly_issues = fetch_nightly_issues(log_lines)
+    nightly_issues = await fetch_nightly_issues(log_lines)
     for issue in nightly_issues:
         issue_num = issue["number"]
         issue_title = issue["title"]
@@ -320,11 +342,11 @@ def main():
 
     # Save processed IDs
     if not dry_run:
-        _save_processed_ids(new_processed_ids)
+        await _async_save_processed_ids(new_processed_ids)
 
     # Clean up PENDING_REFLECTION.json if we processed it
-    if pending and not dry_run and os.path.exists(PENDING_PATH):
-        os.rename(PENDING_PATH, PENDING_PATH + f".done-{target_date}")
+    if pending and not dry_run and await path_exists(PENDING_PATH):
+        await rename_path(PENDING_PATH, PENDING_PATH + f".done-{target_date}")
 
     _log(f"\n{'='*60}", log_lines)
     _log(
@@ -333,13 +355,25 @@ def main():
     )
     _log(f"{'='*60}", log_lines)
 
-    _write_log(target_date, log_lines)
+    await _write_log(target_date, log_lines)
 
 
-def _write_log(target_date: date, log_lines: list):
+def main():
+    parser = argparse.ArgumentParser(description="Nightly self-improvement")
+    parser.add_argument("--date", help="Target date (YYYY-MM-DD)")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    args = parser.parse_args()
+    asyncio.run(_async_main(args))
+
+
+async def _write_log(target_date: date, log_lines: list):
     """Append to nightly log."""
-    os.makedirs(LOG_DIR, exist_ok=True)
+    await ensure_dir(LOG_DIR)
     log_path = os.path.join(LOG_DIR, f"nightly-{target_date}.log")
+    await run_blocking(_append_log, log_path, log_lines)
+
+
+def _append_log(log_path: str, log_lines: list) -> None:
     with open(log_path, "a") as f:
         f.write("\n--- SELF-IMPROVEMENT ---\n")
         for line in log_lines:

@@ -3,7 +3,7 @@
 The _capture_session_tokens / dashboard.agent_runs path was removed.
 Only the formula unit test and the CLI report test remain.
 """
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 class TestTokenDerivation:
@@ -31,7 +31,7 @@ class TestTokenDerivation:
 class TestTokenMetricsCLI:
     """Integration tests for cli/token_metrics.py."""
 
-    def test_report_returns_expected_keys(self):
+    async def test_report_returns_expected_keys(self):
         """Verify report structure."""
         from brain.app.cli.token_metrics import report
 
@@ -69,8 +69,8 @@ class TestTokenMetricsCLI:
             for index in range(2)
         ]
 
-        with patch("brain.app.cli.token_metrics._runs_for_period", return_value=runs):
-            result = report(days=7)
+        with patch("brain.app.cli.token_metrics._runs_for_period", new=AsyncMock(return_value=runs)):
+            result = await report(days=7)
 
         assert "overall" in result
         assert "token_tracking_coverage_pct" in result

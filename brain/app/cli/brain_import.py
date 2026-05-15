@@ -7,6 +7,7 @@ Usage:
     python3 -m brain.app.cli.brain_import --from-export ./export/ --dry-run
 """
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -19,7 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".
 from brain.kernel import config
 
 
-def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
+async def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
     """Import from an exported starter kit directory."""
     from sqlalchemy import text
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -29,13 +30,14 @@ def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
     # 1. Apply schema if tables don't exist
     schema_path = os.path.join(export_dir, 'schema.sql')
     if os.path.exists(schema_path):
-        with UnitOfWork() as uow:
-            row = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            result = await uow.session.execute(text("""
                 SELECT EXISTS (
                     SELECT FROM information_schema.tables
                     WHERE table_name = 'memories'
                 )
-            """)).mappings().first()
+            """))
+            row = result.mappings().first()
             exists = row['exists']
 
         if not exists and not dry_run:
@@ -59,8 +61,8 @@ def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
     migration_path = str(Path(config.BRAIN_DIR) / 'migrations' / '012_scope_column.sql')
     if not dry_run:
         try:
-            with UnitOfWork() as uow:
-                uow.session.execute(text(
+            async with UnitOfWork() as uow:
+                await uow.session.execute(text(
                     "ALTER TABLE memories ADD COLUMN IF NOT EXISTS scope VARCHAR(20) DEFAULT 'personal'"
                 ))
         except Exception:
@@ -79,7 +81,7 @@ def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
                 if dry_run:
                     print(f"  [DRY] Would import: [{m.get('memory_type', '?')}] {m['content'][:60]}...")
                 else:
-                    result = add_memory(
+                    result = await add_memory(
                         content=m['content'],
                         memory_type=m.get('memory_type', 'lesson'),
                         salience=m.get('salience', 5.0),
@@ -100,7 +102,7 @@ def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
 
         if not dry_run:
             from brain.systems.skills.gate import validate_skill_structure
-            with UnitOfWork() as uow:
+            async with UnitOfWork() as uow:
                 for s in skills:
                     # Validate via centralized skill-creator gate (issue #187)
                     violations = validate_skill_structure(
@@ -111,7 +113,7 @@ def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
                         continue
 
                     # Upsert by name
-                    uow.session.execute(text("""
+                    await uow.session.execute(text("""
                         INSERT INTO skills (name, description, procedure, version, level,
                                            maturity, confidence, pitfalls, refinements, triggers)
                         VALUES (:name, :desc, :proc, :version, :level,
@@ -157,7 +159,7 @@ def import_from_export(export_dir: str, dry_run: bool = False) -> dict:
     return stats
 
 
-def import_from_workspace(workspace_dir: str, dry_run: bool = False) -> dict:
+async def import_from_workspace(workspace_dir: str, dry_run: bool = False) -> dict:
     """Import from a raw legacy workspace by parsing markdown files."""
     from brain.systems.memory.scope import classify_scope
 
@@ -188,7 +190,7 @@ def import_from_workspace(workspace_dir: str, dry_run: bool = False) -> dict:
         if dry_run:
             print(f"  [{scope}] [{mem['type']}] {mem['content'][:70]}...")
         else:
-            add_memory(
+            await add_memory(
                 content=mem['content'],
                 memory_type=mem['type'],
                 salience=mem.get('salience', 5.0),
@@ -236,6 +238,19 @@ def _parse_markdown_sections(filepath: str, default_type: str) -> list[dict]:
     return memories
 
 
+async def _async_main(args) -> None:
+    if args.from_export:
+        stats = await import_from_export(args.from_export, dry_run=args.dry_run)
+        mode = "DRY RUN" if args.dry_run else "IMPORTED"
+        print(f"\n[{mode}] Memories: {stats['memories']}, Skills: {stats['skills']}, "
+              f"Templates: {stats['templates']}")
+    else:
+        stats = await import_from_workspace(args.from_workspace, dry_run=args.dry_run)
+        mode = "DRY RUN" if args.dry_run else "IMPORTED"
+        print(f"\n[{mode}] {stats['total']} memories "
+              f"({stats['universal']} universal, {stats['personal']} personal)")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Import memories into the brain')
     group = parser.add_mutually_exclusive_group(required=True)
@@ -243,17 +258,7 @@ def main():
     group.add_argument('--from-workspace', help='Import from legacy workspace')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
-
-    if args.from_export:
-        stats = import_from_export(args.from_export, dry_run=args.dry_run)
-        mode = "DRY RUN" if args.dry_run else "IMPORTED"
-        print(f"\n[{mode}] Memories: {stats['memories']}, Skills: {stats['skills']}, "
-              f"Templates: {stats['templates']}")
-    else:
-        stats = import_from_workspace(args.from_workspace, dry_run=args.dry_run)
-        mode = "DRY RUN" if args.dry_run else "IMPORTED"
-        print(f"\n[{mode}] {stats['total']} memories "
-              f"({stats['universal']} universal, {stats['personal']} personal)")
+    asyncio.run(_async_main(args))
 
 
 if __name__ == '__main__':

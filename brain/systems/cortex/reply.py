@@ -16,6 +16,8 @@ import sys
 
 import httpx
 
+from brain.platform.async_io import http_post
+
 DASHBOARD_URL = os.environ.get("ILLO_DASHBOARD_URL", "http://127.0.0.1:8000")
 
 
@@ -51,7 +53,7 @@ def reply_to_cortex(idea_id: str, content: str, attachments: list | None = None,
         payload["metadata"] = metadata
     headers = _auth_headers()
     try:
-        resp = httpx.post(url, json=payload, headers=headers, timeout=15)
+        resp = http_post(url, json=payload, headers=headers, timeout=15)
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPError as e:

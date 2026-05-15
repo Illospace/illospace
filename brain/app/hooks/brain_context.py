@@ -11,14 +11,26 @@ Usage:
 Output: JSON with relevant_memories, guardrails, and warnings.
 """
 
+import asyncio
 import json
 import os
 import sys
-from datetime import datetime
+import inspect
+from typing import Any
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
-def get_context(
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _session_execute(session: Any, *args: Any, **kwargs: Any) -> Any:
+    return await _maybe_await(session.execute(*args, **kwargs))
+
+
+async def async_get_context(
     message: str,
     *,
     user_id: str | None = None,
@@ -43,9 +55,9 @@ def get_context(
         query_emb = embed_query(message)
         emb_str = "[" + ",".join(str(x) for x in query_emb) + "]"
 
-        with UnitOfWork() as uow:
+        async with UnitOfWork() as uow:
             # Get top relevant memories (lessons and patterns weighted higher)
-            for row in uow.session.execute(text("""
+            memories_result = await _session_execute(uow.session, text("""
                 SELECT id, content, memory_type, salience,
                        1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity
                 FROM memories
@@ -57,7 +69,8 @@ def get_context(
                     + (salience / 10.0) * 0.15
                     DESC
                 LIMIT 5
-            """), {"emb": emb_str}).mappings().all():
+            """), {"emb": emb_str})
+            for row in memories_result.mappings().all():
                 result["memories"].append({
                     "id": row["id"],
                     "content": row["content"][:300],
@@ -67,7 +80,7 @@ def get_context(
                 })
 
             # 2. Get active guardrails from recent skill failures
-            for row in uow.session.execute(text("""
+            guardrails_result = await _session_execute(uow.session, text("""
                 SELECT s.name, se.outcome_details, se.error_analysis, se.started_at
                 FROM skill_executions se
                 JOIN skills s ON s.id = se.skill_id
@@ -75,7 +88,8 @@ def get_context(
                   AND se.started_at > NOW() - INTERVAL '7 days'
                 ORDER BY se.started_at DESC
                 LIMIT 3
-            """)).mappings().all():
+            """))
+            for row in guardrails_result.mappings().all():
                 failure_text = row["error_analysis"] or row["outcome_details"] or "Unknown failure"
                 result["guardrails"].append({
                     "skill": row["name"],
@@ -84,7 +98,7 @@ def get_context(
                 })
 
             # 3. Check for high-salience warnings (lessons with salience >= 9)
-            for row in uow.session.execute(text("""
+            warnings_result = await _session_execute(uow.session, text("""
                 SELECT content, salience
                 FROM memories
                 WHERE memory_type IN ('lesson', 'pattern')
@@ -93,7 +107,8 @@ def get_context(
                   AND 1 - (semantic_embedding <=> CAST(:emb AS vector)) > 0.5
                 ORDER BY salience DESC, 1 - (semantic_embedding <=> CAST(:emb AS vector)) DESC
                 LIMIT 2
-            """), {"emb": emb_str}).mappings().all():
+            """), {"emb": emb_str})
+            for row in warnings_result.mappings().all():
                 result["warnings"].append(row["content"][:300])
 
     except Exception as e:
@@ -101,19 +116,30 @@ def get_context(
 
     # 4. Vault inventory — only list scoped secret names when a caller identity is known.
     try:
-        from brain.systems.vault import list_secrets, get_missing_requests
+        from brain.systems.vault import async_list_secrets, async_get_missing_requests
         if user_id:
-            vault_secrets = list_secrets(user_id=user_id, org_id=org_id)
+            vault_secrets = await async_list_secrets(user_id=user_id, org_id=org_id)
             vault_names_by_category = {}
             for s in vault_secrets:
                 cat = s.get('category', 'general')
                 vault_names_by_category.setdefault(cat, []).append(s['key_name'])
             result["vault_inventory"] = vault_names_by_category
-        result["vault_missing"] = get_missing_requests(user_id=user_id, org_id=org_id)
+        result["vault_missing"] = await async_get_missing_requests(user_id=user_id, org_id=org_id)
     except Exception:
         pass  # vault not available, skip
 
     return result
+
+
+def get_context(
+    message: str,
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict:
+    """Sync facade for legacy hooks that cannot yet await the async lookup."""
+    with asyncio.Runner() as runner:
+        return runner.run(async_get_context(message, user_id=user_id, org_id=org_id))
 
 
 def format_system_message(ctx: dict) -> str:
@@ -162,7 +188,8 @@ if __name__ == "__main__":
         sys.exit(1)
 
     message = sys.argv[1]
-    ctx = get_context(message)
+    with asyncio.Runner() as runner:
+        ctx = runner.run(async_get_context(message))
     system_msg = format_system_message(ctx)
 
     # Output JSON for the hook to parse

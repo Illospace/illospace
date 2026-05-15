@@ -6,9 +6,6 @@ import json
 import logging
 import re
 
-from sqlalchemy import text
-
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.integrations.anthropic_adapter import build_auth_adapter, create_message_with_token, is_oauth_token
 from brain.platform.integrations.llm import _import_openai_sdk
 from brain.platform.integrations.openai_codex_auth import (
@@ -146,39 +143,6 @@ def verify_provider_api_key(api_key: str, provider: str) -> None:
 def should_trust_failed_key_verification(provider: str, api_key: str) -> bool:
     """Setup tokens are stored on user intent even if live verification fails."""
     return provider == "anthropic" and is_oauth_token(api_key)
-
-
-def store_org_api_key(
-    org_id: str,
-    provider: str,
-    encrypted_key: bytes,
-    *,
-    label: str | None = None,
-    uow_factory=UnitOfWork,
-) -> None:
-    """Upsert an org API key."""
-    with uow_factory() as uow:
-        if label is None:
-            uow.session.execute(
-                text("""
-                    INSERT INTO org_api_keys (org_id, provider, encrypted_key)
-                    VALUES (:org_id, :provider, :encrypted)
-                    ON CONFLICT (org_id, provider) DO UPDATE SET
-                        encrypted_key = EXCLUDED.encrypted_key
-                """),
-                {"org_id": org_id, "provider": provider, "encrypted": encrypted_key},
-            )
-        else:
-            uow.session.execute(
-                text("""
-                    INSERT INTO org_api_keys (org_id, provider, encrypted_key, label)
-                    VALUES (:org_id, :provider, :encrypted, :label)
-                    ON CONFLICT (org_id, provider) DO UPDATE SET
-                        encrypted_key = EXCLUDED.encrypted_key,
-                        label = EXCLUDED.label
-                """),
-                {"org_id": org_id, "provider": provider, "encrypted": encrypted_key, "label": label},
-            )
 
 
 def parse_anthropic_connect_token(raw_token: str) -> tuple[str, str]:

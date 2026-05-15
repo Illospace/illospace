@@ -1,21 +1,10 @@
 """Native chat tool handlers for AgentRun."""
 from __future__ import annotations
 
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import json
 from typing import Any
 
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, logger
-
-
-def _run_coro_sync(coro):
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(asyncio.run, coro).result()
 
 
 def _current_chat_trigger() -> dict[str, Any]:
@@ -51,35 +40,26 @@ def _coerce_optional_int(value: Any) -> int | None:
         raise ValueError("thread_root_message_id must be an integer")
 
 
-def _publish_chat_events(publish, *, org_id: str, db) -> None:
-    async def _publish() -> None:
-        from brain.app.api.routers.chat import (
-            _publish_message_events,
-            _publish_notification_summaries,
-        )
+async def _publish_chat_events(publish, summaries: dict[str, dict[str, Any]]) -> None:
+    from brain.app.api.routers.chat import (
+        _publish_message_events,
+        _publish_notification_summary_payloads,
+    )
 
-        await _publish_message_events(
-            publish,
-            is_thread_reply=publish.root_message is not None,
-        )
-        await _publish_notification_summaries(
-            db,
-            org_id=org_id,
-            user_ids=publish.member_ids,
-        )
-
-    try:
-        _run_coro_sync(_publish())
-    except Exception as exc:
-        logger.warning("agent_chat_publish_failed: %s", exc)
+    await _publish_message_events(
+        publish,
+        is_thread_reply=publish.root_message is not None,
+    )
+    await _publish_notification_summary_payloads(summaries)
 
 
-def _handle_post_chat_message(
+async def _handle_post_chat_message(
     body: str,
     conversation_id: str | None = None,
     thread_root_message_id: int | None = None,
 ) -> str:
     """Post an Illo-authored message to the native team room."""
+    from brain.app.api.routers.chat import _notification_summary_payloads
     from brain.app.api.services.chat import ChatService
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
@@ -98,10 +78,8 @@ def _handle_post_chat_message(
     if not actor_user_id or not org_id:
         return json.dumps({"error": "post_chat_message requires a user-scoped org run"})
 
-    publish = None
-    message_payload = None
-    with UnitOfWork() as uow:
-        message, publish = ChatService(
+    async with UnitOfWork() as uow:
+        message, publish = await ChatService(
             uow.session,
             {
                 "id": actor_user_id,
@@ -117,11 +95,17 @@ def _handle_post_chat_message(
                 "chat_trigger_message_id": trigger.get("message_id"),
             },
         )
+        summaries = await _notification_summary_payloads(
+            uow.session,
+            org_id=org_id,
+            user_ids=publish.member_ids,
+        )
         message_payload = message.model_dump(mode="json")
-        uow.session.flush()
     if publish is not None:
-        with UnitOfWork() as publish_uow:
-            _publish_chat_events(publish, org_id=org_id, db=publish_uow.session)
+        try:
+            await _publish_chat_events(publish, summaries)
+        except Exception as exc:
+            logger.warning("agent_chat_publish_failed: %s", exc)
     return json.dumps({"ok": True, "message": message_payload}, default=str)
 
 

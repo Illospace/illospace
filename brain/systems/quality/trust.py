@@ -23,12 +23,12 @@ FAILURES_TO_DEGRADE = 2
 DEGRADE_WINDOW_DAYS = 7
 
 
-def get_trust_level() -> dict:
+async def get_trust_level() -> dict:
     """Return current trust state with level name."""
-    with UnitOfWork() as uow:
-        row = uow.session.execute(
+    async with UnitOfWork() as uow:
+        row = (await uow.session.execute(
             text("SELECT * FROM trust_state LIMIT 1")
-        ).mappings().first()
+        )).mappings().first()
         if not row:
             return {
                 "current_level": 0,
@@ -41,12 +41,12 @@ def get_trust_level() -> dict:
     return result
 
 
-def check_requirements(task_context: dict) -> dict:
+async def check_requirements(task_context: dict) -> dict:
     """Check what's required for this task at current trust level.
 
     Returns: {requires_tests: bool, requires_verification: bool, reason: str}
     """
-    trust = get_trust_level()
+    trust = await get_trust_level()
     level = trust["current_level"]
     involves_code = task_context.get("involves_code", False)
     lines_changed = task_context.get("lines_changed", 999)
@@ -84,12 +84,12 @@ def check_requirements(task_context: dict) -> dict:
         }
 
 
-def record_outcome(success: bool, caught_by: str = "self") -> dict:
+async def record_outcome(success: bool, caught_by: str = "self") -> dict:
     """Record a task outcome. Returns updated trust state.
 
     Auto-degrades on failures, auto-upgrades on consecutive successes.
     """
-    trust = get_trust_level()
+    trust = await get_trust_level()
     level = trust["current_level"]
     consecutive = trust.get("consecutive_clean", 0)
 
@@ -103,13 +103,13 @@ def record_outcome(success: bool, caught_by: str = "self") -> dict:
         consecutive = 0
         # Check recent failures for auto-degrade
         if not success:
-            recent_failures = _count_recent_failures()
+            recent_failures = await _count_recent_failures()
             if recent_failures + 1 >= FAILURES_TO_DEGRADE and level > 0:
                 level = max(0, level - 1)
 
     # Update DB
-    with UnitOfWork() as uow:
-        uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        await uow.session.execute(text("""
             UPDATE trust_state SET
                 current_level = :level,
                 consecutive_clean = :consecutive,
@@ -125,11 +125,11 @@ def record_outcome(success: bool, caught_by: str = "self") -> dict:
     }
 
 
-def _count_recent_failures() -> int:
+async def _count_recent_failures() -> int:
     """Count failures in the last DEGRADE_WINDOW_DAYS days."""
-    with UnitOfWork() as uow:
-        row = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        row = (await uow.session.execute(text("""
             SELECT COUNT(*) as cnt FROM violation_log
-            WHERE session_date >= CURRENT_DATE - INTERVAL :days
-        """), {"days": f"{DEGRADE_WINDOW_DAYS} days"}).mappings().first()
+            WHERE session_date >= CURRENT_DATE - (CAST(:days AS integer) * INTERVAL '1 day')
+        """), {"days": DEGRADE_WINDOW_DAYS})).mappings().first()
         return row["cnt"] if row else 0

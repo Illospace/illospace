@@ -6,19 +6,22 @@ from __future__ import annotations
 import json
 import re
 import sys
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.schema import CreateTable
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from brain.systems.runs.domain import AgentRunArtifact, AgentRunRequest, ArtifactType
-from brain.systems.runs.engine import AgentRunEngine, RunRecipeResult, RunRuntime
+from brain.systems.runs.engine import AsyncAgentRunEngine, RunRecipeResult, RunRuntime
 from brain.systems.runs.recipes.deep import DeepRecipe
 from brain.systems.runs.recipes.scout import ScoutRecipe
 from brain.systems.runs.status import RunStatus
@@ -26,9 +29,9 @@ from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEven
 
 
 class SmokeWorkerRecipe:
-    def execute(self, runtime: RunRuntime) -> RunRecipeResult:
-        runtime.activity("Smoke worker collecting evidence")
-        runtime.text_delta("worker evidence")
+    async def execute(self, runtime: RunRuntime) -> RunRecipeResult:
+        await runtime.activity("Smoke worker collecting evidence")
+        await runtime.text_delta("worker evidence")
         return RunRecipeResult(
             output="worker evidence",
             artifacts=(
@@ -44,24 +47,30 @@ class SmokeWorkerRecipe:
         )
 
 
-def main() -> int:
+async def _main_async() -> int:
     _patch_sqlite()
-    session = _session()
-    engine = AgentRunEngine(
-        session,
-        recipes={"deep": DeepRecipe(), "scout": ScoutRecipe(), "worker": SmokeWorkerRecipe()},
-    )
-    run = engine.run(
-        AgentRunRequest(
-            thread_id="bench-deep-child-runs",
-            message="Implement a tiny smoke task and verify evidence.",
-            profile="deep",
-            metadata={"deep_workers": [{"role": "smoke", "objective": "Produce deterministic worker evidence."}]},
-        )
-    )
-    session.commit()
-    child_runs = session.scalars(select(AgentRunRow).where(AgentRunRow.parent_run_id == run.id)).all()
-    artifacts = session.scalars(select(AgentRunArtifactRow).where(AgentRunArtifactRow.run_id == run.id)).all()
+    _patch_offline_invocations()
+    engine, session_factory = await _session_factory()
+    try:
+        async with session_factory() as session:
+            run = await AsyncAgentRunEngine(
+                session,
+                recipes={"deep": DeepRecipe(), "scout": ScoutRecipe(), "worker": SmokeWorkerRecipe()},
+            ).run(
+                AgentRunRequest(
+                    thread_id="bench-deep-child-runs",
+                    message="Implement a tiny smoke task and verify evidence.",
+                    profile="deep",
+                    metadata={"deep_workers": [{"role": "smoke", "objective": "Produce deterministic worker evidence."}]},
+                )
+            )
+            await session.commit()
+            child_result = await session.scalars(select(AgentRunRow).where(AgentRunRow.parent_run_id == run.id))
+            artifact_result = await session.scalars(select(AgentRunArtifactRow).where(AgentRunArtifactRow.run_id == run.id))
+            child_runs = child_result.all()
+            artifacts = artifact_result.all()
+    finally:
+        await engine.dispose()
     result = {
         "run_id": run.id,
         "status": run.status.value,
@@ -80,11 +89,33 @@ def main() -> int:
     return 0 if result["passed"] else 1
 
 
-def _session():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    for table in (AgentRunRow.__table__, AgentRunEventRow.__table__, AgentRunArtifactRow.__table__):
-        table.create(engine, checkfirst=True)
-    return sessionmaker(bind=engine, expire_on_commit=False)()
+def main() -> int:
+    return asyncio.run(_main_async())
+
+
+def _patch_offline_invocations() -> None:
+    import brain.systems.runs.recipes.deep as deep_module
+    import brain.systems.runs.recipes.phase_barrier as phase_barrier_module
+
+    def _invoke(spec):
+        session_id = str(getattr(spec, "session_id", "") or "")
+        if "phase-review" in session_id:
+            return SimpleNamespace(
+                output=json.dumps({"summary": "Offline phase review passed.", "revisions": []}),
+                success=True,
+            )
+        return SimpleNamespace(output="Deep completed using native AgentRun workers.", success=True)
+
+    deep_module.invoke_direct_agent = _invoke
+    phase_barrier_module.invoke_direct_agent = _invoke
+
+
+async def _session_factory():
+    engine = create_async_engine("sqlite+aiosqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    async with engine.begin() as conn:
+        for table in (AgentRunRow.__table__, AgentRunEventRow.__table__, AgentRunArtifactRow.__table__):
+            await conn.execute(CreateTable(table, if_not_exists=True))
+    return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
 def _patch_sqlite() -> None:

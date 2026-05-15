@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.agent import AgentApiCall
 from brain.platform.db.models.agent_run import AgentRunRow
@@ -127,39 +127,53 @@ def _apply_status_filter(stmt: Any, statuses: Iterable[str] | None) -> Any:
     return stmt.where(AgentRunRow.status.in_(status_values))
 
 
-def summarize_recent_run_usage(
-    session: Session,
+async def async_summarize_recent_run_usage(
+    session: AsyncSession,
     *,
     limit: int = 500,
     org_id: str | None = None,
     since: datetime | None = None,
     statuses: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return recent runs with token/cost usage attached.
+    """Async recent-run token/cost usage aggregation."""
 
-    This deliberately performs one bounded run query and one grouped usage query
-    to avoid per-run lookups.
-    """
+    run_stmt = _recent_run_usage_stmt(
+        limit=limit,
+        org_id=org_id,
+        since=since,
+        statuses=statuses,
+    )
+    result = await session.scalars(run_stmt)
+    return await async_summarize_runs_usage(session, result.all())
 
-    run_stmt = select(AgentRunRow).order_by(AgentRunRow.created_at.desc()).limit(limit)
+
+def _recent_run_usage_stmt(
+    *,
+    limit: int,
+    org_id: str | None,
+    since: datetime | None,
+    statuses: Iterable[str] | None,
+):
+    stmt = select(AgentRunRow).order_by(AgentRunRow.created_at.desc()).limit(limit)
     if org_id:
-        run_stmt = run_stmt.where(AgentRunRow.org_id == org_id)
+        stmt = stmt.where(AgentRunRow.org_id == org_id)
     if since:
-        run_stmt = run_stmt.where(AgentRunRow.created_at >= since)
-    run_stmt = _apply_status_filter(run_stmt, statuses)
-    runs = list(session.scalars(run_stmt).all())
-    return summarize_runs_usage(session, runs)
+        stmt = stmt.where(AgentRunRow.created_at >= since)
+    return _apply_status_filter(stmt, statuses)
 
 
-def summarize_run_usage(session: Session, run_id: int) -> dict[str, Any] | None:
-    run = session.get(AgentRunRow, run_id)
+async def async_summarize_run_usage(session: AsyncSession, run_id: int) -> dict[str, Any] | None:
+    run = await session.get(AgentRunRow, run_id)
     if run is None:
         return None
-    rows = summarize_runs_usage(session, [run])
+    rows = await async_summarize_runs_usage(session, [run])
     return rows[0] if rows else None
 
 
-def summarize_runs_usage(session: Session, runs: Iterable[AgentRunRow]) -> list[dict[str, Any]]:
+async def async_summarize_runs_usage(
+    session: AsyncSession,
+    runs: Iterable[AgentRunRow],
+) -> list[dict[str, Any]]:
     runs = list(runs)
     run_ids = [run.id for run in runs]
 
@@ -185,22 +199,8 @@ def summarize_runs_usage(session: Session, runs: Iterable[AgentRunRow]) -> list[
     if not run_ids:
         return []
 
-    call_stmt = (
-        select(
-            AgentApiCall.run_id.label("run_id"),
-            AgentApiCall.model.label("model"),
-            func.count(AgentApiCall.id).label("api_calls"),
-            func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
-            func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
-            func.coalesce(func.sum(AgentApiCall.cache_read), 0).label("cache_read"),
-            func.coalesce(func.sum(AgentApiCall.cache_write), 0).label("cache_write"),
-            func.max(AgentApiCall.created_at).label("last_call_at"),
-        )
-        .where(AgentApiCall.run_id.in_(run_ids))
-        .group_by(AgentApiCall.run_id, AgentApiCall.model)
-    )
-
-    for call_row in session.execute(call_stmt).all():
+    call_stmt = _run_usage_call_stmt(run_ids)
+    for call_row in (await session.execute(call_stmt)).all():
         row = usage_by_run.get(call_row.run_id)
         if row is None:
             continue
@@ -222,17 +222,46 @@ def summarize_runs_usage(session: Session, runs: Iterable[AgentRunRow]) -> list[
     return [usage_by_run[run.id] for run in runs]
 
 
-def summarize_member_token_usage(
-    session: Session,
+def _run_usage_call_stmt(run_ids: list[int]):
+    return (
+        select(
+            AgentApiCall.run_id.label("run_id"),
+            AgentApiCall.model.label("model"),
+            func.count(AgentApiCall.id).label("api_calls"),
+            func.coalesce(func.sum(AgentApiCall.tokens_input), 0).label("tokens_input"),
+            func.coalesce(func.sum(AgentApiCall.tokens_output), 0).label("tokens_output"),
+            func.coalesce(func.sum(AgentApiCall.cache_read), 0).label("cache_read"),
+            func.coalesce(func.sum(AgentApiCall.cache_write), 0).label("cache_write"),
+            func.max(AgentApiCall.created_at).label("last_call_at"),
+        )
+        .where(AgentApiCall.run_id.in_(run_ids))
+        .group_by(AgentApiCall.run_id, AgentApiCall.model)
+    )
+
+
+async def async_summarize_member_token_usage(
+    session: AsyncSession,
     *,
     org_id: str,
     since: datetime,
 ) -> dict[Any, dict[str, Any]]:
-    """Aggregate org-scoped token usage by run owner."""
+    """Async aggregate of org-scoped token usage by run owner."""
 
     usage_by_user: dict[Any, dict[str, Any]] = defaultdict(_empty_usage)
 
-    usage_stmt = (
+    for row in (await session.execute(_member_usage_stmt(org_id=org_id, since=since))).all():
+        target = usage_by_user[row.user_id]
+        target["runs"] = _coerce_int(row.runs)
+        _add_call_usage(target, row)
+
+    for row in (await session.execute(_member_cost_stmt(org_id=org_id, since=since))).all():
+        usage_by_user[row.user_id]["estimated_cost"] += _model_cost(row)
+
+    return dict(usage_by_user)
+
+
+def _member_usage_stmt(*, org_id: str, since: datetime):
+    return (
         select(
             AgentRunRow.user_id.label("user_id"),
             func.count(func.distinct(AgentRunRow.id)).label("runs"),
@@ -248,12 +277,9 @@ def summarize_member_token_usage(
         .group_by(AgentRunRow.user_id)
     )
 
-    for row in session.execute(usage_stmt).all():
-        target = usage_by_user[row.user_id]
-        target["runs"] = _coerce_int(row.runs)
-        _add_call_usage(target, row)
 
-    cost_stmt = (
+def _member_cost_stmt(*, org_id: str, since: datetime):
+    return (
         select(
             AgentRunRow.user_id.label("user_id"),
             AgentApiCall.model.label("model"),
@@ -267,21 +293,16 @@ def summarize_member_token_usage(
         .group_by(AgentRunRow.user_id, AgentApiCall.model)
     )
 
-    for row in session.execute(cost_stmt).all():
-        usage_by_user[row.user_id]["estimated_cost"] += _model_cost(row)
 
-    return dict(usage_by_user)
-
-
-def summarize_token_totals(
-    session: Session,
+async def async_summarize_token_totals(
+    session: AsyncSession,
     *,
     since: datetime,
     org_id: str | None = None,
     thread_id: str | None = None,
     statuses: Iterable[str] | None = None,
 ) -> dict[str, Any]:
-    """Summarize run-linked token usage for budget and reporting surfaces."""
+    """Async summary of run-linked token usage for budget and reporting surfaces."""
 
     filters = [AgentApiCall.created_at >= since]
     if org_id:
@@ -303,7 +324,7 @@ def summarize_token_totals(
         .where(*filters)
     )
     total_stmt = _apply_status_filter(total_stmt, statuses)
-    totals = session.execute(total_stmt).one()
+    totals = (await session.execute(total_stmt)).one()
 
     result = _empty_usage()
     result["runs"] = _coerce_int(totals.runs)
@@ -323,5 +344,5 @@ def summarize_token_totals(
     )
     cost_stmt = _apply_status_filter(cost_stmt, statuses)
 
-    result["estimated_cost"] = sum(_model_cost(row) for row in session.execute(cost_stmt).all())
+    result["estimated_cost"] = sum(_model_cost(row) for row in (await session.execute(cost_stmt)).all())
     return result

@@ -8,9 +8,9 @@ Usage:
     python3 -m brain.jobs.pipelines.nightly_assess [--date 2026-03-04] [--dry-run]
 """
 import argparse
+import asyncio
 import json
 import os
-import subprocess
 import sys
 from datetime import date, timedelta
 
@@ -18,6 +18,11 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 import brain.kernel.config as config
+from brain.platform.async_io import (
+    path_exists,
+    read_text as read_text_async,
+    run_subprocess,
+)
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.app.cli.memory import add_memory
 
@@ -60,11 +65,11 @@ def _update_experiment_content(content: str, meta: dict) -> str:
     return f"{desc}\nEXPERIMENT_META:{json.dumps(meta)}"
 
 
-def gather_due_experiments(target_date: date) -> list[dict]:
+async def gather_due_experiments(target_date: date) -> list[dict]:
     """Query active experiment memories due for assessment."""
     date_str = target_date.isoformat()
-    with UnitOfWork() as uow:
-        result = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             SELECT id, content, salience, tags, created_at
             FROM memories
             WHERE memory_type = 'experiment'
@@ -85,26 +90,26 @@ def gather_due_experiments(target_date: date) -> list[dict]:
     return due
 
 
-def gather_data(data_source: str) -> dict:
+async def gather_data(data_source: str) -> dict:
     """Gather quantitative data from a known data source.
 
     Returns: {"available": bool, "metrics": dict, "summary": str}
     """
     if data_source == "skill_success_rates":
-        return _gather_skill_stats()
+        return await _gather_skill_stats()
     elif data_source == "nightly_logs":
-        return _gather_nightly_log_stats()
+        return await _gather_nightly_log_stats()
     elif data_source == "test_results":
-        return _gather_test_results()
+        return await _gather_test_results()
     else:
         return {"available": False, "metrics": {}, "summary": f"Manual assessment needed for source: {data_source}"}
 
 
-def _gather_skill_stats() -> dict:
+async def _gather_skill_stats() -> dict:
     """Query skills table for recent success rates."""
     try:
-        with UnitOfWork() as uow:
-            result = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            result = await uow.session.execute(text("""
                 SELECT name,
                        use_count,
                        success_count,
@@ -129,7 +134,7 @@ def _gather_skill_stats() -> dict:
         return {"available": False, "metrics": {}, "summary": f"Error querying skills: {e}"}
 
 
-def _gather_nightly_log_stats() -> dict:
+async def _gather_nightly_log_stats() -> dict:
     """Check recent nightly logs for errors."""
     try:
         log_dir = LOG_DIR
@@ -138,9 +143,8 @@ def _gather_nightly_log_stats() -> dict:
         for delta in range(7):
             d = (date.today() - timedelta(days=delta)).isoformat()
             log_path = os.path.join(log_dir, f"nightly-{d}.log")
-            if os.path.exists(log_path):
-                with open(log_path) as f:
-                    lines = f.readlines()
+            if await path_exists(log_path):
+                lines = (await read_text_async(log_path)).splitlines()
                 total_lines += len(lines)
                 errors += sum(1 for l in lines if "ERROR" in l or "❌" in l or "Traceback" in l)
         if total_lines == 0:
@@ -154,10 +158,10 @@ def _gather_nightly_log_stats() -> dict:
         return {"available": False, "metrics": {}, "summary": f"Error reading logs: {e}"}
 
 
-def _gather_test_results() -> dict:
+async def _gather_test_results() -> dict:
     """Run pytest and check pass rate."""
     try:
-        r = subprocess.run(
+        r = await run_subprocess(
             ["bash", "-c", "source venv/bin/activate && python3 -m pytest tests/ -q --tb=no"],
             capture_output=True, text=True, timeout=120,
             cwd=PROJECT_ROOT,
@@ -186,7 +190,7 @@ def _gather_test_results() -> dict:
         return {"available": False, "metrics": {}, "summary": f"Error running tests: {e}"}
 
 
-def assess_single_experiment(experiment: dict, target_date: date, dry_run: bool = False) -> dict:
+async def assess_single_experiment(experiment: dict, target_date: date, dry_run: bool = False) -> dict:
     """Assess a single experiment. Returns assessment result dict."""
     meta = experiment["meta"]
     mem_id = experiment["id"]
@@ -197,7 +201,7 @@ def assess_single_experiment(experiment: dict, target_date: date, dry_run: bool 
     _log(f"\n📊 Assessing experiment #{mem_id}: {hypothesis}")
 
     # Gather data
-    data = gather_data(data_source)
+    data = await gather_data(data_source)
     _log(f"  Data source '{data_source}': {data['summary']}")
 
     # Determine verdict
@@ -230,14 +234,14 @@ def assess_single_experiment(experiment: dict, target_date: date, dry_run: bool 
 
     if not dry_run:
         new_content = _update_experiment_content(experiment["content"], meta)
-        with UnitOfWork() as uow:
-            uow.session.execute(text(
+        async with UnitOfWork() as uow:
+            await uow.session.execute(text(
                 "UPDATE memories SET content = :content WHERE id = :id"
             ), {"content": new_content, "id": mem_id})
 
         # If failed and has PR number, create improvement memory suggesting revert
         if verdict == "failed" and meta.get("pr_number"):
-            add_memory(
+            await add_memory(
                 content=f"REVERT RECOMMENDATION: Experiment '{hypothesis}' failed. "
                         f"Consider reverting PR #{meta['pr_number']}. Reason: {reason}",
                 memory_type="improvement",
@@ -288,14 +292,14 @@ def _heuristic_assess(data_source: str, metrics: dict) -> str:
     return "inconclusive"
 
 
-def assess_experiments(target_date: date | None = None, dry_run: bool = False) -> list[dict]:
+async def assess_experiments(target_date: date | None = None, dry_run: bool = False) -> list[dict]:
     """Main entry point: assess all due experiments."""
     target_date = target_date or date.today()
     _log(f"{'='*60}")
     _log(f"EXPERIMENT ASSESSMENT — {target_date} {'[DRY RUN]' if dry_run else ''}")
     _log(f"{'='*60}")
 
-    due = gather_due_experiments(target_date)
+    due = await gather_due_experiments(target_date)
     if not due:
         _log("No experiments due for assessment.")
         return []
@@ -304,7 +308,7 @@ def assess_experiments(target_date: date | None = None, dry_run: bool = False) -
 
     results = []
     for exp in due:
-        result = assess_single_experiment(exp, target_date, dry_run=dry_run)
+        result = await assess_single_experiment(exp, target_date, dry_run=dry_run)
         results.append(result)
 
     _log(f"\n{'='*60}")
@@ -323,7 +327,7 @@ def main():
     args = parser.parse_args()
 
     target_date = date.fromisoformat(args.date) if args.date else date.today()
-    results = assess_experiments(target_date=target_date, dry_run=args.dry_run)
+    results = asyncio.run(assess_experiments(target_date=target_date, dry_run=args.dry_run))
 
     if results:
         print(json.dumps(results, indent=2, default=str))

@@ -10,10 +10,11 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel import config as cfg
+from brain.platform.async_io import ensure_dir, run_blocking, write_text
 from brain.platform.db.models.agent_run import AgentRunRow
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 from .schemas import RuntimeUpdateRead
 
@@ -25,11 +26,11 @@ _START_LOCK_NAME = "illo-self-update.starting"
 _REQUEST_RUNNING_STATUSES = {"queued", "starting", "running"}
 
 
-def get_runtime_update_status() -> RuntimeUpdateRead:
+async def async_get_runtime_update_status(session: AsyncSession) -> RuntimeUpdateRead:
     root = _repo_root()
     request_file = _request_file()
     if request_file is not None:
-        return _request_update_status(request_file)
+        return await _async_request_update_status(session, request_file)
 
     state_dir = _state_dir(root)
     available, detail = _availability(root)
@@ -43,25 +44,29 @@ def get_runtime_update_status() -> RuntimeUpdateRead:
         available=available,
         pid=pid if running else None,
         started_at=started_at,
-        active_agent_runs=_active_agent_run_count(),
+        active_agent_runs=await _async_active_agent_run_count(session),
         log_path=str(state_dir / _LOG_NAME),
         detail=detail,
     )
 
 
-def start_runtime_update(*, requested_by: str | None = None) -> RuntimeUpdateRead:
+async def async_start_runtime_update(
+    session: AsyncSession,
+    *,
+    requested_by: str | None = None,
+) -> RuntimeUpdateRead:
     root = _repo_root()
     request_file = _request_file()
     if request_file is not None:
-        return _start_request_update(request_file, requested_by=requested_by)
+        return await _async_start_request_update(session, request_file, requested_by=requested_by)
 
     available, detail = _availability(root)
     if not available:
         raise HTTPException(status_code=409, detail=detail or "Illospace self-update is unavailable.")
 
     state_dir = _state_dir(root)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    existing = get_runtime_update_status()
+    await ensure_dir(state_dir)
+    existing = await async_get_runtime_update_status(session)
     if existing.status == "running":
         return RuntimeUpdateRead(
             **{
@@ -73,9 +78,10 @@ def start_runtime_update(*, requested_by: str | None = None) -> RuntimeUpdateRea
     lock_path = state_dir / _START_LOCK_NAME
     lock_fd = _acquire_start_lock(lock_path)
     if lock_fd is None:
+        current = await async_get_runtime_update_status(session)
         return RuntimeUpdateRead(
             **{
-                **get_runtime_update_status().model_dump(),
+                **current.model_dump(),
                 "status": "running",
                 "detail": "Illospace update is starting.",
             }
@@ -91,8 +97,10 @@ def start_runtime_update(*, requested_by: str | None = None) -> RuntimeUpdateRea
         if requested_by:
             env["ILLO_SELF_UPDATE_REQUESTED_BY"] = requested_by
 
-        with log_path.open("ab") as handle:
-            process = subprocess.Popen(
+        handle = await run_blocking(log_path.open, "ab")
+        try:
+            process = await run_blocking(
+                subprocess.Popen,
                 command,
                 cwd=str(root),
                 stdin=subprocess.DEVNULL,
@@ -102,6 +110,8 @@ def start_runtime_update(*, requested_by: str | None = None) -> RuntimeUpdateRea
                 start_new_session=True,
                 env=env,
             )
+        finally:
+            await run_blocking(handle.close)
 
         metadata = {
             "pid": process.pid,
@@ -109,10 +119,10 @@ def start_runtime_update(*, requested_by: str | None = None) -> RuntimeUpdateRea
             "requested_by": requested_by,
             "root": str(root),
         }
-        (state_dir / _META_NAME).write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-        (state_dir / _PID_NAME).write_text(f"{process.pid}\n", encoding="utf-8")
+        await write_text(state_dir / _META_NAME, json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        await write_text(state_dir / _PID_NAME, f"{process.pid}\n", encoding="utf-8")
 
-        active_runs = _active_agent_run_count()
+        active_runs = await _async_active_agent_run_count(session)
         detail = "Illospace update started."
         if active_runs:
             detail = (
@@ -188,7 +198,7 @@ def _request_availability(request_file: Path) -> tuple[bool, str | None]:
     return True, "Queues the update for the Compose updater sidecar."
 
 
-def _request_update_status(request_file: Path) -> RuntimeUpdateRead:
+async def _async_request_update_status(session: AsyncSession, request_file: Path) -> RuntimeUpdateRead:
     available, availability_detail = _request_availability(request_file)
     status_data = _read_json(_request_status_file(request_file))
     raw_status = str(status_data.get("status") or "").strip().lower()
@@ -200,18 +210,23 @@ def _request_update_status(request_file: Path) -> RuntimeUpdateRead:
         available=available,
         pid=None,
         started_at=_parse_datetime(status_data.get("started_at") or status_data.get("requested_at")),
-        active_agent_runs=_active_agent_run_count(),
+        active_agent_runs=await _async_active_agent_run_count(session),
         log_path=str(_request_log_path(request_file)),
         detail=detail or availability_detail,
     )
 
 
-def _start_request_update(request_file: Path, *, requested_by: str | None) -> RuntimeUpdateRead:
+async def _async_start_request_update(
+    session: AsyncSession,
+    request_file: Path,
+    *,
+    requested_by: str | None,
+) -> RuntimeUpdateRead:
     available, detail = _request_availability(request_file)
     if not available:
         raise HTTPException(status_code=409, detail=detail or "Illospace self-update is unavailable.")
 
-    existing = _request_update_status(request_file)
+    existing = await _async_request_update_status(session, request_file)
     if existing.status == "running":
         return RuntimeUpdateRead(
             **{
@@ -223,9 +238,10 @@ def _start_request_update(request_file: Path, *, requested_by: str | None) -> Ru
     lock_path = request_file.with_name(f".{request_file.name}.starting")
     lock_fd = _acquire_start_lock(lock_path)
     if lock_fd is None:
+        current = await _async_request_update_status(session, request_file)
         return RuntimeUpdateRead(
             **{
-                **_request_update_status(request_file).model_dump(),
+                **current.model_dump(),
                 "status": "running",
                 "detail": "Illospace update is starting.",
             }
@@ -247,7 +263,7 @@ def _start_request_update(request_file: Path, *, requested_by: str | None) -> Ru
                 "detail": "Illospace update queued for the Compose updater sidecar.",
             },
         )
-        active_runs = _active_agent_run_count()
+        active_runs = await _async_active_agent_run_count(session)
         return RuntimeUpdateRead(
             status="running",
             available=True,
@@ -284,14 +300,13 @@ def _update_command(root: Path) -> list[str]:
     return ["bash", str(root / "illo"), "update"]
 
 
-def _active_agent_run_count() -> int:
+async def _async_active_agent_run_count(session: AsyncSession) -> int:
     try:
-        with UnitOfWork() as uow:
-            count = uow.session.scalar(
-                select(func.count())
-                .select_from(AgentRunRow)
-                .where(AgentRunRow.status.in_(_ACTIVE_AGENT_RUN_STATUSES))
-            )
+        count = await session.scalar(
+            select(func.count())
+            .select_from(AgentRunRow)
+            .where(AgentRunRow.status.in_(_ACTIVE_AGENT_RUN_STATUSES))
+        )
         return int(count or 0)
     except Exception:
         return 0

@@ -74,7 +74,7 @@ def check_content_quality(content: str) -> tuple[bool, str]:
     return True, ""
 
 
-def check_duplicate(
+async def check_duplicate(
     content: str,
     embedding=None,
     window_days: int = 7,
@@ -98,22 +98,22 @@ def check_duplicate(
     )
     vis_clause, vis_params = memory_visibility_sql(visibility_context, alias="")
 
-    with UnitOfWork() as uow:
-        row = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        row = (await uow.session.execute(text("""
             SELECT id, content,
                    1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity
             FROM memories
             WHERE NOT archived
             AND semantic_embedding IS NOT NULL
-            AND created_at > NOW() - INTERVAL :window
+            AND created_at > NOW() - (CAST(:window_days AS integer) * INTERVAL '1 day')
             {vis_clause}
             ORDER BY semantic_embedding <=> CAST(:emb AS vector)
             LIMIT 1
         """.format(vis_clause=vis_clause)), {
             "emb": emb_str,
-            "window": f"{window_days} days",
+            "window_days": window_days,
             **vis_params,
-        }).first()
+        })).first()
 
         if row and row[2] > DEDUP_SIMILARITY_THRESHOLD:
             return True, {
@@ -132,7 +132,7 @@ def cap_salience(salience: float, source: str = "conversation") -> float:
     return min(max(salience, 1.0), 10.0)
 
 
-def validate_memory(
+async def validate_memory(
     content: str,
     salience: float = 5.0,
     source: str = "conversation",
@@ -156,7 +156,7 @@ def validate_memory(
 
     # Step 2: Dedup check
     if not skip_dedup:
-        is_dupe, dupe_details = check_duplicate(
+        is_dupe, dupe_details = await check_duplicate(
             content,
             user_id=user_id,
             org_id=org_id,

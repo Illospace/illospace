@@ -9,11 +9,22 @@ from typing import Any
 from brain.systems.runs.domain import AgentRunRequest
 from brain.systems.runs.events import run_event
 from brain.systems.runs.skill_commands import iter_slash_skill_commands, parse_slash_skill_names
-from brain.systems.runs.store import AgentRunStore
-from brain.systems.runs.cortex.runner import queue_status, start_runner, stop_runner
-from brain.systems.runs.cortex.thread_binding import build_run_request
+from brain.systems.runs.store import AsyncAgentRunStore
+from brain.systems.runs.cortex.runner import queue_status, queue_status_async, start_runner, stop_runner
+from brain.systems.runs.cortex.thread_binding import a_build_run_request
 from brain.platform.db.models.idea import Idea, IdeaStateLog
-from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+UnitOfWork = None
+
+
+def _unit_of_work_factory():
+    global UnitOfWork
+    if UnitOfWork is None:
+        from brain.platform.db.repositories.unit_of_work import UnitOfWork as _UnitOfWork
+
+        UnitOfWork = _UnitOfWork
+    return UnitOfWork
+
 
 
 @dataclass(frozen=True)
@@ -36,15 +47,6 @@ class RunAdmissionResult:
     skipped_reason: str | None = None
 
 
-def _skill_exists(name: str) -> bool:
-    try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-        with UnitOfWork() as uow:
-            return bool(uow.skills.get_by_name(name))
-    except Exception:
-        return False
-
 
 def _parse_skill_mentions(message: str) -> list[str]:
     return parse_slash_skill_names(message)
@@ -54,8 +56,6 @@ def _parse_skill_override(message: str) -> tuple[str | None, str]:
     raw = message or ""
     for command in iter_slash_skill_commands(raw):
         name = command["name"]
-        if not _skill_exists(name):
-            return None, raw
         prefix = raw[: command["start"]]
         suffix = raw[command["end"] :]
         inline = bool(prefix.rsplit("\n", 1)[-1].strip())
@@ -74,8 +74,9 @@ def ensure_schema() -> None:
     return None
 
 
-def _mark_idea_working_for_run_admission(session, idea_id: str, run_id: int) -> dict[str, Any] | None:
-    idea = session.get(Idea, str(idea_id))
+
+async def _a_mark_idea_working_for_run_admission(session, idea_id: str, run_id: int) -> dict[str, Any] | None:
+    idea = await session.get(Idea, str(idea_id))
     if idea is None:
         return None
 
@@ -103,7 +104,7 @@ def _mark_idea_working_for_run_admission(session, idea_id: str, run_id: int) -> 
             trigger="agent_run_admitted",
         )
     )
-    session.flush()
+    await session.flush()
     return {
         "idea_id": str(idea_id),
         "old_status": previous_status,
@@ -113,16 +114,17 @@ def _mark_idea_working_for_run_admission(session, idea_id: str, run_id: int) -> 
     }
 
 
-def _record_adaptation(run_id: int, adaptation: dict[str, Any] | str, *, session=None) -> None:
+async def _record_adaptation(run_id: int, adaptation: dict[str, Any] | str, *, session=None) -> None:
     """Record an adaptation as AgentRun metadata and as an append-only event."""
 
-    def _write(active_session) -> None:
-        row = AgentRunStore(active_session).require_run(int(run_id))
+    async def _write(active_session) -> None:
+        store = AsyncAgentRunStore(active_session)
+        row = await store.require_run(int(run_id))
         payload = adaptation if isinstance(adaptation, dict) else {"message": str(adaptation)}
         current = row.adaptations
         current.append(dict(payload))
         row.adaptations = current
-        AgentRunStore(active_session).append_event(
+        await store.append_event(
             run_event(
                 int(run_id),
                 "run.adaptation_recorded",
@@ -132,26 +134,26 @@ def _record_adaptation(run_id: int, adaptation: dict[str, Any] | str, *, session
         )
 
     if session is not None:
-        _write(session)
+        await _write(session)
         return
-    with UnitOfWork() as uow:
-        _write(uow.session)
+    async with _unit_of_work_factory()() as uow:
+        await _write(uow.session)
 
 
-def _get_adaptation_history(run_id: int, *, session=None) -> list[dict[str, Any]]:
-    def _read(active_session) -> list[dict[str, Any]]:
-        row = AgentRunStore(active_session).get_run(int(run_id))
+async def _get_adaptation_history(run_id: int, *, session=None) -> list[dict[str, Any]]:
+    async def _read(active_session) -> list[dict[str, Any]]:
+        row = await AsyncAgentRunStore(active_session).get_run(int(run_id))
         return row.adaptations if row else []
 
     if session is not None:
-        return _read(session)
-    with UnitOfWork() as uow:
-        return _read(uow.session)
+        return await _read(session)
+    async with _unit_of_work_factory()() as uow:
+        return await _read(uow.session)
 
 
-def admit_run(request: RunAdmissionRequest, *, session=None) -> RunAdmissionResult:
-    def _admit(active_session) -> RunAdmissionResult:
-        run_request: AgentRunRequest = build_run_request(
+async def async_admit_run(request: RunAdmissionRequest, *, session=None) -> RunAdmissionResult:
+    async def _admit(active_session) -> RunAdmissionResult:
+        run_request: AgentRunRequest = await a_build_run_request(
             active_session,
             idea_id=request.idea_id,
             event=request.event,
@@ -163,38 +165,32 @@ def admit_run(request: RunAdmissionRequest, *, session=None) -> RunAdmissionResu
             producer=request.producer,
             idempotency_key=request.idempotency_key,
         )
-        run = AgentRunStore(active_session).create_run(run_request)
-        _mark_idea_working_for_run_admission(active_session, request.idea_id, int(run.id))
+        run = await AsyncAgentRunStore(active_session).create_run(run_request)
+        await _a_mark_idea_working_for_run_admission(active_session, request.idea_id, int(run.id))
         return RunAdmissionResult(ok=True, run_id=run.id)
+
     if session is not None:
-        return _admit(session)
-    with UnitOfWork() as uow:
-        return _admit(uow.session)
+        return await _admit(session)
+    async with _unit_of_work_factory()() as uow:
+        return await _admit(uow.session)
 
 
-def idea_run_history(idea_id: str) -> list[dict[str, Any]]:
-    from brain.systems.runs.cortex.read_models import serialize_run_history
-
-    return serialize_run_history(idea_id)
-
-
-def cancel_runs_for_idea(idea_id: str) -> int:
+async def async_cancel_runs_for_idea(idea_id: str) -> int:
+    from sqlalchemy import select
     from brain.systems.runs.status import RunStatus
     from brain.platform.db.models.agent_run import AgentRunRow
 
     count = 0
-    with UnitOfWork() as uow:
-        store = AgentRunStore(uow.session)
-        rows = (
-            uow.session.query(AgentRunRow)
-            .filter(
+    async with _unit_of_work_factory()() as uow:
+        store = AsyncAgentRunStore(uow.session)
+        result = await uow.session.scalars(
+            select(AgentRunRow).where(
                 AgentRunRow.thread_id == idea_id,
                 AgentRunRow.status.in_(["queued", "starting", "running", "paused", "verifying"]),
             )
-            .all()
         )
-        for row in rows:
-            store.append_event(
+        for row in result.all():
+            await store.append_event(
                 run_event(
                     int(row.id),
                     "run.canceled",
@@ -202,28 +198,35 @@ def cancel_runs_for_idea(idea_id: str) -> int:
                     root_run_id=row.root_run_id,
                 )
             )
-            store.set_status(row.id, RunStatus.CANCELED, reason="canceled_for_thread")
+            await store.set_status(row.id, RunStatus.CANCELED, reason="canceled_for_thread")
             count += 1
     return count
 
 
-cancel_idea_runs = cancel_runs_for_idea
-supersede_runs_for_idea = cancel_runs_for_idea
+async def async_idea_run_history(idea_id: str) -> list[dict[str, Any]]:
+    from brain.systems.runs.cortex.read_models import serialize_run_history_async
+
+    return await serialize_run_history_async(idea_id)
+
+
+cancel_idea_runs = async_cancel_runs_for_idea
+supersede_runs_for_idea = async_cancel_runs_for_idea
 
 
 __all__ = [
     "RunAdmissionRequest",
     "RunAdmissionResult",
     "_get_adaptation_history",
-    "_mark_idea_working_for_run_admission",
+    "_a_mark_idea_working_for_run_admission",
     "_parse_skill_mentions",
     "_parse_skill_override",
     "_record_adaptation",
-    "admit_run",
+    "async_admit_run",
     "cancel_idea_runs",
-    "cancel_runs_for_idea",
-    "idea_run_history",
+    "async_cancel_runs_for_idea",
+    "async_idea_run_history",
     "queue_status",
+    "queue_status_async",
     "ensure_schema",
     "start_runner",
     "stop_runner",

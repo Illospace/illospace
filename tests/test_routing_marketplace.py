@@ -1,13 +1,15 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
+
+import pytest
 
 
 def _make_uow(session):
     uow = MagicMock()
-    uow.__enter__ = MagicMock(return_value=uow)
-    uow.__exit__ = MagicMock(return_value=False)
+    uow.__aenter__ = AsyncMock(return_value=uow)
+    uow.__aexit__ = AsyncMock(return_value=False)
     uow.session = session
     return uow
 
@@ -41,7 +43,8 @@ def test_canary_scope_accepts_uuid_values():
     assert allocation["scope"]["user_id"] == str(user_id)
 
 
-def test_candidate_exclusion_keeps_runtime_openai_only():
+@pytest.mark.asyncio
+async def test_candidate_exclusion_keeps_runtime_openai_only():
     from brain.platform.providers.model_policy import ProviderResolution, SkillRoutingProfile, SkillRuntimeConfig
     from brain.systems.routing.marketplace import resolve_marketplace_routing
 
@@ -84,28 +87,28 @@ def test_candidate_exclusion_keeps_runtime_openai_only():
 
     with patch("brain.systems.routing.marketplace.UnitOfWork", return_value=mock_uow), \
          patch("brain.systems.routing.marketplace.persist_routing_decision", side_effect=lambda _session, decision: decision), \
-         patch("brain.systems.routing.marketplace.resolve_provider_selection", return_value=ProviderResolution(provider="openai", source="fallback", explicit=False)), \
-         patch("brain.systems.routing.marketplace.resolve_skill_routing_profile", return_value=SkillRoutingProfile(
+         patch("brain.systems.routing.marketplace.async_resolve_provider_selection", return_value=ProviderResolution(provider="openai", source="fallback", explicit=False)), \
+         patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="develop",
              reasoning_effort="high",
              model_tier="medium",
              thinking_tier="high",
          )), \
-         patch("brain.systems.routing.marketplace.resolve_skill_runtime", return_value=SkillRuntimeConfig(
+         patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="openai",
              model_name="gpt-5.4",
              reasoning_effort="medium",
              model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.get_provider_model_map", side_effect=lambda provider, **kwargs: {
+         patch("brain.systems.routing.marketplace.async_get_provider_model_map", side_effect=lambda _session, provider, **kwargs: {
              "anthropic": {"high": "claude-opus-4-6", "medium": "claude-sonnet-4-6"},
              "openai": {"high": "gpt-5.4-pro", "medium": "gpt-5.4"},
          }[provider]), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", side_effect=load_snapshot), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", return_value={"sample_count": 12, "success_rate": 0.92}), \
-         patch("brain.systems.services.runtime_introspection.get_provider_auth_status", side_effect=lambda **kwargs: {"authenticated": kwargs.get("provider") == "openai"}):
-        decision = resolve_marketplace_routing(
+         patch("brain.systems.services.runtime_introspection.async_get_provider_auth_status", side_effect=lambda _session, **kwargs: {"authenticated": kwargs.get("provider") == "openai"}):
+        decision = await resolve_marketplace_routing(
             task_family="develop",
             lane="worker",
             skill_name="develop",
@@ -125,7 +128,8 @@ def test_candidate_exclusion_keeps_runtime_openai_only():
     assert included["eligible"] is True
 
 
-def test_candidate_pool_preserves_explicit_anthropic_route():
+@pytest.mark.asyncio
+async def test_candidate_pool_preserves_explicit_anthropic_route():
     from brain.platform.providers.model_policy import ProviderResolution, SkillRoutingProfile, SkillRuntimeConfig
     from brain.systems.routing.marketplace import resolve_marketplace_routing
 
@@ -136,25 +140,25 @@ def test_candidate_pool_preserves_explicit_anthropic_route():
 
     with patch("brain.systems.routing.marketplace.UnitOfWork", return_value=mock_uow), \
          patch("brain.systems.routing.marketplace.persist_routing_decision", side_effect=lambda _session, decision: decision), \
-         patch("brain.systems.routing.marketplace.resolve_provider_selection", return_value=ProviderResolution(provider="anthropic", source="preferred_provider", explicit=False)), \
-         patch("brain.systems.routing.marketplace.resolve_skill_routing_profile", return_value=SkillRoutingProfile(
+         patch("brain.systems.routing.marketplace.async_resolve_provider_selection", return_value=ProviderResolution(provider="anthropic", source="preferred_provider", explicit=False)), \
+         patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="develop",
              reasoning_effort="high",
              model_tier="medium",
              thinking_tier="high",
          )), \
-         patch("brain.systems.routing.marketplace.resolve_skill_runtime", return_value=SkillRuntimeConfig(
+         patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="anthropic",
              model_name="claude-sonnet-4-6",
              reasoning_effort="medium",
              model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.get_provider_model_map", return_value={"medium": "claude-sonnet-4-6"}), \
+         patch("brain.systems.routing.marketplace.async_get_provider_model_map", return_value={"medium": "claude-sonnet-4-6"}), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", return_value=None), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", return_value={"sample_count": 0, "success_rate": None}), \
-         patch("brain.systems.services.runtime_introspection.get_provider_auth_status", return_value={"authenticated": True}):
-        decision = resolve_marketplace_routing(
+         patch("brain.systems.services.runtime_introspection.async_get_provider_auth_status", return_value={"authenticated": True}):
+        decision = await resolve_marketplace_routing(
             task_family="develop",
             lane="worker",
             skill_name="develop",
@@ -171,7 +175,8 @@ def test_candidate_pool_preserves_explicit_anthropic_route():
     assert {candidate["provider"] for candidate in decision.candidate_scores} == {"anthropic"}
 
 
-def test_active_within_provider_canary_uses_stronger_openai_model():
+@pytest.mark.asyncio
+async def test_active_within_provider_canary_uses_stronger_openai_model():
     from brain.platform.providers.model_policy import ProviderResolution, SkillRoutingProfile, SkillRuntimeConfig
     from brain.systems.routing.marketplace import resolve_marketplace_routing
 
@@ -242,28 +247,28 @@ def test_active_within_provider_canary_uses_stronger_openai_model():
          patch("brain.systems.routing.marketplace.get_routing_marketplace_flags", return_value=flags), \
          patch("brain.systems.routing.marketplace._maybe_refresh_health_snapshots"), \
          patch("brain.systems.routing.marketplace.persist_routing_decision", side_effect=lambda _session, decision: decision), \
-         patch("brain.systems.routing.marketplace.resolve_provider_selection", return_value=ProviderResolution(provider="openai", source="fallback", explicit=False)), \
-         patch("brain.systems.routing.marketplace.resolve_skill_routing_profile", return_value=SkillRoutingProfile(
+         patch("brain.systems.routing.marketplace.async_resolve_provider_selection", return_value=ProviderResolution(provider="openai", source="fallback", explicit=False)), \
+         patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="develop",
              reasoning_effort="high",
              model_tier="high",
              thinking_tier="high",
          )), \
-         patch("brain.systems.routing.marketplace.resolve_skill_runtime", return_value=SkillRuntimeConfig(
+         patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="openai",
              model_name="gpt-5.4",
              reasoning_effort="medium",
              model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.get_provider_model_map", side_effect=lambda provider, **kwargs: {
+         patch("brain.systems.routing.marketplace.async_get_provider_model_map", side_effect=lambda _session, provider, **kwargs: {
              "anthropic": {"high": "claude-opus-4-6", "medium": "claude-sonnet-4-6"},
              "openai": {"high": "gpt-5.4-pro", "medium": "gpt-5.4"},
          }[provider]), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", side_effect=load_snapshot), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", side_effect=load_verifier), \
-         patch("brain.systems.services.runtime_introspection.get_provider_auth_status", side_effect=lambda **kwargs: {"authenticated": kwargs.get("provider") == "openai"}):
-        decision = resolve_marketplace_routing(
+         patch("brain.systems.services.runtime_introspection.async_get_provider_auth_status", side_effect=lambda _session, **kwargs: {"authenticated": kwargs.get("provider") == "openai"}):
+        decision = await resolve_marketplace_routing(
             task_family="develop",
             lane="worker",
             skill_name="develop",
@@ -286,7 +291,8 @@ def test_active_within_provider_canary_uses_stronger_openai_model():
     assert decision.inputs["route_summary"]["canary"]["eval_gate"]["ok"] is True
 
 
-def test_active_canary_requires_eval_gate_before_switching_models():
+@pytest.mark.asyncio
+async def test_active_canary_requires_eval_gate_before_switching_models():
     from brain.platform.providers.model_policy import ProviderResolution, SkillRoutingProfile, SkillRuntimeConfig
     from brain.systems.routing.marketplace import resolve_marketplace_routing
 
@@ -346,28 +352,28 @@ def test_active_canary_requires_eval_gate_before_switching_models():
          patch("brain.systems.routing.marketplace.get_routing_marketplace_flags", return_value=flags), \
          patch("brain.systems.routing.marketplace._maybe_refresh_health_snapshots"), \
          patch("brain.systems.routing.marketplace.persist_routing_decision", side_effect=lambda _session, decision: decision), \
-         patch("brain.systems.routing.marketplace.resolve_provider_selection", return_value=ProviderResolution(provider="openai", source="fallback", explicit=False)), \
-         patch("brain.systems.routing.marketplace.resolve_skill_routing_profile", return_value=SkillRoutingProfile(
+         patch("brain.systems.routing.marketplace.async_resolve_provider_selection", return_value=ProviderResolution(provider="openai", source="fallback", explicit=False)), \
+         patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="develop",
              reasoning_effort="high",
              model_tier="high",
              thinking_tier="high",
          )), \
-         patch("brain.systems.routing.marketplace.resolve_skill_runtime", return_value=SkillRuntimeConfig(
+         patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="openai",
              model_name="gpt-5.4",
              reasoning_effort="medium",
              model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.get_provider_model_map", side_effect=lambda provider, **kwargs: {
+         patch("brain.systems.routing.marketplace.async_get_provider_model_map", side_effect=lambda _session, provider, **kwargs: {
              "openai": {"high": "gpt-5.4-pro", "medium": "gpt-5.4"},
              "anthropic": {"high": "claude-opus-4-6", "medium": "claude-sonnet-4-6"},
          }[provider]), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", side_effect=lambda _session, provider, model: snapshots.get((provider, model))), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", return_value={"sample_count": 24, "success_rate": 0.98}), \
-         patch("brain.systems.services.runtime_introspection.get_provider_auth_status", side_effect=lambda **kwargs: {"authenticated": kwargs.get("provider") == "openai"}):
-        decision = resolve_marketplace_routing(
+         patch("brain.systems.services.runtime_introspection.async_get_provider_auth_status", side_effect=lambda _session, **kwargs: {"authenticated": kwargs.get("provider") == "openai"}):
+        decision = await resolve_marketplace_routing(
             task_family="develop",
             lane="worker",
             skill_name="develop",
@@ -387,7 +393,8 @@ def test_active_canary_requires_eval_gate_before_switching_models():
     assert decision.inputs["route_summary"]["canary"]["eval_gate"]["ok"] is False
 
 
-def test_active_within_provider_canary_falls_back_with_clear_reason_when_sparse():
+@pytest.mark.asyncio
+async def test_active_within_provider_canary_falls_back_with_clear_reason_when_sparse():
     from brain.platform.providers.model_policy import ProviderResolution, SkillRoutingProfile, SkillRuntimeConfig
     from brain.systems.routing.marketplace import resolve_marketplace_routing
 
@@ -412,28 +419,28 @@ def test_active_within_provider_canary_falls_back_with_clear_reason_when_sparse(
          patch("brain.systems.routing.marketplace.get_routing_marketplace_flags", return_value=flags), \
          patch("brain.systems.routing.marketplace._maybe_refresh_health_snapshots"), \
          patch("brain.systems.routing.marketplace.persist_routing_decision", side_effect=lambda _session, decision: decision), \
-         patch("brain.systems.routing.marketplace.resolve_provider_selection", return_value=ProviderResolution(provider="openai", source="fallback", explicit=False)), \
-         patch("brain.systems.routing.marketplace.resolve_skill_routing_profile", return_value=SkillRoutingProfile(
+         patch("brain.systems.routing.marketplace.async_resolve_provider_selection", return_value=ProviderResolution(provider="openai", source="fallback", explicit=False)), \
+         patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="develop",
              reasoning_effort="high",
              model_tier="high",
              thinking_tier="high",
          )), \
-         patch("brain.systems.routing.marketplace.resolve_skill_runtime", return_value=SkillRuntimeConfig(
+         patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="openai",
              model_name="gpt-5.4",
              reasoning_effort="medium",
              model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.get_provider_model_map", side_effect=lambda provider, **kwargs: {
+         patch("brain.systems.routing.marketplace.async_get_provider_model_map", side_effect=lambda _session, provider, **kwargs: {
              "anthropic": {"high": "claude-opus-4-6", "medium": "claude-sonnet-4-6"},
              "openai": {"high": "gpt-5.4-pro", "medium": "gpt-5.4"},
          }[provider]), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", return_value=None), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", return_value={"sample_count": 0, "success_rate": None}), \
-         patch("brain.systems.services.runtime_introspection.get_provider_auth_status", side_effect=lambda **kwargs: {"authenticated": kwargs.get("provider") == "openai"}):
-        decision = resolve_marketplace_routing(
+         patch("brain.systems.services.runtime_introspection.async_get_provider_auth_status", side_effect=lambda _session, **kwargs: {"authenticated": kwargs.get("provider") == "openai"}):
+        decision = await resolve_marketplace_routing(
             task_family="develop",
             lane="worker",
             skill_name="develop",
@@ -454,7 +461,8 @@ def test_active_within_provider_canary_falls_back_with_clear_reason_when_sparse(
     assert all(candidate["eligible"] is False for candidate in decision.candidate_scores)
 
 
-def test_scoring_falls_back_to_legacy_when_evidence_is_sparse():
+@pytest.mark.asyncio
+async def test_scoring_falls_back_to_legacy_when_evidence_is_sparse():
     from brain.platform.providers.model_policy import ProviderResolution, SkillRoutingProfile, SkillRuntimeConfig
     from brain.systems.routing.marketplace import resolve_marketplace_routing
 
@@ -465,28 +473,28 @@ def test_scoring_falls_back_to_legacy_when_evidence_is_sparse():
 
     with patch("brain.systems.routing.marketplace.UnitOfWork", return_value=mock_uow), \
          patch("brain.systems.routing.marketplace.persist_routing_decision", side_effect=lambda _session, decision: decision), \
-         patch("brain.systems.routing.marketplace.resolve_provider_selection", return_value=ProviderResolution(provider="openai", source="fallback", explicit=False)), \
-         patch("brain.systems.routing.marketplace.resolve_skill_routing_profile", return_value=SkillRoutingProfile(
+         patch("brain.systems.routing.marketplace.async_resolve_provider_selection", return_value=ProviderResolution(provider="openai", source="fallback", explicit=False)), \
+         patch("brain.systems.routing.marketplace.async_resolve_skill_routing_profile", return_value=SkillRoutingProfile(
              skill_name="coordinate",
              reasoning_effort=None,
              model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.resolve_skill_runtime", return_value=SkillRuntimeConfig(
+         patch("brain.systems.routing.marketplace.async_resolve_skill_runtime", return_value=SkillRuntimeConfig(
              provider="openai",
              model_name="gpt-5.4",
              reasoning_effort="medium",
              model_tier="medium",
              thinking_tier="medium",
          )), \
-         patch("brain.systems.routing.marketplace.get_provider_model_map", side_effect=lambda provider, **kwargs: {
+         patch("brain.systems.routing.marketplace.async_get_provider_model_map", side_effect=lambda _session, provider, **kwargs: {
              "anthropic": {"medium": "claude-sonnet-4-6"},
              "openai": {"medium": "gpt-5.4"},
          }[provider]), \
          patch("brain.systems.routing.marketplace._load_latest_health_snapshot", return_value=None), \
          patch("brain.systems.routing.marketplace._load_verifier_evidence", return_value={"sample_count": 0, "success_rate": None}), \
-         patch("brain.systems.services.runtime_introspection.get_provider_auth_status", return_value={"authenticated": True}):
-        decision = resolve_marketplace_routing(
+         patch("brain.systems.services.runtime_introspection.async_get_provider_auth_status", return_value={"authenticated": True}):
+        decision = await resolve_marketplace_routing(
             task_family="coordinate",
             lane="coordinator",
             skill_name="coordinate",
@@ -505,7 +513,8 @@ def test_scoring_falls_back_to_legacy_when_evidence_is_sparse():
     assert all(candidate["eligible"] is False for candidate in decision.candidate_scores)
 
 
-def test_routing_decision_logging_persists_row():
+@pytest.mark.asyncio
+async def test_routing_decision_logging_persists_row():
     from brain.systems.routing.marketplace import RoutingDecisionResult, persist_routing_decision
 
     added_rows = []
@@ -541,7 +550,7 @@ def test_routing_decision_logging_persists_row():
         fallback_used=False,
     )
 
-    result = persist_routing_decision(session, decision)
+    result = await persist_routing_decision(session, decision)
 
     assert session.add.called is True
     assert session.flush.called is True
@@ -549,7 +558,8 @@ def test_routing_decision_logging_persists_row():
     assert result.decision_id == 123
 
 
-def test_routing_marketplace_snapshot_exposes_fallback_reason():
+@pytest.mark.asyncio
+async def test_routing_marketplace_snapshot_exposes_fallback_reason():
     from types import SimpleNamespace
 
     from brain.systems.routing.marketplace import get_routing_marketplace_snapshot
@@ -606,10 +616,8 @@ def test_routing_marketplace_snapshot_exposes_fallback_reason():
 
     session = MagicMock()
     session.execute.side_effect = [_result([health_row]), _result([decision_row])]
-    mock_uow = _make_uow(session)
 
-    with patch("brain.systems.routing.marketplace.UnitOfWork", return_value=mock_uow):
-        snapshot = get_routing_marketplace_snapshot(user_id="user-1", org_id="org-1", provider="openai")
+    snapshot = await get_routing_marketplace_snapshot(session, user_id="user-1", org_id="org-1", provider="openai")
 
     assert snapshot["healthy"] is True
     assert snapshot["latest_decisions"][0]["fallback_reason"] == "canary_evidence_not_strong"

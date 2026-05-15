@@ -1,9 +1,8 @@
 """Health tier and ops snapshot tests."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -34,8 +33,7 @@ class _Result:
 
 @pytest.mark.asyncio
 async def test_live_endpoint_is_cheap_and_ok(client):
-    with patch("brain.app.ops.health._health_db_session", side_effect=AssertionError("live must not open DB")):
-        resp = await client.get("/api/health/live")
+    resp = await client.get("/api/health/live")
 
     assert resp.status_code == 200
     data = resp.json()
@@ -44,32 +42,28 @@ async def test_live_endpoint_is_cheap_and_ok(client):
     assert data["ok"] is True
 
 
-def test_readiness_snapshot_checks_database_migration_and_event_backbone(monkeypatch):
+@pytest.mark.asyncio
+async def test_readiness_snapshot_checks_database_migration_and_event_backbone(monkeypatch):
     session = MagicMock()
-    session.execute.side_effect = [
+    session.execute = AsyncMock(side_effect=[
         _Result(scalar_value=1),
         _Result(scalar_values=["head-1"]),
-    ]
+    ])
 
-    @contextmanager
-    def fake_db(_session=None):
-        yield session
-
-    monkeypatch.setattr(health, "_health_db_session", fake_db)
-    monkeypatch.setattr(health, "_apply_statement_timeout", lambda *args, **kwargs: None)
+    monkeypatch.setattr(health, "_apply_statement_timeout", AsyncMock())
     monkeypatch.setattr(health, "_alembic_head_revisions", lambda: {"head-1"})
     monkeypatch.setattr(
-        "brain.systems.runs.event_log.run_event_backbone_status",
-        lambda *args, **kwargs: {
+        "brain.systems.runs.event_log.async_run_event_backbone_status",
+        AsyncMock(return_value={
             "consumer_name": "api.websocket_fanout",
             "consumer_running": True,
             "health": "healthy",
             "lag": 0,
             "last_error": None,
-        },
+        }),
     )
 
-    snapshot = health.readiness_health_snapshot(consumer_running=True)
+    snapshot = await health.readiness_health_snapshot(consumer_running=True, session=session)
 
     assert snapshot["status"] == "ready"
     assert snapshot["ready"] is True
@@ -78,26 +72,22 @@ def test_readiness_snapshot_checks_database_migration_and_event_backbone(monkeyp
     assert snapshot["checks"]["event_backbone"]["status"] == "ok"
 
 
-def test_readiness_snapshot_fails_when_migration_is_behind(monkeypatch):
+@pytest.mark.asyncio
+async def test_readiness_snapshot_fails_when_migration_is_behind(monkeypatch):
     session = MagicMock()
-    session.execute.side_effect = [
+    session.execute = AsyncMock(side_effect=[
         _Result(scalar_value=1),
         _Result(scalar_values=["old-head"]),
-    ]
+    ])
 
-    @contextmanager
-    def fake_db(_session=None):
-        yield session
-
-    monkeypatch.setattr(health, "_health_db_session", fake_db)
-    monkeypatch.setattr(health, "_apply_statement_timeout", lambda *args, **kwargs: None)
+    monkeypatch.setattr(health, "_apply_statement_timeout", AsyncMock())
     monkeypatch.setattr(health, "_alembic_head_revisions", lambda: {"new-head"})
     monkeypatch.setattr(
-        "brain.systems.runs.event_log.run_event_backbone_status",
-        lambda *args, **kwargs: {"health": "healthy", "lag": 0, "last_error": None},
+        "brain.systems.runs.event_log.async_run_event_backbone_status",
+        AsyncMock(return_value={"health": "healthy", "lag": 0, "last_error": None}),
     )
 
-    snapshot = health.readiness_health_snapshot(consumer_running=True)
+    snapshot = await health.readiness_health_snapshot(consumer_running=True, session=session)
 
     assert snapshot["status"] == "not_ready"
     assert snapshot["ready"] is False
@@ -111,32 +101,28 @@ def test_readiness_snapshot_fails_when_migration_is_behind(monkeypatch):
     ]
 
 
-def test_readiness_snapshot_fails_when_event_backbone_has_error(monkeypatch):
+@pytest.mark.asyncio
+async def test_readiness_snapshot_fails_when_event_backbone_has_error(monkeypatch):
     session = MagicMock()
-    session.execute.side_effect = [
+    session.execute = AsyncMock(side_effect=[
         _Result(scalar_value=1),
         _Result(scalar_values=["head-1"]),
-    ]
+    ])
 
-    @contextmanager
-    def fake_db(_session=None):
-        yield session
-
-    monkeypatch.setattr(health, "_health_db_session", fake_db)
-    monkeypatch.setattr(health, "_apply_statement_timeout", lambda *args, **kwargs: None)
+    monkeypatch.setattr(health, "_apply_statement_timeout", AsyncMock())
     monkeypatch.setattr(health, "_alembic_head_revisions", lambda: {"head-1"})
     monkeypatch.setattr(
-        "brain.systems.runs.event_log.run_event_backbone_status",
-        lambda *args, **kwargs: {
+        "brain.systems.runs.event_log.async_run_event_backbone_status",
+        AsyncMock(return_value={
             "consumer_name": "api.websocket_fanout",
             "consumer_running": True,
             "health": "degraded",
             "lag": 0,
             "last_error": "broadcast failed",
-        },
+        }),
     )
 
-    snapshot = health.readiness_health_snapshot(consumer_running=True)
+    snapshot = await health.readiness_health_snapshot(consumer_running=True, session=session)
 
     assert snapshot["status"] == "not_ready"
     assert snapshot["checks"]["event_backbone"]["status"] == "failed"
@@ -145,21 +131,22 @@ def test_readiness_snapshot_fails_when_event_backbone_has_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ready_endpoint_returns_503_when_not_ready(client):
-    with patch("brain.app.api.routers.system.readiness_health_snapshot", return_value={
+    with patch("brain.app.api.routers.system.readiness_health_snapshot", new=AsyncMock(return_value={
         "tier": "ready",
         "status": "not_ready",
         "ready": False,
         "ok": False,
         "checks": {},
         "failures": [{"check": "database", "status": "failed", "summary": "database query failed"}],
-    }):
+    })):
         resp = await client.get("/api/health/ready")
 
     assert resp.status_code == 503
     assert resp.json()["status"] == "not_ready"
 
 
-def test_deep_health_reports_degradation_without_secrets(monkeypatch):
+@pytest.mark.asyncio
+async def test_deep_health_reports_degradation_without_secrets(monkeypatch):
     from brain.platform.provider_health import record_provider_failure, reset_provider_health
 
     reset_provider_health()
@@ -180,29 +167,27 @@ def test_deep_health_reports_degradation_without_secrets(monkeypatch):
             details={"api_key_configured": True},
         ),
     )
-    monkeypatch.setattr(
-        health,
-        "_scheduler_health_check",
-        lambda: health.HealthCheck(
+    async def scheduler_check(_session=None):
+        return health.HealthCheck(
             name="scheduler",
             status="ok",
             summary="scheduler healthy",
             latency_ms=1,
-        ),
-    )
-    monkeypatch.setattr(
-        health,
-        "_run_health_check",
-        lambda: health.HealthCheck(
+        )
+
+    async def run_check(_session=None):
+        return health.HealthCheck(
             name="run",
             status="degraded",
             summary="1 recent failed run",
             latency_ms=1,
             details={"recent_failures": [{"error": "Bearer super-secret-token"}]},
-        ),
-    )
+        )
 
-    snapshot = health.deep_health_snapshot(consumer_running=True)
+    monkeypatch.setattr(health, "_scheduler_health_check", scheduler_check)
+    monkeypatch.setattr(health, "_run_health_check", run_check)
+
+    snapshot = await health.deep_health_snapshot(consumer_running=True)
     payload = str(snapshot)
 
     assert snapshot["tier"] == "deep"

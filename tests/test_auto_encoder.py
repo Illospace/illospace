@@ -1,6 +1,6 @@
 """Tests for brain.systems.memory.encoder raw episode capture."""
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from brain.systems.memory.encoder import (
     ExtractedLesson,
@@ -47,28 +47,30 @@ class TestExtractLessons:
 
 class TestAutoEncode:
     @patch("brain.systems.memory.encoder.add_memory")
-    def test_session_dry_run(self, mock_add):
-        results = auto_encode_session("The fix is to use connection pooling properly.", dry_run=True)
+    async def test_session_dry_run(self, mock_add):
+        results = await auto_encode_session("The fix is to use connection pooling properly.", dry_run=True)
 
         assert len(results) == 1
         assert results[0]["dry_run"] is True
         assert results[0]["type"] == "raw_episode"
         mock_add.assert_not_called()
 
-    @patch("brain.systems.memory.encoder.add_memory", return_value={"id": 1})
-    def test_session_encodes_raw_episode(self, mock_add):
-        results = auto_encode_session("The fix is to use connection pooling properly.")
+    @patch("brain.systems.memory.encoder.add_memory", new_callable=AsyncMock)
+    async def test_session_encodes_raw_episode(self, mock_add):
+        mock_add.return_value = {"id": 1}
+        results = await auto_encode_session("The fix is to use connection pooling properly.")
 
         assert len(results) == 1
-        mock_add.assert_called()
+        mock_add.assert_awaited()
         call_kwargs = mock_add.call_args.kwargs
         assert call_kwargs["memory_type"] == "episode"
         assert call_kwargs["tags"] == ["raw_episode"]
 
-    @patch("brain.systems.memory.encoder.add_memory", return_value={"id": 2})
-    def test_agent_run_encodes_raw_episode(self, mock_add):
-        results = auto_encode_agent_run("Found that the root cause was a race condition in the worker.")
+    @patch("brain.systems.memory.encoder.add_memory", new_callable=AsyncMock)
+    async def test_agent_run_encodes_raw_episode(self, mock_add):
+        mock_add.return_value = {"id": 2}
+        results = await auto_encode_agent_run("Found that the root cause was a race condition in the worker.")
 
         assert len(results) == 1
-        mock_add.assert_called()
+        mock_add.assert_awaited()
         assert mock_add.call_args.kwargs["memory_type"] == "episode"

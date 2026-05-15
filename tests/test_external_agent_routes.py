@@ -346,8 +346,8 @@ async def test_hosted_mcp_create_thread_routes_trigger_when_requested():
         "brain.app.api.routers.agent_mcp.external_agents.create_thread_from_agent",
         return_value=(idea, message, []),
     ), patch(
-        "brain.app.triggers.router.route_trigger",
-        return_value=route_result,
+        "brain.app.triggers.router.async_route_trigger",
+        new=AsyncMock(return_value=route_result),
     ) as route_trigger, patch(
         "brain.app.api.routers.agent_bridge.ws_manager.broadcast_product_event",
         new=AsyncMock(side_effect=broadcast),
@@ -375,7 +375,7 @@ async def test_hosted_mcp_create_thread_routes_trigger_when_requested():
     assert response.status_code == 200
     result = json.loads(response.json()["result"]["content"][0]["text"])
     assert result["trigger"] == {"ok": True, "route": "run", "run_id": 123}
-    route_trigger.assert_called_once()
+    route_trigger.assert_awaited_once()
     trigger = route_trigger.call_args.args[0]
     assert trigger.event_type == "cortex.thread_reply"
     assert trigger.target["idea_id"] == "idea-1"

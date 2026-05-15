@@ -194,11 +194,9 @@ def test_plan_idempotency_is_stable_across_input_order():
     assert first.to_dict() == second.to_dict()
 
 
-def test_pipeline_shell_returns_plan_only_payload(monkeypatch):
-    monkeypatch.setattr(
-        nightly_memory_quality,
-        "gather_memory_quality_inputs",
-        lambda **_: {
+async def test_pipeline_shell_returns_plan_only_payload(monkeypatch):
+    async def _fake_inputs(**_):
+        return {
             "contradiction_rows": [
                 {
                     "id": 9,
@@ -220,10 +218,11 @@ def test_pipeline_shell_returns_plan_only_payload(monkeypatch):
                     "valid_from": "2026-04-01T00:00:00Z",
                 },
             ],
-        },
-    )
+        }
 
-    payload = nightly_memory_quality.run_nightly_memory_quality(
+    monkeypatch.setattr(nightly_memory_quality, "gather_memory_quality_inputs", _fake_inputs)
+
+    payload = await nightly_memory_quality.run_nightly_memory_quality(
         target_date=date(2026, 4, 25),
         use_night_budget=False,
     )

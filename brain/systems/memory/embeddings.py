@@ -16,6 +16,8 @@ import time
 
 import numpy as np
 
+from brain.platform.async_io import http_post
+
 logger = logging.getLogger("brain.systems.memory.embeddings")
 
 # ---------------------------------------------------------------------------
@@ -163,7 +165,9 @@ _cpu_model_name = None
 _cpu_lock = threading.Lock()
 
 
-def _runtime_embedding_config():
+def _runtime_embedding_config(runtime_config=None):
+    if runtime_config is not None:
+        return runtime_config
     try:
         from brain.systems.runtime_settings.memory import get_embedding_runtime_config
 
@@ -184,9 +188,9 @@ def _runtime_embedding_config():
         )
 
 
-def _get_cpu_model():
+def _get_cpu_model(runtime_config=None):
     global _cpu_model, _cpu_model_name
-    model_name = _runtime_embedding_config().cpu_model
+    model_name = _runtime_embedding_config(runtime_config).cpu_model
     if _cpu_model is None or _cpu_model_name != model_name:
         with _cpu_lock:
             if _cpu_model is None or _cpu_model_name != model_name:
@@ -197,8 +201,8 @@ def _get_cpu_model():
     return _cpu_model
 
 
-def _embed_cpu(texts: list[str], mode: str) -> np.ndarray:
-    model = _get_cpu_model()
+def _embed_cpu(texts: list[str], mode: str, runtime_config=None) -> np.ndarray:
+    model = _get_cpu_model(runtime_config)
     prefix = "search_query: " if mode == "query" else "search_document: "
     # MiniLM doesn't use prefixes, but larger models (e5, gte) do
     if "e5" in model.get_config_dict().get("model_name_or_path", "").lower():
@@ -218,9 +222,8 @@ def _prepare_gemini_text(text: str, mode: str, model: str) -> str:
     return f"title: none | text: {text}"
 
 
-def _embed_api_gemini(texts: list[str], mode: str) -> np.ndarray:
-    import httpx
-    runtime = _runtime_embedding_config()
+def _embed_api_gemini(texts: list[str], mode: str, runtime_config=None) -> np.ndarray:
+    runtime = _runtime_embedding_config(runtime_config)
     api_key = runtime.api_key
     embedding_dim = runtime.dimensions
 
@@ -242,7 +245,7 @@ def _embed_api_gemini(texts: list[str], mode: str) -> np.ndarray:
         }
         if model != "gemini-embedding-2":
             payload["taskType"] = task_type
-        resp = httpx.post(
+        resp = http_post(
             url,
             headers={
                 "Content-Type": "application/json",
@@ -262,9 +265,8 @@ def _embed_api_gemini(texts: list[str], mode: str) -> np.ndarray:
     return np.array(embeddings, dtype=np.float32)
 
 
-def _embed_api_openai(texts: list[str], mode: str) -> np.ndarray:
-    import httpx
-    runtime = _runtime_embedding_config()
+def _embed_api_openai(texts: list[str], mode: str, runtime_config=None) -> np.ndarray:
+    runtime = _runtime_embedding_config(runtime_config)
 
     api_key = runtime.api_key or ""
     if not api_key:
@@ -274,7 +276,7 @@ def _embed_api_openai(texts: list[str], mode: str) -> np.ndarray:
         )
 
     model = runtime.api_model or "text-embedding-3-small"
-    resp = httpx.post(
+    resp = http_post(
         "https://api.openai.com/v1/embeddings",
         headers={
             "Content-Type": "application/json",
@@ -289,11 +291,11 @@ def _embed_api_openai(texts: list[str], mode: str) -> np.ndarray:
     return np.array([item["embedding"] for item in data["data"]], dtype=np.float32)
 
 
-def _embed_api(texts: list[str], mode: str) -> np.ndarray:
-    runtime = _runtime_embedding_config()
+def _embed_api(texts: list[str], mode: str, runtime_config=None) -> np.ndarray:
+    runtime = _runtime_embedding_config(runtime_config)
     if runtime.provider == "openai":
-        return _embed_api_openai(texts, mode)
-    return _embed_api_gemini(texts, mode)
+        return _embed_api_openai(texts, mode, runtime)
+    return _embed_api_gemini(texts, mode, runtime)
 
 
 # ---------------------------------------------------------------------------
@@ -307,23 +309,26 @@ _BACKENDS = {
 }
 
 
-def embed_batch(texts: list[str], mode: str = "document") -> np.ndarray:
+def embed_batch(texts: list[str], mode: str = "document", runtime_config=None) -> np.ndarray:
     """Embed multiple texts. Returns (N, dims) numpy array."""
-    backend = _runtime_embedding_config().backend
+    runtime = _runtime_embedding_config(runtime_config)
+    backend = runtime.backend
     fn = _BACKENDS.get(backend)
     if not fn:
         raise ValueError(f"Unknown EMBEDDING_BACKEND: {backend!r}. Use gpu, cpu, or api.")
+    if backend in {"cpu", "api"}:
+        return fn(texts, mode, runtime)
     return fn(texts, mode)
 
 
-def embed_document(text: str) -> np.ndarray:
+def embed_document(text: str, runtime_config=None) -> np.ndarray:
     """Embed a document (memory content)."""
-    return embed_batch([text], mode="document")[0]
+    return embed_batch([text], mode="document", runtime_config=runtime_config)[0]
 
 
-def embed_query(text: str) -> np.ndarray:
+def embed_query(text: str, runtime_config=None) -> np.ndarray:
     """Embed a query (with retrieval instruction)."""
-    return embed_batch([text], mode="query")[0]
+    return embed_batch([text], mode="query", runtime_config=runtime_config)[0]
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 """Smoke tests for skills, vault, system, team, costs routers."""
 from contextlib import contextmanager
 from datetime import datetime, date, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -11,12 +11,7 @@ from httpx import ASGITransport, AsyncClient
 @pytest.fixture(autouse=True)
 def mock_session_factory():
     session = MagicMock()
-
-    def _factory():
-        return session
-
-    with patch("brain.platform.db.legacy.legacy_session_factory", _factory):
-        yield session
+    yield session
 
 
 def _mock_obj(**fields):
@@ -95,7 +90,7 @@ async def test_list_skills(client, mock_session_factory):
         archived=False,
     )
     with patch("brain.app.api.routers.skills.SkillRepository") as MockRepo:
-        MockRepo.return_value.list_active_with_executions.return_value = [skill]
+        MockRepo.return_value.a_list_active_with_executions = AsyncMock(return_value=[skill])
         resp = await client.get("/api/skills/")
     assert resp.status_code == 200
     data = resp.json()
@@ -177,7 +172,7 @@ async def test_list_metrics(client, mock_session_factory):
         retrieval_hits=40,
     )
     with patch("brain.app.api.routers.system.DailyMetricsRepository") as MockRepo:
-        MockRepo.return_value.list_recent.return_value = [metric]
+        MockRepo.return_value.a_list_recent = AsyncMock(return_value=[metric])
         resp = await client.get("/api/metrics")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
@@ -223,7 +218,7 @@ async def test_list_costs(client, mock_session_factory):
         estimated_cost=0.01,
         created_at=datetime.now(timezone.utc),
     )
-    with patch("brain.app.api.routers.costs.summarize_recent_run_usage", return_value=[cost]):
+    with patch("brain.app.api.routers.costs.async_summarize_recent_run_usage", return_value=[cost]):
         resp = await client.get("/api/costs/")
     assert resp.status_code == 200
     data = resp.json()
@@ -233,10 +228,10 @@ async def test_list_costs(client, mock_session_factory):
 
 @pytest.mark.asyncio
 async def test_system_info_omits_cortex_concurrency_settings(client, mock_session_factory):
-    with patch("brain.app.api.routers.system._get_llm_info", return_value={
+    with patch("brain.app.api.routers.system._get_llm_info", new=AsyncMock(return_value={
         "harvest_model": "gpt-5-mini",
         "consolidation_model": "gpt-5-mini",
-    }):
+    })):
         resp = await client.get("/api/system")
     assert resp.status_code == 200
     data = resp.json()
@@ -246,7 +241,7 @@ async def test_system_info_omits_cortex_concurrency_settings(client, mock_sessio
 
 @pytest.mark.asyncio
 async def test_scheduler_state_surface(client, mock_session_factory):
-    with patch("brain.app.api.routers.system.scheduler_health_snapshot", return_value={
+    with patch("brain.app.api.routers.system.async_scheduler_health_snapshot", new=AsyncMock(return_value={
         "now": "2026-04-21T03:01:00+00:00",
         "daemon": {"owner_mode": "scheduler", "service_ready": True},
         "summary": {
@@ -266,7 +261,7 @@ async def test_scheduler_state_surface(client, mock_session_factory):
         "lag": {"lag_seconds": 0, "oldest_due_at": None, "lagging_jobs": []},
         "jobs": [],
         "runs": [],
-    }):
+    })):
         resp = await client.get("/api/system/scheduler")
 
     assert resp.status_code == 200
@@ -282,14 +277,14 @@ async def test_scheduler_drain_control_surface(client, mock_session_factory):
 
     app.dependency_overrides[system_router.get_current_user] = lambda: {"role": "owner"}
     try:
-        with patch("brain.app.api.routers.system.scheduler_daemon_tick", return_value={
+        with patch("brain.app.api.routers.system.async_scheduler_daemon_tick", new=AsyncMock(return_value={
             "ok": True,
             "owner_mode": "scheduler",
             "reclaimed": 0,
             "reclaimed_run_ids": [],
             "drain": {"ok": True, "executed": 1, "results": []},
             "snapshot": {"health": {"status": "healthy", "reasons": []}},
-        }) as mock_tick:
+        })) as mock_tick:
             resp = await client.post(
                 "/api/system/scheduler/drain",
                 json={"owner_mode": "scheduler", "job_key": "nightly_sleep", "max_runs": 2, "resume": True},
@@ -300,7 +295,7 @@ async def test_scheduler_drain_control_surface(client, mock_session_factory):
     assert resp.status_code == 200
     data = resp.json()
     assert data["drain"]["executed"] == 1
-    mock_tick.assert_called_once()
+    mock_tick.assert_awaited_once()
 
 
 @pytest.mark.asyncio

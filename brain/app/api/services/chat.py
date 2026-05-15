@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.mentions import extract_mention_tokens
 from brain.app.api.schemas.chat import (
@@ -103,464 +103,7 @@ def normalized_body_or_400(body: str, attachments: list[Any] | None = None) -> s
     return normalized
 
 
-class ChatService:
-    def __init__(self, db: Session, user: dict[str, Any]):
-        self.db = db
-        self.user = user
-        self.viewer_user_id = str(user["id"])
-        self.org_id = self._require_org_id(user)
-        self.team_repo = TeamRepository(db)
-        self.conversation_repo = ChatConversationRepository(db)
-        self.message_repo = ChatMessageRepository(db)
-        self.read_repo = ChatConversationReadRepository(db)
-        self.notification_repo = ChatNotificationRepository(db)
-        self.mention_repo = ChatMessageMentionRepository(db)
-        self.unified_notification_repo = NotificationEventRepository(db)
-
-    def bootstrap(self) -> ChatBootstrapRead:
-        room = self.ensure_org_room()
-        conversations = list(self.conversation_repo.list_for_user(self.org_id, self.viewer_user_id))
-        room_summary = self._serialize_conversation(room, viewer_user_id=self.viewer_user_id)
-        dm_summaries = [
-            self._serialize_conversation(conversation, viewer_user_id=self.viewer_user_id)
-            for conversation in conversations
-            if conversation.type == "dm"
-        ]
-        notifications = [
-            self._serialize_notification(notification)
-            for notification in self.notification_repo.list_for_user(self.viewer_user_id)
-        ]
-        return ChatBootstrapRead(
-            room=room_summary,
-            dms=dm_summaries,
-            notifications=notifications,
-            unread_summary=self._build_unread_summary(room_summary, dm_summaries),
-            default_mode="room",
-            default_conversation_id=str(room.id),
-        )
-
-    def list_conversations(self) -> list[ChatConversationSummaryRead]:
-        room = self.ensure_org_room()
-        conversations = list(self.conversation_repo.list_for_user(self.org_id, self.viewer_user_id))
-        if all(conversation.id != room.id for conversation in conversations):
-            conversations.insert(0, room)
-        return [
-            self._serialize_conversation(conversation, viewer_user_id=self.viewer_user_id)
-            for conversation in conversations
-        ]
-
-    def create_or_fetch_dm(self, body: ChatDmCreate) -> ChatConversationSummaryRead:
-        target_user_id = body.user_id.strip()
-        if target_user_id == self.viewer_user_id:
-            raise HTTPException(status_code=400, detail="You cannot DM yourself")
-
-        target_user = self.team_repo.get_by_id(target_user_id)
-        if target_user is None or str(target_user.org_id) != self.org_id or not target_user.approved:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        conversation = self.conversation_repo.get_or_create_dm(
-            self.org_id,
-            self.viewer_user_id,
-            target_user_id,
-        )
-        self.db.flush()
-        return self._serialize_conversation(conversation, viewer_user_id=self.viewer_user_id)
-
-    def get_conversation_messages(
-        self,
-        conversation_id: str,
-        *,
-        before_seq: int | None,
-        limit: int,
-    ) -> ChatMessagePageRead:
-        conversation = self.get_conversation_or_404(conversation_id)
-        page_limit = validated_limit(limit)
-        messages = list(
-            self.message_repo.list_conversation_messages(
-                conversation,
-                before_seq=before_seq,
-                limit=page_limit + 1,
-            )
-        )
-        has_more = len(messages) > page_limit
-        if has_more:
-            messages = messages[1:]
-
-        user_by_id = self._conversation_user_map(conversation.id)
-        thread_preview_by_root_id = self._thread_preview_participants_by_root_id(
-            [message.id for message in messages if message.reply_count],
-            user_by_id,
-        )
-        return ChatMessagePageRead(
-            conversation=self._serialize_conversation(conversation, viewer_user_id=self.viewer_user_id),
-            messages=[
-                self._serialize_message(
-                    message,
-                    user_by_id,
-                    thread_preview_participants=thread_preview_by_root_id.get(message.id),
-                )
-                for message in messages
-            ],
-            has_more=has_more,
-            next_before_seq=messages[0].conversation_seq if has_more else None,
-        )
-
-    def post_conversation_message(
-        self,
-        conversation_id: str,
-        body: ChatMessageCreate,
-    ) -> tuple[ChatMessageRead, ChatPublishState]:
-        conversation = self.get_conversation_or_404(conversation_id)
-        if body.reply_to_message_id is not None:
-            raise HTTPException(status_code=400, detail="Use the thread endpoint for room replies")
-        attachments = list(body.attachments)
-
-        message = self.message_repo.create_message(
-            conversation_id=conversation.id,
-            sender_user_id=self.viewer_user_id,
-            sender_kind="user",
-            body=normalized_body_or_400(body.body, attachments),
-            body_format=body.body_format,
-            client_generated_id=body.client_generated_id,
-            attachments=attachments,
-            metadata=dict(body.metadata or {}),
-        )
-        members = list(self.conversation_repo.list_member_users(conversation.id))
-        created_notifications = self._store_mentions_and_notifications(
-            conversation=conversation,
-            message=message,
-            sender_user_id=self.viewer_user_id,
-            members=members,
-        )
-        self.db.flush()
-        user_by_id = self._user_map(members)
-        message_read = self._serialize_message(message, user_by_id)
-        publish = self._build_publish_state(
-            conversation=conversation,
-            message=message,
-            message_read=message_read,
-            root_message=None,
-            created_notifications=created_notifications,
-            member_ids=[str(member.id) for member in members],
-        )
-        return message_read, publish
-
-    def get_message_thread(
-        self,
-        message_id: int,
-        *,
-        before_seq: int | None,
-        limit: int,
-    ) -> ChatThreadRead:
-        conversation, root_message = self.get_root_message_or_404(message_id)
-        page_limit = validated_limit(limit)
-        replies = list(
-            self.message_repo.list_thread_replies(
-                root_message.id,
-                before_seq=before_seq,
-                limit=page_limit + 1,
-            )
-        )
-        has_more = len(replies) > page_limit
-        if has_more:
-            replies = replies[1:]
-
-        user_by_id = self._conversation_user_map(conversation.id)
-        thread_preview_by_root_id = self._thread_preview_participants_by_root_id(
-            [root_message.id],
-            user_by_id,
-        )
-        return ChatThreadRead(
-            conversation=self._serialize_conversation(conversation, viewer_user_id=self.viewer_user_id),
-            root_message=self._serialize_message(
-                root_message,
-                user_by_id,
-                thread_preview_participants=thread_preview_by_root_id.get(root_message.id),
-            ),
-            replies=[self._serialize_message(reply, user_by_id) for reply in replies],
-            has_more=has_more,
-            next_before_seq=replies[0].conversation_seq if has_more else None,
-        )
-
-    def search_room_messages(
-        self,
-        *,
-        query: str,
-        limit: int,
-    ) -> list[ChatSearchResultRead]:
-        normalized_query = query.strip()
-        if len(normalized_query) < 2:
-            raise HTTPException(
-                status_code=400,
-                detail="Search query must be at least 2 characters",
-            )
-
-        room = self.ensure_org_room()
-        messages = list(
-            self.message_repo.search_conversation_messages(
-                room,
-                query=normalized_query,
-                limit=validated_limit(limit),
-            )
-        )
-        if not messages:
-            return []
-
-        user_by_id = self._conversation_user_map(room.id)
-        thread_preview_by_root_id = self._thread_preview_participants_by_root_id(
-            [message.thread_root_message_id or message.id for message in messages],
-            user_by_id,
-        )
-        roots_by_id: dict[int, ChatMessageRead] = {}
-        results: list[ChatSearchResultRead] = []
-        for message in messages:
-            root_message_id = message.thread_root_message_id or message.id
-            if root_message_id not in roots_by_id:
-                root_message = self.message_repo.get(root_message_id)
-                if root_message is None or root_message.deleted_at is not None:
-                    continue
-                roots_by_id[root_message_id] = self._serialize_message(
-                    root_message,
-                    user_by_id,
-                    thread_preview_participants=thread_preview_by_root_id.get(root_message_id),
-                )
-            results.append(
-                ChatSearchResultRead(
-                    message=self._serialize_message(message, user_by_id),
-                    root_message=roots_by_id[root_message_id],
-                )
-            )
-        return results
-
-    def post_thread_reply(
-        self,
-        message_id: int,
-        body: ChatMessageCreate,
-    ) -> tuple[ChatMessageRead, ChatPublishState]:
-        conversation, root_message = self.get_root_message_or_404(message_id)
-        self._validate_reply_target_or_400(
-            conversation=conversation,
-            root_message=root_message,
-            reply_to_message_id=body.reply_to_message_id,
-        )
-        attachments = list(body.attachments)
-        reply = self.message_repo.create_message(
-            conversation_id=conversation.id,
-            sender_user_id=self.viewer_user_id,
-            sender_kind="user",
-            body=normalized_body_or_400(body.body, attachments),
-            body_format=body.body_format,
-            client_generated_id=body.client_generated_id,
-            attachments=attachments,
-            metadata=dict(body.metadata or {}),
-            thread_root_message_id=root_message.id,
-            reply_to_message_id=body.reply_to_message_id,
-        )
-        members = list(self.conversation_repo.list_member_users(conversation.id))
-        created_notifications = self._store_mentions_and_notifications(
-            conversation=conversation,
-            message=reply,
-            sender_user_id=self.viewer_user_id,
-            members=members,
-        )
-        self.db.flush()
-        user_by_id = self._user_map(members)
-        reply_read = self._serialize_message(reply, user_by_id)
-        root_read = self._serialize_message(
-            root_message,
-            user_by_id,
-            thread_preview_participants=self._thread_preview_participants_by_root_id(
-                [root_message.id],
-                user_by_id,
-            ).get(root_message.id),
-        )
-        publish = self._build_publish_state(
-            conversation=conversation,
-            message=reply,
-            message_read=reply_read,
-            root_message=root_read,
-            created_notifications=created_notifications,
-            member_ids=[str(member.id) for member in members],
-        )
-        return reply_read, publish
-
-    def post_agent_message(
-        self,
-        *,
-        conversation_id: str,
-        body: str,
-        thread_root_message_id: int | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> tuple[ChatMessageRead, ChatPublishState]:
-        conversation = self.get_conversation_or_404(conversation_id)
-        if conversation.type != "room":
-            raise HTTPException(status_code=400, detail="Illo can only post in the team room")
-
-        root_message = None
-        if thread_root_message_id is not None:
-            root_message = self.message_repo.get(int(thread_root_message_id))
-            if (
-                root_message is None
-                or root_message.deleted_at is not None
-                or root_message.conversation_id != conversation.id
-                or root_message.thread_root_message_id is not None
-            ):
-                raise HTTPException(status_code=400, detail="Thread root not found in team room")
-
-        message = self.message_repo.create_message(
-            conversation_id=conversation.id,
-            sender_user_id=None,
-            sender_kind="agent",
-            body=normalized_body_or_400(body),
-            metadata={
-                "source": "illo_agent",
-                **dict(metadata or {}),
-            },
-            thread_root_message_id=root_message.id if root_message is not None else None,
-        )
-        members = list(self.conversation_repo.list_member_users(conversation.id))
-        created_notifications = self._store_mentions_and_notifications(
-            conversation=conversation,
-            message=message,
-            sender_user_id=None,
-            sender_name=ILLO_NAME,
-            members=members,
-        )
-        self.db.flush()
-        user_by_id = self._user_map(members)
-        message_read = self._serialize_message(message, user_by_id)
-        root_read = (
-            self._serialize_message(
-                root_message,
-                user_by_id,
-                thread_preview_participants=self._thread_preview_participants_by_root_id(
-                    [root_message.id],
-                    user_by_id,
-                ).get(root_message.id),
-            )
-            if root_message is not None
-            else None
-        )
-        publish = self._build_publish_state(
-            conversation=conversation,
-            message=message,
-            message_read=message_read,
-            root_message=root_read,
-            created_notifications=created_notifications,
-            member_ids=[str(member.id) for member in members],
-        )
-        return message_read, publish
-
-    def mark_conversation_read(
-        self,
-        conversation_id: str,
-        body: ChatReadUpdate,
-    ) -> tuple[ChatUnreadSummaryRead, ChatReadPublishState]:
-        conversation = self.get_conversation_or_404(conversation_id)
-        last_read_seq, last_read_message_id = self._resolve_read_target_or_400(
-            conversation=conversation,
-            body=body,
-        )
-        cursor = self.read_repo.upsert_cursor(
-            conversation_id=conversation.id,
-            user_id=self.viewer_user_id,
-            last_read_conversation_seq=last_read_seq,
-            last_read_message_id=last_read_message_id,
-        )
-        self.notification_repo.mark_read_through_conversation_seq(
-            user_id=self.viewer_user_id,
-            conversation_id=conversation.id,
-            last_read_conversation_seq=cursor.last_read_conversation_seq,
-        )
-        self.mention_repo.mark_seen_through_conversation_seq(
-            user_id=self.viewer_user_id,
-            conversation_id=conversation.id,
-            last_read_conversation_seq=cursor.last_read_conversation_seq,
-        )
-        if cursor.last_read_conversation_seq >= (conversation.last_message_seq or 0):
-            self.unified_notification_repo.mark_read_for_chat_conversation(
-                user_id=self.viewer_user_id,
-                conversation_id=conversation.id,
-            )
-        self.db.flush()
-        unread_summary = self.build_unread_summary_for_user(self.viewer_user_id)
-        return unread_summary, ChatReadPublishState(
-            conversation_id=str(conversation.id),
-            user_id=self.viewer_user_id,
-            last_read_message_id=cursor.last_read_message_id,
-            last_read_conversation_seq=cursor.last_read_conversation_seq,
-            unread_summary=unread_summary,
-        )
-
-    def list_notifications(self, *, limit: int) -> list[ChatNotificationRead]:
-        notifications = self.notification_repo.list_for_user(
-            self.viewer_user_id,
-            limit=validated_limit(limit),
-        )
-        return [self._serialize_notification(notification) for notification in notifications]
-
-    def mark_notification_read(self, notification_id: int) -> bool:
-        notification = self.notification_repo.mark_read(notification_id, self.viewer_user_id)
-        if notification is None:
-            raise HTTPException(status_code=404, detail="Notification not found")
-        self.db.flush()
-        return True
-
-    def mark_all_notifications_read(self) -> int:
-        count = self.notification_repo.mark_all_read(self.viewer_user_id)
-        self.db.flush()
-        return count
-
-    def build_unread_summary_for_user(self, user_id: str) -> ChatUnreadSummaryRead:
-        return self.build_unread_summaries_for_users([user_id]).get(
-            str(user_id),
-            ChatUnreadSummaryRead(),
-        )
-
-    def build_unread_summaries_for_users(
-        self,
-        user_ids: list[str],
-    ) -> dict[str, ChatUnreadSummaryRead]:
-        counts_by_user = self.read_repo.unread_counts_for_users(
-            org_id=self.org_id,
-            user_ids=user_ids,
-        )
-        summaries: dict[str, ChatUnreadSummaryRead] = {}
-        for user_id in {str(user_id) for user_id in user_ids if str(user_id)}:
-            room, dms = counts_by_user.get(user_id, (0, 0))
-            summaries[user_id] = ChatUnreadSummaryRead(room=room, dms=dms, total=room + dms)
-        return summaries
-
-    def ensure_org_room(self) -> ChatConversation:
-        room = self.conversation_repo.ensure_org_room(
-            self.org_id,
-            self.viewer_user_id,
-            title="Room",
-        )
-        self.db.flush()
-        return room
-
-    def get_conversation_or_404(self, conversation_id: str) -> ChatConversation:
-        conversation = self.conversation_repo.get_for_user(conversation_id, self.viewer_user_id)
-        if conversation is None or str(conversation.org_id) != self.org_id:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        return conversation
-
-    def get_root_message_or_404(self, message_id: int) -> tuple[ChatConversation, ChatMessage]:
-        root_message = self.message_repo.get(message_id)
-        if root_message is None:
-            raise HTTPException(status_code=404, detail="Thread root not found")
-        conversation = self.get_conversation_or_404(root_message.conversation_id)
-        if conversation.type != "room" or root_message.thread_root_message_id is not None:
-            raise HTTPException(
-                status_code=400,
-                detail="Only root room messages support thread replies",
-            )
-        return conversation, root_message
-
-    def _conversation_user_map(self, conversation_id: str) -> dict[str, User]:
-        return self._user_map(list(self.conversation_repo.list_member_users(conversation_id)))
-
+class _ChatSerializationMixin:
     def _user_map(self, users: list[User]) -> dict[str, User]:
         return {str(user.id): user for user in users}
 
@@ -614,12 +157,487 @@ class ChatService:
             deleted_at=message.deleted_at,
         )
 
-    def _thread_preview_participants_by_root_id(
+    def _build_unread_summary(
+        self,
+        room: ChatConversationSummaryRead,
+        dms: list[ChatConversationSummaryRead],
+    ) -> ChatUnreadSummaryRead:
+        dm_unread = sum(item.unread_count for item in dms)
+        total = room.unread_count + dm_unread
+        return ChatUnreadSummaryRead(room=room.unread_count, dms=dm_unread, total=total)
+
+    @staticmethod
+    def _require_org_id(user: dict[str, Any]) -> str:
+        org_id = user.get("org_id")
+        if not org_id:
+            raise HTTPException(status_code=400, detail="User is not attached to an org")
+        return str(org_id)
+
+
+class ChatService(_ChatSerializationMixin):
+    """AsyncSession-backed chat orchestration for API request paths."""
+
+    def __init__(self, db: AsyncSession, user: dict[str, Any]):
+        self.db = db
+        self.user = user
+        self.viewer_user_id = str(user["id"])
+        self.org_id = self._require_org_id(user)
+        self.team_repo = TeamRepository(db)
+        self.conversation_repo = ChatConversationRepository(db)
+        self.message_repo = ChatMessageRepository(db)
+        self.read_repo = ChatConversationReadRepository(db)
+        self.notification_repo = ChatNotificationRepository(db)
+        self.mention_repo = ChatMessageMentionRepository(db)
+        self.unified_notification_repo = NotificationEventRepository(db)
+
+    async def bootstrap(self) -> ChatBootstrapRead:
+        room = await self.ensure_org_room()
+        conversations = list(await self.conversation_repo.a_list_for_user(self.org_id, self.viewer_user_id))
+        room_summary = await self._serialize_conversation(room, viewer_user_id=self.viewer_user_id)
+        dm_summaries = [
+            await self._serialize_conversation(conversation, viewer_user_id=self.viewer_user_id)
+            for conversation in conversations
+            if conversation.type == "dm"
+        ]
+        notifications = [
+            await self._serialize_notification(notification)
+            for notification in await self.notification_repo.a_list_for_user(self.viewer_user_id)
+        ]
+        return ChatBootstrapRead(
+            room=room_summary,
+            dms=dm_summaries,
+            notifications=notifications,
+            unread_summary=self._build_unread_summary(room_summary, dm_summaries),
+            default_mode="room",
+            default_conversation_id=str(room.id),
+        )
+
+    async def list_conversations(self) -> list[ChatConversationSummaryRead]:
+        room = await self.ensure_org_room()
+        conversations = list(await self.conversation_repo.a_list_for_user(self.org_id, self.viewer_user_id))
+        if all(conversation.id != room.id for conversation in conversations):
+            conversations.insert(0, room)
+        return [
+            await self._serialize_conversation(conversation, viewer_user_id=self.viewer_user_id)
+            for conversation in conversations
+        ]
+
+    async def create_or_fetch_dm(self, body: ChatDmCreate) -> ChatConversationSummaryRead:
+        target_user_id = body.user_id.strip()
+        if target_user_id == self.viewer_user_id:
+            raise HTTPException(status_code=400, detail="You cannot DM yourself")
+
+        target_user = await self.team_repo.a_get_by_id(target_user_id)
+        if target_user is None or str(target_user.org_id) != self.org_id or not target_user.approved:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        conversation = await self.conversation_repo.a_get_or_create_dm(
+            self.org_id,
+            self.viewer_user_id,
+            target_user_id,
+        )
+        await self.db.flush()
+        return await self._serialize_conversation(conversation, viewer_user_id=self.viewer_user_id)
+
+    async def get_conversation_messages(
+        self,
+        conversation_id: str,
+        *,
+        before_seq: int | None,
+        limit: int,
+    ) -> ChatMessagePageRead:
+        conversation = await self.get_conversation_or_404(conversation_id)
+        page_limit = validated_limit(limit)
+        messages = list(
+            await self.message_repo.a_list_conversation_messages(
+                conversation,
+                before_seq=before_seq,
+                limit=page_limit + 1,
+            )
+        )
+        has_more = len(messages) > page_limit
+        if has_more:
+            messages = messages[1:]
+
+        user_by_id = await self._conversation_user_map(conversation.id)
+        thread_preview_by_root_id = await self._thread_preview_participants_by_root_id(
+            [message.id for message in messages if message.reply_count],
+            user_by_id,
+        )
+        return ChatMessagePageRead(
+            conversation=await self._serialize_conversation(conversation, viewer_user_id=self.viewer_user_id),
+            messages=[
+                self._serialize_message(
+                    message,
+                    user_by_id,
+                    thread_preview_participants=thread_preview_by_root_id.get(message.id),
+                )
+                for message in messages
+            ],
+            has_more=has_more,
+            next_before_seq=messages[0].conversation_seq if has_more else None,
+        )
+
+    async def post_conversation_message(
+        self,
+        conversation_id: str,
+        body: ChatMessageCreate,
+    ) -> tuple[ChatMessageRead, ChatPublishState]:
+        conversation = await self.get_conversation_or_404(conversation_id)
+        if body.reply_to_message_id is not None:
+            raise HTTPException(status_code=400, detail="Use the thread endpoint for room replies")
+        attachments = list(body.attachments)
+
+        message = await self.message_repo.a_create_message(
+            conversation_id=conversation.id,
+            sender_user_id=self.viewer_user_id,
+            sender_kind="user",
+            body=normalized_body_or_400(body.body, attachments),
+            body_format=body.body_format,
+            client_generated_id=body.client_generated_id,
+            attachments=attachments,
+            metadata=dict(body.metadata or {}),
+        )
+        members = list(await self.conversation_repo.a_list_member_users(conversation.id))
+        created_notifications = await self._store_mentions_and_notifications(
+            conversation=conversation,
+            message=message,
+            sender_user_id=self.viewer_user_id,
+            members=members,
+        )
+        await self.db.flush()
+        user_by_id = self._user_map(members)
+        message_read = self._serialize_message(message, user_by_id)
+        publish = await self._build_publish_state(
+            conversation=conversation,
+            message=message,
+            message_read=message_read,
+            root_message=None,
+            created_notifications=created_notifications,
+            member_ids=[str(member.id) for member in members],
+        )
+        return message_read, publish
+
+    async def get_message_thread(
+        self,
+        message_id: int,
+        *,
+        before_seq: int | None,
+        limit: int,
+    ) -> ChatThreadRead:
+        conversation, root_message = await self.get_root_message_or_404(message_id)
+        page_limit = validated_limit(limit)
+        replies = list(
+            await self.message_repo.a_list_thread_replies(
+                root_message.id,
+                before_seq=before_seq,
+                limit=page_limit + 1,
+            )
+        )
+        has_more = len(replies) > page_limit
+        if has_more:
+            replies = replies[1:]
+
+        user_by_id = await self._conversation_user_map(conversation.id)
+        thread_preview_by_root_id = await self._thread_preview_participants_by_root_id(
+            [root_message.id],
+            user_by_id,
+        )
+        return ChatThreadRead(
+            conversation=await self._serialize_conversation(conversation, viewer_user_id=self.viewer_user_id),
+            root_message=self._serialize_message(
+                root_message,
+                user_by_id,
+                thread_preview_participants=thread_preview_by_root_id.get(root_message.id),
+            ),
+            replies=[self._serialize_message(reply, user_by_id) for reply in replies],
+            has_more=has_more,
+            next_before_seq=replies[0].conversation_seq if has_more else None,
+        )
+
+    async def search_room_messages(
+        self,
+        *,
+        query: str,
+        limit: int,
+    ) -> list[ChatSearchResultRead]:
+        normalized_query = query.strip()
+        if len(normalized_query) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="Search query must be at least 2 characters",
+            )
+
+        room = await self.ensure_org_room()
+        messages = list(
+            await self.message_repo.a_search_conversation_messages(
+                room,
+                query=normalized_query,
+                limit=validated_limit(limit),
+            )
+        )
+        if not messages:
+            return []
+
+        user_by_id = await self._conversation_user_map(room.id)
+        thread_preview_by_root_id = await self._thread_preview_participants_by_root_id(
+            [message.thread_root_message_id or message.id for message in messages],
+            user_by_id,
+        )
+        roots_by_id: dict[int, ChatMessageRead] = {}
+        results: list[ChatSearchResultRead] = []
+        for message in messages:
+            root_message_id = message.thread_root_message_id or message.id
+            if root_message_id not in roots_by_id:
+                root_message = await self.message_repo.a_get(root_message_id)
+                if root_message is None or root_message.deleted_at is not None:
+                    continue
+                roots_by_id[root_message_id] = self._serialize_message(
+                    root_message,
+                    user_by_id,
+                    thread_preview_participants=thread_preview_by_root_id.get(root_message_id),
+                )
+            results.append(
+                ChatSearchResultRead(
+                    message=self._serialize_message(message, user_by_id),
+                    root_message=roots_by_id[root_message_id],
+                )
+            )
+        return results
+
+    async def post_thread_reply(
+        self,
+        message_id: int,
+        body: ChatMessageCreate,
+    ) -> tuple[ChatMessageRead, ChatPublishState]:
+        conversation, root_message = await self.get_root_message_or_404(message_id)
+        await self._validate_reply_target_or_400(
+            conversation=conversation,
+            root_message=root_message,
+            reply_to_message_id=body.reply_to_message_id,
+        )
+        attachments = list(body.attachments)
+        reply = await self.message_repo.a_create_message(
+            conversation_id=conversation.id,
+            sender_user_id=self.viewer_user_id,
+            sender_kind="user",
+            body=normalized_body_or_400(body.body, attachments),
+            body_format=body.body_format,
+            client_generated_id=body.client_generated_id,
+            attachments=attachments,
+            metadata=dict(body.metadata or {}),
+            thread_root_message_id=root_message.id,
+            reply_to_message_id=body.reply_to_message_id,
+        )
+        members = list(await self.conversation_repo.a_list_member_users(conversation.id))
+        created_notifications = await self._store_mentions_and_notifications(
+            conversation=conversation,
+            message=reply,
+            sender_user_id=self.viewer_user_id,
+            members=members,
+        )
+        await self.db.flush()
+        user_by_id = self._user_map(members)
+        reply_read = self._serialize_message(reply, user_by_id)
+        root_read = self._serialize_message(
+            root_message,
+            user_by_id,
+            thread_preview_participants=(
+                await self._thread_preview_participants_by_root_id([root_message.id], user_by_id)
+            ).get(root_message.id),
+        )
+        publish = await self._build_publish_state(
+            conversation=conversation,
+            message=reply,
+            message_read=reply_read,
+            root_message=root_read,
+            created_notifications=created_notifications,
+            member_ids=[str(member.id) for member in members],
+        )
+        return reply_read, publish
+
+    async def post_agent_message(
+        self,
+        *,
+        conversation_id: str,
+        body: str,
+        thread_root_message_id: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[ChatMessageRead, ChatPublishState]:
+        conversation = await self.get_conversation_or_404(conversation_id)
+        if conversation.type != "room":
+            raise HTTPException(status_code=400, detail="Illo can only post in the team room")
+
+        root_message = None
+        if thread_root_message_id is not None:
+            root_message = await self.message_repo.a_get(int(thread_root_message_id))
+            if (
+                root_message is None
+                or root_message.deleted_at is not None
+                or root_message.conversation_id != conversation.id
+                or root_message.thread_root_message_id is not None
+            ):
+                raise HTTPException(status_code=400, detail="Thread root not found in team room")
+
+        message = await self.message_repo.a_create_message(
+            conversation_id=conversation.id,
+            sender_user_id=None,
+            sender_kind="agent",
+            body=normalized_body_or_400(body),
+            metadata={
+                "source": "illo_agent",
+                **dict(metadata or {}),
+            },
+            thread_root_message_id=root_message.id if root_message is not None else None,
+        )
+        members = list(await self.conversation_repo.a_list_member_users(conversation.id))
+        created_notifications = await self._store_mentions_and_notifications(
+            conversation=conversation,
+            message=message,
+            sender_user_id=None,
+            sender_name=ILLO_NAME,
+            members=members,
+        )
+        await self.db.flush()
+        user_by_id = self._user_map(members)
+        message_read = self._serialize_message(message, user_by_id)
+        root_read = (
+            self._serialize_message(
+                root_message,
+                user_by_id,
+                thread_preview_participants=(
+                    await self._thread_preview_participants_by_root_id([root_message.id], user_by_id)
+                ).get(root_message.id),
+            )
+            if root_message is not None
+            else None
+        )
+        publish = await self._build_publish_state(
+            conversation=conversation,
+            message=message,
+            message_read=message_read,
+            root_message=root_read,
+            created_notifications=created_notifications,
+            member_ids=[str(member.id) for member in members],
+        )
+        return message_read, publish
+
+    async def mark_conversation_read(
+        self,
+        conversation_id: str,
+        body: ChatReadUpdate,
+    ) -> tuple[ChatUnreadSummaryRead, ChatReadPublishState]:
+        conversation = await self.get_conversation_or_404(conversation_id)
+        last_read_seq, last_read_message_id = await self._resolve_read_target_or_400(
+            conversation=conversation,
+            body=body,
+        )
+        cursor = await self.read_repo.a_upsert_cursor(
+            conversation_id=conversation.id,
+            user_id=self.viewer_user_id,
+            last_read_conversation_seq=last_read_seq,
+            last_read_message_id=last_read_message_id,
+        )
+        await self.notification_repo.a_mark_read_through_conversation_seq(
+            user_id=self.viewer_user_id,
+            conversation_id=conversation.id,
+            last_read_conversation_seq=cursor.last_read_conversation_seq,
+        )
+        await self.mention_repo.a_mark_seen_through_conversation_seq(
+            user_id=self.viewer_user_id,
+            conversation_id=conversation.id,
+            last_read_conversation_seq=cursor.last_read_conversation_seq,
+        )
+        if cursor.last_read_conversation_seq >= (conversation.last_message_seq or 0):
+            await self.unified_notification_repo.a_mark_read_for_chat_conversation(
+                user_id=self.viewer_user_id,
+                conversation_id=conversation.id,
+            )
+        await self.db.flush()
+        unread_summary = await self.build_unread_summary_for_user(self.viewer_user_id)
+        return unread_summary, ChatReadPublishState(
+            conversation_id=str(conversation.id),
+            user_id=self.viewer_user_id,
+            last_read_message_id=cursor.last_read_message_id,
+            last_read_conversation_seq=cursor.last_read_conversation_seq,
+            unread_summary=unread_summary,
+        )
+
+    async def list_notifications(self, *, limit: int) -> list[ChatNotificationRead]:
+        notifications = await self.notification_repo.a_list_for_user(
+            self.viewer_user_id,
+            limit=validated_limit(limit),
+        )
+        return [await self._serialize_notification(notification) for notification in notifications]
+
+    async def mark_notification_read(self, notification_id: int) -> bool:
+        notification = await self.notification_repo.a_mark_read(notification_id, self.viewer_user_id)
+        if notification is None:
+            raise HTTPException(status_code=404, detail="Notification not found")
+        await self.db.flush()
+        return True
+
+    async def mark_all_notifications_read(self) -> int:
+        count = await self.notification_repo.a_mark_all_read(self.viewer_user_id)
+        await self.db.flush()
+        return count
+
+    async def build_unread_summary_for_user(self, user_id: str) -> ChatUnreadSummaryRead:
+        return (await self.build_unread_summaries_for_users([user_id])).get(
+            str(user_id),
+            ChatUnreadSummaryRead(),
+        )
+
+    async def build_unread_summaries_for_users(
+        self,
+        user_ids: list[str],
+    ) -> dict[str, ChatUnreadSummaryRead]:
+        counts_by_user = await self.read_repo.a_unread_counts_for_users(
+            org_id=self.org_id,
+            user_ids=user_ids,
+        )
+        summaries: dict[str, ChatUnreadSummaryRead] = {}
+        for user_id in {str(user_id) for user_id in user_ids if str(user_id)}:
+            room, dms = counts_by_user.get(user_id, (0, 0))
+            summaries[user_id] = ChatUnreadSummaryRead(room=room, dms=dms, total=room + dms)
+        return summaries
+
+    async def ensure_org_room(self) -> ChatConversation:
+        room = await self.conversation_repo.a_ensure_org_room(
+            self.org_id,
+            self.viewer_user_id,
+            title="Room",
+        )
+        await self.db.flush()
+        return room
+
+    async def get_conversation_or_404(self, conversation_id: str) -> ChatConversation:
+        conversation = await self.conversation_repo.a_get_for_user(conversation_id, self.viewer_user_id)
+        if conversation is None or str(conversation.org_id) != self.org_id:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return conversation
+
+    async def get_root_message_or_404(self, message_id: int) -> tuple[ChatConversation, ChatMessage]:
+        root_message = await self.message_repo.a_get(message_id)
+        if root_message is None:
+            raise HTTPException(status_code=404, detail="Thread root not found")
+        conversation = await self.get_conversation_or_404(root_message.conversation_id)
+        if conversation.type != "room" or root_message.thread_root_message_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Only root room messages support thread replies",
+            )
+        return conversation, root_message
+
+    async def _conversation_user_map(self, conversation_id: str) -> dict[str, User]:
+        return self._user_map(list(await self.conversation_repo.a_list_member_users(conversation_id)))
+
+    async def _thread_preview_participants_by_root_id(
         self,
         root_message_ids: list[int],
         user_by_id: dict[str, User],
     ) -> dict[int, list[ChatParticipantRead]]:
-        preview_user_ids_by_root_id = self.message_repo.list_thread_preview_sender_ids(
+        preview_user_ids_by_root_id = await self.message_repo.a_list_thread_preview_sender_ids(
             root_message_ids,
             limit_per_thread=2,
         )
@@ -634,15 +652,15 @@ class ChatService:
                 previews[root_message_id] = participants
         return previews
 
-    def _serialize_conversation(
+    async def _serialize_conversation(
         self,
         conversation: ChatConversation,
         *,
         viewer_user_id: str,
     ) -> ChatConversationSummaryRead:
-        members = list(self.conversation_repo.list_member_users(conversation.id))
+        members = list(await self.conversation_repo.a_list_member_users(conversation.id))
         user_by_id = self._user_map(members)
-        last_message = self.message_repo.get_last_message(conversation.id)
+        last_message = await self.message_repo.a_get_last_message(conversation.id)
         counterpart = None
         if conversation.type == "dm":
             counterpart_user = next(
@@ -664,7 +682,7 @@ class ChatService:
             description=conversation.description,
             visibility=conversation.visibility,
             last_message_seq=conversation.last_message_seq or 0,
-            unread_count=self._conversation_unread_count(conversation, viewer_user_id),
+            unread_count=await self._conversation_unread_count(conversation, viewer_user_id),
             participant_count=len(members),
             counterpart=counterpart,
             last_message=self._serialize_message(last_message, user_by_id) if last_message else None,
@@ -672,9 +690,9 @@ class ChatService:
             updated_at=conversation.updated_at,
         )
 
-    def _serialize_notification(self, notification: ChatNotification) -> ChatNotificationRead:
+    async def _serialize_notification(self, notification: ChatNotification) -> ChatNotificationRead:
         actor = (
-            self.team_repo.get_by_id(str(notification.actor_user_id))
+            await self.team_repo.a_get_by_id(str(notification.actor_user_id))
             if notification.actor_user_id
             else None
         )
@@ -691,25 +709,16 @@ class ChatService:
             read_at=notification.read_at,
         )
 
-    def _conversation_unread_count(
+    async def _conversation_unread_count(
         self,
         conversation: ChatConversation,
         user_id: str,
     ) -> int:
-        read_state = self.read_repo.get_for_user(conversation.id, user_id)
+        read_state = await self.read_repo.a_get_for_user(conversation.id, user_id)
         read_seq = read_state.last_read_conversation_seq if read_state else 0
         return max((conversation.last_message_seq or 0) - read_seq, 0)
 
-    def _build_unread_summary(
-        self,
-        room: ChatConversationSummaryRead,
-        dms: list[ChatConversationSummaryRead],
-    ) -> ChatUnreadSummaryRead:
-        dm_unread = sum(item.unread_count for item in dms)
-        total = room.unread_count + dm_unread
-        return ChatUnreadSummaryRead(room=room.unread_count, dms=dm_unread, total=total)
-
-    def _resolve_read_target_or_400(
+    async def _resolve_read_target_or_400(
         self,
         *,
         conversation: ChatConversation,
@@ -721,7 +730,7 @@ class ChatService:
         if body.last_read_message_id is None:
             return body.last_read_conversation_seq or 0, None
 
-        target_message = self.message_repo.get(body.last_read_message_id)
+        target_message = await self.message_repo.a_get(body.last_read_message_id)
         if (
             target_message is None
             or target_message.deleted_at is not None
@@ -748,7 +757,7 @@ class ChatService:
             target_message.id,
         )
 
-    def _store_mentions_and_notifications(
+    async def _store_mentions_and_notifications(
         self,
         *,
         conversation: ChatConversation,
@@ -778,13 +787,13 @@ class ChatService:
             mentioned_user_id = str(mentioned_user.id)
             if sender_user_id is not None and mentioned_user_id == sender_user_id:
                 continue
-            self.mention_repo.create(
+            await self.mention_repo.a_create(
                 message_id=message.id,
                 mentioned_user_id=mentioned_user_id,
                 mentioned_by_user_id=sender_user_id,
                 delivered_at=message.created_at,
             )
-            notification = self.notification_repo.create(
+            notification = await self.notification_repo.a_create(
                 user_id=mentioned_user_id,
                 type="mention",
                 conversation_id=conversation.id,
@@ -795,7 +804,7 @@ class ChatService:
                 },
             )
             notifications.append(notification)
-            self.unified_notification_repo.create_or_coalesce(
+            await self.unified_notification_repo.a_create_or_coalesce(
                 org_id=str(conversation.org_id),
                 user_id=mentioned_user_id,
                 source=NOTIFICATION_SOURCE_CHAT,
@@ -833,7 +842,7 @@ class ChatService:
                 continue
             if not getattr(member, "message_notifications_enabled", True):
                 continue
-            notification = self.notification_repo.create(
+            notification = await self.notification_repo.a_create(
                 user_id=member_id,
                 type=notification_type,
                 conversation_id=conversation.id,
@@ -842,7 +851,7 @@ class ChatService:
                 metadata=None,
             )
             notifications.append(notification)
-            self.unified_notification_repo.create_or_coalesce(
+            await self.unified_notification_repo.a_create_or_coalesce(
                 org_id=str(conversation.org_id),
                 user_id=member_id,
                 source=NOTIFICATION_SOURCE_CHAT,
@@ -858,7 +867,7 @@ class ChatService:
 
         return notifications
 
-    def _validate_reply_target_or_400(
+    async def _validate_reply_target_or_400(
         self,
         *,
         conversation: ChatConversation,
@@ -868,7 +877,7 @@ class ChatService:
         if reply_to_message_id is None:
             return
 
-        reply_target = self.message_repo.get(reply_to_message_id)
+        reply_target = await self.message_repo.a_get(reply_to_message_id)
         if (
             reply_target is None
             or reply_target.deleted_at is not None
@@ -880,7 +889,7 @@ class ChatService:
         if target_root_message_id != root_message.id:
             raise HTTPException(status_code=400, detail="Reply target not found in thread")
 
-    def _build_publish_state(
+    async def _build_publish_state(
         self,
         *,
         conversation: ChatConversation,
@@ -894,10 +903,10 @@ class ChatService:
         for notification in created_notifications:
             user_id = str(notification.user_id)
             notifications_by_user.setdefault(user_id, []).append(
-                self._serialize_notification(notification)
+                await self._serialize_notification(notification)
             )
 
-        unread_by_user = self.build_unread_summaries_for_users(member_ids)
+        unread_by_user = await self.build_unread_summaries_for_users(member_ids)
         return ChatPublishState(
             conversation_id=str(conversation.id),
             root_message_id=message.thread_root_message_id or message.id,
@@ -907,10 +916,3 @@ class ChatService:
             unread_by_user=unread_by_user,
             notifications_by_user=notifications_by_user,
         )
-
-    @staticmethod
-    def _require_org_id(user: dict[str, Any]) -> str:
-        org_id = user.get("org_id")
-        if not org_id:
-            raise HTTPException(status_code=400, detail="User is not attached to an org")
-        return str(org_id)

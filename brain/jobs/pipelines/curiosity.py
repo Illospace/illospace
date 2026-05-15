@@ -23,17 +23,26 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
-import subprocess
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
+from subprocess import TimeoutExpired
+
+import httpx
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
 from brain.kernel import config
+from brain.platform.async_io import (
+    async_http_client,
+    ensure_dir,
+    run_subprocess,
+    write_text as write_text_async,
+)
 
 logging.basicConfig(level=logging.INFO, format='[curiosity] %(message)s')
 logger = logging.getLogger(__name__)
@@ -185,36 +194,57 @@ def pick_source(state):
     return candidates[0][1]
 
 
-def fetch_content(url):
+async def async_fetch_content(url):
     """Fetch and extract readable content from a URL."""
     try:
-        result = subprocess.run(
-            ["python3", "-c", f"""
-import urllib.request, json
-req = urllib.request.Request('{url}', headers={{'User-Agent': 'Mozilla/5.0'}})
-with urllib.request.urlopen(req, timeout=30) as r:
-    print(r.read().decode('utf-8', errors='ignore')[:50000])
-"""],
-            capture_output=True, text=True, timeout=45
-        )
-        return result.stdout[:50000] if result.returncode == 0 else None
-    except Exception as e:
+        async with async_http_client(
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=45.0,
+        ) as client:
+            response = await client.get(url)
+            if response.status_code >= 400:
+                return None
+            return response.text[:50000]
+    except httpx.HTTPError as e:
         logger.error(f"Failed to fetch {url}: {e}")
         return None
 
 
-def get_existing_brain_context():
+def fetch_content(url):
+    """Synchronous compatibility wrapper for tests and CLI inspection."""
+    try:
+        result = asyncio.Runner().run(
+            run_subprocess(
+                ["python3", "-c", f"""
+import urllib.request
+req = urllib.request.Request('{url}', headers={{'User-Agent': 'Mozilla/5.0'}})
+with urllib.request.urlopen(req, timeout=30) as r:
+    print(r.read().decode('utf-8', errors='ignore')[:50000])
+"""],
+                capture_output=True,
+                text=True,
+                timeout=45,
+            )
+        )
+        return result.stdout[:50000] if result.returncode == 0 else None
+    except (TimeoutExpired, RuntimeError) as e:
+        logger.error(f"Failed to fetch {url}: {e}")
+        return None
+
+
+async def get_existing_brain_context():
     """Query the brain for current knowledge areas to help the reader make connections."""
     try:
         # Get recent memories to understand current context
-        result = subprocess.run(
+        result = await run_subprocess(
             ["python3", str(SCRIPT_DIR / "memory.py"), "list", "--limit", "20"],
             capture_output=True, text=True, timeout=30, cwd=str(SCRIPT_DIR)
         )
         recent = result.stdout[:3000] if result.returncode == 0 else ""
 
         # Get skill states
-        result2 = subprocess.run(
+        result2 = await run_subprocess(
             ["python3", str(SCRIPT_DIR / "skills.py"), "dashboard"],
             capture_output=True, text=True, timeout=30, cwd=str(SCRIPT_DIR)
         )
@@ -308,7 +338,7 @@ QUALITY RULES:
 - The morning_brief is for a busy CTO — concise, concrete, no jargon."""
 
 
-def connect_to_existing_memories(reading):
+async def connect_to_existing_memories(reading):
     """After encoding, create explicit edges to related existing memories."""
     if not reading or not reading.get("connections"):
         return
@@ -320,7 +350,7 @@ def connect_to_existing_memories(reading):
             if not query:
                 continue
 
-            result = subprocess.run(
+            result = await run_subprocess(
                 ["python3", str(SCRIPT_DIR / "memory.py"), "query", "-q", query, "--limit", "1"],
                 capture_output=True, text=True, timeout=30, cwd=str(SCRIPT_DIR)
             )
@@ -333,7 +363,7 @@ def connect_to_existing_memories(reading):
             logger.warning(f"Connection search failed: {e}")
 
 
-def encode_reading(reading):
+async def encode_reading(reading):
     """Store the reading in the brain with bounded salience."""
     if not reading:
         logger.info("No reading to encode.")
@@ -380,12 +410,17 @@ def encode_reading(reading):
             "-s", str(salience),
             "--tags", ",".join(tags),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                                cwd=str(SCRIPT_DIR))
+        result = await run_subprocess(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(SCRIPT_DIR),
+        )
         if result.returncode == 0:
             logger.info(f"Encoded: salience={salience}, tags={tags}")
             # Now create connections to existing memories
-            connect_to_existing_memories(reading)
+            await connect_to_existing_memories(reading)
         else:
             logger.error(f"Failed to encode: {result.stderr}")
     except Exception as e:
@@ -450,7 +485,7 @@ def save_reading(source, reading):
     logger.info(f"Saved reading: {filepath}")
 
 
-def run_reading_cycle(specific_url=None):
+async def run_reading_cycle(specific_url=None):
     """Main reading cycle: pick source, fetch, get brain context, analyze, encode."""
     state = load_state()
 
@@ -467,21 +502,20 @@ def run_reading_cycle(specific_url=None):
     logger.info(f"URL: {source['url']}")
 
     # Fetch content
-    content = fetch_content(source["url"])
+    content = await async_fetch_content(source["url"])
     if not content:
         logger.error("Failed to fetch content. Skipping.")
         return
 
     # Get existing brain context for connection-making
     logger.info("Fetching brain context for connections...")
-    brain_context = get_existing_brain_context()
+    brain_context = await get_existing_brain_context()
 
     # Build prompt and write it for the child agent
     prompt = build_analysis_prompt(source, content, brain_context)
     prompt_file = SCRIPT_DIR / "logs" / f"curiosity-prompt-{datetime.now().strftime('%Y-%m-%d')}.txt"
-    prompt_file.parent.mkdir(exist_ok=True)
-    with open(prompt_file, "w") as f:
-        f.write(prompt)
+    await ensure_dir(prompt_file.parent, parents=True, exist_ok=True)
+    await write_text_async(prompt_file, prompt)
 
     logger.info(f"Analysis prompt written to {prompt_file}")
     logger.info("Launching child agent for critical reading...")
@@ -558,7 +592,7 @@ def show_sources():
         print(f"      {s['description']}")
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description="Curiosity Engine — daily critical reading")
     parser.add_argument("--source", help="Read a specific URL")
     parser.add_argument("--list", action="store_true", help="Show source rotation")
@@ -573,6 +607,10 @@ if __name__ == "__main__":
     elif args.brief:
         show_brief()
     else:
-        result = run_reading_cycle(specific_url=args.source)
+        result = asyncio.run(run_reading_cycle(specific_url=args.source))
         if result:
             print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()

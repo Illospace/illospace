@@ -15,6 +15,7 @@ Run: python3 nightly_reflect.py [--date 2026-03-02]
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -25,22 +26,28 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))  # repo root
 import brain.kernel.config as config
+from brain.platform.async_io import (
+    ensure_dir,
+    path_exists,
+    read_text as read_text_async,
+    write_text as write_text_async,
+)
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 WORKSPACE = str(config.WORKSPACE_ROOT)
 PRIVATE_HOME = str(config.PRIVATE_HOME)
 
-def gather_context(target_date: date, org_id: str | None = None) -> dict:
+async def gather_context(target_date: date, org_id: str | None = None) -> dict:
     """Gather all data the LLM needs for reflection."""
     # Only memories has org_id. Other tables are org-wide for now.
     _mem_org_filter = "AND org_id = :org_id" if org_id else ""
     _mem_org_params = {"org_id": org_id} if org_id else {}
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         context = {}
 
         # 1. Today's skill executions
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT se.*, s.name as skill_name, s.procedure, s.pitfalls, s.version
             FROM skill_executions se
             JOIN skills s ON s.id = se.skill_id
@@ -50,7 +57,7 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
         context["skill_executions"] = [dict(r) for r in result.mappings().all()]
 
         # 2. All skills with current state
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT id, name, description, procedure, version, maturity, confidence,
                    use_count, success_count, failure_count, pitfalls, refinements
             FROM skills WHERE NOT archived
@@ -58,7 +65,7 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
         context["skills"] = [dict(r) for r in result.mappings().all()]
 
         # 5. Today's retrieval log
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT query_text, results_returned, top_score, was_relevant, feedback
             FROM retrieval_log
             WHERE timestamp::date = :target_date
@@ -68,13 +75,13 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
         # 5b. Consistently-missed memories (retrieval feedback loop)
         try:
             from brain.systems.memory.retrieval_feedback import analyze_missed_memories
-            context["consistently_missed_memories"] = analyze_missed_memories(min_misses=3, days=30)
+            context["consistently_missed_memories"] = await analyze_missed_memories(min_misses=3, days=30)
         except Exception as e:
             print(f"[reflect] Warning: retrieval feedback analysis failed: {e}")
             context["consistently_missed_memories"] = []
 
         # 6. Today's task-like prompts, now sourced from agent_runs.input_message.
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT input_message AS description,
                    COALESCE(metadata->>'task_type', recipe) AS task_type,
                    COALESCE(metadata->>'strategy_chosen', recipe) AS strategy_chosen,
@@ -100,7 +107,7 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
 
         # 5. New memories created today (scoped by org_id if provided)
         params = {"target_date": target_date, **_mem_org_params}
-        result = uow.session.execute(text(f"""
+        result = await uow.session.execute(text(f"""
             SELECT id, content, memory_type, salience, source
             FROM memories
             WHERE created_at::date = :target_date AND NOT archived {_mem_org_filter}
@@ -109,7 +116,7 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
         context["new_memories"] = [dict(r) for r in result.mappings().all()]
 
         # 8. Previous daily metrics (for comparison)
-        result = uow.session.execute(text("""
+        result = await uow.session.execute(text("""
             SELECT * FROM daily_metrics
             WHERE metric_date >= :target_date - INTERVAL '7 days'
             ORDER BY metric_date DESC
@@ -118,7 +125,7 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
 
         # 9. Agent run activity.
         try:
-            result = uow.session.execute(text("""
+            result = await uow.session.execute(text("""
                 SELECT id, trace_id, thread_id, parent_run_id, root_run_id,
                        profile, recipe, status,
                        COALESCE(metadata->>'skill_used', metadata->>'skill_name') AS skill_used,
@@ -140,9 +147,8 @@ def gather_context(target_date: date, org_id: str | None = None) -> dict:
 
         # 10. Today's daily log if exists
         daily_file = os.path.join(str(config.JOURNAL_DIR), f"{target_date.isoformat()}.md")
-        if os.path.exists(daily_file):
-            with open(daily_file) as f:
-                context["daily_log"] = f.read()[:5000]
+        if await path_exists(daily_file):
+            context["daily_log"] = (await read_text_async(daily_file))[:5000]
 
     return context
 
@@ -298,11 +304,11 @@ Respond with a JSON object (and nothing else) with this structure:
     return prompt
 
 
-def apply_reflection(reflection: dict, target_date: date, context: dict | None = None):
+async def apply_reflection(reflection: dict, target_date: date, context: dict | None = None):
     """Apply the LLM's reflection outputs to the system."""
     context = context or {}
 
-    with UnitOfWork() as uow:
+    async with UnitOfWork() as uow:
         applied = []
 
         # 1. Apply skill refinements
@@ -311,7 +317,7 @@ def apply_reflection(reflection: dict, target_date: date, context: dict | None =
             if not skill_name:
                 continue
 
-            result = uow.session.execute(text(
+            result = await uow.session.execute(text(
                 "SELECT id, version, pitfalls, refinements FROM skills WHERE name = :name"
             ), {"name": skill_name})
             skill = result.mappings().first()
@@ -331,7 +337,7 @@ def apply_reflection(reflection: dict, target_date: date, context: dict | None =
                     "source": "nightly_reflection",
                     "date": target_date.isoformat()
                 })
-                uow.session.execute(text(
+                await uow.session.execute(text(
                     "UPDATE skills SET pitfalls = :pitfalls, updated_at = NOW() WHERE id = :id"
                 ), {"pitfalls": json.dumps(pitfalls), "id": skill_id})
                 applied.append(f"Added pitfall to {skill_name}: {ref['change'][:60]}")
@@ -349,14 +355,14 @@ def apply_reflection(reflection: dict, target_date: date, context: dict | None =
 
                 new_proc = ref.get("new_procedure")
                 if new_proc:
-                    uow.session.execute(text("""
+                    await uow.session.execute(text("""
                         UPDATE skills SET version = :version, procedure = :procedure,
                                refinements = :refinements, updated_at = NOW()
                         WHERE id = :id
                     """), {"version": new_version, "procedure": new_proc,
                            "refinements": json.dumps(refinements), "id": skill_id})
                 else:
-                    uow.session.execute(text("""
+                    await uow.session.execute(text("""
                         UPDATE skills SET version = :version, refinements = :refinements,
                                updated_at = NOW()
                         WHERE id = :id
@@ -371,7 +377,7 @@ def apply_reflection(reflection: dict, target_date: date, context: dict | None =
             if not prop.get("name") or not prop.get("initial_procedure"):
                 continue
 
-            result = uow.session.execute(text(
+            result = await uow.session.execute(text(
                 "SELECT id FROM skills WHERE name = :name"
             ), {"name": prop["name"]})
             if result.mappings().first():
@@ -387,7 +393,7 @@ def apply_reflection(reflection: dict, target_date: date, context: dict | None =
                 )
                 continue
 
-            uow.session.execute(text("""
+            await uow.session.execute(text("""
                 INSERT INTO skills (name, description, procedure, auto_emerged)
                 VALUES (:name, :description, :procedure, TRUE)
             """), {"name": prop["name"], "description": prop.get("description", ""),
@@ -397,7 +403,7 @@ def apply_reflection(reflection: dict, target_date: date, context: dict | None =
         # 3. Update daily metrics
         metrics = reflection.get("daily_metrics_update", {})
         if metrics:
-            uow.session.execute(text("""
+            await uow.session.execute(text("""
                 INSERT INTO daily_metrics (metric_date,
                     competence_architecture, competence_debugging, competence_frontend,
                     competence_provider_apis, competence_communication, competence_proactivity,
@@ -437,32 +443,39 @@ def apply_reflection(reflection: dict, target_date: date, context: dict | None =
     journal_text = reflection.get("journal_entry", "")
     if journal_text:
         journal_dir = str(config.JOURNAL_DIR)
-        os.makedirs(journal_dir, exist_ok=True)
+        await ensure_dir(journal_dir)
 
         # Use YYYY-MM-DD.md naming (no numeric prefix)
         journal_path = os.path.join(journal_dir, f"{target_date.isoformat()}.md")
 
-        with open(journal_path, 'w') as f:
-            f.write(f"# Nightly Reflection — {target_date.isoformat()}\n\n")
-            f.write(f"*Auto-generated by LLM reflection at {datetime.now().isoformat()}*\n\n")
-            f.write(journal_text)
-            f.write("\n\n## Actions Taken\n")
-            for a in applied:
-                f.write(f"- {a}\n")
+        journal_lines = [
+            f"# Nightly Reflection — {target_date.isoformat()}",
+            "",
+            f"*Auto-generated by LLM reflection at {datetime.now().isoformat()}*",
+            "",
+            journal_text,
+            "",
+            "## Actions Taken",
+        ]
+        journal_lines.extend(f"- {a}" for a in applied)
 
-            # Add system proposals
-            proposals = reflection.get("system_proposals", [])
-            if proposals:
-                f.write("\n## System Improvement Proposals\n")
-                for p in proposals:
-                    f.write(f"- [{p.get('priority', 'medium').upper()}] {p.get('area', '?')}: {p.get('proposal', '')}\n")
+        # Add system proposals
+        proposals = reflection.get("system_proposals", [])
+        if proposals:
+            journal_lines.extend(["", "## System Improvement Proposals"])
+            journal_lines.extend(
+                f"- [{p.get('priority', 'medium').upper()}] {p.get('area', '?')}: {p.get('proposal', '')}"
+                for p in proposals
+            )
+
+        await write_text_async(journal_path, "\n".join(journal_lines) + "\n")
 
         applied.append(f"Journal entry written: {journal_path}")
 
     return applied
 
 
-def run_reflection(target_date: date):
+async def run_reflection(target_date: date):
     """Main reflection flow: gather data → prompt LLM → apply results."""
     print(f"{'='*60}")
     print(f"LLM NIGHTLY REFLECTION — {target_date}")
@@ -470,7 +483,7 @@ def run_reflection(target_date: date):
 
     # 1. Gather context
     print("[reflect] Gathering context...")
-    context = gather_context(target_date)
+    context = await gather_context(target_date)
 
     # Check if there's anything to reflect on
     total_data = (len(context["skill_executions"]) +
@@ -491,9 +504,8 @@ def run_reflection(target_date: date):
 
     # 3. Write prompt to temp file for the LLM
     prompt_path = os.path.join(str(config.BRAIN_LOG_DIR), f"reflect-prompt-{target_date}.md")
-    os.makedirs(str(config.BRAIN_LOG_DIR), exist_ok=True)
-    with open(prompt_path, 'w') as f:
-        f.write(prompt)
+    await ensure_dir(str(config.BRAIN_LOG_DIR))
+    await write_text_async(prompt_path, prompt)
 
     # 4. Call the configured provider for deep analysis
     print("[reflect] Calling configured LLM for deep analysis...")
@@ -511,18 +523,19 @@ def run_reflection(target_date: date):
     if reflection is None:
         print("[reflect] Direct CLI failed. Saving prompt for main agent processing.")
         pending_path = os.path.join(str(config.BRAIN_LOG_DIR), f"reflect-pending-{target_date}.md")
-        with open(pending_path, 'w') as f:
-            f.write(prompt)
+        await write_text_async(pending_path, prompt)
 
         # Also save a flag file for the main agent's wake-up
         flag_path = os.path.join(PRIVATE_HOME, "PENDING_REFLECTION.json")
-        with open(flag_path, 'w') as f:
-            json.dump({
+        await write_text_async(
+            flag_path,
+            json.dumps({
                 "date": target_date.isoformat(),
                 "prompt_path": pending_path,
                 "output_path": output_path,
                 "created": datetime.now().isoformat()
-            }, f)
+            }, indent=2),
+        )
 
         print(f"[reflect] Flag file written: {flag_path}")
         print("[reflect] Main agent will process this on next wake-up.")
@@ -532,15 +545,14 @@ def run_reflection(target_date: date):
     try:
         from meta_skills import nightly_meta_analysis
         print("[reflect] Running meta-skill analysis...")
-        meta_summary = nightly_meta_analysis()
+        meta_summary = await nightly_meta_analysis()
         print(meta_summary)
     except Exception as e:
         print(f"[reflect] Meta-skill analysis failed: {e}")
         meta_summary = None
 
     # 6. Save full reflection for review.
-    with open(output_path, 'w') as f:
-        json.dump(reflection, f, indent=2, default=str)
+    await write_text_async(output_path, json.dumps(reflection, indent=2, default=str))
 
     print("\n[reflect] Complete.")
     print(f"[reflect] Full reflection saved to {output_path}")
@@ -568,7 +580,7 @@ def main():
     args = parser.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
-    run_reflection(target)
+    asyncio.run(run_reflection(target))
 
 
 if __name__ == "__main__":

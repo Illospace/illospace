@@ -7,6 +7,7 @@ ensuring workers mechanically verify their work before claiming success.
 
 Run: python scripts/update_develop_skill_verification.py
 """
+import asyncio
 import os
 import sys
 
@@ -33,11 +34,12 @@ Skipping this section means the task is NOT complete, regardless of what you thi
 """
 
 
-def main():
-    with UnitOfWork() as uow:
-        skill = uow.session.scalars(
+async def main():
+    async with UnitOfWork() as uow:
+        skill_rows = await uow.session.scalars(
             select(Skill).where(Skill.name == "develop")
-        ).first()
+        )
+        skill = skill_rows.first()
 
         if skill is None:
             print("ERROR: 'develop' skill not found in database.")
@@ -69,10 +71,9 @@ def main():
         })
         skill.refinements = refinements
 
-        uow.commit()
         print(f"SUCCESS: Updated develop skill to v{skill.version}")
         print(f"Procedure now ends with verification gate ({len(skill.procedure)} chars total)")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

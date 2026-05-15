@@ -9,9 +9,8 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Patch legacy DB pool before importing app
-with patch("brain.platform.db.legacy._get_pool"), \
-     patch("brain.systems.runs.cortex.ensure_schema"), \
+# Patch runtime side effects before importing app.
+with patch("brain.systems.runs.cortex.ensure_schema"), \
      patch("brain.systems.runs.cortex.start_runner"):
     from brain.app.api.main import app
 

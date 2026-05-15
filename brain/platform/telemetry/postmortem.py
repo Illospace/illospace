@@ -7,7 +7,6 @@ routes the lesson to the appropriate corrective system.
 
 import json
 import logging
-import threading
 
 from sqlalchemy import select
 from sqlalchemy import text
@@ -15,16 +14,12 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 
 
-def run_postmortem(run_id: int, error: str, skill_name: str | None = None):
-    """Run post-mortem in a background thread. Fire-and-forget."""
-    threading.Thread(
-        target=_postmortem_worker,
-        args=(run_id, error, skill_name),
-        daemon=True,
-    ).start()
+async def run_postmortem(run_id: int, error: str, skill_name: str | None = None):
+    """Run post-mortem analysis for a failed run."""
+    await _postmortem_worker(run_id, error, skill_name)
 
 
-def _postmortem_worker(run_id: int, error: str, skill_name: str | None):
+async def _postmortem_worker(run_id: int, error: str, skill_name: str | None):
     """Gather data, analyze, store results, route corrections."""
     try:
         from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -35,8 +30,8 @@ def _postmortem_worker(run_id: int, error: str, skill_name: str | None):
         # Look up skill_name from run if not provided
         if not skill_name:
             try:
-                with UnitOfWork() as uow:
-                    result = uow.session.execute(text(
+                async with UnitOfWork() as uow:
+                    result = await uow.session.execute(text(
                         "SELECT skill_used FROM agent_runs WHERE id = :id"
                     ), {"id": run_id})
                     row = result.mappings().first()
@@ -49,16 +44,16 @@ def _postmortem_worker(run_id: int, error: str, skill_name: str | None):
         context_growth = []
         tool_trace = []
         try:
-            with UnitOfWork() as uow:
+            async with UnitOfWork() as uow:
                 from brain.platform.db.models.agent_run import AgentRunEventRow
 
-                result = uow.session.execute(text(
+                result = await uow.session.execute(text(
                     "SELECT turn_number, tokens_input, context_messages, latency_ms, status, error "
                     "FROM agent_api_calls WHERE run_id = :id ORDER BY turn_number"
                 ), {"id": run_id})
                 context_growth = [dict(r) for r in result.mappings().all()]
 
-                events = uow.session.scalars(
+                events_result = await uow.session.scalars(
                     select(AgentRunEventRow)
                     .where(
                         AgentRunEventRow.run_id == run_id,
@@ -67,7 +62,8 @@ def _postmortem_worker(run_id: int, error: str, skill_name: str | None):
                         ),
                     )
                     .order_by(AgentRunEventRow.created_at.asc(), AgentRunEventRow.id.asc())
-                ).all()
+                )
+                events = events_result.all()
                 for event in events:
                     payload = dict(event.payload or {})
                     tool_trace.append(
@@ -94,8 +90,8 @@ def _postmortem_worker(run_id: int, error: str, skill_name: str | None):
         }
 
         # Store on run row
-        with UnitOfWork() as uow:
-            uow.session.execute(text(
+        async with UnitOfWork() as uow:
+            await uow.session.execute(text(
                 "UPDATE agent_runs SET postmortem = :postmortem WHERE id = :id"
             ), {"postmortem": json.dumps(result, default=str), "id": run_id})
 

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.scheduler import OWNER_MODE_SCHEDULER, SchedulerJob, SchedulerRun
 from brain.app.scheduler.planner import next_run_after
@@ -160,8 +160,8 @@ def _serialize_run(run: SchedulerRun) -> dict[str, Any]:
     }
 
 
-def _upsert_scheduler_job(
-    session: Session,
+async def _async_upsert_scheduler_job_row(
+    session: AsyncSession,
     *,
     job_key: str,
     family: str,
@@ -191,7 +191,7 @@ def _upsert_scheduler_job(
             next_fire = next_run_after(cron_expr, timezone_name, now)
         except Exception:
             next_fire = None
-    job = session.scalar(select(SchedulerJob).where(SchedulerJob.job_key == job_key))
+    job = await session.scalar(select(SchedulerJob).where(SchedulerJob.job_key == job_key))
     if job is None:
         job = SchedulerJob(
             job_key=job_key,
@@ -216,7 +216,7 @@ def _upsert_scheduler_job(
             pause_reason=pause_reason,
         )
         session.add(job)
-        session.flush()
+        await session.flush()
         return job
 
     job.family = family
@@ -238,12 +238,12 @@ def _upsert_scheduler_job(
     job.task_contract = task_contract or {}
     job.next_run_at = next_fire
     job.pause_reason = pause_reason
-    session.flush()
+    await session.flush()
     return job
 
 
-def upsert_scheduler_job(
-    session: Session,
+async def async_upsert_scheduler_job(
+    session: AsyncSession,
     *,
     job_key: str,
     cron_expr: str,
@@ -266,7 +266,7 @@ def upsert_scheduler_job(
     target_binding_selector: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> SchedulerJob:
-    """Create or update a scheduler-owned recurring job."""
+    """Create or update a scheduler-owned recurring job using an async session."""
     normalized_key = _slugify(job_key)
     payload = dict(default_payload or {})
     payload.setdefault("name", job_key)
@@ -274,7 +274,7 @@ def upsert_scheduler_job(
     if not contract:
         contract = _default_task_contract(normalized_key)
     resolved_program_key = program_key or _program_key_from_job(job_key, None, handler_ref)
-    return _upsert_scheduler_job(
+    return await _async_upsert_scheduler_job_row(
         session,
         job_key=normalized_key,
         family=_slugify(family or normalized_key),
@@ -299,26 +299,26 @@ def upsert_scheduler_job(
     )
 
 
-def retire_scheduler_job(
-    session: Session,
+async def async_retire_scheduler_job(
+    session: AsyncSession,
     identifier: str,
     *,
     reason: str,
 ) -> SchedulerJob | None:
-    """Soft-disable a scheduler job while preserving history."""
-    from brain.app.scheduler.runtime import find_scheduler_job
+    """Soft-disable a scheduler job while preserving history using an async session."""
+    from brain.app.scheduler.runtime import async_find_scheduler_job
 
-    job = find_scheduler_job(session, identifier)
+    job = await async_find_scheduler_job(session, identifier)
     if job is None:
         return None
     job.enabled = False
     job.pause_reason = reason
-    session.flush()
+    await session.flush()
     return job
 
 
-def sync_scheduler_catalog(
-    session: Session,
+async def async_sync_scheduler_catalog(
+    session: AsyncSession,
     *,
     owner_mode: str = OWNER_MODE_SCHEDULER,
     timezone_name: str = DEFAULT_SCHEDULER_TIMEZONE,
@@ -341,7 +341,7 @@ def sync_scheduler_catalog(
         }
         if selected_keys and not (aliases & selected_keys):
             continue
-        upsert_scheduler_job(
+        await async_upsert_scheduler_job(
             session,
             job_key=str(definition["job_key"]),
             family=str(definition["family"]),
@@ -363,19 +363,25 @@ def sync_scheduler_catalog(
             now=now,
         )
         upserted += 1
-    session.flush()
+    await session.flush()
     return {"upserted": upserted}
 
 
-def list_scheduler_jobs(session: Session) -> list[dict[str, Any]]:
-    jobs = session.scalars(select(SchedulerJob).order_by(SchedulerJob.family.asc(), SchedulerJob.id.asc())).all()
-    return [_serialize_job(job) for job in jobs]
+async def async_list_scheduler_jobs(session: AsyncSession) -> list[dict[str, Any]]:
+    result = await session.scalars(
+        select(SchedulerJob).order_by(SchedulerJob.family.asc(), SchedulerJob.id.asc())
+    )
+    return [_serialize_job(job) for job in result.all()]
 
 
-def list_scheduler_runs(session: Session, *, limit: int = 50) -> list[dict[str, Any]]:
-    runs = session.scalars(
+async def async_list_scheduler_runs(
+    session: AsyncSession,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    result = await session.scalars(
         select(SchedulerRun)
         .order_by(SchedulerRun.scheduled_for.desc(), SchedulerRun.id.desc())
         .limit(limit)
-    ).all()
-    return [_serialize_run(run) for run in runs]
+    )
+    return [_serialize_run(run) for run in result.all()]

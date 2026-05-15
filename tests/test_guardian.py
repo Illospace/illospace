@@ -1,7 +1,7 @@
 """Tests for the Guardian enforcement layer."""
 
 import json
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 import sys
@@ -48,15 +48,15 @@ def _make_trust(level=0, consecutive=0, total=0, bounced=0, user_caught=0,
 def mock_guardian_db():
     """Patch UnitOfWork for guardian tests."""
     mock_uow = MagicMock()
-    mock_uow.__enter__ = MagicMock(return_value=mock_uow)
-    mock_uow.__exit__ = MagicMock(return_value=False)
+    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
+    mock_uow.__aexit__ = AsyncMock(return_value=False)
     mock_session = mock_uow.session
 
     executions = []
 
     original_execute = mock_session.execute
 
-    def track_execute(sql, params=None):
+    async def track_execute(sql, params=None):
         sql_str = str(sql).strip()
         executions.append({"sql": sql_str, "params": params})
         result = MagicMock()
@@ -75,11 +75,11 @@ def mock_guardian_db():
 # ---------------------------------------------------------------------------
 
 class TestLoadRules:
-    def test_load_active_rules(self, mock_guardian_db):
+    async def test_load_active_rules(self, mock_guardian_db):
         session, _ = mock_guardian_db
         rules_data = [_make_rule(), _make_rule(id=2, name="rule2")]
 
-        def custom_execute(sql, params=None):
+        async def custom_execute(sql, params=None):
             result = MagicMock()
             result.mappings.return_value.all.return_value = rules_data
             result.mappings.return_value.first.return_value = _make_trust()
@@ -88,15 +88,15 @@ class TestLoadRules:
         session.execute = custom_execute
 
         from brain.systems.quality.guardian import load_rules
-        rules = load_rules()
+        rules = await load_rules()
         assert len(rules) == 2
         assert rules[0]["name"] == "test_rule"
 
-    def test_load_all_rules(self, mock_guardian_db):
+    async def test_load_all_rules(self, mock_guardian_db):
         session, _ = mock_guardian_db
         rules_data = [_make_rule()]
 
-        def custom_execute(sql, params=None):
+        async def custom_execute(sql, params=None):
             result = MagicMock()
             result.mappings.return_value.all.return_value = rules_data
             result.mappings.return_value.first.return_value = _make_trust()
@@ -105,7 +105,7 @@ class TestLoadRules:
         session.execute = custom_execute
 
         from brain.systems.quality.guardian import load_rules
-        rules = load_rules(active_only=False)
+        rules = await load_rules(active_only=False)
         assert len(rules) == 1
 
 
@@ -114,12 +114,12 @@ class TestLoadRules:
 # ---------------------------------------------------------------------------
 
 class TestCheckCompletion:
-    def test_passes_when_evidence_present(self, mock_guardian_db):
+    async def test_passes_when_evidence_present(self, mock_guardian_db):
         session, _ = mock_guardian_db
 
         call_count = [0]
 
-        def smart_execute(sql, params=None):
+        async def smart_execute(sql, params=None):
             call_count[0] += 1
             result = MagicMock()
             sql_str = str(sql)
@@ -137,17 +137,17 @@ class TestCheckCompletion:
         session.execute = smart_execute
 
         from brain.systems.quality.guardian import check_completion
-        allowed, violations = check_completion(
+        allowed, violations = await check_completion(
             action_log=["ran test_execution and verified output"],
             task_context={"involves_code": True}
         )
         assert allowed is True
         assert violations == []
 
-    def test_bounces_when_evidence_missing(self, mock_guardian_db):
+    async def test_bounces_when_evidence_missing(self, mock_guardian_db):
         session, _ = mock_guardian_db
 
-        def smart_execute(sql, params=None):
+        async def smart_execute(sql, params=None):
             result = MagicMock()
             sql_str = str(sql)
             if "guardian_rules" in sql_str and "SELECT" in sql_str:
@@ -164,7 +164,7 @@ class TestCheckCompletion:
         session.execute = smart_execute
 
         from brain.systems.quality.guardian import check_completion
-        allowed, violations = check_completion(
+        allowed, violations = await check_completion(
             action_log=["edited file.py", "read file.py"],
             task_context={"involves_code": True}
         )
@@ -172,10 +172,10 @@ class TestCheckCompletion:
         assert len(violations) == 1
         assert "test_execution" in violations[0]
 
-    def test_skips_irrelevant_pre_action_rules(self, mock_guardian_db):
+    async def test_skips_irrelevant_pre_action_rules(self, mock_guardian_db):
         session, _ = mock_guardian_db
 
-        def smart_execute(sql, params=None):
+        async def smart_execute(sql, params=None):
             result = MagicMock()
             sql_str = str(sql)
             if "guardian_rules" in sql_str and "SELECT" in sql_str:
@@ -194,16 +194,16 @@ class TestCheckCompletion:
         session.execute = smart_execute
 
         from brain.systems.quality.guardian import check_completion
-        allowed, violations = check_completion(
+        allowed, violations = await check_completion(
             action_log=["asked a question"],
             task_context={"involves_code": False}
         )
         assert allowed is True
 
-    def test_trust_level_bypass(self, mock_guardian_db):
+    async def test_trust_level_bypass(self, mock_guardian_db):
         session, _ = mock_guardian_db
 
-        def smart_execute(sql, params=None):
+        async def smart_execute(sql, params=None):
             result = MagicMock()
             sql_str = str(sql)
             if "guardian_rules" in sql_str and "SELECT" in sql_str:
@@ -221,7 +221,7 @@ class TestCheckCompletion:
         session.execute = smart_execute
 
         from brain.systems.quality.guardian import check_completion
-        allowed, violations = check_completion(
+        allowed, violations = await check_completion(
             action_log=["did stuff"],
             task_context={}
         )
@@ -233,38 +233,38 @@ class TestCheckCompletion:
 # ---------------------------------------------------------------------------
 
 class TestTrustTransitions:
-    def test_clean_completion_increments(self, mock_guardian_db):
+    async def test_clean_completion_increments(self, mock_guardian_db):
         session, executions = mock_guardian_db
 
         from brain.systems.quality.guardian import record_completion
-        record_completion(passed=True, violations=[], caught_by="self")
+        await record_completion(passed=True, violations=[], caught_by="self")
 
         update_sqls = [e["sql"] for e in executions if "trust_state" in e.get("sql", "")]
         assert any("consecutive_clean" in sql for sql in update_sqls)
 
-    def test_user_catch_demotes(self, mock_guardian_db):
+    async def test_user_catch_demotes(self, mock_guardian_db):
         session, executions = mock_guardian_db
 
         from brain.systems.quality.guardian import record_completion
-        record_completion(passed=False, violations=["missed something"], caught_by="user")
+        await record_completion(passed=False, violations=["missed something"], caught_by="user")
 
         update_sqls = [e["sql"] for e in executions if "trust_state" in e.get("sql", "")]
         assert any("current_level - 1" in sql for sql in update_sqls)
 
-    def test_guardian_catch_resets_streak(self, mock_guardian_db):
+    async def test_guardian_catch_resets_streak(self, mock_guardian_db):
         session, executions = mock_guardian_db
 
         from brain.systems.quality.guardian import record_completion
-        record_completion(passed=False, violations=["bounced"], caught_by="guardian")
+        await record_completion(passed=False, violations=["bounced"], caught_by="guardian")
 
         update_sqls = [e["sql"] for e in executions if "trust_state" in e.get("sql", "")]
         assert any("consecutive_clean = 0" in sql for sql in update_sqls)
 
-    def test_demote_function(self, mock_guardian_db):
+    async def test_demote_function(self, mock_guardian_db):
         session, executions = mock_guardian_db
 
         from brain.systems.quality.guardian import demote
-        demote("test demotion reason")
+        await demote("test demotion reason")
 
         update_sqls = [e["sql"] for e in executions if "trust_state" in e.get("sql", "")]
         assert any("current_level - 1" in sql for sql in update_sqls)
@@ -277,10 +277,10 @@ class TestTrustTransitions:
 # ---------------------------------------------------------------------------
 
 class TestGetTrustLevel:
-    def test_returns_level_name(self, mock_guardian_db):
+    async def test_returns_level_name(self, mock_guardian_db):
         session, _ = mock_guardian_db
 
-        def custom_execute(sql, params=None):
+        async def custom_execute(sql, params=None):
             result = MagicMock()
             result.mappings.return_value.first.return_value = _make_trust(level=2)
             return result
@@ -288,14 +288,14 @@ class TestGetTrustLevel:
         session.execute = custom_execute
 
         from brain.systems.quality.guardian import get_trust_level
-        trust = get_trust_level()
+        trust = await get_trust_level()
         assert trust["level_name"] == "trusted"
         assert trust["current_level"] == 2
 
-    def test_empty_trust_state(self, mock_guardian_db):
+    async def test_empty_trust_state(self, mock_guardian_db):
         session, _ = mock_guardian_db
 
-        def custom_execute(sql, params=None):
+        async def custom_execute(sql, params=None):
             result = MagicMock()
             result.mappings.return_value.first.return_value = None
             return result
@@ -303,7 +303,7 @@ class TestGetTrustLevel:
         session.execute = custom_execute
 
         from brain.systems.quality.guardian import get_trust_level
-        trust = get_trust_level()
+        trust = await get_trust_level()
         assert trust["current_level"] == 0
         assert trust["level_name"] == "probation"
 
@@ -313,10 +313,10 @@ class TestGetTrustLevel:
 # ---------------------------------------------------------------------------
 
 class TestScoutChecklist:
-    def test_empty_checklist(self, mock_guardian_db):
+    async def test_empty_checklist(self, mock_guardian_db):
         session, _ = mock_guardian_db
 
-        def custom_execute(sql, params=None):
+        async def custom_execute(sql, params=None):
             result = MagicMock()
             result.mappings.return_value.all.return_value = []
             return result
@@ -324,14 +324,14 @@ class TestScoutChecklist:
         session.execute = custom_execute
 
         from brain.systems.quality.guardian import get_scout_checklist
-        md = get_scout_checklist()
+        md = await get_scout_checklist()
         assert "Pre-Flight Checklist" in md
         assert "No checklist items" in md
 
-    def test_checklist_with_items(self, mock_guardian_db):
+    async def test_checklist_with_items(self, mock_guardian_db):
         session, _ = mock_guardian_db
 
-        def custom_execute(sql, params=None):
+        async def custom_execute(sql, params=None):
             result = MagicMock()
             result.mappings.return_value.all.return_value = [
                 {"category": "code", "check_text": "Run tests before presenting", "priority": 1},
@@ -343,7 +343,7 @@ class TestScoutChecklist:
         session.execute = custom_execute
 
         from brain.systems.quality.guardian import get_scout_checklist
-        md = get_scout_checklist()
+        md = await get_scout_checklist()
         assert "🔴" in md  # Priority 1-2
         assert "Run tests" in md
         assert "### Code" in md

@@ -11,8 +11,9 @@ from sqlalchemy import select
 
 from brain.platform.db.models.agent_run import AgentRunArtifactRow
 from brain.systems.runs.domain import AgentRunArtifact, EventVisibility
-from brain.systems.runs.store import AgentRunStore
+from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.runs.artifacts import coerce_execution_artifact, coerce_execution_artifacts
+from brain.systems.runs.store import AsyncAgentRunStore
 
 logger = logging.getLogger("agent_runtime")
 
@@ -29,18 +30,18 @@ def _append_unique_artifacts(current: list, artifacts: list[Any]) -> list:
     return merged
 
 
-def load_execution_artifacts(*, execution_id: str | None = None, execution_ids: list[str] | None = None) -> list[dict]:
+async def load_execution_artifacts(*, execution_id: str | None = None, execution_ids: list[str] | None = None) -> list[dict]:
     """Load persisted execution artifacts from canonical AgentRun artifacts."""
     requested_execution_ids = [eid for eid in [execution_id, *(execution_ids or [])] if eid]
     if not requested_execution_ids:
         return []
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-        with UnitOfWork() as uow:
-            records = uow.session.scalars(
+        async with UnitOfWork() as uow:
+            records = (
+                await uow.session.scalars(
                 select(AgentRunArtifactRow)
                 .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
+                )
             ).all()
             artifacts: list[dict] = []
             for record in records:
@@ -61,22 +62,26 @@ def load_execution_artifacts(*, execution_id: str | None = None, execution_ids: 
         return []
 
 
-def append_run_execution_artifacts(*, run_id: int | None, artifacts: list[Any]) -> None:
+async def append_run_execution_artifacts(*, run_id: int | None, artifacts: list[Any]) -> None:
     """Persist run-level execution artifacts on the canonical AgentRun ledger."""
     if not run_id or not artifacts:
         return
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-        with UnitOfWork() as uow:
-            store = AgentRunStore(uow.session)
-            run = store.get_run(int(run_id))
+        async with UnitOfWork() as uow:
+            store = AsyncAgentRunStore(uow.session)
+            run = await store.get_run(int(run_id))
             if not run:
                 return
             normalized_artifacts = _append_unique_artifacts([], artifacts)
             existing = {
                 json.dumps(row.payload or {}, sort_keys=True, default=str)
-                for row in uow.agent_run_artifacts.list_for_run(int(run_id))
+                for row in (
+                    await uow.session.scalars(
+                        select(AgentRunArtifactRow)
+                        .where(AgentRunArtifactRow.run_id == int(run_id))
+                        .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
+                    )
+                ).all()
                 if isinstance(row.payload, dict)
             }
             for artifact in normalized_artifacts:
@@ -84,7 +89,7 @@ def append_run_execution_artifacts(*, run_id: int | None, artifacts: list[Any]) 
                 if artifact_key in existing:
                     continue
                 existing.add(artifact_key)
-                store.append_artifact(
+                await store.append_artifact(
                     AgentRunArtifact(
                         run_id=int(run_id),
                         root_run_id=run.root_run_id,
@@ -98,7 +103,7 @@ def append_run_execution_artifacts(*, run_id: int | None, artifacts: list[Any]) 
         logger.debug("Failed to persist run execution artifacts", exc_info=True)
 
 
-def append_execution_artifacts(*, execution_id: str, provenance: dict, artifacts: list[Any]) -> None:
+async def append_execution_artifacts(*, execution_id: str, provenance: dict, artifacts: list[Any]) -> None:
     """Persist execution-scoped artifacts onto the canonical AgentRun ledger."""
     if not execution_id or not artifacts:
         return
@@ -106,17 +111,21 @@ def append_execution_artifacts(*, execution_id: str, provenance: dict, artifacts
     if not run_id:
         return
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-        with UnitOfWork() as uow:
-            store = AgentRunStore(uow.session)
-            run = store.get_run(int(run_id))
+        async with UnitOfWork() as uow:
+            store = AsyncAgentRunStore(uow.session)
+            run = await store.get_run(int(run_id))
             if not run:
                 return
             normalized_artifacts = _append_unique_artifacts([], artifacts)
             existing = {
                 json.dumps(row.payload or {}, sort_keys=True, default=str)
-                for row in uow.agent_run_artifacts.list_for_run(int(run_id))
+                for row in (
+                    await uow.session.scalars(
+                        select(AgentRunArtifactRow)
+                        .where(AgentRunArtifactRow.run_id == int(run_id))
+                        .order_by(AgentRunArtifactRow.created_at.asc(), AgentRunArtifactRow.id.asc())
+                    )
+                ).all()
                 if isinstance(row.payload, dict)
             }
             for artifact in normalized_artifacts:
@@ -129,7 +138,7 @@ def append_execution_artifacts(*, execution_id: str, provenance: dict, artifacts
                 if artifact_key in existing:
                     continue
                 existing.add(artifact_key)
-                store.append_artifact(
+                await store.append_artifact(
                     AgentRunArtifact(
                         run_id=int(run_id),
                         root_run_id=run.root_run_id,
@@ -143,7 +152,7 @@ def append_execution_artifacts(*, execution_id: str, provenance: dict, artifacts
         logger.debug("Failed to persist execution artifacts", exc_info=True)
 
 
-def update_execution_summary(
+async def update_execution_summary(
     *,
     execution_id: str,
     provenance: dict,
@@ -164,11 +173,9 @@ def update_execution_summary(
     if not run_id:
         return
     try:
-        from brain.platform.db.repositories.unit_of_work import UnitOfWork
-
-        with UnitOfWork() as uow:
-            store = AgentRunStore(uow.session)
-            run = store.get_run(int(run_id))
+        async with UnitOfWork() as uow:
+            store = AsyncAgentRunStore(uow.session)
+            run = await store.get_run(int(run_id))
             if not run:
                 return
             payload = {
@@ -186,7 +193,7 @@ def update_execution_summary(
                 "duration_sec": int(duration_sec or 0),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
-            store.append_artifact(
+            await store.append_artifact(
                 AgentRunArtifact(
                     run_id=int(run_id),
                     root_run_id=run.root_run_id,
@@ -199,6 +206,6 @@ def update_execution_summary(
             metadata = dict(run.metadata_ or {})
             metadata["last_execution_summary"] = payload
             run.metadata_ = metadata
-            uow.session.flush()
+            await uow.session.flush()
     except Exception:
         logger.debug("Failed to update execution summary", exc_info=True)

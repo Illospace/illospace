@@ -7,6 +7,7 @@ Usage:
     python3 -m brain.app.cli.brain_export --scope universal --output ./export/ --skip-llm
 """
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -105,16 +106,17 @@ def scrub_content(text: str, skip_llm: bool = False) -> str:
 # Export functions
 # ============================================================
 
-def export_memories(scope: str, skip_llm: bool = False) -> list[dict]:
+async def export_memories(scope: str, skip_llm: bool = False) -> list[dict]:
     """Fetch and scrub memories of the given scope."""
-    with UnitOfWork() as uow:
-        rows = [dict(r) for r in uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             SELECT id, content, memory_type, salience,
                    tags, source, created_at, scope
             FROM memories
             WHERE scope = :scope AND NOT archived
             ORDER BY salience DESC, created_at DESC
-        """), {"scope": scope}).mappings().all()]
+        """), {"scope": scope})
+        rows = [dict(r) for r in result.mappings().all()]
 
     exported = []
     for i, row in enumerate(rows):
@@ -131,17 +133,18 @@ def export_memories(scope: str, skip_llm: bool = False) -> list[dict]:
     return exported
 
 
-def export_skills() -> list[dict]:
+async def export_skills() -> list[dict]:
     """Export all non-archived skills."""
-    with UnitOfWork() as uow:
-        rows = uow.session.execute(text("""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text("""
             SELECT name, description, procedure, version, level, maturity,
                    confidence, use_count, success_count, failure_count,
                    partial_count, avg_duration_sec, pitfalls, refinements,
                    triggers
             FROM skills WHERE NOT archived
             ORDER BY use_count DESC
-        """)).mappings().all()
+        """))
+        rows = result.mappings().all()
         return [dict(r) for r in rows]
 
 
@@ -213,17 +216,17 @@ the Illo Brain project.
 """
 
 
-def run_export(scope: str, output_dir: str, dry_run: bool = False,
-               skip_llm: bool = False):
+async def run_export(scope: str, output_dir: str, dry_run: bool = False,
+                     skip_llm: bool = False):
     """Run the full export pipeline."""
     print(f"Exporting {scope} memories to {output_dir}...")
 
     # Memories
-    memories = export_memories(scope, skip_llm=skip_llm)
+    memories = await export_memories(scope, skip_llm=skip_llm)
     print(f"  {len(memories)} memories to export")
 
     # Skills
-    skills = export_skills()
+    skills = await export_skills()
     print(f"  {len(skills)} skills to export")
 
     if dry_run:
@@ -288,7 +291,7 @@ def main():
                         help='Skip LLM scrubbing pass (regex only)')
     args = parser.parse_args()
 
-    run_export(args.scope, args.output, dry_run=args.dry_run, skip_llm=args.skip_llm)
+    asyncio.run(run_export(args.scope, args.output, dry_run=args.dry_run, skip_llm=args.skip_llm))
 
 
 if __name__ == '__main__':

@@ -31,6 +31,7 @@ from brain.systems.runs.project_execution_env import (
     prepare_project_execution_env,
     redact_sensitive_output,
 )
+from brain.platform.async_io import run_subprocess_sync
 
 logger = logging.getLogger("agent.tools")
 
@@ -335,7 +336,7 @@ def _semantic_code_search(query: str, limit: int = 5, workspace_root: str | None
         logger.debug(f"Semantic code search fell back to grep: {e}")
         # Fallback: simple grep
         try:
-            proc = subprocess.run(
+            proc = run_subprocess_sync(
                 ["grep", "-rn", "--include=*.py", "-l", query.split()[0], workspace_root or WORKSPACE_ROOT],
                 capture_output=True, text=True, timeout=10,
             )
@@ -538,7 +539,7 @@ def handle_test_runner(target: str, pattern: str | None = None, verbose: bool = 
     project_execution = prepare_project_execution_env()
 
     try:
-        proc = subprocess.run(
+        proc = run_subprocess_sync(
             cmd, capture_output=True, text=True,
             timeout=120, cwd=workspace_root or WORKSPACE_ROOT,
             env=project_execution.env,
@@ -636,7 +637,7 @@ def handle_project_context(path: str | None = None, workspace_root: str | None =
 
     # Recent git changes
     try:
-        proc = subprocess.run(
+        proc = run_subprocess_sync(
             ["git", "log", "--oneline", "-5"],
             capture_output=True, text=True, timeout=5, cwd=str(root),
         )

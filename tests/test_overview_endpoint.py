@@ -7,7 +7,7 @@ Run: pytest tests/test_overview_endpoint.py -v --tb=short
 from __future__ import annotations
 
 from datetime import date, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -74,28 +74,28 @@ class TestOverviewEndpoint:
         client,
     ):
         mem = MockMemRepo.return_value
-        mem.count_active.return_value = 42
-        mem.count_by_type.return_value = {"lesson": 10, "pattern": 5}
-        mem.recent_activity.return_value = [
+        mem.a_count_active = AsyncMock(return_value=42)
+        mem.a_count_by_type = AsyncMock(return_value={"lesson": 10, "pattern": 5})
+        mem.a_recent_activity = AsyncMock(return_value=[
             {"type": "memory", "subtype": "lesson", "detail": "learned X", "ts": "2026-03-18T00:00:00"}
-        ]
-        mem.retrieval_accuracy.return_value = 0.85
+        ])
+        mem.a_retrieval_accuracy = AsyncMock(return_value=0.85)
 
         edge = MockEdgeRepo.return_value
-        edge.count_all.return_value = 18
+        edge.a_count_all = AsyncMock(return_value=18)
 
         skill_repo = MockSkillRepo.return_value
-        skill_repo.overview_summary.return_value = (
+        skill_repo.a_overview_summary = AsyncMock(return_value=(
             [
                 {"name": "test-skill", "maturity": "developing", "use_count": 5},
                 {"name": "deploy", "maturity": "mature", "use_count": 12},
             ],
             2,
             17,
-        )
+        ))
 
         consol = MockConsolRepo.return_value
-        consol.list_recent.return_value = [_fake_consolidation()]
+        consol.a_list_recent = AsyncMock(return_value=[_fake_consolidation()])
 
         resp = client.get("/api/overview")
         assert resp.status_code == 200
@@ -132,15 +132,15 @@ class TestOverviewEndpoint:
     ):
         """When everything is empty, should return zeros/nulls without error."""
         mem = MockMemRepo.return_value
-        mem.count_active.return_value = 0
-        mem.count_by_type.return_value = {}
-        mem.recent_activity.return_value = []
-        mem.retrieval_accuracy.return_value = None
+        mem.a_count_active = AsyncMock(return_value=0)
+        mem.a_count_by_type = AsyncMock(return_value={})
+        mem.a_recent_activity = AsyncMock(return_value=[])
+        mem.a_retrieval_accuracy = AsyncMock(return_value=None)
 
-        MockEdgeRepo.return_value.count_all.return_value = 0
-        MockSkillRepo.return_value.overview_summary.return_value = ([], 0, 0)
+        MockEdgeRepo.return_value.a_count_all = AsyncMock(return_value=0)
+        MockSkillRepo.return_value.a_overview_summary = AsyncMock(return_value=([], 0, 0))
 
-        MockConsolRepo.return_value.list_recent.return_value = []
+        MockConsolRepo.return_value.a_list_recent = AsyncMock(return_value=[])
 
         resp = client.get("/api/overview")
         assert resp.status_code == 200
@@ -170,19 +170,19 @@ class TestOverviewEndpoint:
     ):
         """Verify correct types for every top-level key."""
         mem = MockMemRepo.return_value
-        mem.count_active.return_value = 1
-        mem.count_by_type.return_value = {"lesson": 1}
-        mem.recent_activity.return_value = []
-        mem.retrieval_accuracy.return_value = 0.9
+        mem.a_count_active = AsyncMock(return_value=1)
+        mem.a_count_by_type = AsyncMock(return_value={"lesson": 1})
+        mem.a_recent_activity = AsyncMock(return_value=[])
+        mem.a_retrieval_accuracy = AsyncMock(return_value=0.9)
 
-        MockEdgeRepo.return_value.count_all.return_value = 0
-        MockSkillRepo.return_value.overview_summary.return_value = (
+        MockEdgeRepo.return_value.a_count_all = AsyncMock(return_value=0)
+        MockSkillRepo.return_value.a_overview_summary = AsyncMock(return_value=(
             [{"name": "test-skill", "maturity": "developing", "use_count": 5}],
             1,
             5,
-        )
+        ))
 
-        MockConsolRepo.return_value.list_recent.return_value = [_fake_consolidation()]
+        MockConsolRepo.return_value.a_list_recent = AsyncMock(return_value=[_fake_consolidation()])
 
         resp = client.get("/api/overview")
         data = resp.json()

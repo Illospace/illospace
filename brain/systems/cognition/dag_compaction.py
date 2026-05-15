@@ -17,8 +17,9 @@ import json
 import logging
 import os
 import re
-import urllib.request
 from typing import Sequence
+
+from brain.platform.async_io import http_post
 
 logger = logging.getLogger(__name__)
 
@@ -338,22 +339,23 @@ def _call_model(prompt: str, model: str, *, user_id: str | None = None) -> str |
 def _call_ollama(prompt: str, model: str) -> str | None:
     """Call Ollama for compression."""
     try:
-        payload = json.dumps({
+        payload = {
             "model": model,
             "prompt": prompt,
             "stream": False,
             "options": {"temperature": 0.2, "num_predict": 600},
             "think": False,
             "keep_alive": "5m",
-        })
-        req = urllib.request.Request(
+        }
+        resp = http_post(
             f"{OLLAMA_URL}/api/generate",
-            data=payload.encode(),
+            json=payload,
             headers={"Content-Type": "application/json"},
+            timeout=30,
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read())
-            return result.get("response", "").strip() or None
+        resp.raise_for_status()
+        result = resp.json()
+        return result.get("response", "").strip() or None
     except Exception as e:
         logger.warning("Ollama compaction call failed: %s", e)
         return None

@@ -178,18 +178,18 @@ def _extract_failure_heuristics(
     ]
 
 
-def store_heuristics(skill_name: str, candidates: list[dict]):
+async def store_heuristics(skill_name: str, candidates: list[dict]):
     """Store candidate heuristics, deduplicating against existing ones."""
     if not candidates:
         return
 
     try:
-        with UnitOfWork() as uow:
+        async with UnitOfWork() as uow:
             # Load existing heuristics for dedup
-            existing = uow.session.execute(text(
+            existing = (await uow.session.execute(text(
                 "SELECT id, condition, action FROM skill_heuristics "
                 "WHERE skill_name = :skill AND active"
-            ), {"skill": skill_name}).mappings().all()
+            ), {"skill": skill_name})).mappings().all()
             existing_texts = {
                 f"{r['condition'].lower().strip()}|{r['action'].lower().strip()}"
                 for r in existing
@@ -202,14 +202,14 @@ def store_heuristics(skill_name: str, candidates: list[dict]):
                     # Duplicate — boost source_count instead
                     for ex in existing:
                         if f"{ex['condition'].lower().strip()}|{ex['action'].lower().strip()}" == key:
-                            uow.session.execute(text(
+                            await uow.session.execute(text(
                                 "UPDATE skill_heuristics SET source_count = source_count + 1, "
                                 "updated_at = NOW() WHERE id = :id"
                             ), {"id": ex["id"]})
                             break
                     continue
 
-                uow.session.execute(text("""
+                await uow.session.execute(text("""
                     INSERT INTO skill_heuristics (skill_name, condition, action)
                     VALUES (:skill, :condition, :action)
                 """), {"skill": skill_name, "condition": h["condition"], "action": h["action"]})
@@ -217,7 +217,7 @@ def store_heuristics(skill_name: str, candidates: list[dict]):
 
             # Update skill heuristic count
             if stored > 0:
-                uow.session.execute(text(
+                await uow.session.execute(text(
                     "UPDATE skills SET heuristic_count = ("
                     "  SELECT COUNT(*) FROM skill_heuristics "
                     "  WHERE skill_name = :skill AND active"
@@ -231,7 +231,7 @@ def store_heuristics(skill_name: str, candidates: list[dict]):
         logger.warning(f"Failed to store heuristics: {e}")
 
 
-def validate_heuristics(skill_name: str, success: bool):
+async def validate_heuristics(skill_name: str, success: bool):
     """Update confidence of active heuristics based on execution outcome.
 
     If the skill succeeded, all active heuristics for it get a small boost.
@@ -239,9 +239,9 @@ def validate_heuristics(skill_name: str, success: bool):
     and useless ones get pruned.
     """
     try:
-        with UnitOfWork() as uow:
+        async with UnitOfWork() as uow:
             if success:
-                uow.session.execute(text("""
+                await uow.session.execute(text("""
                     UPDATE skill_heuristics
                     SET confidence = LEAST(1.0, confidence + :boost),
                         validated_count = validated_count + 1,
@@ -250,7 +250,7 @@ def validate_heuristics(skill_name: str, success: bool):
                     WHERE skill_name = :skill AND active
                 """), {"boost": VALIDATE_BOOST, "skill": skill_name})
             else:
-                uow.session.execute(text("""
+                await uow.session.execute(text("""
                     UPDATE skill_heuristics
                     SET confidence = GREATEST(0.0, confidence - :penalty),
                         violated_count = violated_count + 1,
@@ -260,12 +260,12 @@ def validate_heuristics(skill_name: str, success: bool):
                 """), {"penalty": VIOLATE_PENALTY, "skill": skill_name})
 
             # Prune low-confidence heuristics
-            pruned = uow.session.execute(text("""
+            pruned = (await uow.session.execute(text("""
                 UPDATE skill_heuristics
                 SET active = FALSE, updated_at = NOW()
                 WHERE skill_name = :skill AND active AND confidence < :threshold
                 RETURNING id
-            """), {"skill": skill_name, "threshold": PRUNE_THRESHOLD}).all()
+            """), {"skill": skill_name, "threshold": PRUNE_THRESHOLD})).all()
             if pruned:
                 logger.info(f"Pruned {len(pruned)} low-confidence heuristics for '{skill_name}'")
 
@@ -273,35 +273,35 @@ def validate_heuristics(skill_name: str, success: bool):
         logger.warning(f"Failed to validate heuristics: {e}")
 
 
-def get_active_heuristics(skill_name: str, min_confidence: float = INJECT_THRESHOLD) -> list[dict]:
+async def get_active_heuristics(skill_name: str, min_confidence: float = INJECT_THRESHOLD) -> list[dict]:
     """Get high-confidence heuristics for injection into cognitive frames."""
     try:
-        with UnitOfWork() as uow:
-            rows = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            rows = (await uow.session.execute(text("""
                 SELECT condition, action, confidence, validated_count, source_count
                 FROM skill_heuristics
                 WHERE skill_name = :skill AND active AND confidence >= :min_conf
                   AND (graduated = FALSE OR graduated IS NULL)
                 ORDER BY confidence DESC
                 LIMIT 10
-            """), {"skill": skill_name, "min_conf": min_confidence}).mappings().all()
+            """), {"skill": skill_name, "min_conf": min_confidence})).mappings().all()
             return [dict(r) for r in rows]
     except Exception:
         return []
 
 
-def update_skill_fitness(skill_name: str):
+async def update_skill_fitness(skill_name: str):
     """Recompute and store fitness score for a skill.
 
     Fitness = weighted combination of success rate, efficiency, heuristic quality.
     """
     try:
-        with UnitOfWork() as uow:
-            skill = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            skill = (await uow.session.execute(text("""
                 SELECT use_count, success_count, failure_count, confidence,
                        heuristic_count
                 FROM skills WHERE name = :name AND NOT archived
-            """), {"name": skill_name}).mappings().first()
+            """), {"name": skill_name})).mappings().first()
             if not skill:
                 return
 
@@ -310,23 +310,23 @@ def update_skill_fitness(skill_name: str):
             success_rate = succ / max(use, 1)
 
             # Get average heuristic confidence
-            h_row = uow.session.execute(text("""
+            h_row = (await uow.session.execute(text("""
                 SELECT AVG(confidence) as avg_conf, COUNT(*) as total
                 FROM skill_heuristics
                 WHERE skill_name = :skill AND active
-            """), {"skill": skill_name}).mappings().first()
+            """), {"skill": skill_name})).mappings().first()
             heuristic_quality = float(h_row["avg_conf"] or 0.5)
             heuristic_coverage = min(1.0, (h_row["total"] or 0) / 10)  # 10 heuristics = full coverage
 
             # Get prediction accuracy for this skill
-            pred_row = uow.session.execute(text("""
+            pred_row = (await uow.session.execute(text("""
                 SELECT AVG(1.0 - CAST(payload->>'prediction_error' AS FLOAT)) as accuracy
                 FROM agent_run_artifacts
                 WHERE artifact_type = 'prediction'
                   AND payload->>'skill_name' = :skill
                   AND payload->>'resolved_at' IS NOT NULL
                   AND created_at > NOW() - INTERVAL '30 days'
-            """), {"skill": skill_name}).mappings().first()
+            """), {"skill": skill_name})).mappings().first()
             prediction_accuracy = float(pred_row["accuracy"] or 0.5) if pred_row else 0.5
 
             # Composite fitness
@@ -338,7 +338,7 @@ def update_skill_fitness(skill_name: str):
                 prediction_accuracy * 0.20
             )
 
-            uow.session.execute(text(
+            await uow.session.execute(text(
                 "UPDATE skills SET fitness_score = :fitness, updated_at = NOW() WHERE name = :name"
             ), {"fitness": round(fitness, 4), "name": skill_name})
             logger.debug(f"Skill '{skill_name}' fitness updated: {fitness:.3f}")
@@ -350,7 +350,7 @@ def update_skill_fitness(skill_name: str):
 # ── Graduation / Demotion ─────────────────────────────────────
 
 
-def graduate_heuristics(skill_name: str) -> list[dict]:
+async def graduate_heuristics(skill_name: str) -> list[dict]:
     """Promote high-confidence heuristics to mandatory graduated steps.
 
     Graduated heuristics are stored in skills.graduated_steps (JSONB).
@@ -363,8 +363,8 @@ def graduate_heuristics(skill_name: str) -> list[dict]:
 
     graduated = []
     try:
-        with UnitOfWork() as uow:
-            candidates = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            candidates = (await uow.session.execute(text("""
                 SELECT id, condition, action, confidence, validated_count, source_count, demoted_at
                 FROM skill_heuristics
                 WHERE skill_name = :skill
@@ -378,7 +378,7 @@ def graduate_heuristics(skill_name: str) -> list[dict]:
                 "grad_conf": GRADUATION_CONFIDENCE,
                 "min_val": GRADUATION_MIN_VALIDATIONS,
                 "min_src": GRADUATION_MIN_SOURCES,
-            }).mappings().all()
+            })).mappings().all()
 
             cooldown_cutoff = datetime.now(timezone.utc) - timedelta(days=GRADUATION_COOLDOWN_DAYS)
 
@@ -396,7 +396,7 @@ def graduate_heuristics(skill_name: str) -> list[dict]:
                 }
 
                 # Add to skills.graduated_steps
-                uow.session.execute(text("""
+                await uow.session.execute(text("""
                     UPDATE skills
                     SET graduated_steps = COALESCE(graduated_steps, '[]'::jsonb) || CAST(:step AS jsonb),
                         updated_at = NOW()
@@ -404,7 +404,7 @@ def graduate_heuristics(skill_name: str) -> list[dict]:
                 """), {"step": json.dumps([step]), "skill": skill_name})
 
                 # Mark heuristic as graduated
-                uow.session.execute(text("""
+                await uow.session.execute(text("""
                     UPDATE skill_heuristics
                     SET graduated = TRUE, graduated_at = NOW(), updated_at = NOW()
                     WHERE id = :id
@@ -420,25 +420,25 @@ def graduate_heuristics(skill_name: str) -> list[dict]:
     return graduated
 
 
-def demote_heuristics(skill_name: str) -> list[dict]:
+async def demote_heuristics(skill_name: str) -> list[dict]:
     """Demote graduated heuristics whose confidence has dropped below threshold.
 
     Removes from skills.graduated_steps and sets graduated=FALSE.
     """
     demoted = []
     try:
-        with UnitOfWork() as uow:
-            candidates = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            candidates = (await uow.session.execute(text("""
                 SELECT id, condition, action, confidence
                 FROM skill_heuristics
                 WHERE skill_name = :skill
                   AND graduated = TRUE
                   AND confidence < :threshold
-            """), {"skill": skill_name, "threshold": DEMOTION_CONFIDENCE}).mappings().all()
+            """), {"skill": skill_name, "threshold": DEMOTION_CONFIDENCE})).mappings().all()
 
             for h in candidates:
                 # Remove from graduated_steps
-                uow.session.execute(text("""
+                await uow.session.execute(text("""
                     UPDATE skills
                     SET graduated_steps = (
                         SELECT COALESCE(jsonb_agg(step), '[]'::jsonb)
@@ -450,7 +450,7 @@ def demote_heuristics(skill_name: str) -> list[dict]:
                 """), {"hid": h["id"], "skill": skill_name})
 
                 # Ungraduate the heuristic
-                uow.session.execute(text("""
+                await uow.session.execute(text("""
                     UPDATE skill_heuristics
                     SET graduated = FALSE, demoted_at = NOW(), updated_at = NOW()
                     WHERE id = :id
@@ -468,7 +468,7 @@ def demote_heuristics(skill_name: str) -> list[dict]:
 
 # ── Nightly Consolidation ────────────────────────────────────
 
-def nightly_heuristic_review():
+async def nightly_heuristic_review():
     """Nightly review: prune stale heuristics, recompute all skill fitness.
 
     Called by nightly pipeline to keep the heuristic system healthy.
@@ -480,37 +480,37 @@ def nightly_heuristic_review():
 
     try:
         # Prune stale low-confidence heuristics (not validated in 30 days)
-        with UnitOfWork() as uow:
-            pruned = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            pruned = (await uow.session.execute(text("""
                 UPDATE skill_heuristics
                 SET active = FALSE, updated_at = NOW()
                 WHERE active
                   AND confidence < 0.4
                   AND (last_validated IS NULL OR last_validated < NOW() - INTERVAL '30 days')
                 RETURNING id, skill_name
-            """)).all()
+            """))).all()
             stats["pruned"] = len(pruned)
             if pruned:
                 logger.info(f"Nightly: pruned {len(pruned)} stale heuristics")
 
         # Recompute fitness for all active skills
-        with UnitOfWork() as uow:
-            rows = uow.session.execute(
+        async with UnitOfWork() as uow:
+            rows = (await uow.session.execute(
                 text("SELECT name FROM skills WHERE NOT archived")
-            ).mappings().all()
+            )).mappings().all()
             skills = [r["name"] for r in rows]
 
         for name in skills:
             try:
-                update_skill_fitness(name)
+                await update_skill_fitness(name)
                 stats["skills_updated"] += 1
             except Exception as e:
                 logger.debug(f"Fitness update failed for '{name}': {e}")
 
         # Check for graduation/demotion opportunities across all active skills
         for name in skills:
-            graduate_heuristics(name)
-            demote_heuristics(name)
+            await graduate_heuristics(name)
+            await demote_heuristics(name)
 
         logger.info(
             f"Nightly heuristic review: pruned={stats['pruned']}, "
@@ -522,15 +522,15 @@ def nightly_heuristic_review():
     return stats
 
 
-def summarize_skill_heuristics(skill_name: str) -> dict:
+async def summarize_skill_heuristics(skill_name: str) -> dict:
     """Summarize persisted heuristic state for a skill.
 
     This is read-only and feeds higher-level learning surfaces without
     changing the existing heuristic lifecycle.
     """
     try:
-        with UnitOfWork() as uow:
-            row = uow.session.execute(text("""
+        async with UnitOfWork() as uow:
+            row = (await uow.session.execute(text("""
                 SELECT
                     COUNT(*) FILTER (WHERE active) AS active_count,
                     COUNT(*) FILTER (WHERE graduated) AS graduated_count,
@@ -542,7 +542,7 @@ def summarize_skill_heuristics(skill_name: str) -> dict:
                     COALESCE(SUM(violated_count), 0) AS violated_count_total
                 FROM skill_heuristics
                 WHERE skill_name = :skill
-            """), {"skill": skill_name}).mappings().first()
+            """), {"skill": skill_name})).mappings().first()
             return dict(row) if row else {
                 "active_count": 0,
                 "graduated_count": 0,

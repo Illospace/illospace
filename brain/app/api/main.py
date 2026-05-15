@@ -119,6 +119,24 @@ def _log_publish_failure(future):
         logger.warning("product_event_publish_failed", error=str(exc))
 
 
+def _schedule_on_main_loop(coro, done_callback=None) -> bool:
+    if _main_loop is None:
+        coro.close()
+        return False
+    if not _main_loop.is_running():
+        coro.close()
+        logger.warning("main_loop_not_running_for_scheduled_coroutine")
+        return False
+
+    def _create_task() -> None:
+        task = _main_loop.create_task(coro)
+        if done_callback is not None:
+            task.add_done_callback(done_callback)
+
+    _main_loop.call_soon_threadsafe(_create_task)
+    return True
+
+
 async def _publish_product_event(event_type, data):
     """Resolve product scope and broadcast a live event without sync DB access."""
     from brain.app.api.routers.ws import ws_manager
@@ -156,30 +174,17 @@ def _schedule_product_event_publish(event_type, data):
         logger.warning("product_event_publish_dropped_non_mapping", event_type=event_type)
         return
 
-    publish_coro = _publish_product_event(event_type, data)
     try:
-        if _main_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(publish_coro, _main_loop)
-            future.add_done_callback(_log_publish_failure)
-            publish_coro = None
-        else:
-            _main_loop.run_until_complete(publish_coro)
-            publish_coro = None
+        _schedule_on_main_loop(_publish_product_event(event_type, data), _log_publish_failure)
     except Exception as e:
-        if publish_coro is not None:
-            publish_coro.close()
         logger.warning("product_event_publish_failed", event_type=event_type, error=str(e))
 
     # Throttled ops snapshot: at most one push per _OPS_THROTTLE_SEC
     if event_type in _OPS_TRIGGER_EVENTS and not _ops_pending:
         _ops_pending = True
-        snapshot_coro = _flush_ops_snapshot()
         try:
-            asyncio.run_coroutine_threadsafe(snapshot_coro, _main_loop)
-            snapshot_coro = None
+            _schedule_on_main_loop(_flush_ops_snapshot())
         except Exception as e:
-            if snapshot_coro is not None:
-                snapshot_coro.close()
             _ops_pending = False
             logger.warning("product_event_ops_snapshot_failed", error=str(e))
 
@@ -195,7 +200,7 @@ async def lifespan(app):
     set_publisher(_schedule_product_event_publish)
     await _ensure_starting_skill_bundle()
     if _should_start_run_event_consumer():
-        _run_event_consumer_task = asyncio.create_task(_run_event_consumer_loop())
+        _run_event_consumer_task = _main_loop.create_task(_run_event_consumer_loop())
         logger.info("run_event_consumer_started")
     else:
         logger.info("run_event_consumer_skipped", mode="disabled")

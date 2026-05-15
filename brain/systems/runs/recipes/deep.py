@@ -15,7 +15,7 @@ from brain.systems.runs.domain import AgentRun, AgentRunArtifact, ArtifactType, 
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
 from brain.systems.runs.events import run_event
 from brain.systems.runs.graph import DeepPlan, RunEdge, RunNode
-from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent
+from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.phase_barrier import (
     apply_phase_barrier_decision,
@@ -78,21 +78,21 @@ def _scout_from_payload(payload: dict[str, Any] | None) -> ScoutHandoff:
 class DeepRecipe(BaseRunRecipe):
     name = "deep"
 
-    def execute(self, runtime: RunRuntime) -> RunRecipeResult:
-        runtime.activity("Starting Deep AgentRun graph")
+    async def execute(self, runtime: RunRuntime) -> RunRecipeResult:
+        await runtime.activity("Starting Deep AgentRun graph")
         try:
-            plan = self._plan(runtime)
-            node_results = self._execute_plan(runtime, plan)
+            plan = await self._plan(runtime)
+            node_results = await self._execute_plan(runtime, plan)
             verify_payload = node_results.get("verify")
             verification = self._verification_result(verify_payload)
             verify_status = str((verify_payload or {}).get("status") or "")
             if verification is None and verify_status != RunStatus.COMPLETED.value:
                 output = f"Deep verification failed: verify node ended with status {verify_status or 'missing'}"
-                runtime.text_delta(output)
+                await runtime.text_delta(output)
                 return RunRecipeResult(output=output, status=RunStatus.FAILED)
             if verification is not None and not verification.passed:
                 output = f"Deep verification failed: {verification.warning or 'gate did not pass'}"
-                runtime.text_delta(output)
+                await runtime.text_delta(output)
                 return RunRecipeResult(output=output, status=RunStatus.FAILED)
             output = str((node_results.get("synthesize") or {}).get("output") or "").strip()
             if not output:
@@ -100,15 +100,15 @@ class DeepRecipe(BaseRunRecipe):
         except Exception as exc:
             logger.exception("deep_recipe_failed", extra={"run_id": runtime.run.id})
             return RunRecipeResult(output=f"Deep run failed: {exc}", status=RunStatus.FAILED)
-        runtime.text_delta(output)
+        await runtime.text_delta(output)
         return RunRecipeResult(output=output, status=RunStatus.COMPLETED)
 
-    def _plan(self, runtime: RunRuntime) -> DeepPlan:
-        payload = runtime.run_step("plan", lambda: self._plan_uncached(runtime))
+    async def _plan(self, runtime: RunRuntime) -> DeepPlan:
+        payload = await runtime.run_step("plan", lambda: self._plan_uncached(runtime))
         return DeepPlan.from_payload(payload)
 
-    def _plan_uncached(self, runtime: RunRuntime) -> dict[str, Any]:
-        runtime.activity("Planning Deep run graph", step="plan")
+    async def _plan_uncached(self, runtime: RunRuntime) -> dict[str, Any]:
+        await runtime.activity("Planning Deep run graph", step="plan")
         assignments = self._configured_assignments(runtime.request.metadata) or self._default_assignments(runtime.request.message)
         nodes: list[RunNode] = [
             RunNode(id="scout", role="scout", objective="Scout request", recipe="scout", kind="scout")
@@ -157,7 +157,7 @@ class DeepRecipe(BaseRunRecipe):
             metadata={"request": runtime.request.message},
         )
         payload = plan.to_payload()
-        runtime.store.append_artifact(
+        await runtime.store.append_artifact(
             AgentRunArtifact(
                 run_id=runtime.run.id,
                 root_run_id=_root_run_id(runtime),
@@ -168,10 +168,10 @@ class DeepRecipe(BaseRunRecipe):
         )
         for wave_index, wave in enumerate(plan.waves, start=1):
             for node in wave:
-                self._record_node_event(runtime, "planned", node, status="planned", wave=wave_index)
+                await self._record_node_event(runtime, "planned", node, status="planned", wave=wave_index)
                 if _node_kind(node) == "worker":
                     assignment = _assignment_for_node(node)
-                    runtime.store.append_event(
+                    await runtime.store.append_event(
                         run_event(
                             runtime.run.id,
                             "run.worker_planned",
@@ -186,7 +186,7 @@ class DeepRecipe(BaseRunRecipe):
                     )
         return payload
 
-    def _execute_plan(self, runtime: RunRuntime, plan: DeepPlan) -> dict[str, dict[str, Any]]:
+    async def _execute_plan(self, runtime: RunRuntime, plan: DeepPlan) -> dict[str, dict[str, Any]]:
         node_results: dict[str, dict[str, Any]] = {}
         plan_state = plan
         wave_index = 0
@@ -197,7 +197,7 @@ class DeepRecipe(BaseRunRecipe):
                 if not blocked:
                     break
                 for node in blocked:
-                    payload = runtime.run_step(
+                    payload = await runtime.run_step(
                         node.id,
                         lambda node=node: self._skip_node_uncached(
                             runtime,
@@ -211,7 +211,7 @@ class DeepRecipe(BaseRunRecipe):
 
             wave_index += 1
             completed_nodes: list[RunNode] = []
-            runtime.store.append_event(
+            await runtime.store.append_event(
                 run_event(
                     runtime.run.id,
                     "run.graph_wave_started",
@@ -222,7 +222,7 @@ class DeepRecipe(BaseRunRecipe):
             )
             for planned_node in ready:
                 node = plan_state.require_node(planned_node.id)
-                payload = runtime.run_step(
+                payload = await runtime.run_step(
                     node.id,
                     lambda node=node: self._execute_node_uncached(runtime, node, node_results),
                 )
@@ -235,13 +235,13 @@ class DeepRecipe(BaseRunRecipe):
                     run_id = None
                 plan_state = plan_state.with_node_status(node.id, status, run_id=run_id)
                 completed_node = plan_state.require_node(node.id)
-                self._record_phase_result(runtime, completed_node, dict(payload or {}))
+                await self._record_phase_result(runtime, completed_node, dict(payload or {}))
                 if completed_node.is_terminal:
                     completed_nodes.append(completed_node)
             for completed_node in completed_nodes:
                 if _node_kind(completed_node) != "synthesis":
-                    plan_state = self._review_phase_barrier(runtime, plan_state, completed_node, node_results)
-            runtime.store.append_event(
+                    plan_state = await self._review_phase_barrier(runtime, plan_state, completed_node, node_results)
+            await runtime.store.append_event(
                 run_event(
                     runtime.run.id,
                     "run.graph_wave_completed",
@@ -256,21 +256,21 @@ class DeepRecipe(BaseRunRecipe):
             )
         return node_results
 
-    def _record_phase_result(self, runtime: RunRuntime, node: RunNode, payload: dict[str, Any]) -> None:
-        runtime.run_step(
+    async def _record_phase_result(self, runtime: RunRuntime, node: RunNode, payload: dict[str, Any]) -> None:
+        await runtime.run_step(
             f"phase_result:{node.id}",
             lambda: self._record_phase_result_uncached(runtime, node, payload),
         )
 
-    def _record_phase_result_uncached(self, runtime: RunRuntime, node: RunNode, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _record_phase_result_uncached(self, runtime: RunRuntime, node: RunNode, payload: dict[str, Any]) -> dict[str, Any]:
         artifact = phase_result_artifact(
             run_id=runtime.run.id,
             root_run_id=_root_run_id(runtime),
             node=node,
             payload=payload,
         )
-        runtime.store.append_artifact(artifact)
-        runtime.store.append_event(
+        await runtime.store.append_artifact(artifact)
+        await runtime.store.append_event(
             run_event(
                 runtime.run.id,
                 "run.phase_result_recorded",
@@ -286,14 +286,14 @@ class DeepRecipe(BaseRunRecipe):
         )
         return {"node_id": node.id, "status": payload.get("status"), "artifact_type": str(getattr(artifact.artifact_type, "value", artifact.artifact_type))}
 
-    def _review_phase_barrier(
+    async def _review_phase_barrier(
         self,
         runtime: RunRuntime,
         plan: DeepPlan,
         node: RunNode,
         node_results: dict[str, dict[str, Any]],
     ) -> DeepPlan:
-        payload = runtime.run_step(
+        payload = await runtime.run_step(
             f"phase_barrier:{node.id}",
             lambda: self._review_phase_barrier_uncached(runtime, plan, node, node_results),
         )
@@ -301,17 +301,17 @@ class DeepRecipe(BaseRunRecipe):
             return DeepPlan.from_payload(payload.get("plan"))
         return plan
 
-    def _review_phase_barrier_uncached(
+    async def _review_phase_barrier_uncached(
         self,
         runtime: RunRuntime,
         plan: DeepPlan,
         node: RunNode,
         node_results: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
-        decision = review_completed_phase(runtime, plan, node, node_results)
+        decision = await review_completed_phase(runtime, plan, node, node_results)
         revised_plan, applied = apply_phase_barrier_decision(plan, decision)
         if applied:
-            runtime.store.append_event(
+            await runtime.store.append_event(
                 run_event(
                     runtime.run.id,
                     "run.plan_revised",
@@ -330,7 +330,7 @@ class DeepRecipe(BaseRunRecipe):
                     producer="deep",
                 )
             )
-            runtime.store.append_artifact(
+            await runtime.store.append_artifact(
                 plan_revision_artifact(
                     run_id=runtime.run.id,
                     root_run_id=_root_run_id(runtime),
@@ -347,35 +347,35 @@ class DeepRecipe(BaseRunRecipe):
             "plan": revised_plan.to_payload(),
         }
 
-    def _execute_node_uncached(
+    async def _execute_node_uncached(
         self,
         runtime: RunRuntime,
         node: RunNode,
         node_results: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         node_kind = _node_kind(node)
-        runtime.activity(f"Running Deep node: {node.id}", step=node.id, node_kind=node_kind)
-        self._record_node_event(runtime, "started", node, status=RunStatus.RUNNING.value)
+        await runtime.activity(f"Running Deep node: {node.id}", step=node.id, node_kind=node_kind)
+        await self._record_node_event(runtime, "started", node, status=RunStatus.RUNNING.value)
         try:
             if node_kind == "scout":
-                payload = self._run_scout_node(runtime, node)
+                payload = await self._run_scout_node(runtime, node)
             elif node_kind == "worker":
-                payload = self._run_worker_node(runtime, node, node_results)
+                payload = await self._run_worker_node(runtime, node, node_results)
             elif node_kind == "verification":
-                payload = self._run_verification_node(runtime, node, node_results)
+                payload = await self._run_verification_node(runtime, node, node_results)
             elif node_kind == "synthesis":
-                payload = self._run_synthesis_node(runtime, node, node_results)
+                payload = await self._run_synthesis_node(runtime, node, node_results)
             else:
                 raise ValueError(f"Unsupported Deep node kind: {node_kind}")
         except Exception as exc:
-            self._record_node_event(runtime, "failed", node, status=RunStatus.FAILED.value, error=str(exc))
+            await self._record_node_event(runtime, "failed", node, status=RunStatus.FAILED.value, error=str(exc))
             raise
         status = str(payload.get("status") or RunStatus.COMPLETED.value)
         event_status = "completed" if status == RunStatus.COMPLETED.value else "failed"
-        self._record_node_event(runtime, event_status, node, status=status, result=payload)
+        await self._record_node_event(runtime, event_status, node, status=status, result=payload)
         return payload
 
-    def _skip_node_uncached(self, runtime: RunRuntime, node: RunNode, blocked_by: Iterable[str]) -> dict[str, Any]:
+    async def _skip_node_uncached(self, runtime: RunRuntime, node: RunNode, blocked_by: Iterable[str]) -> dict[str, Any]:
         blocked = tuple(str(item) for item in blocked_by)
         payload = {
             "node_id": node.id,
@@ -383,11 +383,11 @@ class DeepRecipe(BaseRunRecipe):
             "status": "skipped",
             "blocked_by": list(blocked),
         }
-        self._record_node_event(runtime, "skipped", node, status="skipped", blocked_by=list(blocked))
+        await self._record_node_event(runtime, "skipped", node, status="skipped", blocked_by=list(blocked))
         return payload
 
-    def _run_scout_node(self, runtime: RunRuntime, node: RunNode) -> dict[str, Any]:
-        child = runtime.run_child(
+    async def _run_scout_node(self, runtime: RunRuntime, node: RunNode) -> dict[str, Any]:
+        child = await runtime.run_child(
             recipe=RunRecipe.SCOUT,
             message=runtime.request.message,
             step_key=f"node:{node.id}",
@@ -402,7 +402,7 @@ class DeepRecipe(BaseRunRecipe):
             "child_run_id": child.id,
             **scout.to_payload(),
         }
-        runtime.store.append_artifact(
+        await runtime.store.append_artifact(
             AgentRunArtifact(
                 run_id=runtime.run.id,
                 root_run_id=_root_run_id(runtime),
@@ -413,7 +413,7 @@ class DeepRecipe(BaseRunRecipe):
         )
         return payload
 
-    def _run_worker_node(
+    async def _run_worker_node(
         self,
         runtime: RunRuntime,
         node: RunNode,
@@ -428,14 +428,14 @@ class DeepRecipe(BaseRunRecipe):
             "worker_assignment": assignment.to_payload(),
             "evidence_requirements": [requirement.to_payload() for requirement in assignment.evidence_requirements],
         }
-        child = runtime.create_child_run(
+        child = await runtime.create_child_run(
             recipe=RunRecipe.WORKER,
             message=self._worker_message(runtime, scout, assignment),
             step_key=f"node:{node.id}",
             profile=RunProfile.DEEP,
             metadata=metadata,
         )
-        runtime.store.append_event(
+        await runtime.store.append_event(
             run_event(
                 runtime.run.id,
                 "run.worker_started",
@@ -449,12 +449,12 @@ class DeepRecipe(BaseRunRecipe):
                 producer="deep",
             )
         )
-        completed = self._run_existing_child(runtime, child)
-        artifacts = _child_artifacts(runtime.store, child.id)
+        completed = await self._run_existing_child(runtime, child)
+        artifacts = await _child_artifacts(runtime.store, child.id)
         output = _child_output(artifacts)
         status = _status_value(getattr(completed, "status", RunStatus.FAILED))
         event_type = "run.worker_completed" if status == RunStatus.COMPLETED.value else "run.worker_failed"
-        runtime.store.append_event(
+        await runtime.store.append_event(
             run_event(
                 runtime.run.id,
                 event_type,
@@ -479,7 +479,7 @@ class DeepRecipe(BaseRunRecipe):
             node_id=node.id,
         )
 
-    def _run_verification_node(
+    async def _run_verification_node(
         self,
         runtime: RunRuntime,
         node: RunNode,
@@ -499,7 +499,7 @@ class DeepRecipe(BaseRunRecipe):
             "warning": result.warning,
             "details": result.details or {},
         }
-        runtime.store.append_artifact(
+        await runtime.store.append_artifact(
             verification_evidence(
                 runtime.run.id,
                 title="Deep verification report",
@@ -507,7 +507,7 @@ class DeepRecipe(BaseRunRecipe):
                 root_run_id=_root_run_id(runtime),
             )
         )
-        runtime.store.append_event(
+        await runtime.store.append_event(
             run_event(
                 runtime.run.id,
                 "run.verification_passed" if result.passed else "run.verification_failed",
@@ -518,21 +518,21 @@ class DeepRecipe(BaseRunRecipe):
         )
         return payload
 
-    def _run_synthesis_node(
+    async def _run_synthesis_node(
         self,
         runtime: RunRuntime,
         node: RunNode,
         node_results: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
-        output = self._synthesize_with_coordinator(runtime, node_results)
+        output = await self._synthesize_with_coordinator(runtime, node_results)
         return {"node_id": node.id, "node_kind": _node_kind(node), "status": RunStatus.COMPLETED.value, "output": output}
 
-    def _synthesize_with_coordinator(self, runtime: RunRuntime, node_results: dict[str, dict[str, Any]]) -> str:
+    async def _synthesize_with_coordinator(self, runtime: RunRuntime, node_results: dict[str, dict[str, Any]]) -> str:
         fallback = self._synthesize_output(node_results)
         model, thinking = _coordinator_model_and_thinking(runtime)
         system_prompt = soul_prompt_section() + "\n\n" + DEEP_COORDINATOR_SYNTHESIS_INSTRUCTIONS
         payload = _coordinator_synthesis_payload(runtime, node_results)
-        runtime.store.append_event(
+        await runtime.store.append_event(
             run_event(
                 runtime.run.id,
                 "run.coordinator_synthesis_started",
@@ -567,14 +567,14 @@ class DeepRecipe(BaseRunRecipe):
                     "provider_operation_type": "coordinator",
                 },
             )
-            result = invoke_direct_agent(spec)
+            result = await invoke_direct_agent_async(spec)
             success = bool(getattr(result, "success", False))
             output = str(getattr(result, "output", "") or "").strip()
             used_fallback = False
             if not success or not output:
                 output = fallback
                 used_fallback = True
-            runtime.store.append_event(
+            await runtime.store.append_event(
                 run_event(
                     runtime.run.id,
                     "run.coordinator_synthesis_completed",
@@ -589,7 +589,7 @@ class DeepRecipe(BaseRunRecipe):
             return output
         except Exception as exc:
             logger.warning("deep_coordinator_synthesis_failed run_id=%s error=%s", runtime.run.id, exc)
-            runtime.store.append_event(
+            await runtime.store.append_event(
                 run_event(
                     runtime.run.id,
                     "run.coordinator_synthesis_failed",
@@ -623,10 +623,10 @@ class DeepRecipe(BaseRunRecipe):
             details=dict(payload.get("details") or {}),
         )
 
-    def _run_existing_child(self, runtime: RunRuntime, child: AgentRun) -> AgentRun:
+    async def _run_existing_child(self, runtime: RunRuntime, child: AgentRun) -> AgentRun:
         if runtime.engine is None:
             raise RuntimeError("RunRuntime cannot execute child runs without an engine")
-        return runtime.engine.run_existing(child.id)
+        return await runtime.engine.run_existing(child.id)
 
     def _configured_assignments(self, metadata: dict[str, Any]) -> list[WorkerAssignment] | None:
         configured = metadata.get("worker_assignments") or metadata.get("deep_workers")
@@ -720,7 +720,7 @@ class DeepRecipe(BaseRunRecipe):
             f"Required evidence: {requirements or 'worker_result'}"
         )
 
-    def _record_node_event(
+    async def _record_node_event(
         self,
         runtime: RunRuntime,
         event_status: str,
@@ -729,7 +729,7 @@ class DeepRecipe(BaseRunRecipe):
         status: str,
         **payload: Any,
     ) -> None:
-        runtime.store.append_event(
+        await runtime.store.append_event(
             run_event(
                 runtime.run.id,
                 f"run.node_{event_status}",
@@ -755,10 +755,13 @@ def _worker_event_fields(assignment: WorkerAssignment) -> dict[str, Any]:
     }
 
 
-def _child_artifacts(store: Any, child_run_id: int) -> list[Any]:
+async def _child_artifacts(store: Any, child_run_id: int) -> list[Any]:
     if not hasattr(store, "list_artifacts"):
         return []
-    return list(store.list_artifacts(child_run_id))
+    artifacts = store.list_artifacts(child_run_id)
+    if hasattr(artifacts, "__await__"):
+        artifacts = await artifacts
+    return list(artifacts)
 
 
 def _child_output(artifacts: list[Any]) -> str:

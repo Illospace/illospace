@@ -3,7 +3,7 @@
 import json
 import os
 import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
@@ -19,18 +19,19 @@ VALID_PROCEDURE = (
 )
 
 
+@pytest.mark.asyncio
 class TestCreateSkillGateEnforcement:
     """Test that create_skill enforces the live gate."""
 
-    def test_invalid_name_rejected(self):
-        result = _handle_create_skill(
+    async def test_invalid_name_rejected(self):
+        result = await _handle_create_skill(
             name="", description="Good description", procedure=VALID_PROCEDURE,
         )
         assert result["created"] is False
         assert "violations" in result
 
-    def test_vague_procedure_rejected(self):
-        result = _handle_create_skill(
+    async def test_vague_procedure_rejected(self):
+        result = await _handle_create_skill(
             name="my-skill",
             description="Good description",
             procedure="When doing this task, just try hard and do your best. " * 3,
@@ -38,16 +39,16 @@ class TestCreateSkillGateEnforcement:
         assert result["created"] is False
         assert any("Vague" in v for v in result["violations"])
 
-    def test_short_procedure_rejected(self):
-        result = _handle_create_skill(
+    async def test_short_procedure_rejected(self):
+        result = await _handle_create_skill(
             name="my-skill", description="Good description", procedure="do stuff",
         )
         assert result["created"] is False
 
-    def test_user_requested_strict_validation(self):
+    async def test_user_requested_strict_validation(self):
         """User-requested skills require structured procedures."""
         unstructured = "This is a long procedure without any structure just a wall of text that goes on and on without numbered steps or bullets."
-        result = _handle_create_skill(
+        result = await _handle_create_skill(
             name="my-skill", description="Good description",
             procedure=unstructured, user_requested=True,
         )
@@ -58,22 +59,25 @@ class TestCreateSkillGateEnforcement:
 def _make_uow(first_result=None):
     """Create a mock UnitOfWork with a mock session."""
     uow = MagicMock()
-    uow.__enter__ = MagicMock(return_value=uow)
-    uow.__exit__ = MagicMock(return_value=False)
-    uow.session.execute.return_value.mappings.return_value.first.return_value = first_result
+    uow.__aenter__ = AsyncMock(return_value=uow)
+    uow.__aexit__ = AsyncMock(return_value=False)
+    result = MagicMock()
+    result.mappings.return_value.first.return_value = first_result
+    uow.session.execute = AsyncMock(return_value=result)
     return uow
 
 
+@pytest.mark.asyncio
 class TestCreateSkillDBInsert:
     """Test the DB insertion path (mocked)."""
 
     @patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]")
     @patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 384)
     @patch("brain.platform.db.repositories.unit_of_work.UnitOfWork")
-    def test_user_requested_creates_non_provisional(self, MockUoW, mock_embed, mock_vec):
+    async def test_user_requested_creates_non_provisional(self, MockUoW, mock_embed, mock_vec):
         MockUoW.return_value = _make_uow({"id": 42})
 
-        result = _handle_create_skill(
+        result = await _handle_create_skill(
             name="write-issues",
             description="Write well-structured GitHub issues with context and acceptance criteria",
             procedure=VALID_PROCEDURE,
@@ -90,10 +94,10 @@ class TestCreateSkillDBInsert:
     @patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]")
     @patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 384)
     @patch("brain.platform.db.repositories.unit_of_work.UnitOfWork")
-    def test_agent_initiated_creates_provisional(self, MockUoW, mock_embed, mock_vec):
+    async def test_agent_initiated_creates_provisional(self, MockUoW, mock_embed, mock_vec):
         MockUoW.return_value = _make_uow({"id": 43})
 
-        result = _handle_create_skill(
+        result = await _handle_create_skill(
             name="write-issues",
             description="Write well-structured GitHub issues with context and acceptance criteria",
             procedure=VALID_PROCEDURE,
@@ -109,11 +113,11 @@ class TestCreateSkillDBInsert:
     @patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]")
     @patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 384)
     @patch("brain.platform.db.repositories.unit_of_work.UnitOfWork")
-    def test_duplicate_skill_rejected(self, MockUoW, mock_embed, mock_vec):
+    async def test_duplicate_skill_rejected(self, MockUoW, mock_embed, mock_vec):
         # ON CONFLICT DO NOTHING returns None for first()
         MockUoW.return_value = _make_uow(None)
 
-        result = _handle_create_skill(
+        result = await _handle_create_skill(
             name="write-issues",
             description="Write well-structured GitHub issues",
             procedure=VALID_PROCEDURE,
@@ -125,11 +129,11 @@ class TestCreateSkillDBInsert:
     @patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]")
     @patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 384)
     @patch("brain.platform.db.repositories.unit_of_work.UnitOfWork")
-    def test_model_and_thinking_tier_passed(self, MockUoW, mock_embed, mock_vec):
+    async def test_model_and_thinking_tier_passed(self, MockUoW, mock_embed, mock_vec):
         uow = _make_uow({"id": 44})
         MockUoW.return_value = uow
 
-        result = _handle_create_skill(
+        result = await _handle_create_skill(
             name="write-issues",
             description="Write well-structured GitHub issues with context",
             procedure=VALID_PROCEDURE,
@@ -149,8 +153,8 @@ class TestCreateSkillDBInsert:
         assert params["source_kind"] == "agent_draft"
         assert params["trust_level"] == "agent_draft"
 
-    def test_invalid_reasoning_effort_tier_rejected(self):
-        result = _handle_create_skill(
+    async def test_invalid_reasoning_effort_tier_rejected(self):
+        result = await _handle_create_skill(
             name="write-issues",
             description="Write well-structured GitHub issues with context",
             procedure=VALID_PROCEDURE,
@@ -163,11 +167,11 @@ class TestCreateSkillDBInsert:
     @patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]")
     @patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 384)
     @patch("brain.platform.db.repositories.unit_of_work.UnitOfWork")
-    def test_db_error_returns_error(self, MockUoW, mock_embed, mock_vec):
+    async def test_db_error_returns_error(self, MockUoW, mock_embed, mock_vec):
         """If DB fails, returns error dict instead of crashing."""
         MockUoW.side_effect = Exception("Connection refused")
 
-        result = _handle_create_skill(
+        result = await _handle_create_skill(
             name="write-issues",
             description="Write well-structured GitHub issues with context",
             procedure=VALID_PROCEDURE,
@@ -177,11 +181,12 @@ class TestCreateSkillDBInsert:
         assert "error" in result
 
 
+@pytest.mark.asyncio
 class TestManageSkillUmbrella:
     """Test the public manage_skill umbrella surface."""
 
-    def test_help_lists_skill_operations(self):
-        result = json.loads(_handle_manage_skill(action="help"))
+    async def test_help_lists_skill_operations(self):
+        result = json.loads(await _handle_manage_skill(action="help"))
 
         assert result["tool"] == "manage_skill"
         assert "create" in result["operations"]
@@ -190,10 +195,10 @@ class TestManageSkillUmbrella:
     @patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]")
     @patch("brain.systems.memory.embeddings.embed_document", return_value=[0.1] * 384)
     @patch("brain.platform.db.repositories.unit_of_work.UnitOfWork")
-    def test_create_action_delegates_to_skill_creator(self, MockUoW, mock_embed, mock_vec):
+    async def test_create_action_delegates_to_skill_creator(self, MockUoW, mock_embed, mock_vec):
         MockUoW.return_value = _make_uow({"id": 45})
 
-        result = json.loads(_handle_manage_skill(
+        result = json.loads(await _handle_manage_skill(
             action="create",
             name="write-issues",
             description="Write well-structured GitHub issues with context and acceptance criteria",

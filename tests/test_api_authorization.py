@@ -66,6 +66,14 @@ def test_owner_and_admin_roles_keep_management_permissions():
     assert has_permission(member, PERMISSION_MEMORY_MANAGE) is False
 
 
+def test_org_members_can_manage_team_skills():
+    member = {"role": "member", "org_id": "org-1", "permissions": []}
+    outsider = {"role": "member", "permissions": []}
+
+    assert can_manage_skills(member) is True
+    assert can_manage_skills(outsider) is False
+
+
 def test_require_org_context_returns_org_id_or_raises():
     assert require_org_context({"org_id": "org-1"}) == "org-1"
 

@@ -9,6 +9,7 @@ Usage:
     python3 -m brain.jobs.pipelines.nightly_dream [--date 2026-03-04] [--dry-run]
 """
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -18,6 +19,7 @@ from sqlalchemy import text
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 import brain.kernel.config as config
+from brain.platform.async_io import ensure_dir, write_text as write_text_async
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
 PROJECT_ROOT = str(config.BRAIN_DIR)
@@ -25,12 +27,12 @@ WORKSPACE = str(config.WORKSPACE_ROOT)
 LOG_DIR = str(config.BRAIN_LOG_DIR)
 
 
-def gather_today_memories(target_date: date, limit: int = 10, org_id: str | None = None) -> list[dict]:
+async def gather_today_memories(target_date: date, limit: int = 10, org_id: str | None = None) -> list[dict]:
     """Get today's highest-salience memories."""
     _org_filter = "AND org_id = :org_id" if org_id else ""
     _org_params = {"org_id": org_id} if org_id else {}
-    with UnitOfWork() as uow:
-        result = uow.session.execute(text(f"""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text(f"""
             SELECT id, content, memory_type, salience, tags
             FROM memories
             WHERE created_at::date = :target_date AND NOT archived {_org_filter}
@@ -40,12 +42,12 @@ def gather_today_memories(target_date: date, limit: int = 10, org_id: str | None
         return [dict(r) for r in result.mappings().all()]
 
 
-def gather_random_old_memories(target_date: date, limit: int = 10, org_id: str | None = None) -> list[dict]:
+async def gather_random_old_memories(target_date: date, limit: int = 10, org_id: str | None = None) -> list[dict]:
     """Get random old memories from diverse types."""
     _org_filter = "AND org_id = :org_id" if org_id else ""
     _org_params = {"org_id": org_id} if org_id else {}
-    with UnitOfWork() as uow:
-        result = uow.session.execute(text(f"""
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(text(f"""
             SELECT id, content, memory_type, salience, tags,
                    created_at::date as created_date
             FROM memories
@@ -106,7 +108,7 @@ def call_llm(prompt: str) -> dict | None:
     return _call_llm(prompt, thinking="low")
 
 
-def store_dream_memories(dream_output: dict, target_date: date, dry_run: bool) -> int:
+async def store_dream_memories(dream_output: dict, target_date: date, dry_run: bool) -> int:
     """Store dream connections as memories with type='dream'."""
     stored = 0
     connections = dream_output.get("connections", [])
@@ -127,7 +129,7 @@ def store_dream_memories(dream_output: dict, target_date: date, dry_run: bool) -
 
     for item in items:
         try:
-            result = add_memory(
+            result = await add_memory(
                 content=item,
                 memory_type="dream",
                 salience=3.0,
@@ -146,12 +148,7 @@ def store_dream_memories(dream_output: dict, target_date: date, dry_run: bool) -
     return stored
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Nightly dream — creative recombination")
-    parser.add_argument("--date", help="Target date (YYYY-MM-DD)")
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
-
+async def _async_main(args) -> None:
     target_date = date.fromisoformat(args.date) if args.date else date.today()
     dry_run = args.dry_run
 
@@ -159,8 +156,8 @@ def main():
     print(f"NIGHTLY DREAM — {target_date} {'[DRY RUN]' if dry_run else ''}")
     print(f"{'='*60}")
 
-    today_mems = gather_today_memories(target_date)
-    old_mems = gather_random_old_memories(target_date)
+    today_mems = await gather_today_memories(target_date)
+    old_mems = await gather_random_old_memories(target_date)
 
     if not today_mems:
         print("No memories from today to dream about. Skipping.")
@@ -179,20 +176,29 @@ def main():
     if not dream_output:
         print("❌ LLM call failed — no dream output")
         # Save prompt for debugging
-        os.makedirs(LOG_DIR, exist_ok=True)
+        await ensure_dir(LOG_DIR)
         prompt_path = os.path.join(LOG_DIR, f"dream-prompt-{target_date}.md")
-        with open(prompt_path, "w") as f:
-            f.write(prompt)
+        await write_text_async(prompt_path, prompt)
         print(f"Prompt saved to {prompt_path}")
         return
 
     # Save raw output
-    os.makedirs(LOG_DIR, exist_ok=True)
-    with open(os.path.join(LOG_DIR, f"dream-output-{target_date}.json"), "w") as f:
-        json.dump(dream_output, f, indent=2, default=str)
+    await ensure_dir(LOG_DIR)
+    await write_text_async(
+        os.path.join(LOG_DIR, f"dream-output-{target_date}.json"),
+        json.dumps(dream_output, indent=2, default=str),
+    )
 
-    stored = store_dream_memories(dream_output, target_date, dry_run)
+    stored = await store_dream_memories(dream_output, target_date, dry_run)
     print(f"\n💭 Dream complete. Stored {stored} dream memories.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Nightly dream — creative recombination")
+    parser.add_argument("--date", help="Target date (YYYY-MM-DD)")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    asyncio.run(_async_main(args))
 
 
 if __name__ == "__main__":

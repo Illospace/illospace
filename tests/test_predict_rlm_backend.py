@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-import asyncio
 import inspect
 import types
 import sys
@@ -154,7 +153,7 @@ def test_get_agent_worker_backend_settings_falls_back_when_deno_missing(monkeypa
     assert settings.fallback_reason == "deno is not installed on the server"
 
 
-def test_make_async_tool_wrapper_puts_required_params_before_defaulted_ones():
+async def test_make_async_tool_wrapper_puts_required_params_before_defaulted_ones():
     from brain.systems.runs.predict_rlm_backend import _make_async_tool_wrapper
 
     captured = {}
@@ -188,7 +187,7 @@ def test_make_async_tool_wrapper_puts_required_params_before_defaulted_ones():
     signature = inspect.signature(wrapper)
     assert list(signature.parameters) == ["required_second", "optional_first"]
 
-    result = asyncio.run(wrapper(required_second="hello"))
+    result = await wrapper(required_second="hello")
 
     assert result == {"ok": True}
     assert captured == {
@@ -455,8 +454,7 @@ def test_build_predict_rlm_lm_uses_openai_api_key_auth(monkeypatch):
     assert response.output[0].content[0].text == "api-key output"
 
 
-def test_build_predict_rlm_lm_uses_provider_backed_codex_auth(monkeypatch):
-    import asyncio as real_asyncio
+async def test_build_predict_rlm_lm_uses_provider_backed_codex_auth(monkeypatch):
     from types import SimpleNamespace
 
     from brain.systems.runs.predict_rlm_backend import _build_predict_rlm_lm
@@ -566,7 +564,7 @@ def test_build_predict_rlm_lm_uses_provider_backed_codex_auth(monkeypatch):
     assert response.output[0].content[0].text == "codex output"
     assert dict(response.usage) == {"input_tokens": 11, "output_tokens": 7}
 
-    async_response = real_asyncio.run(lm.aforward(messages=[{"role": "user", "content": "async"}]))
+    async_response = await lm.aforward(messages=[{"role": "user", "content": "async"}])
     assert async_response.output[0].content[0].text == "codex output"
 
 
@@ -672,8 +670,8 @@ def test_build_predict_rlm_lm_uses_anthropic_api_key_auth(monkeypatch):
                 captured["cache"] = cache
 
     monkeypatch.setattr(
-        "brain.systems.runs.predict_rlm_backend._resolve_key_from_db",
-        lambda **kwargs: ("sk-ant-test", "user_default"),
+        "brain.systems.runs.predict_rlm_backend._resolve_key_from_env",
+        lambda **kwargs: ("sk-ant-test", "env"),
     )
     monkeypatch.setitem(sys.modules, "dspy", FakeDSPY)
 
