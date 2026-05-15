@@ -23,12 +23,6 @@ _OAUTH_BETA_FLAGS_FALLBACK = [
 _DEBUG_DIR = Path("/tmp/anthropic-debug")
 
 
-# OAuth tokens require this identity prefix in the system prompt to access
-# sonnet/opus models. Without it, the API returns 400 for non-haiku models.
-# Source: https://github.com/badlogic/pi-mono (pi-ai anthropic provider)
-OAUTH_SYSTEM_PROMPT_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
-
-
 @dataclass(frozen=True)
 class AnthropicAuthAdapter:
     client: anthropic.Anthropic

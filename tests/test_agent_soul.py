@@ -30,6 +30,8 @@ def test_default_soul_is_team_workspace_specific(monkeypatch, tmp_path):
     assert "an agent inside a workspace used by a team" in soul.content
     assert "Default to concise" in soul.content
     assert "You are not the user's voice" in soul.content
+    assert "connected\npersonal agent acting for that member" in soul.content
+    assert "not only as a reply to the current user" in soul.content
     assert "teammate-owned threads" in soul.content
 
 

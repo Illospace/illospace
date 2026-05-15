@@ -487,8 +487,7 @@ BRAIN_TOOLS = [
         "description": (
             "Read the workspace roster and, by default, nearby activity for those people. Use for questions about "
             "who is in the workspace, roles, ownership, or what a named teammate appears to be working on. "
-            "Use before coordinating with, greeting, tagging, or handing work to named teammates when you need "
-            "their exact user ids. "
+            "Use when teammate coordination requires exact member ids, names, roles, or ownership. "
             "This is read-only and should be used before answering teammate-activity questions from memory."
         ),
         "input_schema": {
