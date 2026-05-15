@@ -185,7 +185,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "output_budget_chars": 14_000,
         "evidence_emitter": True,
         "context_route": {
-            "description": "Read the workspace roster and optional nearby activity for people. Use for who is here, roles, ownership, and named teammate activity.",
+            "description": "Read the workspace roster and optional nearby activity for people. Use for who is here, roles, ownership, named teammate activity, and teammate coordination that needs exact user ids.",
             "domains": ["team members", "workspace roster", "people", "roles", "ownership", "who is working on what"],
             "scopes": ["narrow", "broad"],
         },
@@ -243,7 +243,7 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "side_effect_class": "idea_management",
         "reversibility": "reversible_by_archive",
         "action_manifest": True,
-        "expected_effect": "read or mutate Cortex thoughts, threads, and ideas",
+        "expected_effect": "read or mutate Cortex thoughts, threads, ideas, and Illo-authored teammate handoffs",
         "output_budget_chars": 14_000,
     },
     "post_chat_message": {

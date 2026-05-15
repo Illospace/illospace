@@ -487,6 +487,8 @@ BRAIN_TOOLS = [
         "description": (
             "Read the workspace roster and, by default, nearby activity for those people. Use for questions about "
             "who is in the workspace, roles, ownership, or what a named teammate appears to be working on. "
+            "Use before coordinating with, greeting, tagging, or handing work to named teammates when you need "
+            "their exact user ids. "
             "This is read-only and should be used before answering teammate-activity questions from memory."
         ),
         "input_schema": {
@@ -782,6 +784,9 @@ CORTEX_IDEA_TOOLS = [
             "Create, list, get, update, archive, restore, or mark-read Cortex thoughts. "
             "When a created thought should start working immediately, set start_run=true "
             "or use status=queued/working so a starter message and AgentRun are created. "
+            "For teammate coordination or handoffs, use action=create with user_id set to the teammate owner. "
+            "The first thread_message you provide is authored by Illo; user_id controls ownership/assignment, "
+            "not message authorship. "
             "Use this for requests about thoughts, threads, idea threads, or ideas, such as "
             "'archive this thread', 'rename this thought', 'mark this resolved', or "
             "'restore that idea'. This is the action/exact-thread tool. For recent team-wide thread "
@@ -823,7 +828,7 @@ CORTEX_IDEA_TOOLS = [
                 "title": {"type": "string", "description": "Raw idea title for create/update."},
                 "thread_message": {
                     "type": "string",
-                    "description": "Optional first thread message for a newly created idea. Defaults to description, then title.",
+                    "description": "Optional first Illo-authored thread message for a newly created idea. Defaults to description, then title.",
                 },
                 "start_run": {
                     "type": "boolean",
@@ -866,8 +871,8 @@ CORTEX_IDEA_TOOLS = [
                 },
                 "orbit_anchor_id": {"type": "string", "description": "Optional orbit anchor target id."},
                 "parent_id": {"type": "string", "description": "Optional parent idea id for create."},
-                "user_id": {"type": "string", "description": "Optional owner id for explicit thread handoff."},
-                "origin": {"type": "string", "description": "Origin for create.", "default": "user_created"},
+                "user_id": {"type": "string", "description": "Optional owner/assignee id for explicit thread handoff. This does not author messages as that user."},
+                "origin": {"type": "string", "description": "Origin for create.", "default": "illo_created"},
                 "origin_ref": {"type": "string", "description": "Optional origin reference for create."},
                 "search": {"type": "string", "description": "Optional title/description filter for list."},
                 "include_archived": {"type": "boolean", "default": False},
