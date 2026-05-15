@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -40,6 +42,7 @@ class AgentResult:
     tool_calls: list[str] = field(default_factory=list)
     worker_results: list = field(default_factory=list)
     error: str | None = None
+    post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = ()
 
 
 def make_result(
@@ -51,6 +54,7 @@ def make_result(
     tool_calls: list[str],
     error: str | None = None,
     worker_results: list | None = None,
+    post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = (),
 ) -> AgentResult:
     """Construct an AgentResult with common runtime fields."""
 
@@ -66,4 +70,5 @@ def make_result(
         tool_calls=tool_calls,
         error=error,
         worker_results=worker_results or [],
+        post_completion_tasks=post_completion_tasks,
     )
