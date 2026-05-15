@@ -32,7 +32,7 @@ from brain.app.api.routers.cortex._helpers import (
 from brain.app.api.routers.cortex._router import router
 from brain.systems.runs.events import run_event
 from brain.systems.runs.status import RunStatus
-from brain.systems.runs.store import AsyncAgentRunStore
+from brain.systems.runs.store import AsyncAgentRunStore as _AgentRunStore
 from brain.systems.runs.cortex.analytics import RunAuditNotFound, async_build_idea_audit_summary
 from brain.platform.db.models.agent_run import AgentRunArtifactRow
 from brain.platform.db.models.run import AgentRun, CortexEvent
@@ -45,12 +45,19 @@ from brain.platform.async_io import async_http_post, ensure_dir, run_subprocess,
 from brain.systems.cortex.title_generation import (
     async_generate_display_title,
 )
+from brain.systems.cortex.thought_lifecycle import (
+    ThoughtStatusCommand,
+    ThreadMessageCommand,
+    post_thread_message,
+    transition_thought_status,
+)
 from brain.systems.cortex.upload_preview import (
     build_upload_preview,
     public_static_upload_url,
     static_upload_url_for,
 )
 from brain.systems.services.runtime_introspection import async_get_provider_auth_status
+from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +70,7 @@ async def _cancel_active_runs_for_idea(session, idea_id: str, *, reason: str) ->
             AgentRun.status.in_(active_statuses),
         )
     )
-    store = AsyncAgentRunStore(session)
+    store = _AgentRunStore(session)
     count = 0
     for row in result.all():
         await store.append_event(
@@ -262,15 +269,17 @@ async def webhook_reply(request: Request):
         if not idea:
             raise HTTPException(status_code=404, detail=f"Idea {idea_id} not found")
         attachments_data = data.get("attachments", [])
-        thread_msg = IdeaThread(
-            idea_id=idea_id,
-            role="illo",
-            content=content,
-            attachments=attachments_data,
+        result = await post_thread_message(
+            uow.session,
+            idea=idea,
+            command=ThreadMessageCommand(
+                idea_id=idea_id,
+                role="illo",
+                content=content,
+                attachments=attachments_data,
+            ),
         )
-        uow.session.add(thread_msg)
-        await uow.session.flush()
-        msg = _row_to_dict(thread_msg)
+        msg = result.message_payload
     return JSONResponse(content=msg, status_code=201)
 
 
@@ -387,12 +396,17 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
             indices = set(branch.get("message_indices", []))
             for idx, msg in enumerate(all_messages):
                 if idx in indices:
-                    uow.session.add(IdeaThread(
-                        idea_id=child_id,
-                        role=msg.role,
-                        content=msg.content,
-                        attachments=msg.attachments or [],
-                    ))
+                    await post_thread_message(
+                        uow.session,
+                        idea=child,
+                        command=ThreadMessageCommand(
+                            idea_id=child_id,
+                            role=msg.role,
+                            content=msg.content,
+                            attachments=msg.attachments or [],
+                        ),
+                        apply_lifecycle=False,
+                    )
 
             uow.session.add(IdeaConnection(
                 id=str(uuid.uuid4()),
@@ -405,15 +419,16 @@ async def split_idea(idea_id: str, request: Request, user: dict[str, Any] = Depe
 
             created_ids.append(child_id)
 
-        previous_status = parent.status
-        parent.status = "resolved"
         parent.active_agents = 0
-        uow.session.add(IdeaStateLog(
-            idea_id=idea_id,
-            from_state=previous_status,
-            to_state="resolved",
-            trigger="thought_split",
-        ))
+        await transition_thought_status(
+            uow.session,
+            idea=parent,
+            command=ThoughtStatusCommand(
+                to_status="resolved",
+                trigger="thought_split",
+                actor=user,
+            ),
+        )
         await _cancel_active_runs_for_idea(uow.session, idea_id, reason="Parent split into branches")
 
     thought_split_payload = {"parent_id": idea_id, "children": created_ids}
@@ -671,8 +686,6 @@ async def idea_audit_analyze(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     """Trigger a self-critique run on the idea's conversation audit."""
-    from brain.systems.runs.cortex import RunAdmissionRequest, async_admit_run
-
     # Build a metrics summary to include in the run message
     async with UnitOfWork() as uow:
         runs = (
@@ -747,16 +760,27 @@ async def idea_audit_analyze(
     )
 
     uid = user.get("id")
-    admission = await async_admit_run(
-        RunAdmissionRequest(
-            idea_id=idea_id,
-            event="audit_analyze",
-            message=f"/audit {summary}",
-            priority=2,
-            user_id=uid,
-            metadata={"run_profile": "deep", "recipe": "deep", "source": "audit"},
-        ),
-    )
+    async with UnitOfWork() as uow:
+        admission = await admit_work(
+            uow.session,
+            WorkIntakeEvent(
+                source="audit",
+                event_type="audit.analyze",
+                org_id=str(user.get("org_id") or ""),
+                actor={"id": uid, "org_id": user.get("org_id")},
+                target={"kind": "cortex_idea", "idea_id": idea_id},
+                payload={
+                    "message": f"/audit {summary}",
+                    "metadata": {"run_profile": "deep", "recipe": "deep", "source": "audit"},
+                },
+                policy={
+                    "priority": 2,
+                    "producer": "audit",
+                    "idempotency_key": f"audit:{idea_id}",
+                    "run_event": "audit_analyze",
+                },
+            ),
+        )
 
     if not admission.ok or admission.run_id is None:
         raise HTTPException(

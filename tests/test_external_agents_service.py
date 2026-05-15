@@ -5,7 +5,6 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -66,6 +65,8 @@ def test_headless_thread_ids_use_external_agent_namespace():
 
 @pytest.mark.asyncio
 async def test_headless_ask_blocks_thread_mutation_tools():
+    from brain.systems.runs.work_intake import WorkIntakeResult
+
     class FakeSession:
         def __init__(self):
             self.added = []
@@ -89,13 +90,13 @@ async def test_headless_ask_blocks_thread_mutation_tools():
         connection_display_name="Hermes",
         agent_kind="hermes",
     )
-    captured_requests = []
+    captured_events = []
 
-    async def fake_create_run(_session, request):
-        captured_requests.append(request)
-        return SimpleNamespace(id=42)
+    async def fake_admit_work(_session, event):
+        captured_events.append(event)
+        return WorkIntakeResult(ok=True, run_id=42)
 
-    with patch("brain.systems.external_agents.service._create_agent_run", side_effect=fake_create_run):
+    with patch("brain.systems.external_agents.service.admit_work", side_effect=fake_admit_work):
         task = await service.create_headless_ask(
             FakeSession(),
             principal,
@@ -103,9 +104,17 @@ async def test_headless_ask_blocks_thread_mutation_tools():
         )
 
     assert task.illo_run_id == 42
-    blocked_tools = captured_requests[0].metadata["tool_policy"]["blocked_tools"]
+    event = captured_events[0]
+    assert event.source == "external_agent"
+    assert event.event_type == "external_agent.headless_ask"
+    assert event.target["kind"] == "external_agent_headless_ask"
+    blocked_tools = event.payload["metadata"]["tool_policy"]["blocked_tools"]
     assert "manage_idea" in blocked_tools
     assert "post_chat_message" in blocked_tools
+    request_source = event.payload["metadata"]["request_source"]
+    assert request_source["surface"] == "personal_agent_bridge"
+    assert request_source["personal_agent"] == "Hermes"
+    assert request_source["visibility"] == "headless_private"
 
 
 class _ScalarResult:

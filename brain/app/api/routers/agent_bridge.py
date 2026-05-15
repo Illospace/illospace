@@ -122,6 +122,17 @@ async def _run_trigger_if_requested(
 ):
     if not metadata.get("trigger_illo"):
         return None
+    metadata = dict(metadata)
+    metadata.setdefault(
+        "request_source",
+        external_agents.request_source_context(
+            principal,
+            surface="mcp_personal_agent" if metadata.get("mcp_tool") else "personal_agent_bridge",
+            visibility="visible_team_thread",
+            permission="visible_coordination_trigger",
+            tool_name=str(metadata.get("mcp_tool") or "") or None,
+        ),
+    )
     from brain.app.triggers.adapters.internal import build_cortex_notify_trigger
     from brain.app.triggers.router import async_route_trigger
 

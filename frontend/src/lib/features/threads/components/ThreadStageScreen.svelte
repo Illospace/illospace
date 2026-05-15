@@ -1303,6 +1303,7 @@
     --thread-stage-panel-padding-block: clamp(14px, 1.7vw, 22px);
     --thread-stage-panel-padding-inline: clamp(16px, 2vw, 24px);
     --thread-stage-docked-header-height: 46px;
+    --thread-stage-stacked-dock-height: clamp(220px, 34svh, 360px);
     --thread-bridge-mention-dropdown-border: rgba(124, 138, 158, 0.14);
     --thread-bridge-mention-dropdown-background:
       linear-gradient(180deg, rgba(10, 14, 22, 0.98), rgba(8, 11, 18, 1));
@@ -1703,9 +1704,19 @@
       --thread-stage-panel-padding-inline: clamp(12px, 2.4vw, 20px);
     }
 
+    .thread-stage-layout.with-dock {
+      grid-template-rows: minmax(0, 1fr) minmax(220px, var(--thread-stage-stacked-dock-height));
+      row-gap: 10px;
+    }
+
     .thread-stage-dock {
-      position: absolute;
-      inset: clamp(132px, 20vh, 168px) clamp(16px, 3vw, 22px) clamp(106px, 15vh, 128px);
+      position: relative;
+      inset: auto;
+      width: 100%;
+      min-height: 0;
+      padding-top: 10px;
+      border-top: 1px solid var(--constellation-utility-panel-header-border);
+      box-sizing: border-box;
     }
   }
 
@@ -1715,6 +1726,7 @@
       --thread-stage-panel-radius: 20px;
       --thread-stage-panel-padding-block: 12px;
       --thread-stage-panel-padding-inline: 12px;
+      --thread-stage-stacked-dock-height: clamp(200px, 32svh, 320px);
     }
   }
 </style>

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Callable, AsyncIterator
 from datetime import datetime, timedelta, timezone
@@ -104,6 +105,41 @@ async def test_claim_and_completion_are_idempotent(session_factory):
 
     events = await _event_types(session, first.id)
     assert events.count("run.completed") == 1
+
+
+async def test_post_completion_tasks_run_after_terminal_completion(session_factory):
+    session = session_factory()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    event_types_at_start: list[str] = []
+    statuses_at_start: list[str | None] = []
+
+    class PostCompletionRecipe:
+        async def execute(self, runtime: RunRuntime) -> RunRecipeResult:
+            async def after_completion() -> None:
+                event_types_at_start.extend(await _event_types(session, runtime.run.id))
+                row = await session.get(AgentRunRow, runtime.run.id)
+                statuses_at_start.append(row.status if row is not None else None)
+                started.set()
+                await release.wait()
+                finished.set()
+
+            return RunRecipeResult(output="done", post_completion_tasks=(after_completion,))
+
+    run = await asyncio.wait_for(
+        AsyncAgentRunEngine(session, recipes={"fast": PostCompletionRecipe()}).run(
+            AgentRunRequest(thread_id="thread-1", message="hello")
+        ),
+        timeout=1,
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=1)
+
+    assert run.status == RunStatus.COMPLETED
+    assert "run.completed" in event_types_at_start
+    assert statuses_at_start == [RunStatus.COMPLETED.value]
 
 
 async def test_deferred_queued_run_waits_for_target_terminal(session_factory):

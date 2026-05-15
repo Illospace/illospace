@@ -10,12 +10,17 @@ from zoneinfo import ZoneInfo
 from croniter import croniter
 from sqlalchemy import and_, or_, select
 
-from brain.app.api.routers.cortex._helpers import _parse_message_type
-from brain.systems.runs.cortex import RunAdmissionRequest, async_admit_run
 from brain.systems.cortex.events import publish
+from brain.systems.cortex.thought_lifecycle import (
+    ThoughtStatusCommand,
+    ThreadMessageCommand,
+    post_thread_message,
+    transition_thought_status,
+)
+from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.run import AgentRun
-from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
+from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
@@ -321,19 +326,22 @@ async def _async_admit_cycle_run(
     metadata: dict | None,
     cycle_run_id: int,
 ) -> int | None:
-    result = await async_admit_run(
-        RunAdmissionRequest(
-            idea_id=idea_id,
-            event="thread_reply",
-            message=message,
-            priority=priority,
-            user_id=user_id,
-            metadata=metadata,
+    result = await admit_work(
+        session,
+        WorkIntakeEvent(
             source="cycle",
-            producer="cycle",
-            idempotency_key=f"cycle_run:{cycle_run_id}",
+            event_type="cycle.due_run",
+            org_id=str((metadata or {}).get("org_id") or ""),
+            actor={"id": user_id, "org_id": (metadata or {}).get("org_id")},
+            target={"kind": "cortex_idea", "idea_id": idea_id},
+            payload={"message": message, "metadata": dict(metadata or {})},
+            policy={
+                "priority": priority,
+                "producer": "cycle",
+                "idempotency_key": f"cycle_run:{cycle_run_id}",
+                "run_event": "thread_reply",
+            },
         ),
-        session=session,
     )
     return result.run_id if result.ok else None
 
@@ -405,62 +413,32 @@ async def _async_append_cycle_thread_message(
     cycle_run: CycleRun,
     owner: User | None,
 ) -> tuple[dict, dict | None]:
-    current_status = idea.status
     metadata = {
         "source": "cycle",
         "cycle_id": cycle.id,
         "cycle_run_id": cycle_run.id,
         "launch_envelope": _cycle_launch_envelope(cycle, cycle_run),
     }
-    thread_msg = IdeaThread(
-        idea_id=idea.id,
-        role="user",
-        content=cycle.prompt,
-        attachments=[],
-        metadata_=metadata,
-        user_id=cycle.user_id,
-        message_type=_parse_message_type(cycle.prompt, "user"),
+    result = await post_thread_message(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="user",
+            content=cycle.prompt,
+            actor={
+                "user_id": str(cycle.user_id) if cycle.user_id else None,
+                "org_id": str(cycle.org_id) if cycle.org_id else None,
+                "name": getattr(owner, "name", None),
+                "color": getattr(owner, "color", None),
+            },
+            attachments=[],
+            metadata=metadata,
+        ),
+        parse_message_type=lambda _content, _role: "trigger",
+        lifecycle_trigger="auto_cycle_message",
     )
-    session.add(thread_msg)
-    await session.flush()
-
-    new_status = None
-    if current_status in ("needs_input", "unread_reply", "emerged"):
-        new_status = "active"
-
-    status_payload = None
-    if new_status and new_status != current_status:
-        idea.status = new_status
-        idea.updated_at = datetime.now(timezone.utc)
-        session.add(
-            IdeaStateLog(
-                idea_id=idea.id,
-                from_state=current_status,
-                to_state=new_status,
-                trigger="auto_cycle_message",
-            )
-        )
-        status_payload = {
-            "idea_id": idea.id,
-            "old_status": current_status,
-            "new_status": new_status,
-        }
-
-    message_payload = {
-        "id": thread_msg.id,
-        "idea_id": idea.id,
-        "role": thread_msg.role,
-        "content": thread_msg.content,
-        "attachments": [],
-        "metadata": thread_msg.metadata_,
-        "user_id": cycle.user_id,
-        "message_type": thread_msg.message_type,
-        "created_at": thread_msg.created_at.isoformat() if thread_msg.created_at else None,
-    }
-    if owner:
-        message_payload["user_name"] = owner.name
-        message_payload["user_color"] = owner.color
-    return message_payload, status_payload
+    return result.message_payload, result.status_change
 
 
 def _finalize_cycle_run(
@@ -603,17 +581,17 @@ async def async_execute_cycle_run(run_id: int) -> None:
             )
             idea = result.first()
         if idea and idea.archived_at is not None:
-            old_status = idea.status
-            idea.archived_at = None
-            idea.status = "needs_input"
-            idea.updated_at = datetime.now(timezone.utc)
-            uow.session.add(
-                IdeaStateLog(
-                    idea_id=idea.id,
-                    from_state=old_status,
-                    to_state="needs_input",
+            await transition_thought_status(
+                uow.session,
+                idea=idea,
+                command=ThoughtStatusCommand(
+                    to_status="needs_input",
                     trigger="cycle_reopen",
-                )
+                    actor={
+                        "user_id": str(cycle.user_id) if cycle.user_id else None,
+                        "org_id": str(cycle.org_id) if cycle.org_id else None,
+                    },
+                ),
             )
             should_publish_idea = True
         if idea and await _async_idea_has_active_run(uow.session, idea.id):

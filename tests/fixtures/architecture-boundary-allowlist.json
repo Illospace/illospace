@@ -253,16 +253,6 @@
       "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
     },
     {
-      "source": "brain/systems/cycles/service.py",
-      "import": "brain.app.api.routers.cortex._helpers",
-      "source_layer": "brain.systems",
-      "target_layer": "brain.app",
-      "allowed_occurrences": 1,
-      "owner": "architecture-boundaries",
-      "planned_removal": "Extract the shared behavior behind the intended lower-layer contract, then remove or lower this allowance.",
-      "reason": "System code reuses app or CLI behavior; move reusable domain behavior into systems."
-    },
-    {
       "source": "brain/systems/feedback/predict.py",
       "import": "brain.app.cli.memory",
       "source_layer": "brain.systems",

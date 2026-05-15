@@ -18,11 +18,9 @@ from brain.systems.runs.store import AsyncAgentRunStore
 from brain.app.api.auth import get_current_user
 from brain.app.api.services.notifications import (
     async_build_notification_summary,
-    compact_notification_text,
 )
 from brain.systems.runs.cortex.read_models import run_stream_payload
 from brain.app.api.routers.cortex._helpers import (
-    _extract_mentions,
     _infer_feedback_tags,
     _parse_message_type,
     _presence_cleanup,
@@ -38,18 +36,19 @@ from brain.systems.cortex.thread_attachments import (
     build_thread_attachment_context,
     project_context_from_text_attachments,
 )
+from brain.systems.cortex.thought_lifecycle import (
+    ThoughtStatusCommand,
+    ThreadMessageCommand,
+    post_thread_message,
+    transition_thought_status,
+)
 from brain.systems.cortex.project_context.snapshot import (
     ProjectContextValidationError,
     validated_project_context_snapshot,
 )
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow
 from brain.platform.db.models.run import AgentRun
-from brain.platform.db.models.idea import IdeaStateLog, IdeaThread
-from brain.platform.db.models.notification import (
-    NOTIFICATION_KIND_WORKSPACE_MENTION,
-    NOTIFICATION_KIND_WORKSPACE_THREAD_ATTENTION,
-    NOTIFICATION_SOURCE_WORKSPACE,
-)
+from brain.platform.db.models.idea import IdeaThread
 from brain.platform.db.models.org import User
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
@@ -491,14 +490,16 @@ async def mark_read(idea_id: str, request: Request, user: dict[str, Any] = Depen
     async with UnitOfWork() as uow:
         idea = await _require_idea_for_user(uow.session, idea_id, user)
         if idea.status == "unread_reply":
-            idea.status = "needs_input"
             idea.read_at = datetime.now(timezone.utc)
-            uow.session.add(IdeaStateLog(
-                idea_id=idea_id,
-                from_state="unread_reply",
-                to_state="needs_input",
-                trigger="user_read",
-            ))
+            await transition_thought_status(
+                uow.session,
+                idea=idea,
+                command=ThoughtStatusCommand(
+                    to_status="needs_input",
+                    trigger="user_read",
+                    actor=user,
+                ),
+            )
         await uow.notifications.mark_read_for_idea(user_id=user_id, idea_id=idea_id)
     try:
         await _publish_notification_summary_updates(org_id=org_id, user_ids={user_id})
@@ -520,7 +521,7 @@ async def update_position(idea_id: str, request: Request, user: dict[str, Any] =
 
 @router.post("/ideas/{idea_id}/thread")
 async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str, Any] = Depends(get_current_user)):
-    """Add thread message — ORM version with full lifecycle logic."""
+    """Add a Cortex thread message."""
     data = await request.json()
     role = data.get("role", "user")
     content = data.get("content", "").strip()
@@ -528,186 +529,63 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
         raise HTTPException(status_code=400, detail="Content is required")
     if role not in ("user", "assistant", "illo"):
         raise HTTPException(status_code=400, detail="Role must be 'user', 'assistant', or 'illo'")
-    raw_uid = user.get("id")
-    # "system" is not a valid UUID — skip user_id for system/localhost users
-    user_id = raw_uid if role == "user" and raw_uid and raw_uid != "system" else None
-    org_id = user.get("org_id")
-
     from brain.systems.cortex.events import publish
 
-    new_status = None
-    notification_user_ids: set[str] = set()
-    notification_org_id: str | None = str(org_id) if org_id else None
+    attachments_data = data.get("attachments", [])
+    if not isinstance(attachments_data, list):
+        attachments_data = []
+    metadata = data.get("metadata")
+    notification_org_id: str | None = str(user.get("org_id")) if user.get("org_id") else None
     async with UnitOfWork() as uow:
         idea = await _require_idea_for_user(uow.session, idea_id, user)
-        current_status = idea.status
-        if idea.org_id:
-            notification_org_id = str(idea.org_id)
 
-        attachments_data = data.get("attachments", [])
-        if not isinstance(attachments_data, list):
-            attachments_data = []
-        metadata = data.get("metadata")
-        thread_attachment_context = build_thread_attachment_context(attachments_data)
-        project_context = _extract_project_context_from_message(
-            attachments_data,
-            metadata if isinstance(metadata, dict) else None,
-        )
-        project_context = _validate_thread_project_context(project_context)
-        if project_context or thread_attachment_context:
-            next_metadata = dict(metadata or {}) if isinstance(metadata, dict) else {}
-            if project_context:
-                next_metadata["project_context"] = project_context
-            if thread_attachment_context:
-                next_metadata["thread_attachment_context"] = thread_attachment_context
-            metadata = next_metadata
-        if project_context:
-            _merge_project_context_into_idea(idea, project_context)
-        msg_type = _parse_message_type(content, role)
-        thread_msg = IdeaThread(
-            idea_id=idea_id,
-            role=role,
-            content=content,
-            attachments=attachments_data,
-            metadata_=metadata,
-            user_id=user_id,
-            message_type=msg_type,
-        )
-        uow.session.add(thread_msg)
-        await uow.session.flush()
-
-        await _append_live_guidance_from_thread_message(
-            session=uow.session,
-            idea_id=idea_id,
-            role=role,
-            content=content,
-            metadata=metadata,
-            thread_msg=thread_msg,
-            user_id=user_id,
-        )
-
-        msg = {
-            "id": thread_msg.id,
-            "idea_id": thread_msg.idea_id,
-            "role": thread_msg.role,
-            "content": thread_msg.content,
-            "attachments": thread_msg.attachments or [],
-            "metadata": thread_msg.metadata_,
-            "user_id": thread_msg.user_id,
-            "message_type": thread_msg.message_type,
-            "created_at": thread_msg.created_at.isoformat() if thread_msg.created_at else None,
-        }
-        if user_id and user.get("name"):
-            msg["user_name"] = user.get("name")
-            msg["user_color"] = user.get("color", "#6366f1")
-
-        # Extract and resolve @mentions
-        thread_msg_id = thread_msg.id
-        mentions = _extract_mentions(content)
-        person_mentions = [m for m in mentions if m != "illo"]
-
-        if person_mentions and user_id and org_id:
+        async def resolve_mentioned_users(names: list[str], org_id: str) -> dict[str, str]:
             stmt = (
                 select(User.id, func.lower(User.name).label("name"))
                 .where(
                     User.org_id == org_id,
-                    func.lower(User.name).in_(person_mentions),
+                    func.lower(User.name).in_(names),
                 )
             )
             result = await uow.session.execute(stmt)
-            rows = result.all()
-            resolved = {row.name: row.id for row in rows}
+            return {row.name: str(row.id) for row in result.all()}
 
-            for name in person_mentions:
-                if name in resolved:
-                    mentioned_user_id = str(resolved[name])
-                    if mentioned_user_id == str(user_id):
-                        continue
-                    _, created = await uow.user_mentions.create_if_missing(
-                        user_id=mentioned_user_id,
-                        idea_id=str(idea_id),
-                        mentioned_by=str(user_id),
-                        thread_message_id=thread_msg_id,
-                    )
-                    if created and notification_org_id:
-                        preview = compact_notification_text(content)
-                        await uow.notifications.create_or_coalesce(
-                            org_id=notification_org_id,
-                            user_id=mentioned_user_id,
-                            source=NOTIFICATION_SOURCE_WORKSPACE,
-                            kind=NOTIFICATION_KIND_WORKSPACE_MENTION,
-                            actor_user_id=str(user_id),
-                            title=f"{user.get('name') or 'Someone'} mentioned you in workspace",
-                            body=preview,
-                            coalesce_key=f"workspace:mention:{mentioned_user_id}:{idea_id}:{thread_msg_id}",
-                            payload={
-                                "preview": preview,
-                                "idea_title": idea.title,
-                                "thread_message_id": thread_msg_id,
-                            },
-                            idea_id=str(idea_id),
-                        )
-                        notification_user_ids.add(mentioned_user_id)
+        async def append_live_guidance(**kwargs):
+            await _append_live_guidance_from_thread_message(
+                session=uow.session,
+                **kwargs,
+            )
 
-            for name, uid in resolved.items():
-                if str(uid) == str(user_id):
-                    continue
-                publish("mention", {
-                    "idea_id": str(idea_id),
-                    "user_id": str(uid),
-                    "mentioned_by": {"user_id": str(user_id), "name": user.get("name"), "color": user.get("color")},
-                })
-
-        # Auto-lifecycle
-        new_status = None
-        if role == "user" and current_status in ("needs_input", "unread_reply", "emerged"):
-            new_status = "active"
-        elif role in ("illo", "assistant") and current_status in ("active", "working", "queued"):
-            new_status = "unread_reply"
-        elif role == "illo" and current_status not in ("resolved",):
-            new_status = "unread_reply"
-
-        if new_status and new_status != current_status:
-            idea.status = new_status
-            idea.updated_at = datetime.now(timezone.utc)
-            uow.session.add(IdeaStateLog(
+        result = await post_thread_message(
+            uow.session,
+            idea=idea,
+            command=ThreadMessageCommand(
                 idea_id=idea_id,
-                from_state=current_status,
-                to_state=new_status,
-                trigger=f"auto_{role}_message",
-            ))
-            status_payload = {
-                "idea_id": idea_id,
-                "old_status": current_status,
-                "new_status": new_status,
-            }
-            if notification_org_id:
-                status_payload["org_id"] = notification_org_id
-            publish("status_change", status_payload)
-            if (
-                new_status == "unread_reply"
-                and notification_org_id
-                and idea.user_id
-            ):
-                owner_user_id = str(idea.user_id)
-                preview = compact_notification_text(content)
-                await uow.notifications.create_or_coalesce(
-                    org_id=notification_org_id,
-                    user_id=owner_user_id,
-                    source=NOTIFICATION_SOURCE_WORKSPACE,
-                    kind=NOTIFICATION_KIND_WORKSPACE_THREAD_ATTENTION,
-                    actor_user_id=None,
-                    title=f"Illo replied in {idea.title}",
-                    body=preview,
-                    coalesce_key=f"workspace:thread_attention:{owner_user_id}:{idea_id}",
-                    payload={
-                        "preview": preview,
-                        "idea_title": idea.title,
-                        "thread_message_id": thread_msg_id,
-                    },
-                    idea_id=str(idea_id),
-                )
-                notification_user_ids.add(owner_user_id)
+                role=role,
+                content=content,
+                actor={
+                    "user_id": user.get("id"),
+                    "org_id": user.get("org_id"),
+                    "name": user.get("name"),
+                    "color": user.get("color"),
+                },
+                attachments=attachments_data,
+                metadata=metadata if isinstance(metadata, dict) else None,
+            ),
+            mention_repo=uow.user_mentions,
+            notification_repo=uow.notifications,
+            resolve_mentioned_users=resolve_mentioned_users,
+            publish=publish,
+            validate_project_context=_validate_thread_project_context,
+            extract_project_context=_extract_project_context_from_message,
+            build_attachment_context=build_thread_attachment_context,
+            parse_message_type=_parse_message_type,
+            append_live_guidance=append_live_guidance,
+        )
+        msg = result.message_payload
+        status_change = result.status_change
+        notification_org_id = result.notification_org_id
+        notification_user_ids = result.notification_user_ids
 
     if role == "user":
         feedback_tags = _infer_feedback_tags(content)
@@ -720,10 +598,10 @@ async def add_thread_message_raw(idea_id: str, request: Request, user: dict[str,
         {"idea_id": idea_id, "message": msg},
         org_id=notification_org_id,
     )
-    if new_status and new_status != current_status:
+    if status_change:
         await ws_manager.broadcast_product_event(
             "status_change",
-            {"idea_id": idea_id, "new_status": new_status},
+            {"idea_id": idea_id, "new_status": status_change["new_status"]},
             org_id=notification_org_id,
         )
     try:

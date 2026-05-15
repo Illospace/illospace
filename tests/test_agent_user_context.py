@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import sys
 from unittest.mock import MagicMock, patch, AsyncMock
-from types import SimpleNamespace
 
 import pytest
 
@@ -153,44 +152,41 @@ class TestBrainEncodeUserScoped:
 class TestRunUserPassthrough:
 
     async def test_admit_run_stores_user_id(self):
-        """async_admit_run() should pass user_id into run request construction."""
+        """Work Intake should pass the actor user_id into run request construction."""
         from types import SimpleNamespace
 
-        import brain.systems.runs.cortex as cortex
-        from brain.systems.runs.cortex import RunAdmissionRequest, async_admit_run
+        from brain.platform.db.models.idea import Idea
+        from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
 
-        captured_kwargs = {}
-        captured_request = None
+        class FakeSession:
+            async def get(self, model, key):
+                if model is Idea and key == "idea-123":
+                    return SimpleNamespace(
+                        id="idea-123",
+                        title="Test idea",
+                        org_id=USER_A["org_id"],
+                        user_id="owner-id",
+                        agent_details=None,
+                    )
+                return None
 
-        async def _build_request(session, **kwargs):
-            captured_kwargs.update(kwargs)
-            return SimpleNamespace(user_id=kwargs["user_id"], thread_id=kwargs["idea_id"])
+            async def scalars(self, *_args, **_kwargs):
+                return SimpleNamespace(first=lambda: None)
 
-        class _Store:
-            def __init__(self, session):
-                self.session = session
-
-            async def create_run(self, run_request):
-                nonlocal captured_request
-                captured_request = run_request
-                return SimpleNamespace(id=100)
-
-        with patch.object(cortex, "a_build_run_request", side_effect=_build_request), \
-             patch.object(cortex, "AsyncAgentRunStore", _Store), \
-             patch.object(cortex, "_a_mark_idea_working_for_run_admission", new=AsyncMock(return_value=None)):
-            result = await async_admit_run(
-                RunAdmissionRequest(
-                    idea_id="idea-123",
-                    event="thread_reply",
-                    message="test message",
-                    user_id=USER_A["id"],
-                ),
-                session=MagicMock(),
+        request = await build_agent_run_request(
+            FakeSession(),
+            WorkIntakeEvent(
+                source="cortex",
+                event_type="cortex.thread_reply",
+                org_id=USER_A["org_id"],
+                actor={"id": USER_A["id"], "org_id": USER_A["org_id"]},
+                target={"kind": "cortex_idea", "idea_id": "idea-123"},
+                payload={"message": "test message"},
+                policy={"run_event": "thread_reply"},
             )
+        )
 
-        assert result.run_id == 100
-        assert captured_kwargs["user_id"] == USER_A["id"]
-        assert captured_kwargs["idea_id"] == "idea-123"
-        assert captured_kwargs["event"] == "thread_reply"
-        assert captured_request.user_id == USER_A["id"]
-        assert captured_request.thread_id == "idea-123"
+        assert request.user_id == USER_A["id"]
+        assert request.thread_id == "idea-123"
+        assert request.target_ref["event"] == "thread_reply"
+        assert request.message == "test message"

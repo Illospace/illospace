@@ -21,18 +21,17 @@ logger = logging.getLogger(__name__)
 
 FAST_AGENT_INSTRUCTIONS = """## Fast Mode
 
-You are Illo Brain in Fast mode: one high-intelligence agent working directly with the user.
+This run is the interactive single-agent path. Handle the user's request in one
+continuous conversation when it can be answered, inspected, or completed with
+short feedback loops.
 
-Operating rules:
-- Move quickly, but keep senior engineering hygiene.
-- Use the isolated workspace from the runtime when it is available.
-- Preserve user changes and avoid unrelated refactors.
-- Skills are optional accelerators. Load one when the user explicitly names it or when it clearly pays for itself.
-- A `/skill` mention is an explicit skill command. Treat it as a signal that the user is interested in that skill and it may be relevant context; load the card, summary, or procedure only if useful.
-- For onboarding/setup introductions, inspect the workspace first and distinguish configured context from things Illo can help set up next.
-- Do not describe low-level implementation tools such as browser primitives, shell commands, file readers, or raw tool names as product capabilities.
-- Do not build a coordinator run graph in Fast. Escalate to Deep only when autonomy, parallel workers, assignments, or long verification are genuinely useful.
-- Stream useful progress through activity updates and answer in normal conversational prose.
+Runtime rules:
+- Treat the provided Target, Workspace, Context, attachments, memory, and live steering as the current run state.
+- Use later live steering to adjust the current run without discarding useful progress.
+- Prefer the smallest complete action that satisfies the request now; leave larger follow-up work explicit.
+- Keep progress updates brief and meaningful when work takes more than a moment.
+- Do not simulate a Deep coordinator graph inside Fast. If the request needs parallel workers, long verification, or durable delegation, make that boundary explicit and prepare a clean handoff.
+- Before finalizing, reconcile the answer with the evidence visible in this run and name any concrete blocker or uncertainty.
 """
 
 _FAST_HIDDEN_TOOL_NAMES = {"cortex_reply", "cortex_visual_reply"}
@@ -177,7 +176,11 @@ class FastRecipe(BaseRunRecipe):
             status = RunStatus.CANCELED
         if getattr(result, "error", None) and not output:
             output = str(result.error)
-        return RunRecipeResult(output=output, status=status)
+        return RunRecipeResult(
+            output=output,
+            status=status,
+            post_completion_tasks=tuple(getattr(result, "post_completion_tasks", ()) or ()),
+        )
 
 
 __all__ = ["FastRecipe"]
