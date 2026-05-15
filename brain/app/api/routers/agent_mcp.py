@@ -154,7 +154,10 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             (
                 "Ask Illo for private workspace context without creating a visible thread. "
                 "Use when the personal agent needs Illo's workspace knowledge, team memory, "
-                "or project context before doing work. Poll with illo_get_ask."
+                "or project context before doing work. This is read/context mode, not "
+                "team-visible coordination; create or post to a visible thread with "
+                "trigger_illo=true when Illo should coordinate or hand off work. Poll "
+                "with illo_get_ask."
             ),
             {
                 "question": {"type": "string", "description": "Question for Illo's headless context agent."},
@@ -412,6 +415,7 @@ async def _handle_mcp_request(
             await _broadcast_thread_result(tool_payload, org_id=principal.org_id)
         return _result(req_id, _tool_result(tool_payload))
     except Exception as exc:
+        await db.rollback()
         return _result(req_id, _tool_error(str(exc)))
 
 

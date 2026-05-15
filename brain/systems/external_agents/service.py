@@ -58,6 +58,14 @@ DEFAULT_BRIDGE_SCOPES = (
     SCOPE_ILLO_THREAD_WRITE,
 )
 
+HEADLESS_ASK_BLOCKED_TOOLS = (
+    "cortex_reply",
+    "cortex_visual_reply",
+    "manage_idea",
+    "manage_workspace_app",
+    "post_chat_message",
+)
+
 TASK_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "canceled"}
 CONNECTION_ADMIN_ROLES = {"owner", "admin"}
 
@@ -1324,12 +1332,7 @@ def create_headless_ask(
                 "headless": True,
                 "tool_policy": {
                     "mode": "read_mostly",
-                    "blocked_tools": [
-                        "cortex_reply",
-                        "cortex_visual_reply",
-                        "post_chat_message",
-                        "manage_workspace_app",
-                    ],
+                    "blocked_tools": list(HEADLESS_ASK_BLOCKED_TOOLS),
                 },
             },
         ),

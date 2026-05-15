@@ -307,3 +307,141 @@ async def test_hosted_mcp_create_thread_commits_before_broadcasting():
     content = payload["result"]["content"][0]["text"]
     assert json.loads(content)["idea"]["id"] == "idea-1"
     assert order[:2] == ["commit", "broadcast:thread_message"]
+
+
+async def test_hosted_mcp_create_thread_routes_trigger_when_requested():
+    order: list[str] = []
+    session = _AsyncSession(order)
+    idea = SimpleNamespace(
+        id="idea-1",
+        title="Coordinate setup",
+        description=None,
+        attachments=[],
+        status="active",
+        org_id="org-1",
+        origin="external_agent",
+        origin_ref=None,
+    )
+    message = SimpleNamespace(
+        id=10,
+        idea_id="idea-1",
+        role="user",
+        content="Please coordinate with JB and Axel",
+        attachments=[],
+        metadata_={},
+        user_id="user-1",
+        message_type="trigger",
+        created_at=datetime.now(timezone.utc),
+    )
+    route_result = MagicMock()
+    route_result.to_response.return_value = {"ok": True, "route": "run", "run_id": 123}
+
+    async def broadcast(event_type, payload, **_kwargs):
+        order.append(f"broadcast:{event_type}")
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.external_agents.create_thread_from_agent",
+        return_value=(idea, message, []),
+    ), patch(
+        "brain.app.triggers.router.route_trigger",
+        return_value=route_result,
+    ) as route_trigger, patch(
+        "brain.app.api.routers.agent_bridge.ws_manager.broadcast_product_event",
+        new=AsyncMock(side_effect=broadcast),
+    ):
+        response = await _request(
+            "POST",
+            "/mcp",
+            session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_create_thread",
+                    "arguments": {
+                        "title": "Coordinate setup",
+                        "body": "Please coordinate with JB and Axel",
+                        "trigger_illo": True,
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    result = json.loads(response.json()["result"]["content"][0]["text"])
+    assert result["trigger"] == {"ok": True, "route": "run", "run_id": 123}
+    route_trigger.assert_called_once()
+    trigger = route_trigger.call_args.args[0]
+    assert trigger.event_type == "cortex.thread_reply"
+    assert trigger.target["idea_id"] == "idea-1"
+    assert "Please coordinate with JB and Axel" in trigger.payload["run_message"]
+    assert order[:2] == ["commit", "broadcast:thread_message"]
+
+
+async def test_hosted_mcp_create_thread_rolls_back_when_trigger_fails():
+    order: list[str] = []
+    session = _AsyncSession(order)
+    idea = SimpleNamespace(
+        id="idea-1",
+        title="Dead message",
+        description=None,
+        attachments=[],
+        status="active",
+        org_id="org-1",
+        origin="external_agent",
+        origin_ref=None,
+    )
+    message = SimpleNamespace(
+        id=10,
+        idea_id="idea-1",
+        role="user",
+        content="This should not persist without a trigger",
+        attachments=[],
+        metadata_={},
+        user_id="user-1",
+        message_type="trigger",
+        created_at=datetime.now(timezone.utc),
+    )
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.external_agents.create_thread_from_agent",
+        return_value=(idea, message, []),
+    ), patch(
+        "brain.app.api.routers.agent_mcp._run_trigger_if_requested",
+        side_effect=ImportError("cannot import name 'route_trigger'"),
+    ), patch(
+        "brain.app.api.routers.agent_bridge.ws_manager.broadcast_product_event",
+        new=AsyncMock(),
+    ) as broadcast:
+        response = await _request(
+            "POST",
+            "/mcp",
+            session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_create_thread",
+                    "arguments": {
+                        "title": "Dead message",
+                        "body": "This should not persist without a trigger",
+                        "trigger_illo": True,
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is True
+    assert order == ["rollback"]
+    broadcast.assert_not_called()

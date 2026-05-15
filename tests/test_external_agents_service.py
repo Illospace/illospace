@@ -1,13 +1,72 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import re
+import sqlite3
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
+from sqlalchemy.orm import Session
 
 from brain.systems.external_agents import service
+from brain.platform.db.models.idea import Idea, IdeaThread, UserMention
+from brain.platform.db.models.notification import (
+    NOTIFICATION_KIND_WORKSPACE_MENTION,
+    NotificationEvent,
+)
+from brain.platform.db.models.org import Org, User
+
+
+ORG_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1"
+OWNER_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1"
+TEAMMATE_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2"
+
+
+def _patch_sqlite_for_pg_types():
+    if not hasattr(SQLiteTypeCompiler, "visit_JSONB"):
+        SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
+    if getattr(SQLiteDDLCompiler, "_illo_external_agent_jsonb_patch", False):
+        return
+
+    original = SQLiteDDLCompiler.get_column_default_string
+
+    def patched(self, column, **kw):
+        result = original(self, column, **kw)
+        if result:
+            result = re.sub(r"::jsonb", "", result)
+        return result
+
+    SQLiteDDLCompiler.get_column_default_string = patched
+    SQLiteDDLCompiler._illo_external_agent_jsonb_patch = True
+
+
+def _register_sqlite_functions(dbapi_conn, _connection_record):
+    dbapi_conn.create_function("NOW", 0, lambda: datetime.now(timezone.utc).isoformat())
+    dbapi_conn.create_function("gen_random_uuid", 0, lambda: str(uuid.uuid4()))
+
+
+def _sqlite_session() -> Session:
+    _patch_sqlite_for_pg_types()
+    sqlite3.register_adapter(list, lambda value: json.dumps(value))
+    sqlite3.register_adapter(dict, lambda value: json.dumps(value))
+    engine = create_engine("sqlite://", echo=False)
+    event.listen(engine, "connect", _register_sqlite_functions)
+    Org.__table__.create(engine, checkfirst=True)
+    User.__table__.create(engine, checkfirst=True)
+    Idea.__table__.create(engine, checkfirst=True)
+    IdeaThread.__table__.create(engine, checkfirst=True)
+    UserMention.__table__.create(engine, checkfirst=True)
+    NotificationEvent.__table__.create(engine, checkfirst=True)
+    return Session(engine)
 
 
 def _load_bridge_module():
@@ -48,6 +107,88 @@ def test_headless_thread_ids_use_external_agent_namespace():
     )
 
     assert f"external-agent:{principal.connection_id}:ask-1" == "external-agent:conn-1:ask-1"
+
+
+def test_headless_ask_blocks_thread_mutation_tools():
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+            self.flush_count = 0
+
+        def add(self, row):
+            self.added.append(row)
+
+        def flush(self):
+            self.flush_count += 1
+
+        def scalar(self, _stmt):
+            return None
+
+    principal = service.AgentBridgePrincipal(
+        connection_id="conn-1",
+        org_id="org-1",
+        owner_user_id="user-1",
+        token_id="token-1",
+        scopes=frozenset(service.DEFAULT_BRIDGE_SCOPES),
+        connection_display_name="Hermes",
+        agent_kind="hermes",
+    )
+    captured_requests = []
+
+    def fake_create_run(_session, request):
+        captured_requests.append(request)
+        return SimpleNamespace(id=42)
+
+    with patch("brain.systems.external_agents.service._create_agent_run", side_effect=fake_create_run):
+        task = service.create_headless_ask(
+            FakeSession(),
+            principal,
+            question="What should I know before replying?",
+        )
+
+    assert task.illo_run_id == 42
+    blocked_tools = captured_requests[0].metadata["tool_policy"]["blocked_tools"]
+    assert "manage_idea" in blocked_tools
+    assert "post_chat_message" in blocked_tools
+
+
+def test_create_thread_from_agent_notifies_teammate_with_unified_notification():
+    db = _sqlite_session()
+    db.add(Org(id=ORG_ID, name="Test Org", slug="test-org"))
+    db.add(User(id=OWNER_ID, org_id=ORG_ID, name="Reda", email="reda@test.com"))
+    db.add(User(id=TEAMMATE_ID, org_id=ORG_ID, name="JB", email="jb@test.com"))
+    db.flush()
+    principal = service.AgentBridgePrincipal(
+        connection_id="conn-1",
+        org_id=ORG_ID,
+        owner_user_id=OWNER_ID,
+        token_id="token-1",
+        scopes=frozenset(service.DEFAULT_BRIDGE_SCOPES),
+        connection_display_name="Codex Desktop",
+        agent_kind="codex",
+    )
+
+    idea, thread, notified = service.create_thread_from_agent(
+        db,
+        principal,
+        title="Install Illo MCP",
+        body="Please install the new MCP bridge.",
+        teammate_user_ids=[TEAMMATE_ID],
+    )
+
+    assert str(idea.id)
+    assert thread.message_type == "agent_share"
+    assert notified == [TEAMMATE_ID]
+
+    mention = db.scalars(select(UserMention)).one()
+    assert mention.user_id == TEAMMATE_ID
+    assert mention.thread_message_id == thread.id
+
+    notification = db.scalars(select(NotificationEvent)).one()
+    assert notification.user_id == TEAMMATE_ID
+    assert notification.kind == NOTIFICATION_KIND_WORKSPACE_MENTION
+    assert notification.idea_id == str(idea.id)
+    assert notification.payload["thread_message_id"] == thread.id
 
 
 def test_fake_bridge_adapter_echoes_task_without_network():
