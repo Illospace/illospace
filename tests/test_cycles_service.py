@@ -250,6 +250,14 @@ def test_validate_nonempty_trimmed_rejects_blank_text():
         service.validate_nonempty_trimmed("   ", "name")
 
 
+def test_cycle_router_bad_request_returns_400():
+    with pytest.raises(cycles_router.HTTPException) as caught:
+        raise cycles_router._bad_request(ValueError("Unknown timezone: Mars/Base"))
+
+    assert caught.value.status_code == 400
+    assert caught.value.detail == "Unknown timezone: Mars/Base"
+
+
 def _cycle_for_serialization(*, schedule_expr: str, timezone_name: str) -> Cycle:
     now = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
     cycle = Cycle()
