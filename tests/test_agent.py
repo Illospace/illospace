@@ -36,7 +36,6 @@ def _mock_llm_client(mock_anthropic_client, provider="anthropic"):
     llm.is_oauth = False
     llm.extra_headers = {}
     llm.token_prefix = "sk-ant-api03-test" if provider == "anthropic" else "sk-openai-test"
-    llm.system_prompt_prefix = ""
     llm.get_extra_headers.return_value = {}
     llm.auth_mode = "api_key"
 

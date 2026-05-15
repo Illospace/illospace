@@ -12,7 +12,6 @@ def _make_llm_mock(is_oauth: bool, client: MagicMock):
     llm.is_oauth = is_oauth
     llm.extra_headers = {"anthropic-beta": "oauth-2025-04-20"} if is_oauth else {}
     llm.token_prefix = "sk-ant-oat01-real" if is_oauth else "sk-ant-api03-test"
-    llm.system_prompt_prefix = "You are Claude Code, Anthropic's official CLI for Claude." if is_oauth else ""
     llm.get_extra_headers.return_value = dict(llm.extra_headers)
     return llm
 

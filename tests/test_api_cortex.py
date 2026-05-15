@@ -490,11 +490,19 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
         )
 
     thread_rows = [obj for obj in added if obj.__class__.__name__ == "IdeaThread"]
+    idea_rows = [obj for obj in added if obj.__class__.__name__ == "Idea"]
     assert payload["created"] is True
     assert payload["thread_message_id"] == 42
     assert payload["run_started"] is False
+    assert idea_rows[0].origin == "illo_created"
+    assert thread_rows[0].role == "illo"
+    assert thread_rows[0].user_id is None
+    assert thread_rows[0].message_type == "agent_response"
     assert thread_rows[0].content == "Inspect vault and AWS credential handoff path."
     assert thread_rows[0].metadata_["source"] == "manage_idea.create"
+    assert thread_rows[0].metadata_["author"] == "illo"
+    assert thread_rows[0].metadata_["requested_by_user_id"] == "user-1"
+    assert thread_rows[0].metadata_["owner_user_id"] == "user-1"
     assert thread_rows[0].metadata_["created_by_run_id"] == 7
     assert published == [("idea_created", {"idea_id": "idea-created", "title": "Check vault state"})]
 
@@ -555,7 +563,10 @@ async def test_manage_idea_create_can_handoff_owner(monkeypatch):
     assert payload["created"] is True
     assert payload["idea"]["user_id"] == "target-user"
     assert idea_rows[0].user_id == "target-user"
-    assert thread_rows[0].user_id == "user-1"
+    assert thread_rows[0].role == "illo"
+    assert thread_rows[0].user_id is None
+    assert thread_rows[0].metadata_["requested_by_user_id"] == "user-1"
+    assert thread_rows[0].metadata_["owner_user_id"] == "target-user"
 
 
 async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch):

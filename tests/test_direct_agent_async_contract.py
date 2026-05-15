@@ -11,7 +11,6 @@ class _FakeLLM:
     auth_mode = "api_key"
     token_prefix = "sk-test"
     is_oauth = False
-    system_prompt_prefix = ""
 
     def build_request_headers(self, **_kwargs):
         return {}

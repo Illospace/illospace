@@ -1113,6 +1113,28 @@ def principalish_user_name(session: Session, user_id: str) -> str:
     return user.name if user is not None and user.name else "Someone"
 
 
+def request_source_context(
+    principal: AgentBridgePrincipal,
+    *,
+    surface: str,
+    visibility: str,
+    permission: str,
+    tool_name: str | None = None,
+) -> dict[str, Any]:
+    context = {
+        "surface": surface,
+        "acting_user_id": principal.owner_user_id,
+        "personal_agent": principal.connection_display_name,
+        "personal_agent_kind": principal.agent_kind,
+        "connection_id": principal.connection_id,
+        "visibility": visibility,
+        "permission": permission,
+    }
+    if tool_name:
+        context["tool"] = tool_name
+    return context
+
+
 def create_thread_from_agent(
     session: Session,
     principal: AgentBridgePrincipal,
@@ -1255,6 +1277,17 @@ def create_headless_ask(
     metadata: Mapping[str, Any] | None = None,
 ) -> ExternalAgentTaskRow:
     task_id = str(uuid.uuid4())
+    metadata = dict(metadata or {})
+    metadata.setdefault(
+        "request_source",
+        request_source_context(
+            principal,
+            surface="mcp_personal_agent" if metadata.get("mcp_tool") else "personal_agent_bridge",
+            visibility="headless_private",
+            permission="private_workspace_context",
+            tool_name=str(metadata.get("mcp_tool") or "") or None,
+        ),
+    )
     task = ExternalAgentTaskRow(
         id=task_id,
         org_id=principal.org_id,
@@ -1266,7 +1299,7 @@ def create_headless_ask(
         input_parts=[{"type": "ask_illo", "question": str(question), "context": dict(context or {})}],
         status="queued",
         idempotency_key=f"ask:{task_id}",
-        metadata_={**dict(metadata or {}), "headless": True},
+        metadata_={**metadata, "headless": True},
     )
     session.add(task)
     session.flush()
@@ -1288,6 +1321,7 @@ def create_headless_ask(
                 "workspace_ref": {"source": "external_agent_bridge", "mode": "headless"},
                 "model_policy": {"tier": "standard", "thinking": "medium"},
                 "metadata": {
+                    **metadata,
                     "origin": "external_agent_headless_ask",
                     "external_agent_connection_id": principal.connection_id,
                     "external_agent_task_id": task_id,
@@ -1384,6 +1418,7 @@ __all__ = [
     "create_external_task_for_idea",
     "create_headless_ask",
     "create_thread_from_agent",
+    "request_source_context",
     "fail_task",
     "generate_connection_token",
     "get_headless_ask",
