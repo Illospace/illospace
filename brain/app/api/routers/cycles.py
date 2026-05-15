@@ -198,16 +198,24 @@ async def update_cycle(
         await _validate_target_idea(db, updates["target_idea_id"], user)
 
     try:
+        next_timezone = cycle.timezone
+        if "timezone" in updates and updates["timezone"] is not None:
+            next_timezone = validate_timezone_name(updates["timezone"])
+
+        next_schedule_expr = cycle.schedule_expr
+        if "run_at" in updates and updates["run_at"] is not None:
+            next_schedule_expr = build_one_time_schedule_expr(updates["run_at"], next_timezone)
+        elif "schedule_expr" in updates and updates["schedule_expr"] is not None:
+            next_schedule_expr = validate_schedule_expr(updates["schedule_expr"], next_timezone)
+
+        next_run_at = compute_next_run_at(next_schedule_expr, next_timezone)
+
         if "name" in updates and updates["name"] is not None:
             cycle.name = validate_nonempty_trimmed(updates["name"], "name")
         if "prompt" in updates and updates["prompt"] is not None:
             cycle.prompt = validate_nonempty_trimmed(updates["prompt"], "prompt")
-        if "timezone" in updates and updates["timezone"] is not None:
-            cycle.timezone = validate_timezone_name(updates["timezone"])
-        if "run_at" in updates and updates["run_at"] is not None:
-            cycle.schedule_expr = build_one_time_schedule_expr(updates["run_at"], cycle.timezone)
-        if "schedule_expr" in updates and updates["schedule_expr"] is not None:
-            cycle.schedule_expr = validate_schedule_expr(updates["schedule_expr"], cycle.timezone)
+        cycle.timezone = next_timezone
+        cycle.schedule_expr = next_schedule_expr
         if "enabled" in updates and updates["enabled"] is not None:
             cycle.enabled = updates["enabled"]
         if "model_override" in updates:
@@ -229,7 +237,7 @@ async def update_cycle(
         cycle.execution_mode = REUSABLE_THREAD_EXECUTION_MODE
         cycle.reopen_archived = True
 
-        cycle.next_run_at = compute_next_run_at(cycle.schedule_expr, cycle.timezone)
+        cycle.next_run_at = next_run_at
     except ValueError as exc:
         raise _bad_request(exc) from exc
     await db.flush()

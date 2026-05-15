@@ -60,6 +60,30 @@ class _AllResult:
         return list(self._values)
 
 
+
+class _RouterCycleResult:
+    def __init__(self, cycle):
+        self._cycle = cycle
+
+    def first(self):
+        return self._cycle
+
+
+class _RouterCycleSession:
+    def __init__(self, cycle):
+        self._cycle = cycle
+        self.flushed = False
+
+    def scalars(self, statement):
+        return _RouterCycleResult(self._cycle)
+
+    def execute(self, statement):
+        return _FirstResult((self._cycle.target_idea_id,))
+
+    def flush(self):
+        self.flushed = True
+
+
 class _ExecuteCycleSession:
     def __init__(self, *, run, cycle, idea, owner=None, expected_run_id=None):
         self._scalar_values = [run, cycle, idea]
@@ -282,6 +306,59 @@ def _cycle_for_serialization(*, schedule_expr: str, timezone_name: str) -> Cycle
     cycle.updated_at = now
     return cycle
 
+
+
+@pytest.mark.asyncio
+async def test_cycle_update_recomputes_schedule_with_new_timezone_before_saving():
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="UTC",
+    )
+    db = _RouterCycleSession(cycle)
+
+    body = cycles_router.CycleUpdate(
+        schedule_expr="0 9 * * 1",
+        timezone="America/Toronto",
+    )
+    response = await cycles_router.update_cycle(
+        cycle.id,
+        body,
+        db=db,
+        user={"id": cycle.user_id, "org_id": None},
+    )
+
+    assert response["schedule_expr"] == "0 9 * * 1"
+    assert response["timezone"] == "America/Toronto"
+    assert response["next_run_at"].tzinfo is not None
+    assert cycle.schedule_expr == "0 9 * * 1"
+    assert cycle.timezone == "America/Toronto"
+    assert db.flushed is True
+
+
+@pytest.mark.asyncio
+async def test_cycle_update_validation_failure_does_not_mutate_or_flush():
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="America/Toronto",
+    )
+    db = _RouterCycleSession(cycle)
+
+    body = cycles_router.CycleUpdate(
+        schedule_expr="0 9 * * 1",
+        timezone="Mars/Base",
+    )
+    with pytest.raises(cycles_router.HTTPException) as caught:
+        await cycles_router.update_cycle(
+            cycle.id,
+            body,
+            db=db,
+            user={"id": cycle.user_id, "org_id": None},
+        )
+
+    assert caught.value.status_code == 400
+    assert cycle.timezone == "America/Toronto"
+    assert cycle.schedule_expr == "0 9 * * *"
+    assert db.flushed is False
 
 def test_serialize_cycle_does_not_raise_for_legacy_bad_timezone():
     cycle = _cycle_for_serialization(
