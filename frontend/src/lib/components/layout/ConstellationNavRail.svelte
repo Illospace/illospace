@@ -2,6 +2,13 @@
   import { page } from '$app/stores';
   import ConstellationGlyphIcon from '../constellation/ConstellationGlyphIcon.svelte';
   import IllospaceLogo from './IllospaceLogo.svelte';
+  import {
+    WORKSPACE_PAGE_MODAL_PARAM,
+    buildCortexHrefWithoutWorkspacePage,
+    buildCortexWorkspacePageHref,
+    isWorkspacePageModalId,
+    workspacePageModalIdForPath,
+  } from '$lib/features/cortex/domain/workspacePageModal';
 
   type NavRailGlyph =
     | 'cortex'
@@ -40,8 +47,35 @@
   } = $props();
 
   const shellClass = $derived(['constellation-nav-rail', className].filter(Boolean).join(' '));
+  const activeWorkspacePageModalId = $derived(
+    isWorkspacePageModalId($page.url.searchParams.get(WORKSPACE_PAGE_MODAL_PARAM))
+      ? $page.url.searchParams.get(WORKSPACE_PAGE_MODAL_PARAM)
+      : null,
+  );
+
+  function sourceParamsForNav(): URLSearchParams | undefined {
+    return $page.url.pathname.startsWith('/cortex')
+      ? $page.url.searchParams
+      : undefined;
+  }
+
+  function hrefForItem(item: NavRailItem): string {
+    const workspacePageId = workspacePageModalIdForPath(item.href);
+    if (workspacePageId) {
+      return buildCortexWorkspacePageHref(workspacePageId, sourceParamsForNav());
+    }
+    if (item.href === '/cortex') {
+      return buildCortexHrefWithoutWorkspacePage(sourceParamsForNav());
+    }
+    return item.href;
+  }
 
   function isActive(href: string, pathname: string): boolean {
+    const workspacePageId = workspacePageModalIdForPath(href);
+    if (workspacePageId) {
+      return activeWorkspacePageModalId === workspacePageId || pathname.startsWith(href);
+    }
+    if (href === '/cortex' && activeWorkspacePageModalId) return false;
     if (href === '/') return pathname === '/';
     return pathname === href || pathname.startsWith(`${href}/`);
   }
@@ -54,9 +88,9 @@
 >
   <div class="constellation-nav-rail-header">
     <a
-      href="/cortex"
+      href={buildCortexHrefWithoutWorkspacePage(sourceParamsForNav())}
       class="constellation-nav-rail-brand"
-      aria-current={$page.url.pathname.startsWith('/cortex') ? 'page' : undefined}
+      aria-current={$page.url.pathname.startsWith('/cortex') && !activeWorkspacePageModalId ? 'page' : undefined}
       aria-label={`Go to ${brandLabel}`}
       title={brandLabel}
     >
@@ -102,7 +136,7 @@
   <nav class="constellation-nav-rail-nav" aria-label="Workspace sections">
     {#each items as item}
       <a
-        href={item.href}
+        href={hrefForItem(item)}
         class="constellation-nav-rail-item"
         class:is-active={isActive(item.href, $page.url.pathname)}
         aria-current={isActive(item.href, $page.url.pathname) ? 'page' : undefined}

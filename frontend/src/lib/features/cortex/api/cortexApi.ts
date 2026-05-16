@@ -19,7 +19,6 @@ export type BindProjectContextGitHubTokenInput = Parameters<typeof api.bindProje
 export type ProjectContextProfile = Awaited<ReturnType<typeof api.listProjectContextProfiles>>[number];
 export type ProjectContextAttachment = Awaited<ReturnType<typeof api.listIdeaProjectContext>>[number];
 export type UploadedCortexFile = Awaited<ReturnType<typeof api.uploadFile>>;
-export type CortexTimelineItem = Awaited<ReturnType<typeof api.timelineData>>;
 export type SlashCommand = Awaited<ReturnType<typeof api.slashCommands>>[number];
 
 type CortexApiMethods = {
@@ -52,7 +51,6 @@ type CortexApiMethods = {
   delegationStats: typeof api.delegationStats;
   detectBranches: typeof api.detectBranches;
   splitIdea: typeof api.splitIdea;
-  timelineData: (limit?: number) => Promise<CortexTimelineItem>;
   uploadFile: (file: File) => Promise<UploadedCortexFile>;
   notifyCortex: typeof api.notifyCortex;
   updateProfile: typeof api.updateProfile;
@@ -96,7 +94,6 @@ export const cortexApi = pickTypedApiMethods<CortexApiMethods>([
   'delegationStats',
   'detectBranches',
   'splitIdea',
-  'timelineData',
   'uploadFile',
   'notifyCortex',
   'updateProfile',
@@ -140,7 +137,6 @@ export const {
   delegationStats,
   detectBranches,
   splitIdea,
-  timelineData,
   uploadFile,
   notifyCortex,
   updateProfile,

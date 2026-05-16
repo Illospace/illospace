@@ -1466,6 +1466,10 @@
     flex: 0 0 auto;
   }
 
+  .thread-header-title-row :global(.thread-header-action-button:hover:not(:disabled)) {
+    transform: none;
+  }
+
   .thread-header-title-row :global(.thread-title-action-button.is-loading svg) {
     animation: thread-title-action-spin 720ms linear infinite;
   }
@@ -1476,7 +1480,7 @@
     gap: 6px;
     margin-left: auto;
     margin-right: -2px;
-    padding: 2px;
+    padding: 3px 2px 2px;
   }
 
   @keyframes thread-title-action-spin {

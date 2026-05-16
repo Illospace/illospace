@@ -53,6 +53,33 @@ def test_thread_markdown_uses_readable_prose_primitive():
     assert ".markdown-view :global(h1)" not in visual_block
 
 
+def test_workspace_pages_open_as_cortex_modals():
+    nav_rail = (REPO_ROOT / "frontend/src/lib/components/layout/ConstellationNavRail.svelte").read_text()
+    cortex_route = (
+        REPO_ROOT / "frontend/src/lib/features/cortex/components/CortexWorkspaceRoute.svelte"
+    ).read_text()
+    modal_shell = (
+        REPO_ROOT / "frontend/src/lib/features/cortex/components/WorkspacePageModal.svelte"
+    ).read_text()
+    modal_contract = (
+        REPO_ROOT / "frontend/src/lib/features/cortex/domain/workspacePageModal.ts"
+    ).read_text()
+
+    assert "buildCortexWorkspacePageHref" in nav_rail
+    assert "workspacePageModalIdForPath(item.href)" in nav_rail
+    assert "WorkspacePageModal" in cortex_route
+    assert "activeWorkspacePageModalId" in cortex_route
+    for section in ["cycles", "skills", "team", "vault", "system"]:
+        assert f"case '{section}':" in cortex_route
+        assert f"id: '{section}'" in modal_contract
+        route_redirect = (REPO_ROOT / f"frontend/src/routes/{section}/+page.ts").read_text()
+        assert f"buildCortexWorkspacePageHref('{section}'" in route_redirect
+
+    assert 'role="dialog"' in modal_shell
+    assert "workspace-page-modal__header" in modal_shell
+    assert "ConstellationIconButton" in modal_shell
+
+
 def test_frontend_theme_uses_named_theme_and_color_scheme_axis():
     app_html = (REPO_ROOT / "frontend/src/app.html").read_text()
     theme_store = (REPO_ROOT / "frontend/src/lib/stores/theme.svelte.ts").read_text()

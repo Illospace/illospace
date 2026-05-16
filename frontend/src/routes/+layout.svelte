@@ -12,13 +12,25 @@
   import { dev } from '$app/environment';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
+  import {
+    WORKSPACE_PAGE_MODAL_PARAM,
+    isWorkspacePageModalId,
+  } from '$lib/features/cortex/domain/workspacePageModal';
 
   let { children } = $props();
   let currentPath = $derived($page.url.pathname);
+  let workspacePageModalId = $derived(
+    isWorkspacePageModalId($page.url.searchParams.get(WORKSPACE_PAGE_MODAL_PARAM))
+      ? $page.url.searchParams.get(WORKSPACE_PAGE_MODAL_PARAM)
+      : null,
+  );
   let isLoginPage = $derived(currentPath === '/login');
   let isOnboardingPage = $derived(currentPath.startsWith('/onboarding'));
   let isSystemPage = $derived(
-    currentPath.startsWith('/system') || currentPath.startsWith('/auth/') || isOnboardingPage,
+    currentPath.startsWith('/system')
+      || currentPath.startsWith('/auth/')
+      || isOnboardingPage
+      || (currentPath.startsWith('/cortex') && workspacePageModalId === 'system'),
   );
   let isCortexPage = $derived(currentPath.startsWith('/cortex'));
   let isVaultPreviewPage = $derived(

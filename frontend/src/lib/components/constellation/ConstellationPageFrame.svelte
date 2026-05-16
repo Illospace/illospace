@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { getContext, type Snippet } from 'svelte';
 
   type Props = {
     eyebrow?: string;
@@ -30,7 +30,9 @@
   const stackClass = $derived(
     ['constellation-page-frame-content-stack', contentClassName].filter(Boolean).join(' '),
   );
-  const showHeader = $derived(Boolean(eyebrow || title || subtitle || actions));
+  const embeddedInWorkspacePageModal = getContext<boolean>('constellation:workspace-page-modal') === true;
+  const showHeaderCopy = $derived(!embeddedInWorkspacePageModal && Boolean(eyebrow || title || subtitle));
+  const showHeader = $derived(Boolean(showHeaderCopy || actions));
 </script>
 
 <section class={rootClass}>
@@ -40,19 +42,21 @@
   <div class="constellation-page-frame-stage">
     <div class="constellation-page-frame-shell">
       {#if showHeader}
-        <header class={headerClass}>
+        <header class={headerClass} class:embedded-in-workspace-page-modal={embeddedInWorkspacePageModal}>
           <div class="constellation-page-frame-header-head">
-            <div class="constellation-page-frame-header-copy">
-              {#if eyebrow}
-                <p class="constellation-page-frame-header-eyebrow">{eyebrow}</p>
-              {/if}
-              {#if title}
-                <h1 class="constellation-page-frame-header-title">{title}</h1>
-              {/if}
-              {#if subtitle}
-                <p class="constellation-page-frame-header-subtitle">{subtitle}</p>
-              {/if}
-            </div>
+            {#if showHeaderCopy}
+              <div class="constellation-page-frame-header-copy">
+                {#if eyebrow}
+                  <p class="constellation-page-frame-header-eyebrow">{eyebrow}</p>
+                {/if}
+                {#if title}
+                  <h1 class="constellation-page-frame-header-title">{title}</h1>
+                {/if}
+                {#if subtitle}
+                  <p class="constellation-page-frame-header-subtitle">{subtitle}</p>
+                {/if}
+              </div>
+            {/if}
 
             {#if actions}
               <div class="constellation-page-frame-header-actions">
@@ -129,11 +133,19 @@
     border-bottom: 1px solid var(--constellation-surface-panel-separator);
   }
 
+  .constellation-page-frame-header.embedded-in-workspace-page-modal {
+    padding: 0 0 14px;
+  }
+
   .constellation-page-frame-header-head {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: 18px;
+  }
+
+  .constellation-page-frame-header.embedded-in-workspace-page-modal .constellation-page-frame-header-head {
+    justify-content: flex-end;
   }
 
   .constellation-page-frame-header-copy {

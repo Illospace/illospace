@@ -1,7 +1,8 @@
 <script lang="ts">
   import { browser } from '$app/environment';
+  import { goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, type Component } from 'svelte';
   import { fly } from 'svelte/transition';
   import type { AppNotification } from '$lib/features/notifications/api/notificationsApi';
   import type { WorkspaceAppRead } from '$lib/features/workspace-apps/api/workspaceAppsApi';
@@ -35,9 +36,17 @@
   import { workspaceApps } from '$lib/stores/workspaceApps.svelte';
   import { workspacePins } from '$lib/stores/workspacePins.svelte';
   import CortexLocalPreviewControls from '$lib/features/cortex/components/LocalPreviewControls.svelte';
+  import WorkspacePageModal from '$lib/features/cortex/components/WorkspacePageModal.svelte';
   import WorkspaceChatDock from '$lib/features/cortex/components/chat/WorkspaceChatDock.svelte';
   import type { CortexChatDockTopLevelMode } from '$lib/features/cortex/components/chat/ChatDockSeam.svelte';
   import { api } from '$lib/api/client';
+  import {
+    WORKSPACE_PAGE_MODAL_PARAM,
+    WORKSPACE_PAGE_MODAL_SECTIONS,
+    buildCortexHrefWithoutWorkspacePage,
+    isWorkspacePageModalId,
+    type WorkspacePageModalId,
+  } from '$lib/features/cortex/domain/workspacePageModal';
 
   const RUNTIME_READY_ONBOARDING_PARAM = 'runtime-ready';
   const WORKSPACE_ARRIVAL_DURATION_MS = 1320;
@@ -71,6 +80,10 @@
   let runtimeReadyIntroStarting = $state(false);
   let runtimeReadyIntroTimer: ReturnType<typeof setTimeout> | null = null;
   let runtimeReadyComposerDraft = $state<RuntimeReadyComposerDraft | null>(null);
+  let workspacePageComponent = $state<Component | null>(null);
+  let workspacePageComponentId = $state<WorkspacePageModalId | null>(null);
+  let workspacePageLoading = $state(false);
+  let workspacePageLoadToken = 0;
   let lastRequestedIdeaId = $state<string | null>(null);
   let initialDirectThreadIdeaId = $state<string | null>($page.url.searchParams.get('idea'));
   let directThreadUrlPending = $state(Boolean($page.url.searchParams.get('idea')));
@@ -80,15 +93,20 @@
   let CortexChatDockSeamComponent = $state<typeof import('$lib/features/cortex/components/chat/ChatDockSeam.svelte').default | null>(null);
   let CortexListViewComponent = $state<typeof import('$lib/features/cortex/components/ListView.svelte').default | null>(null);
   let CortexNotificationsMenuComponent = $state<typeof import('$lib/features/notifications/components/NotificationsMenu.svelte').default | null>(null);
-  let CortexOpsComponent = $state<typeof import('$lib/features/cortex/components/OpsOverlay.svelte').default | null>(null);
   let ThreadStageScreenComponent = $state<typeof import('$lib/features/threads/components/ThreadStageScreen.svelte').default | null>(null);
-  let CortexTimelineComponent = $state<typeof import('$lib/features/cortex/components/TimelineOverlay.svelte').default | null>(null);
   let CortexUserMenuComponent = $state<typeof import('$lib/features/cortex/components/menus/UserMenu.svelte').default | null>(null);
   let CortexWorkspaceMenuComponent = $state<typeof import('$lib/features/cortex/components/menus/WorkspaceMenu.svelte').default | null>(null);
   let CortexWorkspacePinMenuComponent = $state<typeof import('$lib/features/cortex/components/menus/WorkspacePinMenu.svelte').default | null>(null);
   let GeneratedAppRendererComponent = $state<typeof import('$lib/features/workspace-apps/components/GeneratedAppOverlay.svelte').default | null>(null);
   let WorkspaceComposerComponent = $state<typeof import('$lib/features/composer/components/WorkspaceComposer.svelte').default | null>(null);
   const activeWorkspaceApp = $derived(workspaceApps.appById(workspaceOverlay.activeWorkspaceAppId));
+  const activeWorkspacePageModalId = $derived.by(() => {
+    const value = $page.url.searchParams.get(WORKSPACE_PAGE_MODAL_PARAM);
+    return isWorkspacePageModalId(value) ? value : null;
+  });
+  const activeWorkspacePageModal = $derived(
+    activeWorkspacePageModalId ? WORKSPACE_PAGE_MODAL_SECTIONS[activeWorkspacePageModalId] : null,
+  );
   const chatPreviewMembers = $derived.by(() => {
     return cortex.teamMembers
       .filter((member) => isLocalPreviewMemberId(member?.id))
@@ -173,6 +191,49 @@
     clearRuntimeReadyOnboardingUrl({ requireIntroIdea: false });
   }
 
+  async function loadWorkspacePageComponentById(id: WorkspacePageModalId): Promise<Component> {
+    switch (id) {
+      case 'cycles':
+        return (await import('../../../../routes/cycles/+page.svelte')).default;
+      case 'skills':
+        return (await import('../../../../routes/skills/+page.svelte')).default;
+      case 'team':
+        return (await import('../../../../routes/team/+page.svelte')).default;
+      case 'vault':
+        return (await import('../../../../routes/vault/+page.svelte')).default;
+      case 'system':
+        return (await import('../../../../routes/system/+page.svelte')).default;
+    }
+  }
+
+  async function ensureWorkspacePageComponent(id: WorkspacePageModalId) {
+    if (workspacePageComponentId === id && workspacePageComponent) return;
+    const token = ++workspacePageLoadToken;
+    workspacePageLoading = true;
+    workspacePageComponent = null;
+    workspacePageComponentId = id;
+    try {
+      const component = await loadWorkspacePageComponentById(id);
+      if (token !== workspacePageLoadToken) return;
+      workspacePageComponent = component;
+    } catch (err: any) {
+      if (token !== workspacePageLoadToken) return;
+      workspacePageComponentId = null;
+      ui.toast(err?.detail || err?.message || 'Workspace page did not open.', 'error');
+      await closeWorkspacePageModal();
+    } finally {
+      if (token === workspacePageLoadToken) workspacePageLoading = false;
+    }
+  }
+
+  async function closeWorkspacePageModal() {
+    if (!browser) return;
+    await goto(buildCortexHrefWithoutWorkspacePage($page.url.searchParams), {
+      keepFocus: true,
+      noScroll: true,
+    });
+  }
+
   $effect(() => {
     const changedAppId = workspaceApps.lastChangedAppId;
     if (!changedAppId || changedAppId === lastAutoOpenedAppId) return;
@@ -181,6 +242,21 @@
     if (!workspaceApps.appById(changedAppId)) return;
     lastAutoOpenedAppId = changedAppId;
     workspaceOverlay.openWorkspaceApp(changedAppId);
+  });
+
+  $effect(() => {
+    const modalId = activeWorkspacePageModalId;
+    if (!modalId) {
+      workspacePageLoadToken += 1;
+      workspacePageComponent = null;
+      workspacePageComponentId = null;
+      workspacePageLoading = false;
+      return;
+    }
+
+    workspaceOverlay.closeWorkspaceAndPinMenus();
+    workspaceOverlay.closeWorkspaceApp();
+    void ensureWorkspacePageComponent(modalId);
   });
 
   function handleThreadOpen(origin: { x: number; y: number; id: string }) {
@@ -607,23 +683,11 @@
     (component) => (CortexNotificationsMenuComponent = component),
     () => import('$lib/features/notifications/components/NotificationsMenu.svelte'),
   );
-  const ensureCortexOpsLoaded = createLazyComponentLoader(
-    'ops',
-    () => CortexOpsComponent,
-    (component) => (CortexOpsComponent = component),
-    () => import('$lib/features/cortex/components/OpsOverlay.svelte'),
-  );
   const ensureThreadStageScreenLoaded = createLazyComponentLoader(
     'thread-stage',
     () => ThreadStageScreenComponent,
     (component) => (ThreadStageScreenComponent = component),
     () => import('$lib/features/threads/components/ThreadStageScreen.svelte'),
-  );
-  const ensureCortexTimelineLoaded = createLazyComponentLoader(
-    'timeline',
-    () => CortexTimelineComponent,
-    (component) => (CortexTimelineComponent = component),
-    () => import('$lib/features/cortex/components/TimelineOverlay.svelte'),
   );
   const ensureCortexUserMenuLoaded = createLazyComponentLoader(
     'user-menu',
@@ -704,14 +768,6 @@
   });
 
   $effect(() => {
-    if (workspaceOverlay.timelineOpen) ensureCortexTimelineLoaded();
-  });
-
-  $effect(() => {
-    if (workspaceOverlay.opsOpen) ensureCortexOpsLoaded();
-  });
-
-  $effect(() => {
     if (workspaceOverlay.userMenuAnchor) ensureCortexUserMenuLoaded();
   });
 
@@ -738,14 +794,19 @@
   }));
 
   function handleKeydown(e: KeyboardEvent) {
+    if (activeWorkspacePageModalId && e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      void closeWorkspacePageModal();
+      return;
+    }
+
     handleWorkspaceKeydown(
       e,
       {
         chatDockExpanded,
         canvasOpen: cortex.canvasOpen,
         activeWorkspaceAppId: workspaceOverlay.activeWorkspaceAppId,
-        opsOpen: workspaceOverlay.opsOpen,
-        timelineOpen: workspaceOverlay.timelineOpen,
         panelOpen: cortex.panelOpen,
       },
       {
@@ -757,11 +818,7 @@
         },
         closeCanvas: () => (cortex.canvasOpen = false),
         closeWorkspaceApp: () => workspaceOverlay.closeWorkspaceApp(),
-        closeOps: () => workspaceOverlay.closeOps(),
-        closeTimeline: () => workspaceOverlay.closeTimeline(),
         closeThread: () => void cortex.selectIdea(null),
-        toggleTimeline: () => workspaceOverlay.toggleTimeline(),
-        toggleOps: () => workspaceOverlay.toggleOps(),
         setConstellationMode: (active) => (cortex.constellationMode = active),
       },
     );
@@ -909,6 +966,7 @@
   class="cortex-page"
   class:panel-open={cortex.panelOpen}
   class:canvas-open={cortex.canvasOpen}
+  class:workspace-page-open={Boolean(activeWorkspacePageModal)}
   class:is-arriving={workspaceArrivalActive}
   style={threadWorkspaceStyle}
 >
@@ -964,10 +1022,6 @@
                 <div class="loading-overlay" aria-live="polite">
                   <div class="loading-pill">Loading cortex...</div>
                 </div>
-              {/if}
-
-              {#if workspaceOverlay.timelineOpen && CortexTimelineComponent}
-                <CortexTimelineComponent visible={workspaceOverlay.timelineOpen} />
               {/if}
 
               {#if cortexSurfaceReady && !cortex.panelOpen && !chatDockExpanded && !workspaceOverlay.activeWorkspaceAppId && CortexArchiveBinMenuComponent}
@@ -1078,6 +1132,15 @@
       </div>
     {/if}
 
+    {#if activeWorkspacePageModal}
+      <WorkspacePageModal
+        section={activeWorkspacePageModal}
+        PageComponent={workspacePageComponent}
+        loading={workspacePageLoading}
+        onclose={closeWorkspacePageModal}
+      />
+    {/if}
+
     {#if workspaceOverlay.userMenuAnchor && CortexUserMenuComponent}
       <CortexUserMenuComponent anchor={workspaceOverlay.userMenuAnchor} onclose={() => workspaceOverlay.closeUserMenu()} />
     {/if}
@@ -1102,12 +1165,6 @@
     {/if}
 
   </div>
-
-  <!-- Ops Console -->
-  {#if workspaceOverlay.opsOpen && CortexOpsComponent}
-    <CortexOpsComponent visible={workspaceOverlay.opsOpen} onclose={() => workspaceOverlay.closeOps()} />
-  {/if}
-
 </div>
 
 <style>

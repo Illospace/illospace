@@ -842,13 +842,12 @@
   }
 
   .composer-chip-group {
-    --composer-menu-border: rgba(240, 240, 250, 0.09);
-    --composer-menu-background: rgba(9, 12, 18, 0.98);
-    --composer-menu-shadow:
-      0 18px 42px rgba(0, 0, 0, 0.32),
-      0 0 0 1px rgba(255, 255, 255, 0.02) inset;
-    --composer-menu-option-hover-background: rgba(240, 240, 250, 0.06);
-    --composer-menu-option-active-background: rgba(240, 240, 250, 0.075);
+    --composer-menu-border: var(--constellation-select-chip-menu-border);
+    --composer-menu-background: var(--constellation-select-chip-menu-background);
+    --composer-menu-shadow: var(--constellation-select-chip-menu-shadow);
+    --composer-menu-option-hover-background: var(--constellation-select-chip-option-hover-background);
+    --composer-menu-option-active-background: var(--constellation-select-chip-option-active-background);
+    --composer-menu-supporting-text: var(--constellation-button-secondary-text);
     --constellation-select-chip-indicator-active-border: rgba(240, 240, 250, 0.34);
     --constellation-select-chip-indicator-active-background: rgba(240, 240, 250, 0.86);
     --constellation-select-chip-indicator-active-shadow: none;
@@ -860,11 +859,7 @@
   }
 
   :global(:root[data-color-scheme='light']) .composer-chip-group {
-    --composer-menu-border: rgba(49, 63, 76, 0.12);
-    --composer-menu-background: rgba(255, 253, 247, 0.98);
-    --composer-menu-shadow: 0 18px 38px rgba(54, 70, 82, 0.13);
-    --composer-menu-option-hover-background: rgba(49, 63, 76, 0.055);
-    --composer-menu-option-active-background: rgba(49, 63, 76, 0.075);
+    --composer-menu-supporting-text: var(--constellation-button-secondary-text);
     --constellation-select-chip-indicator-active-border: rgba(49, 63, 76, 0.34);
     --constellation-select-chip-indicator-active-background: rgba(49, 63, 76, 0.82);
     --constellation-select-chip-indicator-active-shadow: none;
@@ -1009,6 +1004,7 @@
     border-radius: 14px;
     background: var(--composer-menu-background);
     box-shadow: var(--composer-menu-shadow);
+    color: var(--constellation-color-text-primary);
   }
 
   .composer-settings-primary,
@@ -1027,8 +1023,8 @@
   .composer-settings-secondary {
     position: relative;
     display: grid;
-    align-content: start;
-    min-height: 174px;
+    align-items: start;
+    min-height: 150px;
   }
 
   .composer-settings-group-trigger {
@@ -1070,13 +1066,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--constellation-composer-kicker);
+    color: var(--composer-menu-supporting-text);
     font-size: 10.5px;
   }
 
   .composer-settings-group-panel {
     display: grid;
-    gap: 5px;
+    gap: 4px;
     grid-area: 1 / 1;
     min-width: 0;
     opacity: 0;
@@ -1092,7 +1088,7 @@
 
   .composer-settings-heading {
     padding: 0 4px;
-    color: var(--constellation-composer-kicker);
+    color: var(--composer-menu-supporting-text);
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.12em;
@@ -1101,7 +1097,7 @@
 
   .composer-settings-options {
     display: grid;
-    gap: 4px;
+    gap: 3px;
   }
 
   .composer-settings-option {
@@ -1110,7 +1106,7 @@
     justify-content: space-between;
     gap: 8px;
     min-height: 34px;
-    padding: 6px 7px;
+    padding: 7px 8px;
     border: 0;
     border-radius: 9px;
     background: transparent;
@@ -1154,7 +1150,7 @@
   }
 
   .composer-settings-option-description {
-    color: var(--constellation-composer-kicker);
+    color: var(--composer-menu-supporting-text);
     font-size: 10.5px;
     line-height: 1.2;
   }

@@ -11,8 +11,6 @@ export type ThreadTraceZipDownload = Awaited<ReturnType<typeof api.downloadThrea
 export type RunGraph = Awaited<ReturnType<typeof api.runGraph>>;
 export type RunTraceZipDownload = Awaited<ReturnType<typeof api.downloadRunTraceZip>>;
 export type RunStatus = Awaited<ReturnType<typeof api.runStatus>>;
-export type ActiveOpsRun = Awaited<ReturnType<typeof api.opsActive>>[number];
-export type RecentOpsRun = Awaited<ReturnType<typeof api.opsRecent>>[number];
 export type SkillFeedbackInput = Parameters<typeof api.skillFeedback>[1];
 export type UploadedThreadFile = Awaited<ReturnType<typeof api.uploadFile>>;
 export type UploadPreview = Awaited<ReturnType<typeof api.previewUpload>>;
@@ -29,7 +27,6 @@ type ThreadApiMethods = {
   runHistory: (ideaId: string, includeDebug?: boolean) => Promise<ThreadRunHistoryItem[]>;
   approveRun: typeof api.approveRun;
   denyRun: typeof api.denyRun;
-  cancelRun: typeof api.cancelRun;
   steerRun: typeof api.steerRun;
   cancelAllRuns: typeof api.cancelAllRuns;
   runStatus: () => Promise<RunStatus>;
@@ -38,8 +35,6 @@ type ThreadApiMethods = {
   downloadThreadTraceZip: typeof api.downloadThreadTraceZip;
   downloadRunTraceZip: typeof api.downloadRunTraceZip;
   skillFeedback: typeof api.skillFeedback;
-  opsActive: () => Promise<ActiveOpsRun[]>;
-  opsRecent: (limit?: number, includeDebug?: boolean) => Promise<RecentOpsRun[]>;
   getIdea: (id: string) => Promise<Idea>;
   ideaConnections: (ideaId: string) => Promise<Connection[]>;
   activityTimeline: typeof api.activityTimeline;
@@ -61,7 +56,6 @@ export const threadApi = pickTypedApiMethods<ThreadApiMethods>([
   'runHistory',
   'approveRun',
   'denyRun',
-  'cancelRun',
   'steerRun',
   'cancelAllRuns',
   'runStatus',
@@ -70,8 +64,6 @@ export const threadApi = pickTypedApiMethods<ThreadApiMethods>([
   'downloadThreadTraceZip',
   'downloadRunTraceZip',
   'skillFeedback',
-  'opsActive',
-  'opsRecent',
   'getIdea',
   'ideaConnections',
   'activityTimeline',
@@ -92,7 +84,6 @@ export const {
   runHistory,
   approveRun,
   denyRun,
-  cancelRun,
   steerRun,
   cancelAllRuns,
   runStatus,
@@ -101,8 +92,6 @@ export const {
   downloadThreadTraceZip,
   downloadRunTraceZip,
   skillFeedback,
-  opsActive,
-  opsRecent,
   getIdea,
   ideaConnections,
   activityTimeline,
