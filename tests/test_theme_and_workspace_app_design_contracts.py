@@ -77,7 +77,20 @@ def test_workspace_pages_open_as_cortex_modals():
 
     assert 'role="dialog"' in modal_shell
     assert "workspace-page-modal__header" in modal_shell
+    assert "workspace-page-modal__page-actions" in modal_shell
+    assert "registerActions" in modal_shell
+    assert "registerRefreshAction" in modal_shell
+    assert 'name="refresh"' in modal_shell
     assert "ConstellationIconButton" in modal_shell
+    page_frame = (REPO_ROOT / "frontend/src/lib/components/constellation/ConstellationPageFrame.svelte").read_text()
+    assert "registerActions(actions)" in page_frame
+    assert "!embeddedInWorkspacePageModal && Boolean(showHeaderCopy || actions)" in page_frame
+    for section in ["cycles", "skills", "team", "vault", "system"]:
+        route_page = (REPO_ROOT / f"frontend/src/routes/{section}/+page.svelte").read_text()
+        assert "registerRefreshAction" in route_page
+        assert 'name="refresh"' not in route_page
+        assert ">Refresh<" not in route_page
+        assert 'title="Refresh"' not in route_page
 
 
 def test_frontend_theme_uses_named_theme_and_color_scheme_axis():

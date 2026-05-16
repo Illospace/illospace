@@ -1,7 +1,7 @@
 <script lang="ts">
   import { dev } from '$app/environment';
   import { page } from '$app/stores';
-  import { onMount } from 'svelte';
+  import { getContext, onMount } from 'svelte';
 
   import { api, type CycleRead, type CycleRunRead } from '$lib/api/client';
   import {
@@ -17,6 +17,10 @@
     ConstellationSegmentedToggle,
     ConstellationSkeletonBlock,
   } from '$lib/components/constellation';
+  import {
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+    type ConstellationPageFrameModalContext,
+  } from '$lib/components/constellation/constellationPageFrameContext';
   import AiPromptComposer from '$lib/features/composer/components/AiPromptComposer.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import { parseServerDate, relativeTimeAgo } from '$lib/utils/datetime';
@@ -99,6 +103,17 @@
   let search = $state('');
   let filterMode = $state<FilterMode>('all');
   let previewRuns = $state<Record<number, CycleRunRead[]>>({});
+
+  const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+  );
+
+  $effect(() => {
+    return workspacePageModalContext?.registerRefreshAction({
+      label: 'Refresh cycles',
+      onclick: () => loadCycles(selectedCycleId),
+    });
+  });
 
   const defaultTimezone = () =>
     Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -894,12 +909,6 @@
   {#snippet actions()}
     <ConstellationButton variant="secondary" size="sm" onclick={createNewCycle}>
       New cycle
-    </ConstellationButton>
-    <ConstellationButton variant="quiet" size="sm" onclick={() => loadCycles(selectedCycleId)}>
-      {#snippet leadingVisual()}
-        <ConstellationIcon name="refresh" size={14} />
-      {/snippet}
-      Refresh
     </ConstellationButton>
   {/snippet}
 

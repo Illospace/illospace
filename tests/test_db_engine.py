@@ -6,7 +6,7 @@ from sqlalchemy.pool import NullPool
 
 from brain.app.api.deps import get_db
 from brain.kernel import config
-from brain.platform.db import SessionFactory, engine
+from brain.platform.db import SessionFactory, _engine_kwargs_for_environment, engine
 from tests.db_engine_utils import create_async_test_engine
 
 
@@ -50,3 +50,24 @@ async def test_asyncpg_test_engine_disables_pool_reuse_across_event_loops():
         assert isinstance(test_engine.pool, NullPool)
     finally:
         await test_engine.dispose()
+
+
+def test_runtime_engine_disables_pool_reuse_for_inline_runner():
+    kwargs = _engine_kwargs_for_environment({"CORTEX_INLINE_RUNNER": "1"})
+
+    assert kwargs["poolclass"] is NullPool
+    assert "pool_size" not in kwargs
+
+
+def test_runtime_engine_disables_pool_reuse_for_legacy_inline_dispatcher():
+    kwargs = _engine_kwargs_for_environment({"CORTEX_INLINE_DISPATCHER": "true"})
+
+    assert kwargs["poolclass"] is NullPool
+    assert "pool_size" not in kwargs
+
+
+def test_runtime_engine_keeps_pool_for_single_loop_runtime():
+    kwargs = _engine_kwargs_for_environment({})
+
+    assert kwargs["pool_size"] == config.DB_POOL_MAX
+    assert "poolclass" not in kwargs

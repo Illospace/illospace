@@ -555,28 +555,23 @@
 
             <div class="memory-list">
               {#each sortedMemories as mem (mem.id)}
-                <!-- svelte-ignore a11y_click_events_have_key_events -->
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <article
-                  class="memory-item"
+                  class="memory-item memory-item-card"
                   class:selected={selectedId === mem.id}
                   class:flagged={(mem.tags || []).includes('needs_review')}
-                  onclick={() => selectMemory(mem.id)}
-                  role="button"
-                  tabindex="0"
                 >
-                  <div class="memory-item-header">
-                    <span class="type-badge" style="color: {TYPE_COLORS[mem.memory_type] || '#718096'}">
-                      {mem.memory_type}
-                    </span>
-                    <span class="memory-id">#{mem.id}</span>
-                    {#if (mem.tags || []).includes('confirmed')}
-                      <span class="confirmed-badge">confirmed</span>
-                    {/if}
-                    <span class="salience-badge">sal {mem.salience}</span>
-                  </div>
                   {#if editingId === mem.id}
-                    <div class="edit-form" onclick={(e) => e.stopPropagation()}>
+                    <div class="memory-item-header">
+                      <span class="type-badge" style="color: {TYPE_COLORS[mem.memory_type] || '#718096'}">
+                        {mem.memory_type}
+                      </span>
+                      <span class="memory-id">#{mem.id}</span>
+                      {#if (mem.tags || []).includes('confirmed')}
+                        <span class="confirmed-badge">confirmed</span>
+                      {/if}
+                      <span class="salience-badge">sal {mem.salience}</span>
+                    </div>
+                    <div class="edit-form">
                       <textarea class="input" rows="3" bind:value={editContent}></textarea>
                       <div class="edit-actions">
                         <button class="btn btn-xs btn-primary" onclick={() => saveEdit(mem.id)}>Save</button>
@@ -584,11 +579,28 @@
                       </div>
                     </div>
                   {:else}
-                    <div class="memory-item-text">{(mem.content || '').slice(0, 220)}</div>
+                    <button
+                      type="button"
+                      class="memory-item-body"
+                      aria-pressed={selectedId === mem.id}
+                      onclick={() => selectMemory(mem.id)}
+                    >
+                      <div class="memory-item-header">
+                        <span class="type-badge" style="color: {TYPE_COLORS[mem.memory_type] || '#718096'}">
+                          {mem.memory_type}
+                        </span>
+                        <span class="memory-id">#{mem.id}</span>
+                        {#if (mem.tags || []).includes('confirmed')}
+                          <span class="confirmed-badge">confirmed</span>
+                        {/if}
+                        <span class="salience-badge">sal {mem.salience}</span>
+                      </div>
+                      <div class="memory-item-text">{(mem.content || '').slice(0, 220)}</div>
+                    </button>
                   {/if}
                   <div class="memory-item-footer">
                     <div class="visibility-label">{visIcon(mem.visibility || 'private')}</div>
-                    <div class="memory-item-actions" onclick={(e) => e.stopPropagation()}>
+                    <div class="memory-item-actions">
                       <button class="btn btn-xs btn-ghost" title="Confirm" onclick={() => confirmMemory(mem.id)}>Confirm</button>
                       <button class="btn btn-xs btn-ghost" title="Flag" onclick={() => flagMemory(mem.id)}>Flag</button>
                       <button class="btn btn-xs btn-ghost" title="Edit" onclick={() => startEdit(mem)}>Edit</button>
@@ -1128,6 +1140,28 @@
 
   .memory-item.flagged {
     border-color: color-mix(in srgb, var(--negative) 55%, var(--border-1));
+  }
+
+  .memory-item-card {
+    cursor: default;
+  }
+
+  .memory-item-body {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+  }
+
+  .memory-item-body:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 72%, white 28%);
+    outline-offset: 4px;
+    border-radius: 14px;
   }
 
   .memory-item-header {

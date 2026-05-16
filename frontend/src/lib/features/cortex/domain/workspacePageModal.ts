@@ -6,7 +6,6 @@ export type WorkspacePageModalSection = {
   id: WorkspacePageModalId;
   path: `/${WorkspacePageModalId}`;
   label: string;
-  eyebrow: string;
   title: string;
   subtitle: string;
   glyph: WorkspacePageModalId | 'runtime';
@@ -17,45 +16,40 @@ export const WORKSPACE_PAGE_MODAL_SECTIONS: Record<WorkspacePageModalId, Workspa
     id: 'cycles',
     path: '/cycles',
     label: 'Cycles',
-    eyebrow: 'Workspace Control',
     title: 'Cycles',
-    subtitle: 'Manage recurring prompts, scheduled follow-ups, and unattended work.',
+    subtitle: 'Manage recurring work without leaving Cortex.',
     glyph: 'cycles',
   },
   skills: {
     id: 'skills',
     path: '/skills',
     label: 'Skills',
-    eyebrow: 'Agent System',
     title: 'Skills',
-    subtitle: 'Install, inspect, and refine the skills that shape Illo behavior.',
+    subtitle: 'Shape the workflows Illo can use.',
     glyph: 'skills',
   },
   team: {
     id: 'team',
     path: '/team',
     label: 'Team',
-    eyebrow: 'Workspace Access',
     title: 'Team',
-    subtitle: 'Review members, approvals, attribution, and shared usage.',
+    subtitle: 'Manage members, approvals, and access.',
     glyph: 'team',
   },
   vault: {
     id: 'vault',
     path: '/vault',
     label: 'Vault',
-    eyebrow: 'Secure Context',
     title: 'Vault',
-    subtitle: 'Manage secrets, grants, and agent access without leaving Cortex.',
+    subtitle: 'Manage secrets and agent access.',
     glyph: 'vault',
   },
   system: {
     id: 'system',
     path: '/system',
     label: 'AI Runtime',
-    eyebrow: 'Runtime',
     title: 'AI Runtime',
-    subtitle: 'Configure models, memory, updates, and local runtime connection.',
+    subtitle: 'Configure models, memory, and updates.',
     glyph: 'runtime',
   },
 };

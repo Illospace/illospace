@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import { onMount } from 'svelte';
+  import { getContext, onMount } from 'svelte';
 
   import { api } from '$lib/api/client';
   import {
@@ -10,6 +10,10 @@
     ConstellationNotice,
     ConstellationPageFrame,
   } from '$lib/components/constellation';
+  import {
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+    type ConstellationPageFrameModalContext,
+  } from '$lib/components/constellation/constellationPageFrameContext';
   import {
     closeOAuthPopup,
     navigateOpenAIOAuthPopup,
@@ -81,6 +85,18 @@
   let selectedMemoryVaultKey = $state('');
   let syncingMemoryVaultKey = $state(false);
   let lastVaultLoadUserId = '';
+
+  const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+  );
+
+  $effect(() => {
+    return workspacePageModalContext?.registerRefreshAction({
+      label: loading ? 'Loading settings' : 'Refresh settings',
+      disabled: loading,
+      onclick: loadSettings,
+    });
+  });
 
   const canManageSettings = $derived(settings?.permissions?.can_manage_settings ?? false);
   const connectionStatus = $derived(settings?.connection?.status ?? 'missing');
@@ -825,12 +841,6 @@
         Update Illospace
       </ConstellationButton>
     {/if}
-    <ConstellationButton variant="quiet" onclick={loadSettings} loading={loading} loadingLabel="Loading">
-      {#snippet leadingVisual()}
-        <ConstellationIcon name="refresh" size={14} />
-      {/snippet}
-      Refresh
-    </ConstellationButton>
     {#if setupCanContinue}
       <ConstellationButton onclick={continueToCortex} loading={startingIntro} loadingLabel="Opening">
         Continue to Illo

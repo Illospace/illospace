@@ -1,6 +1,6 @@
 <script lang="ts">
   import { browser } from '$app/environment';
-  import { onMount } from 'svelte';
+  import { getContext, onMount } from 'svelte';
 
   import { api } from '$lib/api/client';
   import {
@@ -16,6 +16,10 @@
     ConstellationSection,
     ConstellationSkeletonBlock,
   } from '$lib/components/constellation';
+  import {
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+    type ConstellationPageFrameModalContext,
+  } from '$lib/components/constellation/constellationPageFrameContext';
   import { auth } from '$lib/stores/auth.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import { buildPresenceSeedStyle } from '$lib/utils/constellationPresence';
@@ -64,6 +68,17 @@
   let savingProfile = $state(false);
 
   let actionPending = $state<Record<string, boolean>>({});
+
+  const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+  );
+
+  $effect(() => {
+    return workspacePageModalContext?.registerRefreshAction({
+      label: 'Refresh team',
+      onclick: refreshTeam,
+    });
+  });
 
   const currentUserId = $derived(auth.user?.id ?? '');
   const approvedMembers = $derived.by(() => members.filter((member) => member.approved));
@@ -310,7 +325,6 @@
         Invite member
       </ConstellationButton>
     {/if}
-    <ConstellationButton variant="quiet" size="sm" onclick={refreshTeam}>Refresh</ConstellationButton>
     {#if currentMember}
       <ConstellationButton variant="secondary" size="sm" onclick={() => openProfileEdit()}>
         Edit profile

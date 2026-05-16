@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { getContext, onMount, onDestroy } from 'svelte';
   import { dev } from '$app/environment';
   import { page } from '$app/stores';
   import { api } from '$lib/api/client';
@@ -16,6 +16,10 @@
     ConstellationSnippetBlock,
     ConstellationTextInput,
   } from '$lib/components/constellation';
+  import {
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+    type ConstellationPageFrameModalContext,
+  } from '$lib/components/constellation/constellationPageFrameContext';
   import { auth } from '$lib/stores/auth.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import { parseServerDate, relativeTimeAgo } from '$lib/utils/datetime';
@@ -167,6 +171,18 @@
   let filterText = $state('');
   let filterMode = $state<FilterMode>('all');
   let selectedRowId = $state<string | null>(null);
+
+  const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+  );
+
+  $effect(() => {
+    return workspacePageModalContext?.registerRefreshAction({
+      label: loading ? 'Loading vault' : 'Refresh vault',
+      disabled: loading,
+      onclick: refreshVault,
+    });
+  });
 
   // PIN state
   let hasPin = $state(false);
@@ -676,6 +692,17 @@
       ui.toast(err.detail || 'Failed to load vault', 'error');
     } finally {
       loading = false;
+    }
+  }
+
+  async function refreshVault() {
+    if (isVaultPreview) {
+      loadPreviewData();
+      return;
+    }
+    await checkPin();
+    if (!vaultLocked) {
+      await loadData();
     }
   }
 

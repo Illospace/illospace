@@ -1,5 +1,9 @@
 <script lang="ts">
   import { getContext, type Snippet } from 'svelte';
+  import {
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+    type ConstellationPageFrameModalContext,
+  } from './constellationPageFrameContext';
 
   type Props = {
     eyebrow?: string;
@@ -30,9 +34,17 @@
   const stackClass = $derived(
     ['constellation-page-frame-content-stack', contentClassName].filter(Boolean).join(' '),
   );
-  const embeddedInWorkspacePageModal = getContext<boolean>('constellation:workspace-page-modal') === true;
+  const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+  );
+  const embeddedInWorkspacePageModal = workspacePageModalContext?.embedded === true;
   const showHeaderCopy = $derived(!embeddedInWorkspacePageModal && Boolean(eyebrow || title || subtitle));
-  const showHeader = $derived(Boolean(showHeaderCopy || actions));
+  const showHeader = $derived(!embeddedInWorkspacePageModal && Boolean(showHeaderCopy || actions));
+
+  $effect(() => {
+    if (!embeddedInWorkspacePageModal) return;
+    return workspacePageModalContext?.registerActions(actions);
+  });
 </script>
 
 <section class={rootClass}>
@@ -42,7 +54,7 @@
   <div class="constellation-page-frame-stage">
     <div class="constellation-page-frame-shell">
       {#if showHeader}
-        <header class={headerClass} class:embedded-in-workspace-page-modal={embeddedInWorkspacePageModal}>
+        <header class={headerClass}>
           <div class="constellation-page-frame-header-head">
             {#if showHeaderCopy}
               <div class="constellation-page-frame-header-copy">
@@ -133,19 +145,11 @@
     border-bottom: 1px solid var(--constellation-surface-panel-separator);
   }
 
-  .constellation-page-frame-header.embedded-in-workspace-page-modal {
-    padding: 0 0 14px;
-  }
-
   .constellation-page-frame-header-head {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: 18px;
-  }
-
-  .constellation-page-frame-header.embedded-in-workspace-page-modal .constellation-page-frame-header-head {
-    justify-content: flex-end;
   }
 
   .constellation-page-frame-header-copy {

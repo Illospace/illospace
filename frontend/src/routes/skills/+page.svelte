@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { getContext, onMount } from 'svelte';
 
   import { api } from '$lib/api/client';
   import {
@@ -16,6 +16,10 @@
     ConstellationSkeletonBlock,
   } from '$lib/components/constellation';
   import type { ConstellationIconName } from '$lib/components/constellation/ConstellationIcon.svelte';
+  import {
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+    type ConstellationPageFrameModalContext,
+  } from '$lib/components/constellation/constellationPageFrameContext';
   import { ui } from '$lib/stores/ui.svelte';
 
   type FilterMode = 'all' | 'attention';
@@ -196,6 +200,17 @@
   let assetLoading = $state(false);
   let assetSaving = $state(false);
   let assetDeleting = $state(false);
+
+  const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+  );
+
+  $effect(() => {
+    return workspacePageModalContext?.registerRefreshAction({
+      label: 'Refresh skills',
+      onclick: () => loadSkills(),
+    });
+  });
   let assetPreview = $state<AssetPreview | null>(null);
   let assetEditorOpen = $state(false);
   let editingAssetPath = $state<string | null>(null);
@@ -789,12 +804,6 @@
         <ConstellationIcon name="edit" size={14} />
       {/snippet}
       New skill
-    </ConstellationButton>
-    <ConstellationButton variant="quiet" onclick={() => loadSkills()}>
-      {#snippet leadingVisual()}
-        <ConstellationIcon name="refresh" size={14} />
-      {/snippet}
-      Refresh
     </ConstellationButton>
   {/snippet}
 
