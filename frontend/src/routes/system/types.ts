@@ -76,6 +76,5 @@ export interface NoticeState {
 export interface MemoryNoticeState {
   tone: 'info' | 'warning' | 'danger' | 'success';
   title: string;
-  detail: string;
-  showAddKeyAction?: boolean;
+  detail?: string;
 }

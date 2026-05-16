@@ -92,9 +92,7 @@
     padding: 16px 18px;
     border-radius: var(--constellation-radius-panel);
     border: 1px solid color-mix(in srgb, var(--notice-accent) 38%, var(--constellation-surface-panel-border));
-    background:
-      linear-gradient(90deg, var(--notice-accent-soft), transparent 24%),
-      var(--constellation-surface-panel-background);
+    background: var(--constellation-surface-panel-background);
     box-shadow: var(--constellation-surface-panel-shadow);
     backdrop-filter: blur(14px) saturate(1.04);
     -webkit-backdrop-filter: blur(14px) saturate(1.04);
@@ -202,9 +200,9 @@
   }
 
   .constellation-notice-tone-warning {
-    --notice-accent: rgba(250, 231, 188, 0.26);
-    --notice-accent-strong: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 26%, transparent);
-    --notice-accent-soft: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 12%, transparent);
+    --notice-accent: var(--constellation-control-pill-warning-border);
+    --notice-accent-strong: var(--constellation-color-warning, #f0b15e);
+    --notice-accent-soft: var(--constellation-control-pill-warning-background);
   }
 
   .constellation-notice-tone-danger {

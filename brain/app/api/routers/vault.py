@@ -331,11 +331,9 @@ async def delete_project_binding(
 
 @router.get("/", response_model=list[SecretRead])
 async def list_secrets(
-    request: Request,
     category: str | None = None,
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    await _async_require_unlocked(request, user)
     from brain.systems.vault import async_list_secrets as _list
 
     return await _list(_require_user_id(user), category=category, org_id=_org_id(user))

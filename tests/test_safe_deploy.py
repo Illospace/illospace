@@ -5,6 +5,17 @@ import subprocess
 from pathlib import Path
 
 
+def _shell_function_body(content: str, name: str) -> str:
+    match = re.search(
+        rf"^{re.escape(name)}\(\) \{{\n(?P<body>.*?)^}}\n",
+        content,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        raise AssertionError(f"{name} not found")
+    return match.group("body")
+
+
 class TestPrePushHook:
     """Test the pre-push hook script logic."""
 
@@ -166,6 +177,19 @@ def test_illo_refuses_to_kill_api_owned_agent_runs_without_force():
     assert "guard_api_port_kill" in content
     assert "ILLO_FORCE_KILL_ACTIVE_RUNS" in content
     assert "Refusing to kill API pid(s)" in content
+
+
+def test_illo_agent_run_count_helpers_use_async_unit_of_work():
+    illo_path = Path(__file__).resolve().parents[1] / "illo"
+    content = illo_path.read_text()
+
+    for helper in ("active_agent_run_count", "api_owned_active_run_count"):
+        body = _shell_function_body(content, helper)
+        assert "import asyncio" in body
+        assert "async with UnitOfWork()" in body
+        assert "await uow.session" in body
+        assert "asyncio.run(main())" in body
+        assert "with UnitOfWork()" not in body.replace("async with UnitOfWork()", "")
 
 
 def test_illo_refuses_to_kill_unknown_port_processes_without_force():

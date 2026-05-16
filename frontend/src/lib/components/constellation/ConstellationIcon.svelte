@@ -6,6 +6,7 @@
     IconArchive,
     IconBell,
     IconBolt,
+    IconBrandOpenai,
     IconBrain,
     IconBrowser,
     IconBrush,
@@ -87,6 +88,7 @@
     | 'moon'
     | 'notification'
     | 'overview'
+    | 'openai'
     | 'paperclip'
     | 'pdf'
     | 'plus'
@@ -147,6 +149,7 @@
     moon: IconMoon,
     notification: IconBell,
     overview: IconLayoutGrid,
+    openai: IconBrandOpenai,
     paperclip: IconPaperclip,
     pdf: IconFileTypePdf,
     plus: IconPlus,

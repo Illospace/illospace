@@ -45,6 +45,34 @@ def test_reveal_requires_unlock_when_pin_is_configured():
     reveal.assert_not_called()
 
 
+def test_list_returns_metadata_without_unlock_when_pin_is_configured():
+    secret = {
+        "id": 1,
+        "key_name": "OPENAI_API_KEY",
+        "description": "OpenAI key",
+        "category": "api",
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+        "last_accessed_at": None,
+        "access_count": 0,
+        "user_id": USER["id"],
+        "is_shared": False,
+        "shared_by_name": None,
+        "agent_access_level": "ask",
+    }
+    with _client() as client, \
+         patch("brain.systems.vault.async_has_pin", return_value=True), \
+         patch("brain.systems.vault.async_validate_vault_token", return_value=False), \
+         patch("brain.systems.vault.async_list_secrets", return_value=[secret]) as list_secrets:
+        response = client.get("/api/vault/")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["key_name"] == "OPENAI_API_KEY"
+    assert "value" not in payload[0]
+    list_secrets.assert_called_once_with(USER["id"], category=None, org_id=USER["org_id"])
+
+
 def test_unlock_rejects_bad_pin_and_returns_session_token_for_good_pin():
     expires = datetime.now(timezone.utc)
     with _client() as client, \

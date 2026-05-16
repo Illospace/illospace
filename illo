@@ -691,17 +691,24 @@ stop_conflicting_services() {
 
 active_agent_run_count() {
   "$ROOT/venv/bin/python3" - <<'PY' 2>/dev/null
+import asyncio
+
 from sqlalchemy import func, select
 
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
-active = ("starting", "running", "verifying")
-with UnitOfWork() as uow:
-    count = uow.session.scalar(
-        select(func.count()).select_from(AgentRunRow).where(AgentRunRow.status.in_(active))
-    )
-print(int(count or 0))
+
+async def main() -> None:
+    active = ("starting", "running", "verifying")
+    async with UnitOfWork() as uow:
+        count = await uow.session.scalar(
+            select(func.count()).select_from(AgentRunRow).where(AgentRunRow.status.in_(active))
+        )
+    print(int(count or 0))
+
+
+asyncio.run(main())
 PY
 }
 
@@ -712,6 +719,7 @@ api_owned_active_run_count() {
     return 0
   fi
   ILLO_RUNNER_OWNER_PIDS="$owner_pids" "$ROOT/venv/bin/python3" - <<'PY' 2>/dev/null
+import asyncio
 import os
 
 from sqlalchemy import select
@@ -719,15 +727,19 @@ from sqlalchemy import select
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 
-pids = {
-    item.strip()
-    for item in os.environ.get("ILLO_RUNNER_OWNER_PIDS", "").replace(",", " ").split()
-    if item.strip()
-}
-active = ("starting", "running", "verifying")
-count = 0
-with UnitOfWork() as uow:
-    rows = uow.session.scalars(select(AgentRunRow).where(AgentRunRow.status.in_(active))).all()
+
+async def main() -> None:
+    pids = {
+        item.strip()
+        for item in os.environ.get("ILLO_RUNNER_OWNER_PIDS", "").replace(",", " ").split()
+        if item.strip()
+    }
+    active = ("starting", "running", "verifying")
+    count = 0
+    async with UnitOfWork() as uow:
+        rows = (
+            await uow.session.scalars(select(AgentRunRow).where(AgentRunRow.status.in_(active)))
+        ).all()
     for row in rows:
         metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
         heartbeat = metadata.get("runner_heartbeat")
@@ -736,7 +748,10 @@ with UnitOfWork() as uow:
         owner_pid = token.split(":", 1)[0] if ":" in token else ""
         if owner_pid in pids:
             count += 1
-print(count)
+    print(count)
+
+
+asyncio.run(main())
 PY
 }
 

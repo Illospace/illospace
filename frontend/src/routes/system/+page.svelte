@@ -6,7 +6,6 @@
   import { api } from '$lib/api/client';
   import {
     ConstellationButton,
-    ConstellationIcon,
     ConstellationNotice,
     ConstellationPageFrame,
   } from '$lib/components/constellation';
@@ -23,6 +22,7 @@
 
   import MemoryCard from './MemoryCard.svelte';
   import ModelsCard from './ModelsCard.svelte';
+  import ProviderConnections from './ProviderConnections.svelte';
   import type {
     EmbedderKey,
     MemoryCheck,
@@ -32,7 +32,6 @@
     NoticeState,
     RuntimeOption,
     RuntimeSettings,
-    RuntimeUpdateStatus,
   } from './types';
 
   type CodexSignInCallbackMode = 'auto' | 'server' | 'local_bridge';
@@ -49,7 +48,6 @@
     savedAt: string;
   };
 
-  const OPEN_VAULT_SELECT_VALUE = '__open_vault__';
   const VAULT_SESSION_STORAGE_PREFIX = 'illo:vault:unlock:v1';
   const VAULT_SESSION_EXPIRY_SKEW_MS = 5000;
 
@@ -64,12 +62,10 @@
   let oauthChannel: BroadcastChannel | null = null;
   let oauthExchangeInFlight = false;
   let savingConnection = $state(false);
-  let savingModels = $state(false);
+  let savingChanges = $state(false);
   let checkingMemory = $state(false);
   let memoryCheck = $state<MemoryCheck | null>(null);
   let notice = $state<NoticeState | null>(null);
-  let updateStatus = $state<RuntimeUpdateStatus | null>(null);
-  let startingUpdate = $state(false);
   let startingIntro = $state(false);
   let modelDraft = $state<Record<ModelTier, string>>({ low: '', medium: '', high: '' });
   let memoryDraft = $state<MemoryDraft>({
@@ -79,7 +75,6 @@
   });
   let vaultSecrets = $state<VaultSecret[]>([]);
   let vaultLoading = $state(false);
-  let vaultLocked = $state(true);
   let vaultLoadError = $state('');
   let vaultToken = $state<string | null>(null);
   let selectedMemoryVaultKey = $state('');
@@ -103,9 +98,10 @@
   const modelOptions = $derived(settings?.models?.options ?? []);
   const setupMode = $derived($page.url.searchParams.get('setup') === '1');
   const setupCanContinue = $derived(setupMode && connectionStatus === 'connected');
-  const updateRunning = $derived(startingUpdate || updateStatus?.status === 'running');
   const memoryVaultProvider = $derived<MemoryVaultProvider>(embeddingProvider(memoryDraft.embedder));
   const memoryVaultKeyOptions = $derived(buildMemoryVaultKeyOptions());
+  const hasRuntimeChanges = $derived(Boolean(settings) && (modelDraftDirty() || memoryDraftDirty()));
+  const runCheckDisabled = $derived(!canManageSettings || memoryChangeNeedsRebuild());
   const vaultSessionStorageKey = $derived(
     auth.user?.id ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.id)}` : '',
   );
@@ -154,42 +150,11 @@
     try {
       const next = await api.runtimeSettings();
       hydrate(next);
-      if (next.permissions?.can_manage_settings) {
-        void loadUpdateStatus();
-      }
       void loadVaultSecrets();
     } catch (error) {
       loadError = error instanceof Error ? error.message : 'System setup failed to load.';
     } finally {
       loading = false;
-    }
-  }
-
-  async function loadUpdateStatus() {
-    if (!settings?.permissions?.can_manage_settings) return;
-    try {
-      updateStatus = await api.runtimeUpdateStatus();
-    } catch {
-      updateStatus = null;
-    }
-  }
-
-  async function startIllospaceUpdate() {
-    if (!canManageSettings || updateStatus?.available === false) return;
-    startingUpdate = true;
-    notice = null;
-    try {
-      const nextStatus = (await api.startRuntimeUpdate()) as RuntimeUpdateStatus;
-      updateStatus = nextStatus;
-      notice = {
-        tone: 'info',
-        title: 'Illospace update started.',
-        detail: nextStatus.detail || updateNoticeDetail(nextStatus),
-      };
-    } catch (error) {
-      notice = errorNotice('Update did not start.', error, 'Check the server update log and try again.');
-    } finally {
-      startingUpdate = false;
     }
   }
 
@@ -221,12 +186,7 @@
         ? {
             tone: 'info',
             title: openedOAuthWindow ? 'Codex sign-in opened.' : 'Codex sign-in ready.',
-            detail:
-              oauthCallbackMode === 'server'
-                ? 'Finish in the OpenAI window. It should return to this Illo server automatically; paste the callback URL below if it does not.'
-                : openedOAuthWindow
-                  ? 'Finish in the OpenAI window. This page should update automatically; paste the callback URL below if it does not.'
-                  : 'Open OpenAI sign-in below. This page should update automatically; paste the callback URL below if it does not.',
+            detail: codexSignInReadyDetail(openedOAuthWindow),
           }
         : {
             tone: 'warning',
@@ -239,6 +199,16 @@
     } finally {
       savingConnection = false;
     }
+  }
+
+  function codexSignInReadyDetail(openedOAuthWindow: boolean) {
+    if (oauthCallbackMode === 'server') {
+      return 'Finish in the OpenAI window. It should return to this Illo server automatically; paste the callback URL below if it does not.';
+    }
+    if (openedOAuthWindow) {
+      return 'Finish in the OpenAI window. This page should update automatically; paste the callback URL below if it does not.';
+    }
+    return 'Open OpenAI sign-in below. This page should update automatically; paste the callback URL below if it does not.';
   }
 
   async function finishCodexSignIn() {
@@ -374,21 +344,6 @@
     await openRuntimeReadyIntro({ openExisting: true });
   }
 
-  async function saveModels() {
-    if (!canManageSettings) return;
-    savingModels = true;
-    notice = null;
-    try {
-      const models = await api.updateRuntimeModels(modelDraft);
-      if (settings) settings = { ...settings, models };
-      notice = { tone: 'success', title: 'Model routing saved.' };
-    } catch (error) {
-      notice = errorNotice('Models were not saved.', error, 'Check the selected models.');
-    } finally {
-      savingModels = false;
-    }
-  }
-
   async function checkMemory() {
     if (!canManageSettings || memoryChangeNeedsRebuild()) return;
     checkingMemory = true;
@@ -404,6 +359,47 @@
       };
     } finally {
       checkingMemory = false;
+    }
+  }
+
+  async function saveRuntimeChanges() {
+    if (!canManageSettings || !settings) return;
+    const shouldSaveModels = modelDraftDirty();
+    const shouldSaveMemory = memoryDraftDirty();
+    if (!shouldSaveModels && !shouldSaveMemory) {
+      notice = { tone: 'info', title: 'Runtime settings are current.' };
+      return;
+    }
+
+    savingChanges = true;
+    notice = null;
+    try {
+      let nextSettings = settings;
+      const saved: string[] = [];
+      if (shouldSaveModels) {
+        const models = await api.updateRuntimeModels(modelDraft);
+        nextSettings = { ...nextSettings, models };
+        saved.push('Model routing');
+      }
+      if (shouldSaveMemory) {
+        const memory = await api.updateRuntimeMemory(memoryPayload());
+        nextSettings = { ...nextSettings, memory };
+        memoryCheck = null;
+        saved.push('Memory');
+      }
+      settings = nextSettings;
+      notice = {
+        tone: 'success',
+        title: saved.length > 1 ? 'Runtime settings saved.' : `${saved[0]} saved.`,
+      };
+    } catch (error) {
+      notice = errorNotice(
+        'Runtime settings were not saved.',
+        error,
+        'Check the selected provider, models, and memory settings.',
+      );
+    } finally {
+      savingChanges = false;
     }
   }
 
@@ -472,39 +468,22 @@
     if (!auth.user?.id) {
       vaultSecrets = [];
       vaultToken = null;
-      vaultLocked = true;
       vaultLoadError = '';
       selectedMemoryVaultKey = '';
       return;
     }
 
-    const token = readPersistedVaultSession();
-    vaultToken = token;
+    vaultToken = readPersistedVaultSession();
     vaultLoadError = '';
-    if (!token) {
-      vaultSecrets = [];
-      vaultLocked = true;
-      selectedMemoryVaultKey = '';
-      return;
-    }
-
     vaultLoading = true;
     try {
-      const next = (await api.listSecrets(undefined, token)) as VaultSecret[];
+      const next = (await api.listSecrets()) as VaultSecret[];
       vaultSecrets = next;
-      vaultLocked = false;
       reconcileSelectedMemoryVaultKey(memoryDraft.embedder, next);
     } catch (error: any) {
       vaultSecrets = [];
       selectedMemoryVaultKey = '';
-      if (error?.status === 423) {
-        vaultToken = null;
-        vaultLocked = true;
-        clearPersistedVaultSession();
-      } else {
-        vaultLocked = false;
-        vaultLoadError = error?.detail || error?.message || 'Vault keys could not be loaded.';
-      }
+      vaultLoadError = error?.detail || error?.message || 'Vault keys could not be loaded.';
     } finally {
       vaultLoading = false;
     }
@@ -567,7 +546,10 @@
   }
 
   function defaultEmbeddingModel(embedder: EmbedderKey, source = settings) {
-    return embeddingModelOptions(embedder, source)[0]?.key || (embedder === 'gemini' ? 'gemini-embedding-2' : 'text-embedding-3-small');
+    return (
+      embeddingModelOptions(embedder, source)[0]?.key ||
+      (embedder === 'gemini' ? 'gemini-embedding-2' : 'text-embedding-3-small')
+    );
   }
 
   function hasApiKeyForEmbedder(embedder: EmbedderKey) {
@@ -578,10 +560,6 @@
     return provider === 'gemini' ? 'Gemini' : 'OpenAI';
   }
 
-  function providerArticle(provider: MemoryVaultProvider) {
-    return provider === 'openai' ? 'an' : 'a';
-  }
-
   function buildMemoryVaultKeyOptions(): RuntimeOption[] {
     if (!usesApiEmbedder(memoryDraft.embedder)) {
       return [{ key: '', label: 'No key needed', description: localEmbedderLabel(memoryDraft.embedder), disabled: true }];
@@ -589,33 +567,25 @@
 
     const provider = memoryVaultProvider;
     const label = providerLabel(provider);
-    const openVault = vaultOpenOption(provider);
 
     if (vaultLoading) {
       return [{ key: '', label: 'Checking Vault', description: 'Reading saved keys.', disabled: true }];
     }
-    if (vaultLocked) {
-      return [
-        { key: '', label: 'Vault locked', description: `Unlock Vault to choose ${providerArticle(provider)} ${label} key.`, disabled: true },
-        openVault,
-      ];
-    }
     if (vaultLoadError) {
-      return [
-        { key: '', label: 'Vault unavailable', description: vaultLoadError, disabled: true },
-        openVault,
-      ];
+      return [{ key: '', label: 'Unable to load keys', description: vaultLoadError, disabled: true }];
     }
 
     const matches = matchingVaultSecrets(provider);
-    const placeholder = hasApiKeyForEmbedder(memoryDraft.embedder) && matches.length === 0
-      ? { key: '', label: 'Runtime key saved', description: 'Add a Vault key to manage it here.', disabled: true }
-      : {
-          key: '',
-          label: matches.length > 0 ? 'Choose Vault key' : 'No matching key',
-          description: matches.length > 0 ? `${label} keys in Vault.` : `Add ${providerArticle(provider)} ${label} key in Vault.`,
-          disabled: true,
-        };
+    if (matches.length === 0) {
+      return [{ key: '', label: 'No API key in Vault', disabled: true }];
+    }
+
+    const placeholder = {
+      key: '',
+      label: 'Choose API key',
+      description: `${label} keys in Vault.`,
+      disabled: true,
+    };
 
     return [
       ...(selectedMemoryVaultKey ? [] : [placeholder]),
@@ -624,32 +594,38 @@
         label: secret.key_name,
         description: secret.description || secret.category || 'Vault secret',
       })),
-      openVault,
     ];
   }
 
-  function vaultOpenOption(provider: MemoryVaultProvider): RuntimeOption {
-    return {
-      key: OPEN_VAULT_SELECT_VALUE,
-      label: 'Open Vault',
-      description: `Add or unlock ${providerArticle(provider)} ${providerLabel(provider)} key.`,
-    };
+  function matchingVaultSecrets(provider: MemoryVaultProvider, source = vaultSecrets) {
+    const apiSecrets = source.filter(isApiVaultSecret);
+    const providerSecrets = apiSecrets.filter((secret) => isProviderVaultSecret(secret, provider));
+    return providerSecrets.length > 0 ? providerSecrets : apiSecrets;
   }
 
-  function matchingVaultSecrets(provider: MemoryVaultProvider, source = vaultSecrets) {
-    return source.filter((secret) => isProviderVaultSecret(secret, provider));
+  function isApiVaultSecret(secret: VaultSecret) {
+    const haystack = vaultSecretSearchText(secret);
+    return haystack.includes('api') || haystack.includes('key') || haystack.includes('token');
   }
 
   function isProviderVaultSecret(secret: VaultSecret, provider: MemoryVaultProvider) {
-    const keyName = secret.key_name.toUpperCase();
-    const haystack = [secret.key_name, secret.description, secret.category]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase();
+    const keyName = normalizedVaultSecretKey(secret);
+    const haystack = vaultSecretSearchText(secret);
     if (provider === 'gemini') {
       return keyName.includes('GEMINI') || haystack.includes('gemini') || haystack.includes('google');
     }
     return keyName.includes('OPENAI') || haystack.includes('openai');
+  }
+
+  function vaultSecretSearchText(secret: VaultSecret) {
+    return [secret.key_name, secret.description, secret.category]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+  }
+
+  function normalizedVaultSecretKey(secret: VaultSecret) {
+    return secret.key_name.toUpperCase();
   }
 
   function reconcileSelectedMemoryVaultKey(embedder = memoryDraft.embedder, source = vaultSecrets) {
@@ -664,23 +640,24 @@
   }
 
   function preferredVaultSecretKey(provider: MemoryVaultProvider, matches: VaultSecret[]) {
-    if (provider === 'gemini') {
-      return matches.find((secret) => secret.key_name.toUpperCase() === 'GEMINI_API_KEY')?.key_name
-        || matches[0]?.key_name
-        || '';
+    const preferredNames = provider === 'gemini'
+      ? ['GEMINI_API_KEY']
+      : ['OPENAI_EMBEDDING_API_KEY', 'OPENAI_API_KEY'];
+    for (const name of preferredNames) {
+      const exactMatch = matches.find((secret) => normalizedVaultSecretKey(secret) === name);
+      if (exactMatch) return exactMatch.key_name;
     }
-    return matches.find((secret) => secret.key_name.toUpperCase() === 'OPENAI_EMBEDDING_API_KEY')?.key_name
-      || matches.find((secret) => secret.key_name.toUpperCase() === 'OPENAI_API_KEY')?.key_name
-      || matches.find((secret) => secret.key_name.toUpperCase().includes('EMBEDDING'))?.key_name
-      || matches[0]?.key_name
-      || '';
+    if (provider === 'gemini') {
+      return matches[0]?.key_name || '';
+    }
+    return (
+      matches.find((secret) => normalizedVaultSecretKey(secret).includes('EMBEDDING'))?.key_name ||
+      matches[0]?.key_name ||
+      ''
+    );
   }
 
   async function handleMemoryVaultKeyChange(keyName: string) {
-    if (keyName === OPEN_VAULT_SELECT_VALUE) {
-      await openVaultForMemoryKey(memoryVaultProvider);
-      return;
-    }
     if (!keyName || !canManageSettings) return;
     await selectMemoryVaultKey(keyName);
   }
@@ -688,13 +665,6 @@
   async function selectMemoryVaultKey(keyName: string) {
     const provider = memoryVaultProvider;
     const token = vaultToken || readPersistedVaultSession();
-    if (!token) {
-      vaultToken = null;
-      vaultLocked = true;
-      selectedMemoryVaultKey = '';
-      await openVaultForMemoryKey(provider);
-      return;
-    }
 
     syncingMemoryVaultKey = true;
     notice = null;
@@ -729,11 +699,10 @@
     } catch (error: any) {
       if (error?.status === 423) {
         vaultToken = null;
-        vaultLocked = true;
         selectedMemoryVaultKey = '';
         clearPersistedVaultSession();
       }
-      notice = errorNotice('Memory key was not selected.', error, 'Unlock Vault and try again.');
+      notice = errorNotice('Memory key was not selected.', error, 'Unlock Vault before using this key.');
     } finally {
       syncingMemoryVaultKey = false;
     }
@@ -752,53 +721,25 @@
       const label = localEmbedderLabel(memoryDraft.embedder);
       if (usesApiEmbedder(memoryDraft.embedder)) {
         const hasKey = hasApiKeyForEmbedder(memoryDraft.embedder);
-        const keyLabel = memoryDraft.embedder === 'gemini' ? 'Gemini' : 'OpenAI';
         return {
           tone: hasKey ? 'info' : 'warning',
-          title: hasKey ? `${keyLabel} memory selected.` : `${keyLabel} key needed.`,
-          detail: hasKey ? 'Save & check.' : 'Choose a Vault key, then Save & check.',
-          showAddKeyAction: !hasKey,
+          title: hasKey ? 'Memory has unsaved changes.' : 'Memory is not set up.',
+          detail: hasKey ? 'Save changes to apply.' : undefined,
         };
       }
       return {
         tone: 'info',
-        title: `${label} selected.`,
-        detail: 'Save & check.',
+        title: 'Memory has unsaved changes.',
+        detail: `${label} selected. Save changes to apply.`,
       };
     }
     if (!settings.memory.embedding_detail) return null;
     const needsApiKey = usesApiEmbedder(settings.memory.embedder) && settings.memory.embedding_status === 'missing_key';
-    const keyLabel = settings.memory.embedder === 'gemini' ? 'Gemini' : 'OpenAI';
-    const article = settings.memory.embedder === 'openai' ? 'an' : 'a';
     return {
       tone: 'warning',
-      title: needsApiKey ? `${keyLabel} API key needed.` : 'Memory status',
-      detail: needsApiKey
-        ? `Choose ${article} ${keyLabel} Vault key, or switch to Local CPU.`
-        : settings.memory.embedding_detail,
-      showAddKeyAction: needsApiKey,
+      title: needsApiKey ? 'Memory is not set up.' : 'Memory status',
+      detail: needsApiKey ? undefined : settings.memory.embedding_detail,
     };
-  }
-
-  async function openVaultForMemoryKey(provider = embeddingProvider(memoryDraft.embedder)) {
-    const keyName = provider === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_EMBEDDING_API_KEY';
-    const description = provider === 'gemini'
-      ? 'Gemini key for memory embeddings'
-      : 'OpenAI key for memory embeddings';
-    const params = new URLSearchParams({
-      add_secret: keyName,
-      category: 'api',
-      description,
-    });
-    await goto(`/vault?${params.toString()}`);
-  }
-
-  function updateNoticeDetail(status: RuntimeUpdateStatus | null) {
-    const activeRuns = status?.active_agent_runs ?? 0;
-    if (activeRuns > 0) {
-      return `${activeRuns} active AgentRun${activeRuns === 1 ? '' : 's'} will finish before the worker restarts on the new code.`;
-    }
-    return 'The server is fetching origin/main and applying the update.';
   }
 
   function errorNotice(title: string, error: unknown, fallback: string): NoticeState {
@@ -822,32 +763,10 @@
 
 <ConstellationPageFrame
   eyebrow="System"
-  title="AI runtime"
-  subtitle="Composer models and memory."
+  title="AI Runtime"
+  subtitle="Configure providers, model routing, and memory."
   contentClassName="system-page"
 >
-  {#snippet actions()}
-    {#if canManageSettings}
-      <ConstellationButton
-        variant="secondary"
-        onclick={startIllospaceUpdate}
-        loading={updateRunning}
-        loadingLabel={startingUpdate ? 'Starting' : 'Updating'}
-        disabled={updateStatus?.available === false}
-      >
-        {#snippet leadingVisual()}
-          <ConstellationIcon name="git-branch" size={14} />
-        {/snippet}
-        Update Illospace
-      </ConstellationButton>
-    {/if}
-    {#if setupCanContinue}
-      <ConstellationButton onclick={continueToCortex} loading={startingIntro} loadingLabel="Opening">
-        Continue to Illo
-      </ConstellationButton>
-    {/if}
-  {/snippet}
-
   {#if loadError}
     <ConstellationNotice title="System failed to load." description={loadError} tone="danger">
       {#snippet actions()}
@@ -863,33 +782,32 @@
   {#if loading && !settings}
     <div class="system-loading">Loading runtime...</div>
   {:else if settings}
-    <div class="runtime-config-grid">
-      <div class="setup-section setup-section-models" data-setup-section="models">
-        <ModelsCard
-          description=""
-          connectionStatus={connectionStatus}
-          {modelDraft}
-          {modelOptions}
+    <div class="runtime-config-layout">
+      <div class="runtime-primary-column">
+        <ProviderConnections
+          {connectionStatus}
           {oauthUrl}
           {oauthCallback}
           oauthPending={Boolean(oauthUrl)}
-          {oauthCallbackAvailable}
           {oauthCallbackMode}
           {canManageSettings}
           {savingConnection}
-          {savingModels}
-          onUpdateModel={updateModelTier}
-          onSaveModels={saveModels}
           onCallbackChange={(value) => (oauthCallback = value)}
           onStartCodexSignIn={() => startCodexSignIn()}
           onStartLocalCodexSignIn={() => startCodexSignIn('local_bridge')}
           onFinishCodexSignIn={finishCodexSignIn}
         />
+
+        <ModelsCard
+          {modelDraft}
+          {modelOptions}
+          {canManageSettings}
+          onUpdateModel={updateModelTier}
+        />
       </div>
 
-      <div class="setup-section setup-section-memory" data-setup-section="memory">
+      <div class="runtime-secondary-column">
         <MemoryCard
-          description=""
           memory={settings.memory}
           {memoryDraft}
           embeddingModelOptions={embeddingModelOptions()}
@@ -898,31 +816,82 @@
           notice={memoryNotice()}
           {memoryCheck}
           {canManageSettings}
-          {checkingMemory}
           {vaultLoading}
           syncingVaultKey={syncingMemoryVaultKey}
-          onCheckMemory={checkMemory}
           onUpdateMemory={updateMemoryDraft}
           onSelectVaultKey={handleMemoryVaultKeyChange}
-          onAddApiKey={() => openVaultForMemoryKey()}
-          checkDisabled={memoryChangeNeedsRebuild()}
         />
       </div>
     </div>
+
+    <footer class="runtime-footer">
+      <p>Unsaved changes apply to future runs.</p>
+      <div class="runtime-footer-actions">
+        {#if setupCanContinue}
+          <ConstellationButton
+            variant="quiet"
+            onclick={continueToCortex}
+            loading={startingIntro}
+            loadingLabel="Opening"
+          >
+            Continue to Illo
+          </ConstellationButton>
+        {/if}
+        <ConstellationButton
+          variant="secondary"
+          onclick={checkMemory}
+          loading={checkingMemory}
+          disabled={runCheckDisabled}
+        >
+          Run check
+        </ConstellationButton>
+        <ConstellationButton
+          onclick={saveRuntimeChanges}
+          loading={savingChanges}
+          loadingLabel="Saving"
+          disabled={!canManageSettings || !hasRuntimeChanges}
+        >
+          Save changes
+        </ConstellationButton>
+      </div>
+    </footer>
   {/if}
 </ConstellationPageFrame>
 
 <style>
   :global(.system-page) {
     display: grid;
-    gap: 20px;
+    gap: 16px;
+    min-height: 100%;
   }
 
-  .runtime-config-grid {
+  .runtime-config-layout {
     display: grid;
-    grid-template-columns: 1fr;
-    gap: 18px;
+    grid-template-columns: minmax(480px, 1.04fr) minmax(420px, 0.86fr);
+    gap: clamp(26px, 3.4vw, 44px);
     align-items: start;
+    width: 100%;
+    max-width: 1540px;
+    min-width: 0;
+    box-sizing: border-box;
+    margin: 0 auto;
+    padding: 0 clamp(12px, 1.4vw, 22px);
+  }
+
+  .runtime-primary-column,
+  .runtime-secondary-column {
+    display: grid;
+    min-width: 0;
+  }
+
+  .runtime-primary-column {
+    gap: 0;
+  }
+
+  .runtime-secondary-column {
+    position: sticky;
+    top: 0;
+    align-self: start;
   }
 
   .system-loading {
@@ -938,10 +907,65 @@
     text-transform: uppercase;
   }
 
-  .setup-section {
-    display: grid;
+  .runtime-footer {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
     min-width: 0;
-    scroll-margin-top: 18px;
+    width: calc(100% - clamp(24px, 2.8vw, 44px));
+    max-width: 1540px;
+    margin: 6px auto 0;
+    box-sizing: border-box;
+    padding: 14px 0 2px;
+    border-top: 1px solid var(--constellation-surface-panel-separator);
+    background:
+      linear-gradient(
+        to top,
+        var(--constellation-surface-page-background, var(--constellation-surface-panel-background)) 68%,
+        color-mix(in srgb, var(--constellation-surface-page-background, var(--constellation-surface-panel-background)) 0%, transparent)
+      );
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
   }
 
+  .runtime-footer p {
+    margin: 0;
+    color: var(--constellation-color-text-secondary);
+    font-size: var(--constellation-type-body-sm);
+    line-height: 1.45;
+  }
+
+  .runtime-footer-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  @media (max-width: 1080px) {
+    .runtime-config-layout {
+      grid-template-columns: 1fr;
+    }
+
+    .runtime-secondary-column {
+      position: static;
+    }
+  }
+
+  @media (max-width: 700px) {
+    .runtime-footer {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .runtime-footer-actions {
+      justify-content: flex-start;
+    }
+  }
 </style>

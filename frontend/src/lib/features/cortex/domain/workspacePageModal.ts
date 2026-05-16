@@ -49,7 +49,7 @@ export const WORKSPACE_PAGE_MODAL_SECTIONS: Record<WorkspacePageModalId, Workspa
     path: '/system',
     label: 'AI Runtime',
     title: 'AI Runtime',
-    subtitle: 'Configure models, memory, and updates.',
+    subtitle: 'Configure providers, model routing, and memory.',
     glyph: 'runtime',
   },
 };

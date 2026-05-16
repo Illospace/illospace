@@ -29,6 +29,7 @@
 
   --constellation-color-user-accent: #57cfa0;
   --constellation-color-amber: var(--thread-accent, var(--constellation-color-user-accent));
+  --constellation-color-warning: #f0b15e;
   --constellation-color-amber-core: color-mix(in srgb, var(--constellation-color-amber) 48%, rgba(5, 9, 16, 0.98));
   --constellation-color-amber-owner: color-mix(in srgb, var(--constellation-color-amber) 34%, rgba(240, 240, 250, 0.96));
   --constellation-color-badge-ring: rgba(5, 9, 16, 0.92);
@@ -46,6 +47,8 @@
   --constellation-control-field-border: rgba(240, 240, 250, 0.08);
   --constellation-control-field-background: rgba(240, 240, 250, 0.03);
   --constellation-control-field-placeholder: rgba(240, 240, 250, 0.38);
+  --constellation-control-input-border: rgba(240, 240, 250, 0.14);
+  --constellation-control-input-background: rgba(240, 240, 250, 0.045);
   --constellation-control-button-secondary-border: rgba(240, 240, 250, 0.08);
   --constellation-control-button-secondary-border-hover: rgba(240, 240, 250, 0.2);
   --constellation-control-button-secondary-text: rgba(240, 240, 250, 0.76);
@@ -94,8 +97,8 @@
   --constellation-control-pill-thinking-background: color-mix(in srgb, var(--constellation-color-amber) 14%, transparent);
   --constellation-control-pill-thinking-text: rgba(250, 231, 188, 0.96);
 
-  --constellation-control-pill-warning-background: color-mix(in srgb, var(--constellation-color-amber) 14%, transparent);
-  --constellation-control-pill-warning-border: color-mix(in srgb, var(--constellation-color-amber) 24%, transparent);
+  --constellation-control-pill-warning-background: rgba(240, 177, 94, 0.14);
+  --constellation-control-pill-warning-border: rgba(240, 177, 94, 0.28);
   --constellation-control-pill-warning-text: rgba(250, 231, 188, 0.96);
 
   --constellation-control-pill-muted-background: rgba(240, 240, 250, 0.05);
@@ -201,8 +204,8 @@
     0 10px 24px rgba(0, 0, 0, 0.12),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
 
-  --constellation-select-chip-trigger-border: var(--constellation-control-button-secondary-border);
-  --constellation-select-chip-trigger-background: var(--constellation-control-button-secondary-background);
+  --constellation-select-chip-trigger-border: var(--constellation-control-input-border);
+  --constellation-select-chip-trigger-background: var(--constellation-control-input-background);
   --constellation-select-chip-trigger-text: rgba(240, 240, 250, 0.68);
   --constellation-select-chip-trigger-bare-text: rgba(240, 240, 250, 0.66);
   --constellation-select-chip-trigger-hover-background: var(--constellation-control-button-secondary-hover-background);
@@ -543,6 +546,7 @@
 
   --constellation-color-user-accent: #57cfa0;
   --constellation-color-amber: var(--thread-accent, var(--constellation-color-user-accent));
+  --constellation-color-warning: #b8691d;
   --constellation-color-amber-core: color-mix(in srgb, var(--constellation-color-amber) 14%, rgba(249, 252, 248, 0.98));
   --constellation-color-amber-owner: color-mix(in srgb, var(--constellation-color-amber) 24%, rgba(20, 31, 45, 0.94));
   --constellation-color-badge-ring: rgba(250, 247, 239, 0.96);
@@ -564,6 +568,8 @@
   --constellation-control-field-border: rgba(126, 92, 52, 0.11);
   --constellation-control-field-background: var(--constellation-neutral-surface);
   --constellation-control-field-placeholder: rgba(82, 98, 111, 0.58);
+  --constellation-control-input-border: rgba(32, 32, 32, 0.16);
+  --constellation-control-input-background: rgba(255, 253, 247, 0.78);
   --constellation-control-button-secondary-border: rgba(32, 32, 32, 0.12);
   --constellation-control-button-secondary-border-hover: rgba(32, 32, 32, 0.22);
   --constellation-control-button-secondary-text: rgba(28, 28, 28, 0.86);
@@ -606,8 +612,8 @@
   --constellation-control-pill-thinking-background: color-mix(in srgb, var(--constellation-color-amber) 15%, transparent);
   --constellation-control-pill-thinking-text: #7c4617;
 
-  --constellation-control-pill-warning-background: color-mix(in srgb, var(--constellation-color-amber) 15%, transparent);
-  --constellation-control-pill-warning-border: color-mix(in srgb, var(--constellation-color-amber) 28%, transparent);
+  --constellation-control-pill-warning-background: rgba(184, 105, 29, 0.13);
+  --constellation-control-pill-warning-border: rgba(184, 105, 29, 0.28);
   --constellation-control-pill-warning-text: #7c4617;
 
   --constellation-control-pill-muted-background: rgba(126, 92, 52, 0.055);
@@ -709,8 +715,8 @@
   --constellation-icon-button-secondary-border-hover: var(--constellation-control-button-secondary-border-hover);
   --constellation-icon-button-secondary-shadow: none;
 
-  --constellation-select-chip-trigger-border: var(--constellation-control-button-secondary-border);
-  --constellation-select-chip-trigger-background: var(--constellation-control-button-secondary-background);
+  --constellation-select-chip-trigger-border: var(--constellation-control-input-border);
+  --constellation-select-chip-trigger-background: var(--constellation-control-input-background);
   --constellation-select-chip-trigger-text: rgba(49, 63, 76, 0.84);
   --constellation-select-chip-trigger-bare-text: rgba(49, 63, 76, 0.72);
   --constellation-select-chip-trigger-hover-background: var(--constellation-control-button-secondary-hover-background);

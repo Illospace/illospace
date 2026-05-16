@@ -2,13 +2,7 @@
   import { tick } from 'svelte';
 
   import { ConstellationIcon } from '$lib/components/constellation';
-
-  export interface RuntimeOption {
-    key: string;
-    label: string;
-    description?: string | null;
-    disabled?: boolean;
-  }
+  import type { RuntimeOption } from './types';
 
   let {
     id,
@@ -16,6 +10,8 @@
     value,
     options,
     disabled = false,
+    labelHidden = false,
+    className = '',
     onValueChange,
   }: {
     id: string;
@@ -23,6 +19,8 @@
     value: string;
     options: RuntimeOption[];
     disabled?: boolean;
+    labelHidden?: boolean;
+    className?: string;
     onValueChange?: (value: string) => void;
   } = $props();
 
@@ -33,6 +31,9 @@
   let fixedMenuStyle = $state('');
 
   const selectedOption = $derived(options.find((option) => option.key === value) ?? options[0] ?? null);
+  const rootClass = $derived(
+    ['runtime-field', labelHidden ? 'has-hidden-label' : '', className].filter(Boolean).join(' '),
+  );
 
   $effect(() => {
     if (!open) return;
@@ -116,8 +117,8 @@
   }
 </script>
 
-<div bind:this={rootEl} class="runtime-field">
-  <span id={`${id}-label`}>{label}</span>
+<div bind:this={rootEl} class={rootClass}>
+  <span id={`${id}-label`} class="runtime-field-label" class:is-hidden={labelHidden}>{label}</span>
   <button
     id={id}
     type="button"
@@ -175,13 +176,27 @@
     color: var(--constellation-text-muted);
   }
 
-  .runtime-field span {
+  .runtime-field-label {
     min-width: 0;
     font-family: var(--constellation-font-mono);
     font-size: var(--constellation-type-meta);
     font-weight: 700;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+  }
+
+  .runtime-field-label.is-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    clip-path: inset(50%);
+  }
+
+  .runtime-field.has-hidden-label {
+    gap: 0;
   }
 
   .runtime-select-trigger {
