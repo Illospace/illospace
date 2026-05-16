@@ -29,6 +29,30 @@ def _last_style_block(source: str) -> str:
     return style_blocks[-1]
 
 
+def test_thread_markdown_uses_readable_prose_primitive():
+    components_css = (REPO_ROOT / "frontend/src/lib/styles/components.css").read_text()
+    transcript = (
+        REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadTranscript.svelte"
+    ).read_text()
+    visual_block = (
+        REPO_ROOT / "frontend/src/lib/features/threads/components/StreamVisualBlock.svelte"
+    ).read_text()
+
+    assert ".constellation-prose {" in components_css
+    assert "letter-spacing: 0;" in components_css
+    assert "text-transform: none;" in components_css
+    assert ".constellation-prose code {" in components_css
+    assert "font-family: var(--font-mono);" in components_css
+    assert "color: inherit;" in components_css
+    assert "border: 1px solid var(--content-code-border)" not in components_css.split(
+        ".constellation-prose .md-inline-code", 1
+    )[1].split(".constellation-prose .md-code-block", 1)[0]
+    assert 'class="thread-message-html constellation-prose"' in transcript
+    assert 'class="markdown-view constellation-prose"' in visual_block
+    assert ".thread-message-html :global(h1)" not in transcript
+    assert ".markdown-view :global(h1)" not in visual_block
+
+
 def test_frontend_theme_uses_named_theme_and_color_scheme_axis():
     app_html = (REPO_ROOT / "frontend/src/app.html").read_text()
     theme_store = (REPO_ROOT / "frontend/src/lib/stores/theme.svelte.ts").read_text()

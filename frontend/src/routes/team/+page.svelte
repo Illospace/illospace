@@ -601,12 +601,8 @@
     position: absolute;
     inset: 0 auto 0 0;
     border-radius: inherit;
-    background: linear-gradient(
-      90deg,
-      color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 78%, transparent),
-      color-mix(in srgb, var(--constellation-color-blue, #8DB7FF) 84%, transparent)
-    );
-    box-shadow: 0 0 14px color-mix(in srgb, var(--constellation-color-blue, #8DB7FF) 24%, transparent);
+    background: color-mix(in srgb, var(--constellation-color-amber) 78%, var(--constellation-color-text-primary) 12%);
+    box-shadow: none;
   }
 
   .team-token-metrics {
@@ -619,7 +615,7 @@
 
   .team-token-metric,
   .team-token-muted {
-    color: rgba(240, 240, 250, 0.58);
+    color: var(--constellation-color-text-tertiary);
     font-size: 11px;
     line-height: 1.35;
     white-space: nowrap;
@@ -628,17 +624,17 @@
   .team-token-metric {
     padding: 3px 7px;
     border-radius: var(--constellation-radius-pill);
-    border: 1px solid rgba(240, 240, 250, 0.08);
-    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid var(--constellation-surface-nested-border);
+    background: var(--constellation-surface-nested-background);
     font-family: var(--constellation-font-mono);
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
 
   .team-token-metric-primary {
-    color: rgba(255, 255, 255, 0.86);
-    border-color: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 30%, transparent);
-    background: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 10%, transparent);
+    color: var(--constellation-section-title);
+    border-color: color-mix(in srgb, var(--constellation-color-amber) 30%, var(--constellation-surface-nested-border));
+    background: color-mix(in srgb, var(--constellation-color-amber) 10%, var(--constellation-surface-nested-background));
   }
 
   .team-token-unattributed {
@@ -654,7 +650,7 @@
   }
 
   .team-token-unattributed-eyebrow {
-    color: rgba(240, 240, 250, 0.52);
+    color: var(--constellation-label-eyebrow);
     font-family: var(--constellation-font-mono);
     font-size: 10px;
     font-weight: 600;
@@ -664,14 +660,14 @@
 
   .team-token-unattributed-title {
     margin-top: 6px;
-    color: rgba(255, 255, 255, 0.84);
+    color: var(--constellation-section-title);
     font-size: 13px;
     line-height: 1.45;
   }
 
   .team-token-unattributed-meta {
     flex-shrink: 0;
-    color: rgba(240, 240, 250, 0.58);
+    color: var(--constellation-color-text-tertiary);
     font-family: var(--constellation-font-mono);
     font-size: 10px;
     letter-spacing: 0.12em;
@@ -687,7 +683,7 @@
 
   .team-profile-eyebrow {
     margin: 0;
-    color: rgba(240, 240, 250, 0.56);
+    color: var(--constellation-label-eyebrow);
     font-family: var(--constellation-font-mono);
     font-size: 10px;
     font-weight: 600;
@@ -697,7 +693,7 @@
 
   .team-profile-title {
     margin: 0;
-    color: rgba(255, 255, 255, 0.96);
+    color: var(--constellation-section-title);
     font-family: var(--constellation-font-sans);
     font-size: 16px;
     font-weight: 560;
@@ -706,7 +702,7 @@
 
   .team-profile-description {
     margin: 0;
-    color: rgba(240, 240, 250, 0.54);
+    color: var(--constellation-section-description);
     font-size: 13px;
     line-height: 1.55;
   }
@@ -722,7 +718,7 @@
   }
 
   .team-profile-label {
-    color: rgba(240, 240, 250, 0.6);
+    color: var(--constellation-label-meta);
     font-family: var(--constellation-font-mono);
     font-size: 10px;
     font-weight: 600;
@@ -742,14 +738,14 @@
     width: 42px;
     height: 30px;
     padding: 0;
-    border: 1px solid rgba(240, 240, 250, 0.14);
+    border: 1px solid var(--constellation-control-field-border);
     border-radius: 10px;
     background: transparent;
     cursor: pointer;
   }
 
   .team-profile-color-value {
-    color: rgba(240, 240, 250, 0.68);
+    color: var(--constellation-color-text-secondary);
     font-family: var(--constellation-font-mono);
     font-size: 11px;
     letter-spacing: 0.1em;
@@ -760,7 +756,7 @@
     display: inline-flex;
     align-items: center;
     gap: 10px;
-    color: rgba(240, 240, 250, 0.72);
+    color: var(--constellation-color-text-secondary);
     font-size: 13px;
     line-height: 1.4;
   }
@@ -768,7 +764,7 @@
   .team-profile-toggle input[type='checkbox'] {
     width: 16px;
     height: 16px;
-    accent-color: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 92%, transparent);
+    accent-color: var(--constellation-color-amber);
   }
 
   @media (max-width: 760px) {

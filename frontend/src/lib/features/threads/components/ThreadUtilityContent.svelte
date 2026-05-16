@@ -925,6 +925,7 @@
     --panel-utility-eval-button-border: rgba(255, 255, 255, 0.08);
     --panel-utility-eval-button-background: rgba(255, 255, 255, 0.03);
     --panel-utility-eval-button-text: rgba(231, 238, 247, 0.66);
+    --panel-utility-eval-button-hover-border: rgba(255, 255, 255, 0.14);
     --panel-utility-eval-button-hover-background: rgba(255, 255, 255, 0.06);
     --panel-utility-eval-button-hover-text: rgba(239, 244, 251, 0.92);
     --panel-utility-action-border: color-mix(in srgb, var(--thread-accent, #57CFA0) 24%, rgba(255, 255, 255, 0.08));
@@ -942,11 +943,12 @@
     --panel-utility-card-border: rgba(126, 92, 52, 0.1);
     --panel-utility-card-background: rgba(248, 250, 248, 0.58);
     --panel-utility-link-dot-shadow: 0 0 0 4px rgba(54, 70, 82, 0.06);
-    --panel-utility-eval-button-border: rgba(126, 92, 52, 0.12);
-    --panel-utility-eval-button-background: rgba(255, 253, 247, 0.76);
-    --panel-utility-eval-button-text: rgba(49, 63, 76, 0.82);
-    --panel-utility-eval-button-hover-background: rgba(255, 253, 247, 0.98);
-    --panel-utility-eval-button-hover-text: rgba(18, 27, 36, 0.96);
+    --panel-utility-eval-button-border: var(--constellation-control-button-secondary-border);
+    --panel-utility-eval-button-background: var(--constellation-control-button-secondary-background);
+    --panel-utility-eval-button-text: var(--constellation-control-button-secondary-text);
+    --panel-utility-eval-button-hover-border: var(--constellation-control-button-secondary-border-hover);
+    --panel-utility-eval-button-hover-background: var(--constellation-control-button-secondary-hover-background);
+    --panel-utility-eval-button-hover-text: var(--constellation-control-button-secondary-hover-text);
     --panel-utility-action-border: color-mix(in srgb, var(--thread-accent, #57CFA0) 32%, rgba(126, 92, 52, 0.12));
     --panel-utility-action-background: color-mix(in srgb, var(--thread-accent, #57CFA0) 14%, rgba(255, 253, 247, 0.9));
     --panel-utility-action-hover-background: color-mix(in srgb, var(--thread-accent, #57CFA0) 20%, rgba(255, 253, 247, 0.98));
@@ -2091,6 +2093,7 @@
   }
 
   .audit-eval-btn:hover:not(:disabled) {
+    border-color: var(--panel-utility-eval-button-hover-border);
     background: var(--panel-utility-eval-button-hover-background);
     color: var(--panel-utility-eval-button-hover-text);
   }

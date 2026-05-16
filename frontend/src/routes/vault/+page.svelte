@@ -899,6 +899,27 @@
     onInitialCreateSaved?.(initialCreatePrefill?.id ?? null);
   }
 
+  async function syncRuntimeSecret(keyName: string, value: string) {
+    const normalized = keyName.trim().toUpperCase();
+    try {
+      if (normalized === 'OPENAI_API_KEY') {
+        await api.connectRuntimeOpenAIKey({ api_key: value });
+        return true;
+      }
+      if (normalized === 'OPENAI_EMBEDDING_API_KEY') {
+        await api.connectRuntimeOpenAIEmbeddingKey({ api_key: value });
+        return true;
+      }
+      if (normalized === 'GEMINI_API_KEY') {
+        await api.connectRuntimeGeminiKey({ api_key: value });
+        return true;
+      }
+    } catch (err: any) {
+      ui.toast(err?.message || 'Secret saved, but runtime did not accept the key.', 'error');
+    }
+    return false;
+  }
+
   async function submitCreate() {
     if (!formKeyName.trim() || !formValue) {
       ui.toast('Key name and value are required', 'error');
@@ -930,16 +951,18 @@
     }
     formSaving = true;
     try {
+      const keyName = formKeyName.trim();
       await api.createSecret({
-        key_name: formKeyName.trim(),
+        key_name: keyName,
         value: formValue,
         description: formDescription.trim(),
         category: formCategory,
         agent_access_level: formAgentAccessLevel,
       }, vaultToken);
-      ui.toast('Secret created', 'success');
+      const runtimeSynced = await syncRuntimeSecret(keyName, formValue);
+      ui.toast(runtimeSynced ? 'Secret created and runtime updated' : 'Secret created', 'success');
       showCreateModal = false;
-      notifyInitialCreateSaved(formKeyName.trim());
+      notifyInitialCreateSaved(keyName);
       await loadData();
     } catch (err: any) {
       handleVaultError(err, 'Create failed');
@@ -2395,7 +2418,7 @@
   .agent-panel-content {
     display: grid;
     gap: 14px;
-    padding: 0 16px 16px;
+    padding: 16px;
   }
 
   .agent-summary-strip {

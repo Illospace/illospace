@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.auth import get_current_user
@@ -60,19 +60,25 @@ async def _require_personal_openai_connection(db: AsyncSession, *, user_id: str,
 
 
 async def _find_existing_intro(session: Any, *, org_id: str, user_id: str) -> Idea | None:
+    intro_ref = _intro_ref(user_id)
     stmt = (
         select(Idea)
         .where(
             Idea.org_id == org_id,
             Idea.user_id == user_id,
-            Idea.origin == INTRO_ORIGIN,
-            Idea.origin_ref == _intro_ref(user_id),
-            Idea.archived_at.is_(None),
+            or_(
+                Idea.origin_ref == intro_ref,
+                (Idea.origin == INTRO_ORIGIN) & (Idea.title == INTRO_TITLE),
+            ),
         )
-        .order_by(Idea.created_at.desc())
+        .order_by(Idea.archived_at.is_not(None), Idea.created_at.desc())
         .limit(1)
     )
     return (await session.scalars(stmt)).first()
+
+
+def _intro_is_archived(idea: Idea) -> bool:
+    return getattr(idea, "archived_at", None) is not None
 
 
 async def _latest_intro_run_status(session: Any, *, idea_id: str) -> str | None:
@@ -97,7 +103,6 @@ def _intro_metadata(prompt_visibility: str = "hidden") -> dict[str, str]:
         "model": INTRO_MODEL,
         "model_tier": "high",
         "thinking_tier": "high",
-        "required_response": "introduce_and_continue_setup",
     }
 
 
@@ -144,9 +149,14 @@ async def runtime_ready_intro_draft(
     await _require_personal_openai_connection(db, user_id=user_id, org_id=org_id)
 
     existing = await _find_existing_intro(db, org_id=org_id, user_id=user_id)
+    existing_active_id = (
+        str(existing.id)
+        if existing is not None and not _intro_is_archived(existing)
+        else None
+    )
     return {
         "ok": True,
-        "idea_id": str(existing.id) if existing is not None else None,
+        "idea_id": existing_active_id,
         "should_play": existing is None,
         "prompt": INTRO_PROMPT,
         "origin": INTRO_ORIGIN,
@@ -170,6 +180,13 @@ async def start_runtime_ready_intro(
 
     existing = await _find_existing_intro(db, org_id=org_id, user_id=user_id)
     if existing is not None:
+        if _intro_is_archived(existing):
+            return {
+                "ok": True,
+                "idea_id": str(existing.id),
+                "created": False,
+                "run_id": None,
+            }
         latest_status = await _latest_intro_run_status(db, idea_id=str(existing.id))
         if latest_status not in INTRO_RUN_SETTLED_STATUSES:
             result = await _route_intro_run(db, idea=existing, user=user)

@@ -3,68 +3,67 @@
 
   import RuntimeSelect from './RuntimeSelect.svelte';
   import SetupCard from './SetupCard.svelte';
-  import type { MemoryCheck, MemoryDraft, MemoryNoticeState, PillTone, RuntimeSettings } from './types';
+  import type { MemoryCheck, MemoryDraft, MemoryNoticeState, RuntimeOption, RuntimeSettings } from './types';
 
   let {
     description,
-    status,
-    statusTone,
     memory,
     memoryDraft,
     embeddingModelOptions,
+    vaultKeyOptions,
+    selectedVaultKey,
     notice,
     memoryCheck,
     canManageSettings,
-    savingMemory,
     checkingMemory,
+    vaultLoading,
+    syncingVaultKey,
     onCheckMemory,
     onUpdateMemory,
-    onSaveMemory,
+    onSelectVaultKey,
     onAddApiKey,
-    saveDisabled = false,
     checkDisabled = false,
   }: {
     description: string;
-    status: string;
-    statusTone: PillTone;
     memory: RuntimeSettings['memory'];
     memoryDraft: MemoryDraft;
     embeddingModelOptions: RuntimeSettings['memory']['embedding_model_options'];
+    vaultKeyOptions: RuntimeOption[];
+    selectedVaultKey: string;
     notice: MemoryNoticeState | null;
     memoryCheck: MemoryCheck | null;
     canManageSettings: boolean;
-    savingMemory: boolean;
     checkingMemory: boolean;
+    vaultLoading: boolean;
+    syncingVaultKey: boolean;
     onCheckMemory: () => void;
     onUpdateMemory: (key: keyof MemoryDraft, value: string) => void;
-    onSaveMemory: () => void;
+    onSelectVaultKey: (value: string) => void;
     onAddApiKey: () => void;
-    saveDisabled?: boolean;
     checkDisabled?: boolean;
   } = $props();
 
   const localModelLabel = $derived(memoryDraft.embedder === 'local_cpu' ? 'Local CPU model' : 'Local GPU model');
   const usesApiModel = $derived(memoryDraft.embedder === 'openai' || memoryDraft.embedder === 'gemini');
+  const showReranker = $derived(memory.reranker_options.length > 1);
 </script>
 
 {#snippet addKeyActions()}
   <ConstellationButton variant="secondary" size="sm" onclick={onAddApiKey}>
-    Add API key
+    Open Vault
   </ConstellationButton>
 {/snippet}
 
 <SetupCard
   eyebrow="Memory"
-  title="Set Up Memory"
+  title="Memory & retrieval"
   {description}
-  {status}
-  {statusTone}
 >
   {#snippet actions()}
     <ConstellationButton
       variant="secondary"
       onclick={onCheckMemory}
-      loading={checkingMemory || savingMemory}
+      loading={checkingMemory}
       disabled={!canManageSettings || checkDisabled}
     >
       Save & check
@@ -92,7 +91,7 @@
     {/if}
   </div>
 
-  <div class="memory-grid">
+  <div class="memory-flow-grid" class:has-reranker={showReranker}>
     <RuntimeSelect
       id="memory-embedder"
       label="Embedder"
@@ -103,6 +102,14 @@
     />
     {#if usesApiModel}
       <RuntimeSelect
+        id="memory-vault-key"
+        label="Vault key"
+        value={selectedVaultKey}
+        options={vaultKeyOptions}
+        disabled={!canManageSettings || vaultLoading || syncingVaultKey}
+        onValueChange={onSelectVaultKey}
+      />
+      <RuntimeSelect
         id="memory-embedding-model"
         label="Embedding model"
         value={memoryDraft.embedding_model}
@@ -111,26 +118,27 @@
         onValueChange={(value) => onUpdateMemory('embedding_model', value)}
       />
     {:else}
+      <label class="runtime-static-field" for="memory-local-key">
+        <span>Vault key</span>
+        <div id="memory-local-key">No key needed</div>
+      </label>
       <label class="runtime-static-field" for="memory-local-model">
         <span>Embedding model</span>
         <div id="memory-local-model">{localModelLabel}</div>
       </label>
     {/if}
-    <RuntimeSelect
-      id="memory-reranker"
-      label="Reranker"
-      value={memoryDraft.reranker}
-      options={memory.reranker_options}
-      disabled={!canManageSettings}
-      onValueChange={(value) => onUpdateMemory('reranker', value)}
-    />
+    {#if showReranker}
+      <RuntimeSelect
+        id="memory-reranker"
+        label="Reranker"
+        value={memoryDraft.reranker}
+        options={memory.reranker_options}
+        disabled={!canManageSettings}
+        onValueChange={(value) => onUpdateMemory('reranker', value)}
+      />
+    {/if}
   </div>
 
-  <div class="panel-actions">
-    <ConstellationButton onclick={onSaveMemory} loading={savingMemory} disabled={!canManageSettings || saveDisabled}>
-      Save memory
-    </ConstellationButton>
-  </div>
 </SetupCard>
 
 <style>
@@ -139,10 +147,17 @@
     gap: 18px;
   }
 
-  .memory-grid {
+  .memory-flow-grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 18px;
+    align-items: end;
+    padding-top: 14px;
+    border-top: 1px solid var(--constellation-surface-panel-separator);
+  }
+
+  .memory-flow-grid.has-reranker {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .runtime-static-field {
@@ -172,13 +187,9 @@
     padding: 0 12px;
   }
 
-  .panel-actions {
-    display: flex;
-    justify-content: flex-end;
-  }
-
   @media (max-width: 980px) {
-    .memory-grid {
+    .memory-flow-grid,
+    .memory-flow-grid.has-reranker {
       grid-template-columns: 1fr;
     }
   }

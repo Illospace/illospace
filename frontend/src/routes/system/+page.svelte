@@ -15,11 +15,10 @@
     navigateOpenAIOAuthPopup,
     openOpenAIOAuthPopup,
   } from '$lib/utils/oauthPopup';
+  import { auth } from '$lib/stores/auth.svelte';
 
-  import AccessCard from './AccessCard.svelte';
   import MemoryCard from './MemoryCard.svelte';
   import ModelsCard from './ModelsCard.svelte';
-  import StartupGuide from './StartupGuide.svelte';
   import type {
     EmbedderKey,
     MemoryCheck,
@@ -27,21 +26,32 @@
     MemoryNoticeState,
     ModelTier,
     NoticeState,
-    PillTone,
     RuntimeOption,
     RuntimeSettings,
     RuntimeUpdateStatus,
-    StartupGuideStep,
-    StartupStepKey,
   } from './types';
 
   type CodexSignInCallbackMode = 'auto' | 'server' | 'local_bridge';
+  type MemoryVaultProvider = 'openai' | 'gemini';
+  type VaultSecret = {
+    id: number;
+    key_name: string;
+    description?: string | null;
+    category?: string | null;
+  };
+  type StoredVaultSession = {
+    token: string;
+    expiresAt: string;
+    savedAt: string;
+  };
+
+  const OPEN_VAULT_SELECT_VALUE = '__open_vault__';
+  const VAULT_SESSION_STORAGE_PREFIX = 'illo:vault:unlock:v1';
+  const VAULT_SESSION_EXPIRY_SKEW_MS = 5000;
 
   let settings = $state<RuntimeSettings | null>(null);
   let loading = $state(true);
   let loadError = $state('');
-  let apiKey = $state('');
-  let openaiEmbedderApiKey = $state('');
   let oauthCallback = $state('');
   let oauthUrl = $state('');
   let oauthState = $state('');
@@ -50,38 +60,39 @@
   let oauthChannel: BroadcastChannel | null = null;
   let oauthExchangeInFlight = false;
   let savingConnection = $state(false);
-  let savingOpenAIEmbedderKey = $state(false);
   let savingModels = $state(false);
-  let savingMemory = $state(false);
   let checkingMemory = $state(false);
   let memoryCheck = $state<MemoryCheck | null>(null);
   let notice = $state<NoticeState | null>(null);
-  let geminiApiKey = $state('');
-  let savingGeminiKey = $state(false);
   let updateStatus = $state<RuntimeUpdateStatus | null>(null);
   let startingUpdate = $state(false);
   let startingIntro = $state(false);
-  let setupEmbedderPromptSkipped = $state(false);
   let modelDraft = $state<Record<ModelTier, string>>({ low: '', medium: '', high: '' });
   let memoryDraft = $state<MemoryDraft>({
     embedder: 'local_gpu',
     embedding_model: 'text-embedding-3-small',
     reranker: 'weighted',
   });
+  let vaultSecrets = $state<VaultSecret[]>([]);
+  let vaultLoading = $state(false);
+  let vaultLocked = $state(true);
+  let vaultLoadError = $state('');
+  let vaultToken = $state<string | null>(null);
+  let selectedMemoryVaultKey = $state('');
+  let syncingMemoryVaultKey = $state(false);
+  let lastVaultLoadUserId = '';
 
   const canManageSettings = $derived(settings?.permissions?.can_manage_settings ?? false);
   const connectionStatus = $derived(settings?.connection?.status ?? 'missing');
-  const connectionTone = $derived<PillTone>(connectionStatus === 'connected' ? 'success' : 'warning');
-  const memoryStatus = $derived(memoryCardStatus());
-  const memoryTone = $derived<PillTone>(memoryCardTone());
   const modelOptions = $derived(settings?.models?.options ?? []);
   const setupMode = $derived($page.url.searchParams.get('setup') === '1');
   const setupCanContinue = $derived(setupMode && connectionStatus === 'connected');
-  const hasEmbeddingApiKey = $derived(Boolean(settings?.memory.api_key_statuses?.openai || settings?.memory.api_key_statuses?.gemini));
-  const showEmbedderKeyPrompt = $derived(setupMode && canManageSettings && !hasEmbeddingApiKey && !setupEmbedderPromptSkipped);
-  const startupGuideSteps = $derived(buildStartupGuideSteps());
-  const showStartupGuide = $derived(shouldShowStartupGuide());
   const updateRunning = $derived(startingUpdate || updateStatus?.status === 'running');
+  const memoryVaultProvider = $derived<MemoryVaultProvider>(embeddingProvider(memoryDraft.embedder));
+  const memoryVaultKeyOptions = $derived(buildMemoryVaultKeyOptions());
+  const vaultSessionStorageKey = $derived(
+    auth.user?.id ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.id)}` : '',
+  );
 
   onMount(() => {
     loadSettings();
@@ -98,6 +109,13 @@
       oauthChannel?.close();
       oauthChannel = null;
     };
+  });
+
+  $effect(() => {
+    const userId = auth.user?.id ?? '';
+    if (!userId || userId === lastVaultLoadUserId) return;
+    lastVaultLoadUserId = userId;
+    void loadVaultSecrets();
   });
 
   function hydrate(next: RuntimeSettings) {
@@ -123,6 +141,7 @@
       if (next.permissions?.can_manage_settings) {
         void loadUpdateStatus();
       }
+      void loadVaultSecrets();
     } catch (error) {
       loadError = error instanceof Error ? error.message : 'System setup failed to load.';
     } finally {
@@ -155,75 +174,6 @@
       notice = errorNotice('Update did not start.', error, 'Check the server update log and try again.');
     } finally {
       startingUpdate = false;
-    }
-  }
-
-  async function connectWithApiKey() {
-    const value = apiKey.trim();
-    if (!value) {
-      notice = { tone: 'warning', title: 'Paste an OpenAI API key first.' };
-      return;
-    }
-    savingConnection = true;
-    notice = null;
-    try {
-      await api.connectRuntimeOpenAIKey({ api_key: value });
-      apiKey = '';
-      notice = {
-        tone: 'success',
-        title: canManageSettings ? 'Workspace OpenAI key connected.' : 'OpenAI API key connected.',
-      };
-      await openRuntimeReadyIntro({ openExisting: true });
-    } catch (error) {
-      notice = errorNotice('Connection failed.', error, 'OpenAI rejected the credential.');
-    } finally {
-      savingConnection = false;
-    }
-  }
-
-  async function connectWithOpenAIEmbeddingKey() {
-    const value = openaiEmbedderApiKey.trim();
-    if (!value) {
-      notice = { tone: 'warning', title: 'Paste an OpenAI API key first.' };
-      return;
-    }
-    savingOpenAIEmbedderKey = true;
-    notice = null;
-    try {
-      const memory = await api.connectRuntimeOpenAIEmbeddingKey({ api_key: value });
-      openaiEmbedderApiKey = '';
-      setupEmbedderPromptSkipped = true;
-      if (settings) hydrate({ ...settings, memory });
-      notice = {
-        tone: 'success',
-        title: 'Workspace memory key saved.',
-        detail: 'Memory and retrieval can use OpenAI embeddings across the workspace.',
-      };
-    } catch (error) {
-      notice = errorNotice('Memory key was not saved.', error, 'Check the OpenAI API key.');
-    } finally {
-      savingOpenAIEmbedderKey = false;
-    }
-  }
-
-  async function connectWithGeminiKey() {
-    const value = geminiApiKey.trim();
-    if (!value) {
-      notice = { tone: 'warning', title: 'Paste a Gemini API key first.' };
-      return;
-    }
-    savingGeminiKey = true;
-    notice = null;
-    try {
-      await api.connectRuntimeGeminiKey({ api_key: value });
-      geminiApiKey = '';
-      setupEmbedderPromptSkipped = true;
-      notice = { tone: 'success', title: 'Gemini API key connected.' };
-      await loadSettings();
-    } catch (error) {
-      notice = errorNotice('Gemini key was not saved.', error, 'Check the Google AI Studio key.');
-    } finally {
-      savingGeminiKey = false;
     }
   }
 
@@ -423,22 +373,6 @@
     }
   }
 
-  async function saveMemory() {
-    if (!canManageSettings || memoryChangeNeedsRebuild()) return;
-    savingMemory = true;
-    notice = null;
-    memoryCheck = null;
-    try {
-      const memory = await api.updateRuntimeMemory(memoryPayload());
-      if (settings) settings = { ...settings, memory };
-      notice = { tone: 'success', title: 'Memory setup saved.' };
-    } catch (error) {
-      notice = errorNotice('Memory setup was not saved.', error, 'Check the selected memory settings.');
-    } finally {
-      savingMemory = false;
-    }
-  }
-
   async function checkMemory() {
     if (!canManageSettings || memoryChangeNeedsRebuild()) return;
     checkingMemory = true;
@@ -469,10 +403,95 @@
         embedder,
         embedding_model: defaultEmbeddingModel(embedder),
       };
+      reconcileSelectedMemoryVaultKey(embedder);
     } else {
       memoryDraft = { ...memoryDraft, [key]: value } as MemoryDraft;
     }
     memoryCheck = null;
+  }
+
+  function getVaultSessionStorage(): Storage | null {
+    if (typeof sessionStorage === 'undefined') return null;
+    try {
+      return sessionStorage;
+    } catch {
+      return null;
+    }
+  }
+
+  function clearPersistedVaultSession() {
+    const storage = getVaultSessionStorage();
+    if (!storage || !vaultSessionStorageKey) return;
+    try {
+      storage.removeItem(vaultSessionStorageKey);
+    } catch {
+      // Browser storage can be blocked; the page still works without persistence.
+    }
+  }
+
+  function readPersistedVaultSession(): string | null {
+    const storage = getVaultSessionStorage();
+    if (!storage || !vaultSessionStorageKey) return null;
+    try {
+      const raw = storage.getItem(vaultSessionStorageKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as Partial<StoredVaultSession>;
+      if (!parsed.token || !parsed.expiresAt) {
+        clearPersistedVaultSession();
+        return null;
+      }
+      const expiresAt = Date.parse(parsed.expiresAt);
+      if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() + VAULT_SESSION_EXPIRY_SKEW_MS) {
+        clearPersistedVaultSession();
+        return null;
+      }
+      return parsed.token;
+    } catch {
+      clearPersistedVaultSession();
+      return null;
+    }
+  }
+
+  async function loadVaultSecrets() {
+    if (!auth.user?.id) {
+      vaultSecrets = [];
+      vaultToken = null;
+      vaultLocked = true;
+      vaultLoadError = '';
+      selectedMemoryVaultKey = '';
+      return;
+    }
+
+    const token = readPersistedVaultSession();
+    vaultToken = token;
+    vaultLoadError = '';
+    if (!token) {
+      vaultSecrets = [];
+      vaultLocked = true;
+      selectedMemoryVaultKey = '';
+      return;
+    }
+
+    vaultLoading = true;
+    try {
+      const next = (await api.listSecrets(undefined, token)) as VaultSecret[];
+      vaultSecrets = next;
+      vaultLocked = false;
+      reconcileSelectedMemoryVaultKey(memoryDraft.embedder, next);
+    } catch (error: any) {
+      vaultSecrets = [];
+      selectedMemoryVaultKey = '';
+      if (error?.status === 423) {
+        vaultToken = null;
+        vaultLocked = true;
+        clearPersistedVaultSession();
+      } else {
+        vaultLocked = false;
+        vaultLoadError = error?.detail || error?.message || 'Vault keys could not be loaded.';
+      }
+    } finally {
+      vaultLoading = false;
+    }
   }
 
   function memoryPayload() {
@@ -483,37 +502,13 @@
     };
   }
 
-  function optionLabel(options: RuntimeOption[], key: string | null | undefined) {
-    return options.find((option) => option.key === key)?.label ?? key ?? 'Unset';
-  }
-
-  function connectionSummary() {
-    if (!settings || settings.connection.status !== 'connected') {
-      return 'Connect Codex or OpenAI for models. Owner API keys can also power workspace memory.';
-    }
-    const label = settings.connection.label || (settings.connection.method === 'chatgpt' ? 'Codex / ChatGPT' : 'OpenAI API key');
-    return `${label} for models. Memory keys apply across the workspace.`;
-  }
-
-  function modelSummary() {
-    if (!settings) return 'Choose low, medium, and high models.';
-    return `Low handles summaries. Medium is ${optionLabel(modelOptions, settings.models.medium)}.`;
-  }
-
-  function memorySummary() {
-    if (!settings) return 'Choose an embedder and ranking mode.';
-    const dimensions = memoryDraftDimensions();
-    return `${optionLabel(settings.memory.embedder_options, memoryDraft.embedder)} - ${dimensions || 'unknown'} dimensions, workspace-wide`;
-  }
-
-  function memoryCardStatus() {
-    if (memoryDraftDirty()) return 'pending';
-    return settings?.memory?.embedding_status ?? 'unknown';
-  }
-
-  function memoryCardTone(): PillTone {
-    if (memoryDraftDirty()) return 'info';
-    return settings?.memory?.embedding_status === 'ready' ? 'success' : 'warning';
+  function modelDraftDirty() {
+    if (!settings) return false;
+    return (
+      modelDraft.low !== settings.models.low ||
+      modelDraft.medium !== settings.models.medium ||
+      modelDraft.high !== settings.models.high
+    );
   }
 
   function memoryDraftDirty() {
@@ -535,14 +530,6 @@
     );
   }
 
-  function memoryDraftDimensions() {
-    if (memoryDraft.embedder === 'openai') return 768;
-    if (memoryDraft.embedder === 'gemini') return 768;
-    if (memoryDraft.embedder === 'local_cpu') return 384;
-    if (memoryDraft.embedder === 'local_gpu') return 2000;
-    return settings?.memory?.embedding_dimensions ?? null;
-  }
-
   function localEmbedderLabel(embedder: EmbedderKey) {
     if (embedder === 'local_cpu') return 'Local CPU';
     if (embedder === 'local_gpu') return 'Local GPU';
@@ -554,7 +541,7 @@
     return embedder === 'openai' || embedder === 'gemini';
   }
 
-  function embeddingProvider(embedder: EmbedderKey) {
+  function embeddingProvider(embedder: EmbedderKey): MemoryVaultProvider {
     return embedder === 'gemini' ? 'gemini' : 'openai';
   }
 
@@ -571,68 +558,169 @@
     return Boolean(settings?.memory.api_key_statuses?.[embeddingProvider(embedder)]);
   }
 
-  function accessReady() {
-    return settings?.connection.status === 'connected';
+  function providerLabel(provider: MemoryVaultProvider) {
+    return provider === 'gemini' ? 'Gemini' : 'OpenAI';
   }
 
-  function modelsReady() {
-    return Boolean(modelDraft.low && modelDraft.medium && modelDraft.high);
+  function providerArticle(provider: MemoryVaultProvider) {
+    return provider === 'openai' ? 'an' : 'a';
   }
 
-  function memoryReady() {
-    return Boolean(settings && !memoryDraftDirty() && settings.memory.embedding_status === 'ready');
-  }
+  function buildMemoryVaultKeyOptions(): RuntimeOption[] {
+    if (!usesApiEmbedder(memoryDraft.embedder)) {
+      return [{ key: '', label: 'No key needed', description: localEmbedderLabel(memoryDraft.embedder), disabled: true }];
+    }
 
-  function shouldShowStartupGuide() {
-    if (!settings) return false;
-    return !accessReady() || !modelsReady() || !memoryReady();
-  }
+    const provider = memoryVaultProvider;
+    const label = providerLabel(provider);
+    const openVault = vaultOpenOption(provider);
 
-  function buildStartupGuideSteps(): StartupGuideStep[] {
-    if (!settings) return [];
-    const accessDone = accessReady();
-    const modelsDone = modelsReady();
-    const memoryDone = memoryReady();
-    const memoryBlocked = memoryChangeNeedsRebuild();
+    if (vaultLoading) {
+      return [{ key: '', label: 'Checking Vault', description: 'Reading saved keys.', disabled: true }];
+    }
+    if (vaultLocked) {
+      return [
+        { key: '', label: 'Vault locked', description: `Unlock Vault to choose ${providerArticle(provider)} ${label} key.`, disabled: true },
+        openVault,
+      ];
+    }
+    if (vaultLoadError) {
+      return [
+        { key: '', label: 'Vault unavailable', description: vaultLoadError, disabled: true },
+        openVault,
+      ];
+    }
+
+    const matches = matchingVaultSecrets(provider);
+    const placeholder = hasApiKeyForEmbedder(memoryDraft.embedder) && matches.length === 0
+      ? { key: '', label: 'Runtime key saved', description: 'Add a Vault key to manage it here.', disabled: true }
+      : {
+          key: '',
+          label: matches.length > 0 ? 'Choose Vault key' : 'No matching key',
+          description: matches.length > 0 ? `${label} keys in Vault.` : `Add ${providerArticle(provider)} ${label} key in Vault.`,
+          disabled: true,
+        };
+
     return [
-      {
-        key: 'access',
-        title: 'Connect Access',
-        status: accessDone ? 'complete' : 'current',
-        detail: accessDone
-          ? connectionSummary()
-          : 'Sign in with Codex or paste a workspace OpenAI key. Add an API key when cloud memory uses OpenAI or Gemini.',
-      },
-      {
-        key: 'models',
-        title: 'Choose Models',
-        status: !canManageSettings ? 'blocked' : modelsDone ? 'complete' : accessDone ? 'current' : 'pending',
-        detail: canManageSettings
-          ? modelsDone
-            ? `Low ${optionLabel(modelOptions, modelDraft.low)}, medium ${optionLabel(modelOptions, modelDraft.medium)}, high ${optionLabel(modelOptions, modelDraft.high)}.`
-            : 'Pick one route for low, medium, and high work.'
-          : 'An owner or admin chooses the low, medium, and high routes.',
-      },
-      {
-        key: 'memory',
-        title: 'Set Up Memory',
-        status: !canManageSettings ? 'blocked' : memoryBlocked ? 'blocked' : memoryDone ? 'complete' : accessDone && modelsDone ? 'current' : 'pending',
-        detail: memoryGuideDetail(memoryDone, memoryBlocked),
-      },
+      ...(selectedMemoryVaultKey ? [] : [placeholder]),
+      ...matches.map((secret) => ({
+        key: secret.key_name,
+        label: secret.key_name,
+        description: secret.description || secret.category || 'Vault secret',
+      })),
+      openVault,
     ];
   }
 
-  function memoryGuideDetail(memoryDone: boolean, memoryBlocked: boolean) {
-    if (!settings) return 'Choose one workspace-wide embedder, then Save & check.';
-    if (!canManageSettings) return 'An owner or admin chooses one workspace-wide embedder and runs Save & check.';
-    if (memoryBlocked) return 'Existing workspace vectors need a rebuild before changing embedder or embedding model.';
-    if (memoryDone) return `${localEmbedderLabel(settings.memory.embedder)} memory is ready across this workspace.`;
-    if (usesApiEmbedder(memoryDraft.embedder) && !hasApiKeyForEmbedder(memoryDraft.embedder)) {
-      const keyLabel = memoryDraft.embedder === 'gemini' ? 'Gemini' : 'OpenAI';
-      const article = memoryDraft.embedder === 'openai' ? 'an' : 'a';
-      return `Add ${article} ${keyLabel} workspace API key, then Save & check.`;
+  function vaultOpenOption(provider: MemoryVaultProvider): RuntimeOption {
+    return {
+      key: OPEN_VAULT_SELECT_VALUE,
+      label: 'Open Vault',
+      description: `Add or unlock ${providerArticle(provider)} ${providerLabel(provider)} key.`,
+    };
+  }
+
+  function matchingVaultSecrets(provider: MemoryVaultProvider, source = vaultSecrets) {
+    return source.filter((secret) => isProviderVaultSecret(secret, provider));
+  }
+
+  function isProviderVaultSecret(secret: VaultSecret, provider: MemoryVaultProvider) {
+    const keyName = secret.key_name.toUpperCase();
+    const haystack = [secret.key_name, secret.description, secret.category]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    if (provider === 'gemini') {
+      return keyName.includes('GEMINI') || haystack.includes('gemini') || haystack.includes('google');
     }
-    return 'Choose one workspace-wide embedder, then Save & check.';
+    return keyName.includes('OPENAI') || haystack.includes('openai');
+  }
+
+  function reconcileSelectedMemoryVaultKey(embedder = memoryDraft.embedder, source = vaultSecrets) {
+    if (!usesApiEmbedder(embedder)) {
+      selectedMemoryVaultKey = '';
+      return;
+    }
+    const provider = embeddingProvider(embedder);
+    const matches = matchingVaultSecrets(provider, source);
+    if (selectedMemoryVaultKey && matches.some((secret) => secret.key_name === selectedMemoryVaultKey)) return;
+    selectedMemoryVaultKey = hasApiKeyForEmbedder(embedder) ? preferredVaultSecretKey(provider, matches) : '';
+  }
+
+  function preferredVaultSecretKey(provider: MemoryVaultProvider, matches: VaultSecret[]) {
+    if (provider === 'gemini') {
+      return matches.find((secret) => secret.key_name.toUpperCase() === 'GEMINI_API_KEY')?.key_name
+        || matches[0]?.key_name
+        || '';
+    }
+    return matches.find((secret) => secret.key_name.toUpperCase() === 'OPENAI_EMBEDDING_API_KEY')?.key_name
+      || matches.find((secret) => secret.key_name.toUpperCase() === 'OPENAI_API_KEY')?.key_name
+      || matches.find((secret) => secret.key_name.toUpperCase().includes('EMBEDDING'))?.key_name
+      || matches[0]?.key_name
+      || '';
+  }
+
+  async function handleMemoryVaultKeyChange(keyName: string) {
+    if (keyName === OPEN_VAULT_SELECT_VALUE) {
+      await openVaultForMemoryKey(memoryVaultProvider);
+      return;
+    }
+    if (!keyName || !canManageSettings) return;
+    await selectMemoryVaultKey(keyName);
+  }
+
+  async function selectMemoryVaultKey(keyName: string) {
+    const provider = memoryVaultProvider;
+    const token = vaultToken || readPersistedVaultSession();
+    if (!token) {
+      vaultToken = null;
+      vaultLocked = true;
+      selectedMemoryVaultKey = '';
+      await openVaultForMemoryKey(provider);
+      return;
+    }
+
+    syncingMemoryVaultKey = true;
+    notice = null;
+    try {
+      const data = await api.revealSecret(keyName, token);
+      const value = String(data?.value || '');
+      if (!value) throw new Error('Vault secret is empty.');
+      if (provider === 'gemini') {
+        await api.connectRuntimeGeminiKey({ api_key: value });
+      } else {
+        await api.connectRuntimeOpenAIEmbeddingKey({ api_key: value });
+      }
+      selectedMemoryVaultKey = keyName;
+      if (settings) {
+        settings = {
+          ...settings,
+          memory: {
+            ...settings.memory,
+            api_key_statuses: {
+              ...(settings.memory.api_key_statuses ?? {}),
+              [provider]: true,
+            },
+          },
+        };
+      }
+      memoryCheck = null;
+      notice = {
+        tone: 'success',
+        title: 'Memory key selected.',
+        detail: `${providerLabel(provider)} is available for memory.`,
+      };
+    } catch (error: any) {
+      if (error?.status === 423) {
+        vaultToken = null;
+        vaultLocked = true;
+        selectedMemoryVaultKey = '';
+        clearPersistedVaultSession();
+      }
+      notice = errorNotice('Memory key was not selected.', error, 'Unlock Vault and try again.');
+    } finally {
+      syncingMemoryVaultKey = false;
+    }
   }
 
   function memoryNotice(): MemoryNoticeState | null {
@@ -641,7 +729,7 @@
       return {
         tone: 'warning',
         title: 'Memory rebuild required.',
-        detail: `${settings.memory.indexed_vectors} workspace vectors use ${localEmbedderLabel(settings.memory.embedder)}. Changing embedder or embedding model needs a rebuild before it is safe.`,
+        detail: `${settings.memory.indexed_vectors} vectors use ${localEmbedderLabel(settings.memory.embedder)}. Rebuild before changing embedder or model.`,
       };
     }
     if (memoryDraftDirty()) {
@@ -649,21 +737,17 @@
       if (usesApiEmbedder(memoryDraft.embedder)) {
         const hasKey = hasApiKeyForEmbedder(memoryDraft.embedder);
         const keyLabel = memoryDraft.embedder === 'gemini' ? 'Gemini' : 'OpenAI';
-        const article = memoryDraft.embedder === 'openai' ? 'an' : 'a';
         return {
           tone: hasKey ? 'info' : 'warning',
-          title: `${keyLabel} memory selected.`,
-          detail:
-            hasKey
-              ? `Save & check to apply ${label} memory.`
-              : `Paste ${article} ${keyLabel} workspace API key in Access, then Save & check.`,
+          title: hasKey ? `${keyLabel} memory selected.` : `${keyLabel} key needed.`,
+          detail: hasKey ? 'Save & check.' : 'Choose a Vault key, then Save & check.',
           showAddKeyAction: !hasKey,
         };
       }
       return {
         tone: 'info',
         title: `${label} selected.`,
-        detail: `Save memory or Save & check to apply ${label} across this workspace. No cloud API key is needed for this embedder.`,
+        detail: 'Save & check.',
       };
     }
     if (!settings.memory.embedding_detail) return null;
@@ -674,37 +758,23 @@
       tone: 'warning',
       title: needsApiKey ? `${keyLabel} API key needed.` : 'Memory status',
       detail: needsApiKey
-        ? `Paste ${article} ${keyLabel} workspace API key in Access and click Connect key, or choose Local CPU.`
+        ? `Choose ${article} ${keyLabel} Vault key, or switch to Local CPU.`
         : settings.memory.embedding_detail,
       showAddKeyAction: needsApiKey,
     };
   }
 
-  function focusAccessKey() {
-    if (typeof document === 'undefined') return;
-    const fieldId = memoryDraft.embedder === 'gemini'
-      ? 'gemini-api-key'
-      : showEmbedderKeyPrompt
-        ? 'openai-embedder-api-key'
-        : 'openai-api-key';
-    const field = document.getElementById(fieldId) as HTMLInputElement | null;
-    field?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    window.requestAnimationFrame(() => field?.focus());
-  }
-
-  function skipEmbedderPrompt() {
-    setupEmbedderPromptSkipped = true;
-    notice = {
-      tone: 'info',
-      title: 'Memory key skipped.',
-      detail: 'Illo can help connect memory and retrieval from Cortex later.',
-    };
-  }
-
-  function scrollToSetupSection(section: StartupStepKey) {
-    if (typeof document === 'undefined') return;
-    const target = document.querySelector(`[data-setup-section="${section}"]`);
-    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  async function openVaultForMemoryKey(provider = embeddingProvider(memoryDraft.embedder)) {
+    const keyName = provider === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_EMBEDDING_API_KEY';
+    const description = provider === 'gemini'
+      ? 'Gemini key for memory embeddings'
+      : 'OpenAI key for memory embeddings';
+    const params = new URLSearchParams({
+      add_secret: keyName,
+      category: 'api',
+      description,
+    });
+    await goto(`/vault?${params.toString()}`);
   }
 
   function updateNoticeDetail(status: RuntimeUpdateStatus | null) {
@@ -735,9 +805,9 @@
 </svelte:head>
 
 <ConstellationPageFrame
-  eyebrow="Runtime setup"
-  title="System"
-  subtitle="Three things to get Illospace running: access, models, and memory."
+  eyebrow="System"
+  title="AI runtime"
+  subtitle="Composer models and memory."
   contentClassName="system-page"
 >
   {#snippet actions()}
@@ -781,79 +851,50 @@
   {/if}
 
   {#if loading && !settings}
-    <div class="system-loading">Loading runtime setup...</div>
+    <div class="system-loading">Loading runtime...</div>
   {:else if settings}
-    <div class="setup-cards">
-      {#if showStartupGuide}
-        <StartupGuide
-          steps={startupGuideSteps}
-          {canManageSettings}
-          onGoToStep={scrollToSetupSection}
-        />
-      {/if}
-
-      <div class="setup-section" data-setup-section="access">
-        <AccessCard
-          description={connectionSummary()}
-          status={connectionStatus}
-          statusTone={connectionTone}
-          {apiKey}
-          {openaiEmbedderApiKey}
-          {geminiApiKey}
+    <div class="runtime-config-grid">
+      <div class="setup-section setup-section-models" data-setup-section="models">
+        <ModelsCard
+          description=""
+          connectionStatus={connectionStatus}
+          {modelDraft}
+          {modelOptions}
           {oauthUrl}
           {oauthCallback}
           oauthPending={Boolean(oauthUrl)}
           {oauthCallbackAvailable}
           {oauthCallbackMode}
-          {showEmbedderKeyPrompt}
           {canManageSettings}
           {savingConnection}
-          {savingOpenAIEmbedderKey}
-          {savingGeminiKey}
-          onApiKeyChange={(value) => (apiKey = value)}
-          onOpenAIEmbedderApiKeyChange={(value) => (openaiEmbedderApiKey = value)}
-          onGeminiApiKeyChange={(value) => (geminiApiKey = value)}
-          onCallbackChange={(value) => (oauthCallback = value)}
-          onConnectWithApiKey={connectWithApiKey}
-          onConnectOpenAIEmbedderKey={connectWithOpenAIEmbeddingKey}
-          onConnectWithGeminiKey={connectWithGeminiKey}
-          onStartCodexSignIn={() => startCodexSignIn()}
-          onStartLocalCodexSignIn={() => startCodexSignIn('local_bridge')}
-          onFinishCodexSignIn={finishCodexSignIn}
-          onSkipEmbedderPrompt={skipEmbedderPrompt}
-        />
-      </div>
-
-      <div class="setup-section" data-setup-section="models">
-        <ModelsCard
-          description={modelSummary()}
-          {modelDraft}
-          {modelOptions}
-          {canManageSettings}
           {savingModels}
           onUpdateModel={updateModelTier}
           onSaveModels={saveModels}
+          onCallbackChange={(value) => (oauthCallback = value)}
+          onStartCodexSignIn={() => startCodexSignIn()}
+          onStartLocalCodexSignIn={() => startCodexSignIn('local_bridge')}
+          onFinishCodexSignIn={finishCodexSignIn}
         />
       </div>
 
-      <div class="setup-section" data-setup-section="memory">
+      <div class="setup-section setup-section-memory" data-setup-section="memory">
         <MemoryCard
-          description={memorySummary()}
-          status={memoryStatus}
-          statusTone={memoryTone}
+          description=""
           memory={settings.memory}
           {memoryDraft}
           embeddingModelOptions={embeddingModelOptions()}
+          vaultKeyOptions={memoryVaultKeyOptions}
+          selectedVaultKey={selectedMemoryVaultKey}
           notice={memoryNotice()}
           {memoryCheck}
           {canManageSettings}
-          {savingMemory}
           {checkingMemory}
+          {vaultLoading}
+          syncingVaultKey={syncingMemoryVaultKey}
           onCheckMemory={checkMemory}
           onUpdateMemory={updateMemoryDraft}
-          onSaveMemory={saveMemory}
-          onAddApiKey={focusAccessKey}
-          saveDisabled={memoryChangeNeedsRebuild()}
+          onSelectVaultKey={handleMemoryVaultKeyChange}
+          onAddApiKey={() => openVaultForMemoryKey()}
           checkDisabled={memoryChangeNeedsRebuild()}
         />
       </div>
@@ -862,10 +903,16 @@
 </ConstellationPageFrame>
 
 <style>
-  :global(.system-page),
-  .setup-cards {
+  :global(.system-page) {
     display: grid;
+    gap: 20px;
+  }
+
+  .runtime-config-grid {
+    display: grid;
+    grid-template-columns: 1fr;
     gap: 18px;
+    align-items: start;
   }
 
   .system-loading {
@@ -886,4 +933,5 @@
     min-width: 0;
     scroll-margin-top: 18px;
   }
+
 </style>

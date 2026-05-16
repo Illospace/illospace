@@ -1135,7 +1135,7 @@
     --workspace-chat-button-border: var(--constellation-control-button-secondary-border);
     --workspace-chat-button-background: var(--constellation-control-button-secondary-background);
     --workspace-chat-button-text: var(--constellation-control-button-secondary-text);
-    --workspace-chat-button-hover-border: var(--constellation-control-button-secondary-border);
+    --workspace-chat-button-hover-border: var(--constellation-control-button-secondary-border-hover);
     --workspace-chat-button-hover-background: var(--constellation-control-button-secondary-hover-background);
     --workspace-chat-button-hover-text: var(--constellation-control-button-secondary-hover-text);
     --workspace-chat-mini-background-idle: transparent;
@@ -1189,7 +1189,7 @@
     --workspace-chat-button-border: var(--constellation-control-button-secondary-border);
     --workspace-chat-button-background: var(--constellation-control-button-secondary-background);
     --workspace-chat-button-text: var(--constellation-control-button-secondary-text);
-    --workspace-chat-button-hover-border: var(--constellation-control-button-secondary-border);
+    --workspace-chat-button-hover-border: var(--constellation-control-button-secondary-border-hover);
     --workspace-chat-button-hover-background: var(--constellation-control-button-secondary-hover-background);
     --workspace-chat-button-hover-text: var(--constellation-control-button-secondary-hover-text);
     --workspace-chat-mini-background-idle: transparent;

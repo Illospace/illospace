@@ -418,7 +418,7 @@
 
         <!-- ═══ MARKDOWN ═══ -->
         {:else if block.type === 'markdown'}
-          <div class="markdown-view">
+          <div class="markdown-view constellation-prose">
             {@html renderMarkdown(block.content)}
           </div>
 
@@ -666,45 +666,12 @@
   /* ── Markdown ── */
   .markdown-view {
     padding: 12px 16px;
-    font-size: 13px;
-    line-height: 1.65;
-    color: rgba(240, 240, 250, 0.82);
-  }
-  .markdown-view :global(h1) { font-size: 1.4em; font-weight: 700; margin: 16px 0 8px; color: rgba(255, 255, 255, 0.94); border-bottom: 1px solid rgba(255, 255, 255, 0.05); padding-bottom: 4px; }
-  .markdown-view :global(h2) { font-size: 1.2em; font-weight: 600; margin: 14px 0 6px; color: rgba(255, 255, 255, 0.94); }
-  .markdown-view :global(h3) { font-size: 1.05em; font-weight: 600; margin: 12px 0 4px; color: rgba(240, 240, 250, 0.82); }
-  .markdown-view :global(h4) { font-size: 1em; font-weight: 500; margin: 10px 0 4px; color: rgba(240, 240, 250, 0.82); }
-  .markdown-view :global(strong) { font-weight: 600; color: rgba(255, 255, 255, 0.94); }
-  .markdown-view :global(em) { font-style: italic; }
-  .markdown-view :global(a) { color: var(--thread-accent, #57CFA0); text-decoration: none; }
-  .markdown-view :global(a:hover) { text-decoration: underline; }
-  .markdown-view :global(hr) { border: none; border-top: 1px solid rgba(255, 255, 255, 0.05); margin: 12px 0; }
-  .markdown-view :global(ul) { padding-left: 20px; margin: 6px 0; }
-  .markdown-view :global(li) { margin: 2px 0; }
-  .markdown-view :global(blockquote) {
-    border-left: 3px solid var(--thread-accent, #57CFA0);
-    padding: 4px 12px;
-    margin: 8px 0;
-    color: rgba(240, 240, 250, 0.72);
-    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 5%, transparent);
-    border-radius: 0 4px 4px 0;
-  }
-  .markdown-view :global(.md-code-block) {
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    border-radius: 6px;
-    padding: 10px;
-    margin: 8px 0;
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 11px;
-    overflow-x: auto;
-  }
-  .markdown-view :global(.md-inline-code) {
-    background: rgba(255, 255, 255, 0.03);
-    padding: 1px 5px;
-    border-radius: 3px;
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 0.9em;
+    --constellation-prose-text: rgba(240, 240, 250, 0.82);
+    --constellation-prose-heading: rgba(255, 255, 255, 0.94);
+    --constellation-prose-muted: rgba(240, 240, 250, 0.72);
+    --constellation-prose-accent: var(--thread-accent, #57CFA0);
+    --constellation-prose-font-size: 13px;
+    --constellation-prose-line-height: 1.65;
   }
 
   /* ── Screenshot ── */

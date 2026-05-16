@@ -94,8 +94,8 @@
 
 <style>
   .constellation-metric-tile {
-    --metric-accent: rgba(141, 183, 255, 0.26);
-    --metric-accent-soft: rgba(141, 183, 255, 0.1);
+    --metric-accent: var(--constellation-metric-accent, rgba(141, 183, 255, 0.26));
+    --metric-accent-soft: var(--constellation-metric-accent-soft, rgba(141, 183, 255, 0.1));
     --metric-value-color: var(--constellation-section-title);
     --metric-detail-color: var(--constellation-color-text-secondary);
     --metric-delta-background: var(--constellation-surface-nested-strong-background);
@@ -239,8 +239,8 @@
   }
 
   .constellation-metric-tile-tone-default {
-    --metric-accent: rgba(141, 183, 255, 0.26);
-    --metric-accent-soft: rgba(141, 183, 255, 0.1);
+    --metric-accent: var(--constellation-metric-accent, rgba(141, 183, 255, 0.26));
+    --metric-accent-soft: var(--constellation-metric-accent-soft, rgba(141, 183, 255, 0.1));
   }
 
   .constellation-metric-tile-tone-info {

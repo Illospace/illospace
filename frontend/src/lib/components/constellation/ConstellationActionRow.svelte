@@ -142,8 +142,8 @@
 
 <style>
   .constellation-action-row {
-    --action-row-accent: rgba(141, 183, 255, 0.18);
-    --action-row-accent-soft: rgba(141, 183, 255, 0.08);
+    --action-row-accent: var(--constellation-action-row-accent, rgba(141, 183, 255, 0.18));
+    --action-row-accent-soft: var(--constellation-action-row-accent-soft, rgba(141, 183, 255, 0.08));
     --action-row-padding-block: 16px;
     --action-row-padding-inline: 18px;
     position: relative;
@@ -296,8 +296,8 @@
   }
 
   .constellation-action-row-tone-default {
-    --action-row-accent: rgba(141, 183, 255, 0.18);
-    --action-row-accent-soft: rgba(141, 183, 255, 0.08);
+    --action-row-accent: var(--constellation-action-row-accent, rgba(141, 183, 255, 0.18));
+    --action-row-accent-soft: var(--constellation-action-row-accent-soft, rgba(141, 183, 255, 0.08));
   }
 
   .constellation-action-row-tone-info {

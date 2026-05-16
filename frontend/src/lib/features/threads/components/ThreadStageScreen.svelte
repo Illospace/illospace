@@ -1687,11 +1687,11 @@
 
     .thread-stage-layout.with-dock .thread-stage-thread :global(.thread-panel-header) {
       min-height: var(--thread-stage-docked-header-height);
-      padding: 0 2px 0 0;
+      padding: 2px 2px 0 0;
     }
 
     .thread-stage-layout.with-dock .thread-stage-thread :global(.thread-header-title-row) {
-      min-height: var(--thread-stage-docked-header-height);
+      min-height: calc(var(--thread-stage-docked-header-height) - 2px);
     }
   }
 

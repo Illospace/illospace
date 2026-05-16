@@ -95,14 +95,18 @@
     --button-border: var(--constellation-button-primary-border);
     --button-border-hover: var(--constellation-button-primary-border-hover);
     --button-text: var(--constellation-button-primary-text);
+    --button-text-hover: var(--constellation-button-primary-text-hover, var(--button-text));
     --button-shadow: var(--constellation-button-primary-shadow);
+    --button-shadow-hover: var(--constellation-button-primary-shadow-hover, var(--button-shadow));
+    appearance: none;
+    -webkit-appearance: none;
     display: inline-flex;
     position: relative;
     align-items: center;
     justify-content: center;
     gap: 8px;
     overflow: hidden;
-    border-radius: var(--constellation-radius-pill);
+    border-radius: var(--constellation-button-radius, var(--constellation-radius-pill));
     border: 1px solid var(--button-border);
     background: var(--button-background);
     color: var(--button-text);
@@ -123,32 +127,16 @@
       opacity var(--constellation-motion-settle-duration) ease;
   }
 
-  .constellation-button::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 62%);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity var(--constellation-motion-hover-duration) ease;
-  }
-
   .constellation-button:hover:not(:disabled) {
     transform: translateY(-1px);
     background: var(--button-background-hover);
     border-color: var(--button-border-hover);
-  }
-
-  .constellation-button:hover:not(:disabled)::after {
-    opacity: 1;
+    color: var(--button-text-hover);
+    box-shadow: var(--button-shadow-hover);
   }
 
   .constellation-button:active:not(:disabled) {
     transform: translateY(1px) scale(0.985);
-  }
-
-  .constellation-button:active:not(:disabled)::after {
-    opacity: 0.42;
   }
 
   .constellation-button:focus-visible {
@@ -175,7 +163,9 @@
     --button-border: var(--constellation-button-primary-border);
     --button-border-hover: var(--constellation-button-primary-border-hover);
     --button-text: var(--constellation-button-primary-text);
+    --button-text-hover: var(--constellation-button-primary-text-hover, var(--button-text));
     --button-shadow: var(--constellation-button-primary-shadow);
+    --button-shadow-hover: var(--constellation-button-primary-shadow-hover, var(--button-shadow));
   }
 
   .constellation-button-secondary {
@@ -184,7 +174,9 @@
     --button-border: var(--constellation-control-button-secondary-border);
     --button-border-hover: var(--constellation-button-secondary-border-hover);
     --button-text: var(--constellation-control-button-secondary-text);
+    --button-text-hover: var(--constellation-control-button-secondary-hover-text, var(--button-text));
     --button-shadow: var(--constellation-button-secondary-shadow);
+    --button-shadow-hover: var(--button-shadow);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
   }
@@ -195,9 +187,17 @@
     --button-border: var(--constellation-button-quiet-border);
     --button-border-hover: var(--constellation-button-quiet-border-hover);
     --button-text: var(--constellation-button-quiet-text);
+    --button-text-hover: var(--button-text);
     --button-shadow: var(--constellation-button-quiet-shadow);
+    --button-shadow-hover: var(--button-shadow);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
+  }
+
+  :global(:root[data-color-scheme='light']) .constellation-button-secondary,
+  :global(:root[data-color-scheme='light']) .constellation-button-quiet {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 
   .constellation-button-destructive {
@@ -206,7 +206,9 @@
     --button-border: var(--constellation-button-destructive-border);
     --button-border-hover: var(--constellation-button-destructive-border-hover);
     --button-text: var(--constellation-button-destructive-text);
+    --button-text-hover: var(--button-text);
     --button-shadow: var(--constellation-button-destructive-shadow);
+    --button-shadow-hover: var(--button-shadow);
   }
 
   .constellation-button-destructive[aria-pressed='true'] {

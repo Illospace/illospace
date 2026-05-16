@@ -56,6 +56,7 @@
   }
 
   .constellation-section.has-divider {
+    padding-top: var(--constellation-section-divider-offset, 16px);
     border-top: 1px solid var(--constellation-section-divider);
   }
 

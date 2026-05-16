@@ -78,9 +78,9 @@
 
 <style>
   .constellation-notice {
-    --notice-accent: rgba(141, 183, 255, 0.24);
-    --notice-accent-strong: rgba(141, 183, 255, 0.22);
-    --notice-accent-soft: rgba(141, 183, 255, 0.12);
+    --notice-accent: var(--constellation-notice-accent, rgba(141, 183, 255, 0.24));
+    --notice-accent-strong: var(--constellation-notice-accent-strong, rgba(141, 183, 255, 0.22));
+    --notice-accent-soft: var(--constellation-notice-accent-soft, rgba(141, 183, 255, 0.12));
     --notice-text: var(--constellation-color-text-primary);
     --notice-body: var(--constellation-color-text-secondary);
     position: relative;

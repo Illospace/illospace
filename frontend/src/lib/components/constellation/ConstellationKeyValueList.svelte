@@ -134,7 +134,7 @@
   }
 
   .constellation-key-value-row {
-    --key-value-accent: rgba(141, 183, 255, 0.08);
+    --key-value-accent: var(--constellation-key-value-accent, rgba(141, 183, 255, 0.08));
     position: relative;
     min-width: 0;
   }
@@ -258,7 +258,7 @@
   }
 
   .constellation-key-value-tone-default {
-    --key-value-accent: rgba(141, 183, 255, 0.08);
+    --key-value-accent: var(--constellation-key-value-accent, rgba(141, 183, 255, 0.08));
   }
 
   .constellation-key-value-tone-info {

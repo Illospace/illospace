@@ -72,9 +72,9 @@
 
 <style>
   .constellation-panel {
-    --panel-accent: rgba(141, 183, 255, 0.22);
-    --panel-accent-strong: rgba(141, 183, 255, 0.16);
-    --panel-accent-soft: rgba(141, 183, 255, 0.07);
+    --panel-accent: var(--constellation-panel-accent, rgba(141, 183, 255, 0.22));
+    --panel-accent-strong: var(--constellation-panel-accent-strong, rgba(141, 183, 255, 0.16));
+    --panel-accent-soft: var(--constellation-panel-accent-soft, rgba(141, 183, 255, 0.07));
     --panel-glow-secondary: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 8%, transparent);
     --panel-separator: var(--constellation-surface-panel-separator);
     --panel-padding: 18px;
@@ -168,9 +168,9 @@
   }
 
   .constellation-panel-tone-default {
-    --panel-accent: rgba(141, 183, 255, 0.22);
-    --panel-accent-strong: rgba(141, 183, 255, 0.15);
-    --panel-accent-soft: rgba(141, 183, 255, 0.07);
+    --panel-accent: var(--constellation-panel-accent, rgba(141, 183, 255, 0.22));
+    --panel-accent-strong: var(--constellation-panel-accent-strong, rgba(141, 183, 255, 0.15));
+    --panel-accent-soft: var(--constellation-panel-accent-soft, rgba(141, 183, 255, 0.07));
     --panel-glow-secondary: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 8%, transparent);
   }
 

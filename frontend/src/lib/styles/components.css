@@ -167,6 +167,114 @@
   border: 1px solid var(--positive-border);
 }
 
+/* -- Rich text / generated prose -- */
+
+.constellation-prose {
+  --constellation-prose-text: var(--text-2);
+  --constellation-prose-heading: var(--text-1);
+  --constellation-prose-muted: var(--text-3);
+  --constellation-prose-accent: var(--content-link);
+  --constellation-prose-font-size: var(--text-md);
+  --constellation-prose-line-height: var(--leading-relaxed);
+  color: var(--constellation-prose-text);
+  font-family: var(--font-sans);
+  font-size: var(--constellation-prose-font-size);
+  line-height: var(--constellation-prose-line-height);
+  overflow-wrap: anywhere;
+}
+
+.constellation-prose > * {
+  margin: 0;
+}
+
+.constellation-prose > * + * {
+  margin-top: 0.82em;
+}
+
+.constellation-prose > :is(h1, h2, h3, h4) {
+  color: var(--constellation-prose-heading);
+  font-family: var(--font-sans);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0;
+  line-height: var(--leading-snug);
+  text-transform: none;
+}
+
+.constellation-prose > * + :is(h1, h2, h3, h4) {
+  margin-top: 1.45em;
+}
+
+.constellation-prose > :is(h1, h2, h3, h4) + * {
+  margin-top: 0.48em;
+}
+
+.constellation-prose > h1 { font-size: 1.28em; }
+.constellation-prose > h2 { font-size: 1.18em; }
+.constellation-prose > h3 { font-size: 1.08em; }
+.constellation-prose > h4 { font-size: 1em; }
+
+.constellation-prose :is(ul, ol) {
+  padding-left: 1.35em;
+}
+
+.constellation-prose li + li {
+  margin-top: 0.28em;
+}
+
+.constellation-prose strong {
+  color: var(--content-strong);
+  font-weight: var(--weight-semibold);
+}
+
+.constellation-prose em {
+  color: var(--content-emphasis);
+}
+
+.constellation-prose a {
+  color: var(--constellation-prose-accent);
+  text-decoration: none;
+}
+
+.constellation-prose a:hover {
+  text-decoration: underline;
+}
+
+.constellation-prose blockquote {
+  border-left: 3px solid color-mix(in srgb, var(--constellation-prose-accent) 72%, transparent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 6px 12px;
+  color: var(--constellation-prose-muted);
+  background: color-mix(in srgb, var(--constellation-prose-accent) 7%, transparent);
+}
+
+.constellation-prose code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.constellation-prose .md-inline-code {
+  display: inline;
+  border-radius: 3px;
+  padding: 0 3px;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+}
+
+.constellation-prose .md-code-block {
+  overflow-x: auto;
+  border: 1px solid var(--content-code-border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  background: var(--content-code-background);
+}
+
+.constellation-prose .md-code-block code {
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+}
+
 /* Status badges */
 .badge-running {
   background: var(--accent-surface);
@@ -343,6 +451,8 @@
 /* ── Buttons ── */
 
 .btn {
+  appearance: none;
+  -webkit-appearance: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -353,18 +463,18 @@
   font-weight: var(--weight-medium);
   font-family: inherit;
   cursor: pointer;
-  border: 1px solid var(--border-3);
-  background: var(--bg-3);
-  color: var(--text-2);
+  border: 1px solid var(--constellation-control-button-secondary-border, var(--border-3));
+  background: var(--constellation-control-button-secondary-background, var(--bg-3));
+  color: var(--constellation-control-button-secondary-text, var(--text-2));
   transition: all var(--duration-fast) var(--ease-out);
   white-space: nowrap;
   line-height: 1;
 }
 
 .btn:hover {
-  background: var(--bg-4);
-  color: var(--text-1);
-  border-color: var(--border-3);
+  background: var(--constellation-control-button-secondary-hover-background, var(--bg-4));
+  color: var(--constellation-control-button-secondary-hover-text, var(--text-1));
+  border-color: var(--constellation-control-button-secondary-border-hover, var(--border-3));
 }
 
 .btn:active {
@@ -380,11 +490,12 @@
 .btn-ghost {
   background: transparent;
   border-color: transparent;
+  color: var(--constellation-button-quiet-text, var(--text-2));
 }
 
 .btn-ghost:hover {
-  background: var(--bg-4);
-  border-color: transparent;
+  background: var(--constellation-button-quiet-background-hover, var(--bg-4));
+  border-color: var(--constellation-button-quiet-border-hover, transparent);
 }
 
 .btn-accent {
@@ -1238,13 +1349,15 @@
 }
 
 .btn-primary {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
+  background: var(--constellation-button-primary-background, var(--accent));
+  color: var(--constellation-button-primary-text, #fff);
+  border-color: var(--constellation-button-primary-border, var(--accent));
+  box-shadow: var(--constellation-button-primary-shadow, none);
 }
 
 .btn-primary:hover {
-  background: var(--accent-bright);
-  border-color: var(--accent-bright);
-  color: #fff;
+  background: var(--constellation-button-primary-background-hover, var(--accent-bright));
+  border-color: var(--constellation-button-primary-border-hover, var(--accent-bright));
+  color: var(--constellation-button-primary-text-hover, var(--constellation-button-primary-text, #fff));
+  box-shadow: var(--constellation-button-primary-shadow-hover, var(--constellation-button-primary-shadow, none));
 }

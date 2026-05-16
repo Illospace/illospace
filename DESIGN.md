@@ -172,6 +172,35 @@ What we can learn from Linear without copying it:
 
 Do not copy Linear wholesale. Illo keeps Constellation's spatial canvas, ownership colors, astres, signal blobs, and light theme. The lesson is restraint, density, and surface discipline.
 
+## UI Change Classification
+
+Every UI change should declare one primary category before implementation. The category decides where the change belongs, how much verification it needs, and whether this file should change with the code.
+
+Use these categories:
+
+- **Primitive change**: updates a reusable Constellation component, adapter, or shared class in `frontend/src/lib/components/constellation/`, `frontend/src/lib/design-system/`, or shared style files. Use this when the same behavior or visual treatment should appear in multiple places. Check approved design-system sources before inventing a new primitive. Update `DESIGN.md` when the primitive introduces or changes product-level grammar.
+- **Token or theme change**: changes semantic colors, type scale, radius, elevation, spacing, focus, or light/dark behavior in `frontend/src/lib/styles/tokens.css` or `frontend/src/lib/styles/constellation.css`. This usually requires a `DESIGN.md` update unless the code is only correcting drift back to an already documented rule.
+- **Documented design-rule change**: changes the design language, surface ladder, typography guidance, interaction grammar, or promotion rules. Update `DESIGN.md` first or in the same patch, then make code follow it.
+- **Page layout change**: rearranges a route, panel, or feature view using existing primitives and tokens. Keep it local to the page or feature folder. Update `DESIGN.md` only if the layout establishes a reusable page pattern or changes product-level hierarchy.
+- **Local component styling change**: tunes a one-off feature component, state, or responsive edge case. Keep styles scoped. Do not promote to tokens or primitives unless the same need appears in multiple places.
+- **Behavior-sensitive visual change**: touches Cortex orbit, thread opening, composer submission, thread reply, stream rendering, generated app surfaces, or workspace motion. Preserve behavior first, then polish. Verify the affected workflow before finishing.
+- **MagicPath exploration**: creates or edits a MagicPath canvas component as a design proposal. Treat it as reference until ported into the Svelte app. When porting, classify the production change using the categories above.
+
+Promotion rules:
+
+- If a value repeats across unrelated components, prefer a token or primitive instead of page-local CSS.
+- If a visual rule affects color, typography, spacing, elevation, radius, or light/dark behavior across the product, update `DESIGN.md`.
+- If a change affects only composition inside one route and uses existing primitives correctly, keep it local.
+- If a local style starts carrying product language, promote it before it spreads.
+- If a MagicPath component is accepted, do not blindly add it to the app. Translate the intent into existing Svelte primitives, or create a new primitive only after the approved-source check.
+
+Before a UI patch, write down:
+
+- category
+- files expected to change
+- whether `DESIGN.md` needs an update
+- visual/workflow checks required before done
+
 ## Colors
 
 The canonical Constellation palette is a deep observatory field with two primary ownership families:
