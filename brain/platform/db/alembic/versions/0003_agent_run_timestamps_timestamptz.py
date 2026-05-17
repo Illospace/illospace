@@ -16,6 +16,10 @@ down_revision = "0002_idea_timestamps_timestamptz"
 branch_labels = None
 depends_on = None
 
+_RUN_LOG_GENERATED_COLUMN_SQL = (
+    "EXTRACT(EPOCH FROM (completed_at - runed_at))::INTEGER"
+)
+
 
 def _target_columns(source_data_type: str) -> list[tuple[str, str]]:
     bind = op.get_bind()
@@ -51,10 +55,47 @@ def _alter_column(
     )
 
 
+def _generated_column_expression(table_name: str, column_name: str) -> str | None:
+    bind = op.get_bind()
+    return bind.execute(
+        sa.text(
+            """
+            SELECT generation_expression
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = :table_name
+              AND column_name = :column_name
+              AND is_generated = 'ALWAYS'
+            """
+        ),
+        {"table_name": table_name, "column_name": column_name},
+    ).scalar_one_or_none()
+
+
+def _drop_run_log_duration_s() -> bool:
+    if _generated_column_expression("run_log", "duration_s") is None:
+        return False
+    op.drop_column("run_log", "duration_s")
+    return True
+
+
+def _restore_run_log_duration_s() -> None:
+    op.add_column(
+        "run_log",
+        sa.Column(
+            "duration_s",
+            sa.Integer(),
+            sa.Computed(_RUN_LOG_GENERATED_COLUMN_SQL),
+            nullable=True,
+        ),
+    )
+
+
 def upgrade() -> None:
     if op.get_bind().dialect.name != "postgresql":
         return
 
+    dropped_run_log_duration_s = _drop_run_log_duration_s()
     for table_name, column_name in _target_columns("timestamp without time zone"):
         _alter_column(
             table_name,
@@ -62,12 +103,15 @@ def upgrade() -> None:
             "TIMESTAMP WITH TIME ZONE",
             "AT TIME ZONE 'UTC'",
         )
+    if dropped_run_log_duration_s:
+        _restore_run_log_duration_s()
 
 
 def downgrade() -> None:
     if op.get_bind().dialect.name != "postgresql":
         return
 
+    dropped_run_log_duration_s = _drop_run_log_duration_s()
     for table_name, column_name in _target_columns("timestamp with time zone"):
         _alter_column(
             table_name,
@@ -75,3 +119,5 @@ def downgrade() -> None:
             "TIMESTAMP WITHOUT TIME ZONE",
             "AT TIME ZONE 'UTC'",
         )
+    if dropped_run_log_duration_s:
+        _restore_run_log_duration_s()

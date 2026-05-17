@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -58,6 +59,69 @@ async def test_runtime_ready_intro_reuses_existing_thread():
     assert result == {
         "ok": True,
         "idea_id": "idea-existing",
+        "created": False,
+        "run_id": None,
+    }
+    route_trigger.assert_not_called()
+    assert background_tasks.tasks == []
+
+
+async def test_existing_intro_lookup_includes_archived_prior_intro():
+    from brain.app.api.routers.onboarding import _find_existing_intro
+
+    session = MagicMock()
+    session.scalars.return_value.first.return_value = None
+
+    await _find_existing_intro(_AsyncSession(session), org_id="org-1", user_id="user-1")
+
+    stmt = session.scalars.call_args.args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "ideas.archived_at IS NULL" not in compiled
+    assert "ideas.origin_ref = 'runtime-ready-intro:user-1'" in compiled
+    assert "ideas.title = 'Hey Illo, help me understand what you can do to help me.'" in compiled
+
+
+async def test_runtime_ready_intro_draft_does_not_replay_archived_intro():
+    from brain.app.api.routers.onboarding import runtime_ready_intro_draft
+
+    session = MagicMock()
+    archived = SimpleNamespace(id="idea-archived", archived_at=datetime.now(timezone.utc))
+    session.scalars.return_value.first.return_value = archived
+
+    with patch(
+        "brain.app.api.routers.onboarding.async_get_provider_auth_status",
+        AsyncMock(return_value=_personal_openai_status()),
+    ):
+        result = await runtime_ready_intro_draft(
+            db=_AsyncSession(session),
+            user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+        )
+
+    assert result["should_play"] is False
+    assert result["idea_id"] is None
+
+
+async def test_runtime_ready_intro_does_not_recover_archived_failed_intro():
+    from brain.app.api.routers.onboarding import start_runtime_ready_intro
+
+    background_tasks = BackgroundTasks()
+    session = MagicMock()
+    archived = SimpleNamespace(id="idea-archived", archived_at=datetime.now(timezone.utc))
+    session.scalars.return_value.first.return_value = archived
+
+    with patch(
+        "brain.app.api.routers.onboarding.async_get_provider_auth_status",
+        AsyncMock(return_value=_personal_openai_status()),
+    ), patch("brain.app.api.routers.onboarding.async_route_trigger") as route_trigger:
+        result = await start_runtime_ready_intro(
+            db=_AsyncSession(session),
+            user={"id": "user-1", "org_id": "org-1", "role": "owner", "name": "Alice"},
+            background_tasks=background_tasks,
+        )
+
+    assert result == {
+        "ok": True,
+        "idea_id": "idea-archived",
         "created": False,
         "run_id": None,
     }

@@ -156,6 +156,7 @@ Current correction:
 - In Daylight, routine chrome should be flat. Do not use gradients on the thread stage, nav rail, toolbar buttons, mini chat hover shell, utility panel, or ordinary controls.
 - Replace default grey outlines with a clear border grammar: no border when shape and spacing are enough; warm taupe hairlines for structure; neutral/spectral borders for active or focus; semantic borders only for true status.
 - Warm taupe is structural in Daylight, not the secondary accent. Do not turn nav selection, toggles, composer controls, or generic hover states amber.
+- Daylight secondary controls should be neutral, not contextual color echoes. Avoid blue, blue-green, sage, or cream button fills that compete with the Cortex background; use the secondary/control tokens.
 - Do not draw selected nav items as side bars, clipped inset rails, or extra dots. Daylight should keep the same active contour language as dark mode, but with enough neutral contrast to be visible.
 - Tone down user-authored message fills. Ownership color should read as rim, mark, or accent before it becomes a large filled block.
 - In thread transcripts, user ownership color should live primarily in the mini astre. Keep user message shells neutral, and avoid repeating the "Illo" author label on every assistant reply.
@@ -171,6 +172,35 @@ What we can learn from Linear without copying it:
 - Dense product UI can still feel premium when hierarchy, spacing, and contrast are disciplined.
 
 Do not copy Linear wholesale. Illo keeps Constellation's spatial canvas, ownership colors, astres, signal blobs, and light theme. The lesson is restraint, density, and surface discipline.
+
+## UI Change Classification
+
+Every UI change should declare one primary category before implementation. The category decides where the change belongs, how much verification it needs, and whether this file should change with the code.
+
+Use these categories:
+
+- **Primitive change**: updates a reusable Constellation component, adapter, or shared class in `frontend/src/lib/components/constellation/`, `frontend/src/lib/design-system/`, or shared style files. Use this when the same behavior or visual treatment should appear in multiple places. Check approved design-system sources before inventing a new primitive. Update `DESIGN.md` when the primitive introduces or changes product-level grammar.
+- **Token or theme change**: changes semantic colors, type scale, radius, elevation, spacing, focus, or light/dark behavior in `frontend/src/lib/styles/tokens.css` or `frontend/src/lib/styles/constellation.css`. This usually requires a `DESIGN.md` update unless the code is only correcting drift back to an already documented rule.
+- **Documented design-rule change**: changes the design language, surface ladder, typography guidance, interaction grammar, or promotion rules. Update `DESIGN.md` first or in the same patch, then make code follow it.
+- **Page layout change**: rearranges a route, panel, or feature view using existing primitives and tokens. Keep it local to the page or feature folder. Update `DESIGN.md` only if the layout establishes a reusable page pattern or changes product-level hierarchy.
+- **Local component styling change**: tunes a one-off feature component, state, or responsive edge case. Keep styles scoped. Do not promote to tokens or primitives unless the same need appears in multiple places.
+- **Behavior-sensitive visual change**: touches Cortex orbit, thread opening, composer submission, thread reply, stream rendering, generated app surfaces, or workspace motion. Preserve behavior first, then polish. Verify the affected workflow before finishing.
+- **MagicPath exploration**: creates or edits a MagicPath canvas component as a design proposal. Treat it as reference until ported into the Svelte app. When porting, classify the production change using the categories above.
+
+Promotion rules:
+
+- If a value repeats across unrelated components, prefer a token or primitive instead of page-local CSS.
+- If a visual rule affects color, typography, spacing, elevation, radius, or light/dark behavior across the product, update `DESIGN.md`.
+- If a change affects only composition inside one route and uses existing primitives correctly, keep it local.
+- If a local style starts carrying product language, promote it before it spreads.
+- If a MagicPath component is accepted, do not blindly add it to the app. Translate the intent into existing Svelte primitives, or create a new primitive only after the approved-source check.
+
+Before a UI patch, write down:
+
+- category
+- files expected to change
+- whether `DESIGN.md` needs an update
+- visual/workflow checks required before done
 
 ## Colors
 
@@ -193,12 +223,14 @@ Theme naming rules:
 - `data-color-scheme` stores the contrast axis, currently `dark` or `light`; light-specific CSS must target this axis rather than `data-theme='light'`.
 - Components should consume semantic `--constellation-*` variables. Do not add local hardcoded dark colors plus a matching light override unless the value is first promoted to a shared token or a clearly scoped component variable.
 - In `frontend/src/lib/styles/constellation.css`, Daylight differences belong in the single `:root[data-color-scheme='light']` token boundary; primitive selectors below it must remain mode-agnostic.
+- If a color feels wrong in more than one page, promote the correction to semantic `--constellation-*` tokens before patching local selectors.
 
 Surface color rules:
 
 - Dark working surfaces should lean toward solid near-black, graphite, and deep slate materials with subtle borders.
 - Daylight working surfaces should lean toward opaque warm white, soft white, and pale gray with crisp readable text.
 - Avoid blue-purple tinted glass as the default material for thread, nav, mini chat, buttons, and secondary pages.
+- Inputs, nested cards, utility rows, and menu surfaces in Daylight should use neutral surface tokens, not pale blue fills copied from the workspace canvas.
 - Use spectral and amber as accents, ownership cues, and state signals; do not let them flood large reading surfaces.
 - `Danger`, `success`, warning, and info colors stay semantic. They are never general decoration.
 
@@ -400,11 +432,15 @@ Component rules:
 
 - Buttons are instrument controls, not glossy CTAs. Keep labels concise and use icons where useful.
 - Icon buttons need tooltips or clear positional meaning.
-- The composer trailing action is special and should not reuse generic button chrome.
+- The composer trailing action defines the primary action feel. Generic primary buttons should align with its simple, elegant shape and contrast, without metallic gradients.
+- Button hover states should stay flat unless a state genuinely needs elevation. Do not reintroduce gradient or shine effects through hover-only rules.
+- Secondary buttons and icon buttons should consume the shared secondary/control tokens. Do not hardcode cream, amber, blue, or sage variants locally.
 - Utility panel tab switching belongs inside one side panel, not in separate stacked columns.
 - Browser and Activity coexist as utility panel tabs in the approved thread stage.
 - Visual reply blocks stay conversational. They may render charts, diffs, diagrams, code, or previews, but they should not feel like a separate app jammed into the transcript.
 - Data tables are for factual secondary screens, not the main expression of the workspace.
+- Popovers and menus should reuse floating/select-chip menu tokens for border, background, shadow, active row, and supporting text. Local menu accents should be promoted only when they establish a reusable state.
+- Compact two-pane menus should align option lists near the top edge. Avoid hidden vertical slack between the category list and its active option panel.
 
 Thread-stage rules:
 
@@ -414,6 +450,8 @@ Thread-stage rules:
 - User messages should be distinct but quiet: use presence seed, rim, narrow accent, or subtle tinted shell before a saturated full-card fill.
 - Illo responses should stay mostly unboxed or very lightly framed, optimized for reading.
 - Dispatch inserts and tool summaries can use stronger structure, but should still feel conversation-native rather than dashboard widgets.
+- Header icon buttons must have enough local inset for borders, focus rings, and hover transforms. If a border clips, fix the row or button-group geometry before changing color or border width.
+- Dividers need follow-through spacing. When a section introduces a horizontal separator, the next heading or control group should not touch it; encode the spacing in the section primitive when the pattern repeats.
 
 Navigation and system-button rules:
 
@@ -470,6 +508,8 @@ Don't:
 - Do not put primary reading surfaces on transparent glass.
 - Do not use broad gradients on system buttons, nav, thread reading surfaces, or mini chat by default.
 - Do not let user message color overwhelm the thread.
+- Do not leave legacy keyboard shortcuts attached to hidden or deprecated overlays. If a surface is no longer part of the product, remove the shortcut, lazy loader, state, component, and feature API wrapper together.
+- Do not patch repeated Daylight color drift page by page when a shared token or primitive is responsible.
 
 ## Spatial Interaction Grammar
 

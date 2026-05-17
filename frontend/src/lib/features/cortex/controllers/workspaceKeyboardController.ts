@@ -2,8 +2,6 @@ export interface WorkspaceKeyboardState {
   chatDockExpanded: boolean;
   canvasOpen: boolean;
   activeWorkspaceAppId: string | null;
-  opsOpen: boolean;
-  timelineOpen: boolean;
   panelOpen: boolean;
 }
 
@@ -13,11 +11,7 @@ export interface WorkspaceKeyboardActions {
   openChat(): void;
   closeCanvas(): void;
   closeWorkspaceApp(): void;
-  closeOps(): void;
-  closeTimeline(): void;
   closeThread(): void;
-  toggleTimeline(): void;
-  toggleOps(): void;
   setConstellationMode(active: boolean): void;
 }
 
@@ -73,10 +67,6 @@ export function handleWorkspaceKeydown(
       actions.closeCanvas();
     } else if (state.activeWorkspaceAppId) {
       actions.closeWorkspaceApp();
-    } else if (state.opsOpen) {
-      actions.closeOps();
-    } else if (state.timelineOpen) {
-      actions.closeTimeline();
     } else if (state.panelOpen) {
       actions.closeThread();
     } else {
@@ -87,10 +77,6 @@ export function handleWorkspaceKeydown(
       event.preventDefault();
       releaseWorkspaceShortcutFocus();
     }
-  } else if (event.key === 't' || event.key === 'T') {
-    actions.toggleTimeline();
-  } else if (event.key === 'o' || event.key === 'O') {
-    actions.toggleOps();
   } else if (event.key === 'Shift' && !event.repeat) {
     actions.setConstellationMode(true);
   } else if (event.key === 'f' || event.key === 'F') {

@@ -17,6 +17,8 @@ export { default as ConstellationKeyValueList } from './ConstellationKeyValueLis
 export { default as ConstellationMetricTile } from './ConstellationMetricTile.svelte';
 export { default as ConstellationNotice } from './ConstellationNotice.svelte';
 export { default as ConstellationPageFrame } from './ConstellationPageFrame.svelte';
+export { default as ConstellationPageTabs } from './ConstellationPageTabs.svelte';
+export type { ConstellationPageTabOption } from './ConstellationPageTabs.svelte';
 export { default as ConstellationPanel } from './ConstellationPanel.svelte';
 export { default as ConstellationPill } from './ConstellationPill.svelte';
 export { default as ConstellationPresenceSeed } from './ConstellationPresenceSeed.svelte';

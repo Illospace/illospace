@@ -163,11 +163,9 @@
     )
   );
 
-  // Use tick to force reactivity on simulation updates
-  void tick;
 </script>
 
-<div class="graph-container" class:loaded bind:this={container}>
+<div class="graph-container" class:loaded data-simulation-tick={tick} bind:this={container}>
   <!-- Ambient background effects -->
   <div class="bg-grain"></div>
   <div class="bg-glow bg-glow-1"></div>

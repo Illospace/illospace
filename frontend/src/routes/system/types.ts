@@ -1,8 +1,6 @@
 export type ModelTier = 'low' | 'medium' | 'high';
 export type EmbedderKey = 'local_gpu' | 'local_cpu' | 'openai' | 'gemini';
 export type PillTone = 'muted' | 'warning' | 'success' | 'danger' | 'info';
-export type StartupStepKey = 'access' | 'models' | 'memory';
-export type StartupStepStatus = 'complete' | 'current' | 'pending' | 'blocked';
 
 export interface RuntimeOption {
   key: string;
@@ -78,13 +76,5 @@ export interface NoticeState {
 export interface MemoryNoticeState {
   tone: 'info' | 'warning' | 'danger' | 'success';
   title: string;
-  detail: string;
-  showAddKeyAction?: boolean;
-}
-
-export interface StartupGuideStep {
-  key: StartupStepKey;
-  title: string;
-  detail: string;
-  status: StartupStepStatus;
+  detail?: string;
 }

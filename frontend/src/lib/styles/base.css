@@ -73,6 +73,10 @@ img, svg {
   max-width: 100%;
 }
 
+button, input, textarea, select {
+  font: inherit;
+}
+
 code, pre {
   font-family: var(--font-mono);
 }

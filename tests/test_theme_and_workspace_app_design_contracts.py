@@ -29,6 +29,70 @@ def _last_style_block(source: str) -> str:
     return style_blocks[-1]
 
 
+def test_thread_markdown_uses_readable_prose_primitive():
+    components_css = (REPO_ROOT / "frontend/src/lib/styles/components.css").read_text()
+    transcript = (
+        REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadTranscript.svelte"
+    ).read_text()
+    visual_block = (
+        REPO_ROOT / "frontend/src/lib/features/threads/components/StreamVisualBlock.svelte"
+    ).read_text()
+
+    assert ".constellation-prose {" in components_css
+    assert "letter-spacing: 0;" in components_css
+    assert "text-transform: none;" in components_css
+    assert ".constellation-prose code {" in components_css
+    assert "font-family: var(--font-mono);" in components_css
+    assert "color: inherit;" in components_css
+    assert "border: 1px solid var(--content-code-border)" not in components_css.split(
+        ".constellation-prose .md-inline-code", 1
+    )[1].split(".constellation-prose .md-code-block", 1)[0]
+    assert 'class="thread-message-html constellation-prose"' in transcript
+    assert 'class="markdown-view constellation-prose"' in visual_block
+    assert ".thread-message-html :global(h1)" not in transcript
+    assert ".markdown-view :global(h1)" not in visual_block
+
+
+def test_workspace_pages_open_as_cortex_modals():
+    nav_rail = (REPO_ROOT / "frontend/src/lib/components/layout/ConstellationNavRail.svelte").read_text()
+    cortex_route = (
+        REPO_ROOT / "frontend/src/lib/features/cortex/components/CortexWorkspaceRoute.svelte"
+    ).read_text()
+    modal_shell = (
+        REPO_ROOT / "frontend/src/lib/features/cortex/components/WorkspacePageModal.svelte"
+    ).read_text()
+    modal_contract = (
+        REPO_ROOT / "frontend/src/lib/features/cortex/domain/workspacePageModal.ts"
+    ).read_text()
+
+    assert "buildCortexWorkspacePageHref" in nav_rail
+    assert "workspacePageModalIdForPath(item.href)" in nav_rail
+    assert "WorkspacePageModal" in cortex_route
+    assert "activeWorkspacePageModalId" in cortex_route
+    for section in ["cycles", "skills", "team", "vault", "system"]:
+        assert f"case '{section}':" in cortex_route
+        assert f"id: '{section}'" in modal_contract
+        route_redirect = (REPO_ROOT / f"frontend/src/routes/{section}/+page.ts").read_text()
+        assert f"buildCortexWorkspacePageHref('{section}'" in route_redirect
+
+    assert 'role="dialog"' in modal_shell
+    assert "workspace-page-modal__header" in modal_shell
+    assert "workspace-page-modal__page-actions" in modal_shell
+    assert "registerActions" in modal_shell
+    assert "registerRefreshAction" in modal_shell
+    assert 'name="refresh"' in modal_shell
+    assert "ConstellationIconButton" in modal_shell
+    page_frame = (REPO_ROOT / "frontend/src/lib/components/constellation/ConstellationPageFrame.svelte").read_text()
+    assert "registerActions(actions)" in page_frame
+    assert "!embeddedInWorkspacePageModal && Boolean(showHeaderCopy || actions)" in page_frame
+    for section in ["cycles", "skills", "team", "vault", "system"]:
+        route_page = (REPO_ROOT / f"frontend/src/routes/{section}/+page.svelte").read_text()
+        assert "registerRefreshAction" in route_page
+        assert 'name="refresh"' not in route_page
+        assert ">Refresh<" not in route_page
+        assert 'title="Refresh"' not in route_page
+
+
 def test_frontend_theme_uses_named_theme_and_color_scheme_axis():
     app_html = (REPO_ROOT / "frontend/src/app.html").read_text()
     theme_store = (REPO_ROOT / "frontend/src/lib/stores/theme.svelte.ts").read_text()
@@ -174,7 +238,7 @@ def test_cortex_workspace_chat_light_mode_is_page_tokenized():
 
     assert ":global(:root[data-color-scheme='light']) .cortex-page {" in source
     assert "--workspace-chat-expanded-background" in source
-    assert "background: var(--cortex-panel-open-overlay-background)" in source
+    assert "background: transparent" in source
     assert "data-color-scheme='light']) .workspace-chat" not in source
     assert "data-color-scheme='light']) .cortex-main::after" not in source
 
@@ -197,6 +261,45 @@ def test_thread_stage_sits_between_compact_and_foreground_chat_layers():
     assert re.search(r"\.workspace-chat-dock\s*\{.*?z-index: 2;", workspace_chat, re.DOTALL)
     assert re.search(r"\.thread-stage-shell\s*\{.*?z-index: 25;", thread_shell, re.DOTALL)
     assert re.search(r"\.workspace-chat-dock\.is-foreground\s*\{.*?z-index: 120;", workspace_chat, re.DOTALL)
+
+
+def test_thread_stage_open_motion_keeps_cortex_static():
+    page = (REPO_ROOT / "frontend/src/lib/features/cortex/components/CortexWorkspaceRoute.svelte").read_text()
+    thread_shell = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageShell.svelte").read_text()
+    controller = (
+        REPO_ROOT / "frontend/src/lib/features/cortex/controllers/workspaceThreadStageController.svelte.ts"
+    ).read_text()
+    shell_style = _last_style_block(thread_shell)
+    panel_open_rule = re.search(r"\.panel-open \.cortex-main\s*\{(?P<body>.*?)\}", page, re.DOTALL)
+    panel_overlay_rule = re.search(r"\.panel-open \.cortex-main::after\s*\{(?P<body>.*?)\}", page, re.DOTALL)
+
+    assert "threadStagePrewarmQueued" in page
+    assert "runWhenBrowserIdle(() => ensureThreadStageScreenLoaded()" in page
+    assert "threadStage.syncPanelOpen(cortex.panelOpen && Boolean(ThreadStageScreenComponent))" in page
+    assert "clip-path:" not in shell_style
+    assert "thread-origin-bloom" not in thread_shell
+    assert "thread-origin-ring" not in thread_shell
+    assert "thread-shell-presence" in thread_shell
+    assert "thread-shell-reveal" not in thread_shell
+    assert panel_open_rule
+    assert "opacity: 1;" in panel_open_rule.group("body")
+    assert "transform: none;" in panel_open_rule.group("body")
+    assert panel_overlay_rule
+    assert "opacity: 0;" in panel_overlay_rule.group("body")
+    assert "}, 32);" in controller
+    assert "}, 460);" in controller
+
+
+def test_thread_stage_dismiss_preserves_mounted_workspace_scene():
+    source = (REPO_ROOT / "frontend/src/lib/features/cortex/components/CortexWorkspaceRoute.svelte").read_text()
+    dismiss_body = source.split("function handleThreadStageDismiss()", 1)[1].split(
+        "async function loadWorkspaceSceneSidecars()",
+        1,
+    )[0]
+
+    assert "const shouldRefreshWorkspaceSceneSidecars = directThreadActive || !workspaceSceneSidecarsReady;" in dismiss_body
+    assert "if (shouldRefreshWorkspaceSceneSidecars)" in dismiss_body
+    assert "void loadWorkspaceSceneSidecars();" in dismiss_body
 
 
 def test_cortex_list_view_light_mode_is_component_tokenized():

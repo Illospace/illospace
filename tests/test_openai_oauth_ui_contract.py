@@ -18,10 +18,9 @@ def test_onboarding_shows_manual_callback_escape_hatch_while_oauth_is_pending():
 
 
 def test_system_access_card_expands_manual_callback_while_oauth_is_pending():
-    source = (ROOT / "frontend/src/routes/system/AccessCard.svelte").read_text()
+    source = (ROOT / "frontend/src/routes/system/ProviderConnections.svelte").read_text()
 
-    assert "const showManualCallback = $derived(Boolean(oauthPending));" in source
-    assert "{#if showManualCallback}" in source
+    assert "{#if oauthPending && !hasModelAccess}" in source
     assert "oauthUrl: string;" in source
     assert 'href={oauthUrl}' in source
 

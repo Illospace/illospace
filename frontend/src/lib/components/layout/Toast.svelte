@@ -74,17 +74,6 @@
       var(--constellation-motion-ease-lift, cubic-bezier(0.22, 1, 0.36, 1));
   }
 
-  .constellation-toast::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background:
-      var(--constellation-surface-floating-highlight),
-      linear-gradient(90deg, var(--toast-accent-background), transparent 42%);
-    opacity: 0.78;
-  }
-
   .constellation-toast--success {
     --toast-accent-background: var(--constellation-control-pill-success-background);
     --toast-accent-border: var(--constellation-control-pill-success-border);

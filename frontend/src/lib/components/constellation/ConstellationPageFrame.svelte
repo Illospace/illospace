@@ -1,5 +1,9 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { getContext, type Snippet } from 'svelte';
+  import {
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+    type ConstellationPageFrameModalContext,
+  } from './constellationPageFrameContext';
 
   type Props = {
     eyebrow?: string;
@@ -9,6 +13,7 @@
     headerClassName?: string;
     contentClassName?: string;
     actions?: Snippet;
+    tabs?: Snippet;
     children?: Snippet;
   };
 
@@ -20,6 +25,7 @@
     headerClassName = '',
     contentClassName = '',
     actions,
+    tabs,
     children,
   }: Props = $props();
 
@@ -30,7 +36,17 @@
   const stackClass = $derived(
     ['constellation-page-frame-content-stack', contentClassName].filter(Boolean).join(' '),
   );
-  const showHeader = $derived(Boolean(eyebrow || title || subtitle || actions));
+  const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
+    CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
+  );
+  const embeddedInWorkspacePageModal = workspacePageModalContext?.embedded === true;
+  const showHeaderCopy = $derived(!embeddedInWorkspacePageModal && Boolean(eyebrow || title || subtitle));
+  const showHeader = $derived(!embeddedInWorkspacePageModal && Boolean(showHeaderCopy || actions));
+
+  $effect(() => {
+    if (!embeddedInWorkspacePageModal) return;
+    return workspacePageModalContext?.registerActions(actions);
+  });
 </script>
 
 <section class={rootClass}>
@@ -42,17 +58,19 @@
       {#if showHeader}
         <header class={headerClass}>
           <div class="constellation-page-frame-header-head">
-            <div class="constellation-page-frame-header-copy">
-              {#if eyebrow}
-                <p class="constellation-page-frame-header-eyebrow">{eyebrow}</p>
-              {/if}
-              {#if title}
-                <h1 class="constellation-page-frame-header-title">{title}</h1>
-              {/if}
-              {#if subtitle}
-                <p class="constellation-page-frame-header-subtitle">{subtitle}</p>
-              {/if}
-            </div>
+            {#if showHeaderCopy}
+              <div class="constellation-page-frame-header-copy">
+                {#if eyebrow}
+                  <p class="constellation-page-frame-header-eyebrow">{eyebrow}</p>
+                {/if}
+                {#if title}
+                  <h1 class="constellation-page-frame-header-title">{title}</h1>
+                {/if}
+                {#if subtitle}
+                  <p class="constellation-page-frame-header-subtitle">{subtitle}</p>
+                {/if}
+              </div>
+            {/if}
 
             {#if actions}
               <div class="constellation-page-frame-header-actions">
@@ -63,11 +81,24 @@
         </header>
       {/if}
 
-      <div class={stackClass}>
-        {#if children}
-          {@render children()}
-        {/if}
-      </div>
+      {#if tabs}
+        <div class="constellation-page-frame-body">
+          <div class="constellation-page-frame-tabs">
+            {@render tabs()}
+          </div>
+          <div class={stackClass}>
+            {#if children}
+              {@render children()}
+            {/if}
+          </div>
+        </div>
+      {:else}
+        <div class={stackClass}>
+          {#if children}
+            {@render children()}
+          {/if}
+        </div>
+      {/if}
     </div>
   </div>
 </section>
@@ -181,6 +212,16 @@
   .constellation-page-frame-content-stack {
     display: grid;
     gap: 22px;
+    min-width: 0;
+  }
+
+  .constellation-page-frame-body {
+    display: grid;
+    gap: 18px;
+    min-width: 0;
+  }
+
+  .constellation-page-frame-tabs {
     min-width: 0;
   }
 

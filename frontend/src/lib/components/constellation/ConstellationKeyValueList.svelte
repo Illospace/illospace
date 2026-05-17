@@ -134,7 +134,7 @@
   }
 
   .constellation-key-value-row {
-    --key-value-accent: rgba(141, 183, 255, 0.08);
+    --key-value-accent: var(--constellation-key-value-accent, var(--constellation-tone-info-accent-soft));
     position: relative;
     min-width: 0;
   }
@@ -165,9 +165,9 @@
     border: 1px solid color-mix(in srgb, var(--key-value-accent) 72%, var(--constellation-surface-panel-border));
     background:
       var(--constellation-surface-panel-background),
-      linear-gradient(90deg, var(--key-value-accent), transparent 48%);
+      var(--constellation-key-value-grid-accent-background);
     box-shadow:
-      0 12px 28px rgba(0, 0, 0, 0.14),
+      var(--constellation-key-value-grid-shadow),
       var(--constellation-surface-nested-shadow);
   }
 
@@ -258,39 +258,39 @@
   }
 
   .constellation-key-value-tone-default {
-    --key-value-accent: rgba(141, 183, 255, 0.08);
+    --key-value-accent: var(--constellation-key-value-accent, var(--constellation-tone-info-accent-soft));
   }
 
   .constellation-key-value-tone-info {
-    --key-value-accent: rgba(141, 183, 255, 0.12);
+    --key-value-accent: var(--constellation-tone-info-accent-soft);
   }
 
   .constellation-key-value-tone-success {
-    --key-value-accent: rgba(109, 245, 189, 0.12);
+    --key-value-accent: var(--constellation-tone-success-accent-soft);
   }
 
   .constellation-key-value-tone-warning {
-    --key-value-accent: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 14%, transparent);
+    --key-value-accent: var(--constellation-tone-warning-accent-soft);
   }
 
   .constellation-key-value-tone-danger {
-    --key-value-accent: rgba(219, 110, 130, 0.14);
+    --key-value-accent: var(--constellation-tone-danger-accent-soft);
   }
 
   .constellation-key-value-tone-info .constellation-key-value-value {
-    color: rgba(204, 226, 255, 0.94);
+    color: var(--constellation-tone-info-text);
   }
 
   .constellation-key-value-tone-success .constellation-key-value-value {
-    color: rgba(184, 248, 219, 0.94);
+    color: var(--constellation-tone-success-text);
   }
 
   .constellation-key-value-tone-warning .constellation-key-value-value {
-    color: rgba(255, 230, 184, 0.94);
+    color: var(--constellation-tone-warning-text);
   }
 
   .constellation-key-value-tone-danger .constellation-key-value-value {
-    color: rgba(255, 186, 198, 0.94);
+    color: var(--constellation-tone-danger-text);
   }
 
   @media (max-width: 880px) {

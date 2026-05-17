@@ -6,6 +6,7 @@
     IconArchive,
     IconBell,
     IconBolt,
+    IconBrandOpenai,
     IconBrain,
     IconBrowser,
     IconBrush,
@@ -15,9 +16,12 @@
     IconChevronRight,
     IconCoins,
     IconCode,
+    IconCopy,
     IconCpu,
     IconDatabase,
     IconEdit,
+    IconEye,
+    IconEyeOff,
     IconExternalLink,
     IconFile,
     IconFileText,
@@ -29,6 +33,8 @@
     IconLayoutGrid,
     IconLayoutSidebarRight,
     IconLink,
+    IconLock,
+    IconLockOpen,
     IconListDetails,
     IconLogout,
     IconMenu2,
@@ -67,11 +73,14 @@
     | 'check'
     | 'close'
     | 'code'
+    | 'copy'
     | 'costs'
     | 'cortex'
     | 'cycles'
     | 'database'
     | 'edit'
+    | 'eye'
+    | 'eye-off'
     | 'document'
     | 'external-link'
     | 'file'
@@ -81,12 +90,15 @@
     | 'git-branch'
     | 'image'
     | 'link'
+    | 'lock'
+    | 'lock-open'
     | 'logout'
     | 'memory'
     | 'menu'
     | 'moon'
     | 'notification'
     | 'overview'
+    | 'openai'
     | 'paperclip'
     | 'pdf'
     | 'plus'
@@ -127,11 +139,14 @@
     check: IconCheck,
     close: IconX,
     code: IconCode,
+    copy: IconCopy,
     costs: IconCoins,
     cortex: IconBrain,
     cycles: IconRefresh,
     database: IconDatabase,
     edit: IconEdit,
+    eye: IconEye,
+    'eye-off': IconEyeOff,
     document: IconFileText,
     'external-link': IconExternalLink,
     file: IconFile,
@@ -141,12 +156,15 @@
     'git-branch': IconGitBranch,
     image: IconPhoto,
     link: IconLink,
+    lock: IconLock,
+    'lock-open': IconLockOpen,
     logout: IconLogout,
     memory: IconNotes,
     menu: IconMenu2,
     moon: IconMoon,
     notification: IconBell,
     overview: IconLayoutGrid,
+    openai: IconBrandOpenai,
     paperclip: IconPaperclip,
     pdf: IconFileTypePdf,
     plus: IconPlus,

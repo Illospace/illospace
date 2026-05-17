@@ -5,8 +5,6 @@ import type { CortexWorkspacePoint } from '$lib/features/workspace-scene/domain/
 import type { WorkspacePinRead } from '$lib/features/workspace-scene/api/workspacePinsApi';
 
 export class WorkspaceOverlayController {
-  timelineOpen = $state(false);
-  opsOpen = $state(false);
   composerContext = $state<CortexWorkspacePoint | null>(null);
   activeWorkspaceAppId = $state<string | null>(null);
   userMenuAnchor = $state<CortexUserMenuAnchor | null>(null);
@@ -95,21 +93,6 @@ export class WorkspaceOverlayController {
     this.archiveDropActive = false;
   }
 
-  toggleTimeline() {
-    this.timelineOpen = !this.timelineOpen;
-  }
-
-  closeTimeline() {
-    this.timelineOpen = false;
-  }
-
-  toggleOps() {
-    this.opsOpen = !this.opsOpen;
-  }
-
-  closeOps() {
-    this.opsOpen = false;
-  }
 }
 
 export function createWorkspaceOverlayController(): WorkspaceOverlayController {

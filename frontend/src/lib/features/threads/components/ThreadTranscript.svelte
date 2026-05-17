@@ -529,7 +529,7 @@
             {#if header.onArchiveAction}
               <ConstellationIconButton
                 label={header.archiveActionLabel ?? 'Archive thread'}
-                title="Archive thread"
+                title="Archive"
                 className={`thread-header-action-button thread-archive-button ${header.archiveActionLoading ? 'is-loading' : ''}`}
                 disabled={header.archiveActionLoading}
                 onclick={header.onArchiveAction}
@@ -607,7 +607,7 @@
 
               <div class="thread-message-content">
                 {#if item.html}
-                  <div class="thread-message-html">{@html item.html}</div>
+                  <div class="thread-message-html constellation-prose">{@html item.html}</div>
                 {:else if item.paragraphs}
                   {#each item.paragraphs as paragraph}
                     <p>{paragraph}</p>
@@ -1466,6 +1466,24 @@
     flex: 0 0 auto;
   }
 
+  .thread-header-title-row :global(.thread-header-action-button:hover:not(:disabled)) {
+    transform: none;
+  }
+
+  .thread-header-title-row :global(.thread-archive-button) {
+    color: var(--constellation-button-destructive-text);
+  }
+
+  .thread-header-title-row :global(.thread-archive-button:hover:not(:disabled)),
+  .thread-header-title-row :global(.thread-archive-button:focus-visible) {
+    color: var(--constellation-button-destructive-text);
+  }
+
+  .thread-header-title-row :global(.thread-archive-button:active:not(:disabled)),
+  .thread-header-title-row :global(.thread-archive-button.is-loading) {
+    color: var(--constellation-button-destructive-pressed-text);
+  }
+
   .thread-header-title-row :global(.thread-title-action-button.is-loading svg) {
     animation: thread-title-action-spin 720ms linear infinite;
   }
@@ -1476,7 +1494,7 @@
     gap: 6px;
     margin-left: auto;
     margin-right: -2px;
-    padding: 2px;
+    padding: 3px 2px 2px;
   }
 
   @keyframes thread-title-action-spin {
@@ -1647,55 +1665,11 @@
   }
 
   .thread-message-html {
-    display: grid;
-    gap: 12px;
-  }
-
-  .thread-message-html :global(*) {
-    margin: 0;
-  }
-
-  .thread-message-html :global(ul),
-  .thread-message-html :global(ol) {
-    padding-left: 18px;
-  }
-
-  .thread-message-html :global(li + li) {
-    margin-top: 4px;
-  }
-
-  .thread-message-html :global(h1),
-  .thread-message-html :global(h2),
-  .thread-message-html :global(h3),
-  .thread-message-html :global(h4) {
-    color: var(--constellation-thread-message-heading);
-    font-family: var(--thread-font-mono);
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.14em;
-    line-height: 1.4;
-    text-transform: uppercase;
-  }
-
-  .thread-message-html :global(code) {
-    font-family: var(--thread-font-mono);
-    font-size: 0.92em;
-  }
-
-  .thread-message-html :global(.md-inline-code) {
-    display: inline;
-  }
-
-  .thread-message-html :global(.md-code-block) {
-    overflow-x: auto;
-    border-radius: 8px;
-    padding: 10px 12px;
-    background: rgba(141, 183, 255, 0.09);
-  }
-
-  .thread-message-html :global(.md-code-block code) {
-    background: transparent;
-    padding: 0;
+    --constellation-prose-text: var(--thread-message-body);
+    --constellation-prose-heading: var(--constellation-thread-message-heading);
+    --constellation-prose-muted: var(--thread-message-meta);
+    --constellation-prose-font-size: 14px;
+    --constellation-prose-line-height: 1.62;
   }
 
   .thread-message-content ul,
@@ -1710,12 +1684,12 @@
 
   .thread-message-content h2 {
     color: var(--constellation-thread-message-heading);
-    font-family: var(--thread-font-mono);
-    font-size: 11px;
+    font-family: var(--thread-font-sans);
+    font-size: 15px;
     font-weight: 600;
-    letter-spacing: 0.14em;
-    line-height: 1.4;
-    text-transform: uppercase;
+    letter-spacing: 0;
+    line-height: 1.35;
+    text-transform: none;
   }
 
   .thread-message-attachments {

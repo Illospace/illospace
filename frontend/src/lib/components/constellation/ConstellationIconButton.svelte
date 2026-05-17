@@ -59,13 +59,20 @@
 
 <style>
   .constellation-icon-button {
+    --icon-button-background: var(--constellation-icon-button-quiet-background);
+    --icon-button-background-hover: var(--constellation-icon-button-quiet-background-hover);
+    --icon-button-border: var(--constellation-icon-button-quiet-border, var(--constellation-icon-button-border));
+    --icon-button-border-hover: var(--constellation-icon-button-quiet-border-hover);
+    --icon-button-shadow: var(--constellation-icon-button-quiet-shadow);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     padding: 0;
     border-radius: 8px;
-    border: 1px solid var(--constellation-icon-button-border);
+    border: 1px solid var(--icon-button-border);
+    background: var(--icon-button-background);
     color: var(--constellation-icon-button-text);
+    box-shadow: var(--icon-button-shadow);
     cursor: pointer;
     transition:
       transform var(--constellation-motion-hover-duration) ease,
@@ -79,6 +86,8 @@
 
   .constellation-icon-button:hover:not(:disabled) {
     transform: translateY(-1px);
+    border-color: var(--icon-button-border-hover);
+    background: var(--icon-button-background-hover);
     color: var(--constellation-color-text-primary);
   }
 
@@ -103,23 +112,24 @@
   }
 
   .constellation-icon-button-quiet {
-    background: var(--constellation-icon-button-quiet-background);
-    box-shadow: var(--constellation-icon-button-quiet-shadow);
-  }
-
-  .constellation-icon-button-quiet:hover:not(:disabled) {
-    background: var(--constellation-icon-button-quiet-background-hover);
-    border-color: var(--constellation-icon-button-quiet-border-hover);
+    --icon-button-background: var(--constellation-icon-button-quiet-background);
+    --icon-button-background-hover: var(--constellation-icon-button-quiet-background-hover);
+    --icon-button-border: var(--constellation-icon-button-quiet-border, var(--constellation-icon-button-border));
+    --icon-button-border-hover: var(--constellation-icon-button-quiet-border-hover);
+    --icon-button-shadow: var(--constellation-icon-button-quiet-shadow);
   }
 
   .constellation-icon-button-secondary {
-    background: var(--constellation-icon-button-secondary-background);
-    box-shadow: var(--constellation-icon-button-secondary-shadow);
+    --icon-button-background: var(--constellation-icon-button-secondary-background);
+    --icon-button-background-hover: var(--constellation-icon-button-secondary-background-hover);
+    --icon-button-border: var(--constellation-icon-button-secondary-border, var(--constellation-icon-button-border));
+    --icon-button-border-hover: var(--constellation-icon-button-secondary-border-hover);
+    --icon-button-shadow: var(--constellation-icon-button-secondary-shadow);
   }
 
-  .constellation-icon-button-secondary:hover:not(:disabled) {
-    background: var(--constellation-icon-button-secondary-background-hover);
-    border-color: var(--constellation-icon-button-secondary-border-hover);
+  :global(:root[data-color-scheme='light']) .constellation-icon-button {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 
   .constellation-icon-button-sm {

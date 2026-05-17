@@ -29,6 +29,9 @@
 
   --constellation-color-user-accent: #57cfa0;
   --constellation-color-amber: var(--thread-accent, var(--constellation-color-user-accent));
+  --constellation-color-success: var(--positive);
+  --constellation-color-warning: #f0b15e;
+  --constellation-color-danger: var(--negative);
   --constellation-color-amber-core: color-mix(in srgb, var(--constellation-color-amber) 48%, rgba(5, 9, 16, 0.98));
   --constellation-color-amber-owner: color-mix(in srgb, var(--constellation-color-amber) 34%, rgba(240, 240, 250, 0.96));
   --constellation-color-badge-ring: rgba(5, 9, 16, 0.92);
@@ -36,6 +39,26 @@
   --constellation-shadow-astre-amber:
     0 0 0 1px rgba(240, 240, 250, 0.06),
     0 0 36px color-mix(in srgb, var(--constellation-color-amber) 24%, transparent);
+
+  --constellation-tone-neutral-accent: color-mix(in srgb, var(--constellation-color-text-primary) 16%, transparent);
+  --constellation-tone-neutral-accent-strong: color-mix(in srgb, var(--constellation-color-text-primary) 20%, transparent);
+  --constellation-tone-neutral-accent-soft: color-mix(in srgb, var(--constellation-color-text-primary) 6%, transparent);
+  --constellation-tone-info-accent: color-mix(in srgb, var(--constellation-color-spectral) 30%, transparent);
+  --constellation-tone-info-accent-strong: color-mix(in srgb, var(--constellation-color-spectral) 28%, transparent);
+  --constellation-tone-info-accent-soft: color-mix(in srgb, var(--constellation-color-spectral) 12%, transparent);
+  --constellation-tone-info-text: color-mix(in srgb, var(--constellation-color-spectral) 42%, var(--constellation-color-text-primary));
+  --constellation-tone-success-accent: color-mix(in srgb, var(--constellation-color-success) 30%, transparent);
+  --constellation-tone-success-accent-strong: color-mix(in srgb, var(--constellation-color-success) 28%, transparent);
+  --constellation-tone-success-accent-soft: color-mix(in srgb, var(--constellation-color-success) 12%, transparent);
+  --constellation-tone-success-text: color-mix(in srgb, var(--constellation-color-success) 46%, var(--constellation-color-text-primary));
+  --constellation-tone-warning-accent: var(--constellation-control-pill-warning-border);
+  --constellation-tone-warning-accent-strong: var(--constellation-color-warning);
+  --constellation-tone-warning-accent-soft: var(--constellation-control-pill-warning-background);
+  --constellation-tone-warning-text: var(--constellation-control-pill-warning-text);
+  --constellation-tone-danger-accent: color-mix(in srgb, var(--constellation-color-danger) 30%, transparent);
+  --constellation-tone-danger-accent-strong: color-mix(in srgb, var(--constellation-color-danger) 28%, transparent);
+  --constellation-tone-danger-accent-soft: color-mix(in srgb, var(--constellation-color-danger) 12%, transparent);
+  --constellation-tone-danger-text: var(--constellation-control-pill-danger-text);
 
   --constellation-control-focus-ring: rgba(240, 240, 250, 0.52);
   --constellation-control-summary: rgba(240, 240, 250, 0.56);
@@ -45,8 +68,12 @@
   --constellation-control-surface-shadow: 0 14px 36px rgba(0, 0, 0, 0.28);
   --constellation-control-field-border: rgba(240, 240, 250, 0.08);
   --constellation-control-field-background: rgba(240, 240, 250, 0.03);
+  --constellation-control-field-focus-border: var(--constellation-control-focus-ring);
   --constellation-control-field-placeholder: rgba(240, 240, 250, 0.38);
+  --constellation-control-input-border: rgba(240, 240, 250, 0.14);
+  --constellation-control-input-background: rgba(240, 240, 250, 0.045);
   --constellation-control-button-secondary-border: rgba(240, 240, 250, 0.08);
+  --constellation-control-button-secondary-border-hover: rgba(240, 240, 250, 0.2);
   --constellation-control-button-secondary-text: rgba(240, 240, 250, 0.76);
   --constellation-control-button-secondary-background: rgba(240, 240, 250, 0.04);
   --constellation-control-button-secondary-hover-background: rgba(240, 240, 250, 0.08);
@@ -70,6 +97,22 @@
   --constellation-system-chrome-active-shadow:
     inset 0 0 0 1px rgba(240, 240, 250, 0.14),
     0 0 24px rgba(141, 183, 255, 0.08);
+  --constellation-nav-rail-shell-gap: 16px;
+  --constellation-nav-rail-collapsed-width: 54px;
+  --constellation-nav-rail-expanded-width: 166px;
+  --constellation-nav-rail-logo-width: 64px;
+  --constellation-nav-rail-logo-shift: 10.5px;
+  --constellation-nav-rail-brand-mark-background: var(--constellation-system-chrome-active-background);
+  --constellation-nav-rail-brand-mark-color: var(--constellation-system-chrome-active-text);
+  --constellation-nav-rail-border: var(--constellation-system-chrome-border);
+  --constellation-nav-rail-shadow: var(--constellation-system-chrome-shadow);
+  --constellation-nav-rail-item-color: var(--constellation-system-chrome-text);
+  --constellation-nav-rail-item-hover-color: var(--constellation-system-chrome-text-hover);
+  --constellation-nav-rail-item-active-background: var(--constellation-system-chrome-active-background);
+  --constellation-nav-rail-item-active-color: var(--constellation-system-chrome-active-text);
+  --constellation-nav-rail-item-active-shadow: var(--constellation-system-chrome-active-shadow);
+  --constellation-nav-rail-glyph-color: color-mix(in srgb, var(--constellation-system-chrome-active-text) 72%, transparent);
+  --constellation-nav-rail-active-glyph-color: var(--constellation-system-chrome-active-text);
   --constellation-control-slider-track: rgba(240, 240, 250, 0.18);
   --constellation-control-slider-knob: rgba(240, 240, 250, 0.9);
 
@@ -93,8 +136,8 @@
   --constellation-control-pill-thinking-background: color-mix(in srgb, var(--constellation-color-amber) 14%, transparent);
   --constellation-control-pill-thinking-text: rgba(250, 231, 188, 0.96);
 
-  --constellation-control-pill-warning-background: color-mix(in srgb, var(--constellation-color-amber) 14%, transparent);
-  --constellation-control-pill-warning-border: color-mix(in srgb, var(--constellation-color-amber) 24%, transparent);
+  --constellation-control-pill-warning-background: rgba(240, 177, 94, 0.14);
+  --constellation-control-pill-warning-border: rgba(240, 177, 94, 0.28);
   --constellation-control-pill-warning-text: rgba(250, 231, 188, 0.96);
 
   --constellation-control-pill-muted-background: rgba(240, 240, 250, 0.05);
@@ -141,23 +184,23 @@
     0 0 28px rgba(141, 183, 255, 0.08);
   --constellation-surface-floating-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 18%);
 
-  --constellation-button-primary-background: linear-gradient(180deg, rgba(240, 240, 250, 0.12), rgba(240, 240, 250, 0.08));
-  --constellation-button-primary-background-hover: linear-gradient(180deg, rgba(240, 240, 250, 0.18), rgba(240, 240, 250, 0.12));
-  --constellation-button-primary-border: rgba(240, 240, 250, 0.28);
-  --constellation-button-primary-border-hover: rgba(240, 240, 250, 0.4);
-  --constellation-button-primary-text: var(--constellation-color-text-primary);
-  --constellation-button-primary-shadow:
-    0 12px 28px rgba(0, 0, 0, 0.18),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --constellation-button-primary-background: rgba(238, 240, 246, 0.92);
+  --constellation-button-primary-background-hover: rgba(250, 251, 255, 0.96);
+  --constellation-button-primary-border: rgba(240, 240, 250, 0.14);
+  --constellation-button-primary-border-hover: rgba(240, 240, 250, 0.22);
+  --constellation-button-primary-text: rgba(12, 15, 22, 0.82);
+  --constellation-button-primary-text-hover: rgba(6, 8, 13, 0.92);
+  --constellation-button-primary-shadow: none;
+  --constellation-button-primary-shadow-hover: none;
   --constellation-button-pressed-background: linear-gradient(180deg, color-mix(in srgb, var(--constellation-color-amber) 18%, transparent), color-mix(in srgb, var(--constellation-color-amber) 8%, transparent));
   --constellation-button-pressed-border: color-mix(in srgb, var(--constellation-color-amber) 34%, transparent);
   --constellation-button-pressed-text: rgba(255, 247, 230, 0.94);
   --constellation-button-pressed-shadow:
     0 14px 30px rgba(0, 0, 0, 0.22),
     0 0 0 1px rgba(255, 218, 140, 0.08) inset;
-  --constellation-button-secondary-background: rgba(240, 240, 250, 0.04);
-  --constellation-button-secondary-background-hover: rgba(240, 240, 250, 0.08);
-  --constellation-button-secondary-border-hover: rgba(240, 240, 250, 0.2);
+  --constellation-button-secondary-background: var(--constellation-control-button-secondary-background);
+  --constellation-button-secondary-background-hover: var(--constellation-control-button-secondary-hover-background);
+  --constellation-button-secondary-border-hover: var(--constellation-control-button-secondary-border-hover);
   --constellation-button-secondary-shadow:
     0 10px 24px rgba(0, 0, 0, 0.12),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
@@ -187,10 +230,12 @@
   --constellation-icon-button-pressed-text: rgba(255, 247, 230, 0.94);
   --constellation-icon-button-pressed-border: color-mix(in srgb, var(--constellation-color-amber) 34%, transparent);
   --constellation-icon-button-pressed-background: color-mix(in srgb, var(--constellation-color-amber) 12%, transparent);
+  --constellation-icon-button-quiet-border: var(--constellation-icon-button-border);
   --constellation-icon-button-quiet-background: rgba(240, 240, 250, 0.03);
   --constellation-icon-button-quiet-background-hover: rgba(240, 240, 250, 0.06);
   --constellation-icon-button-quiet-border-hover: rgba(240, 240, 250, 0.16);
   --constellation-icon-button-quiet-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  --constellation-icon-button-secondary-border: var(--constellation-icon-button-border);
   --constellation-icon-button-secondary-background: rgba(240, 240, 250, 0.05);
   --constellation-icon-button-secondary-background-hover: rgba(240, 240, 250, 0.08);
   --constellation-icon-button-secondary-border-hover: rgba(240, 240, 250, 0.2);
@@ -198,13 +243,13 @@
     0 10px 24px rgba(0, 0, 0, 0.12),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
 
-  --constellation-select-chip-trigger-border: rgba(240, 240, 250, 0.08);
-  --constellation-select-chip-trigger-background: rgba(240, 240, 250, 0.04);
+  --constellation-select-chip-trigger-border: var(--constellation-control-input-border);
+  --constellation-select-chip-trigger-background: var(--constellation-control-input-background);
   --constellation-select-chip-trigger-text: rgba(240, 240, 250, 0.68);
   --constellation-select-chip-trigger-bare-text: rgba(240, 240, 250, 0.66);
-  --constellation-select-chip-trigger-hover-background: rgba(240, 240, 250, 0.08);
+  --constellation-select-chip-trigger-hover-background: var(--constellation-control-button-secondary-hover-background);
   --constellation-select-chip-trigger-hover-text: rgba(240, 240, 250, 0.92);
-  --constellation-select-chip-trigger-open-border: rgba(240, 240, 250, 0.14);
+  --constellation-select-chip-trigger-open-border: var(--constellation-control-button-secondary-border-hover);
   --constellation-select-chip-trigger-open-background: rgba(240, 240, 250, 0.09);
   --constellation-select-chip-trigger-open-text: rgba(240, 240, 250, 0.94);
   --constellation-select-chip-trigger-open-shadow: 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
@@ -233,18 +278,14 @@
   --constellation-composer-action-glow: linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 62%);
   --constellation-composer-orb-size: 32px;
   --constellation-composer-action-button-size: 32px;
-  --constellation-composer-action-button-border: rgba(240, 240, 250, 0.14);
-  --constellation-composer-action-button-border-hover: rgba(240, 240, 250, 0.22);
-  --constellation-composer-action-button-background: linear-gradient(180deg, rgba(238, 240, 246, 0.92), rgba(198, 203, 214, 0.92));
-  --constellation-composer-action-button-background-hover: linear-gradient(180deg, rgba(250, 251, 255, 0.96), rgba(215, 220, 230, 0.95));
-  --constellation-composer-action-button-text: rgba(12, 15, 22, 0.82);
-  --constellation-composer-action-button-text-hover: rgba(6, 8, 13, 0.92);
-  --constellation-composer-action-button-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.42),
-    inset 0 -8px 12px rgba(0, 0, 0, 0.08);
-  --constellation-composer-action-button-shadow-hover:
-    inset 0 1px 0 rgba(255, 255, 255, 0.52),
-    inset 0 -8px 12px rgba(0, 0, 0, 0.08);
+  --constellation-composer-action-button-border: var(--constellation-button-primary-border);
+  --constellation-composer-action-button-border-hover: var(--constellation-button-primary-border-hover);
+  --constellation-composer-action-button-background: var(--constellation-button-primary-background);
+  --constellation-composer-action-button-background-hover: var(--constellation-button-primary-background-hover);
+  --constellation-composer-action-button-text: var(--constellation-button-primary-text);
+  --constellation-composer-action-button-text-hover: var(--constellation-button-primary-text-hover);
+  --constellation-composer-action-button-shadow: var(--constellation-button-primary-shadow);
+  --constellation-composer-action-button-shadow-hover: var(--constellation-button-primary-shadow-hover);
   --constellation-composer-action-button-working-border: rgba(240, 240, 250, 0.16);
   --constellation-composer-action-button-working-background: linear-gradient(180deg, rgba(49, 54, 66, 0.98), rgba(24, 28, 38, 0.98));
   --constellation-composer-action-button-working-text: rgba(240, 240, 250, 0.88);
@@ -430,6 +471,8 @@
   --constellation-data-table-cell-warning: rgba(255, 228, 173, 0.92);
   --constellation-data-table-cell-danger: rgba(255, 178, 192, 0.92);
   --constellation-data-table-empty: rgba(240, 240, 250, 0.5);
+  --constellation-key-value-grid-accent-background: linear-gradient(90deg, var(--key-value-accent), transparent 48%);
+  --constellation-key-value-grid-shadow: 0 12px 28px rgba(0, 0, 0, 0.14);
 
   --constellation-thread-header-title: #ffffff;
   --constellation-thread-header-status-idle-dot: rgba(240, 240, 250, 0.34);
@@ -529,6 +572,10 @@
 }
 
 :root[data-color-scheme='light'] {
+  --constellation-neutral-surface: rgba(245, 243, 238, 0.86);
+  --constellation-neutral-surface-strong: rgba(250, 248, 243, 0.92);
+  --constellation-neutral-surface-muted: rgba(239, 237, 231, 0.72);
+
   --constellation-color-text-primary: rgba(21, 30, 39, 0.96);
   --constellation-color-text-secondary: rgba(49, 63, 76, 0.78);
   --constellation-color-text-tertiary: rgba(82, 98, 111, 0.66);
@@ -540,6 +587,7 @@
 
   --constellation-color-user-accent: #57cfa0;
   --constellation-color-amber: var(--thread-accent, var(--constellation-color-user-accent));
+  --constellation-color-warning: #b8691d;
   --constellation-color-amber-core: color-mix(in srgb, var(--constellation-color-amber) 14%, rgba(249, 252, 248, 0.98));
   --constellation-color-amber-owner: color-mix(in srgb, var(--constellation-color-amber) 24%, rgba(20, 31, 45, 0.94));
   --constellation-color-badge-ring: rgba(250, 247, 239, 0.96);
@@ -559,12 +607,15 @@
   --constellation-control-surface-background: rgba(255, 253, 247, 0.92);
   --constellation-control-surface-shadow: 0 14px 34px rgba(54, 70, 82, 0.09);
   --constellation-control-field-border: rgba(126, 92, 52, 0.11);
-  --constellation-control-field-background: rgba(247, 250, 248, 0.82);
+  --constellation-control-field-background: var(--constellation-neutral-surface);
   --constellation-control-field-placeholder: rgba(82, 98, 111, 0.58);
-  --constellation-control-button-secondary-border: transparent;
-  --constellation-control-button-secondary-text: rgba(42, 55, 68, 0.86);
-  --constellation-control-button-secondary-background: rgba(255, 253, 247, 0.78);
-  --constellation-control-button-secondary-hover-background: rgba(255, 253, 247, 0.98);
+  --constellation-control-input-border: rgba(32, 32, 32, 0.16);
+  --constellation-control-input-background: rgba(255, 253, 247, 0.78);
+  --constellation-control-button-secondary-border: rgba(32, 32, 32, 0.12);
+  --constellation-control-button-secondary-border-hover: rgba(32, 32, 32, 0.22);
+  --constellation-control-button-secondary-text: rgba(28, 28, 28, 0.86);
+  --constellation-control-button-secondary-background: #dedede;
+  --constellation-control-button-secondary-hover-background: #d0d0d0;
   --constellation-control-button-secondary-hover-text: rgba(18, 27, 36, 0.96);
   --constellation-control-button-secondary-active-background: rgba(49, 63, 76, 0.075);
   --constellation-control-button-secondary-active-text: rgba(18, 27, 36, 0.98);
@@ -583,7 +634,7 @@
   --constellation-control-slider-knob: #57CFA0;
 
   --constellation-control-pill-border: rgba(126, 92, 52, 0.1);
-  --constellation-control-pill-background: rgba(247, 250, 248, 0.82);
+  --constellation-control-pill-background: var(--constellation-neutral-surface);
   --constellation-control-pill-text: rgba(50, 64, 76, 0.78);
 
   --constellation-control-pill-active-background: rgba(49, 63, 76, 0.075);
@@ -602,8 +653,8 @@
   --constellation-control-pill-thinking-background: color-mix(in srgb, var(--constellation-color-amber) 15%, transparent);
   --constellation-control-pill-thinking-text: #7c4617;
 
-  --constellation-control-pill-warning-background: color-mix(in srgb, var(--constellation-color-amber) 15%, transparent);
-  --constellation-control-pill-warning-border: color-mix(in srgb, var(--constellation-color-amber) 28%, transparent);
+  --constellation-control-pill-warning-background: rgba(184, 105, 29, 0.13);
+  --constellation-control-pill-warning-border: rgba(184, 105, 29, 0.28);
   --constellation-control-pill-warning-text: #7c4617;
 
   --constellation-control-pill-muted-background: rgba(126, 92, 52, 0.055);
@@ -632,10 +683,21 @@
   --constellation-surface-panel-shadow: 0 16px 38px rgba(54, 70, 82, 0.11);
   --constellation-surface-panel-hover-border: rgba(49, 63, 76, 0.14);
   --constellation-surface-panel-hover-shadow: 0 20px 44px rgba(54, 70, 82, 0.13);
+  --constellation-panel-accent: rgba(126, 92, 52, 0.09);
+  --constellation-panel-accent-strong: rgba(126, 92, 52, 0.06);
+  --constellation-panel-accent-soft: rgba(126, 92, 52, 0.035);
+  --constellation-action-row-accent: rgba(126, 92, 52, 0.09);
+  --constellation-action-row-accent-soft: rgba(126, 92, 52, 0.035);
+  --constellation-metric-accent: rgba(126, 92, 52, 0.1);
+  --constellation-metric-accent-soft: rgba(126, 92, 52, 0.04);
+  --constellation-key-value-accent: rgba(126, 92, 52, 0.04);
+  --constellation-notice-accent: rgba(126, 92, 52, 0.12);
+  --constellation-notice-accent-strong: rgba(126, 92, 52, 0.09);
+  --constellation-notice-accent-soft: rgba(126, 92, 52, 0.045);
 
   --constellation-surface-nested-border: rgba(126, 92, 52, 0.09);
-  --constellation-surface-nested-background: rgba(231, 240, 244, 0.62);
-  --constellation-surface-nested-strong-background: rgba(248, 250, 248, 0.84);
+  --constellation-surface-nested-background: var(--constellation-neutral-surface-muted);
+  --constellation-surface-nested-strong-background: var(--constellation-neutral-surface-strong);
   --constellation-surface-nested-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
 
   --constellation-surface-floating-border: rgba(126, 92, 52, 0.11);
@@ -648,23 +710,23 @@
   --constellation-button-primary-border: rgba(126, 92, 52, 0.16);
   --constellation-button-primary-border-hover: rgba(126, 92, 52, 0.24);
   --constellation-button-primary-text: #fffdf7;
-  --constellation-button-primary-shadow:
-    0 16px 34px rgba(54, 70, 82, 0.14),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --constellation-button-primary-text-hover: rgba(255, 255, 255, 0.98);
+  --constellation-button-primary-shadow: none;
+  --constellation-button-primary-shadow-hover: none;
   --constellation-button-pressed-background: rgba(49, 63, 76, 0.075);
   --constellation-button-pressed-border: rgba(49, 63, 76, 0.16);
   --constellation-button-pressed-text: #18212a;
   --constellation-button-pressed-shadow:
     0 14px 30px rgba(54, 70, 82, 0.09),
     0 0 0 1px rgba(255, 255, 255, 0.42) inset;
-  --constellation-button-secondary-background: rgba(248, 250, 248, 0.8);
-  --constellation-button-secondary-background-hover: rgba(255, 253, 247, 0.98);
-  --constellation-button-secondary-border-hover: rgba(49, 63, 76, 0.14);
-  --constellation-button-secondary-shadow: 0 10px 24px rgba(54, 70, 82, 0.08);
-  --constellation-button-quiet-background: rgba(248, 250, 248, 0.58);
-  --constellation-button-quiet-background-hover: rgba(255, 253, 247, 0.88);
+  --constellation-button-secondary-background: var(--constellation-control-button-secondary-background);
+  --constellation-button-secondary-background-hover: var(--constellation-control-button-secondary-hover-background);
+  --constellation-button-secondary-border-hover: var(--constellation-control-button-secondary-border-hover);
+  --constellation-button-secondary-shadow: none;
+  --constellation-button-quiet-background: transparent;
+  --constellation-button-quiet-background-hover: rgba(49, 63, 76, 0.06);
   --constellation-button-quiet-border: transparent;
-  --constellation-button-quiet-border-hover: rgba(49, 63, 76, 0.14);
+  --constellation-button-quiet-border-hover: rgba(49, 63, 76, 0.12);
   --constellation-button-quiet-text: rgba(49, 63, 76, 0.82);
   --constellation-button-quiet-shadow: none;
   --constellation-button-destructive-background: rgba(178, 74, 97, 0.12);
@@ -683,23 +745,25 @@
   --constellation-icon-button-pressed-text: #18212a;
   --constellation-icon-button-pressed-border: transparent;
   --constellation-icon-button-pressed-background: rgba(49, 63, 76, 0.075);
-  --constellation-icon-button-quiet-background: rgba(255, 253, 247, 0.74);
-  --constellation-icon-button-quiet-background-hover: rgba(255, 253, 247, 0.96);
-  --constellation-icon-button-quiet-border-hover: rgba(49, 63, 76, 0.14);
-  --constellation-icon-button-quiet-shadow: 0 10px 22px rgba(54, 70, 82, 0.08);
-  --constellation-icon-button-secondary-background: rgba(255, 253, 247, 0.86);
-  --constellation-icon-button-secondary-background-hover: rgba(255, 253, 247, 0.98);
-  --constellation-icon-button-secondary-border-hover: rgba(49, 63, 76, 0.14);
-  --constellation-icon-button-secondary-shadow: 0 12px 28px rgba(54, 70, 82, 0.1);
+  --constellation-icon-button-quiet-border: transparent;
+  --constellation-icon-button-quiet-background: transparent;
+  --constellation-icon-button-quiet-background-hover: rgba(49, 63, 76, 0.06);
+  --constellation-icon-button-quiet-border-hover: rgba(49, 63, 76, 0.12);
+  --constellation-icon-button-quiet-shadow: none;
+  --constellation-icon-button-secondary-border: var(--constellation-control-button-secondary-border);
+  --constellation-icon-button-secondary-background: var(--constellation-control-button-secondary-background);
+  --constellation-icon-button-secondary-background-hover: var(--constellation-control-button-secondary-hover-background);
+  --constellation-icon-button-secondary-border-hover: var(--constellation-control-button-secondary-border-hover);
+  --constellation-icon-button-secondary-shadow: none;
 
-  --constellation-select-chip-trigger-border: transparent;
-  --constellation-select-chip-trigger-background: rgba(248, 250, 248, 0.78);
+  --constellation-select-chip-trigger-border: var(--constellation-control-input-border);
+  --constellation-select-chip-trigger-background: var(--constellation-control-input-background);
   --constellation-select-chip-trigger-text: rgba(49, 63, 76, 0.84);
   --constellation-select-chip-trigger-bare-text: rgba(49, 63, 76, 0.72);
-  --constellation-select-chip-trigger-hover-background: rgba(255, 253, 247, 0.96);
+  --constellation-select-chip-trigger-hover-background: var(--constellation-control-button-secondary-hover-background);
   --constellation-select-chip-trigger-hover-text: rgba(18, 27, 36, 0.96);
-  --constellation-select-chip-trigger-open-border: rgba(49, 63, 76, 0.14);
-  --constellation-select-chip-trigger-open-background: rgba(255, 253, 247, 0.98);
+  --constellation-select-chip-trigger-open-border: var(--constellation-control-button-secondary-border-hover);
+  --constellation-select-chip-trigger-open-background: var(--constellation-control-button-secondary-hover-background);
   --constellation-select-chip-trigger-open-text: rgba(18, 27, 36, 0.96);
   --constellation-select-chip-trigger-open-shadow: none;
   --constellation-select-chip-menu-border: rgba(126, 92, 52, 0.11);
@@ -714,7 +778,7 @@
   --constellation-select-chip-shortcut-background: rgba(126, 92, 52, 0.06);
   --constellation-select-chip-shortcut-text: rgba(82, 98, 111, 0.76);
   --constellation-select-chip-indicator-border: rgba(126, 92, 52, 0.12);
-  --constellation-select-chip-indicator-background: rgba(248, 250, 248, 0.88);
+  --constellation-select-chip-indicator-background: var(--constellation-neutral-surface-strong);
   --constellation-select-chip-indicator-active-border: rgba(49, 95, 214, 0.36);
   --constellation-select-chip-indicator-active-background: rgba(49, 95, 214, 0.9);
   --constellation-select-chip-indicator-active-shadow: 0 0 16px rgba(49, 95, 214, 0.18);
@@ -723,18 +787,14 @@
   --constellation-composer-action-core: rgba(40, 56, 72, 0.96);
   --constellation-composer-action-owner: rgba(255, 255, 255, 0.94);
   --constellation-composer-action-glow: none;
-  --constellation-composer-action-button-border: rgba(126, 92, 52, 0.14);
-  --constellation-composer-action-button-border-hover: rgba(126, 92, 52, 0.22);
-  --constellation-composer-action-button-background: rgba(33, 47, 61, 0.98);
-  --constellation-composer-action-button-background-hover: rgba(42, 58, 73, 0.98);
-  --constellation-composer-action-button-text: rgba(255, 253, 247, 0.94);
-  --constellation-composer-action-button-text-hover: rgba(255, 255, 255, 0.98);
-  --constellation-composer-action-button-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.16),
-    inset 0 -8px 12px rgba(0, 0, 0, 0.16);
-  --constellation-composer-action-button-shadow-hover:
-    inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    inset 0 -8px 12px rgba(0, 0, 0, 0.18);
+  --constellation-composer-action-button-border: var(--constellation-button-primary-border);
+  --constellation-composer-action-button-border-hover: var(--constellation-button-primary-border-hover);
+  --constellation-composer-action-button-background: var(--constellation-button-primary-background);
+  --constellation-composer-action-button-background-hover: var(--constellation-button-primary-background-hover);
+  --constellation-composer-action-button-text: var(--constellation-button-primary-text);
+  --constellation-composer-action-button-text-hover: var(--constellation-button-primary-text-hover);
+  --constellation-composer-action-button-shadow: var(--constellation-button-primary-shadow);
+  --constellation-composer-action-button-shadow-hover: var(--constellation-button-primary-shadow-hover);
   --constellation-composer-action-button-working-border: rgba(126, 92, 52, 0.14);
   --constellation-composer-action-button-working-background: rgba(33, 47, 61, 0.98);
   --constellation-composer-action-button-working-text: rgba(255, 253, 247, 0.96);
@@ -742,7 +802,7 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.22),
     inset 0 -8px 12px rgba(0, 0, 0, 0.14);
   --constellation-composer-orb-border: rgba(126, 92, 52, 0.1);
-  --constellation-composer-orb-background: rgba(248, 250, 248, 0.8);
+  --constellation-composer-orb-background: var(--constellation-neutral-surface);
   --constellation-composer-orb-text: rgba(49, 63, 76, 0.8);
   --constellation-composer-orb-bare-text: rgba(49, 63, 76, 0.74);
   --constellation-composer-orb-hover-background: rgba(255, 253, 247, 0.98);
@@ -772,7 +832,7 @@
   --constellation-skill-mention-text: rgba(18, 27, 36, 0.98);
   --constellation-skill-mention-sigil: rgba(49, 63, 76, 0.72);
   --constellation-skill-mention-selection: rgba(49, 63, 76, 0.18);
-  --constellation-composer-attachment-background: rgba(248, 250, 248, 0.86);
+  --constellation-composer-attachment-background: var(--constellation-neutral-surface-strong);
   --constellation-composer-attachment-border: rgba(126, 92, 52, 0.1);
   --constellation-composer-attachment-text: rgba(49, 63, 76, 0.84);
   --constellation-composer-attachment-remove: rgba(82, 98, 111, 0.76);
@@ -797,11 +857,11 @@
   --constellation-utility-panel-tab-hover-text: rgba(18, 27, 36, 0.92);
   --constellation-utility-panel-tab-active-text: rgba(18, 27, 36, 0.96);
   --constellation-utility-panel-tab-active-border: rgba(49, 95, 214, 0.48);
-  --constellation-utility-panel-close-border: transparent;
-  --constellation-utility-panel-close-background: rgba(248, 250, 248, 0.78);
+  --constellation-utility-panel-close-border: var(--constellation-button-quiet-border);
+  --constellation-utility-panel-close-background: var(--constellation-button-quiet-background);
   --constellation-utility-panel-close-text: rgba(49, 63, 76, 0.82);
-  --constellation-utility-panel-close-hover-background: rgba(255, 253, 247, 0.98);
-  --constellation-utility-panel-close-hover-border: color-mix(in srgb, var(--constellation-color-amber) 18%, transparent);
+  --constellation-utility-panel-close-hover-background: var(--constellation-button-quiet-background-hover);
+  --constellation-utility-panel-close-hover-border: var(--constellation-button-quiet-border-hover);
   --constellation-utility-panel-close-hover-text: rgba(18, 27, 36, 0.94);
   --constellation-utility-panel-scrollbar: rgba(126, 92, 52, 0.16);
 
@@ -814,7 +874,7 @@
   --constellation-notification-empty-border: rgba(126, 92, 52, 0.12);
   --constellation-notification-empty-text: rgba(82, 98, 111, 0.72);
   --constellation-notification-row-border: transparent;
-  --constellation-notification-row-background: rgba(248, 250, 248, 0.78);
+  --constellation-notification-row-background: var(--constellation-neutral-surface);
   --constellation-notification-row-hover-border: color-mix(in srgb, var(--constellation-color-amber) 18%, transparent);
   --constellation-notification-row-hover-background: rgba(255, 253, 247, 0.96);
   --constellation-notification-avatar-text: rgba(255, 253, 247, 0.96);
@@ -823,7 +883,11 @@
   --constellation-notification-occurrence: #7c4617;
 
   --constellation-chat-shell-sidebar-border: rgba(126, 92, 52, 0.08);
-  --constellation-chat-shell-footer-fade: linear-gradient(180deg, rgba(248, 250, 248, 0), rgba(236, 245, 247, 0.94) 20%);
+  --constellation-chat-shell-footer-fade: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--constellation-neutral-surface) 0%, transparent),
+    var(--constellation-neutral-surface-strong) 20%
+  );
   --constellation-chat-unread-muted-background: rgba(126, 92, 52, 0.055);
   --constellation-chat-unread-muted-border: rgba(126, 92, 52, 0.09);
   --constellation-chat-unread-muted-text: rgba(82, 98, 111, 0.76);
@@ -837,7 +901,7 @@
   --constellation-chat-message-system-border: rgba(126, 92, 52, 0.1);
   --constellation-chat-message-system-text: rgba(49, 63, 76, 0.78);
   --constellation-chat-attachment-border: rgba(126, 92, 52, 0.1);
-  --constellation-chat-attachment-background: rgba(248, 250, 248, 0.78);
+  --constellation-chat-attachment-background: var(--constellation-neutral-surface);
   --constellation-chat-attachment-image-border: rgba(126, 92, 52, 0.1);
   --constellation-chat-attachment-label: rgba(18, 27, 36, 0.94);
   --constellation-chat-attachment-detail: rgba(82, 98, 111, 0.72);
@@ -981,11 +1045,11 @@
   --constellation-thread-run-value: rgba(18, 27, 36, 0.86);
   --constellation-thread-run-divider: rgba(82, 98, 111, 0.26);
   --constellation-thread-scroll-cue-border: rgba(26, 39, 49, 0.12);
-  --constellation-thread-scroll-cue-background: rgba(248, 250, 248, 0.9);
+  --constellation-thread-scroll-cue-background: var(--constellation-neutral-surface-strong);
   --constellation-thread-scroll-cue-text: rgba(49, 63, 76, 0.82);
   --constellation-thread-scroll-cue-shadow: 0 12px 26px rgba(54, 70, 82, 0.08);
   --constellation-thread-empty-border: rgba(126, 92, 52, 0.1);
-  --constellation-thread-empty-background: rgba(248, 250, 248, 0.66);
+  --constellation-thread-empty-background: var(--constellation-neutral-surface-muted);
   --constellation-thread-empty-text: rgba(82, 98, 111, 0.72);
   --constellation-thread-stage-backdrop-filter: saturate(0.98) brightness(1) blur(1.4px);
   --constellation-thread-stage-backdrop-opacity: 0.94;
@@ -1000,11 +1064,11 @@
   --constellation-thread-composer-border: rgba(126, 92, 52, 0.1);
   --constellation-thread-composer-shadow: none;
   --constellation-thread-message-illo-accent: rgba(26, 39, 49, 0.2);
-  --constellation-thread-message-illo-core: rgba(248, 250, 248, 0.34);
+  --constellation-thread-message-illo-core: color-mix(in srgb, var(--constellation-neutral-surface) 40%, transparent);
   --constellation-thread-message-illo-owner: rgba(18, 27, 36, 0.94);
   --constellation-thread-message-illo-body: rgba(32, 45, 59, 0.92);
   --constellation-thread-message-illo-meta: rgba(82, 98, 111, 0.6);
-  --constellation-thread-message-user-shell-base: rgba(248, 250, 248, 0.9);
+  --constellation-thread-message-user-shell-base: var(--constellation-neutral-surface-strong);
   --constellation-thread-message-user-border-base: rgba(126, 92, 52, 0.1);
   --constellation-thread-message-user-fill-strength: 0%;
   --constellation-thread-message-user-border-strength: 0%;
@@ -1012,12 +1076,16 @@
   --constellation-thread-message-author: rgba(18, 27, 36, 0.9);
   --constellation-thread-message-heading: rgba(18, 27, 36, 0.92);
   --constellation-thread-message-image-border: rgba(126, 92, 52, 0.1);
-  --constellation-thread-message-image-background: rgba(231, 240, 244, 0.84);
+  --constellation-thread-message-image-background: var(--constellation-neutral-surface-muted);
   --constellation-thread-message-file-border: rgba(126, 92, 52, 0.1);
-  --constellation-thread-message-file-background: rgba(248, 250, 248, 0.68);
+  --constellation-thread-message-file-background: var(--constellation-neutral-surface-muted);
   --constellation-thread-message-file-text: rgba(49, 63, 76, 0.88);
   --constellation-thread-run-surface-border: rgba(26, 39, 49, 0.12);
-  --constellation-thread-run-surface-background: linear-gradient(180deg, rgba(255, 253, 247, 0.94), rgba(231, 240, 244, 0.9));
+  --constellation-thread-run-surface-background: linear-gradient(
+    180deg,
+    var(--constellation-neutral-surface-strong),
+    var(--constellation-neutral-surface)
+  );
   --constellation-thread-run-surface-shadow:
     0 16px 30px rgba(26, 39, 49, 0.1),
     inset 0 1px 0 rgba(255, 255, 255, 0.38);
@@ -1047,7 +1115,7 @@
   --constellation-nav-rail-glyph-color: rgba(49, 63, 76, 0.8);
   --constellation-nav-rail-active-glyph-color: #18212a;
   --constellation-nav-rail-footer-muted: rgba(82, 98, 111, 0.62);
-  --constellation-nav-rail-health-background: rgba(248, 250, 248, 0.72);
+  --constellation-nav-rail-health-background: var(--constellation-neutral-surface);
   --constellation-nav-rail-health-color: rgba(49, 63, 76, 0.76);
   --constellation-nav-rail-health-dot: #315fd6;
 
@@ -1887,6 +1955,7 @@
 .run-control [role='button']:hover {
   color: var(--constellation-control-button-secondary-hover-text);
   background: var(--constellation-control-button-secondary-hover-background);
+  border-color: var(--constellation-control-button-secondary-border-hover);
 }
 
 .constellation-control button[aria-pressed='true'],

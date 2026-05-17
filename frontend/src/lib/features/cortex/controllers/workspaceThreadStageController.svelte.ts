@@ -265,11 +265,11 @@ export class WorkspaceThreadStageController {
       this.revealTimer = setTimeout(() => {
         this.ready = true;
         this.revealTimer = null;
-      }, 90);
+      }, 32);
       this.settledTimer = setTimeout(() => {
         this.entering = false;
         this.settledTimer = null;
-      }, 620);
+      }, 460);
     } else if (!isOpen && this.wasPanelOpen) {
       this.clearTimers();
       this.entering = false;

@@ -487,7 +487,6 @@ def test_fast_onboarding_tool_surface_uses_standard_fast_surface(monkeypatch):
         request=SimpleNamespace(
             metadata={
                 "origin": "onboarding",
-                "required_response": "introduce_and_continue_setup",
             }
         )
     )
