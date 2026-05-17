@@ -94,8 +94,8 @@
 
 <style>
   .constellation-metric-tile {
-    --metric-accent: var(--constellation-metric-accent, rgba(141, 183, 255, 0.26));
-    --metric-accent-soft: var(--constellation-metric-accent-soft, rgba(141, 183, 255, 0.1));
+    --metric-accent: var(--constellation-metric-accent, var(--constellation-tone-info-accent));
+    --metric-accent-soft: var(--constellation-metric-accent-soft, var(--constellation-tone-info-accent-soft));
     --metric-value-color: var(--constellation-section-title);
     --metric-detail-color: var(--constellation-color-text-secondary);
     --metric-delta-background: var(--constellation-surface-nested-strong-background);
@@ -239,40 +239,40 @@
   }
 
   .constellation-metric-tile-tone-default {
-    --metric-accent: var(--constellation-metric-accent, rgba(141, 183, 255, 0.26));
-    --metric-accent-soft: var(--constellation-metric-accent-soft, rgba(141, 183, 255, 0.1));
+    --metric-accent: var(--constellation-metric-accent, var(--constellation-tone-info-accent));
+    --metric-accent-soft: var(--constellation-metric-accent-soft, var(--constellation-tone-info-accent-soft));
   }
 
   .constellation-metric-tile-tone-info {
-    --metric-accent: rgba(141, 183, 255, 0.3);
-    --metric-accent-soft: rgba(141, 183, 255, 0.12);
+    --metric-accent: var(--constellation-tone-info-accent);
+    --metric-accent-soft: var(--constellation-tone-info-accent-soft);
   }
 
   .constellation-metric-tile-tone-success {
-    --metric-accent: rgba(109, 245, 189, 0.28);
-    --metric-accent-soft: rgba(87, 207, 160, 0.1);
+    --metric-accent: var(--constellation-tone-success-accent);
+    --metric-accent-soft: var(--constellation-tone-success-accent-soft);
   }
 
   .constellation-metric-tile-tone-warning {
-    --metric-accent: rgba(250, 231, 188, 0.28);
-    --metric-accent-soft: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 12%, transparent);
+    --metric-accent: var(--constellation-tone-warning-accent);
+    --metric-accent-soft: var(--constellation-tone-warning-accent-soft);
   }
 
   .constellation-metric-tile-tone-danger {
-    --metric-accent: rgba(219, 110, 130, 0.3);
-    --metric-accent-soft: rgba(219, 110, 130, 0.12);
+    --metric-accent: var(--constellation-tone-danger-accent);
+    --metric-accent-soft: var(--constellation-tone-danger-accent-soft);
   }
 
   .constellation-metric-tile-trend-up {
-    --metric-delta-background: rgba(87, 207, 160, 0.14);
-    --metric-delta-border: rgba(87, 207, 160, 0.22);
-    --metric-delta-color: rgba(223, 255, 243, 0.94);
+    --metric-delta-background: var(--constellation-control-pill-success-background);
+    --metric-delta-border: var(--constellation-control-pill-success-border);
+    --metric-delta-color: var(--constellation-control-pill-success-text);
   }
 
   .constellation-metric-tile-trend-down {
-    --metric-delta-background: rgba(219, 110, 130, 0.14);
-    --metric-delta-border: rgba(219, 110, 130, 0.22);
-    --metric-delta-color: rgba(255, 225, 232, 0.94);
+    --metric-delta-background: var(--constellation-control-pill-danger-background);
+    --metric-delta-border: var(--constellation-control-pill-danger-border);
+    --metric-delta-color: var(--constellation-control-pill-danger-text);
   }
 
   .constellation-metric-tile-trend-flat {

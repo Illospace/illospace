@@ -33,17 +33,17 @@
   }
 
   .constellation-address-dot.connected {
-    background: #57cfa0;
-    box-shadow: 0 0 10px rgba(87, 207, 160, 0.48);
+    background: var(--constellation-color-success);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--constellation-color-success) 48%, transparent);
   }
 
   .constellation-address-dot.loading {
-    background: #57CFA0;
-    box-shadow: 0 0 10px color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 44%, transparent);
+    background: var(--constellation-color-amber);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--constellation-color-amber) 44%, transparent);
   }
 
   .constellation-address-dot.error {
-    background: #d17878;
-    box-shadow: 0 0 10px rgba(209, 120, 120, 0.46);
+    background: var(--constellation-color-danger);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--constellation-color-danger) 46%, transparent);
   }
 </style>

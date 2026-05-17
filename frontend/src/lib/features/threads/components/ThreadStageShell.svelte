@@ -78,9 +78,6 @@
 </script>
 
 <div class="thread-stage-shell" class:entering={entering} class:ready={ready} style={shellStyle}>
-  <div class="thread-origin-bloom" aria-hidden="true"></div>
-  <div class="thread-origin-ring" aria-hidden="true"></div>
-
   {#if peripherySignals.length > 0}
     <div class="thread-periphery-layer" aria-hidden="true">
       {#each peripherySignals as cue, index (`${cue.side}-${Math.round(cue.offset)}-${index}`)}
@@ -124,37 +121,7 @@
     padding: clamp(18px, 2.4vw, 30px);
     box-sizing: border-box;
     pointer-events: auto;
-    clip-path: circle(140% at var(--thread-origin-x) var(--thread-origin-y));
-  }
-
-  .thread-origin-bloom,
-  .thread-origin-ring {
-    position: absolute;
-    left: var(--thread-origin-x);
-    top: var(--thread-origin-y);
-    pointer-events: none;
-    transform: translate(-50%, -50%);
-    z-index: 1;
-    opacity: 0;
-  }
-
-  .thread-origin-bloom {
-    width: 94px;
-    height: 94px;
-    border-radius: 999px;
-    background:
-      radial-gradient(circle, rgba(var(--thread-accent-rgb), 0.34) 0%, rgba(var(--thread-accent-rgb), 0.18) 38%, rgba(var(--thread-accent-rgb), 0.06) 58%, transparent 76%);
-    filter: blur(6px);
-  }
-
-  .thread-origin-ring {
-    width: 62px;
-    height: 62px;
-    border-radius: 999px;
-    border: 1px solid rgba(var(--thread-accent-rgb), 0.32);
-    box-shadow:
-      0 0 0 1px rgba(255, 255, 255, 0.05) inset,
-      0 0 32px rgba(var(--thread-accent-rgb), 0.2);
+    opacity: 1;
   }
 
   .thread-stage-frame {
@@ -162,16 +129,17 @@
     height: calc(100% - 6px);
     max-height: 100%;
     pointer-events: none;
-    transform-origin: var(--thread-origin-x) var(--thread-origin-y);
+    transform-origin: 50% 54%;
     position: relative;
     z-index: 3;
     overflow: visible;
     isolation: isolate;
     opacity: 0;
-    transform: scale(0.94) translateY(18px);
+    transform: translate3d(0, 10px, 0) scale(0.985);
+    will-change: opacity, transform;
     transition:
-      opacity 260ms cubic-bezier(0.22, 1, 0.36, 1),
-      transform 380ms cubic-bezier(0.22, 1, 0.36, 1);
+      opacity 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 340ms cubic-bezier(0.18, 0.95, 0.32, 1);
   }
 
   .thread-stage-frame > * {
@@ -180,7 +148,7 @@
 
   .thread-stage-shell.ready .thread-stage-frame {
     opacity: 1;
-    transform: scale(1) translateY(0);
+    transform: translate3d(0, 0, 0) scale(1);
   }
 
   .thread-stage-edge-dismiss {
@@ -364,59 +332,15 @@
   }
 
   .thread-stage-shell.entering {
-    animation: thread-shell-reveal 540ms cubic-bezier(0.18, 0.95, 0.32, 1) both;
+    animation: thread-shell-presence 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
-  .thread-stage-shell.entering .thread-origin-bloom {
-    animation: thread-origin-bloom 640ms cubic-bezier(0.18, 0.95, 0.32, 1) both;
-  }
-
-  .thread-stage-shell.entering .thread-origin-ring {
-    animation: thread-origin-ring 700ms cubic-bezier(0.18, 0.95, 0.32, 1) both;
-  }
-
-  @keyframes thread-shell-reveal {
+  @keyframes thread-shell-presence {
     0% {
-      opacity: 0.72;
-      clip-path: circle(18px at var(--thread-origin-x) var(--thread-origin-y));
-    }
-    55% {
-      opacity: 1;
-      clip-path: circle(60% at var(--thread-origin-x) var(--thread-origin-y));
+      opacity: 0;
     }
     100% {
       opacity: 1;
-      clip-path: circle(140% at var(--thread-origin-x) var(--thread-origin-y));
-    }
-  }
-
-  @keyframes thread-origin-bloom {
-    0% {
-      opacity: 0.52;
-      transform: translate(-50%, -50%) scale(0.45);
-    }
-    58% {
-      opacity: 0.26;
-      transform: translate(-50%, -50%) scale(9.8);
-    }
-    100% {
-      opacity: 0;
-      transform: translate(-50%, -50%) scale(13.8);
-    }
-  }
-
-  @keyframes thread-origin-ring {
-    0% {
-      opacity: 0.6;
-      transform: translate(-50%, -50%) scale(0.84);
-    }
-    64% {
-      opacity: 0.24;
-      transform: translate(-50%, -50%) scale(8);
-    }
-    100% {
-      opacity: 0;
-      transform: translate(-50%, -50%) scale(9.6);
     }
   }
 
@@ -442,8 +366,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .thread-origin-bloom,
-    .thread-origin-ring,
+    .thread-stage-shell,
     .thread-edge-aura,
     .thread-edge-core,
     .thread-edge-trace {

@@ -152,21 +152,18 @@
 
 <style>
   .constellation-nav-rail {
-    --nav-shell-gap: 16px;
-    --nav-collapsed-width: 54px;
-    --nav-expanded-width: 166px;
+    --nav-shell-gap: var(--constellation-nav-rail-shell-gap);
+    --nav-collapsed-width: var(--constellation-nav-rail-collapsed-width);
+    --nav-expanded-width: var(--constellation-nav-rail-expanded-width);
     --nav-font-mono: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
-    --nav-brand-mark-background: var(--constellation-system-chrome-active-background, rgba(240, 240, 250, 0.1));
-    --nav-brand-mark-color: var(--constellation-system-chrome-active-text, #f0f0fa);
-    --nav-rail-background: var(
-      --constellation-nav-rail-background,
-      var(--constellation-system-chrome-background, linear-gradient(180deg, #000000, #04070d))
-    );
-    --nav-rail-border: var(--constellation-system-chrome-border, rgba(240, 240, 250, 0.08));
-    --nav-item-color: var(--constellation-system-chrome-text, rgba(240, 240, 250, 0.58));
-    --nav-item-active-background: var(--constellation-system-chrome-active-background, rgba(240, 240, 250, 0.06));
-    --nav-item-active-color: var(--constellation-system-chrome-active-text, #ffffff);
-    --nav-glyph-color: rgba(240, 240, 250, 0.72);
+    --nav-brand-mark-background: var(--constellation-nav-rail-brand-mark-background);
+    --nav-brand-mark-color: var(--constellation-nav-rail-brand-mark-color);
+    --nav-rail-background: var(--constellation-nav-rail-background);
+    --nav-rail-border: var(--constellation-nav-rail-border);
+    --nav-item-color: var(--constellation-nav-rail-item-color);
+    --nav-item-active-background: var(--constellation-nav-rail-item-active-background);
+    --nav-item-active-color: var(--constellation-nav-rail-item-active-color);
+    --nav-glyph-color: var(--constellation-nav-rail-glyph-color);
     position: fixed;
     top: var(--nav-shell-gap);
     left: var(--nav-shell-gap);
@@ -180,11 +177,7 @@
     border: 1px solid var(--nav-rail-border);
     border-radius: 18px;
     background: var(--nav-rail-background);
-    box-shadow: var(
-      --constellation-system-chrome-shadow,
-      0 24px 80px rgba(0, 0, 0, 0.22),
-      inset 0 1px 0 rgba(240, 240, 250, 0.08)
-    );
+    box-shadow: var(--constellation-nav-rail-shadow);
     backdrop-filter: var(--constellation-nav-rail-backdrop-filter, none);
     -webkit-backdrop-filter: var(--constellation-nav-rail-backdrop-filter, none);
     transition:
@@ -270,8 +263,8 @@
 
   .constellation-nav-rail-brand-logo-expanded {
     --illospace-logo-color: var(--nav-item-active-color);
-    --illospace-logo-width: 64px;
-    --illospace-logo-shift: 10.5px;
+    --illospace-logo-width: var(--constellation-nav-rail-logo-width);
+    --illospace-logo-shift: var(--constellation-nav-rail-logo-shift);
     --illospace-logo-letter-opacity: 1;
     --illospace-logo-letter-translate: 0px;
     --illospace-logo-letter-scale-y: 1;
@@ -279,7 +272,7 @@
     --illospace-logo-mid-delay: 140ms;
     --illospace-logo-i-delay: 200ms;
     display: none;
-    width: 64px;
+    width: var(--constellation-nav-rail-logo-width);
     pointer-events: none;
   }
 
@@ -346,21 +339,14 @@
 
   .constellation-nav-rail-item:hover,
   .constellation-nav-rail-item:focus-visible {
-    color: var(--constellation-system-chrome-text-hover, rgba(240, 240, 250, 0.78));
+    color: var(--constellation-nav-rail-item-hover-color);
     outline: none;
   }
 
   .constellation-nav-rail-item.is-active {
     background: var(--nav-item-active-background);
     color: var(--nav-item-active-color);
-    box-shadow: var(
-      --constellation-nav-rail-item-active-shadow,
-      var(
-        --constellation-system-chrome-active-shadow,
-        inset 0 0 0 1px rgba(240, 240, 250, 0.14),
-        0 0 24px rgba(141, 183, 255, 0.08)
-      )
-    );
+    box-shadow: var(--constellation-nav-rail-item-active-shadow);
   }
 
   .constellation-nav-rail-glyph {
@@ -400,7 +386,7 @@
   .constellation-nav-rail:hover .constellation-nav-rail-brand-logo,
   .constellation-nav-rail:focus-within .constellation-nav-rail-brand-logo,
   .constellation-nav-rail[data-expanded='true'] .constellation-nav-rail-brand-logo {
-    width: 64px;
+    width: var(--constellation-nav-rail-logo-width);
   }
 
   .constellation-nav-rail:hover .constellation-nav-rail-brand-logo-collapsed,

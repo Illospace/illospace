@@ -16,9 +16,10 @@
     CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
     type ConstellationPageFrameModalContext,
   } from '$lib/components/constellation/constellationPageFrameContext';
+  import { DEFAULT_PROFILE_COLOR } from '$lib/features/cortex/components/menus/userProfilePalette';
   import { auth } from '$lib/stores/auth.svelte';
   import { ui } from '$lib/stores/ui.svelte';
-  import { buildPresenceSeedStyle } from '$lib/utils/constellationPresence';
+  import { buildPresenceSeedStyle, normalizeHexColor } from '$lib/utils/constellationPresence';
   import { parseServerDate } from '$lib/utils/datetime';
 
   interface TeamMember {
@@ -59,7 +60,7 @@
   let tokenAnalyticsLoading = $state(true);
 
   let editingProfile = $state(false);
-  let profileColor = $state('#6d46d9');
+  let profileColor = $state(DEFAULT_PROFILE_COLOR);
   let profileAttribution = $state(true);
   let savingProfile = $state(false);
 
@@ -228,7 +229,7 @@
       return;
     }
 
-    profileColor = member.color || '#6366f1';
+    profileColor = normalizeHexColor(member.color) ?? DEFAULT_PROFILE_COLOR;
     profileAttribution = member.attribution_visible ?? true;
     editingProfile = true;
   }

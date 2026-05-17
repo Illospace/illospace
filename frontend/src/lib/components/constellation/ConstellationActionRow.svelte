@@ -142,8 +142,8 @@
 
 <style>
   .constellation-action-row {
-    --action-row-accent: var(--constellation-action-row-accent, rgba(141, 183, 255, 0.18));
-    --action-row-accent-soft: var(--constellation-action-row-accent-soft, rgba(141, 183, 255, 0.08));
+    --action-row-accent: var(--constellation-action-row-accent, var(--constellation-tone-info-accent));
+    --action-row-accent-soft: var(--constellation-action-row-accent-soft, var(--constellation-tone-info-accent-soft));
     --action-row-padding-block: 16px;
     --action-row-padding-inline: 18px;
     position: relative;
@@ -296,28 +296,28 @@
   }
 
   .constellation-action-row-tone-default {
-    --action-row-accent: var(--constellation-action-row-accent, rgba(141, 183, 255, 0.18));
-    --action-row-accent-soft: var(--constellation-action-row-accent-soft, rgba(141, 183, 255, 0.08));
+    --action-row-accent: var(--constellation-action-row-accent, var(--constellation-tone-info-accent));
+    --action-row-accent-soft: var(--constellation-action-row-accent-soft, var(--constellation-tone-info-accent-soft));
   }
 
   .constellation-action-row-tone-info {
-    --action-row-accent: rgba(141, 183, 255, 0.22);
-    --action-row-accent-soft: rgba(141, 183, 255, 0.1);
+    --action-row-accent: var(--constellation-tone-info-accent);
+    --action-row-accent-soft: var(--constellation-tone-info-accent-soft);
   }
 
   .constellation-action-row-tone-success {
-    --action-row-accent: rgba(109, 245, 189, 0.22);
-    --action-row-accent-soft: rgba(87, 207, 160, 0.1);
+    --action-row-accent: var(--constellation-tone-success-accent);
+    --action-row-accent-soft: var(--constellation-tone-success-accent-soft);
   }
 
   .constellation-action-row-tone-warning {
-    --action-row-accent: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 22%, transparent);
-    --action-row-accent-soft: color-mix(in srgb, var(--constellation-color-amber, #57CFA0) 12%, transparent);
+    --action-row-accent: var(--constellation-tone-warning-accent);
+    --action-row-accent-soft: var(--constellation-tone-warning-accent-soft);
   }
 
   .constellation-action-row-tone-danger {
-    --action-row-accent: rgba(219, 110, 130, 0.24);
-    --action-row-accent-soft: rgba(219, 110, 130, 0.12);
+    --action-row-accent: var(--constellation-tone-danger-accent);
+    --action-row-accent-soft: var(--constellation-tone-danger-accent-soft);
   }
 
   @media (max-width: 760px) {

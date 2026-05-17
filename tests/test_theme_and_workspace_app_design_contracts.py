@@ -238,7 +238,7 @@ def test_cortex_workspace_chat_light_mode_is_page_tokenized():
 
     assert ":global(:root[data-color-scheme='light']) .cortex-page {" in source
     assert "--workspace-chat-expanded-background" in source
-    assert "background: var(--cortex-panel-open-overlay-background)" in source
+    assert "background: transparent" in source
     assert "data-color-scheme='light']) .workspace-chat" not in source
     assert "data-color-scheme='light']) .cortex-main::after" not in source
 
@@ -261,6 +261,45 @@ def test_thread_stage_sits_between_compact_and_foreground_chat_layers():
     assert re.search(r"\.workspace-chat-dock\s*\{.*?z-index: 2;", workspace_chat, re.DOTALL)
     assert re.search(r"\.thread-stage-shell\s*\{.*?z-index: 25;", thread_shell, re.DOTALL)
     assert re.search(r"\.workspace-chat-dock\.is-foreground\s*\{.*?z-index: 120;", workspace_chat, re.DOTALL)
+
+
+def test_thread_stage_open_motion_keeps_cortex_static():
+    page = (REPO_ROOT / "frontend/src/lib/features/cortex/components/CortexWorkspaceRoute.svelte").read_text()
+    thread_shell = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageShell.svelte").read_text()
+    controller = (
+        REPO_ROOT / "frontend/src/lib/features/cortex/controllers/workspaceThreadStageController.svelte.ts"
+    ).read_text()
+    shell_style = _last_style_block(thread_shell)
+    panel_open_rule = re.search(r"\.panel-open \.cortex-main\s*\{(?P<body>.*?)\}", page, re.DOTALL)
+    panel_overlay_rule = re.search(r"\.panel-open \.cortex-main::after\s*\{(?P<body>.*?)\}", page, re.DOTALL)
+
+    assert "threadStagePrewarmQueued" in page
+    assert "runWhenBrowserIdle(() => ensureThreadStageScreenLoaded()" in page
+    assert "threadStage.syncPanelOpen(cortex.panelOpen && Boolean(ThreadStageScreenComponent))" in page
+    assert "clip-path:" not in shell_style
+    assert "thread-origin-bloom" not in thread_shell
+    assert "thread-origin-ring" not in thread_shell
+    assert "thread-shell-presence" in thread_shell
+    assert "thread-shell-reveal" not in thread_shell
+    assert panel_open_rule
+    assert "opacity: 1;" in panel_open_rule.group("body")
+    assert "transform: none;" in panel_open_rule.group("body")
+    assert panel_overlay_rule
+    assert "opacity: 0;" in panel_overlay_rule.group("body")
+    assert "}, 32);" in controller
+    assert "}, 460);" in controller
+
+
+def test_thread_stage_dismiss_preserves_mounted_workspace_scene():
+    source = (REPO_ROOT / "frontend/src/lib/features/cortex/components/CortexWorkspaceRoute.svelte").read_text()
+    dismiss_body = source.split("function handleThreadStageDismiss()", 1)[1].split(
+        "async function loadWorkspaceSceneSidecars()",
+        1,
+    )[0]
+
+    assert "const shouldRefreshWorkspaceSceneSidecars = directThreadActive || !workspaceSceneSidecarsReady;" in dismiss_body
+    assert "if (shouldRefreshWorkspaceSceneSidecars)" in dismiss_body
+    assert "void loadWorkspaceSceneSidecars();" in dismiss_body
 
 
 def test_cortex_list_view_light_mode_is_component_tokenized():

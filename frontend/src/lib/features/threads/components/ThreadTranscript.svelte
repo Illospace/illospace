@@ -529,7 +529,7 @@
             {#if header.onArchiveAction}
               <ConstellationIconButton
                 label={header.archiveActionLabel ?? 'Archive thread'}
-                title="Archive thread"
+                title="Archive"
                 className={`thread-header-action-button thread-archive-button ${header.archiveActionLoading ? 'is-loading' : ''}`}
                 disabled={header.archiveActionLoading}
                 onclick={header.onArchiveAction}
@@ -1468,6 +1468,20 @@
 
   .thread-header-title-row :global(.thread-header-action-button:hover:not(:disabled)) {
     transform: none;
+  }
+
+  .thread-header-title-row :global(.thread-archive-button) {
+    color: var(--constellation-button-destructive-text);
+  }
+
+  .thread-header-title-row :global(.thread-archive-button:hover:not(:disabled)),
+  .thread-header-title-row :global(.thread-archive-button:focus-visible) {
+    color: var(--constellation-button-destructive-text);
+  }
+
+  .thread-header-title-row :global(.thread-archive-button:active:not(:disabled)),
+  .thread-header-title-row :global(.thread-archive-button.is-loading) {
+    color: var(--constellation-button-destructive-pressed-text);
   }
 
   .thread-header-title-row :global(.thread-title-action-button.is-loading svg) {

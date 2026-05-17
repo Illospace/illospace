@@ -88,6 +88,7 @@
   let initialDirectThreadIdeaId = $state<string | null>($page.url.searchParams.get('idea'));
   let directThreadUrlPending = $state(Boolean($page.url.searchParams.get('idea')));
   let lastAutoOpenedAppId = $state<string | null>(null);
+  let threadStagePrewarmQueued = false;
   let CortexArchiveBinMenuComponent = $state<typeof import('$lib/features/cortex/components/ArchiveBinMenu.svelte').default | null>(null);
   let WorkspaceSceneComponent = $state<typeof import('$lib/features/workspace-scene/components/WorkspaceScene.svelte').default | null>(null);
   let CortexChatDockSeamComponent = $state<typeof import('$lib/features/cortex/components/chat/ChatDockSeam.svelte').default | null>(null);
@@ -473,11 +474,14 @@
   }
 
   function handleThreadStageDismiss() {
+    const shouldRefreshWorkspaceSceneSidecars = directThreadActive || !workspaceSceneSidecarsReady;
     cortex.selectIdea(null);
     initialDirectThreadIdeaId = null;
     ensureWorkspaceRealtime();
     void cortex.loadTeamMembers();
-    void loadWorkspaceSceneSidecars();
+    if (shouldRefreshWorkspaceSceneSidecars) {
+      void loadWorkspaceSceneSidecars();
+    }
   }
 
   async function loadWorkspaceSceneSidecars() {
@@ -594,7 +598,7 @@
   }
 
   $effect(() => {
-    threadStage.syncPanelOpen(cortex.panelOpen);
+    threadStage.syncPanelOpen(cortex.panelOpen && Boolean(ThreadStageScreenComponent));
   });
 
   const threadWorkspaceStyle = $derived.by(() => threadStage.workspaceStyle);
@@ -739,6 +743,12 @@
 
   $effect(() => {
     if (cortexSurfaceReady) ensureCortexNotificationsMenuLoaded();
+  });
+
+  $effect(() => {
+    if (!cortexSurfaceReady || ThreadStageScreenComponent || threadStagePrewarmQueued) return;
+    threadStagePrewarmQueued = true;
+    runWhenBrowserIdle(() => ensureThreadStageScreenLoaded(), 260, 1600);
   });
 
   $effect(() => {
@@ -1450,10 +1460,6 @@
     padding: 0;
     transform: scale(1);
     transform-origin: var(--thread-origin-x) var(--thread-origin-y);
-    will-change: opacity, transform;
-    transition:
-      opacity 0.38s cubic-bezier(0.22, 1, 0.36, 1),
-      transform 0.48s cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   .cortex-main::after {
@@ -1463,8 +1469,7 @@
     z-index: 3;
     pointer-events: none;
     opacity: 0;
-    background: var(--cortex-panel-open-overlay-background);
-    transition: opacity 0.38s cubic-bezier(0.22, 1, 0.36, 1);
+    background: transparent;
   }
 
   .cortex-main > :global(.cortex-container) {
@@ -1478,12 +1483,12 @@
   }
 
   .panel-open .cortex-main {
-    opacity: var(--constellation-thread-stage-backdrop-opacity, 0.78);
-    transform: scale(var(--constellation-thread-stage-backdrop-scale, 0.985));
+    opacity: 1;
+    transform: none;
   }
 
   .panel-open .cortex-main::after {
-    opacity: 1;
+    opacity: 0;
   }
 
   .loading-overlay {

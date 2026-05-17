@@ -29,7 +29,9 @@
 
   --constellation-color-user-accent: #57cfa0;
   --constellation-color-amber: var(--thread-accent, var(--constellation-color-user-accent));
+  --constellation-color-success: var(--positive);
   --constellation-color-warning: #f0b15e;
+  --constellation-color-danger: var(--negative);
   --constellation-color-amber-core: color-mix(in srgb, var(--constellation-color-amber) 48%, rgba(5, 9, 16, 0.98));
   --constellation-color-amber-owner: color-mix(in srgb, var(--constellation-color-amber) 34%, rgba(240, 240, 250, 0.96));
   --constellation-color-badge-ring: rgba(5, 9, 16, 0.92);
@@ -37,6 +39,26 @@
   --constellation-shadow-astre-amber:
     0 0 0 1px rgba(240, 240, 250, 0.06),
     0 0 36px color-mix(in srgb, var(--constellation-color-amber) 24%, transparent);
+
+  --constellation-tone-neutral-accent: color-mix(in srgb, var(--constellation-color-text-primary) 16%, transparent);
+  --constellation-tone-neutral-accent-strong: color-mix(in srgb, var(--constellation-color-text-primary) 20%, transparent);
+  --constellation-tone-neutral-accent-soft: color-mix(in srgb, var(--constellation-color-text-primary) 6%, transparent);
+  --constellation-tone-info-accent: color-mix(in srgb, var(--constellation-color-spectral) 30%, transparent);
+  --constellation-tone-info-accent-strong: color-mix(in srgb, var(--constellation-color-spectral) 28%, transparent);
+  --constellation-tone-info-accent-soft: color-mix(in srgb, var(--constellation-color-spectral) 12%, transparent);
+  --constellation-tone-info-text: color-mix(in srgb, var(--constellation-color-spectral) 42%, var(--constellation-color-text-primary));
+  --constellation-tone-success-accent: color-mix(in srgb, var(--constellation-color-success) 30%, transparent);
+  --constellation-tone-success-accent-strong: color-mix(in srgb, var(--constellation-color-success) 28%, transparent);
+  --constellation-tone-success-accent-soft: color-mix(in srgb, var(--constellation-color-success) 12%, transparent);
+  --constellation-tone-success-text: color-mix(in srgb, var(--constellation-color-success) 46%, var(--constellation-color-text-primary));
+  --constellation-tone-warning-accent: var(--constellation-control-pill-warning-border);
+  --constellation-tone-warning-accent-strong: var(--constellation-color-warning);
+  --constellation-tone-warning-accent-soft: var(--constellation-control-pill-warning-background);
+  --constellation-tone-warning-text: var(--constellation-control-pill-warning-text);
+  --constellation-tone-danger-accent: color-mix(in srgb, var(--constellation-color-danger) 30%, transparent);
+  --constellation-tone-danger-accent-strong: color-mix(in srgb, var(--constellation-color-danger) 28%, transparent);
+  --constellation-tone-danger-accent-soft: color-mix(in srgb, var(--constellation-color-danger) 12%, transparent);
+  --constellation-tone-danger-text: var(--constellation-control-pill-danger-text);
 
   --constellation-control-focus-ring: rgba(240, 240, 250, 0.52);
   --constellation-control-summary: rgba(240, 240, 250, 0.56);
@@ -46,6 +68,7 @@
   --constellation-control-surface-shadow: 0 14px 36px rgba(0, 0, 0, 0.28);
   --constellation-control-field-border: rgba(240, 240, 250, 0.08);
   --constellation-control-field-background: rgba(240, 240, 250, 0.03);
+  --constellation-control-field-focus-border: var(--constellation-control-focus-ring);
   --constellation-control-field-placeholder: rgba(240, 240, 250, 0.38);
   --constellation-control-input-border: rgba(240, 240, 250, 0.14);
   --constellation-control-input-background: rgba(240, 240, 250, 0.045);
@@ -74,6 +97,22 @@
   --constellation-system-chrome-active-shadow:
     inset 0 0 0 1px rgba(240, 240, 250, 0.14),
     0 0 24px rgba(141, 183, 255, 0.08);
+  --constellation-nav-rail-shell-gap: 16px;
+  --constellation-nav-rail-collapsed-width: 54px;
+  --constellation-nav-rail-expanded-width: 166px;
+  --constellation-nav-rail-logo-width: 64px;
+  --constellation-nav-rail-logo-shift: 10.5px;
+  --constellation-nav-rail-brand-mark-background: var(--constellation-system-chrome-active-background);
+  --constellation-nav-rail-brand-mark-color: var(--constellation-system-chrome-active-text);
+  --constellation-nav-rail-border: var(--constellation-system-chrome-border);
+  --constellation-nav-rail-shadow: var(--constellation-system-chrome-shadow);
+  --constellation-nav-rail-item-color: var(--constellation-system-chrome-text);
+  --constellation-nav-rail-item-hover-color: var(--constellation-system-chrome-text-hover);
+  --constellation-nav-rail-item-active-background: var(--constellation-system-chrome-active-background);
+  --constellation-nav-rail-item-active-color: var(--constellation-system-chrome-active-text);
+  --constellation-nav-rail-item-active-shadow: var(--constellation-system-chrome-active-shadow);
+  --constellation-nav-rail-glyph-color: color-mix(in srgb, var(--constellation-system-chrome-active-text) 72%, transparent);
+  --constellation-nav-rail-active-glyph-color: var(--constellation-system-chrome-active-text);
   --constellation-control-slider-track: rgba(240, 240, 250, 0.18);
   --constellation-control-slider-knob: rgba(240, 240, 250, 0.9);
 
@@ -432,6 +471,8 @@
   --constellation-data-table-cell-warning: rgba(255, 228, 173, 0.92);
   --constellation-data-table-cell-danger: rgba(255, 178, 192, 0.92);
   --constellation-data-table-empty: rgba(240, 240, 250, 0.5);
+  --constellation-key-value-grid-accent-background: linear-gradient(90deg, var(--key-value-accent), transparent 48%);
+  --constellation-key-value-grid-shadow: 0 12px 28px rgba(0, 0, 0, 0.14);
 
   --constellation-thread-header-title: #ffffff;
   --constellation-thread-header-status-idle-dot: rgba(240, 240, 250, 0.34);

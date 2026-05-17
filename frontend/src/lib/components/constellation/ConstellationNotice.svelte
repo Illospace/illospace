@@ -78,9 +78,9 @@
 
 <style>
   .constellation-notice {
-    --notice-accent: var(--constellation-notice-accent, rgba(141, 183, 255, 0.24));
-    --notice-accent-strong: var(--constellation-notice-accent-strong, rgba(141, 183, 255, 0.22));
-    --notice-accent-soft: var(--constellation-notice-accent-soft, rgba(141, 183, 255, 0.12));
+    --notice-accent: var(--constellation-notice-accent, var(--constellation-tone-neutral-accent));
+    --notice-accent-strong: var(--constellation-notice-accent-strong, var(--constellation-tone-neutral-accent-strong));
+    --notice-accent-soft: var(--constellation-notice-accent-soft, var(--constellation-tone-neutral-accent-soft));
     --notice-text: var(--constellation-color-text-primary);
     --notice-body: var(--constellation-color-text-secondary);
     position: relative;
@@ -182,33 +182,33 @@
   }
 
   .constellation-notice-tone-neutral {
-    --notice-accent: rgba(255, 255, 255, 0.16);
-    --notice-accent-strong: rgba(240, 240, 250, 0.2);
-    --notice-accent-soft: rgba(255, 255, 255, 0.06);
+    --notice-accent: var(--constellation-tone-neutral-accent);
+    --notice-accent-strong: var(--constellation-tone-neutral-accent-strong);
+    --notice-accent-soft: var(--constellation-tone-neutral-accent-soft);
   }
 
   .constellation-notice-tone-info {
-    --notice-accent: rgba(141, 183, 255, 0.28);
-    --notice-accent-strong: rgba(141, 183, 255, 0.24);
-    --notice-accent-soft: rgba(141, 183, 255, 0.12);
+    --notice-accent: var(--constellation-tone-info-accent);
+    --notice-accent-strong: var(--constellation-tone-info-accent-strong);
+    --notice-accent-soft: var(--constellation-tone-info-accent-soft);
   }
 
   .constellation-notice-tone-success {
-    --notice-accent: rgba(109, 245, 189, 0.28);
-    --notice-accent-strong: rgba(87, 207, 160, 0.24);
-    --notice-accent-soft: rgba(87, 207, 160, 0.1);
+    --notice-accent: var(--constellation-tone-success-accent);
+    --notice-accent-strong: var(--constellation-tone-success-accent-strong);
+    --notice-accent-soft: var(--constellation-tone-success-accent-soft);
   }
 
   .constellation-notice-tone-warning {
     --notice-accent: var(--constellation-control-pill-warning-border);
-    --notice-accent-strong: var(--constellation-color-warning, #f0b15e);
+    --notice-accent-strong: var(--constellation-color-warning);
     --notice-accent-soft: var(--constellation-control-pill-warning-background);
   }
 
   .constellation-notice-tone-danger {
-    --notice-accent: rgba(219, 110, 130, 0.28);
-    --notice-accent-strong: rgba(219, 110, 130, 0.24);
-    --notice-accent-soft: rgba(219, 110, 130, 0.12);
+    --notice-accent: var(--constellation-tone-danger-accent);
+    --notice-accent-strong: var(--constellation-tone-danger-accent-strong);
+    --notice-accent-soft: var(--constellation-tone-danger-accent-soft);
   }
 
   @media (max-width: 720px) {
