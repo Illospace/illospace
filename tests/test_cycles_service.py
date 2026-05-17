@@ -60,6 +60,30 @@ class _AllResult:
         return list(self._values)
 
 
+
+class _RouterCycleResult:
+    def __init__(self, cycle):
+        self._cycle = cycle
+
+    def first(self):
+        return self._cycle
+
+
+class _RouterCycleSession:
+    def __init__(self, cycle):
+        self._cycle = cycle
+        self.flushed = False
+
+    def scalars(self, statement):
+        return _RouterCycleResult(self._cycle)
+
+    def execute(self, statement):
+        return _FirstResult((self._cycle.target_idea_id,))
+
+    def flush(self):
+        self.flushed = True
+
+
 class _ExecuteCycleSession:
     def __init__(self, *, run, cycle, idea, owner=None, expected_run_id=None):
         self._scalar_values = [run, cycle, idea]
@@ -250,6 +274,14 @@ def test_validate_nonempty_trimmed_rejects_blank_text():
         service.validate_nonempty_trimmed("   ", "name")
 
 
+def test_cycle_router_bad_request_returns_400():
+    with pytest.raises(cycles_router.HTTPException) as caught:
+        raise cycles_router._bad_request(ValueError("Unknown timezone: Mars/Base"))
+
+    assert caught.value.status_code == 400
+    assert caught.value.detail == "Unknown timezone: Mars/Base"
+
+
 def _cycle_for_serialization(*, schedule_expr: str, timezone_name: str) -> Cycle:
     now = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
     cycle = Cycle()
@@ -274,6 +306,59 @@ def _cycle_for_serialization(*, schedule_expr: str, timezone_name: str) -> Cycle
     cycle.updated_at = now
     return cycle
 
+
+
+@pytest.mark.asyncio
+async def test_cycle_update_recomputes_schedule_with_new_timezone_before_saving():
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="UTC",
+    )
+    db = _RouterCycleSession(cycle)
+
+    body = cycles_router.CycleUpdate(
+        schedule_expr="0 9 * * 1",
+        timezone="America/Toronto",
+    )
+    response = await cycles_router.update_cycle(
+        cycle.id,
+        body,
+        db=db,
+        user={"id": cycle.user_id, "org_id": None},
+    )
+
+    assert response["schedule_expr"] == "0 9 * * 1"
+    assert response["timezone"] == "America/Toronto"
+    assert response["next_run_at"].tzinfo is not None
+    assert cycle.schedule_expr == "0 9 * * 1"
+    assert cycle.timezone == "America/Toronto"
+    assert db.flushed is True
+
+
+@pytest.mark.asyncio
+async def test_cycle_update_validation_failure_does_not_mutate_or_flush():
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="America/Toronto",
+    )
+    db = _RouterCycleSession(cycle)
+
+    body = cycles_router.CycleUpdate(
+        schedule_expr="0 9 * * 1",
+        timezone="Mars/Base",
+    )
+    with pytest.raises(cycles_router.HTTPException) as caught:
+        await cycles_router.update_cycle(
+            cycle.id,
+            body,
+            db=db,
+            user={"id": cycle.user_id, "org_id": None},
+        )
+
+    assert caught.value.status_code == 400
+    assert cycle.timezone == "America/Toronto"
+    assert cycle.schedule_expr == "0 9 * * *"
+    assert db.flushed is False
 
 def test_serialize_cycle_does_not_raise_for_legacy_bad_timezone():
     cycle = _cycle_for_serialization(
@@ -388,15 +473,15 @@ async def test_async_run_cycle_now_uses_native_uow_without_sync_bridges(monkeypa
 
 @pytest.mark.asyncio
 async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
-    from brain.systems.runs.cortex import RunAdmissionResult
+    from brain.systems.runs.work_intake import WorkIntakeResult
 
     calls = []
 
-    async def fake_admit(request, *, session=None):
-        calls.append((request, session))
-        return RunAdmissionResult(ok=True, run_id=77)
+    async def fake_admit(session, event):
+        calls.append((session, event))
+        return WorkIntakeResult(ok=True, run_id=77)
 
-    monkeypatch.setattr(service, "async_admit_run", fake_admit)
+    monkeypatch.setattr(service, "admit_work", fake_admit)
     session = object()
 
     run_id = await service._async_admit_cycle_run(
@@ -410,13 +495,16 @@ async def test_cycle_run_creation_uses_typed_admission(monkeypatch):
     )
 
     assert run_id == 77
-    request, passed_session = calls[0]
+    passed_session, event = calls[0]
     assert passed_session is session
-    assert request.source == "cycle"
-    assert request.producer == "cycle"
-    assert request.idempotency_key == "cycle_run:12"
-    assert request.metadata["source"] == "cycle"
-    assert request.metadata["cycle_run_id"] == 12
+    assert event.source == "cycle"
+    assert event.event_type == "cycle.due_run"
+    assert event.target == {"kind": "cortex_idea", "idea_id": "idea-1"}
+    assert event.payload["metadata"]["source"] == "cycle"
+    assert event.payload["metadata"]["cycle_run_id"] == 12
+    assert event.policy["producer"] == "cycle"
+    assert event.policy["idempotency_key"] == "cycle_run:12"
+    assert event.policy["run_event"] == "thread_reply"
 
 
 @pytest.mark.asyncio

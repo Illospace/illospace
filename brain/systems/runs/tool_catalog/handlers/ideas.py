@@ -7,6 +7,13 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 
+from brain.systems.cortex.thought_lifecycle import (
+    ThoughtStatusCommand,
+    ThreadMessageCommand,
+    post_thread_message,
+    transition_thought_status,
+)
+from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.runs.tool_catalog.handlers.common import *
 
 
@@ -52,6 +59,24 @@ def _idea_actor(*, org_id: str | None, actor_user_id: str | None) -> dict[str, A
         "role": "owner",
         "principal_type": "human",
     }
+
+
+def _caller_is_service_actor(actor: dict[str, Any]) -> bool:
+    from brain.app.api.routers.cortex._helpers import _caller_is_service_principal
+
+    return bool(_caller_is_service_principal(actor))
+
+
+def _actor_org_context(actor: dict[str, Any]) -> str:
+    from brain.app.api.authorization import require_org_context
+
+    return str(require_org_context(actor))
+
+
+async def _require_idea_for_actor(session, idea_id: str, actor: dict[str, Any]):
+    from brain.app.api.routers.cortex._helpers import _a_require_idea_for_user
+
+    return await _a_require_idea_for_user(session, idea_id, actor)
 
 
 def _target_idea_id(idea_id: str | None, thread_id: str | None, context_idea_id: str | None) -> str | None:
@@ -115,30 +140,35 @@ async def _seed_created_idea_thread(
     idea,
     seed_content: str,
     actor_user_id: str | None,
+    owner_user_id: str | None,
     parent_id: str | None,
     origin_ref: str | None,
 ) -> Any | None:
-    from brain.platform.db.models.idea import IdeaThread
-
     if not seed_content:
         return None
     source_run_id = _current_tool_run_id()
-    thread_msg = IdeaThread(
-        idea_id=str(idea.id),
-        role="user",
-        content=seed_content,
-        user_id=actor_user_id,
-        message_type="trigger",
-        metadata_={
-            "source": "manage_idea.create",
-            "created_by_run_id": source_run_id,
-            "parent_idea_id": parent_id,
-            "origin_ref": origin_ref,
-        },
+    result = await post_thread_message(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="illo",
+            content=seed_content,
+            actor={"org_id": getattr(idea, "org_id", None)},
+            metadata={
+                "source": "manage_idea.create",
+                "author": "illo",
+                "requested_by_user_id": actor_user_id,
+                "owner_user_id": owner_user_id,
+                "created_by_run_id": source_run_id,
+                "parent_idea_id": parent_id,
+                "origin_ref": origin_ref,
+            },
+        ),
+        parse_message_type=lambda _content, _role: "agent_response",
+        apply_lifecycle=False,
     )
-    session.add(thread_msg)
-    await session.flush()
-    return thread_msg
+    return result.message
 
 
 async def _admit_created_idea_run(
@@ -151,31 +181,35 @@ async def _admit_created_idea_run(
     origin_ref: str | None,
     thread_message_id: int | None,
 ):
-    from brain.systems.runs.cortex import RunAdmissionRequest, async_admit_run
-
     source_run_id = _current_tool_run_id()
-    result = await async_admit_run(
-        RunAdmissionRequest(
-            idea_id=str(idea.id),
-            event="idea_created",
-            message=_created_idea_run_message(idea, seed_content),
-            user_id=actor_user_id,
-            metadata={
-                "created_by_tool": "manage_idea",
-                "created_by_run_id": source_run_id,
-                "parent_idea_id": parent_id,
-                "origin_ref": origin_ref,
-                "thread_message_id": thread_message_id,
+    result = await admit_work(
+        session,
+        WorkIntakeEvent(
+            source="tool",
+            event_type="tool.idea_created",
+            org_id=str(getattr(idea, "org_id", "") or ""),
+            actor={"id": actor_user_id, "org_id": getattr(idea, "org_id", None)},
+            target={"kind": "cortex_idea", "idea_id": str(idea.id)},
+            payload={
+                "message": _created_idea_run_message(idea, seed_content),
+                "metadata": {
+                    "created_by_tool": "manage_idea",
+                    "created_by_run_id": source_run_id,
+                    "parent_idea_id": parent_id,
+                    "origin_ref": origin_ref,
+                    "thread_message_id": thread_message_id,
+                },
             },
-            source="tool:manage_idea",
-            producer="agent_tool",
-            idempotency_key=(
-                f"manage_idea:create:{source_run_id}:{idea.id}"
-                if source_run_id is not None
-                else f"manage_idea:create:{idea.id}"
-            ),
+            policy={
+                "producer": "agent_tool",
+                "idempotency_key": (
+                    f"manage_idea:create:{source_run_id}:{idea.id}"
+                    if source_run_id is not None
+                    else f"manage_idea:create:{idea.id}"
+                ),
+                "run_event": "idea_created",
+            },
         ),
-        session=session,
     )
     if not result.ok:
         raise RuntimeError(result.skipped_reason or "Failed to admit AgentRun for created idea")
@@ -228,63 +262,73 @@ async def _list_ideas(
 
 
 async def _status_change(idea, next_status: str, *, trigger: str, session) -> tuple[str, str] | None:
-    from brain.platform.db.models.idea import IdeaStateLog
-
     if next_status not in _IDEA_STATUSES:
         raise ValueError(f"Unsupported idea status: {next_status}")
     old_status = str(idea.status or "")
     if old_status == next_status and (next_status != "archived" or idea.archived_at is not None):
         return None
-    idea.status = next_status
-    idea.updated_at = datetime.now(timezone.utc)
-    if next_status == "archived":
-        idea.archived_at = datetime.now(timezone.utc)
-    session.add(
-        IdeaStateLog(
-            idea_id=str(idea.id),
-            from_state=old_status,
-            to_state=next_status,
+    await transition_thought_status(
+        session,
+        idea=idea,
+        command=ThoughtStatusCommand(
+            to_status=next_status,
             trigger=trigger,
-        )
+        ),
     )
     return old_status, next_status
 
 
 async def _restore_idea(idea, *, session) -> tuple[str, str]:
-    from brain.platform.db.models.idea import IdeaStateLog
-
     old_status = str(idea.status or "")
-    idea.archived_at = None
-    if old_status == "archived":
-        idea.status = "emerged"
-    idea.updated_at = datetime.now(timezone.utc)
-    session.add(
-        IdeaStateLog(
-            idea_id=str(idea.id),
-            from_state=old_status,
-            to_state=str(idea.status or ""),
+    next_status = "emerged" if old_status == "archived" else old_status
+    await transition_thought_status(
+        session,
+        idea=idea,
+        command=ThoughtStatusCommand(
+            to_status=next_status,
             trigger="agent_restore",
-        )
+        ),
     )
     return old_status, str(idea.status or "")
 
 
 async def _apply_owner_handoff(idea, *, next_owner_id: str, actor: dict[str, Any], session) -> None:
-    from brain.app.api.routers.cortex._helpers import _caller_is_service_principal
     from brain.app.api.routers.cortex._ideas import _freeze_display_author_for_handoff
-    from brain.app.api.authorization import require_org_context
     from brain.platform.db.models.org import User
 
     target_user = await session.scalar(select(User).where(User.id == str(next_owner_id)))
     if target_user is None:
         raise HTTPException(status_code=404, detail="Target owner not found")
-    if not _caller_is_service_principal(actor):
-        org_id = require_org_context(actor)
+    if not _caller_is_service_actor(actor):
+        org_id = _actor_org_context(actor)
         if str(target_user.org_id) != str(org_id):
             raise HTTPException(status_code=403, detail="Target owner is outside this org")
     if str(next_owner_id) != str(getattr(idea, "user_id", "")):
-            await _freeze_display_author_for_handoff(idea, session)
+        await _freeze_display_author_for_handoff(idea, session)
     idea.user_id = str(next_owner_id)
+
+
+async def _validated_create_owner_id(
+    *,
+    session,
+    requested_owner_id: str | None,
+    fallback_owner_id: str,
+    actor: dict[str, Any],
+) -> str:
+    from brain.platform.db.models.org import User
+
+    owner_id = str(requested_owner_id or fallback_owner_id)
+    if owner_id == str(fallback_owner_id):
+        return owner_id
+
+    target_user = await session.scalar(select(User).where(User.id == owner_id))
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="Target owner not found")
+    if not _caller_is_service_actor(actor):
+        org_id = _actor_org_context(actor)
+        if str(target_user.org_id) != str(org_id):
+            raise HTTPException(status_code=403, detail="Target owner is outside this org")
+    return owner_id
 
 
 async def _apply_idea_updates(
@@ -366,7 +410,7 @@ async def _handle_manage_idea(
     orbit_anchor_id: str | None = None,
     parent_id: str | None = None,
     user_id: str | None = None,
-    origin: str = "user_created",
+    origin: str = "illo_created",
     origin_ref: str | None = None,
     search: str | None = None,
     include_archived: bool = False,
@@ -376,7 +420,6 @@ async def _handle_manage_idea(
     if normalized_action in {"help", "schema"}:
         return _manage_tool_guide("manage_idea", operation)
 
-    from brain.app.api.routers.cortex._helpers import _a_require_idea_for_user
     from brain.systems.cortex.events import publish_safe
     from brain.platform.db.models.idea import Idea
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -412,14 +455,20 @@ async def _handle_manage_idea(
                 if should_start_run is None:
                     should_start_run = requested_status in _RUN_ADMISSION_CREATE_STATUSES
                 initial_status = "emerged" if should_start_run or requested_status in _RUN_ADMISSION_CREATE_STATUSES else requested_status
+                owner_user_id = await _validated_create_owner_id(
+                    session=uow.session,
+                    requested_owner_id=user_id,
+                    fallback_owner_id=actor_user_id,
+                    actor=actor,
+                )
                 idea = Idea(
                     title=title,
                     description=description,
                     status=initial_status,
-                    origin=origin or "user_created",
+                    origin=origin or "illo_created",
                     origin_ref=origin_ref,
                     parent_id=parent_id,
-                    user_id=actor_user_id,
+                    user_id=owner_user_id,
                     org_id=org_id,
                 )
                 if salience_score is not None:
@@ -449,12 +498,10 @@ async def _handle_manage_idea(
                     idea=idea,
                     seed_content=seed_content,
                     actor_user_id=actor_user_id,
+                    owner_user_id=owner_user_id,
                     parent_id=parent_id,
                     origin_ref=origin_ref,
                 )
-                if user_id is not None:
-                    await _apply_owner_handoff(idea, next_owner_id=user_id, actor=actor, session=uow.session)
-                    await uow.session.flush()
                 run_result = None
                 if should_start_run:
                     run_result = await _admit_created_idea_run(
@@ -479,7 +526,7 @@ async def _handle_manage_idea(
             else:
                 if not target_idea_id:
                     return json.dumps({"error": f"{normalized_action or 'action'} requires: idea_id when no current Cortex thread is bound"})
-                idea = await _a_require_idea_for_user(uow.session, target_idea_id, actor)
+                idea = await _require_idea_for_actor(uow.session, target_idea_id, actor)
 
                 if normalized_action == "get":
                     return json.dumps({"idea": await _serialize_idea(idea, uow.session)}, default=str)

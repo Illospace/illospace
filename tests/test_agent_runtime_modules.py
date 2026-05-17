@@ -112,12 +112,9 @@ def test_request_runtime_preserves_cache_policy_and_facade_wrappers():
     )
     from brain.systems.runs.direct_loop import request as runtime_request
 
-    llm = SimpleNamespace(system_prompt_prefix="prefix")
+    llm = SimpleNamespace()
     system = _build_system_blocks(llm, "Be precise", cache=True)
-    assert system == [
-        {"type": "text", "text": "prefix"},
-        {"type": "text", "text": "Be precise"},
-    ]
+    assert system == [{"type": "text", "text": "Be precise"}]
     assert _apply_anthropic_cache_breakpoint(system, True)[-1]["cache_control"] == {"type": "ephemeral"}
     anthropic_system = _apply_provider_system_cache_policy("anthropic", "Be precise", True)
     assert anthropic_system == [{"type": "text", "text": "Be precise", "cache_control": {"type": "ephemeral"}}]
@@ -282,7 +279,6 @@ def test_run_agent_retries_once_after_context_overflow_with_checkpoint(monkeypat
         is_oauth=False,
         extra_headers={},
         token_prefix="sk-test",
-        system_prompt_prefix="",
         auth_mode="api_key",
         get_extra_headers=lambda: {},
         build_request_headers=lambda **_kwargs: {},
@@ -368,7 +364,6 @@ def test_run_agent_uses_thread_handoff_but_persists_raw_archive(monkeypatch):
         is_oauth=False,
         extra_headers={},
         token_prefix="sk-test",
-        system_prompt_prefix="",
         auth_mode="api_key",
         get_extra_headers=lambda: {},
         build_request_headers=lambda **_kwargs: {},

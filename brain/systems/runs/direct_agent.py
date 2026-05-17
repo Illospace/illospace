@@ -31,8 +31,9 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Awaitable
 from contextlib import suppress
-from typing import Callable
+from typing import Any, Callable
 
 from brain.platform.integrations.llm import (
     async_resolve_llm_client,
@@ -110,7 +111,6 @@ from brain.systems.runs.direct_loop.tool_execution import (
     PendingToolCall as _PendingToolCall,
     ResolvedToolCall as _ResolvedToolCall,
     async_execute_tool_calls as _runtime_async_execute_tool_calls,
-    invoke_tool_handler as _runtime_invoke_tool_handler,
     resolve_tool_call as _runtime_resolve_tool_call,
 )
 from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
@@ -1125,6 +1125,7 @@ def _make_result(
     output: str, success: bool, session_id: str, tokens: _TokenAccumulator,
     start_time: float, tool_calls: list[str], error: str | None = None,
     worker_results: list | None = None,
+    post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = (),
 ) -> AgentResult:
     """Construct an AgentResult with common fields."""
     return _runtime_make_result(
@@ -1136,6 +1137,7 @@ def _make_result(
         tool_calls,
         error=error,
         worker_results=worker_results,
+        post_completion_tasks=post_completion_tasks,
     )
 
 
@@ -1202,19 +1204,6 @@ async def _api_call_with_retry_async(
         make_cancelled_result=_make_result,
         degrade_betas=_degrade_betas,
         is_cancelled_result=lambda response: isinstance(response, AgentResult),
-    )
-
-
-# ── Tool Execution ───────────────────────────────────────────
-
-
-def _invoke_tool_handler(handler: Callable, tool_input: dict, threadlocal_context: dict | None = None):
-    """Execute a tool handler with optional propagated AgentRun context."""
-    return _runtime_invoke_tool_handler(
-        handler,
-        tool_input,
-        agent_context=_agent_context,
-        threadlocal_context=threadlocal_context,
     )
 
 
@@ -1291,6 +1280,7 @@ async def run_agent_async(
     load_session_handoff: Callable[..., dict | None] | None = None,
     save_session: Callable[..., None] | None = None,
     save_session_handoff: Callable[..., None] | None = None,
+    defer_thread_handoff: bool = True,
 ) -> AgentResult:
     """Run an agent loop with tool use from async runtime code.
 
@@ -1757,16 +1747,23 @@ async def run_agent_async(
             persist_session=persist_session,
             save_session=save_session,
         )
+        post_completion_tasks = ()
         if persist_session and raw_archive_messages is not None:
-            await _update_thread_handoff_after_run_async(
-                session_id=session_id,
-                archive_messages=persistable_messages,
-                previous_handoff=thread_handoff,
-                semantic_compactor=thread_handoff_compactor,
-                run_id=run_id,
-                user_id=None,
-                save_session_handoff=save_session_handoff,
-            )
+            def handoff_update():
+                return _update_thread_handoff_after_run_async(
+                    session_id=session_id,
+                    archive_messages=persistable_messages,
+                    previous_handoff=thread_handoff,
+                    semantic_compactor=thread_handoff_compactor,
+                    run_id=run_id,
+                    user_id=None,
+                    save_session_handoff=save_session_handoff,
+                )
+
+            if defer_thread_handoff:
+                post_completion_tasks = (handoff_update,)
+            else:
+                await handoff_update()
 
         logger.info(
             "Agent %s: completed in %ds (turns=%d, input=%d, output=%d, tools=%d)",
@@ -1785,7 +1782,15 @@ async def run_agent_async(
                 len(state.tool_calls_made),
                 len(state.messages),
             )
-        return _make_result(output, True, session_id, state.tokens, start_time, state.tool_calls_made)
+        return _make_result(
+            output,
+            True,
+            session_id,
+            state.tokens,
+            start_time,
+            state.tool_calls_made,
+            post_completion_tasks=post_completion_tasks,
+        )
 
     except Exception as e:
         if state.provider and state.provider.is_api_error(e):
@@ -1915,6 +1920,7 @@ def run_agent(
         "load_session_handoff": load_session_handoff or _async_from_sync(globals()["_load_session_handoff"]),
         "save_session": save_session or _async_from_sync(globals()["_save_session"]),
         "save_session_handoff": save_session_handoff or _async_from_sync(globals()["_save_session_handoff"]),
+        "defer_thread_handoff": False,
     }
     with asyncio.Runner() as runner:
         return runner.run(run_agent_async(**kwargs))

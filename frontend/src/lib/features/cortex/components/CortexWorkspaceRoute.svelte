@@ -1034,16 +1034,6 @@
                 </div>
               {/if}
 
-              {#if cortexSurfaceReady && !cortex.panelOpen && !chatDockExpanded && !workspaceOverlay.activeWorkspaceAppId && CortexArchiveBinMenuComponent}
-                <div class="workspace-archive-bin-shell" class:dragging={workspaceOverlay.archiveDragActive}>
-                  <CortexArchiveBinMenuComponent
-                    dragging={workspaceOverlay.archiveDragActive}
-                    dropActive={workspaceOverlay.archiveDropActive}
-                    onrestore={handleRestoreArchivedThread}
-                    onrestoreapp={handleRestoreArchivedApp}
-                  />
-                </div>
-              {/if}
             </div>
           {/snippet}
 
@@ -1080,6 +1070,19 @@
                     onAutoDraftComplete={handleRuntimeReadyAutoDraftComplete}
                   />
                 {/if}
+              </div>
+            {/if}
+          {/snippet}
+
+          {#snippet overlays()}
+            {#if cortexSurfaceReady && !cortex.panelOpen && !chatDockExpanded && !workspaceOverlay.activeWorkspaceAppId && CortexArchiveBinMenuComponent}
+              <div class="workspace-archive-bin-shell" class:dragging={workspaceOverlay.archiveDragActive}>
+                <CortexArchiveBinMenuComponent
+                  dragging={workspaceOverlay.archiveDragActive}
+                  dropActive={workspaceOverlay.archiveDropActive}
+                  onrestore={handleRestoreArchivedThread}
+                  onrestoreapp={handleRestoreArchivedApp}
+                />
               </div>
             {/if}
           {/snippet}
@@ -1321,7 +1324,7 @@
     position: absolute;
     right: 22px;
     bottom: 16px;
-    z-index: 6;
+    z-index: 1;
     pointer-events: auto;
   }
 

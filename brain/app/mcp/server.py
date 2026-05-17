@@ -51,21 +51,6 @@ from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_
 
 logger = logging.getLogger("mcp_brain")
 
-# ── Tool Implementations ─────────────────────────────────────
-
-
-def _run_mcp_sync(awaitable: Any) -> Any:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        with asyncio.Runner() as runner:
-            return runner.run(awaitable)
-    close = getattr(awaitable, "close", None)
-    if callable(close):
-        close()
-    raise RuntimeError("MCP sync facade cannot run inside an active event loop; await the async tool API")
-
-
 async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
@@ -311,28 +296,6 @@ async def async_tool_brain_recall(
     )
 
 
-def tool_brain_recall(
-    query: str,
-    limit: int = 3,
-    user_id: str | None = None,
-    org_id: str | None = None,
-    attention_debug: bool = False,
-    expand_lazy_load: bool | None = None,
-    service_retrieval: bool = False,
-) -> dict:
-    return _run_mcp_sync(
-        async_tool_brain_recall(
-            query=query,
-            limit=limit,
-            user_id=user_id,
-            org_id=org_id,
-            attention_debug=attention_debug,
-            expand_lazy_load=expand_lazy_load,
-            service_retrieval=service_retrieval,
-        ),
-    )
-
-
 async def _finalize_recall_response(
     *,
     query: str,
@@ -454,10 +417,6 @@ async def async_tool_brain_guardrails(skill: str | None = None) -> dict:
                 ]
 
     return result
-
-
-def tool_brain_guardrails(skill: str | None = None) -> dict:
-    return _run_mcp_sync(async_tool_brain_guardrails(skill=skill))
 
 
 async def async_tool_brain_skills(task: str) -> dict:
@@ -849,10 +808,6 @@ async def async_tool_brain_skills(task: str) -> dict:
     return result
 
 
-def tool_brain_skills(task: str) -> dict:
-    return _run_mcp_sync(async_tool_brain_skills(task))
-
-
 async def async_tool_skill_view(
     name: str,
     section: str = "procedure",
@@ -925,16 +880,6 @@ async def async_tool_skill_view(
         return payload
 
 
-def tool_skill_view(
-    name: str,
-    section: str = "procedure",
-    max_chars: int = 12000,
-) -> dict:
-    return _run_mcp_sync(
-        async_tool_skill_view(name=name, section=section, max_chars=max_chars),
-    )
-
-
 async def async_tool_skill_asset(
     name: str,
     path: str,
@@ -987,16 +932,6 @@ async def async_tool_skill_asset(
             "loaded_sections": [f"asset:{asset.path}"],
             **_skill_digest_metadata(skill),
         }
-
-
-def tool_skill_asset(
-    name: str,
-    path: str,
-    max_chars: int = 12000,
-) -> dict:
-    return _run_mcp_sync(
-        async_tool_skill_asset(name=name, path=path, max_chars=max_chars),
-    )
 
 
 async def async_tool_brain_encode(
@@ -1069,40 +1004,6 @@ async def async_tool_brain_encode(
         result["warning"] = degraded_reason
         result["embedding_deferred"] = True
     return result
-
-
-def tool_brain_encode(
-    content: str,
-    memory_type: str = "episode",
-    salience: float = 5.0,
-    source: str = "agent_run",
-    user_id: str | None = None,
-    org_id: str | None = None,
-    visibility: str = "private",
-    conversation_id: str | None = None,
-    idea_id: str | None = None,
-    run_id: int | str | None = None,
-    session_id: str | None = None,
-    confidence: float | None = None,
-    evidence: dict | None = None,
-) -> dict:
-    return _run_mcp_sync(
-        async_tool_brain_encode(
-            content=content,
-            memory_type=memory_type,
-            salience=salience,
-            source=source,
-            user_id=user_id,
-            org_id=org_id,
-            visibility=visibility,
-            conversation_id=conversation_id,
-            idea_id=idea_id,
-            run_id=run_id,
-            session_id=session_id,
-            confidence=confidence,
-            evidence=evidence,
-        ),
-    )
 
 
 async def tool_brain_vault(

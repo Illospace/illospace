@@ -148,11 +148,13 @@ class WorkerRecipe(BaseRunRecipe):
             logger.exception("worker_recipe_failed", extra={"run_id": runtime.run.id})
             output = f"Worker failed: {exc}"
             status = RunStatus.FAILED
+            post_completion_tasks = ()
         else:
             output = str(getattr(result, "output", "") or "").strip()
             status = RunStatus.COMPLETED if getattr(result, "success", False) else RunStatus.FAILED
             if getattr(result, "error", None) and not output:
                 output = str(result.error)
+            post_completion_tasks = tuple(getattr(result, "post_completion_tasks", ()) or ())
         if output and not streamed_output:
             await runtime.text_delta(output)
         worker_result = worker_result_artifact(
@@ -163,7 +165,12 @@ class WorkerRecipe(BaseRunRecipe):
             tool_records=tool_records,
             root_run_id=runtime.run.root_run_id,
         )
-        return RunRecipeResult(output=output, status=status, artifacts=(worker_result,))
+        return RunRecipeResult(
+            output=output,
+            status=status,
+            artifacts=(worker_result,),
+            post_completion_tasks=post_completion_tasks,
+        )
 
 
 def worker_assignment_from_runtime(runtime: RunRuntime) -> WorkerAssignment:

@@ -57,6 +57,10 @@ def _cycle_scope_conditions(user: dict[str, Any]) -> list[Any]:
     return [Cycle.user_id == str(user["id"]), Cycle.deleted_at.is_(None)]
 
 
+def _bad_request(exc: ValueError) -> HTTPException:
+    return HTTPException(status_code=400, detail=str(exc))
+
+
 def _target_idea_scope_conditions(idea_id: str, user: dict[str, Any]) -> list[Any]:
     conditions: list[Any] = [Idea.id == idea_id]
     if _is_service_principal(user):
@@ -121,20 +125,21 @@ async def create_cycle(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    timezone_name = validate_timezone_name(body.timezone)
-    if body.run_at is not None:
-        schedule_expr = build_one_time_schedule_expr(body.run_at, timezone_name)
-    elif body.schedule_expr:
-        schedule_expr = validate_schedule_expr(body.schedule_expr, timezone_name)
-    else:
-        raise HTTPException(status_code=400, detail="schedule_expr or run_at is required")
-    execution_mode = validate_execution_mode(body.execution_mode)
-    thinking_override = validate_thinking_override(body.thinking_override)
     try:
+        timezone_name = validate_timezone_name(body.timezone)
+        if body.run_at is not None:
+            schedule_expr = build_one_time_schedule_expr(body.run_at, timezone_name)
+        elif body.schedule_expr:
+            schedule_expr = validate_schedule_expr(body.schedule_expr, timezone_name)
+        else:
+            raise HTTPException(status_code=400, detail="schedule_expr or run_at is required")
+        execution_mode = validate_execution_mode(body.execution_mode)
+        thinking_override = validate_thinking_override(body.thinking_override)
         name = validate_nonempty_trimmed(body.name, "name")
         prompt = validate_nonempty_trimmed(body.prompt, "prompt")
+        next_run_at = compute_next_run_at(schedule_expr, timezone_name)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise _bad_request(exc) from exc
     await _validate_target_idea(db, body.target_idea_id, user)
     cycle = Cycle(
         user_id=user["id"],
@@ -152,7 +157,7 @@ async def create_cycle(
             execution_mode=execution_mode,
             reopen_archived=body.reopen_archived,
         ),
-        next_run_at=compute_next_run_at(schedule_expr, timezone_name),
+        next_run_at=next_run_at,
     )
     db.add(cycle)
     await db.flush()
@@ -192,44 +197,49 @@ async def update_cycle(
     if "target_idea_id" in updates:
         await _validate_target_idea(db, updates["target_idea_id"], user)
 
-    if "name" in updates and updates["name"] is not None:
-        try:
+    try:
+        next_timezone = cycle.timezone
+        if "timezone" in updates and updates["timezone"] is not None:
+            next_timezone = validate_timezone_name(updates["timezone"])
+
+        next_schedule_expr = cycle.schedule_expr
+        if "run_at" in updates and updates["run_at"] is not None:
+            next_schedule_expr = build_one_time_schedule_expr(updates["run_at"], next_timezone)
+        elif "schedule_expr" in updates and updates["schedule_expr"] is not None:
+            next_schedule_expr = validate_schedule_expr(updates["schedule_expr"], next_timezone)
+
+        next_run_at = compute_next_run_at(next_schedule_expr, next_timezone)
+
+        if "name" in updates and updates["name"] is not None:
             cycle.name = validate_nonempty_trimmed(updates["name"], "name")
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if "prompt" in updates and updates["prompt"] is not None:
-        try:
+        if "prompt" in updates and updates["prompt"] is not None:
             cycle.prompt = validate_nonempty_trimmed(updates["prompt"], "prompt")
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if "timezone" in updates and updates["timezone"] is not None:
-        cycle.timezone = validate_timezone_name(updates["timezone"])
-    if "run_at" in updates and updates["run_at"] is not None:
-        cycle.schedule_expr = build_one_time_schedule_expr(updates["run_at"], cycle.timezone)
-    if "schedule_expr" in updates and updates["schedule_expr"] is not None:
-        cycle.schedule_expr = validate_schedule_expr(updates["schedule_expr"], cycle.timezone)
-    if "enabled" in updates and updates["enabled"] is not None:
-        cycle.enabled = updates["enabled"]
-    if "model_override" in updates:
-        cycle.model_override = (updates["model_override"] or "").strip() or None
-    if "thinking_override" in updates:
-        cycle.thinking_override = validate_thinking_override(updates["thinking_override"])
-    if "execution_mode" in updates and updates["execution_mode"] is not None:
-        cycle.execution_mode = validate_execution_mode(updates["execution_mode"])
-    if "target_idea_id" in updates:
-        cycle.target_idea_id = updates["target_idea_id"]
-    if "reopen_archived" in updates and updates["reopen_archived"] is not None:
-        cycle.reopen_archived = updates["reopen_archived"]
-    elif "execution_mode" in updates and "reopen_archived" not in updates:
-        cycle.reopen_archived = cycle_defaults(
-            execution_mode=cycle.execution_mode,
-            reopen_archived=None,
-        )
+        cycle.timezone = next_timezone
+        cycle.schedule_expr = next_schedule_expr
+        if "enabled" in updates and updates["enabled"] is not None:
+            cycle.enabled = updates["enabled"]
+        if "model_override" in updates:
+            cycle.model_override = (updates["model_override"] or "").strip() or None
+        if "thinking_override" in updates:
+            cycle.thinking_override = validate_thinking_override(updates["thinking_override"])
+        if "execution_mode" in updates and updates["execution_mode"] is not None:
+            cycle.execution_mode = validate_execution_mode(updates["execution_mode"])
+        if "target_idea_id" in updates:
+            cycle.target_idea_id = updates["target_idea_id"]
+        if "reopen_archived" in updates and updates["reopen_archived"] is not None:
+            cycle.reopen_archived = updates["reopen_archived"]
+        elif "execution_mode" in updates and "reopen_archived" not in updates:
+            cycle.reopen_archived = cycle_defaults(
+                execution_mode=cycle.execution_mode,
+                reopen_archived=None,
+            )
 
-    cycle.execution_mode = REUSABLE_THREAD_EXECUTION_MODE
-    cycle.reopen_archived = True
+        cycle.execution_mode = REUSABLE_THREAD_EXECUTION_MODE
+        cycle.reopen_archived = True
 
-    cycle.next_run_at = compute_next_run_at(cycle.schedule_expr, cycle.timezone)
+        cycle.next_run_at = next_run_at
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
     await db.flush()
     payload = serialize_cycle(cycle)
     event = {

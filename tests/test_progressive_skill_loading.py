@@ -81,8 +81,8 @@ def _skill(**overrides):
     return SimpleNamespace(**defaults)
 
 
-def test_brain_skills_returns_catalog_card_without_procedure():
-    from brain.app.mcp.server import tool_brain_skills
+async def test_brain_skills_returns_catalog_card_without_procedure():
+    from brain.app.mcp.server import async_tool_brain_skills
 
     asset = SimpleNamespace(
         path="examples/happy.md",
@@ -123,7 +123,7 @@ def test_brain_skills_returns_catalog_card_without_procedure():
     with patch("brain.app.mcp.server.UnitOfWork", return_value=uow), \
          patch("brain.systems.memory.embeddings.embed_query", return_value=[0.1]), \
          patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]"):
-        result = tool_brain_skills("fix a bug")
+        result = await async_tool_brain_skills("fix a bug")
 
     assert {"task", "strategy", "recommended_skills", "guardrails"} <= set(result)
     card = result["recommended_skills"][0]
@@ -146,8 +146,8 @@ def test_brain_skills_returns_catalog_card_without_procedure():
     assert "composite_score" not in card
 
 
-def test_brain_skills_surfaces_manage_domains_for_domain_tool_tasks():
-    from brain.app.mcp.server import tool_brain_skills
+async def test_brain_skills_surfaces_manage_domains_for_domain_tool_tasks():
+    from brain.app.mcp.server import async_tool_brain_skills
 
     develop_row = {
         "id": 1,
@@ -190,13 +190,13 @@ def test_brain_skills_surfaces_manage_domains_for_domain_tool_tasks():
     with patch("brain.app.mcp.server.UnitOfWork", return_value=uow), \
          patch("brain.systems.memory.embeddings.embed_query", return_value=[0.1]), \
          patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]"):
-        result = tool_brain_skills("using the domains tool, do you see it?")
+        result = await async_tool_brain_skills("using the domains tool, do you see it?")
 
     assert result["recommended_skills"][0]["name"] == "manage-domains"
 
 
-def test_brain_skills_uses_structured_trigger_matches_for_private_db_skills():
-    from brain.app.mcp.server import tool_brain_skills
+async def test_brain_skills_uses_structured_trigger_matches_for_private_db_skills():
+    from brain.app.mcp.server import async_tool_brain_skills
 
     develop_row = {
         "id": 1,
@@ -239,14 +239,14 @@ def test_brain_skills_uses_structured_trigger_matches_for_private_db_skills():
     with patch("brain.app.mcp.server.UnitOfWork", return_value=uow), \
          patch("brain.systems.memory.embeddings.embed_query", return_value=[0.1]), \
          patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]"):
-        result = tool_brain_skills("check the server logs")
+        result = await async_tool_brain_skills("check the server logs")
 
     top = result["recommended_skills"][0]
     assert top["name"] == "server-ops"
 
 
-def test_brain_skills_keeps_manage_domains_top_when_embeddings_degrade():
-    from brain.app.mcp.server import tool_brain_skills
+async def test_brain_skills_keeps_manage_domains_top_when_embeddings_degrade():
+    from brain.app.mcp.server import async_tool_brain_skills
 
     develop_row = {
         "id": 1,
@@ -291,14 +291,14 @@ def test_brain_skills_keeps_manage_domains_top_when_embeddings_degrade():
 
     with patch("brain.app.mcp.server.UnitOfWork", return_value=uow), \
          patch("brain.systems.memory.embeddings.embed_query", side_effect=RuntimeError("embedding unavailable")):
-        result = tool_brain_skills("using the domains tool, do you see it?")
+        result = await async_tool_brain_skills("using the domains tool, do you see it?")
 
     assert result["degraded"] is True
     assert result["recommended_skills"][0]["name"] == "manage-domains"
 
 
-def test_recordful_workspace_app_requests_surface_domain_first_then_app_builder():
-    from brain.app.mcp.server import tool_brain_skills
+async def test_recordful_workspace_app_requests_surface_domain_first_then_app_builder():
+    from brain.app.mcp.server import async_tool_brain_skills
 
     develop_row = {
         "id": 1,
@@ -349,7 +349,7 @@ def test_recordful_workspace_app_requests_surface_domain_first_then_app_builder(
     with patch("brain.app.mcp.server.UnitOfWork", return_value=uow), \
          patch("brain.systems.memory.embeddings.embed_query", return_value=[0.1]), \
          patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]"):
-        result = tool_brain_skills("build a quick to-do workspace app")
+        result = await async_tool_brain_skills("build a quick to-do workspace app")
 
     assert [skill["name"] for skill in result["recommended_skills"][:2]] == [
         "manage-domains",
@@ -357,8 +357,8 @@ def test_recordful_workspace_app_requests_surface_domain_first_then_app_builder(
     ]
 
 
-def test_brain_skills_degrades_when_embedding_unavailable():
-    from brain.app.mcp.server import tool_brain_skills
+async def test_brain_skills_degrades_when_embedding_unavailable():
+    from brain.app.mcp.server import async_tool_brain_skills
 
     row = {
         "id": 1,
@@ -392,7 +392,7 @@ def test_brain_skills_degrades_when_embedding_unavailable():
 
     with patch("brain.app.mcp.server.UnitOfWork", return_value=uow), \
          patch("brain.systems.memory.embeddings.embed_query", side_effect=RuntimeError("worker_unavailable: embedding failed")):
-        result = tool_brain_skills("fix a bug")
+        result = await async_tool_brain_skills("fix a bug")
 
     assert result["degraded"] is True
     assert result["recommended_skills"][0]["name"] == "develop"
@@ -400,11 +400,11 @@ def test_brain_skills_degrades_when_embedding_unavailable():
     uow.memories.guardrail_memories_for_task.assert_not_called()
 
 
-def test_skill_view_loads_procedure_with_digest_metadata():
-    from brain.app.mcp.server import tool_skill_view
+async def test_skill_view_loads_procedure_with_digest_metadata():
+    from brain.app.mcp.server import async_tool_skill_view
 
     with patch("brain.app.mcp.server.UnitOfWork", return_value=_FakeUow(skill=_skill())):
-        result = tool_skill_view("develop", section="procedure", max_chars=10)
+        result = await async_tool_skill_view("develop", section="procedure", max_chars=10)
 
     assert result["name"] == "develop"
     assert result["section"] == "procedure"
@@ -414,11 +414,11 @@ def test_skill_view_loads_procedure_with_digest_metadata():
     assert result["loaded_sections"] == ["procedure"]
 
 
-def test_skill_view_loads_minimal_card():
-    from brain.app.mcp.server import tool_skill_view
+async def test_skill_view_loads_minimal_card():
+    from brain.app.mcp.server import async_tool_skill_view
 
     with patch("brain.app.mcp.server.UnitOfWork", return_value=_FakeUow(skill=_skill())):
-        result = tool_skill_view("develop", section="card")
+        result = await async_tool_skill_view("develop", section="card")
 
     assert result == {
         "name": "develop",
@@ -428,11 +428,11 @@ def test_skill_view_loads_minimal_card():
     }
 
 
-def test_skill_view_loads_summary_before_full_procedure():
-    from brain.app.mcp.server import tool_skill_view
+async def test_skill_view_loads_summary_before_full_procedure():
+    from brain.app.mcp.server import async_tool_skill_view
 
     with patch("brain.app.mcp.server.UnitOfWork", return_value=_FakeUow(skill=_skill())):
-        result = tool_skill_view("develop", section="summary", max_chars=1200)
+        result = await async_tool_skill_view("develop", section="summary", max_chars=1200)
 
     assert result["name"] == "develop"
     assert result["section"] == "summary"
@@ -446,18 +446,18 @@ def test_skill_view_loads_summary_before_full_procedure():
     assert result["effective_digest"] == "sha256:effective"
 
 
-def test_skill_view_loads_structured_sections():
-    from brain.app.mcp.server import tool_skill_view
+async def test_skill_view_loads_structured_sections():
+    from brain.app.mcp.server import async_tool_skill_view
 
     with patch("brain.app.mcp.server.UnitOfWork", return_value=_FakeUow(skill=_skill())):
-        result = tool_skill_view("develop", section="pitfalls")
+        result = await async_tool_skill_view("develop", section="pitfalls")
 
     assert result["items"] == [{"text": "Do not skip tests", "severity": "high"}]
     assert result["loaded_sections"] == ["pitfalls"]
 
 
-def test_skill_asset_loads_bundle_asset_and_rejects_traversal():
-    from brain.app.mcp.server import tool_skill_asset
+async def test_skill_asset_loads_bundle_asset_and_rejects_traversal():
+    from brain.app.mcp.server import async_tool_skill_asset
 
     asset = SimpleNamespace(
         path="examples/happy.md",
@@ -473,8 +473,8 @@ def test_skill_asset_loads_bundle_asset_and_rejects_traversal():
         "brain.app.mcp.server.UnitOfWork",
         return_value=_FakeUow(skill=_skill(), assets=[asset]),
     ):
-        result = tool_skill_asset("develop", "examples/happy.md")
-        bad = tool_skill_asset("develop", "../secret.md")
+        result = await async_tool_skill_asset("develop", "examples/happy.md")
+        bad = await async_tool_skill_asset("develop", "../secret.md")
 
     assert result["path"] == "examples/happy.md"
     assert result["asset_kind"] == "example"

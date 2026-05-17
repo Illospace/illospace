@@ -22,7 +22,7 @@ def normalize_model_name(model: str) -> str:
     return model
 
 
-def build_system_blocks(llm, system_prompt: str, cache: bool) -> list[dict] | None:
+def build_system_blocks(_llm, system_prompt: str, cache: bool) -> list[dict] | None:
     """Build the system parameter with optional caching.
 
     The cache flag is accepted for direct-agent helper parity. The
@@ -31,8 +31,6 @@ def build_system_blocks(llm, system_prompt: str, cache: bool) -> list[dict] | No
     """
 
     blocks = []
-    if llm.system_prompt_prefix:
-        blocks.append({"type": "text", "text": llm.system_prompt_prefix})
     if system_prompt:
         blocks.append({"type": "text", "text": system_prompt})
     return blocks or None

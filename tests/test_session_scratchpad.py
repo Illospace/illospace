@@ -183,12 +183,7 @@ class TestSessionScratchpadModel:
 class TestHandlerRegistration:
     """Verify handlers are wired up in the run map."""
 
-    @patch("brain.systems.runs.tool_handlers.tool_brain_recall", create=True)
-    @patch("brain.systems.runs.tool_handlers.tool_brain_guardrails", create=True)
-    @patch("brain.systems.runs.tool_handlers.tool_brain_skills", create=True)
-    @patch("brain.systems.runs.tool_handlers.tool_brain_encode", create=True)
-    @patch("brain.systems.runs.tool_handlers.tool_brain_vault", create=True)
-    def test_session_handlers_in_map(self, *mocks):
+    def test_session_handlers_in_map(self):
         from brain.systems.runs.tool_handlers import _get_tool_handlers
         handlers = _get_tool_handlers()
         assert "session_write" in handlers

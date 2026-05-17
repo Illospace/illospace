@@ -3,7 +3,7 @@
 import os
 import sys
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -125,21 +125,21 @@ class TestProjectContext:
 class TestSemanticSearch:
     """Test semantic_search tool."""
 
-    @patch("brain.app.mcp.server.tool_brain_recall")
-    def test_memory_search(self, mock_recall):
+    @patch("brain.app.mcp.server.async_tool_brain_recall", new_callable=AsyncMock)
+    async def test_memory_search(self, mock_recall):
         from brain.systems.tools.handlers import handle_semantic_search
         mock_recall.return_value = {
             "count": 1,
             "memories": [{"content": "Redis timeout fix", "type": "lesson", "similarity": 0.8}],
         }
-        result = handle_semantic_search("redis issues", scope="memories")
+        result = await handle_semantic_search("redis issues", scope="memories")
         assert result["count"] >= 1
         assert result["results"][0]["source"] == "memory"
 
-    def test_search_returns_results_structure(self):
+    async def test_search_returns_results_structure(self):
         from brain.systems.tools.handlers import handle_semantic_search
         # Even if backends fail, should return valid structure
-        result = handle_semantic_search("test query", scope="both", limit=3)
+        result = await handle_semantic_search("test query", scope="both", limit=3)
         assert "results" in result
         assert "count" in result
         assert isinstance(result["results"], list)
@@ -177,20 +177,20 @@ class TestIntegration:
         assert "trace_symbol" in handlers
         assert "build_implementation_map" in handlers
 
-    def test_brain_recall_handler_injects_agent_context(self):
+    async def test_brain_recall_handler_injects_agent_context(self):
         from brain.systems.runs.execution_context import AgentExecutionContext, bind_agent_context
         from brain.systems.runs.tool_handlers import _get_tool_handlers
 
         captured = {}
 
-        def fake_recall(**kwargs):
+        async def fake_recall(**kwargs):
             captured.update(kwargs)
             return {"memories": []}
 
-        with patch("brain.app.mcp.server.tool_brain_recall", side_effect=fake_recall):
+        with patch("brain.app.mcp.server.async_tool_brain_recall", side_effect=fake_recall):
             handlers = _get_tool_handlers()
             with bind_agent_context(AgentExecutionContext(user_id="user-1", org_id="org-1")):
-                result = handlers["brain_recall"](query="deployment notes")
+                result = await handlers["brain_recall"](query="deployment notes")
 
         assert result == {"memories": []}
         assert captured["query"] == "deployment notes"
@@ -236,7 +236,7 @@ class TestIntegration:
 class TestPredictiveReading:
     """Test predictive reading tools."""
 
-    def test_summarize_file_for_task_fallback(self, tmp_path):
+    async def test_summarize_file_for_task_fallback(self, tmp_path):
         from brain.systems.tools.handlers import handle_summarize_file_for_task
 
         py_file = tmp_path / "service.py"
@@ -265,8 +265,8 @@ class TestPredictiveReading:
         py_file.write_text("\n".join(flattened))
 
         with patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)):
-            with patch("brain.systems.tools.handlers._reader_completion", return_value=None):
-                result = handle_summarize_file_for_task(
+            with patch("brain.systems.tools.handlers._reader_completion", new=AsyncMock(return_value=None)):
+                result = await handle_summarize_file_for_task(
                     str(py_file),
                     "Where is route_with_confidence defined and what does it return?",
                 )
@@ -278,7 +278,7 @@ class TestPredictiveReading:
         assert result["confidence"] > 0
         assert len(result["relevant_ranges"]) >= 1
 
-    def test_summarize_file_for_task_can_skip_llm_reader(self, tmp_path):
+    async def test_summarize_file_for_task_can_skip_llm_reader(self, tmp_path):
         from brain.systems.tools.handlers import handle_summarize_file_for_task
 
         py_file = tmp_path / "service.py"
@@ -291,8 +291,8 @@ class TestPredictiveReading:
         )
 
         with patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)):
-            with patch("brain.systems.tools.handlers._reader_completion") as mock_reader:
-                result = handle_summarize_file_for_task(
+            with patch("brain.systems.tools.handlers._reader_completion", new_callable=AsyncMock) as mock_reader:
+                result = await handle_summarize_file_for_task(
                     str(py_file),
                     "What does route_with_confidence return?",
                     allow_llm=False,
@@ -302,7 +302,7 @@ class TestPredictiveReading:
         assert result["model"] == "deterministic-multihop-fallback"
         assert "route_with_confidence" in result["key_symbols"]
 
-    def test_summarize_file_for_task_threads_agent_identity(self, tmp_path):
+    async def test_summarize_file_for_task_threads_agent_identity(self, tmp_path):
         from brain.systems.runs.execution_context import _agent_context
         from brain.systems.runs.tool_handlers import _get_tool_handlers
 
@@ -316,8 +316,8 @@ class TestPredictiveReading:
 
         try:
             handlers = _get_tool_handlers(workspace_root=str(tmp_path))
-            with patch("brain.systems.tools.handlers._reader_completion", return_value=None) as mock_reader:
-                handlers["summarize_file_for_task"](
+            with patch("brain.systems.tools.handlers._reader_completion", new=AsyncMock(return_value=None)) as mock_reader:
+                await handlers["summarize_file_for_task"](
                     str(py_file),
                     "Where is route_with_confidence defined?",
                 )
@@ -331,7 +331,7 @@ class TestPredictiveReading:
         assert mock_reader.call_args.kwargs["user_id"] == "user-123"
         assert mock_reader.call_args.kwargs["org_id"] == "org-456"
 
-    def test_summarize_files_for_task_threads_metadata_identity(self, tmp_path):
+    async def test_summarize_files_for_task_threads_metadata_identity(self, tmp_path):
         from brain.systems.runs.execution_context import _agent_context
         from brain.systems.runs.tool_handlers import _get_tool_handlers
 
@@ -344,8 +344,8 @@ class TestPredictiveReading:
 
         try:
             handlers = _get_tool_handlers(workspace_root=str(tmp_path))
-            with patch("brain.systems.tools.handlers._reader_completion", return_value=None) as mock_reader:
-                handlers["summarize_files_for_task"](
+            with patch("brain.systems.tools.handlers._reader_completion", new=AsyncMock(return_value=None)) as mock_reader:
+                await handlers["summarize_files_for_task"](
                     [str(py_file)],
                     "Which file owns create_child_run?",
                 )
@@ -359,7 +359,7 @@ class TestPredictiveReading:
         assert mock_reader.call_args.kwargs["user_id"] == "metadata-user"
         assert mock_reader.call_args.kwargs["org_id"] == "metadata-org"
 
-    def test_summarize_files_for_task_fallback(self, tmp_path):
+    async def test_summarize_files_for_task_fallback(self, tmp_path):
         from brain.systems.tools.handlers import handle_summarize_files_for_task
 
         a = tmp_path / "a.py"
@@ -376,8 +376,8 @@ class TestPredictiveReading:
         )
 
         with patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)):
-            with patch("brain.systems.tools.handlers._reader_completion", return_value=None):
-                result = handle_summarize_files_for_task(
+            with patch("brain.systems.tools.handlers._reader_completion", new=AsyncMock(return_value=None)):
+                result = await handle_summarize_files_for_task(
                     [str(a), str(b)],
                     "Which file owns create_child_run and invocation setup?",
                 )
@@ -388,7 +388,7 @@ class TestPredictiveReading:
         assert any(item["path"] == str(b) for item in result["files_ranked"])
         assert "implementation_map" in result
 
-    def test_summarize_files_for_task_llm_path(self, tmp_path):
+    async def test_summarize_files_for_task_llm_path(self, tmp_path):
         from brain.systems.tools.handlers import handle_summarize_files_for_task
 
         file_path = tmp_path / "workers.py"
@@ -408,9 +408,9 @@ class TestPredictiveReading:
         }
 
         with patch("brain.systems.tools.handlers.WORKSPACE_ROOT", str(tmp_path)):
-            with patch("brain.systems.tools.handlers._reader_completion", return_value=llm_payload):
+            with patch("brain.systems.tools.handlers._reader_completion", new=AsyncMock(return_value=llm_payload)):
                 with patch("brain.systems.tools.handlers._reader_model", return_value="openai/gpt-5-mini"):
-                    result = handle_summarize_files_for_task(
+                    result = await handle_summarize_files_for_task(
                         [str(file_path)],
                         "Which file owns child run creation?",
                     )

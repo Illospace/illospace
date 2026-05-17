@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from sqlalchemy import func, or_, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
+from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunRow
 from brain.platform.db.models.external_agent import (
     ExternalAgentConnectionRow,
     ExternalAgentConnectionTokenRow,
@@ -20,7 +20,7 @@ from brain.platform.db.models.external_agent import (
     ExternalAgentTaskEventRow,
     ExternalAgentTaskRow,
 )
-from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread, UserMention
+from brain.platform.db.models.idea import Idea, IdeaThread, UserMention
 from brain.platform.db.models.notification import (
     NOTIFICATION_KIND_WORKSPACE_MENTION,
     NOTIFICATION_KIND_WORKSPACE_THREAD_ATTENTION,
@@ -28,10 +28,15 @@ from brain.platform.db.models.notification import (
     NotificationEvent,
 )
 from brain.platform.db.models.org import User
-from brain.systems.runs.domain import AgentRunEvent, AgentRunRequest, EventVisibility, RunProfile, RunRecipe
-from brain.systems.runs.events import run_event
-from brain.systems.runs.ids import trace_id_for_run_id
+from brain.platform.db.repositories.notifications import NotificationEventRepository
+from brain.systems.cortex.thought_lifecycle import (
+    ThoughtStatusCommand,
+    ThreadMessageCommand,
+    post_thread_message,
+    transition_thought_status,
+)
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
+from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
 
 TOKEN_PREFIX = "illo_conn_"
@@ -131,20 +136,20 @@ def _json_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
-def _ensure_org_user(session: Session, *, org_id: str, user_id: str) -> User:
-    user = session.get(User, str(user_id))
+async def _ensure_org_user(session: AsyncSession, *, org_id: str, user_id: str) -> User:
+    user = await session.get(User, str(user_id))
     if user is None or str(user.org_id) != str(org_id):
         raise ExternalAgentNotFound("User not found in organization")
     return user
 
 
-def _require_connection(
-    session: Session,
+async def _require_connection(
+    session: AsyncSession,
     *,
     connection_id: str,
     org_id: str | None = None,
 ) -> ExternalAgentConnectionRow:
-    connection = session.get(ExternalAgentConnectionRow, str(connection_id))
+    connection = await session.get(ExternalAgentConnectionRow, str(connection_id))
     if connection is None:
         raise ExternalAgentNotFound("External agent connection not found")
     if org_id is not None and str(connection.org_id) != str(org_id):
@@ -152,13 +157,13 @@ def _require_connection(
     return connection
 
 
-def require_connection(
-    session: Session,
+async def require_connection(
+    session: AsyncSession,
     *,
     connection_id: str,
     org_id: str | None = None,
 ) -> ExternalAgentConnectionRow:
-    return _require_connection(session, connection_id=connection_id, org_id=org_id)
+    return await _require_connection(session, connection_id=connection_id, org_id=org_id)
 
 
 def user_can_manage_connection(
@@ -170,8 +175,8 @@ def user_can_manage_connection(
     return str(role or "").lower() in CONNECTION_ADMIN_ROLES or str(connection.owner_user_id) == str(user_id)
 
 
-def require_connection_for_user(
-    session: Session,
+async def require_connection_for_user(
+    session: AsyncSession,
     *,
     connection_id: str,
     org_id: str,
@@ -179,7 +184,7 @@ def require_connection_for_user(
     role: str | None,
     require_manage: bool = False,
 ) -> ExternalAgentConnectionRow:
-    connection = require_connection(session, connection_id=connection_id, org_id=org_id)
+    connection = await require_connection(session, connection_id=connection_id, org_id=org_id)
     if require_manage and not user_can_manage_connection(connection, user_id=user_id, role=role):
         raise ExternalAgentPermissionError("Permission denied for external agent connection")
     return connection
@@ -189,12 +194,12 @@ def _connection_disabled(connection: ExternalAgentConnectionRow) -> bool:
     return bool(connection.disabled_at or str(connection.status or "").lower() == "disabled")
 
 
-def _require_task_for_principal(
-    session: Session,
+async def _require_task_for_principal(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     task_id: str,
 ) -> ExternalAgentTaskRow:
-    task = session.get(ExternalAgentTaskRow, str(task_id))
+    task = await session.get(ExternalAgentTaskRow, str(task_id))
     if (
         task is None
         or str(task.connection_id) != principal.connection_id
@@ -204,12 +209,12 @@ def _require_task_for_principal(
     return task
 
 
-def require_task_for_principal(
-    session: Session,
+async def require_task_for_principal(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     task_id: str,
 ) -> ExternalAgentTaskRow:
-    return _require_task_for_principal(session, principal, task_id)
+    return await _require_task_for_principal(session, principal, task_id)
 
 
 def serialize_connection(row: ExternalAgentConnectionRow) -> dict[str, Any]:
@@ -282,12 +287,12 @@ def serialize_artifact(row: ExternalAgentTaskArtifactRow) -> dict[str, Any]:
     }
 
 
-def serialize_task(
+async def serialize_task(
     row: ExternalAgentTaskRow,
     *,
     include_events: bool = False,
     include_artifacts: bool = False,
-    session: Session | None = None,
+    session: AsyncSession | None = None,
 ) -> dict[str, Any]:
     data = {
         "id": str(row.id),
@@ -322,28 +327,34 @@ def serialize_task(
         "updated_at": _iso(row.updated_at),
     }
     if session is not None and include_events:
-        data["events"] = [
-            serialize_event(event)
-            for event in session.scalars(
+        events = (
+            await session.scalars(
                 select(ExternalAgentTaskEventRow)
                 .where(ExternalAgentTaskEventRow.task_id == str(row.id))
                 .order_by(ExternalAgentTaskEventRow.sequence_no.asc(), ExternalAgentTaskEventRow.id.asc())
-            ).all()
+            )
+        ).all()
+        data["events"] = [
+            serialize_event(event)
+            for event in events
         ]
     if session is not None and include_artifacts:
-        data["artifacts"] = [
-            serialize_artifact(artifact)
-            for artifact in session.scalars(
+        artifacts = (
+            await session.scalars(
                 select(ExternalAgentTaskArtifactRow)
                 .where(ExternalAgentTaskArtifactRow.task_id == str(row.id))
                 .order_by(ExternalAgentTaskArtifactRow.created_at.asc(), ExternalAgentTaskArtifactRow.id.asc())
-            ).all()
+            )
+        ).all()
+        data["artifacts"] = [
+            serialize_artifact(artifact)
+            for artifact in artifacts
         ]
     return data
 
 
-def create_connection(
-    session: Session,
+async def create_connection(
+    session: AsyncSession,
     *,
     org_id: str,
     owner_user_id: str,
@@ -356,7 +367,7 @@ def create_connection(
     capabilities: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> ExternalAgentConnectionRow:
-    _ensure_org_user(session, org_id=str(org_id), user_id=str(owner_user_id))
+    await _ensure_org_user(session, org_id=str(org_id), user_id=str(owner_user_id))
     row = ExternalAgentConnectionRow(
         org_id=str(org_id),
         owner_user_id=str(owner_user_id),
@@ -371,12 +382,12 @@ def create_connection(
         metadata_=dict(metadata or {}),
     )
     session.add(row)
-    session.flush()
+    await session.flush()
     return row
 
 
-def list_connections(
-    session: Session,
+async def list_connections(
+    session: AsyncSession,
     *,
     org_id: str,
     owner_user_id: str | None = None,
@@ -388,11 +399,11 @@ def list_connections(
     )
     if owner_user_id:
         stmt = stmt.where(ExternalAgentConnectionRow.owner_user_id == str(owner_user_id))
-    return list(session.scalars(stmt).all())
+    return list((await session.scalars(stmt)).all())
 
 
-def mint_connection_token(
-    session: Session,
+async def mint_connection_token(
+    session: AsyncSession,
     *,
     connection_id: str,
     org_id: str,
@@ -400,7 +411,7 @@ def mint_connection_token(
     scopes: Sequence[str] | None = None,
     expires_at: datetime | None = None,
 ) -> tuple[str, ExternalAgentConnectionTokenRow]:
-    connection = _require_connection(session, connection_id=str(connection_id), org_id=str(org_id))
+    connection = await _require_connection(session, connection_id=str(connection_id), org_id=str(org_id))
     if _connection_disabled(connection):
         raise ExternalAgentPermissionError("External agent connection is disabled")
     raw_token = generate_connection_token()
@@ -416,12 +427,12 @@ def mint_connection_token(
         expires_at=expires_at,
     )
     session.add(row)
-    session.flush()
+    await session.flush()
     return raw_token, row
 
 
-def authenticate_bridge_token(
-    session: Session,
+async def authenticate_bridge_token(
+    session: AsyncSession,
     token: str,
     *,
     required_scope: str | None = None,
@@ -429,16 +440,18 @@ def authenticate_bridge_token(
     value = str(token or "").strip()
     if not value:
         raise ExternalAgentAuthError("Bridge token is required")
-    row = session.scalars(
-        select(ExternalAgentConnectionTokenRow)
-        .where(ExternalAgentConnectionTokenRow.token_hash == hash_connection_token(value))
-        .limit(1)
+    row = (
+        await session.scalars(
+            select(ExternalAgentConnectionTokenRow)
+            .where(ExternalAgentConnectionTokenRow.token_hash == hash_connection_token(value))
+            .limit(1)
+        )
     ).first()
     if row is None or row.revoked_at is not None:
         raise ExternalAgentAuthError("Invalid bridge token")
     if row.expires_at is not None and _utc_comparable(row.expires_at) < utcnow():
         raise ExternalAgentAuthError("Bridge token expired")
-    connection = session.get(ExternalAgentConnectionRow, str(row.connection_id))
+    connection = await session.get(ExternalAgentConnectionRow, str(row.connection_id))
     if connection is None or _connection_disabled(connection):
         raise ExternalAgentAuthError("External agent connection disabled")
     scopes = frozenset(str(scope) for scope in _json_list(row.scopes))
@@ -456,15 +469,15 @@ def authenticate_bridge_token(
     )
 
 
-def record_heartbeat(
-    session: Session,
+async def record_heartbeat(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     status: str | None = None,
     capabilities: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> ExternalAgentConnectionRow:
-    connection = _require_connection(session, connection_id=principal.connection_id, org_id=principal.org_id)
+    connection = await _require_connection(session, connection_id=principal.connection_id, org_id=principal.org_id)
     connection.last_seen_at = utcnow()
     connection.status = str(status or "online")
     connection.last_error = None
@@ -474,12 +487,12 @@ def record_heartbeat(
         existing = _json_dict(connection.metadata_)
         existing.update(dict(metadata))
         connection.metadata_ = existing
-    session.flush()
+    await session.flush()
     return connection
 
 
-def _next_event_sequence(session: Session, task_id: str) -> int:
-    current = session.scalar(
+async def _next_event_sequence(session: AsyncSession, task_id: str) -> int:
+    current = await session.scalar(
         select(func.max(ExternalAgentTaskEventRow.sequence_no)).where(
             ExternalAgentTaskEventRow.task_id == str(task_id)
         )
@@ -487,8 +500,8 @@ def _next_event_sequence(session: Session, task_id: str) -> int:
     return int(current or 0) + 1
 
 
-def append_task_event(
-    session: Session,
+async def append_task_event(
+    session: AsyncSession,
     task: ExternalAgentTaskRow,
     *,
     event_type: str,
@@ -503,7 +516,7 @@ def append_task_event(
         task_id=str(task.id),
         org_id=str(task.org_id),
         connection_id=str(task.connection_id),
-        sequence_no=_next_event_sequence(session, str(task.id)),
+        sequence_no=await _next_event_sequence(session, str(task.id)),
         event_type=str(event_type),
         status=status,
         message=message,
@@ -513,7 +526,7 @@ def append_task_event(
         visibility=visibility,
     )
     session.add(event)
-    session.flush()
+    await session.flush()
     return event
 
 
@@ -523,13 +536,15 @@ def _idea_project_context(idea: Idea) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, dict) else None
 
 
-def _thread_context(session: Session, idea_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
+async def _thread_context(session: AsyncSession, idea_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
     rows = list(
-        session.scalars(
-            select(IdeaThread)
-            .where(IdeaThread.idea_id == str(idea_id))
-            .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
-            .limit(max(1, min(int(limit), 100)))
+        (
+            await session.scalars(
+                select(IdeaThread)
+                .where(IdeaThread.idea_id == str(idea_id))
+                .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
+                .limit(max(1, min(int(limit), 100)))
+            )
         ).all()
     )
     rows.reverse()
@@ -548,21 +563,23 @@ def _thread_context(session: Session, idea_id: str, *, limit: int = 30) -> list[
     ]
 
 
-def _idea_for_org(session: Session, *, idea_id: str, org_id: str) -> Idea:
-    idea = session.scalars(
-        select(Idea).where(Idea.id == str(idea_id), Idea.org_id == str(org_id))
+async def _idea_for_org(session: AsyncSession, *, idea_id: str, org_id: str) -> Idea:
+    idea = (
+        await session.scalars(
+            select(Idea).where(Idea.id == str(idea_id), Idea.org_id == str(org_id))
+        )
     ).first()
     if idea is None:
         raise ExternalAgentNotFound("Idea not found")
     return idea
 
 
-def require_idea_for_org(session: Session, *, idea_id: str, org_id: str) -> Idea:
-    return _idea_for_org(session, idea_id=idea_id, org_id=org_id)
+async def require_idea_for_org(session: AsyncSession, *, idea_id: str, org_id: str) -> Idea:
+    return await _idea_for_org(session, idea_id=idea_id, org_id=org_id)
 
 
-def create_external_task_for_idea(
-    session: Session,
+async def create_external_task_for_idea(
+    session: AsyncSession,
     *,
     org_id: str,
     user_id: str,
@@ -575,11 +592,11 @@ def create_external_task_for_idea(
     metadata: Mapping[str, Any] | None = None,
     idempotency_key: str | None = None,
 ) -> tuple[ExternalAgentTaskRow, IdeaThread]:
-    connection = _require_connection(session, connection_id=str(connection_id), org_id=str(org_id))
+    connection = await _require_connection(session, connection_id=str(connection_id), org_id=str(org_id))
     if _connection_disabled(connection):
         raise ExternalAgentPermissionError("External agent connection is disabled")
-    idea = _idea_for_org(session, idea_id=str(idea_id), org_id=str(org_id))
-    _ensure_org_user(session, org_id=str(org_id), user_id=str(user_id))
+    idea = await _idea_for_org(session, idea_id=str(idea_id), org_id=str(org_id))
+    await _ensure_org_user(session, org_id=str(org_id), user_id=str(user_id))
 
     parts: list[dict[str, Any]] = [
         {
@@ -594,7 +611,7 @@ def create_external_task_for_idea(
         }
     ]
     if include_thread_context:
-        parts.append({"type": "thread_context", "messages": _thread_context(session, str(idea.id))})
+        parts.append({"type": "thread_context", "messages": await _thread_context(session, str(idea.id))})
     if include_project_context:
         project_context = _idea_project_context(idea)
         if project_context:
@@ -614,8 +631,8 @@ def create_external_task_for_idea(
         metadata_=dict(metadata or {}),
     )
     session.add(task)
-    session.flush()
-    append_task_event(
+    await session.flush()
+    await append_task_event(
         session,
         task,
         event_type="external_task.created",
@@ -625,40 +642,39 @@ def create_external_task_for_idea(
         producer="illo",
     )
 
-    current_status = idea.status
-    if current_status in {"emerged", "needs_input", "unread_reply", "active"}:
-        idea.status = "working"
-        idea.updated_at = utcnow()
-        session.add(
-            IdeaStateLog(
-                idea_id=str(idea.id),
-                from_state=current_status,
-                to_state="working",
+    if idea.status in {"emerged", "needs_input", "unread_reply", "active"}:
+        await transition_thought_status(
+            session,
+            idea=idea,
+            command=ThoughtStatusCommand(
+                to_status="working",
                 trigger="external_agent_task_created",
-            )
+            ),
         )
 
-    status_message = IdeaThread(
-        idea_id=str(idea.id),
-        role="illo",
-        content=f"Delegated to {connection.display_name}: {str(instructions).strip()}",
-        user_id=None,
-        message_type="agent_status",
-        metadata_={
-            "external_agent_task_id": str(task.id),
-            "external_agent_connection_id": str(connection.id),
-            "external_agent_display_name": connection.display_name,
-        },
+    status_result = await post_thread_message(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="illo",
+            content=f"Delegated to {connection.display_name}: {str(instructions).strip()}",
+            metadata={
+                "external_agent_task_id": str(task.id),
+                "external_agent_connection_id": str(connection.id),
+                "external_agent_display_name": connection.display_name,
+            },
+        ),
+        parse_message_type=lambda _content, _role: "agent_status",
+        apply_lifecycle=False,
     )
-    session.add(status_message)
-    session.flush()
-    task.source_thread_message_id = status_message.id
-    session.flush()
-    return task, status_message
+    task.source_thread_message_id = status_result.message.id
+    await session.flush()
+    return task, status_result.message
 
 
-def claim_tasks(
-    session: Session,
+async def claim_tasks(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     max_tasks: int = 1,
@@ -673,14 +689,14 @@ def claim_tasks(
         .order_by(ExternalAgentTaskRow.created_at.asc(), ExternalAgentTaskRow.id.asc())
         .limit(max(1, min(int(max_tasks or 1), 10)))
     )
-    if session.bind is not None and session.bind.dialect.name == "postgresql":
+    if _dialect_name(session) == "postgresql":
         stmt = stmt.with_for_update(skip_locked=True)
-    rows = list(session.scalars(stmt).all())
+    rows = list((await session.scalars(stmt)).all())
     now = utcnow()
     for task in rows:
         task.status = "claimed"
         task.claimed_at = now
-        append_task_event(
+        await append_task_event(
             session,
             task,
             event_type="external_task.claimed",
@@ -688,12 +704,12 @@ def claim_tasks(
             message="Task claimed by bridge",
             producer="external_agent_bridge",
         )
-    session.flush()
+    await session.flush()
     return rows
 
 
-def update_task_event(
-    session: Session,
+async def update_task_event(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     task_id: str,
@@ -703,7 +719,7 @@ def update_task_event(
     payload: Mapping[str, Any] | None = None,
     remote_event_id: str | None = None,
 ) -> ExternalAgentTaskEventRow:
-    task = _require_task_for_principal(session, principal, task_id)
+    task = await _require_task_for_principal(session, principal, task_id)
     normalized_status = str(status).strip().lower() if status else None
     if normalized_status and normalized_status not in TASK_TERMINAL_STATUSES:
         task.status = normalized_status
@@ -711,7 +727,7 @@ def update_task_event(
             task.started_at = utcnow()
         if normalized_status == "submitted" and task.submitted_at is None:
             task.submitted_at = utcnow()
-    event = append_task_event(
+    event = await append_task_event(
         session,
         task,
         event_type=event_type,
@@ -720,12 +736,12 @@ def update_task_event(
         payload=payload,
         remote_event_id=remote_event_id,
     )
-    session.flush()
+    await session.flush()
     return event
 
 
-def append_artifact(
-    session: Session,
+async def append_artifact(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     task_id: str,
@@ -738,7 +754,7 @@ def append_artifact(
     upload_id: str | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> ExternalAgentTaskArtifactRow:
-    task = _require_task_for_principal(session, principal, task_id)
+    task = await _require_task_for_principal(session, principal, task_id)
     artifact = ExternalAgentTaskArtifactRow(
         task_id=str(task.id),
         org_id=str(task.org_id),
@@ -753,8 +769,8 @@ def append_artifact(
         metadata_=dict(metadata or {}),
     )
     session.add(artifact)
-    session.flush()
-    append_task_event(
+    await session.flush()
+    await append_task_event(
         session,
         task,
         event_type="external_task.artifact_added",
@@ -783,8 +799,8 @@ def serialize_thread_message(message: IdeaThread) -> dict[str, Any]:
     return _thread_message_payload(message)
 
 
-def _add_external_agent_thread_message(
-    session: Session,
+async def _add_external_agent_thread_message(
+    session: AsyncSession,
     *,
     task: ExternalAgentTaskRow,
     content: str,
@@ -792,35 +808,35 @@ def _add_external_agent_thread_message(
 ) -> IdeaThread | None:
     if not task.source_idea_id:
         return None
-    idea = session.get(Idea, str(task.source_idea_id))
+    idea = await session.get(Idea, str(task.source_idea_id))
     if idea is None:
         return None
-    message = IdeaThread(
-        idea_id=str(idea.id),
-        role="illo",
-        content=str(content),
-        user_id=None,
-        message_type=message_type,
-        metadata_={
-            "external_agent_task_id": str(task.id),
-            "external_agent_connection_id": str(task.connection_id),
-        },
+    result = await post_thread_message(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="illo",
+            content=str(content),
+            metadata={
+                "external_agent_task_id": str(task.id),
+                "external_agent_connection_id": str(task.connection_id),
+            },
+        ),
+        parse_message_type=lambda _content, _role: message_type,
+        apply_lifecycle=False,
     )
-    session.add(message)
     if message_type == "agent_response" and idea.status != "resolved":
-        previous = idea.status
-        idea.status = "unread_reply"
-        idea.updated_at = utcnow()
-        session.add(
-            IdeaStateLog(
-                idea_id=str(idea.id),
-                from_state=previous,
-                to_state="unread_reply",
+        await transition_thought_status(
+            session,
+            idea=idea,
+            command=ThoughtStatusCommand(
+                to_status="unread_reply",
                 trigger="external_agent_task_completed",
-            )
+            ),
         )
         if idea.user_id and idea.org_id:
-            NotificationEventRepository(session).create_or_coalesce(
+            await NotificationEventRepository(session).a_create_or_coalesce(
                 org_id=str(idea.org_id),
                 user_id=str(idea.user_id),
                 source=NOTIFICATION_SOURCE_WORKSPACE,
@@ -836,12 +852,12 @@ def _add_external_agent_thread_message(
                 },
                 idea_id=str(idea.id),
             )
-    session.flush()
-    return message
+    await session.flush()
+    return result.message
 
 
-def complete_task(
-    session: Session,
+async def complete_task(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     task_id: str,
@@ -849,9 +865,9 @@ def complete_task(
     artifacts: Sequence[Mapping[str, Any]] | None = None,
     payload: Mapping[str, Any] | None = None,
 ) -> tuple[ExternalAgentTaskRow, IdeaThread | None]:
-    task = _require_task_for_principal(session, principal, task_id)
+    task = await _require_task_for_principal(session, principal, task_id)
     for artifact in artifacts or []:
-        append_artifact(
+        await append_artifact(
             session,
             principal,
             task_id=str(task.id),
@@ -867,7 +883,7 @@ def complete_task(
     task.status = "completed"
     task.completed_at = utcnow()
     task.result_summary = str(result_summary or "")
-    event = append_task_event(
+    event = await append_task_event(
         session,
         task,
         event_type="external_task.completed",
@@ -875,30 +891,30 @@ def complete_task(
         message=_compact_text(result_summary, limit=240),
         payload=dict(payload or {}),
     )
-    thread_message = _add_external_agent_thread_message(
+    thread_message = await _add_external_agent_thread_message(
         session,
         task=task,
         content=str(result_summary or "External agent completed the task."),
         message_type="agent_response",
     )
     task.metadata_ = {**_json_dict(task.metadata_), "completed_event_id": event.id}
-    session.flush()
+    await session.flush()
     return task, thread_message
 
 
-def fail_task(
-    session: Session,
+async def fail_task(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     task_id: str,
     error: str,
     payload: Mapping[str, Any] | None = None,
 ) -> tuple[ExternalAgentTaskRow, IdeaThread | None]:
-    task = _require_task_for_principal(session, principal, task_id)
+    task = await _require_task_for_principal(session, principal, task_id)
     task.status = "failed"
     task.failed_at = utcnow()
     task.error = str(error or "External agent task failed")
-    append_task_event(
+    await append_task_event(
         session,
         task,
         event_type="external_task.failed",
@@ -906,18 +922,18 @@ def fail_task(
         message=task.error,
         payload=dict(payload or {}),
     )
-    thread_message = _add_external_agent_thread_message(
+    thread_message = await _add_external_agent_thread_message(
         session,
         task=task,
         content=f"External agent task failed: {task.error}",
         message_type="agent_status",
     )
-    session.flush()
+    await session.flush()
     return task, thread_message
 
 
-def search_workspace(
-    session: Session,
+async def search_workspace(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     query: str,
@@ -930,15 +946,17 @@ def search_workspace(
     max_results = max(1, min(int(limit or 10), 25))
     results: list[dict[str, Any]] = []
 
-    ideas = session.scalars(
-        select(Idea)
-        .where(
-            Idea.org_id == principal.org_id,
-            Idea.archived_at.is_(None),
-            or_(Idea.title.ilike(pattern), Idea.description.ilike(pattern)),
+    ideas = (
+        await session.scalars(
+            select(Idea)
+            .where(
+                Idea.org_id == principal.org_id,
+                Idea.archived_at.is_(None),
+                or_(Idea.title.ilike(pattern), Idea.description.ilike(pattern)),
+            )
+            .order_by(Idea.updated_at.desc(), Idea.id.desc())
+            .limit(max_results)
         )
-        .order_by(Idea.updated_at.desc(), Idea.id.desc())
-        .limit(max_results)
     ).all()
     for idea in ideas:
         results.append(
@@ -954,16 +972,18 @@ def search_workspace(
 
     remaining = max_results - len(results)
     if remaining > 0:
-        rows = session.execute(
-            select(IdeaThread, Idea.title.label("idea_title"))
-            .join(Idea, IdeaThread.idea_id == Idea.id)
-            .where(
-                Idea.org_id == principal.org_id,
-                Idea.archived_at.is_(None),
-                IdeaThread.content.ilike(pattern),
+        rows = (
+            await session.execute(
+                select(IdeaThread, Idea.title.label("idea_title"))
+                .join(Idea, IdeaThread.idea_id == Idea.id)
+                .where(
+                    Idea.org_id == principal.org_id,
+                    Idea.archived_at.is_(None),
+                    IdeaThread.content.ilike(pattern),
+                )
+                .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
+                .limit(remaining)
             )
-            .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
-            .limit(remaining)
         ).all()
         for row in rows:
             thread = row[0]
@@ -981,14 +1001,14 @@ def search_workspace(
     return {"query": text, "results": results}
 
 
-def get_thread(
-    session: Session,
+async def get_thread(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     idea_id: str,
     limit: int = 100,
 ) -> dict[str, Any]:
-    idea = _idea_for_org(session, idea_id=str(idea_id), org_id=principal.org_id)
+    idea = await _idea_for_org(session, idea_id=str(idea_id), org_id=principal.org_id)
     return {
         "idea": {
             "id": str(idea.id),
@@ -998,15 +1018,17 @@ def get_thread(
             "created_at": _iso(idea.created_at),
             "updated_at": _iso(idea.updated_at),
         },
-        "messages": _thread_context(session, str(idea.id), limit=limit),
+        "messages": await _thread_context(session, str(idea.id), limit=limit),
     }
 
 
-def get_team_members(session: Session, principal: AgentBridgePrincipal) -> dict[str, Any]:
-    rows = session.scalars(
-        select(User)
-        .where(User.org_id == principal.org_id, User.approved.is_(True))
-        .order_by(User.name.asc(), User.email.asc())
+async def get_team_members(session: AsyncSession, principal: AgentBridgePrincipal) -> dict[str, Any]:
+    rows = (
+        await session.scalars(
+            select(User)
+            .where(User.org_id == principal.org_id, User.approved.is_(True))
+            .order_by(User.name.asc(), User.email.asc())
+        )
     ).all()
     return {
         "members": [
@@ -1031,8 +1053,8 @@ def _compact_text(text: str | None, *, limit: int = 160) -> str | None:
     return normalized[: max(limit - 3, 0)].rstrip() + "..."
 
 
-def _notify_mentions(
-    session: Session,
+async def _notify_mentions(
+    session: AsyncSession,
     *,
     org_id: str,
     idea: Idea,
@@ -1045,7 +1067,7 @@ def _notify_mentions(
     for user_id in dict.fromkeys(str(uid) for uid in mentioned_user_ids if uid):
         if user_id == str(actor_user_id):
             continue
-        user = session.get(User, user_id)
+        user = await session.get(User, user_id)
         if user is None or str(user.org_id) != str(org_id):
             continue
         session.add(
@@ -1057,21 +1079,23 @@ def _notify_mentions(
             )
         )
         coalesce_key = f"workspace:external_agent_share:{user_id}:{idea.id}:{thread_message.id}"
-        title = f"{principalish_user_name(session, actor_user_id)} shared a personal-agent thread with you"
+        title = f"{await principalish_user_name(session, actor_user_id)} shared a personal-agent thread with you"
         body = _compact_text(content)
         payload = {
             "preview": _compact_text(content),
             "idea_title": idea.title,
             "thread_message_id": thread_message.id,
         }
-        existing = session.scalars(
-            select(NotificationEvent)
-            .where(
-                NotificationEvent.user_id == user_id,
-                NotificationEvent.coalesce_key == coalesce_key,
-                NotificationEvent.read_at.is_(None),
+        existing = (
+            await session.scalars(
+                select(NotificationEvent)
+                .where(
+                    NotificationEvent.user_id == user_id,
+                    NotificationEvent.coalesce_key == coalesce_key,
+                    NotificationEvent.read_at.is_(None),
+                )
+                .order_by(NotificationEvent.updated_at.desc(), NotificationEvent.id.desc())
             )
-            .order_by(NotificationEvent.updated_at.desc(), NotificationEvent.id.desc())
         ).first()
         if existing is not None:
             existing.org_id = str(org_id)
@@ -1105,13 +1129,35 @@ def _notify_mentions(
     return notified
 
 
-def principalish_user_name(session: Session, user_id: str) -> str:
-    user = session.get(User, str(user_id))
+async def principalish_user_name(session: AsyncSession, user_id: str) -> str:
+    user = await session.get(User, str(user_id))
     return user.name if user is not None and user.name else "Someone"
 
 
-def create_thread_from_agent(
-    session: Session,
+def request_source_context(
+    principal: AgentBridgePrincipal,
+    *,
+    surface: str,
+    visibility: str,
+    permission: str,
+    tool_name: str | None = None,
+) -> dict[str, Any]:
+    context = {
+        "surface": surface,
+        "acting_user_id": principal.owner_user_id,
+        "personal_agent": principal.connection_display_name,
+        "personal_agent_kind": principal.agent_kind,
+        "connection_id": principal.connection_id,
+        "visibility": visibility,
+        "permission": permission,
+    }
+    if tool_name:
+        context["tool"] = tool_name
+    return context
+
+
+async def create_thread_from_agent(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     title: str,
@@ -1121,7 +1167,7 @@ def create_thread_from_agent(
     trigger_illo: bool = False,
     metadata: Mapping[str, Any] | None = None,
 ) -> tuple[Idea, IdeaThread, list[str]]:
-    _ensure_org_user(session, org_id=principal.org_id, user_id=principal.owner_user_id)
+    await _ensure_org_user(session, org_id=principal.org_id, user_id=principal.owner_user_id)
     idea = Idea(
         title=str(title or "Shared from personal agent").strip(),
         description=None,
@@ -1137,24 +1183,29 @@ def create_thread_from_agent(
         },
     )
     session.add(idea)
-    session.flush()
-    thread = IdeaThread(
-        idea_id=str(idea.id),
-        role="user",
-        content=str(body or ""),
-        user_id=principal.owner_user_id,
-        attachments=list(artifacts or []),
-        message_type="trigger" if trigger_illo else "agent_share",
-        metadata_={
-            "external_agent_connection_id": principal.connection_id,
-            "external_agent_display_name": principal.connection_display_name,
-            "trigger_illo": bool(trigger_illo),
-            **dict(metadata or {}),
-        },
+    await session.flush()
+    thread_result = await post_thread_message(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="user",
+            content=str(body or ""),
+            actor={"user_id": principal.owner_user_id, "org_id": principal.org_id},
+            attachments=list(artifacts or []),
+            metadata={
+                "external_agent_connection_id": principal.connection_id,
+                "external_agent_display_name": principal.connection_display_name,
+                "trigger_illo": bool(trigger_illo),
+                **dict(metadata or {}),
+            },
+        ),
+        parse_message_type=lambda _content, _role: "trigger" if trigger_illo else "agent_share",
+        apply_lifecycle=bool(trigger_illo),
+        lifecycle_trigger="external_agent_thread_message",
     )
-    session.add(thread)
-    session.flush()
-    notified = _notify_mentions(
+    thread = thread_result.message
+    notified = await _notify_mentions(
         session,
         org_id=principal.org_id,
         idea=idea,
@@ -1163,12 +1214,12 @@ def create_thread_from_agent(
         actor_user_id=principal.owner_user_id,
         content=body,
     )
-    session.flush()
+    await session.flush()
     return idea, thread, notified
 
 
-def post_thread_message_from_agent(
-    session: Session,
+async def post_thread_message_from_agent(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     idea_id: str,
@@ -1178,36 +1229,29 @@ def post_thread_message_from_agent(
     trigger_illo: bool = False,
     metadata: Mapping[str, Any] | None = None,
 ) -> tuple[Idea, IdeaThread, list[str]]:
-    idea = _idea_for_org(session, idea_id=str(idea_id), org_id=principal.org_id)
-    thread = IdeaThread(
-        idea_id=str(idea.id),
-        role="user",
-        content=str(body or ""),
-        user_id=principal.owner_user_id,
-        attachments=list(artifacts or []),
-        message_type="trigger" if trigger_illo else "agent_share",
-        metadata_={
-            "external_agent_connection_id": principal.connection_id,
-            "external_agent_display_name": principal.connection_display_name,
-            "trigger_illo": bool(trigger_illo),
-            **dict(metadata or {}),
-        },
+    idea = await _idea_for_org(session, idea_id=str(idea_id), org_id=principal.org_id)
+    thread_result = await post_thread_message(
+        session,
+        idea=idea,
+        command=ThreadMessageCommand(
+            idea_id=str(idea.id),
+            role="user",
+            content=str(body or ""),
+            actor={"user_id": principal.owner_user_id, "org_id": principal.org_id},
+            attachments=list(artifacts or []),
+            metadata={
+                "external_agent_connection_id": principal.connection_id,
+                "external_agent_display_name": principal.connection_display_name,
+                "trigger_illo": bool(trigger_illo),
+                **dict(metadata or {}),
+            },
+        ),
+        parse_message_type=lambda _content, _role: "trigger" if trigger_illo else "agent_share",
+        apply_lifecycle=bool(trigger_illo),
+        lifecycle_trigger="external_agent_thread_message",
     )
-    session.add(thread)
-    previous = idea.status
-    if previous in {"needs_input", "unread_reply", "emerged"}:
-        idea.status = "active"
-        idea.updated_at = utcnow()
-        session.add(
-            IdeaStateLog(
-                idea_id=str(idea.id),
-                from_state=previous,
-                to_state="active",
-                trigger="external_agent_thread_message",
-            )
-        )
-    session.flush()
-    notified = _notify_mentions(
+    thread = thread_result.message
+    notified = await _notify_mentions(
         session,
         org_id=principal.org_id,
         idea=idea,
@@ -1216,7 +1260,7 @@ def post_thread_message_from_agent(
         actor_user_id=principal.owner_user_id,
         content=body,
     )
-    session.flush()
+    await session.flush()
     return idea, thread, notified
 
 
@@ -1232,89 +1276,28 @@ def _headless_prompt(question: str, context: Mapping[str, Any] | None) -> str:
     )
 
 
-def _dialect_name(session: Session) -> str:
+def _dialect_name(session: AsyncSession) -> str:
     bind = session.get_bind()
     return str(getattr(getattr(bind, "dialect", None), "name", "") or "")
 
 
-def _append_run_event(session: Session, event: AgentRunEvent) -> AgentRunEventRow:
-    if _dialect_name(session) == "postgresql":
-        session.execute(text("SELECT pg_advisory_xact_lock(:run_id)"), {"run_id": int(event.run_id)})
-    sequence_no = event.sequence_no
-    if sequence_no is None:
-        sequence_no = int(
-            session.scalar(
-                select(func.coalesce(func.max(AgentRunEventRow.sequence_no), 0)).where(
-                    AgentRunEventRow.run_id == int(event.run_id)
-                )
+async def _latest_run_artifact_text(session: AsyncSession, run_id: int) -> str:
+    row = (
+        await session.scalars(
+            select(AgentRunArtifactRow)
+            .where(
+                AgentRunArtifactRow.run_id == int(run_id),
+                AgentRunArtifactRow.artifact_type == "final_answer",
             )
-            or 0
-        ) + 1
-    row = AgentRunEventRow(
-        run_id=int(event.run_id),
-        root_run_id=event.root_run_id or event.run_id,
-        sequence_no=sequence_no,
-        event_type=event.event_type,
-        payload=dict(event.payload or {}),
-        producer=event.producer,
-        visibility=event.visibility.value if isinstance(event.visibility, EventVisibility) else str(event.visibility),
-    )
-    session.add(row)
-    session.flush()
-    return row
-
-
-def _create_agent_run(session: Session, request: AgentRunRequest) -> AgentRunRow:
-    profile = request.normalized_profile
-    recipe = request.normalized_recipe
-    row = AgentRunRow(
-        org_id=request.org_id,
-        user_id=request.user_id,
-        thread_id=request.thread_id,
-        parent_run_id=request.parent_run_id,
-        root_run_id=request.root_run_id,
-        profile=profile.value,
-        recipe=recipe.value,
-        status=RunStatus.QUEUED.value,
-        input_message=request.message,
-        target_ref=dict(request.target_ref or {}),
-        workspace_ref=dict(request.workspace_ref or {}),
-        model_policy=dict(request.model_policy or {}),
-        metadata_=dict(request.metadata or {}),
-    )
-    session.add(row)
-    session.flush()
-    row.trace_id = trace_id_for_run_id(row.id)
-    if row.root_run_id is None:
-        row.root_run_id = row.id
-    session.flush()
-    _append_run_event(
-        session,
-        run_event(
-            int(row.id),
-            "run.created",
-            {"profile": profile.value, "recipe": recipe.value},
-            root_run_id=int(row.root_run_id),
-        ),
-    )
-    return row
-
-
-def _latest_run_artifact_text(session: Session, run_id: int) -> str:
-    row = session.scalars(
-        select(AgentRunArtifactRow)
-        .where(
-            AgentRunArtifactRow.run_id == int(run_id),
-            AgentRunArtifactRow.artifact_type == "final_answer",
+            .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())
+            .limit(1)
         )
-        .order_by(AgentRunArtifactRow.created_at.desc(), AgentRunArtifactRow.id.desc())
-        .limit(1)
     ).first()
     return str(getattr(row, "text", None) or "") if row is not None else ""
 
 
-def create_headless_ask(
-    session: Session,
+async def create_headless_ask(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     question: str,
@@ -1322,6 +1305,17 @@ def create_headless_ask(
     metadata: Mapping[str, Any] | None = None,
 ) -> ExternalAgentTaskRow:
     task_id = str(uuid.uuid4())
+    metadata = dict(metadata or {})
+    metadata.setdefault(
+        "request_source",
+        request_source_context(
+            principal,
+            surface="mcp_personal_agent" if metadata.get("mcp_tool") else "personal_agent_bridge",
+            visibility="headless_private",
+            permission="private_workspace_context",
+            tool_name=str(metadata.get("mcp_tool") or "") or None,
+        ),
+    )
     task = ExternalAgentTaskRow(
         id=task_id,
         org_id=principal.org_id,
@@ -1333,67 +1327,79 @@ def create_headless_ask(
         input_parts=[{"type": "ask_illo", "question": str(question), "context": dict(context or {})}],
         status="queued",
         idempotency_key=f"ask:{task_id}",
-        metadata_={**dict(metadata or {}), "headless": True},
+        metadata_={**metadata, "headless": True},
     )
     session.add(task)
-    session.flush()
-    run = _create_agent_run(
+    await session.flush()
+    run_result = await admit_work(
         session,
-        AgentRunRequest(
+        WorkIntakeEvent(
+            source="external_agent",
+            event_type="external_agent.headless_ask",
             org_id=principal.org_id,
-            user_id=principal.owner_user_id,
-            thread_id=f"external-agent:{principal.connection_id}:{task_id}",
-            profile=RunProfile.FAST,
-            recipe=RunRecipe.FAST,
-            message=_headless_prompt(question, context),
-            target_ref={
+            actor={"id": principal.owner_user_id, "org_id": principal.org_id},
+            target={
                 "kind": "external_agent_headless_ask",
                 "external_agent_connection_id": principal.connection_id,
                 "external_agent_task_id": task_id,
+                "thread_id": f"external-agent:{principal.connection_id}:{task_id}",
             },
-            workspace_ref={"source": "external_agent_bridge", "mode": "headless"},
-            model_policy={"tier": "standard", "thinking": "medium"},
-            metadata={
-                "origin": "external_agent_headless_ask",
-                "external_agent_connection_id": principal.connection_id,
-                "external_agent_task_id": task_id,
-                "headless": True,
-                "tool_policy": {
-                    "mode": "read_mostly",
-                    "blocked_tools": list(HEADLESS_ASK_BLOCKED_TOOLS),
+            payload={
+                "message": _headless_prompt(question, context),
+                "workspace_ref": {"source": "external_agent_bridge", "mode": "headless"},
+                "model_policy": {"tier": "standard", "thinking": "medium"},
+                "metadata": {
+                    **metadata,
+                    "origin": "external_agent_headless_ask",
+                    "external_agent_connection_id": principal.connection_id,
+                    "external_agent_task_id": task_id,
+                    "execution_profile": "fast",
+                    "recipe": "fast",
+                    "headless": True,
+                    "tool_policy": {
+                        "mode": "read_mostly",
+                        "blocked_tools": list(HEADLESS_ASK_BLOCKED_TOOLS),
+                    },
                 },
+            },
+            policy={
+                "producer": "external_agent",
+                "idempotency_key": f"ask:{task_id}",
+                "run_event": "headless_ask",
             },
         ),
     )
-    task.illo_run_id = int(run.id)
+    if not run_result.ok or run_result.run_id is None:
+        raise RuntimeError(run_result.skipped_reason or "Failed to admit headless ask run")
+    task.illo_run_id = int(run_result.run_id)
     task.status = "submitted"
     task.submitted_at = utcnow()
-    append_task_event(
+    await append_task_event(
         session,
         task,
         event_type="external_task.ask_illo_submitted",
         status=task.status,
         message="Headless Illo ask queued",
-        payload={"run_id": int(run.id)},
+        payload={"run_id": int(run_result.run_id)},
         producer="illo",
     )
-    session.flush()
+    await session.flush()
     return task
 
 
-def get_headless_ask(
-    session: Session,
+async def get_headless_ask(
+    session: AsyncSession,
     principal: AgentBridgePrincipal,
     *,
     ask_id: str,
 ) -> dict[str, Any]:
-    task = _require_task_for_principal(session, principal, ask_id)
-    run: AgentRunRow | None = session.get(AgentRunRow, int(task.illo_run_id)) if task.illo_run_id else None
+    task = await _require_task_for_principal(session, principal, ask_id)
+    run: AgentRunRow | None = await session.get(AgentRunRow, int(task.illo_run_id)) if task.illo_run_id else None
     answer = ""
     run_status = None
     if run is not None:
         run_status = coerce_run_status(run.status)
-        answer = _latest_run_artifact_text(session, int(run.id))
+        answer = await _latest_run_artifact_text(session, int(run.id))
         if run_status in TERMINAL_RUN_STATUSES:
             if run_status == RunStatus.COMPLETED:
                 task.status = "completed"
@@ -1403,9 +1409,9 @@ def get_headless_ask(
                 task.status = "failed" if run_status == RunStatus.FAILED else "cancelled"
                 task.error = task.error or f"Illo ask ended with status {run_status.value}"
                 task.failed_at = task.failed_at or utcnow()
-            session.flush()
+            await session.flush()
     return {
-        "ask": serialize_task(task, include_events=True, session=session),
+        "ask": await serialize_task(task, include_events=True, session=session),
         "run": {
             "id": int(run.id) if run is not None else None,
             "status": run_status.value if run_status is not None else None,
@@ -1440,6 +1446,7 @@ __all__ = [
     "create_external_task_for_idea",
     "create_headless_ask",
     "create_thread_from_agent",
+    "request_source_context",
     "fail_task",
     "generate_connection_token",
     "get_headless_ask",

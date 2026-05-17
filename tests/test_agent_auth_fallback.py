@@ -318,7 +318,6 @@ def test_llm_client_build_request_headers_merges_and_normalizes_openai_session()
             "originator": "illo-brain",
         },
         token_prefix="",
-        system_prompt_prefix="",
     )
 
     headers = llm.build_request_headers(

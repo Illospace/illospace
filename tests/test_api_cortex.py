@@ -110,6 +110,24 @@ def _make_thread_msg(**overrides):
     return obj
 
 
+def _assign_thread_defaults_on_add(session):
+    next_thread_id = 1
+
+    def add(obj):
+        nonlocal next_thread_id
+        if obj.__class__.__name__ == "IdeaThread":
+            obj.id = next_thread_id
+            next_thread_id += 1
+            if getattr(obj, "created_at", None) is None:
+                obj.created_at = datetime.now(timezone.utc)
+            if getattr(obj, "attachments", None) is None:
+                obj.attachments = []
+            if getattr(obj, "message_type", None) is None:
+                obj.message_type = "message"
+
+    session.add.side_effect = add
+
+
 def test_project_context_extraction_from_thread_payload():
     from brain.app.api.routers.cortex._idea_ops import _extract_project_context_from_message
 
@@ -472,11 +490,19 @@ async def test_manage_idea_create_seeds_new_thread_message(monkeypatch):
         )
 
     thread_rows = [obj for obj in added if obj.__class__.__name__ == "IdeaThread"]
+    idea_rows = [obj for obj in added if obj.__class__.__name__ == "Idea"]
     assert payload["created"] is True
     assert payload["thread_message_id"] == 42
     assert payload["run_started"] is False
+    assert idea_rows[0].origin == "illo_created"
+    assert thread_rows[0].role == "illo"
+    assert thread_rows[0].user_id is None
+    assert thread_rows[0].message_type == "agent_response"
     assert thread_rows[0].content == "Inspect vault and AWS credential handoff path."
     assert thread_rows[0].metadata_["source"] == "manage_idea.create"
+    assert thread_rows[0].metadata_["author"] == "illo"
+    assert thread_rows[0].metadata_["requested_by_user_id"] == "user-1"
+    assert thread_rows[0].metadata_["owner_user_id"] == "user-1"
     assert thread_rows[0].metadata_["created_by_run_id"] == 7
     assert published == [("idea_created", {"idea_id": "idea-created", "title": "Check vault state"})]
 
@@ -537,7 +563,10 @@ async def test_manage_idea_create_can_handoff_owner(monkeypatch):
     assert payload["created"] is True
     assert payload["idea"]["user_id"] == "target-user"
     assert idea_rows[0].user_id == "target-user"
-    assert thread_rows[0].user_id == "user-1"
+    assert thread_rows[0].role == "illo"
+    assert thread_rows[0].user_id is None
+    assert thread_rows[0].metadata_["requested_by_user_id"] == "user-1"
+    assert thread_rows[0].metadata_["owner_user_id"] == "target-user"
 
 
 async def test_manage_idea_create_queued_admits_run_instead_of_empty_queue(monkeypatch):
@@ -1124,33 +1153,29 @@ async def test_create_idea_empty_title_422(client, mock_session_factory):
 
 @pytest.mark.asyncio
 async def test_create_thread_message(client, mock_session_factory):
-    msg = _make_thread_msg()
-    with patch(
-        "brain.app.api.routers.cortex._ideas.IdeaThreadRepository"
-    ) as MockRepo:
-        MockRepo.return_value.a_add_message = AsyncMock(return_value=msg)
-        resp = await client.post(
-            "/api/cortex/ideas/some-id/threads",
-            json={"content": "Hello", "role": "user"},
-        )
+    _assign_thread_defaults_on_add(mock_session_factory)
+
+    resp = await client.post(
+        "/api/cortex/ideas/some-id/threads",
+        json={"content": "Hello", "role": "user"},
+    )
+
     assert resp.status_code == 201
     assert resp.json()["content"] == "Hello"
 
 
 @pytest.mark.asyncio
 async def test_create_thread_message_commits_before_broadcast(client, mock_session_factory):
-    msg = _make_thread_msg()
     idea = _make_idea(id="some-id", org_id="test-org")
     order: list[str] = []
+    _assign_thread_defaults_on_add(mock_session_factory)
     mock_session_factory.commit.side_effect = lambda: order.append("commit")
 
     async def _broadcast(*_args, **_kwargs):
         order.append("broadcast")
 
-    with patch("brain.app.api.routers.cortex._ideas.IdeaThreadRepository") as MockRepo, \
-         patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)), \
+    with patch("brain.app.api.routers.cortex._ideas._require_idea_for_user", AsyncMock(return_value=idea)), \
          patch("brain.app.api.routers.cortex._ideas.ws_manager.broadcast_product_event", side_effect=_broadcast):
-        MockRepo.return_value.a_add_message = AsyncMock(return_value=msg)
         resp = await client.post(
             "/api/cortex/ideas/some-id/threads",
             json={"content": "Hello", "role": "user"},

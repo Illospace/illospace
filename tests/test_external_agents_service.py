@@ -1,21 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
-import re
-import sqlite3
 import sys
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine, event, select
-from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
-from sqlalchemy.orm import Session
 
 from brain.systems.external_agents import service
 from brain.platform.db.models.idea import Idea, IdeaThread, UserMention
@@ -23,50 +15,12 @@ from brain.platform.db.models.notification import (
     NOTIFICATION_KIND_WORKSPACE_MENTION,
     NotificationEvent,
 )
-from brain.platform.db.models.org import Org, User
+from brain.platform.db.models.org import User
 
 
 ORG_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1"
 OWNER_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1"
 TEAMMATE_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2"
-
-
-def _patch_sqlite_for_pg_types():
-    if not hasattr(SQLiteTypeCompiler, "visit_JSONB"):
-        SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
-    if getattr(SQLiteDDLCompiler, "_illo_external_agent_jsonb_patch", False):
-        return
-
-    original = SQLiteDDLCompiler.get_column_default_string
-
-    def patched(self, column, **kw):
-        result = original(self, column, **kw)
-        if result:
-            result = re.sub(r"::jsonb", "", result)
-        return result
-
-    SQLiteDDLCompiler.get_column_default_string = patched
-    SQLiteDDLCompiler._illo_external_agent_jsonb_patch = True
-
-
-def _register_sqlite_functions(dbapi_conn, _connection_record):
-    dbapi_conn.create_function("NOW", 0, lambda: datetime.now(timezone.utc).isoformat())
-    dbapi_conn.create_function("gen_random_uuid", 0, lambda: str(uuid.uuid4()))
-
-
-def _sqlite_session() -> Session:
-    _patch_sqlite_for_pg_types()
-    sqlite3.register_adapter(list, lambda value: json.dumps(value))
-    sqlite3.register_adapter(dict, lambda value: json.dumps(value))
-    engine = create_engine("sqlite://", echo=False)
-    event.listen(engine, "connect", _register_sqlite_functions)
-    Org.__table__.create(engine, checkfirst=True)
-    User.__table__.create(engine, checkfirst=True)
-    Idea.__table__.create(engine, checkfirst=True)
-    IdeaThread.__table__.create(engine, checkfirst=True)
-    UserMention.__table__.create(engine, checkfirst=True)
-    NotificationEvent.__table__.create(engine, checkfirst=True)
-    return Session(engine)
 
 
 def _load_bridge_module():
@@ -109,7 +63,10 @@ def test_headless_thread_ids_use_external_agent_namespace():
     assert f"external-agent:{principal.connection_id}:ask-1" == "external-agent:conn-1:ask-1"
 
 
-def test_headless_ask_blocks_thread_mutation_tools():
+@pytest.mark.asyncio
+async def test_headless_ask_blocks_thread_mutation_tools():
+    from brain.systems.runs.work_intake import WorkIntakeResult
+
     class FakeSession:
         def __init__(self):
             self.added = []
@@ -118,10 +75,10 @@ def test_headless_ask_blocks_thread_mutation_tools():
         def add(self, row):
             self.added.append(row)
 
-        def flush(self):
+        async def flush(self):
             self.flush_count += 1
 
-        def scalar(self, _stmt):
+        async def scalar(self, _stmt):
             return None
 
     principal = service.AgentBridgePrincipal(
@@ -133,31 +90,81 @@ def test_headless_ask_blocks_thread_mutation_tools():
         connection_display_name="Hermes",
         agent_kind="hermes",
     )
-    captured_requests = []
+    captured_events = []
 
-    def fake_create_run(_session, request):
-        captured_requests.append(request)
-        return SimpleNamespace(id=42)
+    async def fake_admit_work(_session, event):
+        captured_events.append(event)
+        return WorkIntakeResult(ok=True, run_id=42)
 
-    with patch("brain.systems.external_agents.service._create_agent_run", side_effect=fake_create_run):
-        task = service.create_headless_ask(
+    with patch("brain.systems.external_agents.service.admit_work", side_effect=fake_admit_work):
+        task = await service.create_headless_ask(
             FakeSession(),
             principal,
             question="What should I know before replying?",
         )
 
     assert task.illo_run_id == 42
-    blocked_tools = captured_requests[0].metadata["tool_policy"]["blocked_tools"]
+    event = captured_events[0]
+    assert event.source == "external_agent"
+    assert event.event_type == "external_agent.headless_ask"
+    assert event.target["kind"] == "external_agent_headless_ask"
+    blocked_tools = event.payload["metadata"]["tool_policy"]["blocked_tools"]
     assert "manage_idea" in blocked_tools
     assert "post_chat_message" in blocked_tools
+    request_source = event.payload["metadata"]["request_source"]
+    assert request_source["surface"] == "personal_agent_bridge"
+    assert request_source["personal_agent"] == "Hermes"
+    assert request_source["visibility"] == "headless_private"
 
 
-def test_create_thread_from_agent_notifies_teammate_with_unified_notification():
-    db = _sqlite_session()
-    db.add(Org(id=ORG_ID, name="Test Org", slug="test-org"))
-    db.add(User(id=OWNER_ID, org_id=ORG_ID, name="Reda", email="reda@test.com"))
-    db.add(User(id=TEAMMATE_ID, org_id=ORG_ID, name="JB", email="jb@test.com"))
-    db.flush()
+class _ScalarResult:
+    def __init__(self, rows: list[object]):
+        self._rows = rows
+
+    def first(self):
+        return self._rows[0] if self._rows else None
+
+
+class _ExternalAgentSession:
+    def __init__(self):
+        self.users = {
+            OWNER_ID: User(id=OWNER_ID, org_id=ORG_ID, name="Reda", email="reda@test.com"),
+            TEAMMATE_ID: User(id=TEAMMATE_ID, org_id=ORG_ID, name="JB", email="jb@test.com"),
+        }
+        self.added: list[object] = []
+        self._next_thread_id = 1
+        self._next_mention_id = 1
+        self._next_notification_id = 1
+
+    def add(self, row):
+        self.added.append(row)
+
+    async def get(self, model, item_id):
+        if model is User:
+            return self.users.get(str(item_id))
+        return None
+
+    async def scalars(self, _stmt):
+        return _ScalarResult([])
+
+    async def flush(self):
+        for row in self.added:
+            if isinstance(row, Idea) and not row.id:
+                row.id = str(uuid.uuid4())
+            elif isinstance(row, IdeaThread) and row.id is None:
+                row.id = self._next_thread_id
+                self._next_thread_id += 1
+            elif isinstance(row, UserMention) and row.id is None:
+                row.id = self._next_mention_id
+                self._next_mention_id += 1
+            elif isinstance(row, NotificationEvent) and row.id is None:
+                row.id = self._next_notification_id
+                self._next_notification_id += 1
+
+
+@pytest.mark.asyncio
+async def test_create_thread_from_agent_notifies_teammate_with_unified_notification():
+    db = _ExternalAgentSession()
     principal = service.AgentBridgePrincipal(
         connection_id="conn-1",
         org_id=ORG_ID,
@@ -168,7 +175,7 @@ def test_create_thread_from_agent_notifies_teammate_with_unified_notification():
         agent_kind="codex",
     )
 
-    idea, thread, notified = service.create_thread_from_agent(
+    idea, thread, notified = await service.create_thread_from_agent(
         db,
         principal,
         title="Install Illo MCP",
@@ -180,11 +187,11 @@ def test_create_thread_from_agent_notifies_teammate_with_unified_notification():
     assert thread.message_type == "agent_share"
     assert notified == [TEAMMATE_ID]
 
-    mention = db.scalars(select(UserMention)).one()
+    mention = next(row for row in db.added if isinstance(row, UserMention))
     assert mention.user_id == TEAMMATE_ID
     assert mention.thread_message_id == thread.id
 
-    notification = db.scalars(select(NotificationEvent)).one()
+    notification = next(row for row in db.added if isinstance(row, NotificationEvent))
     assert notification.user_id == TEAMMATE_ID
     assert notification.kind == NOTIFICATION_KIND_WORKSPACE_MENTION
     assert notification.idea_id == str(idea.id)

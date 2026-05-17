@@ -217,6 +217,10 @@ async def _sync_items_to_domain(
     title_expr = sync_spec.get("title") or sync_spec.get("title_path")
     limit = min(_positive_int(sync_spec.get("limit") or _MAX_ITEMS, "connector_spec.sync.limit"), _MAX_ITEMS)
 
+    object_type = await service.get_object_type(domain_id, object_key)
+    field_keys = {str(field.key) for field in await service.list_fields(object_type.id)}
+    title_field_key = str(getattr(object_type, "title_field", "") or "").strip()
+
     existing_by_remote: dict[str, Any] = {}
     if remote_id_field:
         for record in await service.list_records(context.org_id, domain_id, object_key=object_key, limit=500):
@@ -244,6 +248,10 @@ async def _sync_items_to_domain(
             data.setdefault(remote_id_field, str(remote_id))
         title = _mapped_value(title_expr, item) if title_expr is not None else None
         title_text = str(title).strip() if title is not None else None
+        if title_text:
+            for field_key in ("title", title_field_key):
+                if field_key and field_key in field_keys and field_key not in data:
+                    data[field_key] = title_text
 
         existing = existing_by_remote.get(str(remote_id)) if remote_id is not None else None
         try:

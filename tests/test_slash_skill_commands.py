@@ -44,3 +44,27 @@ def test_run_context_prompts_agent_about_slash_skill_command():
     assert "Slash skill command(s): /debug" in prompt
     assert "user is interested in those skills" in prompt
     assert "prefer loading the skill card or summary before the full procedure" in prompt
+
+
+def test_run_context_includes_structured_request_source():
+    from brain.systems.runs.context import RunContextLoader
+
+    context = RunContextLoader().load(
+        thread_id="idea-1",
+        message="coordinate this",
+        metadata={
+            "request_source": {
+                "surface": "mcp_personal_agent",
+                "acting_user_id": "user-1",
+                "personal_agent": "Hermes",
+                "visibility": "visible_team_thread",
+                "permission": "visible_coordination_trigger",
+            }
+        },
+    )
+
+    prompt = context.prompt_context()
+    assert "Request Source:" in prompt
+    assert '"surface": "mcp_personal_agent"' in prompt
+    assert '"personal_agent": "Hermes"' in prompt
+    assert '"visibility": "visible_team_thread"' in prompt

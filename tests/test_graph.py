@@ -375,8 +375,8 @@ class TestBrainRecallIntegration:
     @patch("brain.systems.cognition.graph.graph_augmented_recall")
     @patch("brain.systems.memory.embeddings.embed_query")
     @patch("brain.systems.memory.embeddings.vec_to_pg")
-    def test_brain_recall_uses_graph(self, mock_vec, mock_emb, mock_graph):
-        """tool_brain_recall should try graph-augmented recall first."""
+    async def test_brain_recall_uses_graph(self, mock_vec, mock_emb, mock_graph):
+        """async_tool_brain_recall should try graph-augmented recall first."""
         import importlib
         import brain.app.mcp.server as mcp_server
         importlib.reload(mcp_server)
@@ -400,7 +400,7 @@ class TestBrainRecallIntegration:
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
              patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value={"retrieval_decision_id": 11, "stage": "brain_recall"})):
-            result = mcp_server.tool_brain_recall("redis issues")
+            result = await mcp_server.async_tool_brain_recall("redis issues")
 
         assert result["count"] == 1
         assert result["memories"][0]["tier"] == "semantic"
@@ -412,7 +412,7 @@ class TestBrainRecallIntegration:
     @patch("brain.systems.cognition.graph.graph_augmented_recall")
     @patch("brain.systems.memory.embeddings.embed_query")
     @patch("brain.systems.memory.embeddings.vec_to_pg")
-    def test_brain_recall_materializes_attention_selection(self, mock_vec, mock_emb, mock_graph):
+    async def test_brain_recall_materializes_attention_selection(self, mock_vec, mock_emb, mock_graph):
         """brain_recall should return only preload-selected memories and expose lazy-load candidates."""
         import importlib
         import brain.app.mcp.server as mcp_server
@@ -457,7 +457,7 @@ class TestBrainRecallIntegration:
 
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
              patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value=decision)):
-            result = mcp_server.tool_brain_recall("redis issues", attention_debug=True)
+            result = await mcp_server.async_tool_brain_recall("redis issues", attention_debug=True)
 
         assert [mem["id"] for mem in result["memories"]] == [1, 2]
         assert [mem["id"] for mem in result["suppressed_memories"]] == [3]
@@ -467,7 +467,7 @@ class TestBrainRecallIntegration:
     @patch("brain.systems.cognition.graph.graph_augmented_recall")
     @patch("brain.systems.memory.embeddings.embed_query")
     @patch("brain.systems.memory.embeddings.vec_to_pg")
-    def test_brain_recall_expands_lazy_loads_when_enabled(self, mock_vec, mock_emb, mock_graph):
+    async def test_brain_recall_expands_lazy_loads_when_enabled(self, mock_vec, mock_emb, mock_graph):
         """brain_recall should fetch deferred memories when lazy load is explicitly enabled."""
         import importlib
         import brain.app.mcp.server as mcp_server
@@ -523,7 +523,7 @@ class TestBrainRecallIntegration:
         with patch("brain.app.mcp.server.UnitOfWork", return_value=mock_uow), \
              patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value=decision)), \
              patch("brain.app.mcp.server.AttentionController.load_lazy_candidates", new=AsyncMock(return_value=lazy_loaded)) as mock_load:
-            result = mcp_server.tool_brain_recall("redis issues", attention_debug=True, expand_lazy_load=True)
+            result = await mcp_server.async_tool_brain_recall("redis issues", attention_debug=True, expand_lazy_load=True)
 
         assert [mem["id"] for mem in result["memories"]] == [1, 2, 3]
         assert [mem["id"] for mem in result["lazy_loaded_memories"]] == [3]
@@ -532,7 +532,7 @@ class TestBrainRecallIntegration:
     @patch("brain.systems.cognition.graph.graph_augmented_recall", side_effect=Exception("UndefinedColumn"))
     @patch("brain.systems.memory.embeddings.embed_query")
     @patch("brain.systems.memory.embeddings.vec_to_pg")
-    def test_brain_recall_fallback_on_graph_failure(self, mock_vec, mock_emb, _mock_graph):
+    async def test_brain_recall_fallback_on_graph_failure(self, mock_vec, mock_emb, _mock_graph):
         """When graph recall fails, should fall back to vector search."""
         import importlib
         import brain.app.mcp.server as mcp_server
@@ -569,7 +569,7 @@ class TestBrainRecallIntegration:
 
         with patch("brain.app.mcp.server.UnitOfWork", side_effect=[mock_uow_graph, mock_uow_fallback]), \
              patch("brain.app.mcp.server.observe_retrieval", new=AsyncMock(return_value={"retrieval_decision_id": 12, "stage": "brain_recall"})):
-            result = mcp_server.tool_brain_recall("redis issues")
+            result = await mcp_server.async_tool_brain_recall("redis issues")
 
         assert result["count"] == 1
         assert result["memories"][0]["id"] == 7

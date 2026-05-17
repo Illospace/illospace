@@ -28,11 +28,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel.common.env import env_flag as _shared_env_flag
-from brain.platform.integrations.anthropic_adapter import (
-    OAUTH_SYSTEM_PROMPT_PREFIX,
-    build_auth_adapter,
-    get_oauth_betas,
-)
+from brain.platform.integrations.anthropic_adapter import build_auth_adapter, get_oauth_betas
 from brain.platform.integrations.openai_cache import (
     build_openai_extra_headers,
     normalize_openai_request_kwargs,
@@ -99,10 +95,9 @@ class LLMClient:
     provider: str                     # "anthropic" or "openai"
     source: str                       # "user_default", "org_main", "env", "none"
     auth_mode: str | None             # "api_key", "chatgpt", etc.
-    is_oauth: bool                    # True for setup-tokens (sk-ant-oat*)
-    extra_headers: dict[str, str]     # Per-request headers (OAuth betas)
+    is_oauth: bool                    # True for provider OAuth-style credentials.
+    extra_headers: dict[str, str]     # Per-request headers.
     token_prefix: str = ""            # First 18 chars (for logging)
-    system_prompt_prefix: str = ""    # Required prefix for OAuth (Claude Code identity)
 
     def get_extra_headers(self) -> dict[str, str]:
         """Get current extra headers. Re-reads active betas for OAuth clients
@@ -237,7 +232,6 @@ def _build_openai_client(token: str, source: str = "") -> LLMClient:
         is_oauth=False,
         extra_headers={},
         token_prefix=token[:18] if token else "",
-        system_prompt_prefix="",
     )
 
 
@@ -284,7 +278,6 @@ def _build_anthropic_client(token: str) -> LLMClient:
         is_oauth=adapter.is_oauth,
         extra_headers=extra_headers,
         token_prefix=token[:18] if token else "",
-        system_prompt_prefix=OAUTH_SYSTEM_PROMPT_PREFIX if adapter.is_oauth else "",
     )
 
 
@@ -311,7 +304,6 @@ def _build_openai_codex_client(auth: ResolvedProviderAuth) -> LLMClient:
             "originator": originator,
         },
         token_prefix=auth.token[:18] if auth.token else "",
-        system_prompt_prefix="",
     )
 
 
@@ -618,7 +610,6 @@ def resolve_llm_client(
         is_oauth=result.is_oauth,
         extra_headers=result.extra_headers,
         token_prefix=result.token_prefix,
-        system_prompt_prefix=result.system_prompt_prefix,
     )
 
 
@@ -704,7 +695,6 @@ async def async_resolve_llm_client(
             is_oauth=result.is_oauth,
             extra_headers=result.extra_headers,
             token_prefix=result.token_prefix,
-            system_prompt_prefix=result.system_prompt_prefix,
         )
 
     if session is not None:

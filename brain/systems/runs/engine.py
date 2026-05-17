@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 import inspect
+import logging
 from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +20,9 @@ from brain.systems.runs.stream import RunStream
 from brain.systems.runs.steering import SteeringInbox, SteeringMessage
 from brain.systems.runs.tools import AsyncRunToolExecutor
 
+logger = logging.getLogger(__name__)
+_post_completion_tasks: set[asyncio.Task[None]] = set()
+
 
 class AsyncRunRecipeHandler(Protocol):
     def execute(self, runtime: "RunRuntime") -> "RunRecipeResult | Awaitable[RunRecipeResult]":
@@ -29,6 +34,23 @@ class RunRecipeResult:
     output: str
     status: RunStatus = RunStatus.COMPLETED
     artifacts: tuple = ()
+    post_completion_tasks: tuple[Callable[[], Awaitable[Any]], ...] = ()
+
+
+async def _run_post_completion_task(run_id: int, task: Callable[[], Awaitable[Any]]) -> None:
+    try:
+        await task()
+    except Exception:
+        logger.exception("agent_run_post_completion_task_failed run_id=%s", run_id)
+
+
+def _schedule_post_completion_task(run_id: int, task: Callable[[], Awaitable[Any]]) -> None:
+    post_completion_task = asyncio.create_task(
+        _run_post_completion_task(run_id, task),
+        name=f"agent-run-{run_id}-post-completion",
+    )
+    _post_completion_tasks.add(post_completion_task)
+    post_completion_task.add_done_callback(_post_completion_tasks.discard)
 
 
 def _stream_payload(event, row, run: Any | None = None) -> dict[str, Any]:
@@ -269,7 +291,10 @@ class AsyncAgentRunEngine:
             return await self.fail(run.id, result.output or "recipe_failed")
         if result_status == RunStatus.CANCELED:
             return await self.cancel(run.id, reason=result.output or None)
-        return await self.complete(run.id, output=result.output, status=result_status)
+        completed = await self.complete(run.id, output=result.output, status=result_status)
+        for task in result.post_completion_tasks:
+            _schedule_post_completion_task(run.id, task)
+        return completed
 
     async def complete(
         self,
