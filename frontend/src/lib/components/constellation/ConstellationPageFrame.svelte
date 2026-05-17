@@ -13,6 +13,7 @@
     headerClassName?: string;
     contentClassName?: string;
     actions?: Snippet;
+    tabs?: Snippet;
     children?: Snippet;
   };
 
@@ -24,6 +25,7 @@
     headerClassName = '',
     contentClassName = '',
     actions,
+    tabs,
     children,
   }: Props = $props();
 
@@ -79,11 +81,24 @@
         </header>
       {/if}
 
-      <div class={stackClass}>
-        {#if children}
-          {@render children()}
-        {/if}
-      </div>
+      {#if tabs}
+        <div class="constellation-page-frame-body">
+          <div class="constellation-page-frame-tabs">
+            {@render tabs()}
+          </div>
+          <div class={stackClass}>
+            {#if children}
+              {@render children()}
+            {/if}
+          </div>
+        </div>
+      {:else}
+        <div class={stackClass}>
+          {#if children}
+            {@render children()}
+          {/if}
+        </div>
+      {/if}
     </div>
   </div>
 </section>
@@ -197,6 +212,16 @@
   .constellation-page-frame-content-stack {
     display: grid;
     gap: 22px;
+    min-width: 0;
+  }
+
+  .constellation-page-frame-body {
+    display: grid;
+    gap: 18px;
+    min-width: 0;
+  }
+
+  .constellation-page-frame-tabs {
     min-width: 0;
   }
 

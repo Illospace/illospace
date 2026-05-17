@@ -22,9 +22,9 @@
   --content-link-hover: var(--accent-bright);
   --content-strong: var(--text-1);
   --content-emphasis: var(--text-2);
-  --content-code-text: #b9d0ff;
-  --content-code-background: rgba(91,141,239,0.12);
-  --content-code-border: rgba(91,141,239,0.18);
+  --content-code-text: rgba(255,255,255,0.76);
+  --content-code-background: rgba(255,255,255,0.07);
+  --content-code-border: rgba(255,255,255,0.12);
   --content-kbd-text: rgba(255,255,255,0.88);
   --content-kbd-background: rgba(255,255,255,0.08);
   --content-kbd-border: rgba(255,255,255,0.16);
@@ -175,9 +175,9 @@
   --content-link-hover: #153b91;
   --content-strong: rgba(18, 27, 36, 0.98);
   --content-emphasis: rgba(42, 55, 68, 0.88);
-  --content-code-text: #213f83;
-  --content-code-background: rgba(49, 95, 214, 0.13);
-  --content-code-border: rgba(49, 95, 214, 0.24);
+  --content-code-text: rgba(18, 27, 36, 0.86);
+  --content-code-background: rgba(26, 39, 49, 0.06);
+  --content-code-border: rgba(26, 39, 49, 0.13);
   --content-kbd-text: rgba(18, 27, 36, 0.92);
   --content-kbd-background: rgba(26, 39, 49, 0.08);
   --content-kbd-border: rgba(26, 39, 49, 0.18);

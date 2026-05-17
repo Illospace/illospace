@@ -6,14 +6,14 @@
   import {
     ConstellationButton,
     ConstellationEmptyState,
+    ConstellationIcon,
+    ConstellationIconButton,
     ConstellationNotice,
     ConstellationPageFrame,
+    ConstellationPageTabs,
     ConstellationPanel,
     ConstellationPill,
     ConstellationSearchField,
-    ConstellationSectionHeader,
-    ConstellationSegmentedToggle,
-    ConstellationSnippetBlock,
     ConstellationTextInput,
   } from '$lib/components/constellation';
   import {
@@ -118,8 +118,13 @@
     savedAt: string;
   }
 
-  type FilterMode = 'all' | 'attention' | 'grants';
+  type VaultTab = 'library' | 'mcp';
   type PillTone = 'muted' | 'warning' | 'success' | 'danger' | 'info';
+  type DevVaultSample = {
+    key_name: string;
+    description: string;
+    category: string;
+  };
   type VaultInitialCreatePrefill = {
     id?: string | null;
     keyName?: string | null;
@@ -130,7 +135,8 @@
     | { id: string; kind: 'secret'; secret: Secret }
     | { id: string; kind: 'grant'; grant: AgentGrant }
     | { id: string; kind: 'missing'; missing: MissingSecret }
-    | { id: string; kind: 'pin' };
+    | { id: string; kind: 'pin' }
+    | { id: string; kind: 'dev_sample'; sample: DevVaultSample };
 
   const CATEGORIES = ['general', 'api', 'aws', 'auth', 'analytics', 'database', 'messaging', 'monitoring', 'payments', 'service'];
   const AGENT_KIND_OPTIONS = [
@@ -141,11 +147,15 @@
   ];
   const VAULT_SESSION_STORAGE_PREFIX = 'illo:vault:unlock:v1';
   const VAULT_SESSION_EXPIRY_SKEW_MS = 5000;
-  const FILTER_OPTIONS: Array<{ key: FilterMode; label: string }> = [
-    { key: 'all', label: 'All' },
-    { key: 'attention', label: 'Needs Work' },
-    { key: 'grants', label: 'Grants' },
+  const VAULT_TABS = [
+    { key: 'library', label: 'Library' },
+    { key: 'mcp', label: 'MCP' },
   ];
+  const DEV_VAULT_SAMPLE: DevVaultSample = {
+    key_name: 'OPENAI_EMBEDDING_API_KEY',
+    description: 'Dev-only preview key for memory embeddings.',
+    category: 'api',
+  };
   const ACCESS_LEVELS = [
     { key: 'ask', label: 'Ask Each Run' },
     { key: 'available', label: 'Agent Available' },
@@ -169,7 +179,7 @@
   let agentConnections = $state<ExternalAgentConnection[]>([]);
   let loading = $state(true);
   let filterText = $state('');
-  let filterMode = $state<FilterMode>('all');
+  let activeVaultTab = $state<VaultTab>('library');
   let selectedRowId = $state<string | null>(null);
 
   const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
@@ -190,6 +200,8 @@
   let vaultToken = $state<string | null>(null);
   let pinInput = $state('');
   let pinAttempts = $state(0);
+  let vaultLockedUntil = $state<string | null>(null);
+  let showPinInput = $state(false);
   let showPinSetup = $state(false);
   let newPin = $state('');
   let confirmPin = $state('');
@@ -259,32 +271,35 @@
   const vaultSessionStorageKey = $derived(
     auth.user?.id ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.id)}` : '',
   );
+  const vaultLockoutMessage = $derived(
+    vaultLockedUntil ? `Too many attempts. Try again ${relativeTime(vaultLockedUntil)}.` : '',
+  );
   const hostedMcpUrl = $derived.by(
     () => (typeof window === 'undefined' ? '/mcp' : `${window.location.origin}/mcp`),
   );
-  const categoryCount = $derived.by(
-    () => new Set(secrets.map((secret) => secret.category || 'general')).size,
-  );
   const pendingAgentGrants = $derived.by(() => agentGrants.filter((grant) => grant.status === 'pending'));
-  const grantHistory = $derived.by(() => agentGrants.filter((grant) => grant.status !== 'pending'));
   const staleSecrets = $derived.by(() => secrets.filter((secret) => secretAgeNumber(secret.updated_at) >= 180));
-  const attentionCount = $derived.by(
-    () => pendingAgentGrants.length + missing.length + staleSecrets.length + (hasPin ? 0 : 1),
-  );
   const vaultRows = $derived.by<VaultRow[]>(() => [
     ...(!hasPin ? [{ id: 'pin:setup', kind: 'pin' as const }] : []),
     ...pendingAgentGrants.map((grant) => ({ id: `grant:${grant.id}`, kind: 'grant' as const, grant })),
     ...missing.map((item) => ({ id: `missing:${item.key_name}`, kind: 'missing' as const, missing: item })),
     ...secrets.map((secret) => ({ id: `secret:${secret.key_name}`, kind: 'secret' as const, secret })),
   ]);
+  const devVaultSampleRows = $derived.by<VaultRow[]>(() => {
+    const shouldShow =
+      dev &&
+      !loading &&
+      hasPin &&
+      secrets.length === 0 &&
+      missing.length === 0 &&
+      pendingAgentGrants.length === 0;
+
+    return shouldShow ? [{ id: `dev:${DEV_VAULT_SAMPLE.key_name}`, kind: 'dev_sample', sample: DEV_VAULT_SAMPLE }] : [];
+  });
+  const libraryRows = $derived.by<VaultRow[]>(() => [...vaultRows, ...devVaultSampleRows]);
   const filteredRows = $derived.by(() => {
     const needle = filterText.trim().toLowerCase();
-    return vaultRows.filter((row) => {
-      if (filterMode === 'attention' && !rowNeedsAttention(row)) return false;
-      if (filterMode === 'grants' && row.kind !== 'grant') return false;
-      if (!needle) return true;
-      return rowSearchText(row).includes(needle);
-    });
+    return needle ? libraryRows.filter((row) => rowSearchText(row).includes(needle)) : libraryRows;
   });
   const postureLabel = $derived.by(() => {
     if (!hasPin) return 'Setup needed';
@@ -535,6 +550,8 @@
     try {
       const status = await api.pinStatus();
       hasPin = status.has_pin;
+      pinAttempts = Number(status.failed_attempts || 0);
+      vaultLockedUntil = status.locked_until ? String(status.locked_until) : null;
       if (!hasPin) {
         vaultLocked = false;
         clearPersistedVaultSession();
@@ -556,10 +573,19 @@
       vaultLocked = false;
       pinInput = '';
       pinAttempts = 0;
+      vaultLockedUntil = null;
       await loadData();
     } catch (err: any) {
-      pinAttempts++;
-      ui.toast(err?.detail || `Incorrect PIN (attempt ${pinAttempts})`, 'error');
+      try {
+        const status = await api.pinStatus();
+        pinAttempts = Number(status.failed_attempts || pinAttempts + 1);
+        vaultLockedUntil = status.locked_until ? String(status.locked_until) : null;
+      } catch {
+        pinAttempts++;
+      }
+      pinInput = '';
+      showPinInput = false;
+      ui.toast(vaultLockoutMessage || err?.detail || `Incorrect PIN (attempt ${pinAttempts})`, 'error');
     }
   }
 
@@ -587,6 +613,7 @@
       persistVaultSession(unlocked);
       hasPin = true;
       vaultLocked = false;
+      vaultLockedUntil = null;
       showPinSetup = false;
       newPin = '';
       confirmPin = '';
@@ -710,9 +737,9 @@
     selectedRowId = selectedRowId === row.id ? null : row.id;
   }
 
-  function setFilter(key: string) {
-    if (key === 'all' || key === 'attention' || key === 'grants') {
-      filterMode = key;
+  function setActiveVaultTab(key: string) {
+    if (key === 'library' || key === 'mcp') {
+      activeVaultTab = key;
     }
   }
 
@@ -746,17 +773,11 @@
     return 'muted';
   }
 
-  function rowNeedsAttention(row: VaultRow): boolean {
-    if (row.kind === 'pin') return true;
-    if (row.kind === 'grant') return row.grant.status === 'pending';
-    if (row.kind === 'missing') return true;
-    return secretAgeNumber(row.secret.updated_at) >= 180;
-  }
-
   function rowTitle(row: VaultRow): string {
     if (row.kind === 'pin') return 'PIN not configured';
     if (row.kind === 'grant') return row.grant.key_name;
     if (row.kind === 'missing') return row.missing.key_name;
+    if (row.kind === 'dev_sample') return row.sample.key_name;
     return row.secret.key_name;
   }
 
@@ -764,6 +785,7 @@
     if (row.kind === 'pin') return 'Set a lock before storing production credentials.';
     if (row.kind === 'grant') return row.grant.reason || `${row.grant.requested_by || 'agent'} requested access.`;
     if (row.kind === 'missing') return `Requested ${row.missing.request_count}x · last seen ${timeAgo(row.missing.last_requested)}`;
+    if (row.kind === 'dev_sample') return row.sample.description;
     return row.secret.description || row.secret.category || 'No description yet.';
   }
 
@@ -771,6 +793,7 @@
     if (row.kind === 'pin') return 'PIN';
     if (row.kind === 'grant') return row.grant.status;
     if (row.kind === 'missing') return 'Missing';
+    if (row.kind === 'dev_sample') return 'Dev only';
     return accessLevelLabel(row.secret.agent_access_level);
   }
 
@@ -778,6 +801,7 @@
     if (row.kind === 'pin') return 'Vault can still be opened by account session.';
     if (row.kind === 'grant') return `${row.grant.requested_by || 'agent'} · run ${row.grant.run_id ?? 'unknown'}`;
     if (row.kind === 'missing') return 'Runtime requested this key.';
+    if (row.kind === 'dev_sample') return `${row.sample.category} · preview row`;
     return `${row.secret.category || 'general'} · ${secretProjectBindings(row.secret.id).length} project bindings · x${row.secret.access_count || 0}`;
   }
 
@@ -785,6 +809,7 @@
     if (row.kind === 'pin') return 'warning';
     if (row.kind === 'grant') return grantPillVariant(row.grant.status);
     if (row.kind === 'missing') return 'warning';
+    if (row.kind === 'dev_sample') return 'info';
     return accessLevelVariant(row.secret.agent_access_level);
   }
 
@@ -797,6 +822,11 @@
     }
     if (row.kind === 'missing') {
       return [row.missing.key_name, 'missing requested required runtime'].join(' ').toLowerCase();
+    }
+    if (row.kind === 'dev_sample') {
+      return [row.sample.key_name, row.sample.category, row.sample.description, 'development preview']
+        .join(' ')
+        .toLowerCase();
     }
     return [row.secret.key_name, row.secret.category, row.secret.description].join(' ').toLowerCase();
   }
@@ -1156,30 +1186,13 @@
     showAgentConnectionModal = true;
   }
 
-  function mcpClientConfigSnippet(token: string): string {
-    return JSON.stringify(
-      {
-        mcpServers: {
-          illo: {
-            url: hostedMcpUrl,
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          },
-        },
-      },
-      null,
-      2,
-    );
-  }
-
-  function connectionFacts(connection: ExternalAgentConnection): string {
+  function mcpTokenFacts(connection: ExternalAgentConnection): string {
     const parts = [
       agentKindLabel(connection.agent_kind),
-      connection.status || 'pending',
-      connection.last_seen_at ? `seen ${timeAgo(connection.last_seen_at)}` : 'not seen yet',
+      connection.last_seen_at ? `last used ${timeAgo(connection.last_seen_at)}` : 'never used',
     ];
-    if (connection.last_error) parts.push('has error');
+    if (connection.created_at) parts.push(`created ${timeAgo(connection.created_at)}`);
+    if (connection.last_error) parts.push('error');
     return parts.join(' · ');
   }
 
@@ -1404,7 +1417,9 @@
     <div class="vault-constellation-lock-panel">
       <ConstellationPanel tone="warning">
         <div class="vault-constellation-lock-shell">
-          <ConstellationPill variant="warning">Locked</ConstellationPill>
+          <div class="vault-constellation-lock-mark" aria-hidden="true">
+            <ConstellationIcon name="lock" size={20} />
+          </div>
           <div class="vault-constellation-lock-copy">
             <h2 class="vault-constellation-lock-title">Vault locked</h2>
             <p class="vault-constellation-lock-subtitle">Enter your PIN to unlock protected secrets.</p>
@@ -1412,17 +1427,34 @@
           <form class="vault-constellation-lock-form" onsubmit={(e) => { e.preventDefault(); unlockVault(); }}>
             <!-- svelte-ignore a11y_autofocus -->
             <ConstellationTextInput
-              type="password"
+              type={showPinInput ? 'text' : 'password'}
               className="vault-constellation-lock-input"
               placeholder="Enter PIN"
               bind:value={pinInput}
               maxlength={32}
               autofocus
               mono
-            />
+              trailingInteractive
+            >
+              {#snippet trailingVisual()}
+                <ConstellationIconButton
+                  label={showPinInput ? 'Hide PIN' : 'Show PIN'}
+                  title={showPinInput ? 'Hide PIN' : 'Show PIN'}
+                  size="sm"
+                  variant="quiet"
+                  className="vault-constellation-lock-reveal"
+                  onclick={(event) => {
+                    event.preventDefault();
+                    showPinInput = !showPinInput;
+                  }}
+                >
+                  <ConstellationIcon name={showPinInput ? 'eye-off' : 'eye'} />
+                </ConstellationIconButton>
+              {/snippet}
+            </ConstellationTextInput>
             {#if pinAttempts > 0}
               <p class="vault-constellation-lock-attempts">
-                {pinAttempts} failed attempt{pinAttempts !== 1 ? 's' : ''}
+                {vaultLockoutMessage || `${pinAttempts} failed attempt${pinAttempts !== 1 ? 's' : ''}`}
               </p>
             {/if}
             <ConstellationButton type="submit" variant="secondary">Unlock</ConstellationButton>
@@ -1435,371 +1467,386 @@
   <ConstellationPageFrame
     eyebrow="Constellation Vault"
     title="Vault"
-    subtitle={loading ? 'Loading protected secrets, missing keys, and lock state.' : `${secrets.length} secrets · ${agentConnections.length} personal agents · ${categoryCount} categories tracked.`}
+    subtitle="Manage secrets and agent access."
     className={frameClassName}
     contentClassName={frameContentClassName}
   >
     {#snippet actions()}
       {#if hasPin}
-        <ConstellationButton variant="quiet" size="sm" onclick={lockVault}>Lock vault</ConstellationButton>
+        <ConstellationButton variant="quiet" size="sm" onclick={lockVault}>
+          {#snippet leadingVisual()}
+            <ConstellationIcon name="lock-open" />
+          {/snippet}
+          Lock vault
+        </ConstellationButton>
       {/if}
       <ConstellationButton variant="quiet" size="sm" onclick={() => (showPinSetup = true)}>
         {hasPin ? 'Change PIN' : 'Setup PIN'}
       </ConstellationButton>
-      <ConstellationButton variant="secondary" size="sm" onclick={() => openCreate()}>
-        Add secret
-      </ConstellationButton>
+    {/snippet}
+
+    {#snippet tabs()}
+      <ConstellationPageTabs
+        options={VAULT_TABS}
+        activeKey={activeVaultTab}
+        onActiveKeyChange={setActiveVaultTab}
+        ariaLabel="Vault sections"
+      />
     {/snippet}
 
     <section class="workspace">
-      <ConstellationPanel className="agent-panel" padding="none" ariaLabel="Personal agent MCP connections">
-        {#snippet header()}
-          <ConstellationSectionHeader
-            eyebrow="Personal agents"
-            title={agentConnections.length ? `${agentConnections.length} MCP connection${agentConnections.length === 1 ? '' : 's'}` : 'Connect an agent'}
-            description="Hosted MCP access for Hermes, Codex, OpenClaw, or another personal agent."
-            size="sm"
-          >
-            {#snippet actions()}
-              <ConstellationButton variant="secondary" size="sm" onclick={openAgentConnection}>
-                New token
-              </ConstellationButton>
-            {/snippet}
-          </ConstellationSectionHeader>
-        {/snippet}
-
-        <div class="agent-panel-content">
-          <div class="agent-summary-strip">
-            <span>{hostedMcpUrl}</span>
-            <ConstellationPill variant={agentConnections.length ? 'success' : 'info'} leadingDot>
-              {agentConnections.length ? 'Ready' : 'Setup'}
-            </ConstellationPill>
+      {#if activeVaultTab === 'mcp'}
+        <div
+          class="vault-tab-panel agent-pane"
+          id="mcp-panel"
+          role="tabpanel"
+          aria-labelledby="mcp-tab"
+        >
+          <div class="mcp-tab-toolbar">
+            <div class="mcp-endpoint">
+              <div class="mcp-endpoint-copy">
+                <span class="mcp-endpoint-label">Endpoint</span>
+                <span class="mcp-endpoint-value">{hostedMcpUrl}</span>
+              </div>
+              <ConstellationIconButton
+                label={copiedKey === 'mcp-endpoint' ? 'Endpoint copied' : 'Copy endpoint'}
+                title={copiedKey === 'mcp-endpoint' ? 'Copied' : 'Copy endpoint'}
+                size="sm"
+                onclick={() => copyAgentText(hostedMcpUrl, 'mcp-endpoint', 'MCP endpoint copied')}
+              >
+                <ConstellationIcon name={copiedKey === 'mcp-endpoint' ? 'check' : 'copy'} />
+              </ConstellationIconButton>
+            </div>
           </div>
 
-          {#if mintedAgentToken?.token}
-            <section class="agent-token-section" aria-label="One-time MCP token">
-              <div class="agent-section-heading">
-                <strong>One-time token</strong>
-                <small>{mintedAgentTokenConnection?.display_name || 'Personal agent'}</small>
+          <section class="mcp-token-section" aria-label="MCP tokens">
+            {#if agentConnections.length}
+              <div class="mcp-token-heading">
+                <h2>MCP tokens</h2>
+                <ConstellationButton variant="secondary" size="sm" onclick={openAgentConnection}>
+                  New token
+                </ConstellationButton>
               </div>
-              <div class="agent-token-stack">
+            {/if}
+
+            {#if mintedAgentToken?.token}
+              <div class="mcp-token-reveal" aria-label="One-time MCP token">
                 <ConstellationNotice
                   title="Copy this before leaving"
                   description="Illo only shows the raw MCP token once."
                   tone="warning"
                   compact
                 />
-                <div class="vault-revealed minimal">
-                  <code>{mintedAgentToken.token}</code>
-                </div>
-                <ConstellationSnippetBlock
-                  label="MCP client config"
-                  code={mcpClientConfigSnippet(mintedAgentToken.token)}
-                  notes={['Use this when the client supports remote HTTP MCP.']}
-                />
-                <div class="expanded-actions">
-                  <ConstellationButton
-                    variant="quiet"
+                <div class="mcp-token-secret">
+                  <div>
+                    <strong>{mintedAgentTokenConnection?.display_name || 'Personal agent'}</strong>
+                    <code>{mintedAgentToken.token}</code>
+                  </div>
+                  <ConstellationIconButton
+                    label={copiedKey === 'agent-token' ? 'Token copied' : 'Copy token'}
+                    title={copiedKey === 'agent-token' ? 'Copied' : 'Copy token'}
                     size="sm"
                     onclick={() => copyAgentText(mintedAgentToken?.token || '', 'agent-token', 'Token copied')}
                   >
-                    {copiedKey === 'agent-token' ? 'Copied' : 'Copy token'}
-                  </ConstellationButton>
-                  <ConstellationButton
-                    variant="secondary"
-                    size="sm"
-                    onclick={() => copyAgentText(
-                      mcpClientConfigSnippet(mintedAgentToken?.token || ''),
-                      'agent-config',
-                      'MCP config copied',
-                    )}
-                  >
-                    {copiedKey === 'agent-config' ? 'Copied' : 'Copy config'}
-                  </ConstellationButton>
+                    <ConstellationIcon name={copiedKey === 'agent-token' ? 'check' : 'copy'} />
+                  </ConstellationIconButton>
                 </div>
               </div>
-            </section>
-          {/if}
+            {/if}
 
-          <div class="agent-panel-grid">
-            <section class="agent-panel-section">
-              <div class="agent-section-heading">
-                <strong>Hosted MCP</strong>
-                <small>Bearer auth</small>
-              </div>
-              <dl class="metadata-list">
-                <div><dt>Endpoint</dt><dd>{hostedMcpUrl}</dd></div>
-                <div><dt>Header</dt><dd>Authorization</dd></div>
-                <div><dt>Alias</dt><dd>/api/mcp</dd></div>
-                <div><dt>Scopes</dt><dd>Default bridge tools</dd></div>
-              </dl>
-            </section>
-
-            <section class="agent-panel-section">
-              <div class="agent-section-heading">
-                <strong>Connections</strong>
-                <small>{agentConnections.length ? `${agentConnections.length} configured` : 'none yet'}</small>
-              </div>
-              {#if agentConnections.length}
-                <div class="agent-connection-list">
-                  {#each agentConnections as connection (connection.id)}
-                    <div class="agent-connection-row">
-                      <ConstellationPill variant={connectionStatusVariant(connection.status)}>{connection.status || 'pending'}</ConstellationPill>
-                      <div>
-                        <strong>{connection.display_name}</strong>
-                        <span>{connectionFacts(connection)}</span>
-                      </div>
-                      <ConstellationButton variant="quiet" size="sm" onclick={() => mintTokenForConnection(connection)}>
-                        New token
-                      </ConstellationButton>
+            {#if agentConnections.length}
+              <div class="mcp-token-list">
+                {#each agentConnections as connection (connection.id)}
+                  <div class="mcp-token-row">
+                    <div>
+                      <strong>{connection.display_name}</strong>
+                      <span>{mcpTokenFacts(connection)}</span>
                     </div>
-                  {/each}
-                </div>
-              {:else}
-                <p class="empty-inline">No personal agents connected yet.</p>
-              {/if}
-            </section>
+                    <ConstellationPill variant={connectionStatusVariant(connection.status)}>{connection.status || 'pending'}</ConstellationPill>
+                    <ConstellationButton variant="quiet" size="sm" onclick={() => mintTokenForConnection(connection)}>
+                      Mint token
+                    </ConstellationButton>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <ConstellationEmptyState
+                title="No MCP tokens"
+                description="Create a token so a personal agent can connect to this endpoint."
+                size="sm"
+                surface="plain"
+              >
+                {#snippet actions()}
+                  <ConstellationButton variant="secondary" size="sm" onclick={openAgentConnection}>
+                    New token
+                  </ConstellationButton>
+                {/snippet}
+              </ConstellationEmptyState>
+            {/if}
+          </section>
+        </div>
+      {:else}
+        <div
+          class="vault-tab-panel inventory-pane"
+          id="library-panel"
+          role="tabpanel"
+          aria-labelledby="library-tab"
+        >
+          <div class="vault-tab-toolbar inventory-tools">
+            <ConstellationSearchField bind:value={filterText} placeholder="Search vault..." aria-label="Search vault" />
+            <div class="vault-tab-actions">
+              <ConstellationButton variant="secondary" size="sm" onclick={() => openCreate()}>
+                Add secret
+              </ConstellationButton>
+            </div>
+          </div>
+
+          <div class="vault-list" aria-label="Vault entries">
+            {#if loading}
+              {#each Array(9) as _}
+                <div class="vault-row-skeleton"></div>
+              {/each}
+            {:else if filteredRows.length === 0}
+              <ConstellationEmptyState
+                title="No matching vault entries"
+                description="Try a different search or add a new secret."
+                size="sm"
+                surface="plain"
+              />
+            {:else}
+              {#each filteredRows as row (row.id)}
+                <article class="vault-item" class:is-expanded={selectedRowId === row.id}>
+                    <button
+                      type="button"
+                      class="vault-row"
+                      class:is-selected={selectedRowId === row.id}
+                      onclick={() => selectRow(row)}
+                    >
+                      <span class="vault-row-main">
+                        <strong>{rowTitle(row)}</strong>
+                        <small>{rowDescription(row)}</small>
+                      </span>
+                      <span class="vault-row-side">
+                        <ConstellationPill variant={rowStatusVariant(row)} leadingDot>{rowStatusLabel(row)}</ConstellationPill>
+                        <small>{rowStatusDetail(row)}</small>
+                      </span>
+                    </button>
+
+                    {#if selectedRowId === row.id}
+                      <div class="vault-expanded">
+                        {#if row.kind === 'pin'}
+                          <div class="expanded-toolbar">
+                            <div class="expanded-facts">
+                              <span>setup needed</span>
+                              <span>{secrets.length} secrets</span>
+                              <span>{pendingAgentGrants.length} grants</span>
+                            </div>
+                            <div class="expanded-actions">
+                              <ConstellationButton variant="secondary" size="sm" onclick={() => (showPinSetup = true)}>
+                                Setup PIN
+                              </ConstellationButton>
+                            </div>
+                          </div>
+                          <details class="vault-region" open>
+                            <summary>
+                              <span>Why it matters</span>
+                              <small>Vault unlock boundary</small>
+                            </summary>
+                            <p class="empty-inline">A PIN adds a second local unlock step before the browser can reveal or mutate secrets.</p>
+                          </details>
+                        {:else if row.kind === 'grant'}
+                          <div class="expanded-toolbar">
+                            <div class="expanded-facts">
+                              <span>{row.grant.requested_by || 'agent'}</span>
+                              <span>run {row.grant.run_id ?? 'unknown'}</span>
+                              <span>{row.grant.read_count}/{row.grant.max_reads} reads</span>
+                            </div>
+                            <div class="expanded-actions">
+                              <ConstellationButton variant="quiet" size="sm" onclick={() => denyAgentGrant(row.grant.id)}>
+                                Deny
+                              </ConstellationButton>
+                              <ConstellationButton variant="secondary" size="sm" onclick={() => approveAgentGrant(row.grant.id)}>
+                                Approve once
+                              </ConstellationButton>
+                            </div>
+                          </div>
+                          <details class="vault-region" open>
+                            <summary>
+                              <span>Request reason</span>
+                              <small>{timeAgo(row.grant.requested_at)}</small>
+                            </summary>
+                            <p class="empty-inline">{row.grant.reason}</p>
+                          </details>
+                        {:else if row.kind === 'missing'}
+                          <div class="expanded-toolbar">
+                            <div class="expanded-facts">
+                              <span>{row.missing.request_count} requests</span>
+                              <span>{timeAgo(row.missing.last_requested)}</span>
+                              <span>runtime key</span>
+                            </div>
+                            <div class="expanded-actions">
+                              <ConstellationButton variant="secondary" size="sm" onclick={() => openCreate(row.missing.key_name)}>
+                                Add secret
+                              </ConstellationButton>
+                            </div>
+                          </div>
+                          <details class="vault-region" open>
+                            <summary>
+                              <span>Missing key</span>
+                              <small>Requested by recent work</small>
+                            </summary>
+                            <p class="empty-inline">Add this key when the active task should be able to use it through approved vault access.</p>
+                          </details>
+                        {:else if row.kind === 'dev_sample'}
+                          <div class="expanded-toolbar">
+                            <div class="expanded-facts">
+                              <span>development only</span>
+                              <span>{row.sample.category}</span>
+                              <span>not stored</span>
+                            </div>
+                            <div class="expanded-actions">
+                              <ConstellationButton
+                                variant="secondary"
+                                size="sm"
+                                onclick={() =>
+                                  openCreate(row.sample.key_name, {
+                                    description: row.sample.description,
+                                    category: row.sample.category,
+                                  })}
+                              >
+                                Add real secret
+                              </ConstellationButton>
+                            </div>
+                          </div>
+                          <details class="vault-region" open>
+                            <summary>
+                              <span>Preview key</span>
+                              <small>Empty dev library</small>
+                            </summary>
+                            <p class="empty-inline">
+                              This sample appears only in development when the vault library has no entries.
+                            </p>
+                          </details>
+                        {:else}
+                          <div class="expanded-toolbar">
+                            <div class="expanded-facts" aria-label="Secret facts">
+                              <span>{row.secret.category || 'general'}</span>
+                              <span>{secretAgeDays(row.secret.updated_at)} old</span>
+                              <span>{row.secret.access_count || 0} reads</span>
+                              <span>{accessLevelLabel(row.secret.agent_access_level)}</span>
+                              <span>{secretGrantHistory(row.secret.key_name).length} grants</span>
+                            </div>
+                            <div class="expanded-actions">
+                              <ConstellationButton
+                                variant="quiet"
+                                size="sm"
+                                onclick={() => revealSecret(row.secret.key_name)}
+                              >
+                                {revealed[row.secret.key_name] ? 'Hide' : 'Reveal'}
+                              </ConstellationButton>
+                              <ConstellationButton
+                                variant="quiet"
+                                size="sm"
+                                onclick={() => copySecret(row.secret.key_name)}
+                              >
+                                {copiedKey === row.secret.key_name ? 'Copied' : 'Copy'}
+                              </ConstellationButton>
+                              <ConstellationButton variant="secondary" size="sm" onclick={() => openEdit(row.secret)}>
+                                Edit
+                              </ConstellationButton>
+                              <ConstellationButton variant="quiet" size="sm" onclick={() => openBind(row.secret)}>
+                                Bind project
+                              </ConstellationButton>
+                              <ConstellationButton variant="quiet" size="sm" onclick={() => openShare(row.secret)}>
+                                Share
+                              </ConstellationButton>
+                              <ConstellationButton
+                                variant="destructive"
+                                size="sm"
+                                onclick={() => deleteSecret(row.secret.key_name)}
+                              >
+                                Delete
+                              </ConstellationButton>
+                            </div>
+                          </div>
+
+                          {#if revealed[row.secret.key_name]}
+                            <div class="vault-revealed minimal">
+                              <code>{revealed[row.secret.key_name]}</code>
+                            </div>
+                          {/if}
+
+                          <details class="vault-region" open>
+                            <summary>
+                              <span>Analytics</span>
+                              <small>{timeAgo(row.secret.last_accessed_at)} / x{row.secret.access_count || 0}</small>
+                            </summary>
+                            <dl class="metadata-list">
+                              <div><dt>Category</dt><dd>{row.secret.category || 'general'}</dd></div>
+                              <div><dt>Access count</dt><dd>{row.secret.access_count || 0}</dd></div>
+                              <div><dt>Last accessed</dt><dd>{timeAgo(row.secret.last_accessed_at)}</dd></div>
+                              <div><dt>Created</dt><dd>{timeAgo(row.secret.created_at)}</dd></div>
+                              <div><dt>Updated</dt><dd>{timeAgo(row.secret.updated_at)}</dd></div>
+                              <div><dt>Rotation age</dt><dd>{secretAgeDays(row.secret.updated_at)}</dd></div>
+                              <div><dt>Agent policy</dt><dd>{accessLevelLabel(row.secret.agent_access_level)}</dd></div>
+                            </dl>
+                          </details>
+
+                          <details class="vault-region">
+                            <summary>
+                              <span>Agent access</span>
+                              <small>{secretProjectBindings(row.secret.id).length} project bindings / {secretGrantHistory(row.secret.key_name).length} grants</small>
+                            </summary>
+                            {#if secretProjectBindings(row.secret.id).length}
+                              <div class="advisory-list">
+                                {#each secretProjectBindings(row.secret.id) as binding (binding.id)}
+                                  <div class="advisory-row">
+                                    <ConstellationPill variant="info">{binding.env_name}</ConstellationPill>
+                                    <span>{binding.project_slug}</span>
+                                    <button type="button" class="inline-action" onclick={() => deleteProjectBinding(binding.id)}>Remove</button>
+                                  </div>
+                                {/each}
+                              </div>
+                            {:else}
+                              <p class="empty-inline">No project bindings for this key yet.</p>
+                            {/if}
+                            {#if secretGrantHistory(row.secret.key_name).length}
+                              <div class="advisory-list">
+                                {#each secretGrantHistory(row.secret.key_name).slice(0, 8) as grant (grant.id)}
+                                  <div class="advisory-row">
+                                    <ConstellationPill variant={grantPillVariant(grant.status)}>{grant.status}</ConstellationPill>
+                                    <span>{grantDescription(grant)}</span>
+                                  </div>
+                                {/each}
+                              </div>
+                            {:else}
+                              <p class="empty-inline">No decided grants for this key yet.</p>
+                            {/if}
+                          </details>
+
+                          <details class="vault-region">
+                            <summary>
+                              <span>Vault readiness</span>
+                              <small>{postureLabel}</small>
+                            </summary>
+                            <div class="advisory-list">
+                              {#each postureItems as item}
+                                <div class="advisory-row">
+                                  <ConstellationPill variant={item.ok ? 'success' : 'warning'}>{item.label}</ConstellationPill>
+                                  <span>{item.detail}</span>
+                                </div>
+                              {/each}
+                            </div>
+                          </details>
+                        {/if}
+                      </div>
+                    {/if}
+                </article>
+              {/each}
+            {/if}
           </div>
         </div>
-      </ConstellationPanel>
-
-      <ConstellationPanel className="inventory-panel" padding="none" ariaLabel="Vault inventory">
-        {#snippet header()}
-          <ConstellationSectionHeader
-            eyebrow="Library"
-            title={loading ? 'Loading' : `${filteredRows.length} visible`}
-            description={loading
-              ? 'Checking lock state and protected inventory.'
-              : `${attentionCount} signal${attentionCount === 1 ? '' : 's'} / ${categoryCount} categor${categoryCount === 1 ? 'y' : 'ies'} / ${grantHistory.length} grant decision${grantHistory.length === 1 ? '' : 's'}`}
-            size="sm"
-          />
-        {/snippet}
-
-        <div class="inventory-tools">
-          <ConstellationSearchField bind:value={filterText} placeholder="Search vault..." aria-label="Search vault" />
-          <ConstellationSegmentedToggle
-            options={FILTER_OPTIONS}
-            activeKey={filterMode}
-            onActiveKeyChange={setFilter}
-            ariaLabel="Vault filter"
-          />
-        </div>
-
-        <div class="vault-list" aria-label="Vault entries">
-          {#if loading}
-            {#each Array(9) as _}
-              <div class="vault-row-skeleton"></div>
-            {/each}
-          {:else if filteredRows.length === 0}
-            <ConstellationEmptyState
-              title="No matching vault entries"
-              description="The active filters returned an empty vault view."
-              size="sm"
-              surface="plain"
-            />
-          {:else}
-            {#each filteredRows as row (row.id)}
-              <article class="vault-item" class:is-expanded={selectedRowId === row.id}>
-                  <button
-                    type="button"
-                    class="vault-row"
-                    class:is-selected={selectedRowId === row.id}
-                    onclick={() => selectRow(row)}
-                  >
-                    <span class="vault-row-main">
-                      <strong>{rowTitle(row)}</strong>
-                      <small>{rowDescription(row)}</small>
-                    </span>
-                    <span class="vault-row-side">
-                      <ConstellationPill variant={rowStatusVariant(row)} leadingDot>{rowStatusLabel(row)}</ConstellationPill>
-                      <small>{rowStatusDetail(row)}</small>
-                    </span>
-                  </button>
-
-                  {#if selectedRowId === row.id}
-                    <div class="vault-expanded">
-                      {#if row.kind === 'pin'}
-                        <div class="expanded-toolbar">
-                          <div class="expanded-facts">
-                            <span>setup needed</span>
-                            <span>{secrets.length} secrets</span>
-                            <span>{pendingAgentGrants.length} grants</span>
-                          </div>
-                          <div class="expanded-actions">
-                            <ConstellationButton variant="secondary" size="sm" onclick={() => (showPinSetup = true)}>
-                              Setup PIN
-                            </ConstellationButton>
-                          </div>
-                        </div>
-                        <details class="vault-region" open>
-                          <summary>
-                            <span>Why it matters</span>
-                            <small>Vault unlock boundary</small>
-                          </summary>
-                          <p class="empty-inline">A PIN adds a second local unlock step before the browser can reveal or mutate secrets.</p>
-                        </details>
-                      {:else if row.kind === 'grant'}
-                        <div class="expanded-toolbar">
-                          <div class="expanded-facts">
-                            <span>{row.grant.requested_by || 'agent'}</span>
-                            <span>run {row.grant.run_id ?? 'unknown'}</span>
-                            <span>{row.grant.read_count}/{row.grant.max_reads} reads</span>
-                          </div>
-                          <div class="expanded-actions">
-                            <ConstellationButton variant="quiet" size="sm" onclick={() => denyAgentGrant(row.grant.id)}>
-                              Deny
-                            </ConstellationButton>
-                            <ConstellationButton variant="secondary" size="sm" onclick={() => approveAgentGrant(row.grant.id)}>
-                              Approve once
-                            </ConstellationButton>
-                          </div>
-                        </div>
-                        <details class="vault-region" open>
-                          <summary>
-                            <span>Request reason</span>
-                            <small>{timeAgo(row.grant.requested_at)}</small>
-                          </summary>
-                          <p class="empty-inline">{row.grant.reason}</p>
-                        </details>
-                      {:else if row.kind === 'missing'}
-                        <div class="expanded-toolbar">
-                          <div class="expanded-facts">
-                            <span>{row.missing.request_count} requests</span>
-                            <span>{timeAgo(row.missing.last_requested)}</span>
-                            <span>runtime key</span>
-                          </div>
-                          <div class="expanded-actions">
-                            <ConstellationButton variant="secondary" size="sm" onclick={() => openCreate(row.missing.key_name)}>
-                              Add secret
-                            </ConstellationButton>
-                          </div>
-                        </div>
-                        <details class="vault-region" open>
-                          <summary>
-                            <span>Missing key</span>
-                            <small>Requested by recent work</small>
-                          </summary>
-                          <p class="empty-inline">Add this key when the active task should be able to use it through approved vault access.</p>
-                        </details>
-                      {:else}
-                        <div class="expanded-toolbar">
-                          <div class="expanded-facts" aria-label="Secret facts">
-                            <span>{row.secret.category || 'general'}</span>
-                            <span>{secretAgeDays(row.secret.updated_at)} old</span>
-                            <span>{row.secret.access_count || 0} reads</span>
-                            <span>{accessLevelLabel(row.secret.agent_access_level)}</span>
-                            <span>{secretGrantHistory(row.secret.key_name).length} grants</span>
-                          </div>
-                          <div class="expanded-actions">
-                            <ConstellationButton
-                              variant="quiet"
-                              size="sm"
-                              onclick={() => revealSecret(row.secret.key_name)}
-                            >
-                              {revealed[row.secret.key_name] ? 'Hide' : 'Reveal'}
-                            </ConstellationButton>
-                            <ConstellationButton
-                              variant="quiet"
-                              size="sm"
-                              onclick={() => copySecret(row.secret.key_name)}
-                            >
-                              {copiedKey === row.secret.key_name ? 'Copied' : 'Copy'}
-                            </ConstellationButton>
-                            <ConstellationButton variant="secondary" size="sm" onclick={() => openEdit(row.secret)}>
-                              Edit
-                            </ConstellationButton>
-                            <ConstellationButton variant="quiet" size="sm" onclick={() => openBind(row.secret)}>
-                              Bind project
-                            </ConstellationButton>
-                            <ConstellationButton variant="quiet" size="sm" onclick={() => openShare(row.secret)}>
-                              Share
-                            </ConstellationButton>
-                            <ConstellationButton
-                              variant="destructive"
-                              size="sm"
-                              onclick={() => deleteSecret(row.secret.key_name)}
-                            >
-                              Delete
-                            </ConstellationButton>
-                          </div>
-                        </div>
-
-                        {#if revealed[row.secret.key_name]}
-                          <div class="vault-revealed minimal">
-                            <code>{revealed[row.secret.key_name]}</code>
-                          </div>
-                        {/if}
-
-                        <details class="vault-region" open>
-                          <summary>
-                            <span>Analytics</span>
-                            <small>{timeAgo(row.secret.last_accessed_at)} / x{row.secret.access_count || 0}</small>
-                          </summary>
-                          <dl class="metadata-list">
-                            <div><dt>Category</dt><dd>{row.secret.category || 'general'}</dd></div>
-                            <div><dt>Access count</dt><dd>{row.secret.access_count || 0}</dd></div>
-                            <div><dt>Last accessed</dt><dd>{timeAgo(row.secret.last_accessed_at)}</dd></div>
-                            <div><dt>Created</dt><dd>{timeAgo(row.secret.created_at)}</dd></div>
-                            <div><dt>Updated</dt><dd>{timeAgo(row.secret.updated_at)}</dd></div>
-                            <div><dt>Rotation age</dt><dd>{secretAgeDays(row.secret.updated_at)}</dd></div>
-                            <div><dt>Agent policy</dt><dd>{accessLevelLabel(row.secret.agent_access_level)}</dd></div>
-                          </dl>
-                        </details>
-
-                        <details class="vault-region">
-                          <summary>
-                            <span>Agent access</span>
-                            <small>{secretProjectBindings(row.secret.id).length} project bindings / {secretGrantHistory(row.secret.key_name).length} grants</small>
-                          </summary>
-                          {#if secretProjectBindings(row.secret.id).length}
-                            <div class="advisory-list">
-                              {#each secretProjectBindings(row.secret.id) as binding (binding.id)}
-                                <div class="advisory-row">
-                                  <ConstellationPill variant="info">{binding.env_name}</ConstellationPill>
-                                  <span>{binding.project_slug}</span>
-                                  <button type="button" class="inline-action" onclick={() => deleteProjectBinding(binding.id)}>Remove</button>
-                                </div>
-                              {/each}
-                            </div>
-                          {:else}
-                            <p class="empty-inline">No project bindings for this key yet.</p>
-                          {/if}
-                          {#if secretGrantHistory(row.secret.key_name).length}
-                            <div class="advisory-list">
-                              {#each secretGrantHistory(row.secret.key_name).slice(0, 8) as grant (grant.id)}
-                                <div class="advisory-row">
-                                  <ConstellationPill variant={grantPillVariant(grant.status)}>{grant.status}</ConstellationPill>
-                                  <span>{grantDescription(grant)}</span>
-                                </div>
-                              {/each}
-                            </div>
-                          {:else}
-                            <p class="empty-inline">No decided grants for this key yet.</p>
-                          {/if}
-                        </details>
-
-                        <details class="vault-region">
-                          <summary>
-                            <span>Vault readiness</span>
-                            <small>{postureLabel}</small>
-                          </summary>
-                          <div class="advisory-list">
-                            {#each postureItems as item}
-                              <div class="advisory-row">
-                                <ConstellationPill variant={item.ok ? 'success' : 'warning'}>{item.label}</ConstellationPill>
-                                <span>{item.detail}</span>
-                              </div>
-                            {/each}
-                          </div>
-                        </details>
-                      {/if}
-                    </div>
-                  {/if}
-              </article>
-            {/each}
-          {/if}
-        </div>
-      </ConstellationPanel>
+      {/if}
     </section>
   </ConstellationPageFrame>
 {/if}
@@ -2104,6 +2151,17 @@
     text-align: center;
   }
 
+  .vault-constellation-lock-mark {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    border: 1px solid var(--constellation-surface-nested-border);
+    border-radius: 999px;
+    background: var(--constellation-surface-nested-background);
+    color: var(--constellation-color-text-primary);
+  }
+
   .vault-constellation-lock-copy {
     display: grid;
     gap: 8px;
@@ -2138,8 +2196,17 @@
   }
 
   :global(.vault-constellation-lock-input .constellation-text-input-control) {
-    text-align: center;
-    font-size: 16px;
+    text-align: left;
+    font-size: 14px;
+  }
+
+  :global(.vault-constellation-lock-input .constellation-text-input-trailing) {
+    color: var(--constellation-color-text-secondary);
+  }
+
+  :global(.vault-constellation-lock-reveal) {
+    width: 24px;
+    height: 24px;
   }
 
   .vault-constellation-lock-attempts {
@@ -2157,32 +2224,87 @@
     display: grid;
     grid-template-columns: 1fr;
     align-items: start;
-    gap: 14px;
     min-height: 0;
   }
 
-  :global(.inventory-panel .constellation-panel-header) {
-    padding: 18px 18px 16px;
-  }
-
-  :global(.inventory-panel .constellation-panel-content) {
+  .vault-tab-panel {
     display: grid;
-    gap: 0;
+    gap: 18px;
+    min-width: 0;
     min-height: 0;
-    overflow: visible;
   }
 
-  .inventory-tools {
+  .vault-tab-toolbar {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
+    justify-content: space-between;
     gap: 12px;
-    padding: 16px;
+    min-width: 0;
+    padding: 0 0 16px;
     border-bottom: 1px solid var(--constellation-surface-panel-separator);
+  }
+
+  .mcp-tab-toolbar {
+    display: grid;
+    min-width: 0;
   }
 
   .inventory-tools :global(.constellation-search-field) {
     flex: 1 1 260px;
+  }
+
+  .vault-tab-actions {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .mcp-endpoint {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    justify-content: flex-start;
+    min-width: 0;
+    min-height: 34px;
+  }
+
+  .mcp-endpoint-copy {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .mcp-endpoint-label {
+    color: var(--constellation-label-eyebrow);
+    font-family: var(--constellation-font-mono);
+    font-size: var(--constellation-type-meta);
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .mcp-endpoint-value {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--content-code-text);
+    background: var(--content-code-background);
+    border: 1px solid var(--content-code-border);
+    border-radius: var(--radius-xs);
+    font-family: var(--constellation-font-mono);
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 1px 4px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    width: fit-content;
+    max-width: 100%;
   }
 
   .vault-list {
@@ -2191,7 +2313,7 @@
     gap: 6px;
     min-height: 0;
     overflow: visible;
-    padding: 0 14px 14px;
+    padding: 0;
   }
 
   .vault-item {
@@ -2433,22 +2555,37 @@
     overflow-wrap: anywhere;
   }
 
-  :global(.agent-panel .constellation-panel-header) {
-    padding: 18px 18px 16px;
-  }
-
-  :global(.agent-panel .constellation-panel-content) {
+  .mcp-token-section {
     display: grid;
-    gap: 0;
+    gap: 12px;
+    min-width: 0;
   }
 
-  .agent-panel-content {
+  .mcp-token-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .mcp-token-heading h2 {
+    margin: 0;
+    color: var(--constellation-color-text-primary);
+    font-family: var(--constellation-font-sans);
+    font-size: 18px;
+    font-weight: 560;
+    letter-spacing: 0;
+    line-height: 1.25;
+  }
+
+  .mcp-token-reveal {
     display: grid;
-    gap: 14px;
-    padding: 16px;
+    gap: 10px;
+    min-width: 0;
   }
 
-  .agent-summary-strip {
+  .mcp-token-secret {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
@@ -2457,117 +2594,64 @@
     padding: 10px 12px;
     border: 1px solid var(--constellation-surface-panel-separator);
     border-radius: 8px;
-    background: color-mix(in srgb, var(--constellation-surface-nested-background) 78%, transparent);
+    background: var(--constellation-surface-nested-background);
   }
 
-  .agent-summary-strip span {
-    min-width: 0;
-    overflow: hidden;
-    color: var(--constellation-color-text-secondary);
-    font-family: var(--constellation-font-mono);
-    font-size: 12px;
-    line-height: 1.45;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .agent-token-section,
-  .agent-panel-section {
+  .mcp-token-secret div,
+  .mcp-token-row div {
     display: grid;
-    gap: 12px;
-    min-width: 0;
-    padding: 12px;
-    border: 1px solid var(--constellation-surface-panel-separator);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--constellation-surface-nested-background) 82%, transparent);
-  }
-
-  .agent-panel-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
-    gap: 12px;
+    gap: 4px;
     min-width: 0;
   }
 
-  .agent-section-heading {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 12px;
+  .mcp-token-secret strong,
+  .mcp-token-row strong {
     min-width: 0;
-  }
-
-  .agent-section-heading strong {
-    min-width: 0;
-    overflow: hidden;
     color: var(--constellation-color-text-primary);
     font-size: 13px;
     font-weight: 560;
     line-height: 1.35;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
-  .agent-section-heading small {
+  .mcp-token-secret code,
+  .mcp-token-row span {
     min-width: 0;
     overflow: hidden;
     color: var(--constellation-color-text-secondary);
     font-size: 12px;
     line-height: 1.45;
-    text-align: right;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .agent-token-stack {
-    display: grid;
-    gap: 12px;
-    min-width: 0;
+  .mcp-token-secret code {
+    color: var(--constellation-color-text-primary);
+    font-family: var(--constellation-font-mono);
   }
 
-  .agent-connection-list {
+  .mcp-token-list {
     display: grid;
     gap: 8px;
     min-width: 0;
   }
 
-  .agent-connection-row {
+  .mcp-token-row {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
     gap: 10px;
     min-width: 0;
-    padding: 8px 0;
-    border-bottom: 1px solid var(--constellation-surface-panel-separator);
+    padding: 10px 12px;
+    border: 1px solid var(--constellation-surface-panel-separator);
+    border-radius: 8px;
+    background: var(--constellation-surface-nested-background);
   }
 
-  .agent-connection-row:last-child {
-    border-bottom: 0;
-  }
-
-  .agent-connection-row div {
-    display: grid;
-    gap: 3px;
-    min-width: 0;
-  }
-
-  .agent-connection-row strong {
-    min-width: 0;
+  .mcp-token-row strong {
     overflow: hidden;
     color: var(--constellation-color-text-primary);
-    font-size: 13px;
-    font-weight: 560;
-    line-height: 1.35;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .agent-connection-row span {
-    min-width: 0;
-    overflow-wrap: anywhere;
-    color: var(--constellation-color-text-secondary);
-    font-size: 12px;
-    line-height: 1.45;
   }
 
   :global(.agent-modal-notice) {
@@ -2653,18 +2737,26 @@
       grid-template-columns: 1fr;
     }
 
-    .agent-panel-grid,
-    .agent-summary-strip,
-    .agent-section-heading {
+    .vault-tab-toolbar {
+      align-items: stretch;
+    }
+
+    .vault-tab-actions {
+      justify-content: flex-start;
+    }
+
+    .mcp-endpoint {
+      grid-template-columns: 1fr;
+      gap: 5px;
+    }
+
+    .mcp-endpoint-copy,
+    .mcp-token-secret,
+    .mcp-token-row {
       grid-template-columns: 1fr;
     }
 
-    .agent-section-heading small {
-      text-align: left;
-    }
-
-    .agent-connection-row {
-      grid-template-columns: 1fr;
+    .mcp-token-row {
       align-items: start;
     }
   }

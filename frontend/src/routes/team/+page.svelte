@@ -4,15 +4,11 @@
 
   import { api } from '$lib/api/client';
   import {
-    ConstellationActionRow,
     ConstellationButton,
-    ConstellationCallout,
     ConstellationEmptyState,
     ConstellationPageFrame,
-    ConstellationPanel,
     ConstellationPill,
     ConstellationPresenceSeed,
-    ConstellationPresenceStack,
     ConstellationSection,
     ConstellationSkeletonBlock,
   } from '$lib/components/constellation';
@@ -85,14 +81,6 @@
   const pendingMembers = $derived.by(() => members.filter((member) => !member.approved));
   const currentMember = $derived.by(
     () => approvedMembers.find((member) => String(member.id) === currentUserId) ?? null,
-  );
-
-  const activePresenceMembers = $derived.by(() =>
-    approvedMembers.slice(0, 4).map((member) => ({
-      name: member.name,
-      tone: 'spectral' as const,
-      style: presenceSeedStyle(member.color),
-    })),
   );
 
   const tokenUsageByMember = $derived.by(() => {
@@ -296,11 +284,6 @@
     }
   }
 
-  function memberSubtitle(member: TeamMember) {
-    const pieces = [member.email, `joined ${timeAgo(member.created_at)}`];
-    return pieces.join(' · ');
-  }
-
   function isCurrentMember(member: TeamMember) {
     return String(member.id) === currentUserId;
   }
@@ -315,82 +298,52 @@
 </script>
 
 <ConstellationPageFrame
-  eyebrow="Constellation Team"
   title="Team"
-  subtitle={loading ? 'Loading roster and approvals.' : `${approvedMembers.length} active member${approvedMembers.length === 1 ? '' : 's'}${pendingMembers.length ? ` · ${pendingMembers.length} pending approval` : ''}`}
+  subtitle="Manage members and usage."
 >
   {#snippet actions()}
     {#if canApproveAccess()}
-      <ConstellationButton variant="primary" size="sm" onclick={copyInviteLink}>
+      <ConstellationButton variant="secondary" size="sm" onclick={copyInviteLink}>
         Invite member
-      </ConstellationButton>
-    {/if}
-    {#if currentMember}
-      <ConstellationButton variant="secondary" size="sm" onclick={() => openProfileEdit()}>
-        Edit profile
       </ConstellationButton>
     {/if}
   {/snippet}
 
   {#if loading}
     <section class="team-loading-stack" aria-label="Team loading">
-      <ConstellationSkeletonBlock variant="panel" height="120px" />
+      <ConstellationSkeletonBlock variant="panel" height="68px" />
       <ConstellationSkeletonBlock variant="panel" height="280px" />
     </section>
   {:else if members.length === 0}
-    <ConstellationPanel>
+    <div class="team-empty">
       <ConstellationEmptyState
         title="No team members found."
-        description="Once people join the workspace, approvals and roster details will appear here."
+        description="Invite a teammate to start building the roster."
       />
-    </ConstellationPanel>
+    </div>
   {:else}
-    {#if approvedMembers.length || pendingMembers.length}
-      <ConstellationCallout
-        title={pendingMembers.length ? `${pendingMembers.length} ${pendingMembers.length === 1 ? 'person is' : 'people are'} waiting for approval` : `${approvedMembers.length} active ${approvedMembers.length === 1 ? 'member' : 'members'} in the workspace`}
-        text={`${approvedMembers.length} member${approvedMembers.length === 1 ? '' : 's'} are active across workspace and thread right now.`}
-      >
-        {#snippet actions()}
-          {#if activePresenceMembers.length}
-            <ConstellationPresenceStack
-              members={activePresenceMembers}
-              caption={`${approvedMembers.length} active now`}
-            />
-          {/if}
-          {#if pendingMembers.length}
-            <ConstellationPill variant="thinking">{pendingMembers.length} pending</ConstellationPill>
-          {/if}
-        {/snippet}
-      </ConstellationCallout>
-    {/if}
-
     {#if pendingMembers.length}
-      <ConstellationSection
-        eyebrow="Pending approval"
-        title="Approval queue"
-        description="Any active workspace member can approve new access requests."
-      >
-        <div class="team-row-stack">
+      <ConstellationSection eyebrow="Access" title="Pending approval">
+        <div class="team-pending-list">
           {#each pendingMembers as member (member.id)}
-            <ConstellationActionRow
-              title={member.name}
-              description={memberSubtitle(member)}
-              tone="warning"
-              meta="Awaiting member review"
-            >
-              {#snippet leading()}
+            <article class="team-pending-row">
+              <div class="team-member-identity">
                 <ConstellationPresenceSeed
                   label={member.name}
                   size="md"
+                  treatment="plain"
                   style={presenceSeedStyle(member.color)}
                 />
-              {/snippet}
+                <div class="team-member-copy">
+                  <div class="team-member-name-row">
+                    <h3>{member.name}</h3>
+                    <ConstellationPill variant="warning">Pending</ConstellationPill>
+                  </div>
+                  <p>{member.email} · joined {timeAgo(member.created_at)}</p>
+                </div>
+              </div>
 
-              {#snippet badge()}
-                <ConstellationPill variant="warning">Pending</ConstellationPill>
-              {/snippet}
-
-              {#snippet actions()}
+              <div class="team-pending-actions">
                 {#if canRejectAccess()}
                   <ConstellationButton
                     variant="quiet"
@@ -411,282 +364,424 @@
                     {actionPending[String(member.id)] ? 'Working...' : 'Approve'}
                   </ConstellationButton>
                 {/if}
-              {/snippet}
-            </ConstellationActionRow>
+              </div>
+            </article>
           {/each}
         </div>
       </ConstellationSection>
     {/if}
 
-    <ConstellationSection
-      eyebrow="Roster"
-      title="Members"
-      description="Approved people with their current presence color, access role, and run-linked token usage."
-    >
+    <ConstellationSection eyebrow="Roster" title="Members">
       {#snippet actions()}
         {#if tokenAnalyticsLoading}
           <ConstellationPill variant="muted">Loading tokens</ConstellationPill>
         {:else if tokenAnalytics}
-          <ConstellationPill variant="info">
-            {formatTokens(tokenAnalytics.totals.total_tokens)} tokens · {formatCost(tokenAnalytics.totals.estimated_cost)} · {tokenAnalytics.window_days}d
+          <ConstellationPill variant="muted">
+            {tokenAnalytics.window_days}d · {formatTokens(tokenAnalytics.totals.total_tokens)} tokens · {formatCost(tokenAnalytics.totals.estimated_cost)}
           </ConstellationPill>
         {:else}
           <ConstellationPill variant="warning">Tokens unavailable</ConstellationPill>
         {/if}
       {/snippet}
 
-      <div class="team-row-stack">
+      <div class="team-member-list" role="table" aria-label="Approved team members">
+        <div class="team-member-header" role="row">
+          <span role="columnheader">Member</span>
+          <span role="columnheader">Role</span>
+          <span role="columnheader">Activity</span>
+          <span role="columnheader">Tokens</span>
+          <span role="columnheader">Cost</span>
+          <span role="columnheader">Last used</span>
+        </div>
+
         {#each approvedMembers as member (member.id)}
           {@const tokenUsage = tokenUsageForMember(member)}
-          <ConstellationActionRow
-            title={member.name}
-            description={memberSubtitle(member)}
-            tone="default"
-            meta={member.role}
-          >
-            {#snippet leading()}
-              <ConstellationPresenceSeed
-                label={member.name}
-                size="md"
-                style={presenceSeedStyle(member.color)}
-              />
-            {/snippet}
-
-            {#snippet badge()}
-              <ConstellationPill variant={member.role === 'owner' ? 'info' : 'muted'}>
-                {isCurrentMember(member) ? 'You' : member.role}
-              </ConstellationPill>
-            {/snippet}
-
-            {#snippet actions()}
+          <div class="team-member-row" role="row">
+            <div class="team-member-cell team-member-identity" role="cell">
               {#if isCurrentMember(member)}
-                <ConstellationButton
-                  variant="quiet"
-                  size="sm"
+                <button
+                  type="button"
+                  class="team-avatar-button"
+                  aria-label="Edit your profile"
                   onclick={() => openProfileEdit(member)}
                 >
-                  Edit
-                </ConstellationButton>
+                  <ConstellationPresenceSeed
+                    label={member.name}
+                    size="md"
+                    treatment="plain"
+                    style={presenceSeedStyle(member.color)}
+                  />
+                </button>
+              {:else}
+                <ConstellationPresenceSeed
+                  label={member.name}
+                  size="md"
+                  treatment="plain"
+                  style={presenceSeedStyle(member.color)}
+                />
               {/if}
-            {/snippet}
-
-            {#snippet supporting()}
-              <div class="team-token-analytics">
-                {#if tokenAnalyticsLoading}
-                  <span class="team-token-muted">Loading token analytics...</span>
-                {:else if !tokenAnalytics}
-                  <span class="team-token-muted">Token analytics unavailable</span>
-                {:else}
-                  <div class="team-token-meter" aria-hidden="true">
-                    <span
-                      class="team-token-meter-fill"
-                      style={`width: ${tokenUsagePercent(tokenUsage)}%`}
-                    ></span>
-                  </div>
-                  <div class="team-token-metrics" aria-label={`Token analytics for ${member.name}`}>
-                    <span class="team-token-metric team-token-metric-primary">
-                      {formatTokens(tokenUsage.total_tokens)} tokens
-                    </span>
-                    <span class="team-token-metric">In {formatTokens(tokenUsage.input_tokens)}</span>
-                    <span class="team-token-metric">Out {formatTokens(tokenUsage.output_tokens)}</span>
-                    <span class="team-token-metric">{tokenUsage.runs.toLocaleString()} runs</span>
-                    <span class="team-token-metric">{tokenUsage.api_calls.toLocaleString()} calls</span>
-                    {#if tokenUsage.cache_read || tokenUsage.cache_write}
-                      <span class="team-token-metric">Cache {formatTokens(tokenUsage.cache_read)} read</span>
-                    {/if}
-                    <span class="team-token-metric">{formatCost(tokenUsage.estimated_cost)}</span>
-                    {#if tokenUsage.last_used_at}
-                      <span class="team-token-muted">last {timeAgo(tokenUsage.last_used_at)}</span>
-                    {:else}
-                      <span class="team-token-muted">no tracked usage</span>
-                    {/if}
-                  </div>
-                {/if}
+              <div class="team-member-copy">
+                <div class="team-member-name-row">
+                  <h3>{member.name}</h3>
+                  {#if isCurrentMember(member)}
+                    <ConstellationPill variant="muted">You</ConstellationPill>
+                  {/if}
+                </div>
+                <p>{member.email}</p>
               </div>
-            {/snippet}
-          </ConstellationActionRow>
+            </div>
+
+            <div class="team-member-cell" role="cell">
+              <span class="team-member-primary">{member.role}</span>
+              <span class="team-member-secondary">joined {timeAgo(member.created_at)}</span>
+            </div>
+
+            <div class="team-member-cell team-member-number" role="cell">
+              {#if tokenAnalyticsLoading}
+                <span class="team-member-secondary">Loading</span>
+              {:else if !tokenAnalytics}
+                <span class="team-member-secondary">Unavailable</span>
+              {:else}
+                <span class="team-member-primary">{tokenUsage.runs.toLocaleString()} runs</span>
+                <span class="team-member-secondary">{tokenUsage.api_calls.toLocaleString()} calls</span>
+              {/if}
+            </div>
+
+            <div class="team-member-cell team-token-cell" role="cell">
+              {#if tokenAnalyticsLoading}
+                <span class="team-member-secondary">Loading</span>
+              {:else if !tokenAnalytics}
+                <span class="team-member-secondary">Unavailable</span>
+              {:else}
+                <div class="team-token-meter" aria-hidden="true">
+                  <span
+                    class="team-token-meter-fill"
+                    style={`width: ${tokenUsagePercent(tokenUsage)}%`}
+                  ></span>
+                </div>
+                <span class="team-member-primary">{formatTokens(tokenUsage.total_tokens)} tokens</span>
+                <span class="team-member-secondary">
+                  In {formatTokens(tokenUsage.input_tokens)} / Out {formatTokens(tokenUsage.output_tokens)}
+                </span>
+              {/if}
+            </div>
+
+            <div class="team-member-cell team-member-number" role="cell">
+              {#if tokenAnalyticsLoading}
+                <span class="team-member-secondary">Loading</span>
+              {:else if !tokenAnalytics}
+                <span class="team-member-secondary">Unavailable</span>
+              {:else}
+                <span class="team-member-primary">{formatCost(tokenUsage.estimated_cost)}</span>
+              {/if}
+            </div>
+
+            <div class="team-member-cell" role="cell">
+              {#if tokenAnalyticsLoading}
+                <span class="team-member-secondary">Loading</span>
+              {:else if !tokenAnalytics}
+                <span class="team-member-secondary">Unavailable</span>
+              {:else if tokenUsage.last_used_at}
+                <span class="team-member-primary">{timeAgo(tokenUsage.last_used_at)}</span>
+              {:else}
+                <span class="team-member-secondary">No tracked usage</span>
+              {/if}
+            </div>
+          </div>
         {/each}
+
+        {#if !tokenAnalyticsLoading && tokenAnalytics?.unattributed?.total_tokens}
+          <div class="team-member-row team-member-row-muted" role="row">
+            <div class="team-member-cell team-member-identity" role="cell">
+              <span class="team-system-mark" aria-hidden="true"></span>
+              <div class="team-member-copy">
+                <div class="team-member-name-row">
+                  <h3>System / unattributed</h3>
+                </div>
+                <p>Usage without a member attribution.</p>
+              </div>
+            </div>
+            <div class="team-member-cell" role="cell">
+              <span class="team-member-secondary">System</span>
+            </div>
+            <div class="team-member-cell team-member-number" role="cell">
+              <span class="team-member-primary">{tokenAnalytics.unattributed.runs.toLocaleString()} runs</span>
+              <span class="team-member-secondary">{tokenAnalytics.unattributed.api_calls.toLocaleString()} calls</span>
+            </div>
+            <div class="team-member-cell team-token-cell" role="cell">
+              <span class="team-member-primary">{formatTokens(tokenAnalytics.unattributed.total_tokens)} tokens</span>
+            </div>
+            <div class="team-member-cell team-member-number" role="cell">
+              <span class="team-member-primary">{formatCost(tokenAnalytics.unattributed.estimated_cost)}</span>
+            </div>
+            <div class="team-member-cell" role="cell">
+              <span class="team-member-secondary">Unassigned</span>
+            </div>
+          </div>
+        {/if}
       </div>
     </ConstellationSection>
 
-    {#if !tokenAnalyticsLoading && tokenAnalytics?.unattributed?.total_tokens}
-      <ConstellationPanel>
-        <div class="team-token-unattributed">
-          <div>
-            <p class="team-token-unattributed-eyebrow">System / unattributed</p>
-            <p class="team-token-unattributed-title">
-              {formatTokens(tokenAnalytics.unattributed.total_tokens)} tokens could not be assigned to a member.
-            </p>
-          </div>
-          <div class="team-token-unattributed-meta">
-            {tokenAnalytics.unattributed.runs.toLocaleString()} runs · {tokenAnalytics.unattributed.api_calls.toLocaleString()} calls · {formatCost(tokenAnalytics.unattributed.estimated_cost)}
-          </div>
-        </div>
-      </ConstellationPanel>
-    {/if}
-
     {#if editingProfile}
-      <ConstellationPanel tone="info">
-        <div class="team-profile-editor">
-          <div class="team-profile-copy">
-            <p class="team-profile-eyebrow">Profile</p>
-            <h2 class="team-profile-title">Edit your presence</h2>
-            <p class="team-profile-description">
-              Choose the color used for your seed across shared surfaces and whether your name appears on contributions.
-            </p>
-          </div>
-
-          <div class="team-profile-fields">
-            <label class="team-profile-field" for="profile-color">
-              <span class="team-profile-label">Color</span>
-              <div class="team-profile-color-row">
-                <input
-                  id="profile-color"
-                  type="color"
-                  bind:value={profileColor}
-                  class="team-profile-color-input"
-                />
-                <span class="team-profile-color-value">{profileColor}</span>
-                <ConstellationPresenceSeed
-                  label={currentMember?.name || auth.user?.name || 'You'}
-                  size="md"
-                  style={presenceSeedStyle(profileColor)}
-                />
-              </div>
-            </label>
-
-            <label class="team-profile-field">
-              <span class="team-profile-label">Attribution</span>
-              <span class="team-profile-toggle">
-                <input type="checkbox" bind:checked={profileAttribution} />
-                <span>Show my name on contributions</span>
-              </span>
-            </label>
-          </div>
-
-          <div class="team-profile-actions">
-            <ConstellationButton variant="quiet" size="sm" onclick={() => (editingProfile = false)}>
-              Cancel
-            </ConstellationButton>
-            <ConstellationButton
-              variant="secondary"
-              size="sm"
-              disabled={savingProfile}
-              onclick={saveProfile}
-            >
-              {savingProfile ? 'Saving…' : 'Save'}
-            </ConstellationButton>
-          </div>
+      <section class="team-profile-editor" aria-label="Edit profile">
+        <div class="team-profile-copy">
+          <p class="team-profile-eyebrow">Profile</p>
+          <h2 class="team-profile-title">Edit your presence</h2>
+          <p class="team-profile-description">
+            Choose your shared color and attribution preference.
+          </p>
         </div>
-      </ConstellationPanel>
+
+        <div class="team-profile-fields">
+          <label class="team-profile-field" for="profile-color">
+            <span class="team-profile-label">Color</span>
+            <div class="team-profile-color-row">
+              <input
+                id="profile-color"
+                type="color"
+                bind:value={profileColor}
+                class="team-profile-color-input"
+              />
+              <span class="team-profile-color-value">{profileColor}</span>
+              <ConstellationPresenceSeed
+                label={currentMember?.name || auth.user?.name || 'You'}
+                size="md"
+                treatment="plain"
+                style={presenceSeedStyle(profileColor)}
+              />
+            </div>
+          </label>
+
+          <label class="team-profile-field">
+            <span class="team-profile-label">Attribution</span>
+            <span class="team-profile-toggle">
+              <input type="checkbox" bind:checked={profileAttribution} />
+              <span>Show my name on contributions</span>
+            </span>
+          </label>
+        </div>
+
+        <div class="team-profile-actions">
+          <ConstellationButton variant="quiet" size="sm" onclick={() => (editingProfile = false)}>
+            Cancel
+          </ConstellationButton>
+          <ConstellationButton
+            variant="secondary"
+            size="sm"
+            disabled={savingProfile}
+            onclick={saveProfile}
+          >
+            {savingProfile ? 'Saving...' : 'Save'}
+          </ConstellationButton>
+        </div>
+      </section>
     {/if}
   {/if}
 </ConstellationPageFrame>
 
 <style>
-  .team-loading-stack,
-  .team-row-stack {
+  .team-loading-stack {
     display: grid;
-    gap: 18px;
+    gap: 14px;
   }
 
-  .team-profile-editor {
-    display: grid;
-    gap: 22px;
+  .team-empty {
+    padding-top: 18px;
+    border-top: 1px solid var(--constellation-surface-panel-separator);
   }
 
-  .team-token-analytics {
+  .team-pending-list,
+  .team-member-list {
     display: grid;
-    gap: 8px;
-    width: 100%;
     min-width: 0;
+    border-top: 1px solid var(--constellation-surface-panel-separator);
+  }
+
+  .team-pending-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    min-width: 0;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--constellation-surface-panel-separator);
+  }
+
+  .team-pending-actions {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .team-member-header,
+  .team-member-row {
+    display: grid;
+    grid-template-columns:
+      minmax(250px, 1.45fr)
+      minmax(112px, 0.62fr)
+      minmax(108px, 0.58fr)
+      minmax(210px, 1.08fr)
+      minmax(86px, 0.44fr)
+      minmax(116px, 0.58fr);
+    gap: 16px;
+    align-items: center;
+    min-width: 900px;
+  }
+
+  .team-member-header {
+    padding: 10px 0 8px;
+    color: var(--constellation-label-eyebrow);
+    font-family: var(--constellation-font-mono);
+    font-size: var(--constellation-type-meta);
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    line-height: 1.3;
+    text-transform: uppercase;
+  }
+
+  .team-member-row {
+    padding: 14px 0;
+    border-top: 1px solid var(--constellation-surface-panel-separator);
+  }
+
+  .team-member-row-muted {
+    color: var(--constellation-color-text-tertiary);
+  }
+
+  .team-member-cell {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    align-content: center;
+  }
+
+  .team-member-identity {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .team-avatar-button {
+    display: inline-grid;
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .team-avatar-button:hover {
+    background: var(--constellation-surface-nested-background);
+  }
+
+  .team-avatar-button:focus-visible {
+    outline: 2px solid var(--constellation-control-field-focus-border);
+    outline-offset: 3px;
+  }
+
+  .team-system-mark {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--constellation-surface-nested-border);
+    border-radius: 999px;
+    background: var(--constellation-surface-nested-background);
+  }
+
+  .team-member-copy {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .team-member-name-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .team-member-copy h3 {
+    margin: 0;
+    overflow: hidden;
+    color: var(--constellation-color-text-primary);
+    font-size: 14px;
+    font-weight: 560;
+    line-height: 1.32;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .team-member-copy p {
+    margin: 0;
+    overflow: hidden;
+    color: var(--constellation-color-text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .team-member-primary,
+  .team-member-secondary {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .team-member-primary {
+    color: var(--constellation-color-text-primary);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.35;
+  }
+
+  .team-member-secondary {
+    color: var(--constellation-color-text-tertiary);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .team-member-number .team-member-primary,
+  .team-member-number .team-member-secondary {
+    font-family: var(--constellation-font-mono);
+  }
+
+  .team-token-cell {
+    gap: 5px;
   }
 
   .team-token-meter {
     position: relative;
-    width: min(420px, 100%);
-    height: 5px;
+    width: min(150px, 100%);
+    height: 4px;
     overflow: hidden;
     border-radius: var(--constellation-radius-pill);
-    background: color-mix(in srgb, var(--constellation-color-text-primary) 8%, transparent);
+    background: color-mix(in srgb, var(--constellation-color-text-primary) 7%, transparent);
   }
 
   .team-token-meter-fill {
     position: absolute;
     inset: 0 auto 0 0;
     border-radius: inherit;
-    background: color-mix(in srgb, var(--constellation-color-amber) 78%, var(--constellation-color-text-primary) 12%);
+    background: color-mix(in srgb, var(--constellation-color-text-primary) 32%, transparent);
     box-shadow: none;
   }
 
-  .team-token-metrics {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 7px;
-    min-width: 0;
-  }
-
-  .team-token-metric,
-  .team-token-muted {
-    color: var(--constellation-color-text-tertiary);
-    font-size: 11px;
-    line-height: 1.35;
-    white-space: nowrap;
-  }
-
-  .team-token-metric {
-    padding: 3px 7px;
-    border-radius: var(--constellation-radius-pill);
-    border: 1px solid var(--constellation-surface-nested-border);
-    background: var(--constellation-surface-nested-background);
-    font-family: var(--constellation-font-mono);
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-
-  .team-token-metric-primary {
-    color: var(--constellation-section-title);
-    border-color: color-mix(in srgb, var(--constellation-color-amber) 30%, var(--constellation-surface-nested-border));
-    background: color-mix(in srgb, var(--constellation-color-amber) 10%, var(--constellation-surface-nested-background));
-  }
-
-  .team-token-unattributed {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-  }
-
-  .team-token-unattributed-eyebrow,
-  .team-token-unattributed-title {
-    margin: 0;
-  }
-
-  .team-token-unattributed-eyebrow {
-    color: var(--constellation-label-eyebrow);
-    font-family: var(--constellation-font-mono);
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-  }
-
-  .team-token-unattributed-title {
-    margin-top: 6px;
-    color: var(--constellation-section-title);
-    font-size: 13px;
-    line-height: 1.45;
-  }
-
-  .team-token-unattributed-meta {
-    flex-shrink: 0;
-    color: var(--constellation-color-text-tertiary);
-    font-family: var(--constellation-font-mono);
-    font-size: 10px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    white-space: nowrap;
+  .team-profile-editor {
+    display: grid;
+    gap: 20px;
+    padding-top: 18px;
+    border-top: 1px solid var(--constellation-surface-panel-separator);
   }
 
   .team-profile-copy {
@@ -781,14 +876,23 @@
     accent-color: var(--constellation-color-amber);
   }
 
+  @media (max-width: 1020px) {
+    .team-member-list {
+      overflow-x: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--constellation-data-table-scrollbar) transparent;
+    }
+  }
+
   @media (max-width: 760px) {
-    .team-token-unattributed {
+    .team-pending-row {
       align-items: flex-start;
       flex-direction: column;
     }
 
-    .team-token-unattributed-meta {
-      white-space: normal;
+    .team-pending-actions {
+      justify-content: flex-start;
+      padding-left: 40px;
     }
   }
 </style>

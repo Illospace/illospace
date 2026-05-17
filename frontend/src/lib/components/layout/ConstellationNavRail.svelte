@@ -11,7 +11,6 @@
   } from '$lib/features/cortex/domain/workspacePageModal';
 
   type NavRailGlyph =
-    | 'cortex'
     | 'cycles'
     | 'skills'
     | 'team'
@@ -24,7 +23,6 @@
   };
 
   const defaultItems: readonly NavRailItem[] = [
-    { href: '/cortex', label: 'Cortex', glyph: 'cortex' },
     { href: '/cycles', label: 'Cycles', glyph: 'cycles' },
     { href: '/skills', label: 'Skills', glyph: 'skills' },
     { href: '/team', label: 'Team', glyph: 'team' },
@@ -156,7 +154,7 @@
   .constellation-nav-rail {
     --nav-shell-gap: 16px;
     --nav-collapsed-width: 54px;
-    --nav-expanded-width: 184px;
+    --nav-expanded-width: 166px;
     --nav-font-mono: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
     --nav-brand-mark-background: var(--constellation-system-chrome-active-background, rgba(240, 240, 250, 0.1));
     --nav-brand-mark-color: var(--constellation-system-chrome-active-text, #f0f0fa);
@@ -206,7 +204,6 @@
     align-items: center;
     justify-content: center;
     padding: 8px 4px 7px;
-    border-bottom: 1px solid rgba(240, 240, 250, 0.06);
   }
 
   .constellation-nav-rail-brand {
@@ -389,6 +386,7 @@
   .constellation-nav-rail:focus-within .constellation-nav-rail-header,
   .constellation-nav-rail[data-expanded='true'] .constellation-nav-rail-header {
     justify-content: center;
+    padding-inline: 4px;
   }
 
   .constellation-nav-rail:hover .constellation-nav-rail-brand,

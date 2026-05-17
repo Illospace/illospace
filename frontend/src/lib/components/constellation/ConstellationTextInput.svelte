@@ -6,6 +6,7 @@
     className?: string;
     leadingVisual?: Snippet;
     trailingVisual?: Snippet;
+    trailingInteractive?: boolean;
     mono?: boolean;
     value?: string;
   };
@@ -14,6 +15,7 @@
     className = '',
     leadingVisual,
     trailingVisual,
+    trailingInteractive = false,
     mono = false,
     spellcheck = false,
     value = $bindable(''),
@@ -35,7 +37,7 @@
   <input class="constellation-text-input-control" bind:value {spellcheck} {...rest} />
 
   {#if trailingVisual}
-    <span class="constellation-text-input-trailing" aria-hidden="true">
+    <span class="constellation-text-input-trailing" aria-hidden={trailingInteractive ? undefined : 'true'}>
       {@render trailingVisual()}
     </span>
   {/if}

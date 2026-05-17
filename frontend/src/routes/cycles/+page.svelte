@@ -10,10 +10,8 @@
     ConstellationIcon,
     ConstellationNotice,
     ConstellationPageFrame,
-    ConstellationPanel,
     ConstellationPill,
     ConstellationSearchField,
-    ConstellationSectionHeader,
     ConstellationSegmentedToggle,
     ConstellationSkeletonBlock,
   } from '$lib/components/constellation';
@@ -27,7 +25,7 @@
 
   type ThinkingLevel = '' | 'none' | 'low' | 'medium' | 'high' | 'xhigh';
   type ScheduleCadence = 'once' | 'daily' | 'weekdays' | 'weekly' | 'monthly' | 'custom';
-  type FilterMode = 'all' | 'active' | 'attention';
+  type FilterMode = 'all' | 'active';
   type PillTone = 'muted' | 'warning' | 'success' | 'danger' | 'info';
 
   type CycleForm = {
@@ -72,7 +70,6 @@
   const FILTER_OPTIONS: Array<{ key: FilterMode; label: string }> = [
     { key: 'all', label: 'All' },
     { key: 'active', label: 'Active' },
-    { key: 'attention', label: 'Needs Work' },
   ];
 
   const WEEKDAY_OPTIONS = [
@@ -102,6 +99,7 @@
   let advancedOpen = $state(false);
   let search = $state('');
   let filterMode = $state<FilterMode>('all');
+  let showCreateModal = $state(false);
   let previewRuns = $state<Record<number, CycleRunRead[]>>({});
 
   const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
@@ -143,39 +141,20 @@
     () => cycles.find((cycle) => cycle.id === selectedCycleId) ?? null,
   );
   const isCyclesPreview = $derived(dev && $page.url.searchParams.get('preview') === '1');
-  const activeCount = $derived.by(() => cycles.filter((cycle) => cycle.enabled).length);
-  const pausedCount = $derived.by(() => cycles.length - activeCount);
-  const attentionCount = $derived.by(() => cycles.filter(cycleNeedsAttention).length);
   const filteredCycles = $derived.by(() => {
     const needle = search.trim().toLowerCase();
     return cycles.filter((cycle) => {
       if (filterMode === 'active' && !cycle.enabled) return false;
-      if (filterMode === 'attention' && !cycleNeedsAttention(cycle)) return false;
       if (!needle) return true;
       return cycleSearchText(cycle).includes(needle);
     });
   });
-  const visibleRowCount = $derived.by(
-    () => filteredCycles.length + (selectedRowId === 'draft' ? 1 : 0),
-  );
   const selectedRunThreadId = $derived.by(
     () => runs.find((run) => Boolean(run.idea_id))?.idea_id ?? null,
   );
   const selectedThreadId = $derived.by(
     () => selectedCycle?.target_idea_id || selectedRunThreadId,
   );
-  const nextCycle = $derived.by(() => {
-    const candidates = cycles
-      .filter((cycle) => cycle.enabled && cycle.next_run_at)
-      .map((cycle) => ({
-        cycle,
-        time: new Date(cycle.next_run_at as string).getTime(),
-      }))
-      .filter((entry) => !Number.isNaN(entry.time))
-      .sort((a, b) => a.time - b.time);
-
-    return candidates[0]?.cycle ?? null;
-  });
   const schedulePreview = $derived.by(() => scheduleLabelForForm(form));
 
   function toneForStatus(status: string | null | undefined): PillTone {
@@ -248,7 +227,7 @@
   }
 
   function setFilter(key: string) {
-    if (key === 'all' || key === 'active' || key === 'attention') {
+    if (key === 'all' || key === 'active') {
       filterMode = key;
     }
   }
@@ -718,12 +697,21 @@
 
   function createNewCycle() {
     selectedCycleId = null;
-    selectedRowId = 'draft';
+    selectedRowId = null;
     runs = [];
     fillForm(null);
+    showCreateModal = true;
+  }
+
+  function closeCreateModal() {
+    showCreateModal = false;
+    if (!selectedCycleId) {
+      fillForm(null);
+    }
   }
 
   async function selectCycle(cycleId: number) {
+    showCreateModal = false;
     const cycle = cycles.find((item) => item.id === cycleId) ?? null;
     if (!cycle) return;
     const rowId = cycleRowId(cycle);
@@ -741,6 +729,7 @@
   }
 
   async function saveCycle() {
+    const isCreate = !selectedCycleId;
     const scheduleExpr = scheduleExprFromForm();
     const payload = {
       name: form.name.trim(),
@@ -791,6 +780,7 @@
         selectedRowId = cycleRowId(saved);
         fillForm(saved);
         runs = previewRuns[saved.id] ?? [];
+        if (isCreate) showCreateModal = false;
         ui.toast(existing ? 'Preview cycle updated' : 'Preview cycle created', 'success');
         return;
       }
@@ -798,6 +788,7 @@
         ? await api.updateCycle(selectedCycleId, payload)
         : await api.createCycle(payload);
       ui.toast(selectedCycleId ? 'Cycle updated' : 'Cycle created', 'success');
+      if (isCreate) showCreateModal = false;
       await loadCycles(saved.id);
     } catch (err: any) {
       ui.toast(err.detail || 'Failed to save cycle', 'error');
@@ -901,9 +892,7 @@
 <ConstellationPageFrame
   eyebrow="Constellation Cycles"
   title="Cycles"
-  subtitle={loading
-    ? 'Loading recurring work.'
-    : `${cycles.length} cycles · ${activeCount} active · ${attentionCount} need work`}
+  subtitle="Schedule recurring prompts."
   contentClassName="cycles-page"
 >
   {#snippet actions()}
@@ -921,20 +910,7 @@
   {/if}
 
   <section class="workspace">
-    <ConstellationPanel className="inventory-panel" padding="none" ariaLabel="Cycle inventory">
-      {#snippet header()}
-        <ConstellationSectionHeader
-          eyebrow="Library"
-          title={loading ? 'Loading' : `${visibleRowCount} visible`}
-          description={loading
-            ? 'Loading schedules and recent run state.'
-            : `${activeCount} active / ${pausedCount} paused / ${attentionCount} need work / next ${
-                nextCycle ? formatDateTime(nextCycle.next_run_at) : 'none'
-              }`}
-          size="sm"
-        />
-      {/snippet}
-
+    <section class="inventory-panel" aria-label="Cycle inventory">
       <div class="inventory-tools">
         <ConstellationSearchField bind:value={search} placeholder="Search cycles..." aria-label="Search cycles" />
         <ConstellationSegmentedToggle
@@ -950,243 +926,19 @@
           {#each Array(7) as _}
             <div class="cycle-row-skeleton"></div>
           {/each}
-        {:else if !cycles.length && selectedRowId !== 'draft'}
+        {:else if !cycles.length}
           <ConstellationEmptyState
             title="No cycles yet"
-            description="Create the first recurring prompt from the action above."
             size="sm"
             surface="plain"
           />
-        {:else if filteredCycles.length === 0 && selectedRowId !== 'draft'}
+        {:else if filteredCycles.length === 0}
           <ConstellationEmptyState
             title="No matching cycles"
-            description="The active filters returned an empty cycle library."
             size="sm"
             surface="plain"
           />
         {:else}
-          {#if selectedRowId === 'draft'}
-            <article class="cycle-item is-expanded">
-              <button type="button" class="cycle-row is-selected" onclick={() => (selectedRowId = null)}>
-                <span class="cycle-row-main">
-                  <strong>New cycle</strong>
-                  <small>{schedulePreview}</small>
-                </span>
-                <span class="cycle-row-side">
-                  <ConstellationPill variant="muted" leadingDot>Draft</ConstellationPill>
-                  <small>Not saved</small>
-                </span>
-              </button>
-
-              <div class="cycle-expanded">
-                <div class="expanded-toolbar">
-                  <div class="expanded-facts">
-                    <span>{schedulePreview}</span>
-                    <span>{friendlyTimezone(localTimezone)}</span>
-                    <span>{form.enabled ? 'active' : 'paused'}</span>
-                  </div>
-                  <div class="expanded-actions">
-                    <ConstellationButton variant="primary" size="sm" loading={saving} onclick={saveCycle}>
-                      Create cycle
-                    </ConstellationButton>
-                    <ConstellationButton variant="quiet" size="sm" onclick={() => (selectedRowId = null)}>
-                      Cancel
-                    </ConstellationButton>
-                  </div>
-                </div>
-
-                <details class="cycle-region" open>
-                  <summary>
-                    <span>Editor</span>
-                    <small>Draft schedule</small>
-                  </summary>
-                  <div class="cycle-form">
-                    <section class="cycle-form-section" aria-labelledby="cycle-draft-basics-heading">
-                      <div class="cycle-form-section-heading">
-                        <h3 id="cycle-draft-basics-heading">Basics</h3>
-                      </div>
-
-                      <div class="cycle-form-grid">
-                        <label class="cycle-field cycle-field-full">
-                          <span class="cycle-field-label">Name</span>
-                          <input bind:value={form.name} class="cycle-input" placeholder="Morning briefing" />
-                        </label>
-
-                        <label class="cycle-field cycle-field-full">
-                          <span class="cycle-field-label">Prompt</span>
-                          <AiPromptComposer
-                            bind:value={form.prompt}
-                            className="cycle-prompt-composer"
-                            rows={7}
-                            minHeight={176}
-                            maxHeight={320}
-                            slashPlacement="below"
-                            ariaLabel="Cycle prompt"
-                            placeholder="Review my latest priorities and tell me what needs attention."
-                          />
-                        </label>
-                      </div>
-                    </section>
-
-                    <section class="cycle-form-section" aria-labelledby="cycle-draft-schedule-heading">
-                      <div class="cycle-form-section-heading">
-                        <h3 id="cycle-draft-schedule-heading">When</h3>
-                        <p>{schedulePreview}</p>
-                      </div>
-
-                      <div class="cadence-grid" role="group" aria-label="Schedule frequency">
-                        {#each CADENCE_OPTIONS as option}
-                          <button
-                            type="button"
-                            class="cadence-option"
-                            class:active={form.cadence === option.value}
-                            aria-pressed={form.cadence === option.value}
-                            onclick={() => setCadence(option.value)}
-                          >
-                            <span>{option.label}</span>
-                            <small>{option.description}</small>
-                          </button>
-                        {/each}
-                      </div>
-
-                      {#if form.cadence !== 'custom'}
-                        <div class="schedule-fields">
-                          {#if form.cadence === 'once'}
-                            <label class="cycle-field">
-                              <span class="cycle-field-label">Date</span>
-                              <input bind:value={form.date} class="cycle-input" type="date" />
-                            </label>
-                          {/if}
-
-                          <label class="cycle-field">
-                            <span class="cycle-field-label">Time</span>
-                            <input bind:value={form.time} class="cycle-input" type="time" />
-                          </label>
-
-                          {#if form.cadence === 'weekly'}
-                            <label class="cycle-field">
-                              <span class="cycle-field-label">Day</span>
-                              <select bind:value={form.weekday} class="cycle-select">
-                                {#each WEEKDAY_OPTIONS as option}
-                                  <option value={option.value}>{option.label}</option>
-                                {/each}
-                              </select>
-                            </label>
-                          {:else if form.cadence === 'monthly'}
-                            <label class="cycle-field">
-                              <span class="cycle-field-label">Day of month</span>
-                              <select bind:value={form.monthday} class="cycle-select">
-                                {#each MONTHDAY_OPTIONS as day}
-                                  <option value={day}>{day}</option>
-                                {/each}
-                              </select>
-                            </label>
-                          {/if}
-                        </div>
-                      {/if}
-
-                      <p class="local-time-note">
-                        Runs in your local time: {friendlyTimezone(localTimezone)}
-                      </p>
-                    </section>
-
-                    <section class="cycle-form-section" aria-labelledby="cycle-draft-thread-heading">
-                      <div class="cycle-form-section-heading">
-                        <h3 id="cycle-draft-thread-heading">Thread</h3>
-                      </div>
-
-                      <div class="thread-status">
-                        <div>
-                          <strong>Thread will be created on first run</strong>
-                          <p>After the first run, this cycle will keep using that thread automatically.</p>
-                        </div>
-                      </div>
-                    </section>
-
-                    <section class="cycle-form-section" aria-labelledby="cycle-draft-status-heading">
-                      <div class="cycle-form-section-heading">
-                        <h3 id="cycle-draft-status-heading">Status</h3>
-                      </div>
-
-                      <button
-                        type="button"
-                        class="status-switch"
-                        class:active={form.enabled}
-                        aria-pressed={form.enabled}
-                        onclick={() => (form.enabled = !form.enabled)}
-                      >
-                        <span aria-hidden="true"></span>
-                        <strong>{form.enabled ? 'Active' : 'Paused'}</strong>
-                        <small>
-                          {form.enabled
-                            ? 'Runs automatically on the schedule above.'
-                            : 'Kept for later, but will not run automatically.'}
-                        </small>
-                      </button>
-                    </section>
-
-                    <section class="cycle-advanced">
-                      <button
-                        type="button"
-                        class="advanced-toggle"
-                        aria-expanded={advancedOpen}
-                        onclick={() => (advancedOpen = !advancedOpen)}
-                      >
-                        <span>Advanced settings</span>
-                        <span aria-hidden="true">{advancedOpen ? 'Hide' : 'Show'}</span>
-                      </button>
-
-                      {#if advancedOpen}
-                        <div class="advanced-fields">
-                          {#if form.cadence === 'custom'}
-                            <label class="cycle-field cycle-field-full">
-                              <span class="cycle-field-label">Custom schedule</span>
-                              <input
-                                bind:value={form.custom_schedule}
-                                class="cycle-input cycle-mono"
-                                placeholder="0 9 * * *"
-                              />
-                              <span class="cycle-field-hint">
-                                Use this only when Once, Daily, Weekdays, Weekly, or Monthly does not cover the cycle.
-                              </span>
-                            </label>
-                          {/if}
-
-                          <label class="cycle-field">
-                            <span class="cycle-field-label">Model override</span>
-                            <input
-                              bind:value={form.model_override}
-                              class="cycle-input cycle-mono"
-                              placeholder="Use default"
-                            />
-                          </label>
-
-                          <label class="cycle-field">
-                            <span class="cycle-field-label">Reasoning</span>
-                            <select bind:value={form.thinking_override} class="cycle-select">
-                              {#each THINKING_OPTIONS as option}
-                                <option value={option.value}>{option.label}</option>
-                              {/each}
-                            </select>
-                          </label>
-                        </div>
-                      {/if}
-                    </section>
-
-                    <div class="cycle-form-actions">
-                      <ConstellationButton variant="primary" loading={saving} onclick={saveCycle}>
-                        Create cycle
-                      </ConstellationButton>
-                      <ConstellationButton variant="secondary" onclick={() => (selectedRowId = null)}>
-                        Cancel
-                      </ConstellationButton>
-                    </div>
-                  </div>
-                </details>
-              </div>
-            </article>
-          {/if}
-
           {#each filteredCycles as cycle (cycle.id)}
             <article class="cycle-item" class:is-expanded={selectedRowId === cycleRowId(cycle)}>
               <button
@@ -1495,9 +1247,194 @@
           {/each}
         {/if}
       </div>
-    </ConstellationPanel>
+    </section>
   </section>
 </ConstellationPageFrame>
+
+{#if showCreateModal}
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="modal-overlay" onclick={closeCreateModal} role="dialog" aria-modal="true" tabindex="-1">
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal cycle-modal" onclick={(event) => event.stopPropagation()}>
+      <div class="modal-header">
+        <span class="modal-title">New cycle</span>
+        <button class="modal-close" onclick={closeCreateModal} aria-label="Close new cycle form">&times;</button>
+      </div>
+
+      <form class="cycle-form" onsubmit={(event) => { event.preventDefault(); saveCycle(); }}>
+        <section class="cycle-form-section" aria-labelledby="cycle-create-basics-heading">
+          <div class="cycle-form-section-heading">
+            <h3 id="cycle-create-basics-heading">Basics</h3>
+          </div>
+
+          <div class="cycle-form-grid">
+            <label class="cycle-field cycle-field-full">
+              <span class="cycle-field-label">Name</span>
+              <input bind:value={form.name} class="cycle-input" placeholder="Morning briefing" />
+            </label>
+
+            <label class="cycle-field cycle-field-full">
+              <span class="cycle-field-label">Prompt</span>
+              <AiPromptComposer
+                bind:value={form.prompt}
+                className="cycle-prompt-composer"
+                rows={7}
+                minHeight={176}
+                maxHeight={320}
+                slashPlacement="below"
+                ariaLabel="Cycle prompt"
+                placeholder="Review my latest priorities and tell me what needs attention."
+              />
+            </label>
+          </div>
+        </section>
+
+        <section class="cycle-form-section" aria-labelledby="cycle-create-schedule-heading">
+          <div class="cycle-form-section-heading">
+            <h3 id="cycle-create-schedule-heading">When</h3>
+            <p>{schedulePreview}</p>
+          </div>
+
+          <div class="cadence-grid" role="group" aria-label="Schedule frequency">
+            {#each CADENCE_OPTIONS as option}
+              <button
+                type="button"
+                class="cadence-option"
+                class:active={form.cadence === option.value}
+                aria-pressed={form.cadence === option.value}
+                onclick={() => setCadence(option.value)}
+              >
+                <span>{option.label}</span>
+                <small>{option.description}</small>
+              </button>
+            {/each}
+          </div>
+
+          {#if form.cadence !== 'custom'}
+            <div class="schedule-fields">
+              {#if form.cadence === 'once'}
+                <label class="cycle-field">
+                  <span class="cycle-field-label">Date</span>
+                  <input bind:value={form.date} class="cycle-input" type="date" />
+                </label>
+              {/if}
+
+              <label class="cycle-field">
+                <span class="cycle-field-label">Time</span>
+                <input bind:value={form.time} class="cycle-input" type="time" />
+              </label>
+
+              {#if form.cadence === 'weekly'}
+                <label class="cycle-field">
+                  <span class="cycle-field-label">Day</span>
+                  <select bind:value={form.weekday} class="cycle-select">
+                    {#each WEEKDAY_OPTIONS as option}
+                      <option value={option.value}>{option.label}</option>
+                    {/each}
+                  </select>
+                </label>
+              {:else if form.cadence === 'monthly'}
+                <label class="cycle-field">
+                  <span class="cycle-field-label">Day of month</span>
+                  <select bind:value={form.monthday} class="cycle-select">
+                    {#each MONTHDAY_OPTIONS as day}
+                      <option value={day}>{day}</option>
+                    {/each}
+                  </select>
+                </label>
+              {/if}
+            </div>
+          {/if}
+
+          <p class="local-time-note">
+            Runs in your local time: {friendlyTimezone(localTimezone)}
+          </p>
+        </section>
+
+        <section class="cycle-form-section" aria-labelledby="cycle-create-status-heading">
+          <div class="cycle-form-section-heading">
+            <h3 id="cycle-create-status-heading">Status</h3>
+          </div>
+
+          <button
+            type="button"
+            class="status-switch"
+            class:active={form.enabled}
+            aria-pressed={form.enabled}
+            onclick={() => (form.enabled = !form.enabled)}
+          >
+            <span aria-hidden="true"></span>
+            <strong>{form.enabled ? 'Active' : 'Paused'}</strong>
+            <small>
+              {form.enabled
+                ? 'Runs automatically on the schedule above.'
+                : 'Kept for later, but will not run automatically.'}
+            </small>
+          </button>
+        </section>
+
+        <section class="cycle-advanced">
+          <button
+            type="button"
+            class="advanced-toggle"
+            aria-expanded={advancedOpen}
+            onclick={() => (advancedOpen = !advancedOpen)}
+          >
+            <span>Advanced settings</span>
+            <span aria-hidden="true">{advancedOpen ? 'Hide' : 'Show'}</span>
+          </button>
+
+          {#if advancedOpen}
+            <div class="advanced-fields">
+              {#if form.cadence === 'custom'}
+                <label class="cycle-field cycle-field-full">
+                  <span class="cycle-field-label">Custom schedule</span>
+                  <input
+                    bind:value={form.custom_schedule}
+                    class="cycle-input cycle-mono"
+                    placeholder="0 9 * * *"
+                  />
+                  <span class="cycle-field-hint">
+                    Use this only when Once, Daily, Weekdays, Weekly, or Monthly does not cover the cycle.
+                  </span>
+                </label>
+              {/if}
+
+              <label class="cycle-field">
+                <span class="cycle-field-label">Model override</span>
+                <input
+                  bind:value={form.model_override}
+                  class="cycle-input cycle-mono"
+                  placeholder="Use default"
+                />
+              </label>
+
+              <label class="cycle-field">
+                <span class="cycle-field-label">Reasoning</span>
+                <select bind:value={form.thinking_override} class="cycle-select">
+                  {#each THINKING_OPTIONS as option}
+                    <option value={option.value}>{option.label}</option>
+                  {/each}
+                </select>
+              </label>
+            </div>
+          {/if}
+        </section>
+
+        <div class="cycle-form-actions">
+          <ConstellationButton variant="quiet" onclick={closeCreateModal} disabled={saving}>
+            Cancel
+          </ConstellationButton>
+          <ConstellationButton type="submit" variant="primary" loading={saving} loadingLabel="Creating">
+            Create cycle
+          </ConstellationButton>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
 
 <style>
   :global(.cycles-page) {
@@ -1512,13 +1449,9 @@
     min-height: 0;
   }
 
-  :global(.inventory-panel .constellation-panel-header) {
-    padding: 18px 18px 16px;
-  }
-
-  :global(.inventory-panel .constellation-panel-content) {
+  .inventory-panel {
     display: grid;
-    gap: 0;
+    gap: 14px;
     min-height: 0;
     overflow: visible;
   }
@@ -1528,7 +1461,7 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 12px;
-    padding: 16px;
+    padding: 0 0 14px;
     border-bottom: 1px solid var(--constellation-surface-panel-separator);
   }
 
@@ -1539,18 +1472,18 @@
   .cycle-list {
     display: grid;
     align-content: start;
-    gap: 6px;
+    gap: 8px;
     min-height: 0;
     overflow: visible;
-    padding: 0 14px 14px;
+    padding: 0;
   }
 
   .cycle-item {
     display: grid;
     min-width: 0;
-    border: 1px solid var(--constellation-surface-nested-border);
+    border: 1px solid var(--constellation-surface-panel-separator);
     border-radius: 8px;
-    background: var(--constellation-surface-nested-background);
+    background: var(--constellation-surface-panel-background);
     overflow: hidden;
   }
 
@@ -1585,7 +1518,7 @@
 
   .cycle-row:hover,
   .cycle-row.is-selected {
-    background: var(--constellation-control-button-secondary-background-hover);
+    background: color-mix(in srgb, var(--constellation-color-text-primary) 3%, transparent);
   }
 
   .cycle-row-main,
@@ -1633,7 +1566,7 @@
     border-radius: 8px;
     background:
       linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent),
-      var(--constellation-surface-nested-background);
+      var(--constellation-surface-panel-background);
     background-size: 200% 100%;
     animation: cycle-pulse 1.4s ease-in-out infinite;
   }
@@ -1681,7 +1614,7 @@
     min-width: 0;
     border: 1px solid var(--constellation-surface-panel-separator);
     border-radius: 8px;
-    background: color-mix(in srgb, var(--constellation-surface-nested-background) 82%, transparent);
+    background: var(--constellation-surface-panel-background);
   }
 
   .cycle-region summary {
@@ -1902,7 +1835,7 @@
     padding: 12px;
     border: 1px solid var(--constellation-surface-panel-separator);
     border-radius: 8px;
-    background: color-mix(in srgb, var(--constellation-surface-nested-background) 76%, transparent);
+    background: color-mix(in srgb, var(--constellation-color-text-primary) 2%, transparent);
   }
 
   .thread-status p {
@@ -1919,7 +1852,7 @@
     padding: 10px 12px;
     border: 1px solid var(--constellation-surface-nested-border);
     border-radius: 8px;
-    background: var(--constellation-surface-nested-background);
+    background: var(--constellation-surface-panel-background);
     color: var(--constellation-color-text-primary);
     text-align: left;
     cursor: pointer;
@@ -1976,7 +1909,7 @@
 
   .advanced-toggle span:last-child,
   .cycle-link {
-    color: var(--constellation-content-link, #8db7ff);
+    color: var(--constellation-color-text-secondary);
     font-family: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
     font-size: 11px;
     font-weight: 600;
@@ -1985,6 +1918,7 @@
   }
 
   .cycle-form-actions {
+    justify-content: flex-end;
     padding-top: 2px;
   }
 
@@ -2028,6 +1962,16 @@
     align-content: start;
     justify-content: flex-end;
     text-align: right;
+  }
+
+  .cycle-modal {
+    max-width: min(920px, calc(100vw - 36px));
+    max-height: min(860px, calc(100vh - 36px));
+    overflow: auto;
+  }
+
+  .cycle-modal :global(.cycle-prompt-composer) {
+    min-height: 176px;
   }
 
   @keyframes cycle-pulse {

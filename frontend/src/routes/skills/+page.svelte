@@ -12,7 +12,6 @@
     ConstellationPill,
     ConstellationSearchField,
     ConstellationSectionHeader,
-    ConstellationSegmentedToggle,
     ConstellationSkeletonBlock,
   } from '$lib/components/constellation';
   import type { ConstellationIconName } from '$lib/components/constellation/ConstellationIcon.svelte';
@@ -22,8 +21,7 @@
   } from '$lib/components/constellation/constellationPageFrameContext';
   import { ui } from '$lib/stores/ui.svelte';
 
-  type FilterMode = 'all' | 'attention';
-  type EditorMode = 'idle' | 'create' | 'edit';
+  type EditorMode = 'idle' | 'create';
   type PillTone = 'muted' | 'warning' | 'success' | 'danger' | 'info';
 
   interface SkillTrigger {
@@ -148,11 +146,6 @@
     tone: PillTone;
   }
 
-  const FILTER_OPTIONS = [
-    { key: 'all', label: 'All' },
-    { key: 'attention', label: 'Needs Setup' },
-  ];
-
   const TRIGGER_DIRECTIONS = ['for', 'not_for'];
   const GUARDRAIL_SEVERITIES = ['info', 'warning', 'critical'];
   const ASSET_ROOTS: AssetRoot[] = [
@@ -190,13 +183,14 @@
   let loading = $state(true);
   let loadError = $state('');
   let selectedId = $state<number | null>(null);
-  let filterMode = $state<FilterMode>('all');
   let search = $state('');
   let editorMode = $state<EditorMode>('idle');
-  let editingSkillId = $state<number | null>(null);
   let saving = $state(false);
   let deleting = $state(false);
   let converting = $state(false);
+  let inlineDraftSkillId = $state<number | null>(null);
+  let inlineDraft = $state<SkillForm | null>(null);
+  let inlineSaving = $state(false);
   let assetLoading = $state(false);
   let assetSaving = $state(false);
   let assetDeleting = $state(false);
@@ -225,7 +219,6 @@
   const selectedPackageFiles = $derived(
     array(selectedPackage?.assets).filter((asset) => asset.path !== 'SKILL.md'),
   );
-  const attentionCount = $derived(items.filter((item) => attentionReasons(item).length > 0).length);
   const selectedAssetGroups = $derived.by<AssetGroup[]>(() =>
     ASSET_ROOTS.map((root) => {
       const assets = selectedPackageFiles.filter((asset) => assetMatchesRoot(asset, root));
@@ -237,7 +230,6 @@
     return items
       .filter((item) => {
         const skill = item.skill;
-        if (filterMode === 'attention' && attentionReasons(item).length === 0) return false;
         if (!needle) return true;
         return [
           skill.name,
@@ -253,7 +245,24 @@
           .toLowerCase()
           .includes(needle);
       })
-      .sort((a, b) => rowPriority(b) - rowPriority(a) || numberValue(b.skill.use_count) - numberValue(a.skill.use_count));
+      .sort((a, b) => numberValue(b.skill.use_count) - numberValue(a.skill.use_count));
+  });
+  const inlineDraftDirty = $derived.by(() => {
+    if (!selectedSkill || !inlineDraft || inlineDraftSkillId !== selectedSkill.id) return false;
+    return JSON.stringify(payloadFromDraft(inlineDraft)) !== JSON.stringify(payloadFromDraft(formFromSkill(selectedSkill)));
+  });
+
+  $effect(() => {
+    if (!selectedSkill) {
+      inlineDraftSkillId = null;
+      inlineDraft = null;
+      return;
+    }
+
+    if (inlineDraftSkillId !== selectedSkill.id) {
+      inlineDraftSkillId = selectedSkill.id;
+      inlineDraft = formFromSkill(selectedSkill);
+    }
   });
 
   onMount(() => {
@@ -378,10 +387,6 @@
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  function rowPriority(item: EnhancedSkill): number {
-    return attentionReasons(item).length > 0 ? 30 : 0;
-  }
-
   function attentionReasons(item: EnhancedSkill): AttentionReason[] {
     const skill = item.skill;
     const useCount = numberValue(skill.use_count);
@@ -434,28 +439,32 @@
     };
   }
 
-  function payloadFromForm() {
+  function payloadFromDraft(draft: SkillForm) {
     return {
-      name: form.name.trim(),
-      description: form.description.trim(),
-      procedure: form.procedure.trim(),
-      model_tier: form.model_tier,
-      thinking_tier: form.thinking_tier,
-      triggers: form.triggers
+      name: draft.name.trim(),
+      description: draft.description.trim(),
+      procedure: draft.procedure.trim(),
+      model_tier: draft.model_tier,
+      thinking_tier: draft.thinking_tier,
+      triggers: draft.triggers
         .filter((trigger) => trigger.pattern.trim())
         .map((trigger) => ({
           direction: trigger.direction || 'for',
           pattern: trigger.pattern.trim(),
         })),
-      guardrails: form.guardrails
+      guardrails: draft.guardrails
         .filter((guardrail) => guardrail.text.trim())
         .map((guardrail) => ({
           severity: guardrail.severity || 'warning',
           text: guardrail.text.trim(),
         })),
-      pitfalls: form.pitfalls.map((item) => item.trim()).filter(Boolean),
-      refinements: form.refinements.map((item) => item.trim()).filter(Boolean),
+      pitfalls: draft.pitfalls.map((item) => item.trim()).filter(Boolean),
+      refinements: draft.refinements.map((item) => item.trim()).filter(Boolean),
     };
+  }
+
+  function payloadFromForm() {
+    return payloadFromDraft(form);
   }
 
   async function loadSkills(preselectId: number | null = selectedId) {
@@ -485,26 +494,9 @@
     editingAssetPath = null;
   }
 
-  function setFilter(key: string) {
-    if (key === 'all' || key === 'attention') {
-      filterMode = key;
-    }
-  }
-
   function startCreate() {
     editorMode = 'create';
-    editingSkillId = null;
     form = emptyForm();
-    assetPreview = null;
-    assetEditorOpen = false;
-    editingAssetPath = null;
-  }
-
-  function startEdit(skill: Skill) {
-    editorMode = 'edit';
-    editingSkillId = skill.id;
-    selectedId = skill.id;
-    form = formFromSkill(skill);
     assetPreview = null;
     assetEditorOpen = false;
     editingAssetPath = null;
@@ -512,8 +504,53 @@
 
   function cancelEdit() {
     editorMode = 'idle';
-    editingSkillId = null;
     form = emptyForm();
+  }
+
+  function resetInlineDraft() {
+    if (!selectedSkill) return;
+    inlineDraftSkillId = selectedSkill.id;
+    inlineDraft = formFromSkill(selectedSkill);
+  }
+
+  function addInlineTrigger() {
+    if (!inlineDraft) return;
+    inlineDraft.triggers = [...inlineDraft.triggers, { direction: 'for', pattern: '' }];
+  }
+
+  function addInlineGuardrail() {
+    if (!inlineDraft) return;
+    inlineDraft.guardrails = [...inlineDraft.guardrails, { severity: 'warning', text: '' }];
+  }
+
+  function addInlinePitfall() {
+    if (!inlineDraft) return;
+    inlineDraft.pitfalls = [...inlineDraft.pitfalls, ''];
+  }
+
+  function addInlineRefinement() {
+    if (!inlineDraft) return;
+    inlineDraft.refinements = [...inlineDraft.refinements, ''];
+  }
+
+  function removeInlineTrigger(index: number) {
+    if (!inlineDraft) return;
+    inlineDraft.triggers = inlineDraft.triggers.filter((_, i) => i !== index);
+  }
+
+  function removeInlineGuardrail(index: number) {
+    if (!inlineDraft) return;
+    inlineDraft.guardrails = inlineDraft.guardrails.filter((_, i) => i !== index);
+  }
+
+  function removeInlinePitfall(index: number) {
+    if (!inlineDraft) return;
+    inlineDraft.pitfalls = inlineDraft.pitfalls.filter((_, i) => i !== index);
+  }
+
+  function removeInlineRefinement(index: number) {
+    if (!inlineDraft) return;
+    inlineDraft.refinements = inlineDraft.refinements.filter((_, i) => i !== index);
   }
 
   function addTrigger() {
@@ -595,14 +632,11 @@
 
     saving = true;
     try {
-      let saved =
-        editorMode === 'create'
-          ? await api.createSkill(payload)
-          : await api.updateSkill(editingSkillId as number, payload);
-      if (editorMode === 'create' && form.create_as_package && saved?.id) {
+      let saved = await api.createSkill(payload);
+      if (form.create_as_package && saved?.id) {
         saved = await api.convertSkillToBundle(saved.id);
       }
-      if (editorMode === 'create' && saved?.id) {
+      if (saved?.id) {
         for (const asset of initialAssets) {
           await api.upsertSkillAsset(saved.id, {
             path: asset.path.trim(),
@@ -612,14 +646,34 @@
           });
         }
       }
-      ui.toast(editorMode === 'create' ? 'Skill created.' : 'Skill updated.', 'success');
+      ui.toast('Skill created.', 'success');
       editorMode = 'idle';
-      editingSkillId = null;
       await loadSkills(saved?.id ?? selectedId);
     } catch (error) {
       ui.toast(errorMessage(error, 'Skill save failed.'), 'error');
     } finally {
       saving = false;
+    }
+  }
+
+  async function saveInlineSkill() {
+    const skill = selectedSkill;
+    if (!skill || !inlineDraft || !inlineDraftDirty) return;
+    const payload = payloadFromDraft(inlineDraft);
+    if (!payload.name || !payload.procedure) {
+      ui.toast('Name and procedure are required.', 'error');
+      return;
+    }
+
+    inlineSaving = true;
+    try {
+      const saved = await api.updateSkill(skill.id, payload);
+      ui.toast('Skill saved.', 'success');
+      await loadSkills(saved?.id ?? skill.id);
+    } catch (error) {
+      ui.toast(errorMessage(error, 'Skill save failed.'), 'error');
+    } finally {
+      inlineSaving = false;
     }
   }
 
@@ -632,7 +686,6 @@
     try {
       await api.deleteSkill(skill.id);
       ui.toast('Skill deleted from the active list.', 'success');
-      if (editingSkillId === skill.id) cancelEdit();
       await loadSkills(null);
     } catch (error) {
       ui.toast(errorMessage(error, 'Delete failed.'), 'error');
@@ -819,12 +872,6 @@
     <section class="inventory-panel" aria-label="Skill inventory">
       <div class="inventory-tools">
         <ConstellationSearchField bind:value={search} placeholder="Search skills..." aria-label="Search skills" />
-        <ConstellationSegmentedToggle
-          options={FILTER_OPTIONS}
-          activeKey={filterMode}
-          onActiveKeyChange={setFilter}
-          ariaLabel="Skill filter"
-        />
       </div>
 
       <div class="skill-list" aria-label="Skills">
@@ -835,7 +882,7 @@
         {:else if filteredItems.length === 0}
           <ConstellationEmptyState
             title="No matching skills"
-            description="No skill matches the current search or filter."
+            description="No skill matches the current search."
             size="sm"
             surface="plain"
           />
@@ -870,6 +917,26 @@
                     {/if}
                   </div>
                   <div class="expanded-actions">
+                    {#if inlineDraftDirty}
+                      <span class="expanded-save-state">Unsaved changes</span>
+                      <ConstellationButton
+                        variant="quiet"
+                        size="sm"
+                        onclick={resetInlineDraft}
+                        disabled={inlineSaving}
+                      >
+                        Revert
+                      </ConstellationButton>
+                      <ConstellationButton
+                        variant="secondary"
+                        size="sm"
+                        onclick={saveInlineSkill}
+                        loading={inlineSaving}
+                        loadingLabel="Saving"
+                      >
+                        Save
+                      </ConstellationButton>
+                    {/if}
                     {#if selectedItem?.convert_to_bundle_available}
                       <ConstellationButton
                         variant="secondary"
@@ -881,9 +948,6 @@
                         Add files
                       </ConstellationButton>
                     {/if}
-                    <ConstellationButton variant="secondary" size="sm" onclick={() => startEdit(selectedSkill)}>
-                      Edit
-                    </ConstellationButton>
                     <ConstellationButton
                       variant="destructive"
                       size="sm"
@@ -906,42 +970,104 @@
                   </div>
                 {/if}
 
+                {#if inlineDraft}
+                  <div class="inline-skill-fields" aria-label="Inline skill editor">
+                    <label class="field">
+                      <span>Name</span>
+                      <input bind:value={inlineDraft.name} required maxlength="80" />
+                    </label>
+                    <label class="field">
+                      <span>Description</span>
+                      <input bind:value={inlineDraft.description} placeholder="When this skill should help" />
+                    </label>
+                  </div>
+                {/if}
+
                 <details class="skill-region" open>
                   <summary>
                     <span>Procedure</span>
                     <small>Reusable instructions</small>
                   </summary>
-                  <pre>{selectedSkill.procedure || 'No procedure supplied.'}</pre>
+                  {#if inlineDraft}
+                    <textarea
+                      class="inline-procedure-editor"
+                      bind:value={inlineDraft.procedure}
+                      required
+                      rows="10"
+                      placeholder="Write the reusable steps here."
+                      aria-label="Skill procedure"
+                    ></textarea>
+                  {:else}
+                    <pre>{selectedSkill.procedure || 'No procedure supplied.'}</pre>
+                  {/if}
                 </details>
 
                 <details class="skill-region">
                   <summary>
                     <span>Examples and guardrails</span>
-                    <small>{array(selectedSkill.triggers).length} examples / {array(selectedSkill.guardrails).length} guardrails</small>
+                    <small>{inlineDraft?.triggers.length ?? array(selectedSkill.triggers).length} examples / {inlineDraft?.guardrails.length ?? array(selectedSkill.guardrails).length} guardrails</small>
                   </summary>
                   <div class="region-columns">
                     <section>
-                      <h3>When to use it</h3>
-                      {#if array(selectedSkill.triggers).length}
+                      <div class="inline-section-head">
+                        <h3>When to use it</h3>
+                        <ConstellationButton variant="quiet" size="sm" onclick={addInlineTrigger}>Add</ConstellationButton>
+                      </div>
+                      {#if inlineDraft && inlineDraft.triggers.length}
+                        <div class="inline-row-list">
+                          {#each inlineDraft.triggers as trigger, index (index)}
+                            <div class="editable-row">
+                              <select bind:value={trigger.direction} aria-label="Example direction">
+                                {#each TRIGGER_DIRECTIONS as direction}
+                                  <option value={direction}>{triggerDirectionLabel(direction)}</option>
+                                {/each}
+                              </select>
+                              <input bind:value={trigger.pattern} placeholder="Example request" aria-label="Example request" />
+                              <button type="button" class="icon-button" title="Remove example" onclick={() => removeInlineTrigger(index)}>
+                                <ConstellationIcon name="x" size={14} />
+                              </button>
+                            </div>
+                          {/each}
+                        </div>
+                      {:else if inlineDraft}
+                        <p class="empty-inline">No examples yet.</p>
+                      {:else if array(selectedSkill.triggers).length}
                         <ul class="line-list">
                           {#each array(selectedSkill.triggers) as trigger}
                             <li><strong>{triggerDirectionLabel(trigger.direction)}</strong><span>{trigger.pattern || 'No pattern'}</span></li>
                           {/each}
                         </ul>
-                      {:else}
-                        <p class="empty-inline">No examples yet.</p>
                       {/if}
                     </section>
                     <section>
-                      <h3>Guardrails</h3>
-                      {#if array(selectedSkill.guardrails).length}
+                      <div class="inline-section-head">
+                        <h3>Guardrails</h3>
+                        <ConstellationButton variant="quiet" size="sm" onclick={addInlineGuardrail}>Add</ConstellationButton>
+                      </div>
+                      {#if inlineDraft && inlineDraft.guardrails.length}
+                        <div class="inline-row-list">
+                          {#each inlineDraft.guardrails as guardrail, index (index)}
+                            <div class="editable-row">
+                              <select bind:value={guardrail.severity} aria-label="Guardrail severity">
+                                {#each GUARDRAIL_SEVERITIES as severity}
+                                  <option value={severity}>{severity}</option>
+                                {/each}
+                              </select>
+                              <input bind:value={guardrail.text} placeholder="Guardrail text" aria-label="Guardrail text" />
+                              <button type="button" class="icon-button" title="Remove guardrail" onclick={() => removeInlineGuardrail(index)}>
+                                <ConstellationIcon name="x" size={14} />
+                              </button>
+                            </div>
+                          {/each}
+                        </div>
+                      {:else if inlineDraft}
+                        <p class="empty-inline">No guardrails yet.</p>
+                      {:else if array(selectedSkill.guardrails).length}
                         <ul class="line-list">
                           {#each array(selectedSkill.guardrails) as guardrail}
                             <li><strong>{guardrail.severity || 'warning'}</strong><span>{guardrail.text || 'No text'}</span></li>
                           {/each}
                         </ul>
-                      {:else}
-                        <p class="empty-inline">No guardrails yet.</p>
                       {/if}
                     </section>
                   </div>
@@ -970,7 +1096,50 @@
                     </section>
                     <section>
                       <h3>Notes</h3>
-                      {#if textItems(selectedSkill.pitfalls).length || textItems(selectedSkill.refinements).length}
+                      {#if inlineDraft}
+                        <div class="inline-note-groups">
+                          <div class="inline-note-group">
+                            <div class="inline-section-head">
+                              <strong>Avoid</strong>
+                              <ConstellationButton variant="quiet" size="sm" onclick={addInlinePitfall}>Add</ConstellationButton>
+                            </div>
+                            {#if inlineDraft.pitfalls.length}
+                              <div class="inline-row-list">
+                                {#each inlineDraft.pitfalls as _, index (index)}
+                                  <div class="editable-row text-only">
+                                    <input bind:value={inlineDraft.pitfalls[index]} placeholder="Thing to avoid" aria-label="Thing to avoid" />
+                                    <button type="button" class="icon-button" title="Remove note" onclick={() => removeInlinePitfall(index)}>
+                                      <ConstellationIcon name="x" size={14} />
+                                    </button>
+                                  </div>
+                                {/each}
+                              </div>
+                            {:else}
+                              <p class="empty-inline">No avoid notes.</p>
+                            {/if}
+                          </div>
+                          <div class="inline-note-group">
+                            <div class="inline-section-head">
+                              <strong>Improve</strong>
+                              <ConstellationButton variant="quiet" size="sm" onclick={addInlineRefinement}>Add</ConstellationButton>
+                            </div>
+                            {#if inlineDraft.refinements.length}
+                              <div class="inline-row-list">
+                                {#each inlineDraft.refinements as _, index (index)}
+                                  <div class="editable-row text-only">
+                                    <input bind:value={inlineDraft.refinements[index]} placeholder="Improvement" aria-label="Improvement" />
+                                    <button type="button" class="icon-button" title="Remove improvement" onclick={() => removeInlineRefinement(index)}>
+                                      <ConstellationIcon name="x" size={14} />
+                                    </button>
+                                  </div>
+                                {/each}
+                              </div>
+                            {:else}
+                              <p class="empty-inline">No improvements.</p>
+                            {/if}
+                          </div>
+                        </div>
+                      {:else if textItems(selectedSkill.pitfalls).length || textItems(selectedSkill.refinements).length}
                         {#if textItems(selectedSkill.pitfalls).length}
                           <ul class="line-list compact-list">
                             {#each textItems(selectedSkill.pitfalls) as pitfall}
@@ -1141,9 +1310,9 @@
       <ConstellationPanel className="editor-panel" ariaLabel="Skill editor">
         {#snippet header()}
           <ConstellationSectionHeader
-            eyebrow={editorMode === 'create' ? 'Create' : 'Edit'}
-            title={editorMode === 'create' ? 'New skill' : form.name || 'Skill editor'}
-            description="Edit how Illo recognizes and follows this workflow."
+            eyebrow="Create"
+            title="New skill"
+            description="Define how Illo recognizes and follows this workflow."
             size="sm"
           >
             {#snippet actions()}
@@ -1170,12 +1339,10 @@
             <textarea bind:value={form.procedure} required rows="12" placeholder="Write the reusable steps here."></textarea>
           </label>
 
-          {#if editorMode === 'create'}
-            <label class="toggle-row">
-              <input type="checkbox" bind:checked={form.create_as_package} />
-              <span>Allow files with this skill</span>
-            </label>
-          {/if}
+          <label class="toggle-row">
+            <input type="checkbox" bind:checked={form.create_as_package} />
+            <span>Allow files with this skill</span>
+          </label>
 
           <section class="editor-section">
             <div class="section-head">
@@ -1233,76 +1400,74 @@
             </div>
           </section>
 
-          {#if editorMode === 'create'}
-            <section class="editor-section">
-              <div class="section-head">
-                <div>
-                  <h3>Files</h3>
-                  <p>Optional references, examples, templates, and evals.</p>
-                </div>
-                <div class="asset-root-actions">
-                  {#each ASSET_ROOTS as root}
-                    <button type="button" class="mini-action" onclick={() => addInitialAsset(root.root)}>
-                      {root.label}
-                    </button>
-                  {/each}
-                </div>
+          <section class="editor-section">
+            <div class="section-head">
+              <div>
+                <h3>Files</h3>
+                <p>Optional references, examples, templates, and evals.</p>
               </div>
-              <div class="asset-draft-list">
-                {#if form.assets.length === 0}
-                  <p class="empty-inline">No files yet.</p>
-                {/if}
-                {#each form.assets as asset, index (index)}
-                  <div class="asset-draft-card">
-                    <div class="form-grid two">
-                      <label class="field">
-                        <span>Path</span>
-                        <input
-                          bind:value={asset.path}
-                          placeholder="references/context.md"
-                          oninput={() => (asset.asset_kind = assetKindFromPath(asset.path))}
-                        />
-                      </label>
-                      <div class="form-grid two compact">
-                        <label class="field">
-                          <span>Kind</span>
-                          <select
-                            bind:value={asset.asset_kind}
-                            onchange={() => (asset.path = assetSampleForKind(asset.asset_kind))}
-                          >
-                            {#each ASSET_ROOTS as option}
-                              <option value={option.kind}>{option.kind}</option>
-                            {/each}
-                          </select>
-                        </label>
-                        <label class="field">
-                          <span>MIME</span>
-                          <input bind:value={asset.mime_type} placeholder="auto" />
-                        </label>
-                      </div>
-                    </div>
-                    <label class="field">
-                      <span>Content</span>
-                      <textarea bind:value={asset.content} rows="8" placeholder="File content"></textarea>
-                    </label>
-                    <div class="asset-card-actions">
-                      <label class="mini-action file-action">
-                        Choose file
-                        <input
-                          type="file"
-                          accept={TEXT_ASSET_ACCEPT}
-                          onchange={(event) => importInitialAssetFile(event, index)}
-                        />
-                      </label>
-                      <ConstellationButton variant="quiet" size="sm" onclick={() => removeInitialAsset(index)}>
-                        Remove
-                      </ConstellationButton>
-                    </div>
-                  </div>
+              <div class="asset-root-actions">
+                {#each ASSET_ROOTS as root}
+                  <button type="button" class="mini-action" onclick={() => addInitialAsset(root.root)}>
+                    {root.label}
+                  </button>
                 {/each}
               </div>
-            </section>
-          {/if}
+            </div>
+            <div class="asset-draft-list">
+              {#if form.assets.length === 0}
+                <p class="empty-inline">No files yet.</p>
+              {/if}
+              {#each form.assets as asset, index (index)}
+                <div class="asset-draft-card">
+                  <div class="form-grid two">
+                    <label class="field">
+                      <span>Path</span>
+                      <input
+                        bind:value={asset.path}
+                        placeholder="references/context.md"
+                        oninput={() => (asset.asset_kind = assetKindFromPath(asset.path))}
+                      />
+                    </label>
+                    <div class="form-grid two compact">
+                      <label class="field">
+                        <span>Kind</span>
+                        <select
+                          bind:value={asset.asset_kind}
+                          onchange={() => (asset.path = assetSampleForKind(asset.asset_kind))}
+                        >
+                          {#each ASSET_ROOTS as option}
+                            <option value={option.kind}>{option.kind}</option>
+                          {/each}
+                        </select>
+                      </label>
+                      <label class="field">
+                        <span>MIME</span>
+                        <input bind:value={asset.mime_type} placeholder="auto" />
+                      </label>
+                    </div>
+                  </div>
+                  <label class="field">
+                    <span>Content</span>
+                    <textarea bind:value={asset.content} rows="8" placeholder="File content"></textarea>
+                  </label>
+                  <div class="asset-card-actions">
+                    <label class="mini-action file-action">
+                      Choose file
+                      <input
+                        type="file"
+                        accept={TEXT_ASSET_ACCEPT}
+                        onchange={(event) => importInitialAssetFile(event, index)}
+                      />
+                    </label>
+                    <ConstellationButton variant="quiet" size="sm" onclick={() => removeInitialAsset(index)}>
+                      Remove
+                    </ConstellationButton>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </section>
 
           <div class="form-grid two">
             <section class="editor-section">
@@ -1417,9 +1582,9 @@
   .skill-item {
     display: grid;
     min-width: 0;
-    border: 1px solid var(--constellation-surface-nested-border);
+    border: 1px solid var(--constellation-surface-panel-separator);
     border-radius: 8px;
-    background: var(--constellation-surface-nested-background);
+    background: var(--constellation-surface-panel-background);
     overflow: hidden;
   }
 
@@ -1454,7 +1619,7 @@
 
   .skill-row:hover,
   .skill-row.is-selected {
-    background: var(--constellation-control-button-secondary-background-hover);
+    background: color-mix(in srgb, var(--constellation-color-text-primary) 3%, transparent);
   }
 
   .skill-row-main,
@@ -1493,7 +1658,7 @@
   .skill-row-skeleton {
     background:
       linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent),
-      var(--constellation-surface-nested-background);
+      var(--constellation-surface-panel-background);
     background-size: 200% 100%;
     animation: skills-pulse 1.4s ease-in-out infinite;
   }
@@ -1534,13 +1699,21 @@
     letter-spacing: 0;
   }
 
+  .expanded-save-state {
+    color: var(--constellation-color-text-tertiary);
+    font-family: var(--constellation-font-mono);
+    font-size: var(--constellation-type-meta);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
   .attention-reasons {
     display: grid;
     gap: 6px;
     padding: 9px;
     border: 1px solid var(--constellation-surface-panel-separator);
     border-radius: 8px;
-    background: color-mix(in srgb, var(--constellation-surface-nested-background) 74%, transparent);
+    background: color-mix(in srgb, var(--constellation-color-text-primary) 2.5%, transparent);
   }
 
   .attention-reason {
@@ -1553,12 +1726,19 @@
     font-size: 12px;
   }
 
+  .inline-skill-fields {
+    display: grid;
+    grid-template-columns: minmax(160px, 0.42fr) minmax(0, 1fr);
+    gap: 12px;
+    padding-top: 2px;
+  }
+
   .skill-region {
     display: grid;
     min-width: 0;
     border: 1px solid var(--constellation-surface-panel-separator);
     border-radius: 8px;
-    background: color-mix(in srgb, var(--constellation-surface-nested-background) 82%, transparent);
+    background: var(--constellation-surface-panel-background);
   }
 
   .skill-region summary {
@@ -1604,6 +1784,31 @@
   .files-region {
     display: grid;
     gap: 16px;
+  }
+
+  .inline-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 30px;
+  }
+
+  .inline-section-head h3,
+  .inline-section-head strong {
+    margin: 0;
+    color: var(--constellation-color-text-primary);
+    font-size: 12px;
+    font-weight: 560;
+    letter-spacing: 0;
+  }
+
+  .inline-row-list,
+  .inline-note-groups,
+  .inline-note-group {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
   }
 
   .region-columns section,
@@ -1772,6 +1977,21 @@
     resize: vertical;
     padding: 12px;
     line-height: 1.55;
+  }
+
+  .inline-procedure-editor {
+    min-height: 240px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    font-family: var(--constellation-font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    padding: 0;
+  }
+
+  .inline-procedure-editor:focus {
+    outline-offset: 4px;
   }
 
   input:focus,
@@ -1996,6 +2216,7 @@
   }
 
   @media (max-width: 760px) {
+    .inline-skill-fields,
     .region-columns,
     .form-grid.two {
       grid-template-columns: 1fr;
