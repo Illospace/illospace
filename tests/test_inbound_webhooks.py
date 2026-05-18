@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -140,6 +141,19 @@ async def _post_webhook(session, *, headers: dict[str, str] | None = None, json:
         app.dependency_overrides.update(overrides)
 
 
+async def _post_mcp(session, *, headers: dict[str, str] | None = None, json_body: dict):
+    overrides = dict(app.dependency_overrides)
+    app.dependency_overrides[get_db] = lambda: session
+    app.dependency_overrides[rate_limit] = lambda: None
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/mcp", headers=headers or {}, json=json_body)
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(overrides)
+
+
 async def test_webhook_requires_authenticated_source_identity(session):
     response = await _post_webhook(
         session,
@@ -176,6 +190,76 @@ async def test_post_webhook_stores_event_even_without_policy(session):
     assert event.token_id == TOKEN_ID
     assert event.authority_user_id == USER_ID
     assert event.source_actor["connection_id"] == CONNECTION_ID
+
+
+async def test_webhook_and_mcp_signals_share_inbound_event_path(session):
+    await _seed_connection(session)
+
+    webhook_response = await _post_webhook(
+        session,
+        headers={"Authorization": f"Bearer {RAW_TOKEN}"},
+        json={
+            "origin": "jira.ticket_created",
+            "payload": {"issue": {"key": "PROJ-1"}},
+            "idempotency_key": "jira:PROJ-1:created",
+        },
+    )
+    mcp_response = await _post_mcp(
+        session,
+        headers={"Authorization": f"Bearer {RAW_TOKEN}"},
+        json_body={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "illo_submit_signal",
+                "arguments": {
+                    "summary": "Implemented inbound coordination.",
+                    "origin": "codex.progress",
+                    "source_tool": "codex",
+                    "repo": "illospace-project",
+                    "branch": "codex/inbound-coordination-e2e",
+                    "task_title": "Unify inbound PRs",
+                    "files_touched": ["brain/app/api/routers/agent_mcp.py"],
+                    "payload": {"tests": "e2e"},
+                    "desired_outcome": "team_update",
+                    "idempotency_key": "codex:e2e:1",
+                    "metadata": {"hook": "post-message"},
+                },
+            },
+        },
+    )
+
+    assert webhook_response.status_code == 202
+    assert mcp_response.status_code == 200
+    mcp_payload = json.loads(mcp_response.json()["result"]["content"][0]["text"])
+    assert webhook_response.json()["status"] == "review_required"
+    assert mcp_payload["status"] == "review_required"
+    assert mcp_payload["matched_policy_id"] is None
+    assert mcp_payload["ilo_outcome"] == {"reason": "no_matching_source_policy"}
+
+    events = (await session.scalars(select(InboundEventRow).order_by(InboundEventRow.created_at))).all()
+    assert [event.origin for event in events] == ["jira.ticket_created", "codex.progress"]
+    assert [event.status for event in events] == ["review_required", "review_required"]
+    assert [event.action_type for event in events] == ["ilo_required", "ilo_required"]
+    assert all(event.connection_id == CONNECTION_ID for event in events)
+    assert all(event.authority_user_id == USER_ID for event in events)
+    assert events[0].ingress_context["surface"] == "webhook"
+    assert events[1].ingress_context["surface"] == "mcp_personal_tool"
+    assert events[1].normalized_payload["summary"] == "Implemented inbound coordination."
+    assert events[1].normalized_payload["hints"]["source_tool"] == "codex"
+    assert events[1].normalized_payload["hints"]["files_touched"] == [
+        "brain/app/api/routers/agent_mcp.py"
+    ]
+
+    receipts = (
+        await session.scalars(
+            select(InboundDecisionReceiptRow).order_by(InboundDecisionReceiptRow.created_at)
+        )
+    ).all()
+    assert len(receipts) == 2
+    assert [receipt.event_id for receipt in receipts] == [str(event.id) for event in events]
+    assert all(receipt.outcome == {"reason": "no_matching_source_policy"} for receipt in receipts)
 
 
 async def test_webhook_rejects_overlong_idempotency_header(session):

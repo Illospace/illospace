@@ -96,10 +96,10 @@ Do not send top-level `idea_id`, `thread_id`, `project_id`, `pin_id`,
 `teammate_user_ids`, or `trigger_illo`. If the source has context that may help
 IloSpace route the signal, put it in `hints` instead.
 
-## Post-Merge Test Boundary
+## Shared-Service Test Boundary
 
-Until JB's foundation branch lands, MCP tests mock `submit_inbound_envelope`.
-After both PRs merge, add integration coverage proving that:
+MCP route unit tests may mock `submit_inbound_envelope` at the adapter boundary.
+Combined integration coverage must prove that:
 
 - `illo_submit_signal` persists through the real shared service;
 - MCP and webhook events create the same inbound event/receipt record types;

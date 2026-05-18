@@ -20,6 +20,7 @@ from brain.app.api.routers.agent_bridge import (
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.mentions import classify_mention_intent
 from brain.systems.external_agents import service as external_agents
+from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
 
 
 router = APIRouter(tags=["agent-mcp"], dependencies=[Depends(rate_limit)])
@@ -386,31 +387,9 @@ async def submit_inbound_envelope(
     envelope: dict[str, Any],
     ingress_context: dict[str, Any],
 ) -> dict[str, Any]:
-    """Adapter to JB's shared inbound service, with an explicit pre-merge fallback."""
+    """Adapter to the shared inbound service, kept patchable for route tests."""
 
-    try:
-        from brain.systems.inbound.service import submit_inbound_envelope as real_submit
-    except ModuleNotFoundError as exc:
-        if exc.name not in {"brain.systems.inbound", "brain.systems.inbound.service"}:
-            raise
-        return {
-            "status": "review_required",
-            "event_id": None,
-            "matched_policy_id": None,
-            "ilo_outcome": {
-                "type": "post_merge_pending",
-                "message": (
-                    "Inbound foundation service is not merged yet; MCP envelope was "
-                    "built but not persisted."
-                ),
-            },
-            "confidence": None,
-            "post_merge_pending": True,
-            "envelope": envelope,
-            "connection": connection,
-            "ingress_context": ingress_context,
-        }
-    return await real_submit(
+    return await _submit_inbound_envelope(
         db,
         connection=connection,
         envelope=envelope,
