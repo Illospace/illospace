@@ -13,7 +13,7 @@ This PRD uses the following vocabulary deliberately:
 - **External Source Connection** means any outside tool, app, agent, webhook source, IDE, script, or personal worker connected to IloSpace.
 - **Inbound Signal** means something an external source tells IloSpace happened.
 - **External Task** means work IloSpace asks an external source to do.
-- **Workspace Action** means a mutation inside IloSpace: post to a thread, create an idea, link to a project, notify a teammate, ask a human, or trigger an Ilo run.
+- **Ilo Outcome** means the result of Ilo handling a signal. It may be a tool call, a workspace mutation, a stored note, a summary, a question to a human, a no-op, a scheduled follow-up, or another action Ilo can perform with its available skills and tools.
 
 Current implementation and repo docs may still use the existing `Illospace` / `Illo` spelling and `illo_*` API/tool prefixes. This PRD is about product architecture and uses the requested conceptual distinction: **IloSpace is the system; Ilo is the agent**.
 
@@ -29,7 +29,7 @@ The product needs a bare but strong foundation for inbound coordination:
 
 - external tools submit signals and intent into IloSpace;
 - IloSpace records, authenticates, normalizes, dedupes, and applies known policy deterministically;
-- Ilo triages ambiguity when the system cannot safely decide;
+- Ilo handles ambiguity and chooses what to do using its skills and tools when the deterministic layer cannot safely shortcut;
 - repeated Ilo triage decisions become routing receipts, learned patterns, and eventually deterministic rules;
 - personal agents can still receive tasks from IloSpace without being conflated with simple inbound webhook sources.
 
@@ -55,9 +55,23 @@ They should not generally say:
 
 > “Post this to that thread and trigger Ilo.”
 
-IloSpace should route incoming envelopes through deterministic policy first. If the signal has an explicit task binding, explicit approved target, source rule, idempotency match, known payload fingerprint, or learned pattern, IloSpace can execute the action without invoking Ilo. If the signal is ambiguous, Ilo performs triage, chooses an action, and records a Triage Receipt. Over time, repeated receipts can promote into source rules or learned patterns so future events bypass or minimize Ilo triage.
+IloSpace should route incoming envelopes through deterministic preflight first. If the signal has an explicit task binding, explicit approved target, source rule, idempotency match, known payload fingerprint, or learned pattern, IloSpace can resolve the envelope without invoking Ilo. If the signal is ambiguous, Ilo handles it directly: it reasons over the signal, uses its available tools and skills, chooses whether anything should happen, and records a Triage Receipt. Over time, repeated receipts can promote into source rules or learned patterns so future events bypass or minimize Ilo reasoning.
 
 Existing Hermes/OpenClaw work remains valuable. It becomes the first implemented specialization of this broader model: a personal-agent connection that can receive outbound tasks and report results. Jira/GitHub/Figma-style sources are connections that mostly submit inbound signals. Codex can be either: a normal session may only submit signals, while a long-running Codex daemon could also receive tasks.
+
+## Ilo-First Configuration Principle
+
+All configuration must be possible through Ilo. Users should configure inbound integrations, source policies, schemas, instructions, thresholds, action permissions, replay tests, and rule promotion by chatting with Ilo.
+
+V1 should not build an integration builder UI, schema builder UI, drag/drop priority UI, or manual settings dashboard. The implementation should build durable configuration services and expose them to Ilo as tools. A UI may emerge later on top of the same services, but it is not the product surface for this PRD.
+
+Observability is allowed and useful, but it is not configuration. V1 may expose server-style logs, event details, dry-run results, replay results, and current config snapshots so humans can inspect what happened. Changes still go through Ilo.
+
+The product principle is:
+
+> If a human could configure it, Ilo must have a tool to configure it.
+
+Ilo configuration and inbound handling should always have an authority principal. Even when the event comes from MCP, a webhook, or an external agent, the connection should resolve to the user who configured it, requested it, or owns that personal connection. Ilo acts on behalf of that user, and backend permission checks use that user/org context.
 
 ## V1 Alignment And Parallel Work Split
 
@@ -65,7 +79,7 @@ The webhook integration workstream and the MCP/personal-tool workstream should l
 
 The shared rule is:
 
-> Different ingress, same envelope, same policy/triage path, same workspace executor.
+> Different ingress, same envelope, same deterministic preflight, same Ilo action runtime.
 
 ### Shared Foundation Workstream
 
@@ -76,10 +90,11 @@ The foundation owns:
 - External Source Connection identity, auth, org/workspace scope, source type, capabilities, and status.
 - Inbound Envelope persistence for raw payload, normalized payload, idempotency, status, source metadata, and processing result.
 - Source Policy lookup for allowed envelope kinds, instructions, origin patterns, action permissions, thresholds, review mode, and schema expectations.
-- Deterministic policy evaluation before Ilo triage.
-- Ilo triage interface that returns a strict Workspace Action Plan.
+- Deterministic policy evaluation before Ilo reasoning.
+- Ilo action runtime interface that lets Ilo handle ambiguous signals using its available tools and skills.
 - Triage Receipt persistence for decision, confidence, target, action, reasoning summary, features used, and reusable-pattern candidate.
-- Workspace Executor interface for the first safe action types.
+- Tool/runtime guardrails for permissions, review/quarantine outcomes, dry-run, and safe execution.
+- Ilo configuration tools for every configurable field in the foundation.
 
 The foundation should expose one internal service interface that both product surfaces call:
 
@@ -108,8 +123,7 @@ The first result shape should make review/debugging possible:
   "status": "processed | review_required | quarantined | failed",
   "event_id": "inbound-event-id",
   "matched_policy_id": "policy-id-or-null",
-  "action_plan": {},
-  "action_result": {},
+  "ilo_outcome": {},
   "confidence": 0.91
 }
 ```
@@ -124,13 +138,13 @@ Webhook V1 owns:
 - Authenticated integration connection or integration token.
 - Minimal external payload: `origin` and `payload`, plus optional idempotency/header metadata.
 - Origin pattern matching with explicit priority/order.
-- User-friendly incoming schema builder that compiles to internal JSON Schema or equivalent validation.
+- Incoming schema configuration model that Ilo can populate through tools and the backend can compile to internal JSON Schema or equivalent validation.
 - Integration instructions for Ilo triage.
 - Allowed actions and auto-execute thresholds.
 - Dry-run/test payload flow.
 - Event logs.
 - Replay.
-- Integrations UI.
+- Read-only observability endpoints/views if needed for logs, event details, dry-run results, replay results, and config snapshots.
 
 The webhook proposal maps directly to the shared model:
 
@@ -140,16 +154,16 @@ POST /webhooks                -> webhook ingress
 origin + payload              -> Inbound Envelope
 origin_patterns + priority    -> deterministic source policy matching
 integration_events            -> Inbound Envelope/Event Store
-LLM strict plan               -> Ilo triage action plan
-allowed_actions + thresholds  -> Workspace Executor gate
+LLM strict plan               -> Ilo outcome / receipt
+allowed_actions + thresholds  -> tool/runtime guardrails
 event logs + replay           -> receipt/replay/audit tooling
 ```
 
-For V1 webhook actions:
+For V1 webhook outcomes:
 
-- `open_cortex_thread` may auto-execute above threshold.
-- `create_memory` may auto-execute above threshold, but must preserve source provenance and remain easy to inspect/delete.
-- `create_domain_record` must start in review/dry-run only, even at high confidence, because it writes into stricter domain structure.
+- Ilo may open a Cortex thread above threshold when source policy permits it.
+- Ilo may create memory above threshold when source policy permits it, but the result must preserve source provenance and remain easy to inspect/delete.
+- Domain record creation must start in review/dry-run only, even at high confidence, because it writes into stricter domain structure.
 
 Webhook integrations are **workspace/org-level system actors**, not user-owned personal actors. They must still be scoped to one IloSpace workspace/org. They must not be global across all orgs.
 
@@ -170,10 +184,10 @@ MCP V1 owns:
 The MCP lane should treat direct `create_thread` / `post_thread_message` style tools as advanced or compatibility tools, not the default path. The default path is:
 
 ```text
-Personal tool -> hosted MCP submit signal -> Inbound Envelope -> Source Policy -> deterministic policy or Ilo triage -> Workspace Action
+Personal tool -> hosted MCP submit signal -> Inbound Envelope -> Source Policy -> deterministic preflight or Ilo action runtime -> Ilo Outcome
 ```
 
-The MCP lane should not block on the webhook UI. It only needs the shared foundation service and a connection/token with `can_submit_signals`.
+The MCP lane should not block on webhook observability surfaces. It only needs the shared foundation service and a connection/token with `can_submit_signals`.
 
 ### Existing Hermes/OpenClaw Compatibility Workstream
 
@@ -214,7 +228,7 @@ Both must produce:
 - a stored Inbound Envelope/Event;
 - a matched Source Policy or default policy;
 - a deterministic decision or Ilo Triage Receipt;
-- a Workspace Action result or review/quarantine outcome;
+- an Ilo Outcome or review/quarantine outcome;
 - provenance visible in logs and any workspace projection.
 
 ## Architecture Diagrams
@@ -230,19 +244,19 @@ flowchart LR
 
     subgraph IloSpace["IloSpace system"]
         Ingress["Unified ingress<br/>MCP / webhook / REST"]
-        Policy["Deterministic policy layer<br/>auth, scope, dedupe, rules, fingerprints"]
-        Agent["Ilo<br/>LLM triage agent"]
-        Executor["Workspace executor<br/>applies chosen action"]
-        Workspace["Workspace state<br/>threads, ideas, pins, projects, tasks, notifications"]
+        Policy["Deterministic preflight<br/>auth, scope, dedupe, rules, fingerprints"]
+        Agent["Ilo action runtime<br/>LLM + skills + tools"]
+        Guard["Tool/runtime guardrails<br/>permissions, dry-run, review, audit"]
+        Workspace["IloSpace state<br/>memory, threads, projects, tasks, logs"]
     end
 
     People --> Tools
     Tools --> Ingress
     Ingress --> Policy
-    Policy -->|"known / safe"| Executor
+    Policy -->|"known / safe shortcut"| Guard
     Policy -->|"ambiguous"| Agent
-    Agent --> Executor
-    Executor --> Workspace
+    Agent --> Guard
+    Guard --> Workspace
 ```
 
 ### 2. Connection Capability Model
@@ -278,9 +292,9 @@ sequenceDiagram
     participant Source as External Source
     participant Ingress as IloSpace Ingress
     participant Store as Signal Store
-    participant Policy as Policy Engine
-    participant Ilo as Ilo Triage Agent
-    participant Exec as Workspace Executor
+    participant Policy as Deterministic Preflight
+    participant Ilo as Ilo Action Runtime
+    participant Guard as Tool / Runtime Guardrails
     participant Workspace as IloSpace Workspace
 
     Source->>Ingress: submit envelope
@@ -289,14 +303,15 @@ sequenceDiagram
     Store->>Policy: evaluate signal
 
     alt explicit binding or known rule
-        Policy->>Exec: deterministic decision
+        Policy->>Guard: shortcut decision
     else ambiguous signal
-        Policy->>Ilo: request triage
+        Policy->>Ilo: hand signal to Ilo
+        Ilo->>Workspace: read context through tools
+        Ilo->>Guard: use tools / choose outcome
         Ilo->>Store: write triage receipt
-        Ilo->>Exec: chosen action
     end
 
-    Exec->>Workspace: post/create/link/notify/ask/trigger
+    Guard->>Workspace: apply permitted tool effects or record review
     Policy->>Store: update fingerprints and rule candidates
 ```
 
@@ -308,8 +323,8 @@ flowchart LR
         Idea["Thread / idea / project context"]
         Task["ExternalTask<br/>IloSpace asks outside worker"]
         Signal["InboundSignal<br/>outside source tells IloSpace something"]
-        Triage["Ilo or deterministic policy"]
-        Action["Workspace Action"]
+        Triage["Deterministic preflight or Ilo"]
+        Outcome["Ilo Outcome"]
     end
 
     subgraph PersonalAgent["Personal agent / worker"]
@@ -328,7 +343,7 @@ flowchart LR
     CodexDaemon -->|"task_event / task_result"| Signal
 
     Signal --> Triage
-    Triage --> Action
+    Triage --> Outcome
 ```
 
 ### 5. LLM Bypass Ladder
@@ -356,9 +371,9 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Foundation["Shared Foundation<br/>External Source Connection<br/>Inbound Envelope Store<br/>Source Policy<br/>Ilo Triage<br/>Workspace Executor"]
+    Foundation["Shared Foundation<br/>External Source Connection<br/>Inbound Envelope Store<br/>Source Policy<br/>Ilo Config Tools<br/>Ilo Triage<br/>Workspace Executor"]
 
-    Webhook["Webhook Integrations V1<br/>POST /webhooks<br/>origin rules<br/>schema builder<br/>instructions<br/>logs/replay"]
+    Webhook["Webhook Integrations V1<br/>POST /webhooks<br/>origin rules<br/>Ilo-configured schema<br/>instructions<br/>logs/replay"]
 
     MCP["MCP / Personal Tool V1<br/>hosted submit signal tool<br/>Codex hook guidance<br/>personal tool examples"]
 
@@ -381,14 +396,14 @@ flowchart TD
 6. As a teammate using Jira, I want Jira issue events to enter IloSpace as signals, so that relevant project activity can be routed into team context.
 7. As a teammate using GitHub, I want pull request and issue activity to enter IloSpace as signals, so that engineering changes can be connected to threads, projects, and pins.
 8. As a designer using Figma, I want design updates to enter IloSpace as signals, so that design work can be coordinated with engineering and product threads.
-9. As an admin, I want to register an External Source Connection, so that each outside source has identity, auth, scopes, and capabilities.
-10. As an admin, I want to configure whether a connection can submit signals, receive tasks, report task events, ask for context, or request explicit actions, so that each source has the minimum required power.
-11. As an admin, I want webhook sources to have source-specific policies, so that common payloads can be normalized and routed cheaply.
-12. As an admin, I want connection tokens to be scoped, revocable, and auditable, so that external sources never need broad internal service credentials.
-13. As an admin, I want repeated source behavior to produce proposed rules, so that IloSpace becomes faster and cheaper over time.
-14. As an admin, I want to approve or reject proposed routing rules, so that learned automation stays understandable and governed.
-15. As an admin, I want to inspect a connection’s recent signals, task events, failures, and decisions, so that I can debug integrations.
-16. As an admin, I want low-confidence or sensitive actions to require human confirmation, so that external automation cannot silently create messy or risky workspace state.
+9. As an authorized teammate chatting with Ilo, I want Ilo to register an External Source Connection, so that each outside source has identity, auth, scopes, and capabilities without me using a settings UI.
+10. As an authorized teammate chatting with Ilo, I want Ilo to configure whether a connection can submit signals, receive tasks, report task events, ask for context, or request explicit actions, so that each source has the minimum required power.
+11. As an authorized teammate chatting with Ilo, I want Ilo to configure source-specific webhook policies, so that common payloads can be normalized and routed cheaply.
+12. As an authorized teammate chatting with Ilo, I want Ilo to create scoped, revocable, auditable connection tokens, so that external sources never need broad internal service credentials.
+13. As an authorized teammate chatting with Ilo, I want Ilo to surface repeated source behavior and proposed rules, so that IloSpace becomes faster and cheaper over time.
+14. As an authorized teammate chatting with Ilo, I want Ilo to approve, reject, or modify proposed routing rules according to my instructions and permissions, so that learned automation stays understandable and governed.
+15. As an authorized teammate chatting with Ilo, I want Ilo to inspect a connection’s recent signals, task events, failures, and decisions, so that I can debug integrations conversationally.
+16. As an authorized teammate chatting with Ilo, I want low-confidence or sensitive actions to require human confirmation through Ilo, so that external automation cannot silently create messy or risky workspace state.
 17. As Ilo, I want incoming signals to include raw payload, normalized fields, hints, source identity, and policy context, so that I can triage only when deterministic policy is insufficient.
 18. As Ilo, I want every triage decision to produce a receipt, so that future signals can reuse prior judgment without repeating full reasoning.
 19. As Ilo, I want deterministic rules and payload fingerprints to handle common cases, so that my LLM reasoning is reserved for ambiguity.
@@ -429,10 +444,16 @@ flowchart TD
 54. As a security-minded admin, I want integration actors to remain scoped to one workspace/org, so that “system actor” never means cross-org global write access.
 55. As a coding agent, I want the hosted MCP tool to accept repo, branch, task, and file hints, so that IloSpace can route progress without forcing me to choose a thread.
 56. As an operator, I want the first shared milestone to prove webhook and MCP inputs produce the same internal records, so that the foundation is real and not just conceptual.
+57. As an authorized teammate, I want to configure integrations by chatting with Ilo rather than filling out forms, so that IloSpace stays agent-native instead of becoming another settings dashboard.
+58. As Ilo, I want tools for every configurable integration field, so that I can create and update connections, policies, schemas, thresholds, allowed actions, tests, replays, and rule promotions on behalf of authorized users.
+59. As a teammate, I want observability surfaces to be read-only by default, so that I can inspect events and logs without confusing logs with the configuration experience.
 
 ## Implementation Decisions
 
 - Add a generalized External Source Connection concept that is capability-based, not product-name-based. Hermes, OpenClaw, Codex, Jira, GitHub, Figma, and custom scripts are all connections with different capabilities.
+- Build configuration services first, then expose those services to Ilo as tools. Do not make a manual configuration UI the V1 product surface.
+- Every configurable field must have an Ilo-accessible tool path: connections, capabilities, source policies, origin patterns, instructions, schema fields, allowed actions, thresholds, dry-run inputs, replay, rule candidates, and source status.
+- Treat logs, dry-run output, replay output, and config snapshots as observability surfaces, not the primary configuration surface.
 - Use one shared inbound service for webhook, MCP, and future inbound lanes. Do not build a webhook-only service that cannot be reused by the hosted MCP tool.
 - Implement the shared foundation before or alongside the first webhook/MCP slices. Both product lanes should call `submit_inbound_envelope` or an equivalent service boundary.
 - Treat the colleague’s webhook proposal as the first configured-source implementation of the broader inbound architecture.
@@ -463,7 +484,7 @@ flowchart TD
 - For Codex, support both modes conceptually: ordinary sessions submit signals; future long-running Codex workers may receive tasks.
 - For Jira/GitHub/Figma, start with inbound-only signal connections and source policies.
 - For webhook V1, support origin matching with explicit priority/order. The first active integration/policy whose rules match the authenticated source and origin wins.
-- For webhook V1, support a user-friendly schema builder that compiles to internal validation. Do not require users to hand-author raw JSON Schema.
+- For webhook V1, support an Ilo-configurable schema field model that compiles to internal validation. Do not require users to hand-author raw JSON Schema and do not require a schema-builder UI in V1.
 - For webhook V1, support dry-run and replay before expecting broad auto-execution.
 - For webhook V1, support `open_cortex_thread`, `create_memory`, and `create_domain_record` as the first action vocabulary, with `create_domain_record` review-only at first.
 - For MCP V1, add one default signal submission tool and update tool descriptions/guidance so coding agents understand that fuzzy routing belongs to IloSpace.
@@ -476,6 +497,7 @@ flowchart TD
 ### Proposed Deep Modules
 
 - **Connection Registry**: owns external source identity, auth, scopes, capabilities, status, and source card metadata.
+- **Ilo Configuration Tool Surface**: gives Ilo tools for every configurable connection, source policy, schema, action, threshold, dry-run, replay, and rule-promotion operation.
 - **Inbound Envelope Store**: owns raw payloads, normalized signals, idempotency, redaction, and replayable state.
 - **Signal Normalizer**: converts source-specific payloads into a stable inbound signal shape.
 - **Policy Engine**: performs deterministic routing decisions and decides whether Ilo triage is needed.
@@ -494,6 +516,7 @@ Build the backend foundation used by both webhook and MCP ingress.
 Deliverables:
 
 - Connection capability model.
+- Ilo configuration tools for connection and policy creation/update.
 - Inbound envelope/event persistence.
 - Source policy representation.
 - Internal `submit_inbound_envelope` service.
@@ -512,11 +535,11 @@ Deliverables:
 - Public webhook ingress with authenticated source identity.
 - Minimal payload shape: `origin` and `payload`.
 - Origin pattern matching with priority.
-- Schema builder and validation.
+- Ilo-configurable schema fields and backend validation.
 - Integration instructions.
 - Allowed actions and auto-execute thresholds.
 - Event logs, dry-run, replay.
-- Initial Integrations UI.
+- Read-only observability for event logs, dry-run results, replay results, and config snapshots.
 - Jira-like fixture proving ticket triage into review or open thread.
 
 #### Package C: MCP / Personal Tool Signals V1
@@ -572,7 +595,8 @@ Deliverables:
 - Building source-specific deep integrations for every app in the first pass.
 - Renaming all existing code identifiers from current `illo_*` naming.
 - Guaranteeing fully autonomous rule promotion without operator visibility.
-- Building a complete UI for every source policy field in the first implementation.
+- Building a manual configuration UI for source policy fields in the first implementation.
+- Making UI the configuration surface for integrations.
 - Making all external tools always-on personal agents.
 - Letting external sources perform fuzzy workspace routing directly.
 - Treating Jira/GitHub/Figma events as external tasks.
