@@ -1,6 +1,7 @@
 # Core
 psycopg2-binary>=2.9
 asyncpg>=0.30
+aiosqlite>=0.20
 alembic>=1.15
 sqlalchemy>=2.0
 greenlet>=3.2
