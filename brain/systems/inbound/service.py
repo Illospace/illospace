@@ -40,6 +40,8 @@ VALID_PROJECTION_FAILURE_STATUSES = frozenset(
     {STATUS_REVIEW_REQUIRED, STATUS_QUARANTINED, STATUS_FAILED}
 )
 VALID_PROJECTION_UPSERT_MODES = frozenset({"upsert", "create_only", "update_only"})
+MAX_INBOUND_KIND_LENGTH = 40
+MAX_INBOUND_ORIGIN_LENGTH = 240
 
 
 class InboundValidationError(ValueError):
@@ -383,6 +385,10 @@ def _normalize_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
         raise InboundValidationError("kind is required")
     if not origin:
         raise InboundValidationError("origin is required")
+    if len(kind) > MAX_INBOUND_KIND_LENGTH:
+        raise InboundValidationError(f"kind must be {MAX_INBOUND_KIND_LENGTH} characters or fewer")
+    if len(origin) > MAX_INBOUND_ORIGIN_LENGTH:
+        raise InboundValidationError(f"origin must be {MAX_INBOUND_ORIGIN_LENGTH} characters or fewer")
     payload = data.get("payload") or {}
     if not isinstance(payload, dict):
         raise InboundValidationError("payload must be an object")

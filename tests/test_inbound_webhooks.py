@@ -264,6 +264,33 @@ async def test_webhook_and_mcp_signals_share_inbound_event_path(session):
     assert all(receipt.outcome == {"reason": "no_matching_source_policy"} for receipt in receipts)
 
 
+async def test_mcp_signal_rejects_overlong_origin_before_inbound_processing(session):
+    await _seed_connection(session)
+
+    response = await _post_mcp(
+        session,
+        headers={"Authorization": f"Bearer {RAW_TOKEN}"},
+        json_body={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "illo_submit_signal",
+                "arguments": {
+                    "summary": "This should not reach persistence.",
+                    "origin": "x" * 241,
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert "origin must be 240 characters or fewer" in result["content"][0]["text"]
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
+
+
 async def test_webhook_rejects_overlong_idempotency_header(session):
     await _seed_connection(session)
 
