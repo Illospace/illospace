@@ -43,6 +43,7 @@ EXPECTED_TABLES = {
     "external_agent_task_events",
     "external_agent_tasks",
     "inbound_decision_receipts",
+    "inbound_domain_projection_keys",
     "inbound_domain_projections",
     "inbound_events",
     "inbound_source_policies",

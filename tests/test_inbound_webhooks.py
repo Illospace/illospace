@@ -26,6 +26,7 @@ from brain.platform.db.models.external_agent import (
 )
 from brain.platform.db.models.inbound import (
     InboundDecisionReceiptRow,
+    InboundDomainProjectionKeyRow,
     InboundDomainProjectionRow,
     InboundEventRow,
     InboundSourcePolicyRow,
@@ -78,6 +79,7 @@ async def session(async_sqlite_session_factory):
             DomainEvent.__table__,
             InboundSourcePolicyRow.__table__,
             InboundDomainProjectionRow.__table__,
+            InboundDomainProjectionKeyRow.__table__,
             InboundEventRow.__table__,
             InboundDecisionReceiptRow.__table__,
         ]
@@ -498,6 +500,10 @@ async def test_domain_projection_creates_updates_and_dedupes_domain_records(sess
     }
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 2
     assert await session.scalar(select(func.count()).select_from(InboundDecisionReceiptRow)) == 2
+    projection_key = (await session.scalars(select(InboundDomainProjectionKeyRow))).one()
+    assert projection_key.projection_id == str(projection.id)
+    assert projection_key.external_id == "PROJ-7"
+    assert projection_key.record_id == record_id
     domain_events = await domain_service.list_events(ORG_ID, domain.id, record_id=record_id)
     assert [event.event_type for event in domain_events] == ["record.updated", "record.created"]
     assert all(str(event.reason).startswith("inbound_event:") for event in domain_events)
@@ -648,6 +654,9 @@ async def test_domain_projection_finds_existing_record_beyond_default_list_cap(s
     assert result["status"] == "processed"
     assert result["ilo_outcome"]["operation"] == "updated"
     assert await session.scalar(select(func.count()).select_from(DomainRecord)) == 501
+    projection_key = (await session.scalars(select(InboundDomainProjectionKeyRow))).one()
+    assert projection_key.external_id == "PROJ-OLD"
+    assert projection_key.record_id == records[0].id
     oldest_record = await session.get(DomainRecord, records[0].id)
     assert oldest_record is not None
     assert oldest_record.data["summary"] == "Found beyond cap"

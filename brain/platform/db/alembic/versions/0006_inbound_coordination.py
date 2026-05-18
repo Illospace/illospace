@@ -21,6 +21,7 @@ depends_on = None
 INBOUND_TABLES = {
     "inbound_source_policies",
     "inbound_domain_projections",
+    "inbound_domain_projection_keys",
     "inbound_events",
     "inbound_decision_receipts",
 }
@@ -37,6 +38,9 @@ def upgrade() -> None:
     if existing_tables:
         missing_tables = INBOUND_TABLES.difference(existing_tables)
         if not missing_tables:
+            return
+        if missing_tables == {"inbound_domain_projection_keys"}:
+            _create_projection_key_table()
             return
         missing = ", ".join(sorted(missing_tables))
         existing = ", ".join(sorted(existing_tables))
@@ -120,6 +124,8 @@ def upgrade() -> None:
         "inbound_domain_projections",
         ["domain_id", "object_key"],
     )
+
+    _create_projection_key_table()
 
     op.create_table(
         "inbound_events",
@@ -228,3 +234,33 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     return None
+
+
+def _create_projection_key_table() -> None:
+    op.create_table(
+        "inbound_domain_projection_keys",
+        sa.Column("id", postgresql.UUID(as_uuid=False), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column("org_id", postgresql.UUID(as_uuid=False), sa.ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "projection_id",
+            postgresql.UUID(as_uuid=False),
+            sa.ForeignKey("inbound_domain_projections.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column("domain_id", sa.Integer(), sa.ForeignKey("domains.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("record_id", sa.Integer(), sa.ForeignKey("domain_records.id", ondelete="SET NULL"), nullable=True),
+        sa.Column("external_id", sa.Text(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("NOW()")),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("NOW()")),
+        sa.UniqueConstraint("projection_id", "external_id", name="uq_inbound_projection_keys_projection_external"),
+    )
+    op.create_index(
+        "ix_inbound_projection_keys_org_projection",
+        "inbound_domain_projection_keys",
+        ["org_id", "projection_id"],
+    )
+    op.create_index(
+        "ix_inbound_projection_keys_record",
+        "inbound_domain_projection_keys",
+        ["record_id"],
+    )

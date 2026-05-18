@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from typing import Any, Mapping, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +15,7 @@ from brain.platform.db.models.domain import DomainRecord
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
 from brain.platform.db.models.inbound import (
     InboundDecisionReceiptRow,
+    InboundDomainProjectionKeyRow,
     InboundDomainProjectionRow,
     InboundEventRow,
     InboundSourcePolicyRow,
@@ -482,12 +483,42 @@ async def _apply_domain_projection(
         title = _string_value(title_value) if title_value is not _MISSING else None
 
     domain_service = AsyncDomainService(session)
-    existing = await _find_projected_record(
-        domain_service,
-        context.org_id,
-        projection,
-        external_id=external_id,
-    )
+    projection_key = await _get_projection_key(session, projection, external_id=external_id)
+    existing = await _record_from_projection_key(session, projection_key, context.org_id, projection)
+    if projection_key is not None and existing is None:
+        existing = await _find_projected_record(domain_service, context.org_id, projection, external_id=external_id)
+        if existing is not None:
+            projection_key.record_id = existing.id
+            await session.flush()
+    if projection_key is None:
+        existing = await _find_projected_record(domain_service, context.org_id, projection, external_id=external_id)
+        if existing is not None:
+            projection_key, _claimed = await _claim_projection_key(
+                session,
+                context=context,
+                projection=projection,
+                external_id=external_id,
+                record_id=existing.id,
+            )
+    if projection_key is None and existing is None:
+        projection_key, claimed = await _claim_projection_key(
+            session,
+            context=context,
+            projection=projection,
+            external_id=external_id,
+        )
+        if not claimed:
+            existing = await _record_from_projection_key(session, projection_key, context.org_id, projection)
+            if existing is None:
+                existing = await _find_projected_record(
+                    domain_service,
+                    context.org_id,
+                    projection,
+                    external_id=external_id,
+                )
+                if existing is not None:
+                    projection_key.record_id = existing.id
+                    await session.flush()
     reason = f"inbound_event:{event.id}"
     if existing is None:
         if projection.upsert_mode == "update_only":
@@ -502,6 +533,8 @@ async def _apply_domain_projection(
             actor_kind="external_source",
             reason=reason,
         )
+        projection_key.record_id = record.id
+        await session.flush()
         operation = "created"
     else:
         if projection.upsert_mode == "create_only":
@@ -525,8 +558,73 @@ async def _apply_domain_projection(
         "object_key": projection.object_key,
         "record_id": record.id,
         "external_id": external_id,
+        "projection_key_id": str(projection_key.id) if projection_key is not None else None,
         "record": serialized,
     }
+
+
+async def _get_projection_key(
+    session: AsyncSession,
+    projection: InboundDomainProjectionRow,
+    *,
+    external_id: str,
+) -> InboundDomainProjectionKeyRow | None:
+    stmt = (
+        select(InboundDomainProjectionKeyRow)
+        .where(
+            InboundDomainProjectionKeyRow.projection_id == str(projection.id),
+            InboundDomainProjectionKeyRow.external_id == external_id,
+        )
+        .limit(1)
+        .with_for_update()
+    )
+    return (await session.scalars(stmt)).first()
+
+
+async def _claim_projection_key(
+    session: AsyncSession,
+    *,
+    context: _ConnectionContext,
+    projection: InboundDomainProjectionRow,
+    external_id: str,
+    record_id: int | None = None,
+) -> tuple[InboundDomainProjectionKeyRow, bool]:
+    key = InboundDomainProjectionKeyRow(
+        org_id=context.org_id,
+        projection_id=str(projection.id),
+        domain_id=projection.domain_id,
+        record_id=record_id,
+        external_id=external_id,
+    )
+    try:
+        async with session.begin_nested():
+            session.add(key)
+            await session.flush()
+    except IntegrityError:
+        existing = await _get_projection_key(session, projection, external_id=external_id)
+        if existing is not None:
+            return existing, False
+        raise
+    return key, True
+
+
+async def _record_from_projection_key(
+    session: AsyncSession,
+    key: InboundDomainProjectionKeyRow | None,
+    org_id: str,
+    projection: InboundDomainProjectionRow,
+) -> DomainRecord | None:
+    if key is None or key.record_id is None:
+        return None
+    record = await session.get(DomainRecord, key.record_id)
+    if (
+        record is None
+        or str(record.org_id) != str(org_id)
+        or int(record.domain_id) != int(projection.domain_id)
+        or record.archived_at is not None
+    ):
+        return None
+    return record
 
 
 async def _find_projected_record(
@@ -538,6 +636,10 @@ async def _find_projected_record(
 ) -> DomainRecord | None:
     domain = await domain_service.get_domain(org_id, projection.domain_id)
     obj = await domain_service.get_object_type(domain.id, projection.object_key)
+    external_id_expr = DomainRecord.data[projection.external_id_field].as_string()
+    bind = domain_service.session.get_bind()
+    if bind.dialect.name == "sqlite":
+        external_id_expr = func.json_extract(DomainRecord.data, f"$.{projection.external_id_field}")
     stmt = (
         select(DomainRecord)
         .where(
@@ -545,14 +647,12 @@ async def _find_projected_record(
             DomainRecord.domain_id == domain.id,
             DomainRecord.object_type_id == obj.id,
             DomainRecord.archived_at.is_(None),
+            external_id_expr == external_id,
         )
         .order_by(DomainRecord.updated_at.desc(), DomainRecord.id.desc())
+        .limit(1)
     )
-    records = (await domain_service.session.scalars(stmt)).all()
-    for record in records:
-        if _string_value((record.data or {}).get(projection.external_id_field)) == external_id:
-            return record
-    return None
+    return (await domain_service.session.scalars(stmt)).first()
 
 
 def _validate_schema_config(schema_config: Mapping[str, Any], envelope: Mapping[str, Any]) -> None:

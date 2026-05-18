@@ -30,6 +30,7 @@ UUIDString = UUID(as_uuid=False).with_variant(String, "sqlite")
 __all__ = [
     "InboundDecisionReceiptRow",
     "InboundDomainProjectionRow",
+    "InboundDomainProjectionKeyRow",
     "InboundEventRow",
     "InboundSourcePolicyRow",
 ]
@@ -191,6 +192,47 @@ class InboundDomainProjectionRow(Base, TimestampMixin):
         server_default=text("'{}'::jsonb"),
         default=dict,
     )
+
+
+class InboundDomainProjectionKeyRow(Base, TimestampMixin):
+    """Unique external-id claim for a configured Domain Projection."""
+
+    __tablename__ = "inbound_domain_projection_keys"
+    __table_args__ = (
+        UniqueConstraint(
+            "projection_id",
+            "external_id",
+            name="uq_inbound_projection_keys_projection_external",
+        ),
+        Index("ix_inbound_projection_keys_org_projection", "org_id", "projection_id"),
+        Index("ix_inbound_projection_keys_record", "record_id"),
+    )
+
+    id: Mapped[str] = mapped_column(UUIDString, primary_key=True, default=lambda: str(uuid.uuid4()))
+    org_id: Mapped[str] = mapped_column(
+        UUIDString,
+        ForeignKey("orgs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    projection_id: Mapped[str] = mapped_column(
+        UUIDString,
+        ForeignKey("inbound_domain_projections.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    domain_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("domains.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    record_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("domain_records.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class InboundEventRow(Base, CreatedAtMixin):

@@ -1,6 +1,6 @@
 # MCP Personal Tool Signals
 
-Status: implementation note for Reda's MCP lane  
+Status: implementation note for Reda's MCP lane
 Parent PRD: `docs/prd-inbound-coordination-layer.md`
 
 ## Purpose
