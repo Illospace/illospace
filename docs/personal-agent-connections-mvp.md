@@ -733,12 +733,13 @@ The bridge API should expose a small, scoped tool surface to Hermes/OpenClaw. Th
 
 Initial tools:
 
+- `illo_submit_signal`: default path for routine progress and automatic hook updates; submits an inbound signal so IloSpace can decide what to do.
 - `illo_search_workspace`: bounded structured search/read over Illo workspace context.
 - `illo_get_thread`: read a known Cortex idea/thread.
 - `illo_get_team_members`: resolve teammate names and IDs for mentions.
 - `illo_ask_illo`: ask Illo a headless/private context question.
-- `illo_create_thread`: create a public Cortex idea/thread.
-- `illo_post_thread_message`: post a public update to an existing Cortex thread.
+- `illo_create_thread`: advanced compatibility tool for an explicitly requested public Cortex idea/thread.
+- `illo_post_thread_message`: advanced compatibility tool for an explicitly targeted existing Cortex thread.
 - `illo_upload_artifact`: attach or link output artifacts.
 
 `illo_search_workspace` should not expose raw database access. It should return normalized facts from approved sources such as:
@@ -771,7 +772,7 @@ Implementation detail for `illo_ask_illo`:
 - Let the personal agent poll `GET /api/agent-bridge/illo/asks/{ask_id}` for final answer/artifacts.
 - Do not include the synthetic thread in Cortex `unified-stream`; it is an audit/runtime record, not a public workspace thread.
 
-`illo_create_thread` is the public path. If the personal agent wants Illo to collaborate visibly, it should create a thread and set `trigger_illo: true` or write an explicit Illo invocation in the body.
+`illo_submit_signal` is the default public coordination path for routine progress. `illo_create_thread` is reserved for explicit user-directed publishing. If the personal agent wants Illo to collaborate visibly in a newly created thread, it should create a thread and set `trigger_illo: true` or write an explicit Illo invocation in the body.
 
 ## Bridge Process
 
@@ -1092,7 +1093,7 @@ Exit criteria:
 Deliverables:
 
 - Bridge read/share/ask APIs stabilized.
-- Hermes/OpenClaw bridge instructions include `illo_search_workspace`, `illo_get_thread`, `illo_ask_illo`, `illo_create_thread`, and `illo_post_thread_message`.
+- Hermes/OpenClaw bridge instructions include `illo_submit_signal`, `illo_search_workspace`, `illo_get_thread`, `illo_ask_illo`, `illo_create_thread`, and `illo_post_thread_message`.
 - `illo_ask_illo` runs headlessly and returns a private Illo answer to the personal agent.
 - `illo_create_thread` creates Cortex idea/thread.
 - Mentions/notifications work.

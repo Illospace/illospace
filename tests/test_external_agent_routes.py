@@ -217,6 +217,7 @@ async def test_hosted_mcp_lists_tools_for_scoped_bridge_token():
 
     assert response.status_code == 200
     names = {tool["name"] for tool in response.json()["result"]["tools"]}
+    assert "illo_submit_signal" in names
     assert "illo_create_thread" in names
     assert "illo_ask" in names
     assert "illo_search_workspace" in names
@@ -246,6 +247,167 @@ async def test_hosted_mcp_filters_tools_by_bridge_token_scope():
 
     names = {tool["name"] for tool in response.json()["result"]["tools"]}
     assert names == {"illo_search_workspace", "illo_get_thread", "illo_get_team_members"}
+
+
+async def test_hosted_mcp_submit_signal_builds_shared_envelope():
+    session = _AsyncSession()
+    captured: dict[str, object] = {}
+
+    async def fake_submit(db, *, connection, envelope, ingress_context):
+        captured["db"] = db
+        captured["connection"] = connection
+        captured["envelope"] = envelope
+        captured["ingress_context"] = ingress_context
+        return {"status": "processed", "event_id": "evt-1", "confidence": 0.9}
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.submit_inbound_envelope",
+        new=AsyncMock(side_effect=fake_submit),
+    ) as submit:
+        response = await _request(
+            "POST",
+            "/mcp",
+            session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_submit_signal",
+                    "arguments": {
+                        "summary": "Implemented the submit signal tool.",
+                        "origin": "codex.progress",
+                        "source_tool": "codex",
+                        "repo": "illospace-project",
+                        "branch": "codex/mcp-submit-signal",
+                        "task_title": "MCP signal lane",
+                        "files_touched": ["brain/app/api/routers/agent_mcp.py"],
+                        "payload": {"tests": "targeted"},
+                        "desired_outcome": "team_update",
+                        "idempotency_key": "codex:run-1",
+                        "metadata": {"hook": "post-message"},
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload == {"status": "processed", "event_id": "evt-1", "confidence": 0.9}
+    submit.assert_awaited_once()
+    assert captured["db"] is session
+    assert captured["connection"] == {
+        "id": "conn-1",
+        "org_id": "org-1",
+        "owner_user_id": "user-1",
+        "token_id": "token-1",
+        "display_name": "Hermes",
+        "agent_kind": "hermes",
+        "source_type": "personal_tool",
+        "capabilities": ["submit_signals"],
+    }
+    assert captured["envelope"] == {
+        "kind": "signal",
+        "origin": "codex.progress",
+        "payload": {"tests": "targeted"},
+        "summary": "Implemented the submit signal tool.",
+        "hints": {
+            "source_tool": "codex",
+            "repo": "illospace-project",
+            "branch": "codex/mcp-submit-signal",
+            "task_title": "MCP signal lane",
+            "files_touched": ["brain/app/api/routers/agent_mcp.py"],
+        },
+        "desired_outcome": "team_update",
+        "idempotency_key": "codex:run-1",
+    }
+    ingress_context = captured["ingress_context"]
+    assert ingress_context["surface"] == "mcp_personal_tool"
+    assert ingress_context["source_actor"]["connection_id"] == "conn-1"
+    assert ingress_context["authority_principal"] == {
+        "kind": "user",
+        "user_id": "user-1",
+        "org_id": "org-1",
+    }
+    assert ingress_context["metadata"]["hook"] == "post-message"
+    assert ingress_context["metadata"]["mcp_tool"] == "illo_submit_signal"
+
+
+async def test_hosted_mcp_submit_signal_requires_signal_scope():
+    principal = external_agents.AgentBridgePrincipal(
+        connection_id="conn-1",
+        org_id="org-1",
+        owner_user_id="user-1",
+        token_id="token-1",
+        scopes=frozenset({external_agents.SCOPE_WORKSPACE_READ}),
+        connection_display_name="Hermes",
+        agent_kind="hermes",
+    )
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=principal,
+    ), patch(
+        "brain.app.api.routers.agent_mcp.submit_inbound_envelope",
+        new=AsyncMock(),
+    ) as submit:
+        response = await _request(
+            "POST",
+            "/mcp",
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_submit_signal",
+                    "arguments": {"summary": "Progress happened."},
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert "signal:submit" in result["content"][0]["text"]
+    submit.assert_not_called()
+
+
+async def test_hosted_mcp_submit_signal_rejects_direct_workspace_targets():
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.submit_inbound_envelope",
+        new=AsyncMock(),
+    ) as submit:
+        response = await _request(
+            "POST",
+            "/mcp",
+            headers={"Authorization": "Bearer bridge-token"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "tools/call",
+                "params": {
+                    "name": "illo_submit_signal",
+                    "arguments": {
+                        "summary": "Please post this progress.",
+                        "idea_id": "idea-1",
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["isError"] is True
+    assert "direct workspace targets" in result["content"][0]["text"]
+    submit.assert_not_called()
 
 
 async def test_hosted_mcp_create_thread_commits_before_broadcasting():
