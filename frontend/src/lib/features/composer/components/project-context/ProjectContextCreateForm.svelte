@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { ConstellationIcon } from '$lib/components/constellation';
   import { listTeamMembers } from '$lib/features/cortex/api/cortexApi';
   import { auth } from '$lib/stores/auth.svelte';
@@ -52,6 +53,7 @@
   let teamUsersError = $state('');
   let shareSearch = $state('');
   let sharePickerOpen = $state(false);
+  let sharePickerEl: HTMLDivElement | null = $state(null);
 
   function openConnector(nextMode: ConnectorMode) {
     connectorMode = nextMode;
@@ -155,11 +157,25 @@
     }
   }
 
+  function handleDocumentPointerDown(event: PointerEvent) {
+    if (!sharePickerOpen || !sharePickerEl) return;
+    const target = event.target;
+    if (target instanceof Node && sharePickerEl.contains(target)) return;
+    sharePickerOpen = false;
+  }
+
   $effect(() => {
     if (visibility === 'private') return;
     sharedUsernames = '';
     shareSearch = '';
     sharePickerOpen = false;
+  });
+
+  onMount(() => {
+    document.addEventListener('pointerdown', handleDocumentPointerDown, true);
+    return () => {
+      document.removeEventListener('pointerdown', handleDocumentPointerDown, true);
+    };
   });
 </script>
 
@@ -203,7 +219,7 @@
 </div>
 
 {#if visibility === 'private'}
-  <div class="project-access-picker">
+  <div bind:this={sharePickerEl} class="project-access-picker" class:open={sharePickerOpen}>
     {#if selectedShareUsers.length}
       <div class="project-access-selected" aria-label="Shared users">
         {#each selectedShareUsers as selectedName}

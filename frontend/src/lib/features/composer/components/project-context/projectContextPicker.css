@@ -13,6 +13,7 @@
     --project-context-chip-invalid-background: rgba(212, 128, 143, 0.12);
     --project-context-popover-border: var(--composer-menu-border, rgba(240, 240, 250, 0.09));
     --project-context-popover-background: var(--composer-menu-background, rgba(9, 12, 18, 0.98));
+    --project-context-access-menu-background: #0b1118;
     --project-context-popover-shadow: var(
       --composer-menu-shadow,
       0 18px 42px rgba(0, 0, 0, 0.32),
@@ -73,6 +74,7 @@
   :root[data-color-scheme='light'] .project-context-composer {
     --project-context-popover-border: var(--composer-menu-border, rgba(49, 63, 76, 0.12));
     --project-context-popover-background: var(--composer-menu-background, rgba(255, 253, 247, 0.98));
+    --project-context-access-menu-background: #fffdf8;
     --project-context-popover-shadow: var(--composer-menu-shadow, 0 18px 38px rgba(54, 70, 82, 0.13));
     --project-context-option-hover-background: var(--composer-menu-option-hover-background, rgba(49, 63, 76, 0.055));
     --project-context-option-active-background: var(--composer-menu-option-active-background, rgba(49, 63, 76, 0.075));
@@ -589,8 +591,13 @@
 
   .project-access-picker {
     position: relative;
+    z-index: 1;
     display: grid;
     gap: 6px;
+  }
+
+  .project-access-picker.open {
+    z-index: 24;
   }
 
   .project-access-selected {
@@ -715,7 +722,7 @@
     top: calc(100% + 4px);
     left: 0;
     right: 0;
-    z-index: 4;
+    z-index: 25;
     display: grid;
     gap: 1px;
     max-height: 152px;
@@ -724,8 +731,9 @@
     padding: 4px;
     border: 1px solid var(--project-context-popover-border);
     border-radius: 9px;
-    background: var(--project-context-popover-background);
-    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+    background: var(--project-context-access-menu-background);
+    box-shadow: var(--project-context-popover-shadow);
+    color: var(--project-context-option-text);
   }
 
   .project-access-empty {
@@ -814,6 +822,7 @@
     border-radius: 7px;
     padding: 7px 8px;
     background: transparent;
+    color: var(--project-context-option-text);
     text-align: left;
   }
 
