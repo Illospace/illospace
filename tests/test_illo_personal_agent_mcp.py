@@ -27,6 +27,7 @@ def test_tool_catalog_contains_behavior_guidance():
     tools = {tool["name"]: tool for tool in response["result"]["tools"]}
 
     assert {
+        "illo_submit_signal",
         "illo_search_workspace",
         "illo_get_thread",
         "illo_create_thread",
@@ -35,9 +36,10 @@ def test_tool_catalog_contains_behavior_guidance():
         "illo_get_ask",
         "illo_get_team_members",
     } == set(tools)
+    assert "default tool for automatic hooks" in tools["illo_submit_signal"]["description"]
     assert "before creating a new thread" in tools["illo_search_workspace"]["description"]
     assert "without creating a visible thread" in tools["illo_ask"]["description"]
-    assert "share work with teammates" in tools["illo_create_thread"]["description"]
+    assert "Advanced compatibility tool" in tools["illo_create_thread"]["description"]
 
 
 def test_client_routes_and_auth_header_are_stable(monkeypatch):
@@ -52,6 +54,13 @@ def test_client_routes_and_auth_header_are_stable(monkeypatch):
     client = module.IlloBridgeClient(module.IlloBridgeConfig("https://illo.test", "bridge-token", 12))
 
     client.search_workspace("roadmap", limit=5)
+    client.submit_signal(
+        "Implemented signal submission",
+        repo="illospace-project",
+        branch="codex/mcp-submit-signal",
+        files_touched=[" brain/app/api/routers/agent_mcp.py ", ""],
+        metadata={"source": "test"},
+    )
     client.get_thread("idea 1", limit=9)
     client.get_team_members()
     client.create_thread(
@@ -67,6 +76,7 @@ def test_client_routes_and_auth_header_are_stable(monkeypatch):
 
     assert [(call["method"], call["url"]) for call in calls] == [
         ("POST", "https://illo.test/api/agent-bridge/workspace/search"),
+        ("POST", "https://illo.test/api/mcp"),
         ("GET", "https://illo.test/api/agent-bridge/workspace/threads/idea%201?limit=9"),
         ("GET", "https://illo.test/api/agent-bridge/workspace/team-members"),
         ("POST", "https://illo.test/api/agent-bridge/illo/threads"),
@@ -77,9 +87,16 @@ def test_client_routes_and_auth_header_are_stable(monkeypatch):
     assert {call["token"] for call in calls} == {"bridge-token"}
     assert {call["timeout"] for call in calls} == {12}
     assert calls[0]["payload"] == {"query": "roadmap", "limit": 5}
-    assert calls[3]["payload"]["teammate_user_ids"] == ["user-1"]
-    assert calls[3]["payload"]["trigger_illo"] is True
-    assert calls[5]["payload"]["context"] == {"topic": "roadmap"}
+    signal_payload = calls[1]["payload"]
+    assert signal_payload["method"] == "tools/call"
+    assert signal_payload["params"]["name"] == "illo_submit_signal"
+    assert signal_payload["params"]["arguments"]["summary"] == "Implemented signal submission"
+    assert signal_payload["params"]["arguments"]["files_touched"] == [
+        "brain/app/api/routers/agent_mcp.py"
+    ]
+    assert calls[4]["payload"]["teammate_user_ids"] == ["user-1"]
+    assert calls[4]["payload"]["trigger_illo"] is True
+    assert calls[6]["payload"]["context"] == {"topic": "roadmap"}
 
 
 def test_handle_request_invokes_tool_and_returns_json_text():

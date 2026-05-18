@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger("illo_personal_agent_mcp")
 DEFAULT_TIMEOUT_SECONDS = 60.0
+SIGNAL_TOOL_NAME = "illo_submit_signal"
 
 
 class IlloBridgeError(RuntimeError):
@@ -76,6 +77,37 @@ def _clean_string_list(values: list[str] | None) -> list[str]:
     return [str(value).strip() for value in values or [] if str(value or "").strip()]
 
 
+def _drop_empty(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in payload.items()
+        if value is not None and value != "" and value != [] and value != {}
+    }
+
+
+def _decode_mcp_tool_result(response: dict[str, Any]) -> dict[str, Any]:
+    if "error" in response:
+        raise IlloBridgeError(str(response["error"]))
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return response
+    if result.get("isError"):
+        content = result.get("content")
+        if isinstance(content, list) and content and isinstance(content[0], dict):
+            raise IlloBridgeError(str(content[0].get("text") or "MCP tool failed"))
+        raise IlloBridgeError("MCP tool failed")
+    content = result.get("content")
+    if isinstance(content, list) and content and isinstance(content[0], dict):
+        text = str(content[0].get("text") or "")
+        if text:
+            try:
+                value = json.loads(text)
+                return value if isinstance(value, dict) else {"value": value}
+            except json.JSONDecodeError as exc:
+                raise IlloBridgeError("MCP tool returned invalid JSON text") from exc
+    return result
+
+
 class IlloBridgeClient:
     """Thin HTTP client for the scoped Illo personal-agent bridge API."""
 
@@ -120,6 +152,54 @@ class IlloBridgeClient:
 
     def get_team_members(self) -> dict[str, Any]:
         return self._request("GET", "/api/agent-bridge/workspace/team-members")
+
+    def submit_signal(
+        self,
+        summary: str,
+        *,
+        origin: str = "codex.progress",
+        payload: dict[str, Any] | None = None,
+        hints: dict[str, Any] | None = None,
+        desired_outcome: str | None = None,
+        idempotency_key: str | None = None,
+        source_tool: str = "codex",
+        repo: str | None = None,
+        branch: str | None = None,
+        task_title: str | None = None,
+        files_touched: list[str] | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        arguments = _drop_empty(
+            {
+                "summary": str(summary),
+                "origin": str(origin or "codex.progress"),
+                "payload": dict(payload or {}),
+                "hints": dict(hints or {}),
+                "desired_outcome": desired_outcome,
+                "idempotency_key": idempotency_key,
+                "source_tool": source_tool,
+                "repo": repo,
+                "branch": branch,
+                "task_title": task_title,
+                "files_touched": _clean_string_list(files_touched),
+                "session_id": session_id,
+                "run_id": run_id,
+                "metadata": _clean_metadata(metadata),
+            }
+        )
+        response = self._request(
+            "POST",
+            "/api/mcp",
+            payload={
+                "jsonrpc": "2.0",
+                "id": SIGNAL_TOOL_NAME,
+                "method": "tools/call",
+                "params": {"name": SIGNAL_TOOL_NAME, "arguments": arguments},
+            },
+        )
+        return _decode_mcp_tool_result(response)
 
     def create_thread(
         self,
@@ -206,6 +286,40 @@ def tool_illo_get_team_members() -> dict[str, Any]:
     return _client().get_team_members()
 
 
+def tool_illo_submit_signal(
+    summary: str,
+    origin: str = "codex.progress",
+    payload: dict[str, Any] | None = None,
+    hints: dict[str, Any] | None = None,
+    desired_outcome: str | None = None,
+    idempotency_key: str | None = None,
+    source_tool: str = "codex",
+    repo: str | None = None,
+    branch: str | None = None,
+    task_title: str | None = None,
+    files_touched: list[str] | None = None,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return _client().submit_signal(
+        summary=summary,
+        origin=origin,
+        payload=payload,
+        hints=hints,
+        desired_outcome=desired_outcome,
+        idempotency_key=idempotency_key,
+        source_tool=source_tool,
+        repo=repo,
+        branch=branch,
+        task_title=task_title,
+        files_touched=files_touched,
+        session_id=session_id,
+        run_id=run_id,
+        metadata=metadata,
+    )
+
+
 def tool_illo_create_thread(
     title: str,
     body: str,
@@ -258,6 +372,45 @@ ToolFunction = Callable[..., dict[str, Any]]
 
 
 TOOLS: dict[str, dict[str, Any]] = {
+    SIGNAL_TOOL_NAME: {
+        "function": tool_illo_submit_signal,
+        "description": (
+            "Submit a progress or status signal from a personal tool into IloSpace. "
+            "This is the default tool for automatic hooks and routine work updates: "
+            "send what happened, plus hints like repo, branch, task, and files touched. "
+            "Do not choose a thread, project, or teammate target here; IloSpace and Ilo "
+            "decide whether to store, route, summarize, ask, or ignore the signal."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "Concise progress summary."},
+                "origin": {"type": "string", "description": "Stable event name.", "default": "codex.progress"},
+                "payload": {"type": "object", "description": "Optional structured payload.", "default": {}},
+                "hints": {
+                    "type": "object",
+                    "description": "Optional routing/context hints, not direct workspace targets.",
+                    "default": {},
+                },
+                "desired_outcome": {"type": "string", "description": "Optional intent for IloSpace."},
+                "idempotency_key": {"type": "string", "description": "Optional dedupe key."},
+                "source_tool": {"type": "string", "description": "Personal tool name.", "default": "codex"},
+                "repo": {"type": "string", "description": "Repository or workspace hint."},
+                "branch": {"type": "string", "description": "Branch/worktree hint."},
+                "task_title": {"type": "string", "description": "Task title or short objective."},
+                "files_touched": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Files touched during the work session.",
+                    "default": [],
+                },
+                "session_id": {"type": "string", "description": "Optional tool session id."},
+                "run_id": {"type": "string", "description": "Optional tool run id."},
+                "metadata": {"type": "object", "description": "Optional metadata.", "default": {}},
+            },
+            "required": ["summary"],
+        },
+    },
     "illo_search_workspace": {
         "function": tool_illo_search_workspace,
         "description": (
@@ -292,10 +445,13 @@ TOOLS: dict[str, dict[str, Any]] = {
     "illo_create_thread": {
         "function": tool_illo_create_thread,
         "description": (
-            "Create a visible Illo thread from personal-agent work. Use when the user "
-            "asks to share work with teammates, publish findings into Illo, or start "
-            "a team-visible discussion. Set trigger_illo only when the user wants Illo "
-            "to actively respond or the message explicitly mentions Illo."
+            "Advanced compatibility tool for creating a visible Illo thread from "
+            "personal-agent work. Use only when the user explicitly asks to share work "
+            "with teammates, publish findings into Illo, or start a team-visible "
+            "discussion. For automatic hooks and routine progress, prefer "
+            f"{SIGNAL_TOOL_NAME} so IloSpace can route the signal. Set trigger_illo "
+            "only when the user wants Ilo to actively respond or the message explicitly "
+            "mentions Ilo."
         ),
         "inputSchema": {
             "type": "object",
@@ -327,9 +483,10 @@ TOOLS: dict[str, dict[str, Any]] = {
     "illo_post_thread_message": {
         "function": tool_illo_post_thread_message,
         "description": (
-            "Post a visible update into an existing Illo thread. Use for follow-ups, "
-            "status updates, final answers, or sharing new artifacts after reading "
-            "the thread with illo_get_thread."
+            "Advanced compatibility tool for posting a visible update into an existing "
+            "Illo thread. Use only when the user explicitly names or provides the thread "
+            "destination. For automatic hooks and routine progress, prefer "
+            f"{SIGNAL_TOOL_NAME} so IloSpace can route the signal."
         ),
         "inputSchema": {
             "type": "object",
