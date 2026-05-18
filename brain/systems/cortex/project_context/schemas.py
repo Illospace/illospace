@@ -16,7 +16,7 @@ class ProjectProfileCreate(BaseModel):
     description: str | None = None
     project_context: dict[str, Any]
     visibility: str = Field(default=PROJECT_VISIBILITY_PRIVATE)
-    shared_usernames: list[str] = Field(default_factory=list)
+    shared_usernames: list[str] = Field(default_factory=list, description="User names to grant access to a private project.")
     default_environment_binding_id: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -27,7 +27,7 @@ class ProjectProfileUpdate(BaseModel):
     description: str | None = None
     project_context: dict[str, Any] | None = None
     visibility: str | None = None
-    shared_usernames: list[str] | None = None
+    shared_usernames: list[str] | None = Field(default=None, description="User names to grant access to a private project.")
     default_environment_binding_id: int | None = None
     active: bool | None = None
     metadata: dict[str, Any] | None = None

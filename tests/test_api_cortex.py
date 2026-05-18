@@ -1528,7 +1528,7 @@ def test_project_profile_create_defaults_private():
     assert payload.shared_usernames == []
 
 
-async def test_resolve_project_access_users_accepts_names_and_emails():
+async def test_resolve_project_access_users_accepts_names_only():
     from brain.app.api.routers.cortex._project_context import _resolve_project_access_users
 
     session = MagicMock()
@@ -1539,10 +1539,25 @@ async def test_resolve_project_access_users_accepts_names_and_emails():
     users = await _resolve_project_access_users(
         _AsyncSession(session),
         "org-1",
-        ["alex", "alex@example.com"],
+        ["alex"],
     )
 
     assert [user.id for user in users] == ["user-2"]
+
+
+async def test_resolve_project_access_users_rejects_emails():
+    from fastapi import HTTPException
+
+    from brain.app.api.routers.cortex._project_context import _resolve_project_access_users
+
+    session = MagicMock()
+    session.scalars.return_value.all.return_value = []
+
+    with pytest.raises(HTTPException) as excinfo:
+        await _resolve_project_access_users(_AsyncSession(session), "org-1", ["alex@example.com"])
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail == {"unknown_users": ["alex@example.com"]}
 
 
 async def test_resolve_project_access_users_reports_unknown_names():

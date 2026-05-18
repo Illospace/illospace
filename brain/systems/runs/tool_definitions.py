@@ -982,7 +982,7 @@ PROJECT_TOOLS = [
                 },
                 "shared_usernames": {
                     "type": "array",
-                    "description": "User names or emails to grant access to a private project.",
+                    "description": "User names to grant access to a private project.",
                     "items": {"type": "string"},
                 },
                 "default_environment_binding_id": {"type": "integer", "description": "Optional default environment binding id."},

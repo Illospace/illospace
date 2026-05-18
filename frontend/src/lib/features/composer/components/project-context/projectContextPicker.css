@@ -587,6 +587,18 @@
     margin-top: 0;
   }
 
+  .project-access-picker {
+    position: relative;
+    display: grid;
+    gap: 6px;
+  }
+
+  .project-access-selected {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
   .project-create-intro {
     display: grid;
     gap: 3px;
@@ -698,6 +710,31 @@
     cursor: pointer;
   }
 
+  .project-access-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 4;
+    display: grid;
+    gap: 1px;
+    max-height: 152px;
+    overflow: auto;
+    box-sizing: border-box;
+    padding: 4px;
+    border: 1px solid var(--project-context-popover-border);
+    border-radius: 9px;
+    background: var(--project-context-popover-background);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+  }
+
+  .project-access-empty {
+    padding: 8px;
+    color: var(--project-context-muted-text);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
   .project-connector-grid {
     display: grid;
     gap: 8px;
@@ -713,6 +750,8 @@
 
   .connector-back-button,
   .project-visibility-row button,
+  .project-access-selected button,
+  .project-access-menu button,
   .project-context-secondary,
   .project-context-primary,
   .github-connect-row button,
@@ -752,6 +791,35 @@
     border-color: color-mix(in srgb, var(--thread-accent, #57CFA0) 26%, var(--project-context-button-border));
     background: var(--project-context-button-active-background);
     color: var(--project-context-button-active-text);
+  }
+
+  .project-access-selected button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 26px;
+    padding: 5px 7px;
+    border-radius: 999px;
+    background: var(--project-context-pill-background);
+    color: var(--project-context-pill-text);
+  }
+
+  .project-access-menu button {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 7px;
+    min-height: 30px;
+    border: 0;
+    border-radius: 7px;
+    padding: 7px 8px;
+    background: transparent;
+    text-align: left;
+  }
+
+  .project-access-menu button:hover {
+    background: var(--project-context-option-hover-background);
+    color: var(--project-context-option-hover-text);
   }
 
   .connector-view-title {

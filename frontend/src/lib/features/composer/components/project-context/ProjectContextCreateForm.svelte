@@ -1,11 +1,19 @@
 <script lang="ts">
   import { ConstellationIcon } from '$lib/components/constellation';
+  import { listTeamMembers } from '$lib/features/cortex/api/cortexApi';
+  import { auth } from '$lib/stores/auth.svelte';
   import type { ProjectContextResource } from '$lib/utils/projectContext';
   import ProjectContextConnectorMenu from './ProjectContextConnectorMenu.svelte';
   import ProjectContextGitHubConnector from './ProjectContextGitHubConnector.svelte';
   import ProjectContextLocalConnector from './ProjectContextLocalConnector.svelte';
   import ProjectContextResourcePills from './ProjectContextResourcePills.svelte';
   import type { ConnectorMode, ProjectVisibility } from './projectContextProfiles';
+
+  type ShareableUser = {
+    id?: string;
+    user_id?: string;
+    name?: string;
+  };
 
   let {
     name = $bindable(''),
@@ -38,10 +46,47 @@
   } = $props();
 
   let connectorMode = $state<ConnectorMode>('menu');
+  let teamUsers = $state<ShareableUser[]>([]);
+  let teamUsersLoaded = false;
+  let teamUsersLoading = $state(false);
+  let teamUsersError = $state('');
+  let shareSearch = $state('');
+  let sharePickerOpen = $state(false);
 
   function openConnector(nextMode: ConnectorMode) {
     connectorMode = nextMode;
   }
+
+  function userId(user: ShareableUser): string {
+    return String(user.id ?? user.user_id ?? '').trim();
+  }
+
+  function userName(user: ShareableUser): string {
+    return String(user.name ?? '').trim();
+  }
+
+  function selectedShareNames(): string[] {
+    return sharedUsernames
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function selectedShareNameSet(): Set<string> {
+    return new Set(selectedShareNames().map((item) => item.toLowerCase()));
+  }
+
+  const selectedShareUsers = $derived(selectedShareNames());
+  const filteredShareUsers = $derived.by(() => {
+    const needle = shareSearch.trim().toLowerCase();
+    const selected = selectedShareNameSet();
+    const currentUserId = String(auth.user?.id ?? '');
+    return teamUsers
+      .filter((user) => userName(user) && userId(user) !== currentUserId)
+      .filter((user) => !selected.has(userName(user).toLowerCase()))
+      .filter((user) => !needle || userName(user).toLowerCase().includes(needle))
+      .sort((a, b) => userName(a).localeCompare(userName(b)));
+  });
 
   const connectorTitle = $derived(
     connectorMode === 'github'
@@ -50,6 +95,72 @@
         ? 'Files or folders'
         : '',
   );
+
+  async function loadShareUsers() {
+    if (teamUsersLoading || teamUsersLoaded) return;
+    teamUsersLoading = true;
+    teamUsersError = '';
+    try {
+      teamUsers = await listTeamMembers();
+      teamUsersLoaded = true;
+    } catch {
+      teamUsers = [];
+      teamUsersLoaded = true;
+      teamUsersError = 'Could not load users.';
+    } finally {
+      teamUsersLoading = false;
+    }
+  }
+
+  function openSharePicker() {
+    sharePickerOpen = true;
+    void loadShareUsers();
+  }
+
+  function addShareUser(user: ShareableUser) {
+    const name = userName(user);
+    if (!name) return;
+    const selected = selectedShareNames();
+    if (!selected.some((item) => item.toLowerCase() === name.toLowerCase())) {
+      sharedUsernames = [...selected, name].join(', ');
+    }
+    shareSearch = '';
+    sharePickerOpen = true;
+  }
+
+  function removeShareUser(name: string) {
+    sharedUsernames = selectedShareNames()
+      .filter((item) => item.toLowerCase() !== name.toLowerCase())
+      .join(', ');
+    sharePickerOpen = true;
+  }
+
+  function handleShareKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      sharePickerOpen = false;
+      return;
+    }
+    if (event.key === 'Enter') {
+      const first = filteredShareUsers[0];
+      if (!first) return;
+      event.preventDefault();
+      addShareUser(first);
+      return;
+    }
+    if (event.key === 'Backspace' && !shareSearch.trim()) {
+      const selected = selectedShareNames();
+      if (!selected.length) return;
+      event.preventDefault();
+      sharedUsernames = selected.slice(0, -1).join(', ');
+    }
+  }
+
+  $effect(() => {
+    if (visibility === 'private') return;
+    sharedUsernames = '';
+    shareSearch = '';
+    sharePickerOpen = false;
+  });
 </script>
 
 <div class="project-create-intro">
@@ -92,12 +203,51 @@
 </div>
 
 {#if visibility === 'private'}
-  <input
-    class="project-access-input"
-    aria-label="Shared usernames"
-    placeholder="Share with usernames or emails"
-    bind:value={sharedUsernames}
-  />
+  <div class="project-access-picker">
+    {#if selectedShareUsers.length}
+      <div class="project-access-selected" aria-label="Shared users">
+        {#each selectedShareUsers as selectedName}
+          <button type="button" onclick={() => removeShareUser(selectedName)}>
+            <span>{selectedName}</span>
+            <ConstellationIcon name="x" size={12} stroke={2} />
+          </button>
+        {/each}
+      </div>
+    {/if}
+    <input
+      class="project-access-input"
+      aria-label="Shared users"
+      placeholder="Share with users"
+      bind:value={shareSearch}
+      onfocus={openSharePicker}
+      oninput={openSharePicker}
+      onkeydown={handleShareKeydown}
+    />
+    {#if sharePickerOpen}
+      <div class="project-access-menu" role="listbox" aria-label="Users">
+        {#if teamUsersLoading}
+          <div class="project-access-empty">Loading users...</div>
+        {:else if teamUsersError}
+          <div class="project-access-empty">{teamUsersError}</div>
+        {:else if filteredShareUsers.length}
+          {#each filteredShareUsers as user (userId(user) || userName(user))}
+            <button
+              type="button"
+              role="option"
+              aria-selected="false"
+              onpointerdown={(event) => event.preventDefault()}
+              onclick={() => addShareUser(user)}
+            >
+              <ConstellationIcon name="team" size={14} stroke={1.8} />
+              <span>{userName(user)}</span>
+            </button>
+          {/each}
+        {:else}
+          <div class="project-access-empty">No users found.</div>
+        {/if}
+      </div>
+    {/if}
+  </div>
 {/if}
 
 {#if connectorMode === 'menu'}

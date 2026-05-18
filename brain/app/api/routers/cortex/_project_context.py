@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import Depends, File, Form, HTTPException, Request, UploadFile
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.auth import get_current_user
@@ -166,18 +166,17 @@ async def _resolve_project_access_users(
         await db.scalars(
             select(User).where(
                 User.org_id == org_id,
-                or_(func.lower(User.name).in_(lookup_keys), func.lower(User.email).in_(lookup_keys)),
+                func.lower(User.name).in_(lookup_keys),
             )
         )
     ).all()
     found_keys: set[str] = set()
     by_key: dict[str, User] = {}
     for user in users:
-        for value in (user.name, user.email):
-            key = str(value or "").strip().lower()
-            if key and key in lookup_keys:
-                found_keys.add(key)
-                by_key.setdefault(key, user)
+        key = str(user.name or "").strip().lower()
+        if key and key in lookup_keys:
+            found_keys.add(key)
+            by_key.setdefault(key, user)
     missing = [username for username in cleaned if username.lower() not in found_keys]
     if missing:
         raise HTTPException(status_code=422, detail={"unknown_users": missing})
