@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { ConstellationIcon } from '$lib/components/constellation';
   import { listTeamMembers } from '$lib/features/cortex/api/cortexApi';
   import { auth } from '$lib/stores/auth.svelte';
@@ -139,7 +138,7 @@
 
   function handleShareKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
-      sharePickerOpen = false;
+      closeSharePicker();
       return;
     }
     if (event.key === 'Enter') {
@@ -157,11 +156,19 @@
     }
   }
 
-  function handleDocumentPointerDown(event: PointerEvent) {
-    if (!sharePickerOpen || !sharePickerEl) return;
-    const target = event.target;
-    if (target instanceof Node && sharePickerEl.contains(target)) return;
+  function closeSharePicker() {
     sharePickerOpen = false;
+  }
+
+  function isInsideSharePicker(event: Event): boolean {
+    const target = event.target;
+    return target instanceof Node && !!sharePickerEl?.contains(target);
+  }
+
+  function handleShareFocusOut(event: FocusEvent) {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && sharePickerEl?.contains(nextTarget)) return;
+    closeSharePicker();
   }
 
   $effect(() => {
@@ -171,10 +178,29 @@
     sharePickerOpen = false;
   });
 
-  onMount(() => {
+  $effect(() => {
+    if (!sharePickerOpen) return;
+
+    function handleDocumentPointerDown(event: PointerEvent) {
+      if (!isInsideSharePicker(event)) closeSharePicker();
+    }
+
+    function handleDocumentMouseDown(event: MouseEvent) {
+      if (!isInsideSharePicker(event)) closeSharePicker();
+    }
+
+    function handleDocumentKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') closeSharePicker();
+    }
+
     document.addEventListener('pointerdown', handleDocumentPointerDown, true);
+    document.addEventListener('mousedown', handleDocumentMouseDown, true);
+    document.addEventListener('keydown', handleDocumentKeyDown);
+
     return () => {
       document.removeEventListener('pointerdown', handleDocumentPointerDown, true);
+      document.removeEventListener('mousedown', handleDocumentMouseDown, true);
+      document.removeEventListener('keydown', handleDocumentKeyDown);
     };
   });
 </script>
@@ -219,7 +245,12 @@
 </div>
 
 {#if visibility === 'private'}
-  <div bind:this={sharePickerEl} class="project-access-picker" class:open={sharePickerOpen}>
+  <div
+    bind:this={sharePickerEl}
+    class="project-access-picker"
+    class:open={sharePickerOpen}
+    onfocusout={handleShareFocusOut}
+  >
     {#if selectedShareUsers.length}
       <div class="project-access-selected" aria-label="Shared users">
         {#each selectedShareUsers as selectedName}
