@@ -20,6 +20,7 @@ from brain.app.api.schemas.chat import (
     ChatReadUpdate,
     ChatSearchResultRead,
     ChatThreadRead,
+    ChatUnreadThreadRead,
     ChatUnreadSummaryRead,
 )
 from brain.app.api.services.chat import (
@@ -300,6 +301,15 @@ async def list_notifications(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     return await ChatService(db, user).list_notifications(limit=validated_limit(limit))
+
+
+@router.get("/unreads", response_model=list[ChatUnreadThreadRead])
+async def list_unread_threads(
+    limit: int = Query(default=50, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    return await ChatService(db, user).list_unread_threads(limit=validated_limit(limit))
 
 
 @router.post("/notifications/{notification_id}/read", response_model=dict[str, bool])

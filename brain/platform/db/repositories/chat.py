@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Sequence
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
@@ -441,6 +441,126 @@ class ChatMessageRepository(BaseRepository[ChatMessage]):
         )
         return (await self._session.scalars(stmt)).first()
 
+    async def a_list_unread_group_messages_for_user(
+        self,
+        user_id: str,
+        *,
+        limit: int = 50,
+        messages_per_group: int = 5,
+    ) -> Sequence[tuple[ChatMessage, int, datetime]]:
+        user_id = str(user_id)
+        group_limit = self._normalized_limit(limit)
+        preview_limit = self._normalized_limit(messages_per_group)
+        read_join = and_(
+            ChatConversationRead.conversation_id == ChatMessage.conversation_id,
+            ChatConversationRead.user_id == user_id,
+        )
+        read_seq = func.coalesce(ChatConversationRead.last_read_conversation_seq, 0)
+        message_thread_root_id = case(
+            (
+                ChatMessage.thread_root_message_id.is_not(None),
+                ChatMessage.thread_root_message_id,
+            ),
+            else_=ChatMessage.id,
+        )
+        group_kind = case(
+            (ChatConversation.type == CHAT_CONVERSATION_DM, "dm"),
+            else_="thread",
+        )
+        group_root_message_id = case(
+            (ChatConversation.type == CHAT_CONVERSATION_DM, None),
+            else_=message_thread_root_id,
+        )
+        latest_unread_at = func.max(ChatMessage.created_at).label("latest_unread_at")
+        unread_count = func.count(ChatMessage.id).label("unread_count")
+
+        unread_groups = (
+            select(
+                ChatMessage.conversation_id.label("conversation_id"),
+                group_kind.label("kind"),
+                group_root_message_id.label("root_message_id"),
+                latest_unread_at,
+                unread_count,
+            )
+            .select_from(ChatMessage)
+            .join(ChatConversation, ChatConversation.id == ChatMessage.conversation_id)
+            .join(
+                ChatConversationMember,
+                ChatConversationMember.conversation_id == ChatConversation.id,
+            )
+            .outerjoin(ChatConversationRead, read_join)
+            .where(
+                ChatConversationMember.user_id == user_id,
+                ChatConversation.is_archived.is_(False),
+                ChatMessage.deleted_at.is_(None),
+                ChatMessage.conversation_seq > read_seq,
+            )
+            .group_by(
+                ChatMessage.conversation_id,
+                group_kind,
+                group_root_message_id,
+            )
+            .order_by(latest_unread_at.desc())
+            .limit(group_limit)
+            .subquery()
+        )
+
+        preview_rank = func.row_number().over(
+            partition_by=(
+                unread_groups.c.conversation_id,
+                unread_groups.c.kind,
+                unread_groups.c.root_message_id,
+            ),
+            order_by=ChatMessage.conversation_seq.asc(),
+        ).label("preview_rank")
+        unread_preview_messages = (
+            select(
+                ChatMessage.id.label("message_id"),
+                unread_groups.c.latest_unread_at,
+                unread_groups.c.unread_count,
+                preview_rank,
+            )
+            .select_from(ChatMessage)
+            .join(ChatConversation, ChatConversation.id == ChatMessage.conversation_id)
+            .join(
+                unread_groups,
+                and_(
+                    unread_groups.c.conversation_id == ChatMessage.conversation_id,
+                    or_(
+                        and_(
+                            unread_groups.c.kind == "dm",
+                            ChatConversation.type == CHAT_CONVERSATION_DM,
+                        ),
+                        and_(
+                            unread_groups.c.kind == "thread",
+                            message_thread_root_id == unread_groups.c.root_message_id,
+                        ),
+                    ),
+                ),
+            )
+            .outerjoin(ChatConversationRead, read_join)
+            .where(
+                ChatMessage.deleted_at.is_(None),
+                ChatMessage.conversation_seq > read_seq,
+            )
+            .subquery()
+        )
+
+        stmt = (
+            select(
+                ChatMessage,
+                unread_preview_messages.c.unread_count,
+                unread_preview_messages.c.latest_unread_at,
+            )
+            .join(unread_preview_messages, unread_preview_messages.c.message_id == ChatMessage.id)
+            .where(unread_preview_messages.c.preview_rank <= preview_limit)
+            .order_by(
+                unread_preview_messages.c.latest_unread_at.desc(),
+                ChatMessage.conversation_seq.asc(),
+            )
+        )
+        return (await self._session.execute(stmt)).all()
+
     async def a_search_conversation_messages(
         self,
         conversation: ChatConversation,
@@ -658,6 +778,44 @@ class ChatNotificationRepository(BaseRepository[ChatNotification]):
             .where(ChatNotification.user_id == user_id)
             .order_by(ChatNotification.created_at.desc())
             .limit(limit)
+        )
+        return (await self._session.scalars(stmt)).all()
+
+    async def a_list_unread_with_messages_for_user(
+        self,
+        user_id: str,
+        *,
+        limit: int = 50,
+    ) -> Sequence[tuple[ChatNotification, ChatMessage]]:
+        stmt = (
+            select(ChatNotification, ChatMessage)
+            .join(ChatMessage, ChatMessage.id == ChatNotification.message_id)
+            .where(
+                ChatNotification.user_id == user_id,
+                ChatNotification.read_at.is_(None),
+                ChatNotification.message_id.is_not(None),
+            )
+            .order_by(ChatNotification.created_at.desc())
+            .limit(limit)
+        )
+        return (await self._session.execute(stmt)).all()
+
+    async def a_list_unread_for_message_ids(
+        self,
+        user_id: str,
+        message_ids: Sequence[int],
+    ) -> Sequence[ChatNotification]:
+        normalized_ids = [int(message_id) for message_id in message_ids]
+        if not normalized_ids:
+            return []
+        stmt = (
+            select(ChatNotification)
+            .where(
+                ChatNotification.user_id == user_id,
+                ChatNotification.read_at.is_(None),
+                ChatNotification.message_id.in_(normalized_ids),
+            )
+            .order_by(ChatNotification.created_at.asc())
         )
         return (await self._session.scalars(stmt)).all()
 

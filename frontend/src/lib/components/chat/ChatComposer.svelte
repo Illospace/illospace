@@ -2,6 +2,7 @@
   import {
     ConstellationPill,
   } from '$lib/components/constellation';
+  import MentionAutocomplete from '$lib/features/composer/components/MentionAutocomplete.svelte';
   import WorkspaceComposerAdapter from '$lib/features/composer/components/WorkspaceComposerAdapter.svelte';
 
   import type { ChatComposerModel } from './chatTypes';
@@ -21,6 +22,7 @@
     loading = false,
     canSubmit,
     attachments = [],
+    mentionOptions = [],
     typing = null,
     variant = 'room',
     onValueChange,
@@ -35,6 +37,7 @@
 
   let localValue = $state('');
   let textareaEl: HTMLTextAreaElement | undefined = $state();
+  let mentionRef: MentionAutocomplete | undefined = $state();
 
   const composerValue = $derived(value ?? localValue);
   const resolvedCanSubmit = $derived(
@@ -86,6 +89,7 @@
     const nextValue = (event.currentTarget as HTMLTextAreaElement).value;
     updateValue(nextValue);
     resizeTextarea(event.currentTarget as HTMLTextAreaElement);
+    mentionRef?.check(nextValue);
   }
 
   function handleTextareaPaste(event: ClipboardEvent) {
@@ -93,6 +97,7 @@
   }
 
   function handleTextareaKeydown(event: KeyboardEvent) {
+    if (mentionRef?.handleKey(event)) return;
     onKeydown?.(event);
     if (event.defaultPrevented) return;
 
@@ -106,6 +111,28 @@
       event.preventDefault();
       submitComposer();
     }
+  }
+
+  function handleTextareaSelect() {
+    mentionRef?.check(composerValue);
+  }
+
+  function insertMention(name: string) {
+    const textarea = textareaEl;
+    const cursor = textarea?.selectionStart ?? composerValue.length;
+    const beforeCursor = composerValue.slice(0, cursor);
+    const atMatch = beforeCursor.match(/(^|[\s([{])@([A-Za-z0-9._-]*)$/);
+    const atPos = atMatch ? cursor - atMatch[2].length - 1 : composerValue.lastIndexOf('@');
+    if (atPos < 0) return;
+
+    const nextValue = `${composerValue.slice(0, atPos)}@${name} ${composerValue.slice(cursor)}`;
+    const nextCursor = atPos + name.length + 2;
+    updateValue(nextValue);
+    requestAnimationFrame(() => {
+      textareaEl?.focus();
+      textareaEl?.setSelectionRange(nextCursor, nextCursor);
+      resizeTextarea();
+    });
   }
 
   $effect(() => {
@@ -142,6 +169,13 @@
   >
     {#snippet editor()}
       <div class="chat-composer-editor">
+        <MentionAutocomplete
+          bind:this={mentionRef}
+          bind:textarea={textareaEl}
+          options={mentionOptions}
+          onselect={insertMention}
+        />
+
         {#if modeLabel || replyContextLabel}
           <div class="chat-composer-context">
             {#if modeLabel}
@@ -164,6 +198,8 @@
           value={composerValue}
           oninput={handleInput}
           onkeydown={handleTextareaKeydown}
+          onkeyup={handleTextareaSelect}
+          onclick={handleTextareaSelect}
           onpaste={handleTextareaPaste}
         ></textarea>
       </div>
@@ -267,6 +303,7 @@
   }
 
   .chat-composer-editor {
+    position: relative;
     display: grid;
     gap: 8px;
   }

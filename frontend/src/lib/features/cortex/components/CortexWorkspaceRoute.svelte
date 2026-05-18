@@ -537,7 +537,7 @@
 
   function handleChatTopLevelModeChange(nextMode: CortexChatDockTopLevelMode) {
     chatTopLevelMode = nextMode;
-    if (nextMode === 'room') {
+    if (nextMode !== 'dms') {
       chatSelectedPreviewMemberId = null;
     }
   }
@@ -998,7 +998,6 @@
         'cortex-workspace-backdrop',
         directThreadActive ? 'is-direct-thread' : '',
       ].filter(Boolean).join(' ')}
-      toolbarClassName="workspace-toolbar-slot"
       composerClassName="workspace-composer-slot"
     >
           {#snippet canvas()}
@@ -1037,24 +1036,6 @@
             </div>
           {/snippet}
 
-          {#snippet toolbar()}
-            {#if cortexSurfaceReady}
-              <div class="workspace-top-tools">
-                <ConstellationSegmentedToggle
-                  className="workspace-theme-toggle"
-                  options={THEME_OPTIONS}
-                  activeKey={theme.id}
-                  ariaLabel="Workspace theme"
-                  onActiveKeyChange={handleThemeChange}
-                />
-
-                {#if CortexNotificationsMenuComponent}
-                  <CortexNotificationsMenuComponent onSelect={handleNotificationSelect} />
-                {/if}
-              </div>
-            {/if}
-          {/snippet}
-
           {#snippet composer()}
             {#if cortexSurfaceReady && !cortex.panelOpen && !chatDockExpanded && !workspaceOverlay.activeWorkspaceAppId}
               <div
@@ -1088,6 +1069,24 @@
           {/snippet}
 
     </ConstellationWorkspaceBackdrop>
+
+    {#if cortexSurfaceReady}
+      <div class="workspace-top-tools-layer">
+        <div class="workspace-top-tools">
+          <ConstellationSegmentedToggle
+            className="workspace-theme-toggle"
+            options={THEME_OPTIONS}
+            activeKey={theme.id}
+            ariaLabel="Workspace theme"
+            onActiveKeyChange={handleThemeChange}
+          />
+
+          {#if CortexNotificationsMenuComponent}
+            <CortexNotificationsMenuComponent onSelect={handleNotificationSelect} />
+          {/if}
+        </div>
+      </div>
+    {/if}
 
     {#if cortex.panelOpen && ThreadStageScreenComponent}
       <ThreadStageScreenComponent
@@ -1192,6 +1191,7 @@
     --thread-origin-x: 50%;
     --thread-origin-y: 56%;
     --workspace-chrome-control-height: 46px;
+    --workspace-top-tools-inset: 16px;
     --workspace-system-chrome-backdrop-filter: blur(20px) saturate(1.08);
     --workspace-bottom-surface-idle-height: clamp(142px, 20svh, 230px);
     --workspace-bottom-surface-inset: clamp(8px, 1.4vh, 14px);
@@ -1356,7 +1356,17 @@
     pointer-events: auto;
   }
 
-  .cortex-page.is-arriving :global(.workspace-toolbar-slot) {
+  .workspace-top-tools-layer {
+    position: absolute;
+    top: var(--workspace-top-tools-inset);
+    right: var(--workspace-top-tools-inset);
+    z-index: 118;
+    display: flex;
+    justify-content: flex-end;
+    pointer-events: none;
+  }
+
+  .cortex-page.is-arriving .workspace-top-tools-layer {
     animation: cortex-toolbar-arrive 640ms cubic-bezier(0.22, 1, 0.36, 1) 240ms both;
   }
 
@@ -1601,6 +1611,7 @@
     .cortex-page {
       --workspace-bottom-surface-idle-height: clamp(132px, 20svh, 190px);
       --workspace-bottom-surface-inset: 8px;
+      --workspace-top-tools-inset: 12px;
     }
 
     :global(.constellation-workspace-backdrop.cortex-workspace-backdrop) {
@@ -1628,7 +1639,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .cortex-page.is-arriving :global(.workspace-toolbar-slot),
+    .cortex-page.is-arriving .workspace-top-tools-layer,
     .cortex-page.is-arriving .workspace-archive-bin-shell,
     .cortex-page.is-arriving :global(.workspace-composer-slot),
     .cortex-page.is-arriving .cortex-main :global(.constellation-astre) {

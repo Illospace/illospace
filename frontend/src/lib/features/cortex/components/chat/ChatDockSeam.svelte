@@ -3,7 +3,7 @@
   import type { ChatDockPreviewMember } from '$lib/components/chat/ChatDock.svelte';
   import { chat } from '$lib/stores/chat.svelte';
 
-  export type CortexChatDockTopLevelMode = 'room' | 'dms';
+  export type CortexChatDockTopLevelMode = 'room' | 'dms' | 'unread';
   let {
     surface,
     context = 'workspace',
@@ -55,6 +55,13 @@
       return;
     }
 
+    if (topLevelMode === 'unread') {
+      if (chat.mode !== 'unread') {
+        void chat.selectUnread();
+      }
+      return;
+    }
+
     if (selectedConversationId) {
       if (chat.mode !== 'dms' || chat.activeConversationId !== selectedConversationId) {
         void chat.selectDm(selectedConversationId);
@@ -68,7 +75,7 @@
 
   $effect(() => {
     if (topLevelMode !== 'room') {
-      if (chat.activeThreadRootId != null) {
+      if (chat.mode !== 'room' && chat.activeThreadRootId != null) {
         chat.closeThread();
       }
       previousSelectedThreadRootId = selectedThreadRootId;

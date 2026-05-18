@@ -191,6 +191,16 @@ export interface ChatNotification {
   read_at: string | null;
 }
 
+export interface ChatUnreadThread {
+  kind: 'thread' | 'dm' | string;
+  conversation: ChatConversationSummary;
+  root_message: ChatMessage | null;
+  unread_messages: ChatMessage[];
+  notification_ids: number[];
+  unread_count: number;
+  latest_unread_at: string;
+}
+
 export interface AppNotification {
   id: number;
   source: string;
@@ -666,6 +676,8 @@ export const api = {
     }),
   listChatNotifications: (limit = 50) =>
     fetchJson<ChatNotification[]>(withQuery('/api/chat/notifications', { limit })),
+  listChatUnreadThreads: (limit = 50) =>
+    fetchJson<ChatUnreadThread[]>(withQuery('/api/chat/unreads', { limit })),
   markChatNotificationRead: (notificationId: number) =>
     fetchJson<{ ok: boolean }>(`/api/chat/notifications/${notificationId}/read`, { method: 'POST' }),
   markAllChatNotificationsRead: () =>

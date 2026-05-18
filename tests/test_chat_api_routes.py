@@ -181,6 +181,7 @@ async def test_openapi_registers_chat_routes():
     assert "/api/chat/conversations/{conversation_id}/messages" in paths
     assert "/api/chat/search" in paths
     assert "/api/chat/messages/{message_id}/thread" in paths
+    assert "/api/chat/unreads" in paths
     assert "/api/chat/notifications" in paths
 
 
@@ -288,6 +289,127 @@ async def test_room_history_excludes_replies_and_thread_history_returns_root_plu
     assert thread_payload["root_message"]["thread_preview_participants"][0]["name"] == reply["sender_name"]
     assert thread_payload["root_message"]["thread_preview_participants"][0]["color"] == reply["sender_color"]
     assert thread_payload["root_message"]["thread_preview_participants"][0]["email"]
+
+
+async def test_unread_threads_groups_room_replies_by_root(
+    request_as: Callable[..., object],
+):
+    room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
+    root = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{room['id']}/messages",
+            json={"body": "Root unread for the team"},
+        )
+    ).json()
+    reply = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/messages/{root['id']}/thread",
+            json={"body": "Follow-up unread reply"},
+        )
+    ).json()
+
+    response = await request_as(USER_2_ID, "GET", "/api/chat/unreads")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["kind"] == "thread"
+    assert payload[0]["conversation"]["id"] == room["id"]
+    assert payload[0]["root_message"]["id"] == root["id"]
+    assert [message["id"] for message in payload[0]["unread_messages"]] == [root["id"], reply["id"]]
+    assert payload[0]["unread_count"] == 2
+
+
+async def test_unread_threads_follow_chat_read_cursor_after_notification_read(
+    request_as: Callable[..., object],
+):
+    dm = (await request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})).json()
+    sent = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{dm['id']}/messages",
+            json={"body": "Still unread in chat"},
+        )
+    ).json()
+
+    notifications = (await request_as(USER_2_ID, "GET", "/api/chat/notifications")).json()
+    read_notification = await request_as(
+        USER_2_ID,
+        "POST",
+        f"/api/chat/notifications/{notifications[0]['id']}/read",
+    )
+    assert read_notification.status_code == 200
+
+    bootstrap = (await request_as(USER_2_ID, "GET", "/api/chat/bootstrap")).json()
+    assert bootstrap["unread_summary"]["dms"] == 1
+
+    response = await request_as(USER_2_ID, "GET", "/api/chat/unreads")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["kind"] == "dm"
+    assert payload[0]["conversation"]["id"] == dm["id"]
+    assert payload[0]["unread_count"] == 1
+    assert payload[0]["notification_ids"] == []
+    assert [message["id"] for message in payload[0]["unread_messages"]] == [sent["id"]]
+
+
+async def test_unread_threads_limit_applies_after_grouping(
+    request_as: Callable[..., object],
+):
+    dm = (await request_as(USER_1_ID, "POST", "/api/chat/dms", json={"user_id": USER_2_ID})).json()
+    dm_message = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{dm['id']}/messages",
+            json={"body": "Older unread DM"},
+        )
+    ).json()
+
+    room = (await request_as(USER_1_ID, "GET", "/api/chat/bootstrap")).json()["room"]
+    root = (
+        await request_as(
+            USER_1_ID,
+            "POST",
+            f"/api/chat/conversations/{room['id']}/messages",
+            json={"body": "Newer root unread"},
+        )
+    ).json()
+    replies = []
+    for index in range(6):
+        reply = (
+            await request_as(
+                USER_1_ID,
+                "POST",
+                f"/api/chat/messages/{root['id']}/thread",
+                json={"body": f"Newer reply {index + 1}"},
+            )
+        ).json()
+        replies.append(reply)
+
+    response = await request_as(USER_2_ID, "GET", "/api/chat/unreads", params={"limit": 2})
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert len(payload) == 2
+    thread_item = next(item for item in payload if item["kind"] == "thread")
+    dm_item = next(item for item in payload if item["kind"] == "dm")
+    assert thread_item["root_message"]["id"] == root["id"]
+    assert thread_item["unread_count"] == 7
+    assert [message["id"] for message in thread_item["unread_messages"]] == [
+        root["id"],
+        *[reply["id"] for reply in replies[:4]],
+    ]
+    assert dm_item["conversation"]["id"] == dm["id"]
+    assert dm_item["unread_count"] == 1
+    assert [message["id"] for message in dm_item["unread_messages"]] == [dm_message["id"]]
 
 
 async def test_room_search_returns_root_matches_and_thread_replies(

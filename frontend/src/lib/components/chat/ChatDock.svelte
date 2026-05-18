@@ -1,7 +1,11 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
 
-  import { api, type ChatConversationSummary } from '$lib/api/client';
+  import { api, type ChatConversationSummary, type ChatUnreadThread } from '$lib/api/client';
+  import {
+    mentionHandleForPerson,
+    type MentionAutocompleteOption,
+  } from '$lib/features/composer/domain/mentionAutocomplete';
   import {
     ConstellationIcon,
     ConstellationIconButton,
@@ -9,6 +13,7 @@
     ConstellationPresenceSeed,
   } from '$lib/components/constellation';
   import type { ConstellationIconName } from '$lib/components/constellation/ConstellationIcon.svelte';
+  import AttachmentPreviewDialog from '$lib/components/chat/AttachmentPreviewDialog.svelte';
   import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
   import {
@@ -77,7 +82,6 @@
   let attachmentTargetKey = $state<string | null>(null);
   let dockDragOver = $state(false);
   let dockDragTargetKey = $state<string | null>(null);
-  let previewDialogEl: HTMLDivElement | undefined = $state();
   let previewAttachment = $state<any | null>(null);
   let teamMembers = $state<TeamMember[]>([]);
   let roomComposerValue = $state('');
@@ -96,6 +100,7 @@
   let resizingThreadSplit = $state(false);
   let selectedPreviewDmId = $state<string | null>(null);
   let previousSelectedPreviewMemberId = $state<string | null | undefined>(undefined);
+  let lastUnreadFetchTotal = $state(0);
 
   type TeamMember = {
     id: string;
@@ -106,6 +111,20 @@
     approved?: boolean | null;
     preview?: boolean;
   };
+
+  type MessageTextSegment = {
+    text: string;
+    mention: boolean;
+  };
+
+  type MentionAliasEntry = {
+    aliases: Set<string>;
+  };
+
+  const MENTION_RENDER_RE = /(^|[^A-Za-z0-9_])@([A-Za-z0-9._-]+)([.,:;!?]?)/g;
+  const MENTION_PART_SPLIT_RE = /[^a-z0-9]+/;
+  const MENTION_EMAIL_SPLIT_RE = /[._+-]+/;
+  const MIN_MENTION_PREFIX_LENGTH = 2;
 
   const EMPTY_CONVERSATION_PAGE: ChatConversationPageState = {
     conversationId: '',
@@ -133,17 +152,6 @@
     error: null,
   };
 
-  function portalToBody(node: HTMLElement) {
-    if (typeof document === 'undefined') return {};
-
-    document.body.appendChild(node);
-    return {
-      destroy() {
-        node.remove();
-      },
-    };
-  }
-
   onMount(() => {
     void chat.setup().then(() => chat.openDock());
     void loadTeamMembers();
@@ -163,6 +171,14 @@
     roomConversation ? (chat.conversationPageFor(roomConversation.id) ?? EMPTY_CONVERSATION_PAGE) : EMPTY_CONVERSATION_PAGE,
   );
   const roomMessages = $derived(roomPage.messages);
+  const unreadThreads = $derived(chat.unreadThreads);
+  const unreadMessageTotal = $derived(chat.unreadSummary.total);
+  const unreadThreadCount = $derived(unreadThreads.length);
+  const showUnreadTab = $derived(unreadMessageTotal > 0 && unreadThreadCount > 0);
+  const unreadThreadCountText = $derived(
+    `${unreadThreadCount} thread${unreadThreadCount === 1 ? '' : 's'}`,
+  );
+  const unreadThreadHeading = $derived(`${unreadThreadCount} unread ${unreadThreadCountText}`);
   const activePreviewDmMember = $derived.by<TeamMember | null>(() => {
     if (chat.mode !== 'dms' || !selectedPreviewDmId) return null;
     const previewMember = previewMembers.find(
@@ -209,7 +225,9 @@
     threadDraftKey ? (pendingAttachmentsByContext[threadDraftKey] ?? []) : [],
   );
   const dmAttachments = $derived(dmDraftKey ? (pendingAttachmentsByContext[dmDraftKey] ?? []) : []);
-  const activeChatDropTargetKey = $derived(chat.mode === 'dms' ? dmDraftKey : roomDraftKey);
+  const activeChatDropTargetKey = $derived(
+    chat.mode === 'dms' ? dmDraftKey : chat.mode === 'room' ? roomDraftKey : null,
+  );
   const dockDropTargetLabel = $derived(dropTargetLabelForKey(dockDragTargetKey ?? activeChatDropTargetKey));
   const roomTailSignature = $derived(`${roomMessages.length}:${roomMessages.at(-1)?.id ?? 'empty'}`);
   const dmTailSignature = $derived(`${activeDmMessages.length}:${activeDmMessages.at(-1)?.id ?? 'empty'}`);
@@ -275,6 +293,33 @@
       if (String(right.id) === currentUserId) return 1;
       return memberLabel(left).localeCompare(memberLabel(right));
     });
+  });
+  const mentionAliasEntries = $derived.by<MentionAliasEntry[]>(() => {
+    return signedUpTeamMembers.map((member) => ({
+      aliases: mentionAliasesForMember(member),
+    }));
+  });
+  const mentionAliasCounts = $derived.by(() => {
+    const counts = new Map<string, number>([['illo', 1]]);
+    for (const entry of mentionAliasEntries) {
+      for (const alias of entry.aliases) {
+        if (alias === 'illo') continue;
+        counts.set(alias, (counts.get(alias) ?? 0) + 1);
+      }
+    }
+    return counts;
+  });
+  const chatMentionOptions = $derived.by<MentionAutocompleteOption[]>(() => {
+    return signedUpTeamMembers.map((member) => ({
+      id: String(member.id),
+      name: memberLabel(member),
+      insertText: mentionHandleForPerson(member),
+      color: memberColor(member),
+      hint: member.email || 'Mention teammate',
+      keywords: [member.email ?? '', member.name ?? '', memberLabel(member)]
+        .filter(Boolean)
+        .map(String),
+    }));
   });
   const directTeamMembers = $derived.by(() => {
     return signedUpTeamMembers
@@ -416,11 +461,6 @@
   });
 
   $effect(() => {
-    if (!previewAttachment) return;
-    tick().then(() => previewDialogEl?.focus());
-  });
-
-  $effect(() => {
     if (previousSelectedPreviewMemberId === selectedPreviewMemberId) return;
     previousSelectedPreviewMemberId = selectedPreviewMemberId;
     if (!selectedPreviewMemberId) {
@@ -432,9 +472,29 @@
   });
 
   $effect(() => {
-    if (chat.mode === 'room' && selectedPreviewDmId) {
+    if (chat.mode !== 'dms' && selectedPreviewDmId) {
       selectedPreviewDmId = null;
     }
+  });
+
+  $effect(() => {
+    if (!chat.bootstrapped || unreadMessageTotal <= 0) {
+      lastUnreadFetchTotal = 0;
+      return;
+    }
+    if (
+      chat.unreadThreadsLoading ||
+      lastUnreadFetchTotal === unreadMessageTotal
+    ) {
+      return;
+    }
+    lastUnreadFetchTotal = unreadMessageTotal;
+    void chat.refreshUnreadThreads(true);
+  });
+
+  $effect(() => {
+    if (chat.mode !== 'unread' || chat.unreadThreadsLoading || showUnreadTab) return;
+    void chat.selectRoom();
   });
 
   $effect(() => {
@@ -587,18 +647,6 @@
     previewAttachment = null;
   }
 
-  function handlePreviewKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeAttachmentPreview();
-    }
-  }
-
-  function openPreviewAttachmentExternal() {
-    if (!previewAttachmentUrl || typeof window === 'undefined') return;
-    window.open(previewAttachmentUrl, '_blank', 'noopener,noreferrer');
-  }
-
   function shouldShowThreadSummary(message: ChatMessage) {
     return message.reply_count > 0;
   }
@@ -616,6 +664,89 @@
 
   function threadReplyCountLabel(message: ChatMessage) {
     return `${message.reply_count} repl${message.reply_count === 1 ? 'y' : 'ies'}`;
+  }
+
+  function mentionParts(value?: string | null) {
+    return (value ?? '').toLowerCase().split(MENTION_PART_SPLIT_RE).filter(Boolean);
+  }
+
+  function compactMentionAlias(value?: string | null) {
+    return (value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  function mentionAliasesForMember(member: TeamMember) {
+    const nameParts = mentionParts(member.name);
+    const emailLocal = (member.email ?? '').split('@', 1)[0].trim().toLowerCase();
+    const emailParts = emailLocal.split(MENTION_EMAIL_SPLIT_RE).filter(Boolean);
+    const aliases = new Set<string>([
+      (member.name ?? '').trim().toLowerCase(),
+      compactMentionAlias(member.name),
+      emailLocal,
+      compactMentionAlias(emailLocal),
+    ]);
+
+    for (const part of nameParts) aliases.add(part);
+    for (const part of emailParts) aliases.add(part);
+    if (nameParts.length > 1) aliases.add(nameParts.map((part) => part[0]).join(''));
+    if (emailParts.length > 1) aliases.add(emailParts.map((part) => part[0]).join(''));
+    aliases.delete('');
+    return aliases;
+  }
+
+  function isKnownMentionToken(rawToken: string) {
+    const token = rawToken.trim().toLowerCase().replace(/[.,:;!?]+$/, '');
+    if (!token) return false;
+    if ((mentionAliasCounts.get(token) ?? 0) === 1) return true;
+    if (token.length < MIN_MENTION_PREFIX_LENGTH) return false;
+
+    let matchCount = 0;
+    for (const entry of mentionAliasEntries) {
+      for (const alias of entry.aliases) {
+        if (alias.startsWith(token)) {
+          matchCount += 1;
+          break;
+        }
+      }
+      if (matchCount > 1) return false;
+    }
+    return matchCount === 1;
+  }
+
+  function messageTextSegments(body: string): MessageTextSegment[] {
+    const segments: MessageTextSegment[] = [];
+    MENTION_RENDER_RE.lastIndex = 0;
+    let cursor = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = MENTION_RENDER_RE.exec(body)) !== null) {
+      const boundary = match[1] ?? '';
+      let token = match[2] ?? '';
+      let punctuation = match[3] ?? '';
+      const tokenTrailingPunctuation = token.match(/[.,:;!?]+$/)?.[0] ?? '';
+      if (tokenTrailingPunctuation) {
+        token = token.slice(0, -tokenTrailingPunctuation.length);
+        punctuation = `${tokenTrailingPunctuation}${punctuation}`;
+      }
+      const mentionStart = match.index + boundary.length;
+      if (mentionStart > cursor) {
+        segments.push({ text: body.slice(cursor, mentionStart), mention: false });
+      }
+
+      const mentionText = `@${token}`;
+      segments.push({ text: mentionText, mention: isKnownMentionToken(token) });
+      cursor = mentionStart + mentionText.length;
+
+      if (punctuation) {
+        segments.push({ text: punctuation, mention: false });
+        cursor += punctuation.length;
+      }
+    }
+
+    if (cursor < body.length) {
+      segments.push({ text: body.slice(cursor), mention: false });
+    }
+
+    return segments.length > 0 ? segments : [{ text: body, mention: false }];
   }
 
   function showReactionsSoon() {
@@ -965,6 +1096,69 @@
     );
   }
 
+  function unreadThreadAccentStyle(item: ChatUnreadThread) {
+    const message = item.unread_messages.at(-1) ?? item.root_message;
+    return unreadAccentStyle(
+      resolvedParticipantColor(message?.sender_user_id, message?.sender_color ?? item.conversation.counterpart?.color),
+    );
+  }
+
+  function unreadThreadTitle(item: ChatUnreadThread) {
+    if (item.kind === 'dm') return conversationTitle(item.conversation);
+    return item.conversation.title || 'Team';
+  }
+
+  function unreadThreadSubtitle(item: ChatUnreadThread) {
+    const count = item.unread_count;
+    const unit = unreadThreadCountsAsMessage(item)
+      ? `message${count === 1 ? '' : 's'}`
+      : `repl${count === 1 ? 'y' : 'ies'}`;
+    return `${count} unread ${unit}`;
+  }
+
+  function unreadThreadCountsAsMessage(item: ChatUnreadThread) {
+    if (item.kind === 'dm') return true;
+    const rootMessageId = item.root_message?.id;
+    return rootMessageId != null && item.unread_messages.some((message) => message.id === rootMessageId);
+  }
+
+  function unreadThreadDetail(item: ChatUnreadThread) {
+    if (item.kind === 'dm') return item.conversation.counterpart?.email || 'Direct message';
+    const root = item.root_message;
+    if (!root) return 'Team room';
+    return `${root.sender_name}'s thread`;
+  }
+
+  function unreadThreadOpenLabel(item: ChatUnreadThread) {
+    return item.kind === 'dm' ? 'Open DM' : 'Open thread';
+  }
+
+  function unreadThreadRootId(item: ChatUnreadThread) {
+    return item.root_message?.id
+      ?? item.unread_messages[0]?.thread_root_message_id
+      ?? item.unread_messages[0]?.id
+      ?? null;
+  }
+
+  function unreadReplyMessages(item: ChatUnreadThread) {
+    const rootMessageId = item.root_message?.id ?? null;
+    if (item.kind === 'dm') return item.unread_messages.slice(0, 4);
+    return item.unread_messages
+      .filter((message) => message.id !== rootMessageId)
+      .slice(0, 4);
+  }
+
+  function unreadHiddenMessageCount(item: ChatUnreadThread) {
+    const renderedMessages = unreadReplyMessages(item).length;
+    const rootMessageId = item.kind !== 'dm' ? item.root_message?.id : null;
+    const renderedRootMessages = rootMessageId != null
+      && item.unread_messages.some((message) => message.id === rootMessageId)
+      ? 1
+      : 0;
+    const renderedUnreadCount = renderedMessages + renderedRootMessages;
+    return Math.max(item.unread_count - renderedUnreadCount, 0);
+  }
+
   function isMemberConversationActive(member: TeamMember) {
     if (member.preview) {
       return chat.mode === 'dms' && String(selectedPreviewDmId) === String(member.id);
@@ -976,6 +1170,24 @@
   async function selectTeamChat() {
     selectedPreviewDmId = null;
     await chat.selectRoom();
+  }
+
+  async function selectUnreadChat() {
+    selectedPreviewDmId = null;
+    await chat.selectUnread();
+  }
+
+  async function openUnreadItem(item: ChatUnreadThread) {
+    if (item.kind === 'dm') {
+      selectedPreviewDmId = null;
+      await chat.selectDm(item.conversation.id);
+      return;
+    }
+
+    const rootMessageId = unreadThreadRootId(item);
+    if (rootMessageId == null) return;
+    selectedPreviewDmId = null;
+    await chat.openThread(rootMessageId);
   }
 
   async function selectMemberDm(member: TeamMember) {
@@ -1033,6 +1245,25 @@
   <div class="chat-workspace-layout">
     <aside class="chat-channel-rail" aria-label="Conversations">
       <div class="chat-channel-list">
+        {#if showUnreadTab}
+          <button
+            type="button"
+            class="chat-channel-row chat-channel-row-unread"
+            class:is-active={chat.mode === 'unread'}
+            aria-label={`${unreadThreadCount} unread thread${unreadThreadCount === 1 ? '' : 's'}`}
+            title={`${unreadThreadCount} unread thread${unreadThreadCount === 1 ? '' : 's'}`}
+            onclick={selectUnreadChat}
+          >
+            <span class="chat-channel-copy">
+              <span>Unread</span>
+              <small>{unreadThreadCountText}</small>
+            </span>
+            <span class="chat-channel-unread">
+              {unreadThreadCount}
+            </span>
+          </button>
+        {/if}
+
         <button
           type="button"
           class="chat-channel-row chat-channel-row-team"
@@ -1096,7 +1327,71 @@
     </aside>
 
     <div class="chat-workspace-conversation">
-  {#if chat.mode === 'dms'}
+  {#if chat.mode === 'unread' && showUnreadTab}
+    <section class="chat-unread-column">
+      <header class="chat-unread-header">
+        <div class="chat-unread-heading">
+          <span class="chat-unread-kicker">Unread</span>
+          <h3>{unreadThreadHeading}</h3>
+          <p>Latest first.</p>
+        </div>
+        <button
+          type="button"
+          class="chat-unread-refresh"
+          aria-label="Refresh unread threads"
+          title="Refresh unread threads"
+          onclick={() => void chat.refreshUnreadThreads(false)}
+          disabled={chat.unreadThreadsLoading}
+        >
+          <ConstellationIcon name="refresh" size={15} stroke={1.9} />
+        </button>
+      </header>
+
+      <div class="chat-unread-stream">
+        {#each unreadThreads as item (`${item.kind}:${item.conversation.id}:${unreadThreadRootId(item) ?? item.latest_unread_at}`)}
+          <article class="chat-unread-thread" style={unreadThreadAccentStyle(item)}>
+            <button
+              type="button"
+              class="chat-unread-thread-open"
+              aria-label={unreadThreadOpenLabel(item)}
+              title={unreadThreadOpenLabel(item)}
+              onclick={() => openUnreadItem(item)}
+            >
+              <span class="chat-unread-thread-mark" aria-hidden="true"></span>
+              <span class="chat-unread-thread-copy">
+                <span>
+                  {unreadThreadTitle(item)}
+                  <small>{unreadThreadDetail(item)}</small>
+                </span>
+                <span>{unreadThreadSubtitle(item)} · {formatMessageTime(item.latest_unread_at)}</span>
+              </span>
+              <span class="chat-unread-thread-action">
+                <ConstellationIcon name="chevron-right" size={16} stroke={1.9} />
+              </span>
+            </button>
+
+            {#if item.kind !== 'dm' && item.root_message}
+              {@render unreadMessagePreview(item.root_message, 'root')}
+            {/if}
+
+            {#each unreadReplyMessages(item) as message (message.id)}
+              {@render unreadMessagePreview(message, item.kind === 'dm' ? 'root' : 'reply')}
+            {/each}
+
+            {#if unreadHiddenMessageCount(item) > 0}
+              <button
+                type="button"
+                class="chat-unread-more"
+                onclick={() => openUnreadItem(item)}
+              >
+                Show {unreadHiddenMessageCount(item)} more
+              </button>
+            {/if}
+          </article>
+        {/each}
+      </div>
+    </section>
+  {:else if chat.mode === 'dms'}
     {#if !activeDmConversation && !activePreviewDmMember}
       <div class="chat-empty-conversation">
         <span class="chat-empty-icon" aria-hidden="true">
@@ -1176,22 +1471,17 @@
                       />
 
                       <div class="chat-message-author-copy">
-                        <span>
-                          {message.sender_name}
-                          {#if shouldShowThreadSummary(message)}
-                            <span class="chat-message-author-thread-count">
-                              [{message.reply_count}]
-                            </span>
-                          {/if}
-                        </span>
+                        <span>{message.sender_name}</span>
                         <p>{formatMessageTime(message.created_at)}</p>
                       </div>
                     </div>
                   </header>
                 {/if}
 
+                {@render threadMiniSummary(message)}
+
                 {#if message.body}
-                  <p class="chat-message-body">{message.body}</p>
+                  {@render messageBody(message, 'chat-message-body')}
                 {/if}
 
                 {#if message.attachments?.length}
@@ -1222,6 +1512,7 @@
               placeholder={`Message ${conversationTitle(activeDmConversation)}…`}
               value={dmComposerValue}
               attachments={dmAttachments}
+              mentionOptions={chatMentionOptions}
               disabled={activeDmPage.sending}
               loading={activeDmPage.sending}
               primaryActionLabel="Send"
@@ -1328,8 +1619,10 @@
                   </header>
                 {/if}
 
+                {@render threadMiniSummary(message)}
+
                 {#if message.body}
-                  <p class="chat-message-body">{message.body}</p>
+                  {@render messageBody(message, 'chat-message-body')}
                 {/if}
 
                 {#if message.attachments?.length}
@@ -1410,6 +1703,7 @@
             placeholder="Message…"
             value={roomComposerValue}
             attachments={roomAttachments}
+            mentionOptions={chatMentionOptions}
             disabled={roomPage.sending}
             loading={roomPage.sending}
             primaryActionLabel="Send"
@@ -1442,8 +1736,14 @@
         <aside class="chat-thread-column">
           <div class="chat-thread-topbar">
             <span>Thread</span>
-            <button type="button" class="chat-close-thread" onclick={closeThreadPane}>
-              Close
+            <button
+              type="button"
+              class="chat-close-thread"
+              aria-label="Close thread"
+              title="Close thread"
+              onclick={closeThreadPane}
+            >
+              <ConstellationIcon name="close" size={16} stroke={1.9} />
             </button>
           </div>
 
@@ -1468,7 +1768,7 @@
               </header>
 
               {#if activeThreadRoot.body}
-                <p class="chat-message-body">{activeThreadRoot.body}</p>
+                {@render messageBody(activeThreadRoot, 'chat-message-body')}
               {/if}
 
               {#if activeThreadRoot.attachments?.length}
@@ -1531,7 +1831,7 @@
                   {/if}
 
                   {#if reply.body}
-                    <p class="chat-message-body">{reply.body}</p>
+                    {@render messageBody(reply, 'chat-message-body')}
                   {/if}
 
                   {#if reply.attachments?.length}
@@ -1561,6 +1861,7 @@
                   placeholder="Reply in thread…"
                   value={threadComposerValue}
                   attachments={threadAttachments}
+                  mentionOptions={chatMentionOptions}
                   disabled={threadPage.sending}
                   loading={threadPage.sending}
                   primaryActionLabel="Reply"
@@ -1582,6 +1883,69 @@
     </div>
   </div>
 </section>
+
+{#snippet unreadMessagePreview(message: ChatMessage, variant: 'root' | 'reply')}
+  <article
+    class={`chat-unread-message is-${variant}`}
+    style={messageStyle(message)}
+  >
+    <header class="chat-unread-message-header">
+      <ConstellationPresenceSeed
+        label={message.sender_name}
+        size="sm"
+        role={message.sender_kind === 'agent' ? 'illo' : 'user'}
+        tone={participantResolvedTone(message.sender_user_id, message.sender_color)}
+        style={participantStyle(message.sender_user_id, message.sender_color)}
+        treatment="plain"
+      />
+      <div class="chat-unread-message-meta">
+        <span>{message.sender_name}</span>
+        <small>{formatMessageTime(message.created_at)}</small>
+      </div>
+    </header>
+
+    {@render threadMiniSummary(message)}
+
+    {#if message.body}
+      {@render messageBody(message, 'chat-unread-message-body')}
+    {/if}
+
+    {#if message.attachments?.length}
+      <div class="chat-attachments">
+        {#each message.attachments as attachment, attachmentIndex (`unread-${message.id}-${attachment.url ?? attachment.filename ?? attachmentIndex}`)}
+          {@render attachmentCard(attachment)}
+        {/each}
+      </div>
+    {/if}
+
+    {@render messageLinkAttachmentList(message.body, message.attachments)}
+  </article>
+{/snippet}
+
+{#snippet messageBody(message: ChatMessage, className: string)}
+  <p class={className}>
+    {#each messageTextSegments(message.body) as segment, segmentIndex (segmentIndex)}
+      {#if segment.mention}
+        <span class="chat-mention">{segment.text}</span>
+      {:else}
+        {segment.text}
+      {/if}
+    {/each}
+  </p>
+{/snippet}
+
+{#snippet threadMiniSummary(message: ChatMessage)}
+  {#if shouldShowThreadSummary(message)}
+    <button
+      type="button"
+      class="chat-thread-mini-summary"
+      title={threadPreviewTitle(message)}
+      onclick={() => openThread(message)}
+    >
+      <span class="chat-thread-mini-count">{threadReplyCountLabel(message)}</span>
+    </button>
+  {/if}
+{/snippet}
 
 {#snippet attachmentPreviewVisual(attachment: any)}
   {@const kind = attachmentKind(attachment)}
@@ -1644,85 +2008,14 @@
 {/snippet}
 
 {#if previewAttachment && previewAttachmentUrl}
-  <div
-    class="chat-image-preview-layer"
-    bind:this={previewDialogEl}
-    use:portalToBody
-    role="dialog"
-    aria-modal="true"
-    aria-label={`Attachment preview: ${previewAttachmentLabel}`}
-    tabindex="-1"
-    onkeydown={handlePreviewKeydown}
-  >
-    <button
-      type="button"
-      class="chat-image-preview-backdrop"
-      aria-label="Close attachment preview"
-      onclick={closeAttachmentPreview}
-    ></button>
-
-    <div class="chat-image-preview-panel">
-      <div class="chat-image-preview-toolbar">
-        <div class="chat-image-preview-meta">
-          <strong>{previewAttachmentLabel}</strong>
-          {#if previewAttachmentDetail}
-            <span>{previewAttachmentDetail}</span>
-          {/if}
-        </div>
-
-        <div class="chat-image-preview-actions">
-          <ConstellationIconButton
-            label="Open attachment"
-            title="Open attachment"
-            variant="secondary"
-            size="md"
-            onclick={openPreviewAttachmentExternal}
-          >
-            <ConstellationIcon name="external-link" size={16} stroke={1.9} />
-          </ConstellationIconButton>
-
-          <ConstellationIconButton
-            label="Close preview"
-            title="Close preview"
-            variant="secondary"
-            size="md"
-            onclick={closeAttachmentPreview}
-          >
-            <ConstellationIcon name="close" size={16} stroke={1.9} />
-          </ConstellationIconButton>
-        </div>
-      </div>
-
-      <div class={`chat-image-preview-frame is-${previewAttachmentKind}`}>
-        {#if previewAttachmentKind === 'image'}
-          <img src={previewAttachmentUrl} alt={previewAttachmentLabel} />
-        {:else if previewAttachmentKind === 'video'}
-          <!-- svelte-ignore a11y_media_has_caption -->
-          <video src={previewAttachmentUrl} controls playsinline preload="metadata"></video>
-        {:else if previewAttachmentKind === 'pdf' || previewAttachmentKind === 'text' || previewAttachmentKind === 'link'}
-          <iframe
-            src={previewAttachmentUrl}
-            title={previewAttachmentLabel}
-            referrerpolicy="no-referrer"
-            loading="lazy"
-          ></iframe>
-        {:else}
-          <div class="chat-file-preview-fallback">
-            <span class="chat-file-preview-icon">
-              <ConstellationIcon name={attachmentIconName(previewAttachment)} size={34} stroke={1.6} />
-            </span>
-            <strong>{previewAttachmentLabel}</strong>
-            {#if previewAttachmentDetail}
-              <span>{previewAttachmentDetail}</span>
-            {/if}
-            <button type="button" class="chat-file-preview-open" onclick={openPreviewAttachmentExternal}>
-              Open attachment
-            </button>
-          </div>
-        {/if}
-      </div>
-    </div>
-  </div>
+  <AttachmentPreviewDialog
+    url={previewAttachmentUrl}
+    label={previewAttachmentLabel}
+    detail={previewAttachmentDetail}
+    kind={previewAttachmentKind}
+    fallbackIcon={attachmentIconName(previewAttachment)}
+    onClose={closeAttachmentPreview}
+  />
 {/if}
 
 <style>
@@ -1730,8 +2023,7 @@
   display: none;
 }
 
-.chat-dock-shell,
-.chat-image-preview-layer {
+.chat-dock-shell {
   --chat-attachment-image-max-height: min(44vh, 360px);
   --chat-shell-border: rgba(255, 255, 255, 0.06);
   --chat-shell-background: rgba(9, 12, 19, 0.96);
@@ -1752,6 +2044,10 @@
   --chat-unread-background: color-mix(in srgb, var(--chat-unread-accent) 90%, transparent);
   --chat-unread-text: rgba(12, 10, 8, 0.92);
   --chat-unread-ring: rgba(9, 12, 19, 0.96);
+  --chat-unread-thread-border: rgba(255, 255, 255, 0.08);
+  --chat-unread-thread-background: rgba(255, 255, 255, 0.025);
+  --chat-unread-thread-background-hover: rgba(255, 255, 255, 0.045);
+  --chat-unread-thread-mark: color-mix(in srgb, var(--chat-unread-accent) 82%, rgba(255, 255, 255, 0.18));
   --chat-thread-border: rgba(255, 255, 255, 0.08);
   --chat-thread-splitter-background: rgba(255, 255, 255, 0.12);
   --chat-thread-splitter-hover-background: rgba(141, 183, 255, 0.42);
@@ -1799,7 +2095,11 @@
   --chat-thread-summary-link-background-hover: rgba(255, 255, 255, 0.04);
   --chat-thread-summary-link-text-hover: rgba(228, 236, 249, 0.92);
   --chat-thread-summary-accent: rgba(150, 188, 255, 0.94);
-  --chat-thread-summary-avatar-ring: rgba(9, 12, 19, 0.96);
+  --chat-mention-background: rgba(150, 188, 255, 0.16);
+  --chat-mention-text: rgba(207, 224, 255, 0.98);
+  --chat-presence-seed-core-base: #050910;
+  --chat-presence-seed-owner-base: rgba(246, 248, 253, 0.96);
+  --chat-presence-seed-ring: rgba(255, 255, 255, 0.12);
   --chat-message-actions-border: rgba(255, 255, 255, 0.08);
   --chat-message-actions-background: rgba(8, 11, 18, 0.96);
   --chat-message-actions-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
@@ -1869,8 +2169,7 @@
   background: var(--chat-drop-overlay-icon-background);
 }
 
-:global(:root[data-color-scheme='light']) .chat-dock-shell,
-:global(:root[data-color-scheme='light']) .chat-image-preview-layer {
+:global(:root[data-color-scheme='light']) .chat-dock-shell {
   --chat-shell-border: rgba(24, 35, 49, 0.08);
   --chat-shell-background: rgba(247, 250, 253, 0.94);
   --chat-shell-text: rgba(17, 24, 35, 0.94);
@@ -1891,6 +2190,10 @@
   --chat-unread-background: color-mix(in srgb, var(--chat-unread-accent) 88%, transparent);
   --chat-unread-text: rgba(28, 20, 12, 0.9);
   --chat-unread-ring: rgba(247, 250, 253, 0.94);
+  --chat-unread-thread-border: rgba(24, 35, 49, 0.08);
+  --chat-unread-thread-background: rgba(255, 255, 255, 0.46);
+  --chat-unread-thread-background-hover: rgba(255, 255, 255, 0.72);
+  --chat-unread-thread-mark: color-mix(in srgb, var(--chat-unread-accent) 76%, rgba(24, 35, 49, 0.12));
   --chat-thread-border: rgba(24, 35, 49, 0.08);
   --chat-thread-splitter-background: rgba(24, 35, 49, 0.12);
   --chat-thread-splitter-hover-background: rgba(95, 137, 200, 0.42);
@@ -1938,7 +2241,11 @@
   --chat-thread-summary-link-background-hover: rgba(255, 255, 255, 0.52);
   --chat-thread-summary-link-text-hover: rgba(17, 24, 35, 0.92);
   --chat-thread-summary-accent: #486fa8;
-  --chat-thread-summary-avatar-ring: rgba(247, 250, 253, 0.96);
+  --chat-mention-background: rgba(72, 111, 168, 0.14);
+  --chat-mention-text: #315a91;
+  --chat-presence-seed-core-base: rgba(246, 250, 253, 0.96);
+  --chat-presence-seed-owner-base: rgba(19, 28, 40, 0.94);
+  --chat-presence-seed-ring: rgba(24, 35, 49, 0.12);
   --chat-message-actions-border: rgba(24, 35, 49, 0.08);
   --chat-message-actions-background: rgba(247, 250, 253, 0.96);
   --chat-message-actions-shadow: 0 12px 28px rgba(24, 35, 49, 0.12);
@@ -1955,6 +2262,20 @@
 .chat-dock-shell.is-thread-surface {
   border-radius: 18px;
   padding: 16px;
+}
+
+.chat-dock-shell :global(.constellation-presence-seed:not(.is-illo)) {
+  --constellation-presence-seed-user-core-accent-strength: 78%;
+  --constellation-presence-seed-user-core-base: var(--chat-presence-seed-core-base);
+  --constellation-presence-seed-user-owner-accent-strength: 24%;
+  --constellation-presence-seed-user-owner-base: var(--chat-presence-seed-owner-base);
+}
+
+.chat-dock-shell :global(.constellation-presence-seed:not(.is-illo) .constellation-presence-seed-core) {
+  border-color: color-mix(in srgb, var(--seed-accent) 44%, var(--chat-presence-seed-ring));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--seed-accent) 20%, transparent),
+    0 0 15px color-mix(in srgb, var(--seed-accent) 24%, transparent);
 }
 
 .chat-thread-topbar span {
@@ -2064,6 +2385,18 @@
 .chat-channel-row-team {
   height: 54px;
   min-height: 54px;
+}
+
+.chat-channel-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  background: var(--chat-channel-cue-background);
+  color: var(--chat-channel-title);
 }
 
 .chat-channel-presence-stack {
@@ -2231,6 +2564,257 @@
   line-height: 1.45;
 }
 
+.chat-unread-column {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chat-unread-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 12px 14px;
+}
+
+.chat-unread-heading {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chat-unread-heading h3,
+.chat-unread-heading p {
+  margin: 0;
+}
+
+.chat-unread-kicker {
+  color: var(--chat-meta-text);
+  font-family: var(--constellation-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  line-height: 1.1;
+  text-transform: uppercase;
+}
+
+.chat-unread-heading h3 {
+  color: var(--chat-heading-text);
+  font-size: 15px;
+  font-weight: 640;
+  line-height: 1.2;
+}
+
+.chat-unread-heading p {
+  color: var(--chat-description-text);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.chat-unread-refresh,
+.chat-unread-more {
+  appearance: none;
+  border: 1px solid var(--chat-action-border);
+  background: var(--chat-action-background);
+  color: var(--chat-action-text);
+  cursor: pointer;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    transform 150ms ease,
+    opacity 150ms ease;
+}
+
+.chat-unread-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 10px;
+}
+
+.chat-unread-refresh:hover,
+.chat-unread-more:hover {
+  background: var(--chat-action-background-hover);
+}
+
+.chat-unread-refresh:focus-visible,
+.chat-unread-more:focus-visible,
+.chat-unread-thread-open:focus-visible {
+  outline: 2px solid var(--constellation-control-focus-ring);
+  outline-offset: 2px;
+}
+
+.chat-unread-stream {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 12px 12px;
+}
+
+.chat-unread-thread {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--chat-unread-thread-border);
+  border-radius: 16px;
+  background: var(--chat-unread-thread-background);
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease;
+}
+
+.chat-unread-thread:hover {
+  background: var(--chat-unread-thread-background-hover);
+}
+
+.chat-unread-thread-open {
+  appearance: none;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-unread-thread-mark {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--chat-unread-thread-mark);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--chat-unread-accent) 34%, transparent);
+}
+
+.chat-unread-thread-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chat-unread-thread-copy > span {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--chat-heading-text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.18;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-unread-thread-copy small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--chat-description-text);
+  font-size: 11px;
+  font-weight: 520;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-unread-thread-copy > span + span {
+  color: var(--chat-meta-text);
+  font-size: 11px;
+  font-weight: 520;
+}
+
+.chat-unread-thread-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--chat-action-text);
+  opacity: 0.68;
+  transition:
+    opacity 150ms ease,
+    transform 150ms ease;
+}
+
+.chat-unread-thread-open:hover .chat-unread-thread-action {
+  opacity: 1;
+  transform: translateX(2px);
+}
+
+.chat-unread-message {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 4px 0 2px 19px;
+}
+
+.chat-unread-message.is-reply {
+  margin-left: 18px;
+  padding-left: 14px;
+  border-left: 1px solid var(--chat-thread-border);
+}
+
+.chat-unread-message-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.chat-unread-message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-unread-message-meta span {
+  color: var(--chat-message-author-color, var(--chat-heading-text));
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.15;
+}
+
+.chat-unread-message-meta small {
+  color: var(--chat-message-meta-text);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.chat-unread-message-body {
+  margin: 0;
+  color: var(--chat-message-body-text);
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-unread-more {
+  justify-self: start;
+  margin-left: 19px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 620;
+  line-height: 1;
+}
+
 .chat-dm-stream {
   padding-top: 4px;
 }
@@ -2323,7 +2907,6 @@
       opacity 160ms ease;
   }
 
-  .chat-close-thread,
   .chat-load-older {
     padding: 9px 12px;
     border-radius: 999px;
@@ -2335,6 +2918,26 @@
     font-weight: 700;
     letter-spacing: 0.14em;
     text-transform: uppercase;
+  }
+
+  .chat-close-thread {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border-radius: 10px;
+    border: 1px solid var(--chat-action-border);
+    background: var(--chat-action-background);
+    color: var(--chat-action-text);
+    line-height: 1;
+  }
+
+  .chat-close-thread :global(svg) {
+    width: 16px;
+    height: 16px;
   }
 
   .chat-load-older {
@@ -2499,6 +3102,17 @@
     word-break: break-word;
   }
 
+  .chat-mention {
+    display: inline;
+    padding: 0 0.24em;
+    border-radius: 5px;
+    background: var(--chat-mention-background);
+    color: var(--chat-mention-text);
+    font-weight: 680;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+
   .chat-attachments,
   .chat-composer-attachments {
     display: grid;
@@ -2651,174 +3265,33 @@
     font-size: 11px;
   }
 
-  .chat-image-preview-layer {
-    position: fixed;
-    inset: 0;
-    z-index: var(--constellation-layer-modal, 1000);
-    display: grid;
-    place-items: center;
-    padding: clamp(18px, 4vw, 48px);
-    color: var(--constellation-color-text-primary);
-  }
-
-  .chat-image-preview-layer:focus {
-    outline: none;
-  }
-
-  .chat-image-preview-backdrop {
-    position: absolute;
-    inset: 0;
+  .chat-thread-mini-summary {
+    appearance: none;
+    display: none;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
     padding: 0;
     border: 0;
-    background: var(--chat-preview-backdrop-background);
-    cursor: zoom-out;
-    backdrop-filter: blur(16px) saturate(1.04);
-    -webkit-backdrop-filter: blur(16px) saturate(1.04);
-  }
-
-  .chat-image-preview-panel {
-    position: relative;
-    z-index: 1;
-    display: grid;
-    width: min(1120px, 100%);
-    max-height: min(860px, calc(100svh - 36px));
-    margin: 0;
-    overflow: hidden;
-    border-radius: var(--constellation-radius-panel);
-    border: 1px solid var(--chat-preview-panel-border);
-    background: var(--chat-preview-panel-background);
-    box-shadow: var(--chat-preview-panel-shadow);
-  }
-
-  .chat-image-preview-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    min-width: 0;
-    padding: 10px 10px 10px 14px;
-    border-bottom: 1px solid var(--chat-preview-toolbar-border);
-  }
-
-  .chat-image-preview-meta {
-    display: grid;
-    min-width: 0;
-    gap: 3px;
-  }
-
-  .chat-image-preview-meta strong,
-  .chat-image-preview-meta span {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .chat-image-preview-meta strong {
-    color: var(--chat-preview-meta-title);
-    font-size: 13px;
-    font-weight: 620;
-  }
-
-  .chat-image-preview-meta span {
-    color: var(--chat-preview-meta-text);
-    font-size: 11px;
-  }
-
-  .chat-image-preview-actions {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .chat-image-preview-frame {
-    display: grid;
-    place-items: center;
-    min-height: min(62svh, 520px);
-    background: var(--chat-preview-frame-background);
-  }
-
-  .chat-image-preview-frame img,
-  .chat-image-preview-frame video {
-    display: block;
-    width: auto;
-    height: auto;
-    max-width: 100%;
-    max-height: calc(100svh - 142px);
-    object-fit: contain;
-  }
-
-  .chat-image-preview-frame video {
-    width: min(100%, 1040px);
-    background: #000;
-  }
-
-  .chat-image-preview-frame iframe {
-    display: block;
-    width: 100%;
-    height: min(72svh, 720px);
-    min-height: 420px;
-    border: 0;
-    background: #fff;
-  }
-
-  .chat-file-preview-fallback {
-    display: grid;
-    place-items: center;
-    gap: 10px;
-    min-width: min(420px, 100%);
-    padding: 42px 28px;
-    color: var(--chat-file-fallback-text);
-    text-align: center;
-  }
-
-  .chat-file-preview-open {
-    appearance: none;
-    margin-top: 4px;
-    padding: 8px 11px;
-    border-radius: 999px;
-    border: 1px solid var(--chat-action-border);
-    background: var(--chat-action-background);
-    color: var(--chat-action-text);
+    background: transparent;
+    color: var(--chat-thread-summary-accent);
+    font: inherit;
     cursor: pointer;
-    font-family: var(--constellation-font-mono);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
   }
 
-  .chat-file-preview-open:hover,
-  .chat-file-preview-open:focus-visible {
-    background: var(--chat-action-background-hover);
-  }
-
-  .chat-file-preview-icon {
-    display: inline-flex;
-    width: 68px;
-    height: 68px;
-    align-items: center;
-    justify-content: center;
-    border-radius: var(--constellation-radius-panel);
-    border: 1px solid var(--chat-attachment-icon-border);
-    background: var(--chat-attachment-icon-background);
-    color: var(--chat-attachment-icon-text);
-  }
-
-  .chat-file-preview-fallback strong {
-    max-width: 100%;
+  .chat-thread-mini-count {
+    min-width: 0;
     overflow: hidden;
-    color: var(--chat-preview-meta-title);
-    font-size: 14px;
-    font-weight: 650;
+    font-size: 11px;
+    font-weight: 620;
+    line-height: 1;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .chat-file-preview-fallback span:not(.chat-file-preview-icon) {
-    color: var(--chat-file-fallback-text);
-    font-size: 12px;
+  .chat-thread-mini-summary:focus-visible {
+    outline: 2px solid var(--constellation-control-focus-ring);
+    outline-offset: 2px;
   }
 
   .chat-thread-summary {
@@ -2889,14 +3362,15 @@
   .chat-thread-preview-stack {
     display: inline-flex;
     align-items: center;
-    padding-right: 4px;
+    gap: 3px;
+    padding-right: 0;
   }
 
   .chat-thread-preview-avatar {
     display: inline-flex;
-    margin-left: calc(var(--chat-thread-preview-index) * -5px);
+    margin-left: 0;
     border-radius: 999px;
-    box-shadow: 0 0 0 2px var(--chat-thread-summary-avatar-ring);
+    box-shadow: none;
   }
 
   .chat-thread-preview-avatar:first-child {
@@ -3020,6 +3494,7 @@
 
   .chat-close-thread:disabled,
   .chat-load-older:disabled,
+  .chat-unread-refresh:disabled,
   .chat-thread-summary-link:disabled,
   .chat-message-action:disabled {
     opacity: 0.48;
@@ -3184,26 +3659,4 @@
     }
   }
 
-  @media (max-width: 700px) {
-    .chat-image-preview-layer {
-      padding: 10px;
-    }
-
-    .chat-image-preview-panel {
-      max-height: calc(100svh - 20px);
-    }
-
-    .chat-image-preview-toolbar {
-      gap: 10px;
-      padding: 8px;
-    }
-
-    .chat-image-preview-frame {
-      min-height: min(58svh, 420px);
-    }
-
-    .chat-image-preview-frame img {
-      max-height: calc(100svh - 108px);
-    }
-  }
 </style>
