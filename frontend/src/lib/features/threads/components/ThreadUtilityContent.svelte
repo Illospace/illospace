@@ -12,11 +12,12 @@
     ideaAuditAnalyze,
     ideaConnections as loadIdeaConnections,
     runHistory,
+    threadHandoffSummary,
   } from '$lib/features/threads/api/threadApi';
   import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
   import { formatDurationMs, formatDurationSeconds, relativeTimeAgo } from '$lib/utils/datetime';
 
-  type UtilityTab = 'activity' | 'details' | 'audit';
+  type UtilityTab = 'activity' | 'handoff-summary' | 'details' | 'audit';
   type ActivityListItem = {
     _key: string;
     timestamp: string | null;
@@ -60,6 +61,10 @@
   let threadTraceSaving = $state(false);
   let threadTraceSaved = $state<{ bytes?: number; filename?: string } | null>(null);
   let threadTraceError = $state('');
+  let handoffSummaryData = $state<any>(null);
+  let handoffSummaryLoading = $state(false);
+  let handoffSummaryError = $state('');
+  let handoffRequestSeq = 0;
 
   let pollAborted = $state(false);
   let loadedForIdeaId = $state<string | null>(null);
@@ -98,6 +103,10 @@
     threadTraceSaving = false;
     threadTraceSaved = null;
     threadTraceError = '';
+    handoffSummaryData = null;
+    handoffSummaryLoading = false;
+    handoffSummaryError = '';
+    handoffRequestSeq += 1;
     pollAborted = false;
   }
 
@@ -140,6 +149,57 @@
     return parts
       .map((part) => cleanActivityText(part, ''))
       .filter(Boolean);
+  }
+
+  function handoffCheckpoint(source: any): any {
+    const summary = source?.summary;
+    return summary?.checkpoint && typeof summary.checkpoint === 'object'
+      ? summary.checkpoint
+      : summary && typeof summary === 'object'
+        ? summary
+        : {};
+  }
+
+  function handoffText(value: unknown): string {
+    return String(value ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  function handoffList(value: unknown): string[] {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => handoffText(item))
+        .filter(Boolean);
+    }
+    const text = handoffText(value);
+    return text ? [text] : [];
+  }
+
+  function handoffSections(checkpoint: any): Array<{ label: string; items: string[] }> {
+    return [
+      { label: 'Current Plan', items: handoffList(checkpoint.current_plan) },
+      { label: 'Completed', items: handoffList(checkpoint.completed_work) },
+      { label: 'Decisions', items: handoffList(checkpoint.decisions) },
+      { label: 'Files & Objects', items: handoffList(checkpoint.files_or_objects_touched) },
+      { label: 'Constraints', items: handoffList(checkpoint.user_constraints) },
+      { label: 'Open Questions', items: handoffList(checkpoint.open_questions) },
+      { label: 'Risks', items: handoffList(checkpoint.risks_or_unknowns) },
+      { label: 'Important Tool Results', items: handoffList(checkpoint.important_tool_results) },
+    ].filter((section) => section.items.length > 0);
+  }
+
+  function handoffHasVisibleCheckpoint(checkpoint: any): boolean {
+    return Boolean(
+      handoffText(checkpoint.active_objective)
+      || handoffText(checkpoint.recent_user_intent)
+      || handoffText(checkpoint.verification_status)
+      || handoffSections(checkpoint).length,
+    );
+  }
+
+  function handoffSourceLabel(value: unknown): string {
+    return handoffText(value)
+      .replace(/_/g, ' ')
+      .replace(/\bllm\b/i, 'LLM');
   }
 
   async function loadActivity() {
@@ -293,8 +353,32 @@
 
   function loadUtilityTab(tab: UtilityTab) {
     if (tab === 'activity') loadActivity();
+    else if (tab === 'handoff-summary') loadHandoffSummary();
     else if (tab === 'details') loadDetails();
     else if (tab === 'audit') loadAudit();
+  }
+
+  async function loadHandoffSummary() {
+    const ideaId = idea?.id;
+    if (!ideaId) return;
+
+    const requestId = ++handoffRequestSeq;
+    handoffSummaryLoading = true;
+    handoffSummaryError = '';
+
+    try {
+      const result = await threadHandoffSummary(ideaId);
+      if (requestId !== handoffRequestSeq || idea?.id !== ideaId) return;
+      handoffSummaryData = result;
+    } catch (e: any) {
+      if (requestId !== handoffRequestSeq || idea?.id !== ideaId) return;
+      handoffSummaryData = null;
+      handoffSummaryError = e?.detail || 'Failed to load handoff summary.';
+    } finally {
+      if (requestId === handoffRequestSeq && idea?.id === ideaId) {
+        handoffSummaryLoading = false;
+      }
+    }
   }
 
   async function loadAudit() {
@@ -473,6 +557,71 @@
           </div>
         </div>
       {/each}
+    </div>
+  {/if}
+{:else if activeTab === 'handoff-summary'}
+  {#if handoffSummaryLoading}
+    <div class="tab-empty">Loading handoff...</div>
+  {:else if handoffSummaryError}
+    <div class="tab-empty">{handoffSummaryError}</div>
+  {:else if !handoffSummaryData?.found}
+    <div class="tab-empty">No handoff summary yet.</div>
+  {:else}
+    {@const checkpoint = handoffCheckpoint(handoffSummaryData)}
+    <div class="handoff-summary-pane" aria-label="Latest handoff summary">
+      <div class="handoff-summary-toolbar">
+        <div class="activity-trace-copy">
+          <div class="activity-trace-title">Latest handoff summary</div>
+          <div class="activity-trace-note">
+            {handoffSummaryData.run_id ? `Run #${handoffSummaryData.run_id}` : 'Run'}
+            {#if handoffSummaryData.message_count}
+              &middot; {handoffSummaryData.message_count.toLocaleString()} messages
+            {/if}
+            {#if handoffSummaryData.updated_at}
+              &middot; {timeAgo(handoffSummaryData.updated_at)}
+            {/if}
+            {#if handoffSummaryData.summary?.source}
+              &middot; {handoffSourceLabel(handoffSummaryData.summary.source)}
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      {#if handoffHasVisibleCheckpoint(checkpoint)}
+        {#if handoffText(checkpoint.active_objective)}
+          <section class="handoff-summary-section handoff-summary-section-primary">
+            <h4 class="details-section-title">Active Objective</h4>
+            <p class="handoff-summary-lead">{handoffText(checkpoint.active_objective)}</p>
+          </section>
+        {/if}
+
+        {#if handoffText(checkpoint.recent_user_intent)}
+          <section class="handoff-summary-section">
+            <h4 class="details-section-title">Recent User Intent</h4>
+            <p class="handoff-summary-text">{handoffText(checkpoint.recent_user_intent)}</p>
+          </section>
+        {/if}
+
+        {#each handoffSections(checkpoint) as section (section.label)}
+          <section class="handoff-summary-section">
+            <h4 class="details-section-title">{section.label}</h4>
+            <ul class="handoff-summary-list">
+              {#each section.items as item}
+                <li>{item}</li>
+              {/each}
+            </ul>
+          </section>
+        {/each}
+
+        {#if handoffText(checkpoint.verification_status)}
+          <section class="handoff-summary-section">
+            <h4 class="details-section-title">Verification</h4>
+            <p class="handoff-summary-text">{handoffText(checkpoint.verification_status)}</p>
+          </section>
+        {/if}
+      {:else}
+        <div class="tab-empty">The stored handoff is empty.</div>
+      {/if}
     </div>
   {/if}
 {:else if activeTab === 'details'}
@@ -1208,6 +1357,83 @@
     line-height: 1.4;
     overflow-wrap: anywhere;
     word-break: break-word;
+  }
+
+  /* ── Handoff summary tab ─────────────────────────────── */
+  .handoff-summary-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+    width: 100%;
+    padding-bottom: 12px;
+  }
+
+  .handoff-summary-toolbar {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    width: 100%;
+    padding: 2px 2px 12px;
+    border-bottom: 1px solid var(--panel-utility-divider-border);
+  }
+
+  .handoff-summary-section {
+    min-width: 0;
+    padding: 12px 13px 13px;
+    border: 1px solid var(--panel-utility-card-border);
+    border-radius: 16px;
+    background: var(--panel-utility-card-background);
+  }
+
+  .handoff-summary-section-primary {
+    border-color: color-mix(in srgb, var(--thread-accent, #57CFA0) 18%, var(--panel-utility-card-border));
+  }
+
+  .handoff-summary-lead,
+  .handoff-summary-text {
+    margin: 0;
+    color: var(--panel-utility-primary-text);
+    font-size: 12px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .handoff-summary-lead {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .handoff-summary-list {
+    display: grid;
+    gap: 7px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .handoff-summary-list li {
+    position: relative;
+    padding-left: 13px;
+    color: var(--panel-utility-primary-text);
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .handoff-summary-list li::before {
+    content: '';
+    position: absolute;
+    top: 0.67em;
+    left: 0;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 68%, transparent);
   }
 
   /* ── Details tab ─────────────────────────────────────── */

@@ -824,6 +824,10 @@
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'activity'));
   }
 
+  function openHandoffSummaryTab() {
+    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'handoff-summary'));
+  }
+
   function openVaultTab() {
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'vault'));
   }
@@ -874,6 +878,10 @@
     }
     if (item.kind === 'activity') {
       addActivityTab();
+      return;
+    }
+    if (item.kind === 'handoff-summary') {
+      openHandoffSummaryTab();
       return;
     }
     if (item.kind === 'vault') {
@@ -1179,7 +1187,10 @@
   {#snippet utilityPane()}
     <div class="thread-utility-surface">
       <div class="thread-utility-surface-body">
-        <ThreadUtilityContent {idea} activeTab="activity" />
+        <ThreadUtilityContent
+          {idea}
+          activeTab={activeSidePanelTab?.kind === 'handoff-summary' ? 'handoff-summary' : 'activity'}
+        />
       </div>
     </div>
   {/snippet}

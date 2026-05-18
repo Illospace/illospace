@@ -15,6 +15,7 @@
   type DockWidth = number | string;
   const DEFAULT_TABS: ThreadStageRightDockTab[] = [
     { id: 'activity', label: 'Activity', kind: 'activity', closeable: true },
+    { id: 'handoff-summary', label: 'Handoff', kind: 'handoff-summary', closeable: true },
   ];
 
   function clamp(value: number, min: number, max: number) {
@@ -90,15 +91,17 @@
           ? hasPreviewPane
           : tab.kind === 'activity'
             ? hasUtilityPane
-            : tab.kind === 'app'
-              ? hasAppsPane
-              : tab.kind === 'vault'
-                ? hasVaultPane
-                : tab.kind === 'cycles'
-                  ? hasCyclesPane
-                  : tab.kind === 'code-review'
-                    ? hasCodeReviewPane
-                    : true
+            : tab.kind === 'handoff-summary'
+              ? hasUtilityPane
+              : tab.kind === 'app'
+                ? hasAppsPane
+                : tab.kind === 'vault'
+                  ? hasVaultPane
+                  : tab.kind === 'cycles'
+                    ? hasCyclesPane
+                    : tab.kind === 'code-review'
+                      ? hasCodeReviewPane
+                      : true
     )),
   );
   const resolvedActiveTab = $derived(
@@ -200,6 +203,7 @@
     if (kind === 'browser') return 'preview';
     if (kind === 'preview') return 'document';
     if (kind === 'activity') return 'activity';
+    if (kind === 'handoff-summary') return 'document';
     if (kind === 'vault') return 'vault';
     if (kind === 'cycles') return 'cycles';
     if (kind === 'code-review') return 'code';
@@ -315,6 +319,10 @@
           </section>
         {:else if resolvedActiveTab?.kind === 'activity' && hasUtilityPane}
           <section class="right-dock-pane right-dock-activity" aria-label="Activity">
+            {@render utilityPane?.()}
+          </section>
+        {:else if resolvedActiveTab?.kind === 'handoff-summary' && hasUtilityPane}
+          <section class="right-dock-pane right-dock-handoff-summary" aria-label="Handoff summary">
             {@render utilityPane?.()}
           </section>
         {:else if resolvedActiveTab?.kind === 'app' && hasAppsPane}
