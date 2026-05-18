@@ -106,6 +106,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
             ["summary"],
         ),
         "scope": external_agents.SCOPE_SIGNAL_SUBMIT,
+        "mutates_inbound": True,
     },
     "illo_search_workspace": {
         **_tool_schema(
@@ -651,6 +652,8 @@ async def _handle_mcp_request(
             tool_payload = await TOOL_HANDLERS[tool_name](db, principal, arguments)
         except Exception as exc:
             raise_external_agent_http_error(exc)
+        if spec.get("mutates_inbound"):
+            await db.commit()
         if spec.get("mutates_thread"):
             await _add_thread_trigger_result_if_needed(
                 db,

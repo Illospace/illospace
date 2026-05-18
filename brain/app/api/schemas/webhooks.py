@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 class WebhookEnvelopeCreate(BaseModel):
     origin: str = Field(min_length=1, max_length=240)
     payload: dict[str, Any] = Field(default_factory=dict)
-    kind: str = Field(default="signal", max_length=40)
+    kind: str = Field(default="signal", min_length=1, max_length=40)
     summary: str | None = Field(default=None, max_length=2000)
     hints: dict[str, Any] = Field(default_factory=dict)
     desired_outcome: str | None = Field(default=None, max_length=120)

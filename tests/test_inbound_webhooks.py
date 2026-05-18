@@ -278,6 +278,23 @@ async def test_webhook_rejects_overlong_idempotency_header(session):
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
 
 
+async def test_webhook_rejects_empty_kind_before_inbound_processing(session):
+    await _seed_connection(session)
+
+    response = await _post_webhook(
+        session,
+        headers={"Authorization": f"Bearer {RAW_TOKEN}"},
+        json={
+            "origin": "jira.ticket_created",
+            "kind": " ",
+            "payload": {"issue": {"key": "PROJ-1"}},
+        },
+    )
+
+    assert response.status_code == 422
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
+
+
 async def test_idempotent_insert_integrity_error_returns_existing_replay(session, monkeypatch):
     principal = await _seed_connection(session)
     first = await inbound.submit_inbound_envelope(

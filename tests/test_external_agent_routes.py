@@ -337,6 +337,59 @@ async def test_hosted_mcp_submit_signal_builds_shared_envelope():
     assert ingress_context["metadata"]["mcp_tool"] == "illo_submit_signal"
 
 
+async def test_hosted_mcp_submit_signal_commits_before_later_batch_rollback():
+    order: list[str] = []
+    session = _AsyncSession(order)
+
+    async def fake_submit(_db, *, connection, envelope, ingress_context):
+        order.append("signal-write")
+        return {"status": "processed", "event_id": "evt-1", "connection_id": connection["id"]}
+
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        return_value=_principal(),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.submit_inbound_envelope",
+        new=AsyncMock(side_effect=fake_submit),
+    ), patch(
+        "brain.app.api.routers.agent_mcp.external_agents.get_thread",
+        side_effect=RuntimeError("thread lookup exploded"),
+    ):
+        response = await _request(
+            "POST",
+            "/mcp",
+            session=session,
+            headers={"Authorization": "Bearer bridge-token"},
+            json=[
+                {
+                    "jsonrpc": "2.0",
+                    "id": 21,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "illo_submit_signal",
+                        "arguments": {"summary": "Signal should be durable before batch failure."},
+                    },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 22,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "illo_get_thread",
+                        "arguments": {"idea_id": "idea-missing"},
+                    },
+                },
+            ],
+        )
+
+    assert response.status_code == 200
+    first, second = response.json()
+    signal_result = json.loads(first["result"]["content"][0]["text"])
+    assert signal_result["event_id"] == "evt-1"
+    assert second["result"]["isError"] is True
+    assert order == ["signal-write", "commit", "rollback"]
+
+
 async def test_hosted_mcp_submit_signal_requires_signal_scope():
     principal = external_agents.AgentBridgePrincipal(
         connection_id="conn-1",
