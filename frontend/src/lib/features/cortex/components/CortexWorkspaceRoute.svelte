@@ -537,7 +537,7 @@
 
   function handleChatTopLevelModeChange(nextMode: CortexChatDockTopLevelMode) {
     chatTopLevelMode = nextMode;
-    if (nextMode === 'room') {
+    if (nextMode !== 'dms') {
       chatSelectedPreviewMemberId = null;
     }
   }

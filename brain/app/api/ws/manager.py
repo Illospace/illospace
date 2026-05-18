@@ -308,6 +308,7 @@ class ConnectionManager:
                 "thread_root_message_id": thread_root_message_id,
                 "message": dict(message),
             },
+            conversation_id=conversation_id,
             thread_root_message_id=thread_root_message_id,
         )
 

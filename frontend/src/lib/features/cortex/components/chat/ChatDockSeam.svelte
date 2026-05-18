@@ -3,7 +3,7 @@
   import type { ChatDockPreviewMember } from '$lib/components/chat/ChatDock.svelte';
   import { chat } from '$lib/stores/chat.svelte';
 
-  export type CortexChatDockTopLevelMode = 'room' | 'dms';
+  export type CortexChatDockTopLevelMode = 'room' | 'dms' | 'unread';
   let {
     surface,
     context = 'workspace',
@@ -51,6 +51,13 @@
     if (topLevelMode === 'room') {
       if (chat.mode !== 'room') {
         void chat.selectRoom();
+      }
+      return;
+    }
+
+    if (topLevelMode === 'unread') {
+      if (chat.mode !== 'unread') {
+        void chat.selectUnread();
       }
       return;
     }

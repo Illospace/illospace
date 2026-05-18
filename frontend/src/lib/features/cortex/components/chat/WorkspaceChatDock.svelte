@@ -85,6 +85,11 @@
   const chatDockStyle = $derived(
     userHeight == null ? '' : `--workspace-bottom-surface-user-height:${userHeight}px;`,
   );
+  const topLevelModeLabel = $derived.by(() => {
+    if (topLevelMode === 'room') return 'Team room';
+    if (topLevelMode === 'unread') return 'Unread';
+    return 'Direct messages';
+  });
 
   $effect(() => {
     onForegroundChange?.(foreground);
@@ -408,7 +413,7 @@
     <div class="workspace-chat-dock__identity">
       <span class="workspace-chat-dock__kicker">Cortex chat</span>
       <span class="workspace-chat-dock__mode">
-        {topLevelMode === 'room' ? 'Team room' : 'Direct messages'}
+        {topLevelModeLabel}
       </span>
     </div>
 

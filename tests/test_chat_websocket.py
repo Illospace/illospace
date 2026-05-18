@@ -121,6 +121,46 @@ async def test_thread_subscriptions_are_cleaned_up_on_disconnect():
     )
 
 
+async def test_thread_reply_events_reach_room_conversation_subscribers():
+    manager = ConnectionManager()
+    ws_room = AsyncMock()
+    ws_thread = AsyncMock()
+    ws_other_room = AsyncMock()
+
+    await manager.connect(_claims("user-1"), ws_room)
+    await manager.connect(_claims("user-2"), ws_thread)
+    await manager.connect(_claims("user-3"), ws_other_room)
+    for ws in (ws_room, ws_thread, ws_other_room):
+        ws.send_json.reset_mock()
+
+    await manager.subscribe_conversation("user-1", ws_room, "room-1")
+    await manager.subscribe_thread(
+        "user-2",
+        ws_thread,
+        conversation_id="room-1",
+        thread_root_message_id=42,
+    )
+    await manager.subscribe_conversation("user-3", ws_other_room, "room-2")
+    for ws in (ws_room, ws_thread, ws_other_room):
+        ws.send_json.reset_mock()
+
+    await manager.publish_chat_thread_reply_created(
+        conversation_id="room-1",
+        thread_root_message_id=42,
+        message={"id": 84, "thread_root_message_id": 42},
+    )
+
+    expected = {
+        "type": ServerEvent.CHAT_THREAD_REPLY_CREATED,
+        "conversation_id": "room-1",
+        "thread_root_message_id": 42,
+        "message": {"id": 84, "thread_root_message_id": 42},
+    }
+    ws_room.send_json.assert_called_once_with(expected)
+    ws_thread.send_json.assert_called_once_with(expected)
+    ws_other_room.send_json.assert_not_called()
+
+
 async def test_unsubscribe_only_affects_existing_socket_subscriptions():
     manager = ConnectionManager()
     ws_subscribed = AsyncMock()

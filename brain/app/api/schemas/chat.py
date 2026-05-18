@@ -73,6 +73,16 @@ class ChatNotificationRead(BaseModel):
     read_at: datetime | None = None
 
 
+class ChatUnreadThreadRead(BaseModel):
+    kind: str
+    conversation: ChatConversationSummaryRead
+    root_message: ChatMessageRead | None = None
+    unread_messages: list[ChatMessageRead] = Field(default_factory=list)
+    notification_ids: list[int] = Field(default_factory=list)
+    unread_count: int = 0
+    latest_unread_at: datetime
+
+
 class ChatBootstrapRead(BaseModel):
     room: ChatConversationSummaryRead
     dms: list[ChatConversationSummaryRead]

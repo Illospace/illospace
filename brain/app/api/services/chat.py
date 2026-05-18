@@ -21,6 +21,7 @@ from brain.app.api.schemas.chat import (
     ChatReadUpdate,
     ChatSearchResultRead,
     ChatThreadRead,
+    ChatUnreadThreadRead,
     ChatUnreadSummaryRead,
 )
 from brain.app.api.services.notifications import compact_notification_text
@@ -569,6 +570,92 @@ class ChatService(_ChatSerializationMixin):
             limit=validated_limit(limit),
         )
         return [await self._serialize_notification(notification) for notification in notifications]
+
+    async def list_unread_threads(self, *, limit: int) -> list[ChatUnreadThreadRead]:
+        rows = await self.notification_repo.a_list_unread_with_messages_for_user(
+            self.viewer_user_id,
+            limit=validated_limit(limit),
+        )
+        grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+        conversations_by_id: dict[str, ChatConversation] = {}
+
+        for notification, message in rows:
+            conversation_id = str(message.conversation_id)
+            conversation = conversations_by_id.get(conversation_id)
+            if conversation is None:
+                try:
+                    conversation = await self.get_conversation_or_404(conversation_id)
+                except HTTPException as exc:
+                    if exc.status_code == 404:
+                        continue
+                    raise
+                conversations_by_id[conversation_id] = conversation
+
+            if conversation.type == "dm":
+                key: tuple[Any, ...] = ("dm", conversation_id)
+                root_message_id = None
+            else:
+                root_message_id = message.thread_root_message_id or message.id
+                key = ("thread", conversation_id, root_message_id)
+
+            group = grouped.setdefault(
+                key,
+                {
+                    "kind": key[0],
+                    "conversation": conversation,
+                    "root_message_id": root_message_id,
+                    "notifications": [],
+                    "messages": [],
+                    "latest_unread_at": notification.created_at,
+                },
+            )
+            group["notifications"].append(notification)
+            group["messages"].append(message)
+            if notification.created_at > group["latest_unread_at"]:
+                group["latest_unread_at"] = notification.created_at
+
+        results: list[ChatUnreadThreadRead] = []
+        for group in grouped.values():
+            conversation = group["conversation"]
+            user_by_id = await self._conversation_user_map(conversation.id)
+            root_message_read = None
+
+            if group["root_message_id"] is not None:
+                root_message_id = int(group["root_message_id"])
+                root_message = await self.message_repo.a_get(root_message_id)
+                if root_message is None or root_message.deleted_at is not None:
+                    continue
+                thread_preview = (
+                    await self._thread_preview_participants_by_root_id([root_message_id], user_by_id)
+                ).get(root_message_id)
+                root_message_read = self._serialize_message(
+                    root_message,
+                    user_by_id,
+                    thread_preview_participants=thread_preview,
+                )
+
+            unread_messages = sorted(group["messages"], key=lambda entry: entry.conversation_seq)
+            notifications = sorted(group["notifications"], key=lambda entry: entry.created_at)
+            results.append(
+                ChatUnreadThreadRead(
+                    kind=group["kind"],
+                    conversation=await self._serialize_conversation(
+                        conversation,
+                        viewer_user_id=self.viewer_user_id,
+                    ),
+                    root_message=root_message_read,
+                    unread_messages=[
+                        self._serialize_message(message, user_by_id)
+                        for message in unread_messages
+                        if message.deleted_at is None
+                    ],
+                    notification_ids=[notification.id for notification in notifications],
+                    unread_count=len(notifications),
+                    latest_unread_at=group["latest_unread_at"],
+                )
+            )
+
+        return sorted(results, key=lambda item: item.latest_unread_at, reverse=True)
 
     async def mark_notification_read(self, notification_id: int) -> bool:
         notification = await self.notification_repo.a_mark_read(notification_id, self.viewer_user_id)

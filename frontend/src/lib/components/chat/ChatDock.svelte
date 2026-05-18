@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
 
-  import { api, type ChatConversationSummary } from '$lib/api/client';
+  import { api, type ChatConversationSummary, type ChatUnreadThread } from '$lib/api/client';
   import {
     ConstellationIcon,
     ConstellationIconButton,
@@ -96,6 +96,7 @@
   let resizingThreadSplit = $state(false);
   let selectedPreviewDmId = $state<string | null>(null);
   let previousSelectedPreviewMemberId = $state<string | null | undefined>(undefined);
+  let lastUnreadFetchTotal = $state(0);
 
   type TeamMember = {
     id: string;
@@ -163,6 +164,14 @@
     roomConversation ? (chat.conversationPageFor(roomConversation.id) ?? EMPTY_CONVERSATION_PAGE) : EMPTY_CONVERSATION_PAGE,
   );
   const roomMessages = $derived(roomPage.messages);
+  const unreadThreads = $derived(chat.unreadThreads);
+  const unreadMessageTotal = $derived(chat.unreadSummary.total);
+  const unreadThreadCount = $derived(unreadThreads.length);
+  const showUnreadTab = $derived(unreadMessageTotal > 0 && unreadThreadCount > 0);
+  const unreadThreadCountText = $derived(
+    `${unreadThreadCount} thread${unreadThreadCount === 1 ? '' : 's'}`,
+  );
+  const unreadThreadHeading = $derived(`${unreadThreadCount} unread ${unreadThreadCountText}`);
   const activePreviewDmMember = $derived.by<TeamMember | null>(() => {
     if (chat.mode !== 'dms' || !selectedPreviewDmId) return null;
     const previewMember = previewMembers.find(
@@ -209,7 +218,9 @@
     threadDraftKey ? (pendingAttachmentsByContext[threadDraftKey] ?? []) : [],
   );
   const dmAttachments = $derived(dmDraftKey ? (pendingAttachmentsByContext[dmDraftKey] ?? []) : []);
-  const activeChatDropTargetKey = $derived(chat.mode === 'dms' ? dmDraftKey : roomDraftKey);
+  const activeChatDropTargetKey = $derived(
+    chat.mode === 'dms' ? dmDraftKey : chat.mode === 'room' ? roomDraftKey : null,
+  );
   const dockDropTargetLabel = $derived(dropTargetLabelForKey(dockDragTargetKey ?? activeChatDropTargetKey));
   const roomTailSignature = $derived(`${roomMessages.length}:${roomMessages.at(-1)?.id ?? 'empty'}`);
   const dmTailSignature = $derived(`${activeDmMessages.length}:${activeDmMessages.at(-1)?.id ?? 'empty'}`);
@@ -432,9 +443,29 @@
   });
 
   $effect(() => {
-    if (chat.mode === 'room' && selectedPreviewDmId) {
+    if (chat.mode !== 'dms' && selectedPreviewDmId) {
       selectedPreviewDmId = null;
     }
+  });
+
+  $effect(() => {
+    if (!chat.bootstrapped || unreadMessageTotal <= 0) {
+      lastUnreadFetchTotal = 0;
+      return;
+    }
+    if (
+      chat.unreadThreadsLoading ||
+      lastUnreadFetchTotal === unreadMessageTotal
+    ) {
+      return;
+    }
+    lastUnreadFetchTotal = unreadMessageTotal;
+    void chat.refreshUnreadThreads(true);
+  });
+
+  $effect(() => {
+    if (chat.mode !== 'unread' || chat.unreadThreadsLoading || showUnreadTab) return;
+    void chat.selectRoom();
   });
 
   $effect(() => {
@@ -965,6 +996,69 @@
     );
   }
 
+  function unreadThreadAccentStyle(item: ChatUnreadThread) {
+    const message = item.unread_messages.at(-1) ?? item.root_message;
+    return unreadAccentStyle(
+      resolvedParticipantColor(message?.sender_user_id, message?.sender_color ?? item.conversation.counterpart?.color),
+    );
+  }
+
+  function unreadThreadTitle(item: ChatUnreadThread) {
+    if (item.kind === 'dm') return conversationTitle(item.conversation);
+    return item.conversation.title || 'Team';
+  }
+
+  function unreadThreadSubtitle(item: ChatUnreadThread) {
+    const count = item.unread_count;
+    const unit = unreadThreadCountsAsMessage(item)
+      ? `message${count === 1 ? '' : 's'}`
+      : `repl${count === 1 ? 'y' : 'ies'}`;
+    return `${count} unread ${unit}`;
+  }
+
+  function unreadThreadCountsAsMessage(item: ChatUnreadThread) {
+    if (item.kind === 'dm') return true;
+    const rootMessageId = item.root_message?.id;
+    return rootMessageId != null && item.unread_messages.some((message) => message.id === rootMessageId);
+  }
+
+  function unreadThreadDetail(item: ChatUnreadThread) {
+    if (item.kind === 'dm') return item.conversation.counterpart?.email || 'Direct message';
+    const root = item.root_message;
+    if (!root) return 'Team room';
+    return `${root.sender_name}'s thread`;
+  }
+
+  function unreadThreadOpenLabel(item: ChatUnreadThread) {
+    return item.kind === 'dm' ? 'Open DM' : 'Open thread';
+  }
+
+  function unreadThreadRootId(item: ChatUnreadThread) {
+    return item.root_message?.id
+      ?? item.unread_messages[0]?.thread_root_message_id
+      ?? item.unread_messages[0]?.id
+      ?? null;
+  }
+
+  function unreadReplyMessages(item: ChatUnreadThread) {
+    const rootMessageId = item.root_message?.id ?? null;
+    if (item.kind === 'dm') return item.unread_messages.slice(0, 4);
+    return item.unread_messages
+      .filter((message) => message.id !== rootMessageId)
+      .slice(0, 4);
+  }
+
+  function unreadHiddenMessageCount(item: ChatUnreadThread) {
+    const renderedMessages = unreadReplyMessages(item).length;
+    const rootMessageId = item.kind !== 'dm' ? item.root_message?.id : null;
+    const renderedRootMessages = rootMessageId != null
+      && item.unread_messages.some((message) => message.id === rootMessageId)
+      ? 1
+      : 0;
+    const renderedUnreadCount = renderedMessages + renderedRootMessages;
+    return Math.max(item.unread_messages.length - renderedUnreadCount, 0);
+  }
+
   function isMemberConversationActive(member: TeamMember) {
     if (member.preview) {
       return chat.mode === 'dms' && String(selectedPreviewDmId) === String(member.id);
@@ -976,6 +1070,24 @@
   async function selectTeamChat() {
     selectedPreviewDmId = null;
     await chat.selectRoom();
+  }
+
+  async function selectUnreadChat() {
+    selectedPreviewDmId = null;
+    await chat.selectUnread();
+  }
+
+  async function openUnreadItem(item: ChatUnreadThread) {
+    if (item.kind === 'dm') {
+      selectedPreviewDmId = null;
+      await chat.selectDm(item.conversation.id);
+      return;
+    }
+
+    const rootMessageId = unreadThreadRootId(item);
+    if (rootMessageId == null) return;
+    selectedPreviewDmId = null;
+    await chat.openThread(rootMessageId);
   }
 
   async function selectMemberDm(member: TeamMember) {
@@ -1033,6 +1145,25 @@
   <div class="chat-workspace-layout">
     <aside class="chat-channel-rail" aria-label="Conversations">
       <div class="chat-channel-list">
+        {#if showUnreadTab}
+          <button
+            type="button"
+            class="chat-channel-row chat-channel-row-unread"
+            class:is-active={chat.mode === 'unread'}
+            aria-label={`${unreadThreadCount} unread thread${unreadThreadCount === 1 ? '' : 's'}`}
+            title={`${unreadThreadCount} unread thread${unreadThreadCount === 1 ? '' : 's'}`}
+            onclick={selectUnreadChat}
+          >
+            <span class="chat-channel-copy">
+              <span>Unread</span>
+              <small>{unreadThreadCountText}</small>
+            </span>
+            <span class="chat-channel-unread">
+              {unreadThreadCount}
+            </span>
+          </button>
+        {/if}
+
         <button
           type="button"
           class="chat-channel-row chat-channel-row-team"
@@ -1096,7 +1227,71 @@
     </aside>
 
     <div class="chat-workspace-conversation">
-  {#if chat.mode === 'dms'}
+  {#if chat.mode === 'unread' && showUnreadTab}
+    <section class="chat-unread-column">
+      <header class="chat-unread-header">
+        <div class="chat-unread-heading">
+          <span class="chat-unread-kicker">Unread</span>
+          <h3>{unreadThreadHeading}</h3>
+          <p>Latest first.</p>
+        </div>
+        <button
+          type="button"
+          class="chat-unread-refresh"
+          aria-label="Refresh unread threads"
+          title="Refresh unread threads"
+          onclick={() => void chat.refreshUnreadThreads(false)}
+          disabled={chat.unreadThreadsLoading}
+        >
+          <ConstellationIcon name="refresh" size={15} stroke={1.9} />
+        </button>
+      </header>
+
+      <div class="chat-unread-stream">
+        {#each unreadThreads as item (`${item.kind}:${item.conversation.id}:${unreadThreadRootId(item) ?? item.latest_unread_at}`)}
+          <article class="chat-unread-thread" style={unreadThreadAccentStyle(item)}>
+            <button
+              type="button"
+              class="chat-unread-thread-open"
+              aria-label={unreadThreadOpenLabel(item)}
+              title={unreadThreadOpenLabel(item)}
+              onclick={() => openUnreadItem(item)}
+            >
+              <span class="chat-unread-thread-mark" aria-hidden="true"></span>
+              <span class="chat-unread-thread-copy">
+                <span>
+                  {unreadThreadTitle(item)}
+                  <small>{unreadThreadDetail(item)}</small>
+                </span>
+                <span>{unreadThreadSubtitle(item)} · {formatMessageTime(item.latest_unread_at)}</span>
+              </span>
+              <span class="chat-unread-thread-action">
+                <ConstellationIcon name="chevron-right" size={16} stroke={1.9} />
+              </span>
+            </button>
+
+            {#if item.kind !== 'dm' && item.root_message}
+              {@render unreadMessagePreview(item.root_message, 'root')}
+            {/if}
+
+            {#each unreadReplyMessages(item) as message (message.id)}
+              {@render unreadMessagePreview(message, item.kind === 'dm' ? 'root' : 'reply')}
+            {/each}
+
+            {#if unreadHiddenMessageCount(item) > 0}
+              <button
+                type="button"
+                class="chat-unread-more"
+                onclick={() => openUnreadItem(item)}
+              >
+                Show {unreadHiddenMessageCount(item)} more
+              </button>
+            {/if}
+          </article>
+        {/each}
+      </div>
+    </section>
+  {:else if chat.mode === 'dms'}
     {#if !activeDmConversation && !activePreviewDmMember}
       <div class="chat-empty-conversation">
         <span class="chat-empty-icon" aria-hidden="true">
@@ -1442,8 +1637,14 @@
         <aside class="chat-thread-column">
           <div class="chat-thread-topbar">
             <span>Thread</span>
-            <button type="button" class="chat-close-thread" onclick={closeThreadPane}>
-              Close
+            <button
+              type="button"
+              class="chat-close-thread"
+              aria-label="Close thread"
+              title="Close thread"
+              onclick={closeThreadPane}
+            >
+              <ConstellationIcon name="close" size={16} stroke={1.9} />
             </button>
           </div>
 
@@ -1582,6 +1783,42 @@
     </div>
   </div>
 </section>
+
+{#snippet unreadMessagePreview(message: ChatMessage, variant: 'root' | 'reply')}
+  <article
+    class={`chat-unread-message is-${variant}`}
+    style={messageStyle(message)}
+  >
+    <header class="chat-unread-message-header">
+      <ConstellationPresenceSeed
+        label={message.sender_name}
+        size="sm"
+        role={message.sender_kind === 'agent' ? 'illo' : 'user'}
+        tone={participantResolvedTone(message.sender_user_id, message.sender_color)}
+        style={participantStyle(message.sender_user_id, message.sender_color)}
+        treatment="plain"
+      />
+      <div class="chat-unread-message-meta">
+        <span>{message.sender_name}</span>
+        <small>{formatMessageTime(message.created_at)}</small>
+      </div>
+    </header>
+
+    {#if message.body}
+      <p class="chat-unread-message-body">{message.body}</p>
+    {/if}
+
+    {#if message.attachments?.length}
+      <div class="chat-attachments">
+        {#each message.attachments as attachment, attachmentIndex (`unread-${message.id}-${attachment.url ?? attachment.filename ?? attachmentIndex}`)}
+          {@render attachmentCard(attachment)}
+        {/each}
+      </div>
+    {/if}
+
+    {@render messageLinkAttachmentList(message.body, message.attachments)}
+  </article>
+{/snippet}
 
 {#snippet attachmentPreviewVisual(attachment: any)}
   {@const kind = attachmentKind(attachment)}
@@ -1752,6 +1989,10 @@
   --chat-unread-background: color-mix(in srgb, var(--chat-unread-accent) 90%, transparent);
   --chat-unread-text: rgba(12, 10, 8, 0.92);
   --chat-unread-ring: rgba(9, 12, 19, 0.96);
+  --chat-unread-thread-border: rgba(255, 255, 255, 0.08);
+  --chat-unread-thread-background: rgba(255, 255, 255, 0.025);
+  --chat-unread-thread-background-hover: rgba(255, 255, 255, 0.045);
+  --chat-unread-thread-mark: color-mix(in srgb, var(--chat-unread-accent) 82%, rgba(255, 255, 255, 0.18));
   --chat-thread-border: rgba(255, 255, 255, 0.08);
   --chat-thread-splitter-background: rgba(255, 255, 255, 0.12);
   --chat-thread-splitter-hover-background: rgba(141, 183, 255, 0.42);
@@ -1799,7 +2040,9 @@
   --chat-thread-summary-link-background-hover: rgba(255, 255, 255, 0.04);
   --chat-thread-summary-link-text-hover: rgba(228, 236, 249, 0.92);
   --chat-thread-summary-accent: rgba(150, 188, 255, 0.94);
-  --chat-thread-summary-avatar-ring: rgba(9, 12, 19, 0.96);
+  --chat-presence-seed-core-base: #050910;
+  --chat-presence-seed-owner-base: rgba(246, 248, 253, 0.96);
+  --chat-presence-seed-ring: rgba(255, 255, 255, 0.12);
   --chat-message-actions-border: rgba(255, 255, 255, 0.08);
   --chat-message-actions-background: rgba(8, 11, 18, 0.96);
   --chat-message-actions-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
@@ -1891,6 +2134,10 @@
   --chat-unread-background: color-mix(in srgb, var(--chat-unread-accent) 88%, transparent);
   --chat-unread-text: rgba(28, 20, 12, 0.9);
   --chat-unread-ring: rgba(247, 250, 253, 0.94);
+  --chat-unread-thread-border: rgba(24, 35, 49, 0.08);
+  --chat-unread-thread-background: rgba(255, 255, 255, 0.46);
+  --chat-unread-thread-background-hover: rgba(255, 255, 255, 0.72);
+  --chat-unread-thread-mark: color-mix(in srgb, var(--chat-unread-accent) 76%, rgba(24, 35, 49, 0.12));
   --chat-thread-border: rgba(24, 35, 49, 0.08);
   --chat-thread-splitter-background: rgba(24, 35, 49, 0.12);
   --chat-thread-splitter-hover-background: rgba(95, 137, 200, 0.42);
@@ -1938,7 +2185,9 @@
   --chat-thread-summary-link-background-hover: rgba(255, 255, 255, 0.52);
   --chat-thread-summary-link-text-hover: rgba(17, 24, 35, 0.92);
   --chat-thread-summary-accent: #486fa8;
-  --chat-thread-summary-avatar-ring: rgba(247, 250, 253, 0.96);
+  --chat-presence-seed-core-base: rgba(246, 250, 253, 0.96);
+  --chat-presence-seed-owner-base: rgba(19, 28, 40, 0.94);
+  --chat-presence-seed-ring: rgba(24, 35, 49, 0.12);
   --chat-message-actions-border: rgba(24, 35, 49, 0.08);
   --chat-message-actions-background: rgba(247, 250, 253, 0.96);
   --chat-message-actions-shadow: 0 12px 28px rgba(24, 35, 49, 0.12);
@@ -1955,6 +2204,20 @@
 .chat-dock-shell.is-thread-surface {
   border-radius: 18px;
   padding: 16px;
+}
+
+.chat-dock-shell :global(.constellation-presence-seed:not(.is-illo)) {
+  --constellation-presence-seed-user-core-accent-strength: 78%;
+  --constellation-presence-seed-user-core-base: var(--chat-presence-seed-core-base);
+  --constellation-presence-seed-user-owner-accent-strength: 24%;
+  --constellation-presence-seed-user-owner-base: var(--chat-presence-seed-owner-base);
+}
+
+.chat-dock-shell :global(.constellation-presence-seed:not(.is-illo) .constellation-presence-seed-core) {
+  border-color: color-mix(in srgb, var(--seed-accent) 44%, var(--chat-presence-seed-ring));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--seed-accent) 20%, transparent),
+    0 0 15px color-mix(in srgb, var(--seed-accent) 24%, transparent);
 }
 
 .chat-thread-topbar span {
@@ -2064,6 +2327,18 @@
 .chat-channel-row-team {
   height: 54px;
   min-height: 54px;
+}
+
+.chat-channel-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  background: var(--chat-channel-cue-background);
+  color: var(--chat-channel-title);
 }
 
 .chat-channel-presence-stack {
@@ -2231,6 +2506,257 @@
   line-height: 1.45;
 }
 
+.chat-unread-column {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chat-unread-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 12px 14px;
+}
+
+.chat-unread-heading {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chat-unread-heading h3,
+.chat-unread-heading p {
+  margin: 0;
+}
+
+.chat-unread-kicker {
+  color: var(--chat-meta-text);
+  font-family: var(--constellation-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  line-height: 1.1;
+  text-transform: uppercase;
+}
+
+.chat-unread-heading h3 {
+  color: var(--chat-heading-text);
+  font-size: 15px;
+  font-weight: 640;
+  line-height: 1.2;
+}
+
+.chat-unread-heading p {
+  color: var(--chat-description-text);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.chat-unread-refresh,
+.chat-unread-more {
+  appearance: none;
+  border: 1px solid var(--chat-action-border);
+  background: var(--chat-action-background);
+  color: var(--chat-action-text);
+  cursor: pointer;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    transform 150ms ease,
+    opacity 150ms ease;
+}
+
+.chat-unread-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 10px;
+}
+
+.chat-unread-refresh:hover,
+.chat-unread-more:hover {
+  background: var(--chat-action-background-hover);
+}
+
+.chat-unread-refresh:focus-visible,
+.chat-unread-more:focus-visible,
+.chat-unread-thread-open:focus-visible {
+  outline: 2px solid var(--constellation-control-focus-ring);
+  outline-offset: 2px;
+}
+
+.chat-unread-stream {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 12px 12px;
+}
+
+.chat-unread-thread {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--chat-unread-thread-border);
+  border-radius: 16px;
+  background: var(--chat-unread-thread-background);
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease;
+}
+
+.chat-unread-thread:hover {
+  background: var(--chat-unread-thread-background-hover);
+}
+
+.chat-unread-thread-open {
+  appearance: none;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-unread-thread-mark {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--chat-unread-thread-mark);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--chat-unread-accent) 34%, transparent);
+}
+
+.chat-unread-thread-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chat-unread-thread-copy > span {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--chat-heading-text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.18;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-unread-thread-copy small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--chat-description-text);
+  font-size: 11px;
+  font-weight: 520;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-unread-thread-copy > span + span {
+  color: var(--chat-meta-text);
+  font-size: 11px;
+  font-weight: 520;
+}
+
+.chat-unread-thread-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--chat-action-text);
+  opacity: 0.68;
+  transition:
+    opacity 150ms ease,
+    transform 150ms ease;
+}
+
+.chat-unread-thread-open:hover .chat-unread-thread-action {
+  opacity: 1;
+  transform: translateX(2px);
+}
+
+.chat-unread-message {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 4px 0 2px 19px;
+}
+
+.chat-unread-message.is-reply {
+  margin-left: 18px;
+  padding-left: 14px;
+  border-left: 1px solid var(--chat-thread-border);
+}
+
+.chat-unread-message-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.chat-unread-message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-unread-message-meta span {
+  color: var(--chat-message-author-color, var(--chat-heading-text));
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.15;
+}
+
+.chat-unread-message-meta small {
+  color: var(--chat-message-meta-text);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.chat-unread-message-body {
+  margin: 0;
+  color: var(--chat-message-body-text);
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-unread-more {
+  justify-self: start;
+  margin-left: 19px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 620;
+  line-height: 1;
+}
+
 .chat-dm-stream {
   padding-top: 4px;
 }
@@ -2323,7 +2849,6 @@
       opacity 160ms ease;
   }
 
-  .chat-close-thread,
   .chat-load-older {
     padding: 9px 12px;
     border-radius: 999px;
@@ -2335,6 +2860,26 @@
     font-weight: 700;
     letter-spacing: 0.14em;
     text-transform: uppercase;
+  }
+
+  .chat-close-thread {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border-radius: 10px;
+    border: 1px solid var(--chat-action-border);
+    background: var(--chat-action-background);
+    color: var(--chat-action-text);
+    line-height: 1;
+  }
+
+  .chat-close-thread :global(svg) {
+    width: 16px;
+    height: 16px;
   }
 
   .chat-load-older {
@@ -2889,14 +3434,15 @@
   .chat-thread-preview-stack {
     display: inline-flex;
     align-items: center;
-    padding-right: 4px;
+    gap: 3px;
+    padding-right: 0;
   }
 
   .chat-thread-preview-avatar {
     display: inline-flex;
-    margin-left: calc(var(--chat-thread-preview-index) * -5px);
+    margin-left: 0;
     border-radius: 999px;
-    box-shadow: 0 0 0 2px var(--chat-thread-summary-avatar-ring);
+    box-shadow: none;
   }
 
   .chat-thread-preview-avatar:first-child {
@@ -3020,6 +3566,7 @@
 
   .chat-close-thread:disabled,
   .chat-load-older:disabled,
+  .chat-unread-refresh:disabled,
   .chat-thread-summary-link:disabled,
   .chat-message-action:disabled {
     opacity: 0.48;

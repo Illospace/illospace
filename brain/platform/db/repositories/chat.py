@@ -661,6 +661,25 @@ class ChatNotificationRepository(BaseRepository[ChatNotification]):
         )
         return (await self._session.scalars(stmt)).all()
 
+    async def a_list_unread_with_messages_for_user(
+        self,
+        user_id: str,
+        *,
+        limit: int = 50,
+    ) -> Sequence[tuple[ChatNotification, ChatMessage]]:
+        stmt = (
+            select(ChatNotification, ChatMessage)
+            .join(ChatMessage, ChatMessage.id == ChatNotification.message_id)
+            .where(
+                ChatNotification.user_id == user_id,
+                ChatNotification.read_at.is_(None),
+                ChatNotification.message_id.is_not(None),
+            )
+            .order_by(ChatNotification.created_at.desc())
+            .limit(limit)
+        )
+        return (await self._session.execute(stmt)).all()
+
     async def a_mark_read(self, notification_id: int, user_id: str) -> ChatNotification | None:
         stmt = select(ChatNotification).where(
             ChatNotification.id == notification_id,

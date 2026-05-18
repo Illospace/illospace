@@ -8,6 +8,7 @@ import {
   type ChatNotification,
   type ChatReadUpdateInput,
   type ChatThreadPage as ChatThreadPageResponse,
+  type ChatUnreadThread,
   type ChatUnreadSummary,
 } from '$lib/api/client';
 import { auth } from '$lib/stores/auth.svelte';
@@ -20,7 +21,7 @@ const TYPING_TTL_MS = 3000;
 const TYPING_THROTTLE_MS = 1500;
 const DEFAULT_UNREAD_SUMMARY: ChatUnreadSummary = { room: 0, dms: 0, total: 0 };
 
-export type ChatMode = 'room' | 'dms';
+export type ChatMode = 'room' | 'dms' | 'unread';
 export type ChatRoomSubview = 'timeline' | 'thread';
 export type ChatConnectionState = 'idle' | 'connecting' | 'connected';
 
@@ -169,7 +170,10 @@ class ChatStore {
   activeThreadRootId = $state<number | null>(null);
 
   notifications = $state<ChatNotification[]>([]);
+  unreadThreads = $state<ChatUnreadThread[]>([]);
   unreadSummary = $state<ChatUnreadSummary>(cloneUnreadSummary(DEFAULT_UNREAD_SUMMARY));
+  unreadThreadsLoading = $state(false);
+  unreadThreadsError = $state<string | null>(null);
 
   conversationPages = $state<Record<string, ChatConversationPageState>>({});
   threadPages = $state<Record<string, ChatThreadPageState>>({});
@@ -188,6 +192,7 @@ class ChatStore {
   private _lastTypingSentAt = new Map<string, number>();
   private _refreshConversationsTimer: ReturnType<typeof setTimeout> | null = null;
   private _bootstrapPromise: Promise<void> | null = null;
+  private _unreadThreadsPromise: Promise<void> | null = null;
   private _subscribedConversationId: string | null = null;
   private _subscribedThreadRootId: number | null = null;
   private _reconnectPending = false;
@@ -209,6 +214,7 @@ class ChatStore {
 
   get activeConversationId(): string | null {
     if (this.mode === 'room') return this.roomId;
+    if (this.mode === 'unread') return null;
     return this.selectedDmId ?? this.dms[0]?.id ?? null;
   }
 
@@ -343,7 +349,10 @@ class ChatStore {
     this.selectedDmId = null;
     this.activeThreadRootId = null;
     this.notifications = [];
+    this.unreadThreads = [];
     this.unreadSummary = cloneUnreadSummary(DEFAULT_UNREAD_SUMMARY);
+    this.unreadThreadsLoading = false;
+    this.unreadThreadsError = null;
     this.conversationPages = {};
     this.threadPages = {};
     this.threadAgentStates = {};
@@ -416,6 +425,30 @@ class ChatStore {
     }
   }
 
+  async refreshUnreadThreads(silent = true) {
+    if (this._unreadThreadsPromise) return this._unreadThreadsPromise;
+
+    this.unreadThreadsLoading = true;
+    this.unreadThreadsError = null;
+    const promise = (async () => {
+      try {
+        this.unreadThreads = await api.listChatUnreadThreads();
+      } catch (err: any) {
+        const detail = messageDetail(err, 'Failed to load unread threads');
+        this.unreadThreads = [];
+        this.unreadThreadsError = detail;
+        this.lastError = detail;
+        if (!silent) ui.toast(detail, 'error');
+      } finally {
+        this.unreadThreadsLoading = false;
+        this._unreadThreadsPromise = null;
+      }
+    })();
+
+    this._unreadThreadsPromise = promise;
+    return promise;
+  }
+
   async ensureDm(userId: string, options: { select?: boolean } = {}) {
     const dm = await api.createChatDm(userId);
     this._upsertConversationSummary(dm);
@@ -471,6 +504,19 @@ class ChatStore {
     this._syncSubscriptions();
   }
 
+  async selectUnread() {
+    this.mode = 'unread';
+    this.roomSubview = 'timeline';
+    this.activeThreadRootId = null;
+    this._persistState();
+    await this.refreshUnreadThreads();
+    if (this.unreadSummary.total <= 0 || this.unreadThreads.length === 0) {
+      await this.selectRoom();
+      return;
+    }
+    this._syncSubscriptions();
+  }
+
   async selectDm(conversationId: string | null) {
     if (!conversationId) {
       await this.selectRoom();
@@ -487,6 +533,10 @@ class ChatStore {
   async setMode(mode: ChatMode) {
     if (mode === 'room') {
       await this.selectRoom();
+      return;
+    }
+    if (mode === 'unread') {
+      await this.selectUnread();
       return;
     }
 
@@ -512,6 +562,7 @@ class ChatStore {
     this.roomSubview = 'thread';
     this.activeThreadRootId = rootMessageId;
     this._persistState();
+    this._syncSubscriptions();
     if (roomId && !roomLoaded) {
       await this.loadConversation(roomId, { silent: true });
     }
@@ -849,6 +900,7 @@ class ChatStore {
       const unreadSummary = await api.chatMarkRead(conversationId, body);
       this._lastReadSignatureByConversation.set(conversationId, nextReadSignature);
       this.unreadSummary = cloneUnreadSummary(unreadSummary);
+      if (this.mode === 'unread') void this.refreshUnreadThreads(true);
       return this.unreadSummary;
     } catch (err: any) {
       const detail = messageDetail(err, 'Failed to mark chat as read');
@@ -878,6 +930,7 @@ class ChatStore {
             : notification,
         ),
       );
+      if (this.mode === 'unread') void this.refreshUnreadThreads(true);
     } catch (err: any) {
       const detail = messageDetail(err, 'Failed to mark notification read');
       this.lastError = detail;
@@ -896,6 +949,7 @@ class ChatStore {
           read_at: notification.read_at || now,
         })),
       );
+      if (this.mode === 'unread') void this.refreshUnreadThreads(true);
     } catch (err: any) {
       const detail = messageDetail(err, 'Failed to mark notifications read');
       this.lastError = detail;
@@ -1027,6 +1081,7 @@ class ChatStore {
         } else if (!msg.unread_summary) {
           this._recalculateUnreadSummary();
         }
+        if (this.mode === 'unread') void this.refreshUnreadThreads(true);
       }),
     );
 
@@ -1036,6 +1091,7 @@ class ChatStore {
         this.notifications = sortNotifications(
           this._upsertNotification(this.notifications, msg.notification as ChatNotification),
         );
+        if (this.mode === 'unread') void this.refreshUnreadThreads(true);
       }),
     );
 
@@ -1053,6 +1109,7 @@ class ChatStore {
             this._recalculateUnreadSummary();
           }
         }
+        if (this.mode === 'unread') void this.refreshUnreadThreads(true);
       }),
     );
 
@@ -1141,6 +1198,11 @@ class ChatStore {
   }
 
   private async _loadVisibleSurfaces(options: { force?: boolean } = {}) {
+    if (this.mode === 'unread') {
+      await this.refreshUnreadThreads();
+      return;
+    }
+
     const activeConversationId = this.activeConversationId;
     if (activeConversationId) {
       await this.loadConversation(activeConversationId, {
@@ -1736,7 +1798,9 @@ class ChatStore {
       };
 
       this.isOpen = !!parsed.isOpen;
-      if (parsed.mode === 'room' || parsed.mode === 'dms') this.mode = parsed.mode;
+      if (parsed.mode === 'room' || parsed.mode === 'dms' || parsed.mode === 'unread') {
+        this.mode = parsed.mode;
+      }
       if (parsed.selectedDmId) this.selectedDmId = parsed.selectedDmId;
       if (parsed.roomSubview === 'thread' && parsed.activeThreadRootId != null) {
         this.roomSubview = 'thread';
