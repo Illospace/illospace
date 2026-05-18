@@ -58,6 +58,7 @@ EXPECTED_TABLES = {
     "org_provider_model_mappings",
     "orgs",
     "project_narratives",
+    "project_profile_access",
     "project_profiles",
     "provider_health_snapshots",
     "resource_leases",

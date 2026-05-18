@@ -6,9 +6,18 @@ export type ProjectContextProfile = {
   description: string;
   resources: ProjectContextResource[];
   serverProfileId?: string;
+  visibility?: ProjectVisibility;
+  access?: ProjectProfileAccess[];
 };
 
 export type ConnectorMode = 'menu' | 'github' | 'local';
+export type ProjectVisibility = 'private' | 'public';
+
+export type ProjectProfileAccess = {
+  user_id: string;
+  name: string;
+  email?: string | null;
+};
 
 const RESOURCE_TYPE_LABELS: Record<string, string> = {
   repo: 'GitHub',
@@ -42,6 +51,8 @@ export function mapServerProjectProfile(profile: any): ProjectContextProfile {
     serverProfileId: profile.id,
     name: profile.name,
     description: profile.description ?? 'Saved project profile',
+    visibility: profile.visibility === 'public' ? 'public' : 'private',
+    access: Array.isArray(profile.access) ? profile.access : [],
     resources: Array.isArray(profile.project_context?.resources)
       ? profile.project_context.resources
       : [],

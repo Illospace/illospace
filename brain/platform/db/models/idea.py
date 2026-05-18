@@ -10,6 +10,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -35,6 +36,7 @@ __all__ = [
     "UserMention",
     "VisualBlock",
     "ProjectProfile",
+    "ProjectProfileAccess",
     "IdeaProjectAttachment",
 ]
 
@@ -265,6 +267,9 @@ class ProjectProfile(Base, CreatedAtMixin):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     project_context: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    visibility: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="private", default="private"
+    )
     default_environment_binding_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("environment_bindings.id", ondelete="SET NULL"), nullable=True
     )
@@ -275,7 +280,35 @@ class ProjectProfile(Base, CreatedAtMixin):
 
     __table_args__ = (
         UniqueConstraint("org_id", "slug", name="uq_project_profiles_org_slug"),
+        CheckConstraint("visibility IN ('private', 'public')", name="ck_project_profiles_visibility"),
         Index("ix_project_profiles_org_active", "org_id", "active"),
+        Index("ix_project_profiles_org_visibility", "org_id", "visibility"),
+    )
+
+
+class ProjectProfileAccess(Base, CreatedAtMixin):
+    """User access grant for private Project Context profiles."""
+
+    __tablename__ = "project_profile_access"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_profile_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("project_profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    shared_with_user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    shared_by_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_profile_id",
+            "shared_with_user_id",
+            name="uq_project_profile_access_profile_user",
+        ),
+        Index("ix_project_profile_access_user", "shared_with_user_id"),
     )
 
 

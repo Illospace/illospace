@@ -975,6 +975,16 @@ PROJECT_TOOLS = [
                     "items": {"type": "string"},
                 },
                 "metadata": {"type": "object", "description": "Optional metadata for profile or attachment provenance."},
+                "visibility": {
+                    "type": "string",
+                    "enum": ["private", "public"],
+                    "description": "Project visibility. New projects default to private; public projects are visible to the org.",
+                },
+                "shared_usernames": {
+                    "type": "array",
+                    "description": "User names or emails to grant access to a private project.",
+                    "items": {"type": "string"},
+                },
                 "default_environment_binding_id": {"type": "integer", "description": "Optional default environment binding id."},
                 "environment_binding_id": {"type": "integer", "description": "Optional per-thread attachment environment binding id."},
                 "idea_id": {

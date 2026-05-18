@@ -649,13 +649,15 @@ async def _query_project_profiles(
         payload["warnings"].append({"source": "project_profiles", "error": "org_id required"})
         payload["sources"]["project_profiles"] = []
         return
-    from brain.platform.db.models.idea import ProjectProfile
+    from brain.platform.db.models.idea import ProjectProfile, ProjectProfileAccess
     from brain.platform.db.models.org import User
+    from brain.systems.cortex.project_context.access import project_profile_visible_predicate
 
     stmt = (
         select(ProjectProfile, User)
         .outerjoin(User, User.id == ProjectProfile.user_id)
         .where(ProjectProfile.org_id == org_id)
+        .where(project_profile_visible_predicate(ProjectProfile, ProjectProfileAccess, user_id))
         .order_by(ProjectProfile.created_at.desc())
         .limit(limit)
     )
@@ -685,6 +687,7 @@ async def _query_project_profiles(
             "name": profile.name,
             "description": _snippet(profile.description),
             "active": bool(profile.active),
+            "visibility": getattr(profile, "visibility", "public") or "public",
             "user_id": str(profile.user_id) if profile.user_id is not None else None,
             "user_name": user.name if user else None,
             "org_id": str(profile.org_id) if profile.org_id is not None else None,

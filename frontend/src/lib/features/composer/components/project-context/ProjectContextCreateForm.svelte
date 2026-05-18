@@ -5,11 +5,13 @@
   import ProjectContextGitHubConnector from './ProjectContextGitHubConnector.svelte';
   import ProjectContextLocalConnector from './ProjectContextLocalConnector.svelte';
   import ProjectContextResourcePills from './ProjectContextResourcePills.svelte';
-  import type { ConnectorMode } from './projectContextProfiles';
+  import type { ConnectorMode, ProjectVisibility } from './projectContextProfiles';
 
   let {
     name = $bindable(''),
     description = $bindable(''),
+    visibility = $bindable<ProjectVisibility>('private'),
+    sharedUsernames = $bindable(''),
     resources = [],
     validation = { valid: true, errors: [] },
     saveError = '',
@@ -22,6 +24,8 @@
   }: {
     name?: string;
     description?: string;
+    visibility?: ProjectVisibility;
+    sharedUsernames?: string;
     resources?: ProjectContextResource[];
     validation?: { valid: boolean; errors: string[] };
     saveError?: string;
@@ -65,6 +69,36 @@
     bind:value={description}
   />
 </div>
+
+<div class="project-visibility-row" role="group" aria-label="Project visibility">
+  <button
+    type="button"
+    class:selected={visibility === 'private'}
+    aria-pressed={visibility === 'private'}
+    onclick={() => { visibility = 'private'; }}
+  >
+    <ConstellationIcon name="lock" size={14} stroke={1.8} />
+    <span>Private</span>
+  </button>
+  <button
+    type="button"
+    class:selected={visibility === 'public'}
+    aria-pressed={visibility === 'public'}
+    onclick={() => { visibility = 'public'; }}
+  >
+    <ConstellationIcon name="team" size={14} stroke={1.8} />
+    <span>Public</span>
+  </button>
+</div>
+
+{#if visibility === 'private'}
+  <input
+    class="project-access-input"
+    aria-label="Shared usernames"
+    placeholder="Share with usernames or emails"
+    bind:value={sharedUsernames}
+  />
+{/if}
 
 {#if connectorMode === 'menu'}
   <ProjectContextConnectorMenu onOpen={openConnector} />

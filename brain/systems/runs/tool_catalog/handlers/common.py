@@ -216,12 +216,12 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         "get": {"required": ["project_id"], "optional": ["include_inactive"], "effect": "read one project profile"},
         "create": {
             "required": ["slug", "name"],
-            "optional": ["description", "project_context", "resources", "metadata", "default_environment_binding_id"],
+            "optional": ["description", "project_context", "resources", "visibility", "shared_usernames", "metadata", "default_environment_binding_id"],
             "effect": "create a reusable project context profile",
         },
         "update": {
             "required": ["project_id"],
-            "optional": ["slug", "name", "description", "project_context", "resources", "metadata"],
+            "optional": ["slug", "name", "description", "project_context", "resources", "visibility", "shared_usernames", "metadata"],
             "effect": "update a project context profile",
         },
         "archive": {"required": ["project_id"], "optional": [], "effect": "archive a project profile"},
