@@ -26,5 +26,6 @@ from brain.platform.db.models.chat import *  # noqa
 from brain.platform.db.models.notification import *  # noqa
 from brain.platform.db.models.domain import *  # noqa
 from brain.platform.db.models.external_agent import *  # noqa
+from brain.platform.db.models.inbound import *  # noqa
 from brain.platform.db.models.workspace_app import *  # noqa
 from brain.platform.db.models.workspace_pin import *  # noqa
