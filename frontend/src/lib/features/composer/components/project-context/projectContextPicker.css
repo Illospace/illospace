@@ -385,6 +385,14 @@
       0 28px 72px rgba(0, 0, 0, 0.42),
       0 0 0 1px rgba(255, 255, 255, 0.02) inset;
     --project-context-modal-divider: rgba(240, 240, 250, 0.075);
+    --project-context-popover-border: rgba(240, 240, 250, 0.1);
+    --project-context-popover-shadow:
+      0 18px 42px rgba(0, 0, 0, 0.38),
+      0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+    --project-context-access-menu-background: #0b1118;
+    --project-context-option-text: rgba(249, 244, 232, 0.9);
+    --project-context-option-hover-background: rgba(240, 240, 250, 0.075);
+    --project-context-option-hover-text: rgba(249, 244, 232, 0.96);
     --project-context-title: rgba(249, 244, 232, 0.95);
     --project-context-command-border: rgba(255, 255, 255, 0.08);
     --project-context-command-background: rgba(255, 255, 255, 0.035);
@@ -451,6 +459,14 @@
     --project-context-modal-background: rgba(255, 253, 247, 0.99);
     --project-context-modal-shadow: 0 28px 68px rgba(54, 70, 82, 0.17);
     --project-context-modal-divider: rgba(126, 92, 52, 0.09);
+    --project-context-popover-border: rgba(126, 92, 52, 0.14);
+    --project-context-popover-shadow:
+      0 18px 38px rgba(54, 70, 82, 0.2),
+      0 0 0 1px rgba(126, 92, 52, 0.05) inset;
+    --project-context-access-menu-background: #fffefb;
+    --project-context-option-text: #18212a;
+    --project-context-option-hover-background: rgba(49, 63, 76, 0.07);
+    --project-context-option-hover-text: #18212a;
     --project-context-title: #18212a;
     --project-context-command-border: rgba(49, 63, 76, 0.11);
     --project-context-command-background: rgba(248, 250, 248, 0.72);
@@ -729,11 +745,17 @@
     overflow: auto;
     box-sizing: border-box;
     padding: 4px;
-    border: 1px solid var(--project-context-popover-border);
+    border: 1px solid var(--project-context-popover-border, rgba(126, 92, 52, 0.14));
     border-radius: 9px;
-    background: var(--project-context-access-menu-background);
-    box-shadow: var(--project-context-popover-shadow);
-    color: var(--project-context-option-text);
+    background-color: #0b1118;
+    background: var(--project-context-access-menu-background, #fffefb);
+    background-clip: padding-box;
+    box-shadow: var(--project-context-popover-shadow, 0 18px 38px rgba(54, 70, 82, 0.2));
+    color: var(--project-context-option-text, #18212a);
+  }
+
+  :root[data-color-scheme='light'] .project-access-menu {
+    background-color: #fffefb;
   }
 
   .project-access-empty {
@@ -822,7 +844,7 @@
     border-radius: 7px;
     padding: 7px 8px;
     background: transparent;
-    color: var(--project-context-option-text);
+    color: var(--project-context-option-text, #18212a);
     text-align: left;
   }
 
