@@ -13,6 +13,7 @@ brain/uploads
 brain/**/__pycache__
 **/*.pyc
 .env
+brain/.env
 deploy/compose/.env
 *.dump
 *.tar

@@ -71,6 +71,17 @@ def test_docker_web_proxy_routes_public_webhooks_to_api():
     assert content.count("proxy_pass http://api:8000;") >= 8
 
 
+def test_docker_build_context_excludes_local_brain_env():
+    dockerignore_path = Path(__file__).resolve().parents[1] / ".dockerignore"
+    ignored = {
+        line.strip()
+        for line in dockerignore_path.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert "brain/.env" in ignored
+
+
 def test_ops_deploy_drains_worker_instead_of_restarting_active_runs():
     deploy_path = Path(__file__).resolve().parents[1] / "ops" / "deploy.sh"
     content = deploy_path.read_text()
