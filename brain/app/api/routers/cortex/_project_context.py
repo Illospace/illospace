@@ -170,22 +170,24 @@ async def _resolve_project_access_users(
             )
         )
     ).all()
-    found_keys: set[str] = set()
-    by_key: dict[str, User] = {}
+    users_by_key: dict[str, list[User]] = {}
     for user in users:
         key = str(user.name or "").strip().lower()
         if key and key in lookup_keys:
-            found_keys.add(key)
-            by_key.setdefault(key, user)
-    missing = [username for username in cleaned if username.lower() not in found_keys]
+            users_by_key.setdefault(key, []).append(user)
+    missing = [username for username in cleaned if username.lower() not in users_by_key]
     if missing:
         raise HTTPException(status_code=422, detail={"unknown_users": missing})
+    ambiguous = [username for username in cleaned if len(users_by_key.get(username.lower(), [])) > 1]
+    if ambiguous:
+        raise HTTPException(status_code=422, detail={"ambiguous_users": ambiguous})
     ordered: list[User] = []
     seen_ids: set[str] = set()
     for username in cleaned:
-        matched = by_key.get(username.lower())
-        if not matched:
+        matches = users_by_key.get(username.lower()) or []
+        if not matches:
             continue
+        matched = matches[0]
         matched_id = str(matched.id)
         if matched_id in seen_ids:
             continue

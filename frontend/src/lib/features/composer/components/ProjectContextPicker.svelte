@@ -254,6 +254,9 @@
     if (Array.isArray(detail?.unknown_users) && detail.unknown_users.length) {
       return `Unknown users: ${detail.unknown_users.join(', ')}`;
     }
+    if (Array.isArray(detail?.ambiguous_users) && detail.ambiguous_users.length) {
+      return `Ambiguous users: ${detail.ambiguous_users.join(', ')}`;
+    }
     return projectContextErrorDetail(err, 'Could not save project.');
   }
 

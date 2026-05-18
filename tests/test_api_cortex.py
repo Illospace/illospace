@@ -1575,6 +1575,24 @@ async def test_resolve_project_access_users_reports_unknown_names():
     assert excinfo.value.detail == {"unknown_users": ["missing"]}
 
 
+async def test_resolve_project_access_users_rejects_ambiguous_names():
+    from fastapi import HTTPException
+
+    from brain.app.api.routers.cortex._project_context import _resolve_project_access_users
+
+    session = MagicMock()
+    session.scalars.return_value.all.return_value = [
+        SimpleNamespace(id="user-2", org_id="org-1", name="Alex", email="alex@example.com"),
+        SimpleNamespace(id="user-3", org_id="org-1", name="alex", email="alex2@example.com"),
+    ]
+
+    with pytest.raises(HTTPException) as excinfo:
+        await _resolve_project_access_users(_AsyncSession(session), "org-1", ["Alex"])
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail == {"ambiguous_users": ["Alex"]}
+
+
 @pytest.mark.asyncio
 async def test_create_project_profile_rejects_empty_project_context(client, mock_session_factory):
     from brain.app.api.routers.cortex import _project_context as pc_mod

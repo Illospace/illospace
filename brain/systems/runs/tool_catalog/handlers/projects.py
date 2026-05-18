@@ -158,8 +158,7 @@ async def _handle_manage_project(
 
     from sqlalchemy import select
 
-    from brain.app.api.routers.cortex._project_context import _require_idea_for_user
-    from brain.app.api.routers.cortex._project_context import _sync_project_access_list
+    from brain.app.api.routers.cortex._project_context import _require_idea_for_user, _sync_project_access_list
     from brain.systems.cortex.project_context.access import normalize_project_visibility
     from brain.systems.cortex.project_context.resources import normalize_project_resource
     from brain.systems.cortex.project_context.snapshot import (
