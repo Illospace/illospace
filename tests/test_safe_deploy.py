@@ -62,6 +62,15 @@ def test_ops_deploy_builds_frontend_before_restart():
     assert sync_idx < build_idx < restart_idx
 
 
+def test_docker_web_proxy_routes_public_webhooks_to_api():
+    nginx_path = Path(__file__).resolve().parents[1] / "deploy" / "docker" / "web.nginx.conf"
+    content = nginx_path.read_text()
+
+    assert "location = /webhooks" in content
+    assert "location /webhooks/" in content
+    assert content.count("proxy_pass http://api:8000;") >= 8
+
+
 def test_ops_deploy_drains_worker_instead_of_restarting_active_runs():
     deploy_path = Path(__file__).resolve().parents[1] / "ops" / "deploy.sh"
     content = deploy_path.read_text()
