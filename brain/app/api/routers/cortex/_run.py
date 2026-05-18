@@ -17,6 +17,7 @@ from brain.app.api.routers.cortex._helpers import _caller_is_service_principal
 from brain.app.api.routers.cortex._router import router
 from brain.systems.runs.cortex import queue_status_async
 from brain.systems.runs.cortex.permissions import RunReadScope, run_belongs_to_scope
+from brain.systems.runs.cortex.handoff_summary import latest_thread_handoff_summary
 from brain.systems.runs.cortex.recording import (
     agent_trace_export_filename,
     build_agent_trace_snapshot_async,
@@ -173,6 +174,13 @@ async def run_history(
                 raise HTTPException(status_code=404, detail="Idea not found")
 
     return await serialize_run_history_async(idea_id, include_debug=include_debug, uow_factory=UnitOfWork)
+
+
+@router.get("/ideas/{idea_id}/handoff-summary")
+async def thread_handoff_summary(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
+    async with UnitOfWork() as uow:
+        await _require_idea_for_run_history(uow.session, idea_id, user)
+        return await latest_thread_handoff_summary(uow.session, idea_id)
 
 
 @router.get("/run/{run_id}/debug")

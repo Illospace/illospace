@@ -1,4 +1,12 @@
-export type ThreadStageRightDockTabKind = 'browser' | 'activity' | 'app' | 'vault' | 'cycles' | 'preview' | 'code-review';
+export type ThreadStageRightDockTabKind =
+  | 'browser'
+  | 'activity'
+  | 'handoff-summary'
+  | 'app'
+  | 'vault'
+  | 'cycles'
+  | 'preview'
+  | 'code-review';
 
 export type ThreadStageRightDockTab = {
   id: string;
@@ -31,7 +39,10 @@ export type ThreadSidePanelTabState = {
 };
 
 export function createDefaultThreadSidePanelTabs(): ThreadStageRightDockTab[] {
-  return [{ id: 'activity', label: 'Activity', kind: 'activity', closeable: true }];
+  return [
+    { id: 'activity', label: 'Activity', kind: 'activity', closeable: true },
+    { id: 'handoff-summary', label: 'Handoff', kind: 'handoff-summary', closeable: true },
+  ];
 }
 
 export function activeThreadSidePanelTab(
@@ -47,6 +58,7 @@ export function buildThreadSidePanelAddMenuItems(
 ): ThreadStageRightDockAddMenuItem[] {
   const browserCount = tabs.filter((tab) => tab.kind === 'browser').length;
   const hasActivity = tabs.some((tab) => tab.kind === 'activity');
+  const hasHandoffSummary = tabs.some((tab) => tab.kind === 'handoff-summary');
   const hasVault = tabs.some((tab) => tab.kind === 'vault');
   const hasCycles = tabs.some((tab) => tab.kind === 'cycles');
   const hasCodeReview = tabs.some((tab) => tab.kind === 'code-review');
@@ -97,6 +109,15 @@ export function buildThreadSidePanelAddMenuItems(
       kind: 'activity',
       label: 'Activity',
       description: 'Open run activity',
+    });
+  }
+
+  if (!hasHandoffSummary) {
+    items.push({
+      id: 'handoff-summary',
+      kind: 'handoff-summary',
+      label: 'Handoff',
+      description: 'Open durable agent summary',
     });
   }
 
@@ -160,7 +181,7 @@ export function openBrowserThreadSidePanelTab(
 
 export function openSingletonThreadSidePanelTab(
   state: ThreadSidePanelTabState,
-  kind: 'activity' | 'vault' | 'cycles' | 'preview' | 'code-review',
+  kind: 'activity' | 'handoff-summary' | 'vault' | 'cycles' | 'preview' | 'code-review',
 ): ThreadSidePanelTabState {
   const existing = state.tabs.find((tab) => tab.kind === kind);
   if (existing) return { ...state, activeTabId: existing.id };
@@ -173,6 +194,8 @@ export function openSingletonThreadSidePanelTab(
         ? 'Preview'
         : kind === 'code-review'
           ? 'Review files'
+          : kind === 'handoff-summary'
+            ? 'Handoff'
           : 'Activity';
   return {
     ...state,

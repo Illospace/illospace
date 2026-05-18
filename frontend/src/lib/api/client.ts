@@ -821,6 +821,8 @@ export const api = {
     fetchJson<any>(`/api/cortex/ideas/${ideaId}/cancel-all`, { method: 'POST' }),
   runGraph: (id: number) => fetchJson<any>(`/api/cortex/run/${id}/graph`),
   runTools: (id: number) => fetchJson<any[]>(`/api/cortex/runs/${id}/tools`),
+  threadHandoffSummary: (ideaId: string) =>
+    fetchJson<any>(`/api/cortex/ideas/${ideaId}/handoff-summary`),
   downloadThreadTraceZip: async (ideaId: string) => {
     const result = await fetchBlob(`/api/cortex/ideas/${ideaId}/trace-export.zip`, { method: 'POST', timeoutMs: 60_000 });
     return {
