@@ -1479,6 +1479,120 @@ def test_project_context_snapshot_attachment_revalidates_existing_status():
     ]
 
 
+def test_project_profile_visibility_policy_matches_drive_model():
+    from brain.systems.cortex.project_context.access import is_project_profile_visible
+
+    public_profile = SimpleNamespace(user_id="owner-1", visibility="public")
+    private_profile = SimpleNamespace(user_id="owner-1", visibility="private")
+
+    assert is_project_profile_visible(public_profile, user_id="user-2")
+    assert is_project_profile_visible(private_profile, user_id="owner-1")
+    assert is_project_profile_visible(private_profile, user_id="user-2", shared_user_ids=["user-2"])
+    assert not is_project_profile_visible(private_profile, user_id="user-3", shared_user_ids=["user-2"])
+
+
+def test_project_profile_read_includes_visibility_and_access():
+    from brain.systems.cortex.project_context.profiles import profile_to_read
+
+    profile = SimpleNamespace(
+        id="project-1",
+        org_id="org-1",
+        user_id="owner-1",
+        slug="yc",
+        name="YC",
+        description=None,
+        project_context={"resources": [{"kind": "folder", "path": "yc"}]},
+        visibility="private",
+        default_environment_binding_id=None,
+        active=True,
+        metadata_={},
+        created_at=None,
+    )
+
+    payload = profile_to_read(profile, [{"user_id": "user-2", "name": "Alex", "email": "alex@example.com"}])
+
+    assert payload.visibility == "private"
+    assert payload.access[0].name == "Alex"
+
+
+def test_project_profile_create_defaults_private():
+    from brain.systems.cortex.project_context.schemas import ProjectProfileCreate
+
+    payload = ProjectProfileCreate(
+        slug="yc",
+        name="YC",
+        project_context={"resources": [{"kind": "folder", "path": "yc"}]},
+    )
+
+    assert payload.visibility == "private"
+    assert payload.shared_usernames == []
+
+
+async def test_resolve_project_access_users_accepts_names_only():
+    from brain.app.api.routers.cortex._project_context import _resolve_project_access_users
+
+    session = MagicMock()
+    session.scalars.return_value.all.return_value = [
+        SimpleNamespace(id="user-2", org_id="org-1", name="Alex", email="alex@example.com")
+    ]
+
+    users = await _resolve_project_access_users(
+        _AsyncSession(session),
+        "org-1",
+        ["alex"],
+    )
+
+    assert [user.id for user in users] == ["user-2"]
+
+
+async def test_resolve_project_access_users_rejects_emails():
+    from fastapi import HTTPException
+
+    from brain.app.api.routers.cortex._project_context import _resolve_project_access_users
+
+    session = MagicMock()
+    session.scalars.return_value.all.return_value = []
+
+    with pytest.raises(HTTPException) as excinfo:
+        await _resolve_project_access_users(_AsyncSession(session), "org-1", ["alex@example.com"])
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail == {"unknown_users": ["alex@example.com"]}
+
+
+async def test_resolve_project_access_users_reports_unknown_names():
+    from fastapi import HTTPException
+
+    from brain.app.api.routers.cortex._project_context import _resolve_project_access_users
+
+    session = MagicMock()
+    session.scalars.return_value.all.return_value = []
+
+    with pytest.raises(HTTPException) as excinfo:
+        await _resolve_project_access_users(_AsyncSession(session), "org-1", ["missing"])
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail == {"unknown_users": ["missing"]}
+
+
+async def test_resolve_project_access_users_rejects_ambiguous_names():
+    from fastapi import HTTPException
+
+    from brain.app.api.routers.cortex._project_context import _resolve_project_access_users
+
+    session = MagicMock()
+    session.scalars.return_value.all.return_value = [
+        SimpleNamespace(id="user-2", org_id="org-1", name="Alex", email="alex@example.com"),
+        SimpleNamespace(id="user-3", org_id="org-1", name="alex", email="alex2@example.com"),
+    ]
+
+    with pytest.raises(HTTPException) as excinfo:
+        await _resolve_project_access_users(_AsyncSession(session), "org-1", ["Alex"])
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail == {"ambiguous_users": ["Alex"]}
+
+
 @pytest.mark.asyncio
 async def test_create_project_profile_rejects_empty_project_context(client, mock_session_factory):
     from brain.app.api.routers.cortex import _project_context as pc_mod

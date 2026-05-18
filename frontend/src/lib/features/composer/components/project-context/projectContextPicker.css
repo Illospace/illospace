@@ -13,6 +13,7 @@
     --project-context-chip-invalid-background: rgba(212, 128, 143, 0.12);
     --project-context-popover-border: var(--composer-menu-border, rgba(240, 240, 250, 0.09));
     --project-context-popover-background: var(--composer-menu-background, rgba(9, 12, 18, 0.98));
+    --project-context-access-menu-background: #0b1118;
     --project-context-popover-shadow: var(
       --composer-menu-shadow,
       0 18px 42px rgba(0, 0, 0, 0.32),
@@ -73,6 +74,7 @@
   :root[data-color-scheme='light'] .project-context-composer {
     --project-context-popover-border: var(--composer-menu-border, rgba(49, 63, 76, 0.12));
     --project-context-popover-background: var(--composer-menu-background, rgba(255, 253, 247, 0.98));
+    --project-context-access-menu-background: #fffdf8;
     --project-context-popover-shadow: var(--composer-menu-shadow, 0 18px 38px rgba(54, 70, 82, 0.13));
     --project-context-option-hover-background: var(--composer-menu-option-hover-background, rgba(49, 63, 76, 0.055));
     --project-context-option-active-background: var(--composer-menu-option-active-background, rgba(49, 63, 76, 0.075));
@@ -383,6 +385,14 @@
       0 28px 72px rgba(0, 0, 0, 0.42),
       0 0 0 1px rgba(255, 255, 255, 0.02) inset;
     --project-context-modal-divider: rgba(240, 240, 250, 0.075);
+    --project-context-popover-border: rgba(240, 240, 250, 0.1);
+    --project-context-popover-shadow:
+      0 18px 42px rgba(0, 0, 0, 0.38),
+      0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+    --project-context-access-menu-background: #0b1118;
+    --project-context-option-text: rgba(249, 244, 232, 0.9);
+    --project-context-option-hover-background: rgba(240, 240, 250, 0.075);
+    --project-context-option-hover-text: rgba(249, 244, 232, 0.96);
     --project-context-title: rgba(249, 244, 232, 0.95);
     --project-context-command-border: rgba(255, 255, 255, 0.08);
     --project-context-command-background: rgba(255, 255, 255, 0.035);
@@ -449,6 +459,14 @@
     --project-context-modal-background: rgba(255, 253, 247, 0.99);
     --project-context-modal-shadow: 0 28px 68px rgba(54, 70, 82, 0.17);
     --project-context-modal-divider: rgba(126, 92, 52, 0.09);
+    --project-context-popover-border: rgba(126, 92, 52, 0.14);
+    --project-context-popover-shadow:
+      0 18px 38px rgba(54, 70, 82, 0.2),
+      0 0 0 1px rgba(126, 92, 52, 0.05) inset;
+    --project-context-access-menu-background: #fffefb;
+    --project-context-option-text: #18212a;
+    --project-context-option-hover-background: rgba(49, 63, 76, 0.07);
+    --project-context-option-hover-text: #18212a;
     --project-context-title: #18212a;
     --project-context-command-border: rgba(49, 63, 76, 0.11);
     --project-context-command-background: rgba(248, 250, 248, 0.72);
@@ -580,6 +598,30 @@
     margin-bottom: 0;
   }
 
+  .project-visibility-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 0;
+  }
+
+  .project-access-picker {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    gap: 6px;
+  }
+
+  .project-access-picker.open {
+    z-index: 24;
+  }
+
+  .project-access-selected {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
   .project-create-intro {
     display: grid;
     gap: 3px;
@@ -600,6 +642,7 @@
 
   .project-context-field select,
   .project-create-fields input,
+  .project-access-input,
   .connector-panel input,
   .connector-panel select {
     width: 100%;
@@ -620,12 +663,14 @@
 
   .project-context-field select:focus,
   .project-create-fields input:focus,
+  .project-access-input:focus,
   .connector-panel input:focus,
   .connector-panel select:focus {
     border-color: color-mix(in srgb, var(--project-context-field-value) 28%, var(--project-context-field-border));
   }
 
   .project-create-fields input::placeholder,
+  .project-access-input::placeholder,
   .connector-panel input::placeholder {
     color: var(--project-context-muted-text);
   }
@@ -688,6 +733,38 @@
     cursor: pointer;
   }
 
+  .project-access-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 25;
+    display: grid;
+    gap: 1px;
+    max-height: 152px;
+    overflow: auto;
+    box-sizing: border-box;
+    padding: 4px;
+    border: 1px solid var(--project-context-popover-border, rgba(126, 92, 52, 0.14));
+    border-radius: 9px;
+    background-color: #0b1118;
+    background: var(--project-context-access-menu-background, #fffefb);
+    background-clip: padding-box;
+    box-shadow: var(--project-context-popover-shadow, 0 18px 38px rgba(54, 70, 82, 0.2));
+    color: var(--project-context-option-text, #18212a);
+  }
+
+  :root[data-color-scheme='light'] .project-access-menu {
+    background-color: #fffefb;
+  }
+
+  .project-access-empty {
+    padding: 8px;
+    color: var(--project-context-muted-text);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
   .project-connector-grid {
     display: grid;
     gap: 8px;
@@ -702,6 +779,9 @@
   }
 
   .connector-back-button,
+  .project-visibility-row button,
+  .project-access-selected button,
+  .project-access-menu button,
   .project-context-secondary,
   .project-context-primary,
   .github-connect-row button,
@@ -727,6 +807,50 @@
     gap: 3px;
     min-height: 28px;
     padding: 6px 9px 6px 7px;
+  }
+
+  .project-visibility-row button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 34px;
+  }
+
+  .project-visibility-row button.selected {
+    border-color: color-mix(in srgb, var(--thread-accent, #57CFA0) 26%, var(--project-context-button-border));
+    background: var(--project-context-button-active-background);
+    color: var(--project-context-button-active-text);
+  }
+
+  .project-access-selected button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 26px;
+    padding: 5px 7px;
+    border-radius: 999px;
+    background: var(--project-context-pill-background);
+    color: var(--project-context-pill-text);
+  }
+
+  .project-access-menu button {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 7px;
+    min-height: 30px;
+    border: 0;
+    border-radius: 7px;
+    padding: 7px 8px;
+    background: transparent;
+    color: var(--project-context-option-text, #18212a);
+    text-align: left;
+  }
+
+  .project-access-menu button:hover {
+    background: var(--project-context-option-hover-background);
+    color: var(--project-context-option-hover-text);
   }
 
   .connector-view-title {

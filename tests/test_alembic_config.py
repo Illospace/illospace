@@ -24,6 +24,8 @@ BROAD_DESTRUCTIVE_SQL_PATTERNS = (
 )
 REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0003_schema_simplification.py",
+    # Downgrade removes only the access table introduced by the same migration.
+    "0005_project_profile_privacy.py",
 }
 
 

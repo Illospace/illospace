@@ -731,7 +731,16 @@ export const api = {
     fetchJson<any>(`/api/cortex/ideas/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   listProjectContextProfiles: () =>
     fetchJson<any[]>('/api/cortex/project-context/profiles'),
-  createProjectContextProfile: (data: { slug: string; name: string; description?: string | null; project_context: any; default_environment_binding_id?: number | null; metadata?: Record<string, any> }) =>
+  createProjectContextProfile: (data: {
+    slug: string;
+    name: string;
+    description?: string | null;
+    project_context: any;
+    visibility?: 'private' | 'public';
+    shared_usernames?: string[];
+    default_environment_binding_id?: number | null;
+    metadata?: Record<string, any>;
+  }) =>
     fetchJson<any>('/api/cortex/project-context/profiles', { method: 'POST', body: JSON.stringify(data) }),
   connectProjectContextGitHub: (data: { vault_key: string }, vaultToken?: string | null) =>
     fetchJson<any>('/api/cortex/project-context/github/connect', {

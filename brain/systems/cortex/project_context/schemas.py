@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from brain.systems.cortex.project_context.access import PROJECT_VISIBILITY_PRIVATE
 from brain.systems.cortex.project_context.resources import ProjectResource, normalize_project_resource
 
 
@@ -14,6 +15,8 @@ class ProjectProfileCreate(BaseModel):
     name: str = Field(..., min_length=1)
     description: str | None = None
     project_context: dict[str, Any]
+    visibility: str = Field(default=PROJECT_VISIBILITY_PRIVATE)
+    shared_usernames: list[str] = Field(default_factory=list, description="User names to grant access to a private project.")
     default_environment_binding_id: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -23,9 +26,19 @@ class ProjectProfileUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1)
     description: str | None = None
     project_context: dict[str, Any] | None = None
+    visibility: str | None = None
+    shared_usernames: list[str] | None = Field(default=None, description="User names to grant access to a private project.")
     default_environment_binding_id: int | None = None
     active: bool | None = None
     metadata: dict[str, Any] | None = None
+
+
+class ProjectProfileAccessRead(BaseModel):
+    user_id: str
+    name: str
+    email: str | None = None
+    shared_by_user_id: str | None = None
+    created_at: datetime | None = None
 
 
 class ProjectProfileRead(BaseModel):
@@ -38,6 +51,8 @@ class ProjectProfileRead(BaseModel):
     name: str
     description: str | None = None
     project_context: dict[str, Any]
+    visibility: str = PROJECT_VISIBILITY_PRIVATE
+    access: list[ProjectProfileAccessRead] = Field(default_factory=list)
     default_environment_binding_id: int | None = None
     active: bool = True
     metadata_: dict[str, Any] | None = Field(default=None, alias="metadata")

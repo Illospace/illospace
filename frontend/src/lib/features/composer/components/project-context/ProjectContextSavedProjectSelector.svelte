@@ -48,6 +48,16 @@
     selectedProfileId = profile.id;
     onSelect?.();
   }
+
+  function profileMeta(profile: ProjectContextProfile): string {
+    if (profile.id === 'none') return profile.description;
+    const visibility = profile.visibility === 'public' ? 'Public' : 'Private';
+    const sharedCount = profile.visibility === 'private' ? (profile.access?.length ?? 0) : 0;
+    const access = sharedCount > 0 ? `${visibility} · ${sharedCount} shared` : visibility;
+    return [access, profile.description || `${profile.resources.length} resource${profile.resources.length === 1 ? '' : 's'}`]
+      .filter(Boolean)
+      .join(' · ');
+  }
 </script>
 
 <div class="project-context-search-control">
@@ -73,16 +83,14 @@
         aria-selected={isSelected}
         onclick={() => selectProject(profile)}
       >
-        <ConstellationIcon name="folder" size={17} stroke={1.8} />
+        <ConstellationIcon
+          name={profile.id === 'none' ? 'folder' : profile.visibility === 'public' ? 'team' : 'lock'}
+          size={17}
+          stroke={1.8}
+        />
         <span class="project-context-profile-option-copy">
           <strong>{profile.name}</strong>
-          {#if profile.description && profile.id !== 'none'}
-            <small>{profile.description}</small>
-          {:else if profile.resources.length}
-            <small>{profile.resources.length} resource{profile.resources.length === 1 ? '' : 's'}</small>
-          {:else if profile.id !== 'none'}
-            <small>No resources attached</small>
-          {/if}
+          <small>{profileMeta(profile)}</small>
         </span>
         {#if isSelected}
           <span class="project-context-profile-check" aria-hidden="true">

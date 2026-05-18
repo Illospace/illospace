@@ -1,11 +1,14 @@
 """Project Context persistence read-model adapters."""
 from __future__ import annotations
 
+from typing import Any
+
+from brain.systems.cortex.project_context.access import project_profile_visibility
 from brain.systems.cortex.project_context.schemas import IdeaProjectAttachmentRead, ProjectProfileRead
 from brain.platform.db.models.idea import IdeaProjectAttachment, ProjectProfile
 
 
-def profile_to_read(profile: ProjectProfile) -> ProjectProfileRead:
+def profile_to_read(profile: ProjectProfile, access: list[dict[str, Any]] | None = None) -> ProjectProfileRead:
     return ProjectProfileRead.model_validate({
         "id": profile.id,
         "org_id": profile.org_id,
@@ -14,6 +17,8 @@ def profile_to_read(profile: ProjectProfile) -> ProjectProfileRead:
         "name": profile.name,
         "description": profile.description,
         "project_context": profile.project_context,
+        "visibility": project_profile_visibility(profile),
+        "access": access or [],
         "default_environment_binding_id": profile.default_environment_binding_id,
         "active": True if profile.active is None else profile.active,
         "metadata": profile.metadata_ or {},

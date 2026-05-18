@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import Depends, File, Form, HTTPException, Request, UploadFile
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.auth import get_current_user
@@ -20,6 +20,11 @@ from brain.systems.cortex.project_context.github import (
     parse_github_repo_slug,
 )
 from brain.systems.cortex.project_context.profiles import attachment_to_read, profile_to_read
+from brain.systems.cortex.project_context.access import (
+    can_manage_project_profile,
+    normalize_project_visibility,
+    project_profile_visible_predicate,
+)
 from brain.systems.cortex.project_context.resources import normalize_project_resource
 from brain.systems.cortex.project_context.schemas import (
     GitHubConnectRead,
@@ -46,7 +51,7 @@ from brain.systems.cortex.project_context.uploads import (
     save_project_context_uploads,
 )
 from brain.systems.cortex.project_context import vault as project_context_vault
-from brain.platform.db.models.idea import IdeaProjectAttachment, ProjectProfile
+from brain.platform.db.models.idea import IdeaProjectAttachment, ProjectProfile, ProjectProfileAccess
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.org import User
 
@@ -79,8 +84,28 @@ def _profile_scope_stmt(org_id: str | None):
     return stmt.where(ProjectProfile.org_id == org_id)
 
 
-def _profile_lookup_stmt(profile_id: str, org_id: str | None, *, include_inactive: bool = False):
+def _actor_user_id(user: dict[str, Any] | None) -> str | None:
+    user_id = str((user or {}).get("id") or "").strip()
+    return user_id or None
+
+
+def _profile_visible_stmt(org_id: str | None, user: dict[str, Any] | None):
+    stmt = _profile_scope_stmt(org_id)
+    if _caller_is_service_principal(user):
+        return stmt
+    return stmt.where(project_profile_visible_predicate(ProjectProfile, ProjectProfileAccess, _actor_user_id(user)))
+
+
+def _profile_lookup_stmt(
+    profile_id: str,
+    org_id: str | None,
+    user: dict[str, Any] | None,
+    *,
+    include_inactive: bool = False,
+):
     stmt = _profile_scope_stmt(org_id).where(ProjectProfile.id == profile_id)
+    if not _caller_is_service_principal(user):
+        stmt = stmt.where(project_profile_visible_predicate(ProjectProfile, ProjectProfileAccess, _actor_user_id(user)))
     if not include_inactive:
         stmt = stmt.where(ProjectProfile.active.is_(True))
     return stmt
@@ -90,13 +115,161 @@ async def _get_project_profile(
     db: AsyncSession,
     profile_id: str,
     org_id: str | None,
+    user: dict[str, Any] | None,
     *,
     include_inactive: bool = False,
 ) -> ProjectProfile:
-    profile = await db.scalar(_profile_lookup_stmt(profile_id, org_id, include_inactive=include_inactive))
+    profile = await db.scalar(_profile_lookup_stmt(profile_id, org_id, user, include_inactive=include_inactive))
     if profile is None:
         raise HTTPException(status_code=404, detail="Project profile not found")
     return profile
+
+
+def _require_project_profile_manager(profile: ProjectProfile, user: dict[str, Any] | None) -> None:
+    if not can_manage_project_profile(profile, user):
+        raise HTTPException(status_code=403, detail="Only the project owner can change this project")
+
+
+def _request_visibility(value: str | None) -> str:
+    try:
+        return normalize_project_visibility(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _clean_shared_usernames(usernames: list[str] | None) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for username in usernames or []:
+        value = str(username or "").strip()
+        key = value.lower()
+        if not value or key in seen:
+            continue
+        cleaned.append(value)
+        seen.add(key)
+    return cleaned
+
+
+async def _resolve_project_access_users(
+    db: AsyncSession,
+    org_id: str | None,
+    usernames: list[str] | None,
+) -> list[User]:
+    cleaned = _clean_shared_usernames(usernames)
+    if not cleaned:
+        return []
+    if not org_id:
+        raise HTTPException(status_code=422, detail="Project sharing requires an org-scoped user")
+
+    lookup_keys = {item.lower() for item in cleaned}
+    users = (
+        await db.scalars(
+            select(User).where(
+                User.org_id == org_id,
+                func.lower(User.name).in_(lookup_keys),
+            )
+        )
+    ).all()
+    users_by_key: dict[str, list[User]] = {}
+    for user in users:
+        key = str(user.name or "").strip().lower()
+        if key and key in lookup_keys:
+            users_by_key.setdefault(key, []).append(user)
+    missing = [username for username in cleaned if username.lower() not in users_by_key]
+    if missing:
+        raise HTTPException(status_code=422, detail={"unknown_users": missing})
+    ambiguous = [username for username in cleaned if len(users_by_key.get(username.lower(), [])) > 1]
+    if ambiguous:
+        raise HTTPException(status_code=422, detail={"ambiguous_users": ambiguous})
+    ordered: list[User] = []
+    seen_ids: set[str] = set()
+    for username in cleaned:
+        matches = users_by_key.get(username.lower()) or []
+        if not matches:
+            continue
+        matched = matches[0]
+        matched_id = str(matched.id)
+        if matched_id in seen_ids:
+            continue
+        ordered.append(matched)
+        seen_ids.add(matched_id)
+    return ordered
+
+
+async def _sync_project_access_list(
+    db: AsyncSession,
+    profile: ProjectProfile,
+    *,
+    org_id: str | None,
+    shared_usernames: list[str] | None,
+    actor_user_id: str | None,
+) -> None:
+    users = await _resolve_project_access_users(db, org_id, shared_usernames)
+    owner_user_id = str(profile.user_id or "")
+    target_user_ids = [
+        str(user.id)
+        for user in users
+        if str(user.id) != owner_user_id
+    ]
+    target_user_ids = list(dict.fromkeys(target_user_ids))
+
+    if target_user_ids:
+        await db.execute(
+            delete(ProjectProfileAccess).where(
+                ProjectProfileAccess.project_profile_id == profile.id,
+                ProjectProfileAccess.shared_with_user_id.not_in(target_user_ids),
+            )
+        )
+    else:
+        await db.execute(
+            delete(ProjectProfileAccess).where(ProjectProfileAccess.project_profile_id == profile.id)
+        )
+
+    existing_ids = {
+        str(row.shared_with_user_id)
+        for row in (
+            await db.scalars(
+                select(ProjectProfileAccess).where(ProjectProfileAccess.project_profile_id == profile.id)
+            )
+        ).all()
+    }
+    for user_id in target_user_ids:
+        if user_id in existing_ids:
+            continue
+        db.add(
+            ProjectProfileAccess(
+                project_profile_id=profile.id,
+                shared_with_user_id=user_id,
+                shared_by_user_id=actor_user_id,
+            )
+        )
+
+
+async def _access_map_for_profiles(
+    db: AsyncSession,
+    profiles: list[ProjectProfile],
+) -> dict[str, list[dict[str, Any]]]:
+    profile_ids = [str(profile.id) for profile in profiles if profile.id]
+    if not profile_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(ProjectProfileAccess, User)
+            .join(User, User.id == ProjectProfileAccess.shared_with_user_id)
+            .where(ProjectProfileAccess.project_profile_id.in_(profile_ids))
+            .order_by(User.name.asc())
+        )
+    ).all()
+    access_by_profile: dict[str, list[dict[str, Any]]] = {profile_id: [] for profile_id in profile_ids}
+    for access, shared_user in rows:
+        access_by_profile.setdefault(str(access.project_profile_id), []).append({
+            "user_id": str(shared_user.id),
+            "name": shared_user.name,
+            "email": shared_user.email,
+            "shared_by_user_id": str(access.shared_by_user_id) if access.shared_by_user_id else None,
+            "created_at": access.created_at,
+        })
+    return access_by_profile
 
 
 async def _require_idea_for_user(
@@ -176,11 +349,16 @@ async def list_project_profiles(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = _profile_org_id(user)
-    stmt = _profile_scope_stmt(org_id)
+    stmt = _profile_visible_stmt(org_id, user)
     if not include_inactive:
         stmt = stmt.where(ProjectProfile.active.is_(True))
     stmt = stmt.order_by(ProjectProfile.created_at.desc())
-    return [profile_to_read(profile) for profile in (await db.scalars(stmt)).all()]
+    profiles = (await db.scalars(stmt)).all()
+    access_by_profile = await _access_map_for_profiles(db, list(profiles))
+    return [
+        profile_to_read(profile, access_by_profile.get(str(profile.id), []))
+        for profile in profiles
+    ]
 
 
 @router.post("/project-context/profiles", response_model=ProjectProfileRead, status_code=201)
@@ -190,6 +368,7 @@ async def create_project_profile(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = _profile_org_id(user)
+    visibility = _request_visibility(body.visibility)
     _validated_snapshot_or_422(body.project_context)
     existing_stmt = _profile_scope_stmt(org_id).where(ProjectProfile.slug == body.slug)
     existing = await db.scalar(existing_stmt)
@@ -202,13 +381,23 @@ async def create_project_profile(
         name=body.name,
         description=body.description,
         project_context=body.project_context,
+        visibility=visibility,
         default_environment_binding_id=body.default_environment_binding_id,
         metadata_=body.metadata,
     )
     db.add(profile)
+    await db.flush()
+    await _sync_project_access_list(
+        db,
+        profile,
+        org_id=org_id,
+        shared_usernames=body.shared_usernames,
+        actor_user_id=_actor_user_id(user),
+    )
     await db.commit()
     await db.refresh(profile)
-    return profile_to_read(profile)
+    access_by_profile = await _access_map_for_profiles(db, [profile])
+    return profile_to_read(profile, access_by_profile.get(str(profile.id), []))
 
 
 @router.get("/project-context/profiles/{profile_id}", response_model=ProjectProfileRead)
@@ -218,8 +407,9 @@ async def get_project_profile(
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    profile = await _get_project_profile(db, profile_id, _profile_org_id(user), include_inactive=include_inactive)
-    return profile_to_read(profile)
+    profile = await _get_project_profile(db, profile_id, _profile_org_id(user), user, include_inactive=include_inactive)
+    access_by_profile = await _access_map_for_profiles(db, [profile])
+    return profile_to_read(profile, access_by_profile.get(str(profile.id), []))
 
 
 @router.patch("/project-context/profiles/{profile_id}", response_model=ProjectProfileRead)
@@ -230,7 +420,8 @@ async def update_project_profile(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = _profile_org_id(user)
-    profile = await _get_project_profile(db, profile_id, org_id, include_inactive=True)
+    profile = await _get_project_profile(db, profile_id, org_id, user, include_inactive=True)
+    _require_project_profile_manager(profile, user)
     fields = body.model_fields_set
     if "slug" in fields and body.slug and body.slug != profile.slug:
         existing = await db.scalar(
@@ -249,6 +440,8 @@ async def update_project_profile(
     if "project_context" in fields and body.project_context is not None:
         _validated_snapshot_or_422(body.project_context)
         profile.project_context = body.project_context
+    if "visibility" in fields and body.visibility is not None:
+        profile.visibility = _request_visibility(body.visibility)
     if "default_environment_binding_id" in fields:
         profile.default_environment_binding_id = body.default_environment_binding_id
     if "active" in fields and body.active is not None:
@@ -256,9 +449,18 @@ async def update_project_profile(
     if "metadata" in fields:
         profile.metadata_ = body.metadata or {}
     db.add(profile)
+    if "shared_usernames" in fields and body.shared_usernames is not None:
+        await _sync_project_access_list(
+            db,
+            profile,
+            org_id=org_id,
+            shared_usernames=body.shared_usernames,
+            actor_user_id=_actor_user_id(user),
+        )
     await db.commit()
     await db.refresh(profile)
-    return profile_to_read(profile)
+    access_by_profile = await _access_map_for_profiles(db, [profile])
+    return profile_to_read(profile, access_by_profile.get(str(profile.id), []))
 
 
 @router.delete("/project-context/profiles/{profile_id}", response_model=ProjectProfileRead)
@@ -268,12 +470,14 @@ async def archive_project_profile(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = _profile_org_id(user)
-    profile = await _get_project_profile(db, profile_id, org_id, include_inactive=True)
+    profile = await _get_project_profile(db, profile_id, org_id, user, include_inactive=True)
+    _require_project_profile_manager(profile, user)
     profile.active = False
     db.add(profile)
     await db.commit()
     await db.refresh(profile)
-    return profile_to_read(profile)
+    access_by_profile = await _access_map_for_profiles(db, [profile])
+    return profile_to_read(profile, access_by_profile.get(str(profile.id), []))
 
 
 @router.post("/project-context/profiles/{profile_id}/resources", response_model=ProjectProfileRead, status_code=201)
@@ -284,7 +488,8 @@ async def add_project_resources(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = _profile_org_id(user)
-    profile = await _get_project_profile(db, profile_id, org_id, include_inactive=True)
+    profile = await _get_project_profile(db, profile_id, org_id, user, include_inactive=True)
+    _require_project_profile_manager(profile, user)
     resources = _project_resources(profile)
     existing_ids = {str(resource.get("id")) for resource in resources if resource.get("id")}
     for raw in body.resources:
@@ -295,7 +500,8 @@ async def add_project_resources(
     db.add(profile)
     await db.commit()
     await db.refresh(profile)
-    return profile_to_read(profile)
+    access_by_profile = await _access_map_for_profiles(db, [profile])
+    return profile_to_read(profile, access_by_profile.get(str(profile.id), []))
 
 
 @router.patch("/project-context/profiles/{profile_id}/resources/{resource_id}", response_model=ProjectProfileRead)
@@ -307,7 +513,8 @@ async def update_project_resource(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = _profile_org_id(user)
-    profile = await _get_project_profile(db, profile_id, org_id, include_inactive=True)
+    profile = await _get_project_profile(db, profile_id, org_id, user, include_inactive=True)
+    _require_project_profile_manager(profile, user)
     resources = _project_resources(profile)
     for index, resource in enumerate(resources):
         if _resource_identity(resource) != resource_id and str(resource.get("id") or "") != resource_id:
@@ -322,7 +529,8 @@ async def update_project_resource(
     db.add(profile)
     await db.commit()
     await db.refresh(profile)
-    return profile_to_read(profile)
+    access_by_profile = await _access_map_for_profiles(db, [profile])
+    return profile_to_read(profile, access_by_profile.get(str(profile.id), []))
 
 
 @router.delete("/project-context/profiles/{profile_id}/resources/{resource_id}", response_model=ProjectProfileRead)
@@ -333,7 +541,8 @@ async def remove_project_resource(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = _profile_org_id(user)
-    profile = await _get_project_profile(db, profile_id, org_id, include_inactive=True)
+    profile = await _get_project_profile(db, profile_id, org_id, user, include_inactive=True)
+    _require_project_profile_manager(profile, user)
     resources = _project_resources(profile)
     next_resources = [
         resource
@@ -346,7 +555,8 @@ async def remove_project_resource(
     db.add(profile)
     await db.commit()
     await db.refresh(profile)
-    return profile_to_read(profile)
+    access_by_profile = await _access_map_for_profiles(db, [profile])
+    return profile_to_read(profile, access_by_profile.get(str(profile.id), []))
 
 
 @router.post("/project-context/profiles/{profile_id}/resources/reorder", response_model=ProjectProfileRead)
@@ -357,7 +567,8 @@ async def reorder_project_resources(
     user: dict[str, Any] = Depends(get_current_user),
 ):
     org_id = _profile_org_id(user)
-    profile = await _get_project_profile(db, profile_id, org_id, include_inactive=True)
+    profile = await _get_project_profile(db, profile_id, org_id, user, include_inactive=True)
+    _require_project_profile_manager(profile, user)
     resources = _project_resources(profile)
     by_id = {str(resource.get("id") or _resource_identity(resource)): resource for resource in resources}
     requested = [str(resource_id) for resource_id in body.resource_ids]
@@ -367,7 +578,8 @@ async def reorder_project_resources(
     db.add(profile)
     await db.commit()
     await db.refresh(profile)
-    return profile_to_read(profile)
+    access_by_profile = await _access_map_for_profiles(db, [profile])
+    return profile_to_read(profile, access_by_profile.get(str(profile.id), []))
 
 
 @router.post("/project-context/github/connect", response_model=GitHubConnectRead)
@@ -510,7 +722,7 @@ async def attach_idea_project_context(
     profile: ProjectProfile | None = None
     if body.project_profile_id:
         org_id = _profile_org_id(user)
-        profile = await _get_project_profile(db, body.project_profile_id, org_id)
+        profile = await _get_project_profile(db, body.project_profile_id, org_id, user)
         project_context = dict(profile.project_context or {})
     if not project_context:
         raise HTTPException(status_code=422, detail="project_profile_id or project_context is required")

@@ -23,6 +23,7 @@
     resourceLocator,
     slugify,
     type ProjectContextProfile,
+    type ProjectVisibility,
   } from './project-context/projectContextProfiles';
 
   let {
@@ -58,6 +59,8 @@
   let creatingProject = $state(false);
   let newProjectName = $state('');
   let newProjectDescription = $state('');
+  let newProjectVisibility = $state<ProjectVisibility>('private');
+  let newProjectSharedUsernames = $state('');
   let selectedResources = $state<ProjectContextResource[]>([]);
   let projectSaving = $state(false);
   let projectSaveError = $state('');
@@ -231,6 +234,8 @@
     selectedResources = [];
     newProjectName = '';
     newProjectDescription = '';
+    newProjectVisibility = 'private';
+    newProjectSharedUsernames = '';
     projectSaveError = '';
   }
 
@@ -246,7 +251,21 @@
     const detail = err?.detail;
     const validationErrors = detail?.validation_errors;
     if (Array.isArray(validationErrors) && validationErrors.length) return String(validationErrors[0]);
+    if (Array.isArray(detail?.unknown_users) && detail.unknown_users.length) {
+      return `Unknown users: ${detail.unknown_users.join(', ')}`;
+    }
+    if (Array.isArray(detail?.ambiguous_users) && detail.ambiguous_users.length) {
+      return `Ambiguous users: ${detail.ambiguous_users.join(', ')}`;
+    }
     return projectContextErrorDetail(err, 'Could not save project.');
+  }
+
+  function sharedUsernamesForSave(): string[] {
+    if (newProjectVisibility !== 'private') return [];
+    return newProjectSharedUsernames
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
   }
 
   async function saveProjectProfile() {
@@ -268,6 +287,8 @@
           name,
           description: description || null,
           project_context: projectContext,
+          visibility: newProjectVisibility,
+          shared_usernames: sharedUsernamesForSave(),
           metadata: { source: 'cortex-ui-project-picker' },
         });
         profile = mapServerProjectProfile(created);
@@ -286,6 +307,8 @@
       selectedResources = [];
       newProjectName = '';
       newProjectDescription = '';
+      newProjectVisibility = 'private';
+      newProjectSharedUsernames = '';
     } catch (err: any) {
       projectSaveError = errorCopy(err);
     } finally {
@@ -445,6 +468,8 @@
           <ProjectContextCreateForm
             bind:name={newProjectName}
             bind:description={newProjectDescription}
+            bind:visibility={newProjectVisibility}
+            bind:sharedUsernames={newProjectSharedUsernames}
             resources={selectedResources}
             validation={activeProjectValidation}
             saveError={projectSaveError}
