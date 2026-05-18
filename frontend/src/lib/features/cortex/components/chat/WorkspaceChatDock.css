@@ -613,7 +613,8 @@
   }
 
   .workspace-chat-dock.is-corner .chat-room-column,
-  .workspace-chat-dock.is-corner .chat-dm-column {
+  .workspace-chat-dock.is-corner .chat-dm-column,
+  .workspace-chat-dock.is-corner .chat-unread-column {
     flex: 1 1 auto;
     min-height: 0;
   }
@@ -624,7 +625,8 @@
   }
 
   .workspace-chat-dock.is-corner .chat-pane-stream,
-  .workspace-chat-dock.is-corner .chat-dm-stream {
+  .workspace-chat-dock.is-corner .chat-dm-stream,
+  .workspace-chat-dock.is-corner .chat-unread-stream {
     flex: 1 1 0;
     min-height: 0;
     padding: 3px 10px 10px;
@@ -635,19 +637,36 @@
   }
 
   .workspace-chat-dock.is-corner .chat-pane-stream > :first-child,
-  .workspace-chat-dock.is-corner .chat-dm-stream > :first-child {
+  .workspace-chat-dock.is-corner .chat-dm-stream > :first-child,
+  .workspace-chat-dock.is-corner .chat-unread-stream > :first-child {
     margin-top: auto;
   }
 
   .workspace-chat-dock.is-corner .chat-conversation-header,
+  .workspace-chat-dock.is-corner .chat-unread-header,
   .workspace-chat-dock.is-corner .chat-message-actions,
   .workspace-chat-dock.is-corner .chat-thread-summary-arrow,
   .workspace-chat-dock.is-corner .chat-message-author .constellation-presence-seed {
     display: none;
   }
 
+  .workspace-chat-dock.is-corner .chat-unread-thread {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .workspace-chat-dock.is-corner .chat-unread-thread-open,
+  .workspace-chat-dock.is-corner .chat-unread-more {
+    display: none;
+  }
+
   .workspace-chat-dock.is-corner .chat-message,
-  .workspace-chat-dock.is-corner .chat-root-message {
+  .workspace-chat-dock.is-corner .chat-root-message,
+  .workspace-chat-dock.is-corner .chat-unread-message {
     display: block;
     gap: 0;
     align-self: stretch;
@@ -660,6 +679,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .workspace-chat-dock.is-corner .chat-unread-message.is-reply {
+    margin-left: 10px;
+    padding-left: 6px;
+    border-left: 1px solid color-mix(in srgb, var(--mini-chat-thread) 28%, transparent);
   }
 
   .workspace-chat-dock.is-corner .chat-message.is-thread-active {
@@ -681,16 +706,26 @@
     min-width: 0;
   }
 
+  .workspace-chat-dock.is-corner .chat-unread-message-header {
+    display: inline;
+  }
+
+  .workspace-chat-dock.is-corner .chat-unread-message-header .constellation-presence-seed {
+    display: none;
+  }
+
   .workspace-chat-dock.is-corner .chat-message-author {
     display: inline;
   }
 
-  .workspace-chat-dock.is-corner .chat-message-author-copy {
+  .workspace-chat-dock.is-corner .chat-message-author-copy,
+  .workspace-chat-dock.is-corner .chat-unread-message-meta {
     display: inline;
     gap: 0;
   }
 
-  .workspace-chat-dock.is-corner .chat-message-author-copy span {
+  .workspace-chat-dock.is-corner .chat-message-author-copy span,
+  .workspace-chat-dock.is-corner .chat-unread-message-meta span {
     color: var(--chat-message-author-color, var(--mini-chat-author));
     font-family: var(--mini-chat-font);
     font-size: 12px;
@@ -699,7 +734,8 @@
     text-shadow: var(--mini-chat-text-shadow);
   }
 
-  .workspace-chat-dock.is-corner .chat-message-author-copy > span::after {
+  .workspace-chat-dock.is-corner .chat-message-author-copy > span::after,
+  .workspace-chat-dock.is-corner .chat-unread-message-meta > span::after {
     content: ': ';
   }
 
@@ -714,11 +750,13 @@
     content: none;
   }
 
-  .workspace-chat-dock.is-corner .chat-message-author-copy p {
+  .workspace-chat-dock.is-corner .chat-message-author-copy p,
+  .workspace-chat-dock.is-corner .chat-unread-message-meta small {
     display: none;
   }
 
-  .workspace-chat-dock.is-corner .chat-message-body {
+  .workspace-chat-dock.is-corner .chat-message-body,
+  .workspace-chat-dock.is-corner .chat-unread-message-body {
     display: inline;
     color: var(--mini-chat-text);
     font-family: var(--mini-chat-font);
@@ -728,8 +766,34 @@
     white-space: nowrap;
   }
 
+  .workspace-chat-dock.is-corner .chat-mention {
+    padding: 0 0.16em;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--mini-chat-thread) 22%, transparent);
+    color: color-mix(in srgb, var(--mini-chat-thread) 82%, var(--mini-chat-text));
+    font-weight: 650;
+    text-shadow: none;
+  }
+
   .workspace-chat-dock.is-corner .chat-thread-summary {
     display: none;
+  }
+
+  .workspace-chat-dock.is-corner .chat-thread-mini-summary {
+    display: inline-flex;
+    max-width: 104px;
+    margin: 0 5px;
+    color: var(--mini-chat-thread);
+    font-family: var(--mini-chat-font);
+    font-size: 11px;
+    line-height: 1;
+    text-shadow: var(--mini-chat-text-shadow);
+    vertical-align: baseline;
+  }
+
+  .workspace-chat-dock.is-corner .chat-thread-mini-count {
+    max-width: 66px;
+    font-size: 10.5px;
   }
 
   .workspace-chat-dock.is-corner .chat-thread-summary-link {

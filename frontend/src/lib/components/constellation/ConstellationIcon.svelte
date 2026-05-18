@@ -60,6 +60,9 @@
     IconUsers,
     IconVideo,
     IconX,
+    IconZoomIn,
+    IconZoomOut,
+    IconZoomReset,
   } from '@tabler/icons-svelte-runes';
 
   export type ConstellationIconName =
@@ -124,6 +127,9 @@
     | 'vault'
     | 'video'
     | 'x'
+    | 'zoom-in'
+    | 'zoom-out'
+    | 'zoom-reset'
     | 'chevron-down'
     | 'chevron-left'
     | 'chevron-right';
@@ -190,6 +196,9 @@
     vault: IconShieldLock,
     video: IconVideo,
     x: IconX,
+    'zoom-in': IconZoomIn,
+    'zoom-out': IconZoomOut,
+    'zoom-reset': IconZoomReset,
     'chevron-down': IconChevronDown,
     'chevron-left': IconChevronLeft,
     'chevron-right': IconChevronRight,

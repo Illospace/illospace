@@ -3,12 +3,17 @@
 
   import { api, type ChatConversationSummary, type ChatUnreadThread } from '$lib/api/client';
   import {
+    mentionHandleForPerson,
+    type MentionAutocompleteOption,
+  } from '$lib/features/composer/domain/mentionAutocomplete';
+  import {
     ConstellationIcon,
     ConstellationIconButton,
     ConstellationNotice,
     ConstellationPresenceSeed,
   } from '$lib/components/constellation';
   import type { ConstellationIconName } from '$lib/components/constellation/ConstellationIcon.svelte';
+  import AttachmentPreviewDialog from '$lib/components/chat/AttachmentPreviewDialog.svelte';
   import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
   import {
@@ -77,7 +82,6 @@
   let attachmentTargetKey = $state<string | null>(null);
   let dockDragOver = $state(false);
   let dockDragTargetKey = $state<string | null>(null);
-  let previewDialogEl: HTMLDivElement | undefined = $state();
   let previewAttachment = $state<any | null>(null);
   let teamMembers = $state<TeamMember[]>([]);
   let roomComposerValue = $state('');
@@ -108,6 +112,20 @@
     preview?: boolean;
   };
 
+  type MessageTextSegment = {
+    text: string;
+    mention: boolean;
+  };
+
+  type MentionAliasEntry = {
+    aliases: Set<string>;
+  };
+
+  const MENTION_RENDER_RE = /(^|[^A-Za-z0-9_])@([A-Za-z0-9._-]+)([.,:;!?]?)/g;
+  const MENTION_PART_SPLIT_RE = /[^a-z0-9]+/;
+  const MENTION_EMAIL_SPLIT_RE = /[._+-]+/;
+  const MIN_MENTION_PREFIX_LENGTH = 2;
+
   const EMPTY_CONVERSATION_PAGE: ChatConversationPageState = {
     conversationId: '',
     messages: [],
@@ -133,17 +151,6 @@
     sending: false,
     error: null,
   };
-
-  function portalToBody(node: HTMLElement) {
-    if (typeof document === 'undefined') return {};
-
-    document.body.appendChild(node);
-    return {
-      destroy() {
-        node.remove();
-      },
-    };
-  }
 
   onMount(() => {
     void chat.setup().then(() => chat.openDock());
@@ -287,6 +294,33 @@
       return memberLabel(left).localeCompare(memberLabel(right));
     });
   });
+  const mentionAliasEntries = $derived.by<MentionAliasEntry[]>(() => {
+    return signedUpTeamMembers.map((member) => ({
+      aliases: mentionAliasesForMember(member),
+    }));
+  });
+  const mentionAliasCounts = $derived.by(() => {
+    const counts = new Map<string, number>([['illo', 1]]);
+    for (const entry of mentionAliasEntries) {
+      for (const alias of entry.aliases) {
+        if (alias === 'illo') continue;
+        counts.set(alias, (counts.get(alias) ?? 0) + 1);
+      }
+    }
+    return counts;
+  });
+  const chatMentionOptions = $derived.by<MentionAutocompleteOption[]>(() => {
+    return signedUpTeamMembers.map((member) => ({
+      id: String(member.id),
+      name: memberLabel(member),
+      insertText: mentionHandleForPerson(member),
+      color: memberColor(member),
+      hint: member.email || 'Mention teammate',
+      keywords: [member.email ?? '', member.name ?? '', memberLabel(member)]
+        .filter(Boolean)
+        .map(String),
+    }));
+  });
   const directTeamMembers = $derived.by(() => {
     return signedUpTeamMembers
       .filter((member) => member.approved !== false)
@@ -424,11 +458,6 @@
     dmTailSignature;
     if (!dmStreamEl || activeDmPage.loadingOlder) return;
     tick().then(() => scrollChatStreamToBottom('dm'));
-  });
-
-  $effect(() => {
-    if (!previewAttachment) return;
-    tick().then(() => previewDialogEl?.focus());
   });
 
   $effect(() => {
@@ -618,18 +647,6 @@
     previewAttachment = null;
   }
 
-  function handlePreviewKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeAttachmentPreview();
-    }
-  }
-
-  function openPreviewAttachmentExternal() {
-    if (!previewAttachmentUrl || typeof window === 'undefined') return;
-    window.open(previewAttachmentUrl, '_blank', 'noopener,noreferrer');
-  }
-
   function shouldShowThreadSummary(message: ChatMessage) {
     return message.reply_count > 0;
   }
@@ -647,6 +664,89 @@
 
   function threadReplyCountLabel(message: ChatMessage) {
     return `${message.reply_count} repl${message.reply_count === 1 ? 'y' : 'ies'}`;
+  }
+
+  function mentionParts(value?: string | null) {
+    return (value ?? '').toLowerCase().split(MENTION_PART_SPLIT_RE).filter(Boolean);
+  }
+
+  function compactMentionAlias(value?: string | null) {
+    return (value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  function mentionAliasesForMember(member: TeamMember) {
+    const nameParts = mentionParts(member.name);
+    const emailLocal = (member.email ?? '').split('@', 1)[0].trim().toLowerCase();
+    const emailParts = emailLocal.split(MENTION_EMAIL_SPLIT_RE).filter(Boolean);
+    const aliases = new Set<string>([
+      (member.name ?? '').trim().toLowerCase(),
+      compactMentionAlias(member.name),
+      emailLocal,
+      compactMentionAlias(emailLocal),
+    ]);
+
+    for (const part of nameParts) aliases.add(part);
+    for (const part of emailParts) aliases.add(part);
+    if (nameParts.length > 1) aliases.add(nameParts.map((part) => part[0]).join(''));
+    if (emailParts.length > 1) aliases.add(emailParts.map((part) => part[0]).join(''));
+    aliases.delete('');
+    return aliases;
+  }
+
+  function isKnownMentionToken(rawToken: string) {
+    const token = rawToken.trim().toLowerCase().replace(/[.,:;!?]+$/, '');
+    if (!token) return false;
+    if ((mentionAliasCounts.get(token) ?? 0) === 1) return true;
+    if (token.length < MIN_MENTION_PREFIX_LENGTH) return false;
+
+    let matchCount = 0;
+    for (const entry of mentionAliasEntries) {
+      for (const alias of entry.aliases) {
+        if (alias.startsWith(token)) {
+          matchCount += 1;
+          break;
+        }
+      }
+      if (matchCount > 1) return false;
+    }
+    return matchCount === 1;
+  }
+
+  function messageTextSegments(body: string): MessageTextSegment[] {
+    const segments: MessageTextSegment[] = [];
+    MENTION_RENDER_RE.lastIndex = 0;
+    let cursor = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = MENTION_RENDER_RE.exec(body)) !== null) {
+      const boundary = match[1] ?? '';
+      let token = match[2] ?? '';
+      let punctuation = match[3] ?? '';
+      const tokenTrailingPunctuation = token.match(/[.,:;!?]+$/)?.[0] ?? '';
+      if (tokenTrailingPunctuation) {
+        token = token.slice(0, -tokenTrailingPunctuation.length);
+        punctuation = `${tokenTrailingPunctuation}${punctuation}`;
+      }
+      const mentionStart = match.index + boundary.length;
+      if (mentionStart > cursor) {
+        segments.push({ text: body.slice(cursor, mentionStart), mention: false });
+      }
+
+      const mentionText = `@${token}`;
+      segments.push({ text: mentionText, mention: isKnownMentionToken(token) });
+      cursor = mentionStart + mentionText.length;
+
+      if (punctuation) {
+        segments.push({ text: punctuation, mention: false });
+        cursor += punctuation.length;
+      }
+    }
+
+    if (cursor < body.length) {
+      segments.push({ text: body.slice(cursor), mention: false });
+    }
+
+    return segments.length > 0 ? segments : [{ text: body, mention: false }];
   }
 
   function showReactionsSoon() {
@@ -1056,7 +1156,7 @@
       ? 1
       : 0;
     const renderedUnreadCount = renderedMessages + renderedRootMessages;
-    return Math.max(item.unread_messages.length - renderedUnreadCount, 0);
+    return Math.max(item.unread_count - renderedUnreadCount, 0);
   }
 
   function isMemberConversationActive(member: TeamMember) {
@@ -1371,22 +1471,17 @@
                       />
 
                       <div class="chat-message-author-copy">
-                        <span>
-                          {message.sender_name}
-                          {#if shouldShowThreadSummary(message)}
-                            <span class="chat-message-author-thread-count">
-                              [{message.reply_count}]
-                            </span>
-                          {/if}
-                        </span>
+                        <span>{message.sender_name}</span>
                         <p>{formatMessageTime(message.created_at)}</p>
                       </div>
                     </div>
                   </header>
                 {/if}
 
+                {@render threadMiniSummary(message)}
+
                 {#if message.body}
-                  <p class="chat-message-body">{message.body}</p>
+                  {@render messageBody(message, 'chat-message-body')}
                 {/if}
 
                 {#if message.attachments?.length}
@@ -1417,6 +1512,7 @@
               placeholder={`Message ${conversationTitle(activeDmConversation)}…`}
               value={dmComposerValue}
               attachments={dmAttachments}
+              mentionOptions={chatMentionOptions}
               disabled={activeDmPage.sending}
               loading={activeDmPage.sending}
               primaryActionLabel="Send"
@@ -1523,8 +1619,10 @@
                   </header>
                 {/if}
 
+                {@render threadMiniSummary(message)}
+
                 {#if message.body}
-                  <p class="chat-message-body">{message.body}</p>
+                  {@render messageBody(message, 'chat-message-body')}
                 {/if}
 
                 {#if message.attachments?.length}
@@ -1605,6 +1703,7 @@
             placeholder="Message…"
             value={roomComposerValue}
             attachments={roomAttachments}
+            mentionOptions={chatMentionOptions}
             disabled={roomPage.sending}
             loading={roomPage.sending}
             primaryActionLabel="Send"
@@ -1669,7 +1768,7 @@
               </header>
 
               {#if activeThreadRoot.body}
-                <p class="chat-message-body">{activeThreadRoot.body}</p>
+                {@render messageBody(activeThreadRoot, 'chat-message-body')}
               {/if}
 
               {#if activeThreadRoot.attachments?.length}
@@ -1732,7 +1831,7 @@
                   {/if}
 
                   {#if reply.body}
-                    <p class="chat-message-body">{reply.body}</p>
+                    {@render messageBody(reply, 'chat-message-body')}
                   {/if}
 
                   {#if reply.attachments?.length}
@@ -1762,6 +1861,7 @@
                   placeholder="Reply in thread…"
                   value={threadComposerValue}
                   attachments={threadAttachments}
+                  mentionOptions={chatMentionOptions}
                   disabled={threadPage.sending}
                   loading={threadPage.sending}
                   primaryActionLabel="Reply"
@@ -1804,8 +1904,10 @@
       </div>
     </header>
 
+    {@render threadMiniSummary(message)}
+
     {#if message.body}
-      <p class="chat-unread-message-body">{message.body}</p>
+      {@render messageBody(message, 'chat-unread-message-body')}
     {/if}
 
     {#if message.attachments?.length}
@@ -1818,6 +1920,31 @@
 
     {@render messageLinkAttachmentList(message.body, message.attachments)}
   </article>
+{/snippet}
+
+{#snippet messageBody(message: ChatMessage, className: string)}
+  <p class={className}>
+    {#each messageTextSegments(message.body) as segment, segmentIndex (segmentIndex)}
+      {#if segment.mention}
+        <span class="chat-mention">{segment.text}</span>
+      {:else}
+        {segment.text}
+      {/if}
+    {/each}
+  </p>
+{/snippet}
+
+{#snippet threadMiniSummary(message: ChatMessage)}
+  {#if shouldShowThreadSummary(message)}
+    <button
+      type="button"
+      class="chat-thread-mini-summary"
+      title={threadPreviewTitle(message)}
+      onclick={() => openThread(message)}
+    >
+      <span class="chat-thread-mini-count">{threadReplyCountLabel(message)}</span>
+    </button>
+  {/if}
 {/snippet}
 
 {#snippet attachmentPreviewVisual(attachment: any)}
@@ -1881,85 +2008,14 @@
 {/snippet}
 
 {#if previewAttachment && previewAttachmentUrl}
-  <div
-    class="chat-image-preview-layer"
-    bind:this={previewDialogEl}
-    use:portalToBody
-    role="dialog"
-    aria-modal="true"
-    aria-label={`Attachment preview: ${previewAttachmentLabel}`}
-    tabindex="-1"
-    onkeydown={handlePreviewKeydown}
-  >
-    <button
-      type="button"
-      class="chat-image-preview-backdrop"
-      aria-label="Close attachment preview"
-      onclick={closeAttachmentPreview}
-    ></button>
-
-    <div class="chat-image-preview-panel">
-      <div class="chat-image-preview-toolbar">
-        <div class="chat-image-preview-meta">
-          <strong>{previewAttachmentLabel}</strong>
-          {#if previewAttachmentDetail}
-            <span>{previewAttachmentDetail}</span>
-          {/if}
-        </div>
-
-        <div class="chat-image-preview-actions">
-          <ConstellationIconButton
-            label="Open attachment"
-            title="Open attachment"
-            variant="secondary"
-            size="md"
-            onclick={openPreviewAttachmentExternal}
-          >
-            <ConstellationIcon name="external-link" size={16} stroke={1.9} />
-          </ConstellationIconButton>
-
-          <ConstellationIconButton
-            label="Close preview"
-            title="Close preview"
-            variant="secondary"
-            size="md"
-            onclick={closeAttachmentPreview}
-          >
-            <ConstellationIcon name="close" size={16} stroke={1.9} />
-          </ConstellationIconButton>
-        </div>
-      </div>
-
-      <div class={`chat-image-preview-frame is-${previewAttachmentKind}`}>
-        {#if previewAttachmentKind === 'image'}
-          <img src={previewAttachmentUrl} alt={previewAttachmentLabel} />
-        {:else if previewAttachmentKind === 'video'}
-          <!-- svelte-ignore a11y_media_has_caption -->
-          <video src={previewAttachmentUrl} controls playsinline preload="metadata"></video>
-        {:else if previewAttachmentKind === 'pdf' || previewAttachmentKind === 'text' || previewAttachmentKind === 'link'}
-          <iframe
-            src={previewAttachmentUrl}
-            title={previewAttachmentLabel}
-            referrerpolicy="no-referrer"
-            loading="lazy"
-          ></iframe>
-        {:else}
-          <div class="chat-file-preview-fallback">
-            <span class="chat-file-preview-icon">
-              <ConstellationIcon name={attachmentIconName(previewAttachment)} size={34} stroke={1.6} />
-            </span>
-            <strong>{previewAttachmentLabel}</strong>
-            {#if previewAttachmentDetail}
-              <span>{previewAttachmentDetail}</span>
-            {/if}
-            <button type="button" class="chat-file-preview-open" onclick={openPreviewAttachmentExternal}>
-              Open attachment
-            </button>
-          </div>
-        {/if}
-      </div>
-    </div>
-  </div>
+  <AttachmentPreviewDialog
+    url={previewAttachmentUrl}
+    label={previewAttachmentLabel}
+    detail={previewAttachmentDetail}
+    kind={previewAttachmentKind}
+    fallbackIcon={attachmentIconName(previewAttachment)}
+    onClose={closeAttachmentPreview}
+  />
 {/if}
 
 <style>
@@ -1967,8 +2023,7 @@
   display: none;
 }
 
-.chat-dock-shell,
-.chat-image-preview-layer {
+.chat-dock-shell {
   --chat-attachment-image-max-height: min(44vh, 360px);
   --chat-shell-border: rgba(255, 255, 255, 0.06);
   --chat-shell-background: rgba(9, 12, 19, 0.96);
@@ -2040,6 +2095,8 @@
   --chat-thread-summary-link-background-hover: rgba(255, 255, 255, 0.04);
   --chat-thread-summary-link-text-hover: rgba(228, 236, 249, 0.92);
   --chat-thread-summary-accent: rgba(150, 188, 255, 0.94);
+  --chat-mention-background: rgba(150, 188, 255, 0.16);
+  --chat-mention-text: rgba(207, 224, 255, 0.98);
   --chat-presence-seed-core-base: #050910;
   --chat-presence-seed-owner-base: rgba(246, 248, 253, 0.96);
   --chat-presence-seed-ring: rgba(255, 255, 255, 0.12);
@@ -2112,8 +2169,7 @@
   background: var(--chat-drop-overlay-icon-background);
 }
 
-:global(:root[data-color-scheme='light']) .chat-dock-shell,
-:global(:root[data-color-scheme='light']) .chat-image-preview-layer {
+:global(:root[data-color-scheme='light']) .chat-dock-shell {
   --chat-shell-border: rgba(24, 35, 49, 0.08);
   --chat-shell-background: rgba(247, 250, 253, 0.94);
   --chat-shell-text: rgba(17, 24, 35, 0.94);
@@ -2185,6 +2241,8 @@
   --chat-thread-summary-link-background-hover: rgba(255, 255, 255, 0.52);
   --chat-thread-summary-link-text-hover: rgba(17, 24, 35, 0.92);
   --chat-thread-summary-accent: #486fa8;
+  --chat-mention-background: rgba(72, 111, 168, 0.14);
+  --chat-mention-text: #315a91;
   --chat-presence-seed-core-base: rgba(246, 250, 253, 0.96);
   --chat-presence-seed-owner-base: rgba(19, 28, 40, 0.94);
   --chat-presence-seed-ring: rgba(24, 35, 49, 0.12);
@@ -3044,6 +3102,17 @@
     word-break: break-word;
   }
 
+  .chat-mention {
+    display: inline;
+    padding: 0 0.24em;
+    border-radius: 5px;
+    background: var(--chat-mention-background);
+    color: var(--chat-mention-text);
+    font-weight: 680;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+
   .chat-attachments,
   .chat-composer-attachments {
     display: grid;
@@ -3196,174 +3265,33 @@
     font-size: 11px;
   }
 
-  .chat-image-preview-layer {
-    position: fixed;
-    inset: 0;
-    z-index: var(--constellation-layer-modal, 1000);
-    display: grid;
-    place-items: center;
-    padding: clamp(18px, 4vw, 48px);
-    color: var(--constellation-color-text-primary);
-  }
-
-  .chat-image-preview-layer:focus {
-    outline: none;
-  }
-
-  .chat-image-preview-backdrop {
-    position: absolute;
-    inset: 0;
+  .chat-thread-mini-summary {
+    appearance: none;
+    display: none;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
     padding: 0;
     border: 0;
-    background: var(--chat-preview-backdrop-background);
-    cursor: zoom-out;
-    backdrop-filter: blur(16px) saturate(1.04);
-    -webkit-backdrop-filter: blur(16px) saturate(1.04);
-  }
-
-  .chat-image-preview-panel {
-    position: relative;
-    z-index: 1;
-    display: grid;
-    width: min(1120px, 100%);
-    max-height: min(860px, calc(100svh - 36px));
-    margin: 0;
-    overflow: hidden;
-    border-radius: var(--constellation-radius-panel);
-    border: 1px solid var(--chat-preview-panel-border);
-    background: var(--chat-preview-panel-background);
-    box-shadow: var(--chat-preview-panel-shadow);
-  }
-
-  .chat-image-preview-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    min-width: 0;
-    padding: 10px 10px 10px 14px;
-    border-bottom: 1px solid var(--chat-preview-toolbar-border);
-  }
-
-  .chat-image-preview-meta {
-    display: grid;
-    min-width: 0;
-    gap: 3px;
-  }
-
-  .chat-image-preview-meta strong,
-  .chat-image-preview-meta span {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .chat-image-preview-meta strong {
-    color: var(--chat-preview-meta-title);
-    font-size: 13px;
-    font-weight: 620;
-  }
-
-  .chat-image-preview-meta span {
-    color: var(--chat-preview-meta-text);
-    font-size: 11px;
-  }
-
-  .chat-image-preview-actions {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .chat-image-preview-frame {
-    display: grid;
-    place-items: center;
-    min-height: min(62svh, 520px);
-    background: var(--chat-preview-frame-background);
-  }
-
-  .chat-image-preview-frame img,
-  .chat-image-preview-frame video {
-    display: block;
-    width: auto;
-    height: auto;
-    max-width: 100%;
-    max-height: calc(100svh - 142px);
-    object-fit: contain;
-  }
-
-  .chat-image-preview-frame video {
-    width: min(100%, 1040px);
-    background: #000;
-  }
-
-  .chat-image-preview-frame iframe {
-    display: block;
-    width: 100%;
-    height: min(72svh, 720px);
-    min-height: 420px;
-    border: 0;
-    background: #fff;
-  }
-
-  .chat-file-preview-fallback {
-    display: grid;
-    place-items: center;
-    gap: 10px;
-    min-width: min(420px, 100%);
-    padding: 42px 28px;
-    color: var(--chat-file-fallback-text);
-    text-align: center;
-  }
-
-  .chat-file-preview-open {
-    appearance: none;
-    margin-top: 4px;
-    padding: 8px 11px;
-    border-radius: 999px;
-    border: 1px solid var(--chat-action-border);
-    background: var(--chat-action-background);
-    color: var(--chat-action-text);
+    background: transparent;
+    color: var(--chat-thread-summary-accent);
+    font: inherit;
     cursor: pointer;
-    font-family: var(--constellation-font-mono);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
   }
 
-  .chat-file-preview-open:hover,
-  .chat-file-preview-open:focus-visible {
-    background: var(--chat-action-background-hover);
-  }
-
-  .chat-file-preview-icon {
-    display: inline-flex;
-    width: 68px;
-    height: 68px;
-    align-items: center;
-    justify-content: center;
-    border-radius: var(--constellation-radius-panel);
-    border: 1px solid var(--chat-attachment-icon-border);
-    background: var(--chat-attachment-icon-background);
-    color: var(--chat-attachment-icon-text);
-  }
-
-  .chat-file-preview-fallback strong {
-    max-width: 100%;
+  .chat-thread-mini-count {
+    min-width: 0;
     overflow: hidden;
-    color: var(--chat-preview-meta-title);
-    font-size: 14px;
-    font-weight: 650;
+    font-size: 11px;
+    font-weight: 620;
+    line-height: 1;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .chat-file-preview-fallback span:not(.chat-file-preview-icon) {
-    color: var(--chat-file-fallback-text);
-    font-size: 12px;
+  .chat-thread-mini-summary:focus-visible {
+    outline: 2px solid var(--constellation-control-focus-ring);
+    outline-offset: 2px;
   }
 
   .chat-thread-summary {
@@ -3731,26 +3659,4 @@
     }
   }
 
-  @media (max-width: 700px) {
-    .chat-image-preview-layer {
-      padding: 10px;
-    }
-
-    .chat-image-preview-panel {
-      max-height: calc(100svh - 20px);
-    }
-
-    .chat-image-preview-toolbar {
-      gap: 10px;
-      padding: 8px;
-    }
-
-    .chat-image-preview-frame {
-      min-height: min(58svh, 420px);
-    }
-
-    .chat-image-preview-frame img {
-      max-height: calc(100svh - 108px);
-    }
-  }
 </style>

@@ -1,4 +1,5 @@
 import type { ConstellationTone } from '$lib/components/constellation';
+import type { MentionAutocompleteOption } from '$lib/features/composer/domain/mentionAutocomplete';
 
 export type ChatPresenceState = 'active' | 'idle' | 'away' | 'offline';
 export type ChatMessageKind = 'message' | 'root-summary' | 'system';
@@ -78,6 +79,7 @@ export type ChatComposerModel = {
   canSubmit?: boolean;
   attachments?: ChatAttachmentItem[];
   typing?: ChatTypingIndicator | null;
+  mentionOptions?: MentionAutocompleteOption[];
   onValueChange?: (value: string) => void;
   onSubmit?: (value: string) => void;
   onAttach?: () => void;

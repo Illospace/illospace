@@ -141,13 +141,16 @@
   });
 
   function insertMention(name: string) {
-    const atPos = inputValue.lastIndexOf('@');
+    const cursor = textareaEl?.selectionStart ?? inputValue.length;
+    const beforeCursor = inputValue.slice(0, cursor);
+    const atMatch = beforeCursor.match(/(^|[\s([{])@([A-Za-z0-9._-]*)$/);
+    const atPos = atMatch ? cursor - atMatch[2].length - 1 : inputValue.lastIndexOf('@');
     if (atPos < 0) return;
-    inputValue = inputValue.slice(0, atPos) + '@' + name + ' ';
+    inputValue = `${inputValue.slice(0, atPos)}@${name} ${inputValue.slice(cursor)}`;
+    const nextCursor = atPos + name.length + 2;
     requestAnimationFrame(() => {
       textareaEl?.focus();
-      const pos = inputValue.length;
-      textareaEl?.setSelectionRange(pos, pos);
+      textareaEl?.setSelectionRange(nextCursor, nextCursor);
       autoGrowTextarea();
     });
   }

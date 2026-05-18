@@ -125,15 +125,17 @@
 
 <style>
   .workspace-page-modal {
+    --workspace-page-modal-edge-gap: clamp(14px, 2.5vw, 28px);
+    --workspace-page-modal-top-gap: 68px;
     position: absolute;
     inset: 0;
     z-index: 92;
     display: grid;
-    align-items: center;
+    align-items: start;
     justify-items: center;
     box-sizing: border-box;
-    padding: clamp(14px, 2.5vw, 28px) clamp(14px, 2.5vw, 28px) clamp(14px, 2.5vw, 28px)
-      max(92px, clamp(14px, 2.5vw, 28px));
+    padding: var(--workspace-page-modal-top-gap) var(--workspace-page-modal-edge-gap)
+      var(--workspace-page-modal-edge-gap) max(92px, var(--workspace-page-modal-edge-gap));
   }
 
   .workspace-page-modal__scrim {
@@ -143,14 +145,12 @@
     padding: 0;
     background: var(--workspace-page-modal-scrim, rgba(2, 5, 10, 0.54));
     cursor: default;
-    backdrop-filter: blur(12px) saturate(1.02);
-    -webkit-backdrop-filter: blur(12px) saturate(1.02);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 
   :global(:root[data-color-scheme='light']) .workspace-page-modal__scrim {
     --workspace-page-modal-scrim: rgba(229, 236, 242, 0.54);
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
   }
 
   .workspace-page-modal__surface {
@@ -159,8 +159,8 @@
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
     width: min(1320px, 100%);
-    height: min(88svh, calc(100svh - 34px));
-    min-height: 520px;
+    height: calc(100svh - var(--workspace-page-modal-top-gap) - var(--workspace-page-modal-edge-gap));
+    min-height: min(520px, calc(100svh - var(--workspace-page-modal-top-gap) - var(--workspace-page-modal-edge-gap)));
     overflow: hidden;
     border: 1px solid var(--constellation-surface-floating-border);
     border-radius: 22px;

@@ -75,7 +75,7 @@
 
   $effect(() => {
     if (topLevelMode !== 'room') {
-      if (chat.activeThreadRootId != null) {
+      if (chat.mode !== 'room' && chat.activeThreadRootId != null) {
         chat.closeThread();
       }
       previousSelectedThreadRootId = selectedThreadRootId;

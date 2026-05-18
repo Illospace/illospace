@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { tick } from 'svelte';
   import {
     ConstellationButton,
     ConstellationIcon,
@@ -9,11 +8,9 @@
     ConstellationSignalStatusIndicator,
   } from '$lib/components/constellation';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
+  import AttachmentPreviewDialog from '$lib/components/chat/AttachmentPreviewDialog.svelte';
   import type { ConstellationIconName } from '$lib/components/constellation/ConstellationIcon.svelte';
-  import {
-    attachmentCanEmbed,
-    type AttachmentPreviewKind,
-  } from '$lib/utils/attachmentPreview';
+  import type { AttachmentPreviewKind } from '$lib/utils/attachmentPreview';
   import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
   import StreamVisualBlock from '$lib/features/threads/components/StreamVisualBlock.svelte';
 
@@ -63,7 +60,6 @@
   }: ThreadTranscriptProps = $props();
 
   let transcriptContainerEl: HTMLDivElement | undefined = $state();
-  let previewDialogEl: HTMLDivElement | undefined = $state();
   let runExpandedByKey: Record<string, boolean> = $state({});
   let runSectionExpandedByKey: Record<string, boolean> = $state({});
   let runStatusByKey: Record<string, string> = $state({});
@@ -77,22 +73,6 @@
   const previewAttachmentLabel = $derived(previewAttachment ? attachmentPreviewLabel(previewAttachment) : '');
   const previewAttachmentDetail = $derived(previewAttachment?.kind === 'file' ? (previewAttachment.detail ?? '') : '');
   const previewAttachmentKind = $derived(previewAttachment ? attachmentPreviewType(previewAttachment) : 'file');
-
-  function portalToBody(node: HTMLElement) {
-    if (typeof document === 'undefined') return {};
-
-    document.body.appendChild(node);
-    return {
-      destroy() {
-        node.remove();
-      },
-    };
-  }
-
-  $effect(() => {
-    if (!previewAttachment) return;
-    tick().then(() => previewDialogEl?.focus());
-  });
 
   function getMessageTone(item: CortexThreadStageMessageItem): CortexThreadStageTone {
     return item.tone ?? 'spectral';
@@ -396,18 +376,6 @@
 
   function closeAttachmentPreview() {
     previewAttachment = null;
-  }
-
-  function handlePreviewKeydown(event: KeyboardEvent) {
-    if (event.key !== 'Escape') return;
-    event.preventDefault();
-    closeAttachmentPreview();
-  }
-
-  function openPreviewAttachmentExternal() {
-    const target = previewAttachment?.downloadUrl || previewAttachmentUrl;
-    if (!target || typeof window === 'undefined') return;
-    window.open(target, '_blank', 'noopener,noreferrer');
   }
 
   $effect(() => {
@@ -1132,85 +1100,15 @@
 </section>
 
 {#if previewAttachment && previewAttachmentUrl}
-  <div
-    class="thread-attachment-preview-layer"
-    bind:this={previewDialogEl}
-    use:portalToBody
-    role="dialog"
-    aria-modal="true"
-    aria-label={`Attachment preview: ${previewAttachmentLabel}`}
-    tabindex="-1"
-    onkeydown={handlePreviewKeydown}
-  >
-    <button
-      type="button"
-      class="thread-attachment-preview-backdrop"
-      aria-label="Close attachment preview"
-      onclick={closeAttachmentPreview}
-    ></button>
-
-    <div class="thread-attachment-preview-panel">
-      <div class="thread-attachment-preview-toolbar">
-        <div class="thread-attachment-preview-meta">
-          <strong>{previewAttachmentLabel}</strong>
-          {#if previewAttachmentDetail}
-            <span>{previewAttachmentDetail}</span>
-          {/if}
-        </div>
-
-        <div class="thread-attachment-preview-actions">
-          <ConstellationIconButton
-            label="Open attachment"
-            title="Open attachment"
-            variant="secondary"
-            size="md"
-            onclick={openPreviewAttachmentExternal}
-          >
-            <ConstellationIcon name="external-link" size={16} stroke={1.9} />
-          </ConstellationIconButton>
-
-          <ConstellationIconButton
-            label="Close preview"
-            title="Close preview"
-            variant="secondary"
-            size="md"
-            onclick={closeAttachmentPreview}
-          >
-            <ConstellationIcon name="close" size={16} stroke={1.9} />
-          </ConstellationIconButton>
-        </div>
-      </div>
-
-      <div class={`thread-attachment-preview-frame is-${previewAttachmentKind}`}>
-        {#if previewAttachmentKind === 'image'}
-          <img src={previewAttachmentUrl} alt={previewAttachmentLabel} />
-        {:else if previewAttachmentKind === 'video'}
-          <!-- svelte-ignore a11y_media_has_caption -->
-          <video src={previewAttachmentUrl} controls playsinline preload="metadata"></video>
-        {:else if attachmentCanEmbed(previewAttachmentKind)}
-          <iframe
-            src={previewAttachmentUrl}
-            title={previewAttachmentLabel}
-            referrerpolicy="no-referrer"
-            loading="lazy"
-          ></iframe>
-        {:else}
-          <div class="thread-file-preview-fallback">
-            <span class="thread-file-preview-icon" aria-hidden="true">
-              <ConstellationIcon name={attachmentIconName(previewAttachment)} size={34} stroke={1.6} />
-            </span>
-            <strong>{previewAttachmentLabel}</strong>
-            {#if previewAttachmentDetail}
-              <span>{previewAttachmentDetail}</span>
-            {/if}
-            <button type="button" class="thread-file-preview-open" onclick={openPreviewAttachmentExternal}>
-              Open attachment
-            </button>
-          </div>
-        {/if}
-      </div>
-    </div>
-  </div>
+  <AttachmentPreviewDialog
+    url={previewAttachmentUrl}
+    label={previewAttachmentLabel}
+    detail={previewAttachmentDetail}
+    kind={previewAttachmentKind}
+    openUrl={previewAttachment.downloadUrl || previewAttachmentUrl}
+    fallbackIcon={attachmentIconName(previewAttachment)}
+    onClose={closeAttachmentPreview}
+  />
 {/if}
 
 <style>
@@ -1792,211 +1690,6 @@
     font-weight: 500;
     letter-spacing: 0;
     text-transform: none;
-  }
-
-  .thread-attachment-preview-layer {
-    --thread-font-mono: var(--constellation-font-mono, 'IBM Plex Mono', monospace);
-    --thread-preview-backdrop-background: rgba(6, 9, 16, 0.72);
-    --thread-preview-panel-border: rgba(255, 255, 255, 0.1);
-    --thread-preview-panel-background:
-      linear-gradient(180deg, rgba(16, 20, 30, 0.94), rgba(8, 12, 19, 0.92)),
-      rgba(8, 12, 19, 0.92);
-    --thread-preview-panel-shadow:
-      0 28px 90px rgba(0, 0, 0, 0.46),
-      0 0 0 1px rgba(255, 255, 255, 0.03) inset;
-    --thread-preview-toolbar-border: rgba(255, 255, 255, 0.08);
-    --thread-preview-meta-title: rgba(246, 248, 253, 0.94);
-    --thread-preview-meta-text: rgba(240, 240, 250, 0.56);
-    --thread-preview-frame-background:
-      linear-gradient(135deg, rgba(255, 255, 255, 0.035), transparent 45%),
-      rgba(0, 0, 0, 0.24);
-    --thread-file-fallback-text: rgba(240, 240, 250, 0.7);
-    --thread-action-border: rgba(255, 255, 255, 0.08);
-    --thread-action-background: rgba(255, 255, 255, 0.03);
-    --thread-action-background-hover: rgba(255, 255, 255, 0.06);
-    --thread-action-text: rgba(229, 234, 244, 0.84);
-
-    position: fixed;
-    inset: 0;
-    z-index: var(--constellation-layer-modal, 1000);
-    display: grid;
-    place-items: center;
-    padding: clamp(18px, 4vw, 48px);
-    color: var(--constellation-color-text-primary);
-  }
-
-  :global(:root[data-color-scheme='light']) .thread-attachment-preview-layer {
-    --thread-preview-backdrop-background: rgba(234, 241, 247, 0.78);
-    --thread-preview-panel-border: rgba(24, 35, 49, 0.1);
-    --thread-preview-panel-background:
-      linear-gradient(180deg, rgba(252, 254, 255, 0.96), rgba(241, 247, 251, 0.94)),
-      rgba(247, 250, 253, 0.94);
-    --thread-preview-panel-shadow:
-      0 28px 90px rgba(24, 35, 49, 0.2),
-      0 0 0 1px rgba(255, 255, 255, 0.6) inset;
-    --thread-preview-toolbar-border: rgba(24, 35, 49, 0.08);
-    --thread-preview-meta-title: rgba(17, 24, 35, 0.92);
-    --thread-preview-meta-text: rgba(78, 91, 108, 0.6);
-    --thread-preview-frame-background:
-      linear-gradient(135deg, rgba(83, 121, 184, 0.05), transparent 48%),
-      rgba(17, 24, 35, 0.06);
-    --thread-file-fallback-text: rgba(78, 91, 108, 0.62);
-    --thread-action-border: rgba(24, 35, 49, 0.08);
-    --thread-action-background: rgba(255, 255, 255, 0.52);
-    --thread-action-background-hover: rgba(255, 255, 255, 0.72);
-    --thread-action-text: rgba(45, 57, 73, 0.84);
-  }
-
-  .thread-attachment-preview-layer:focus {
-    outline: none;
-  }
-
-  .thread-attachment-preview-backdrop {
-    position: absolute;
-    inset: 0;
-    padding: 0;
-    border: 0;
-    background: var(--thread-preview-backdrop-background);
-    cursor: zoom-out;
-    backdrop-filter: blur(16px) saturate(1.04);
-    -webkit-backdrop-filter: blur(16px) saturate(1.04);
-  }
-
-  .thread-attachment-preview-panel {
-    position: relative;
-    z-index: 1;
-    display: grid;
-    width: min(1120px, 100%);
-    max-height: min(860px, calc(100svh - 36px));
-    overflow: hidden;
-    border-radius: var(--constellation-radius-panel);
-    border: 1px solid var(--thread-preview-panel-border);
-    background: var(--thread-preview-panel-background);
-    box-shadow: var(--thread-preview-panel-shadow);
-  }
-
-  .thread-attachment-preview-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    min-width: 0;
-    padding: 10px 10px 10px 14px;
-    border-bottom: 1px solid var(--thread-preview-toolbar-border);
-  }
-
-  .thread-attachment-preview-meta {
-    display: grid;
-    gap: 3px;
-    min-width: 0;
-  }
-
-  .thread-attachment-preview-meta strong,
-  .thread-attachment-preview-meta span {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .thread-attachment-preview-meta strong {
-    color: var(--thread-preview-meta-title);
-    font-size: 13px;
-    font-weight: 620;
-  }
-
-  .thread-attachment-preview-meta span {
-    color: var(--thread-preview-meta-text);
-    font-size: 11px;
-  }
-
-  .thread-attachment-preview-actions {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .thread-attachment-preview-frame {
-    display: grid;
-    place-items: center;
-    min-height: min(62svh, 520px);
-    background: var(--thread-preview-frame-background);
-  }
-
-  .thread-attachment-preview-frame img,
-  .thread-attachment-preview-frame video {
-    display: block;
-    width: auto;
-    height: auto;
-    max-width: 100%;
-    max-height: calc(100svh - 142px);
-    object-fit: contain;
-  }
-
-  .thread-attachment-preview-frame video {
-    width: min(100%, 1040px);
-    background: #000;
-  }
-
-  .thread-attachment-preview-frame iframe {
-    display: block;
-    width: 100%;
-    height: min(72svh, 720px);
-    min-height: 420px;
-    border: 0;
-    background: #fff;
-  }
-
-  .thread-file-preview-fallback {
-    display: grid;
-    place-items: center;
-    gap: 10px;
-    min-width: min(420px, 100%);
-    padding: 42px 28px;
-    color: var(--thread-file-fallback-text);
-    text-align: center;
-  }
-
-  .thread-file-preview-fallback strong,
-  .thread-file-preview-fallback span {
-    min-width: 0;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .thread-file-preview-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 54px;
-    height: 54px;
-    border-radius: 16px;
-    border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
-    background: color-mix(in srgb, currentColor 7%, transparent);
-  }
-
-  .thread-file-preview-open {
-    appearance: none;
-    margin-top: 4px;
-    padding: 8px 11px;
-    border-radius: 999px;
-    border: 1px solid var(--thread-action-border);
-    background: var(--thread-action-background);
-    color: var(--thread-action-text);
-    cursor: pointer;
-    font-family: var(--thread-font-mono);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-  }
-
-  .thread-file-preview-open:hover,
-  .thread-file-preview-open:focus-visible {
-    background: var(--thread-action-background-hover);
   }
 
   .thread-visual-surface {
@@ -3252,27 +2945,6 @@
   }
 
   @media (max-width: 720px) {
-    .thread-attachment-preview-layer {
-      padding: 10px;
-    }
-
-    .thread-attachment-preview-panel {
-      max-height: calc(100svh - 20px);
-    }
-
-    .thread-attachment-preview-toolbar {
-      gap: 10px;
-      padding: 8px;
-    }
-
-    .thread-attachment-preview-frame {
-      min-height: min(58svh, 420px);
-    }
-
-    .thread-attachment-preview-frame img {
-      max-height: calc(100svh - 108px);
-    }
-
     .thread-panel-header {
       padding: 0 0 8px;
     }

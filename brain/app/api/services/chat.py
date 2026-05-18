@@ -46,6 +46,8 @@ from brain.platform.db.repositories.team import TeamRepository
 ILLO_NAME = "Illo"
 ILLO_COLOR = "#5ea898"
 EMAIL_LOCAL_ALIAS_SPLIT_RE = re.compile(r"[._+-]+")
+MENTION_ALIAS_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+MIN_MENTION_PREFIX_LENGTH = 2
 
 
 @dataclass(slots=True)
@@ -68,6 +70,35 @@ class ChatReadPublishState:
     unread_summary: ChatUnreadSummaryRead
 
 
+def _mention_parts(value: str | None) -> list[str]:
+    return [part for part in MENTION_ALIAS_SPLIT_RE.split((value or "").lower()) if part]
+
+
+def _compact_mention_alias(value: str | None) -> str:
+    return "".join(ch for ch in (value or "").lower() if ch.isalnum())
+
+
+def _mention_aliases_for_user(user: User) -> set[str]:
+    name = (user.name or "").strip().lower()
+    email_local = (user.email or "").split("@", 1)[0].strip().lower()
+    name_parts = _mention_parts(user.name)
+    email_parts = [part for part in EMAIL_LOCAL_ALIAS_SPLIT_RE.split(email_local) if part]
+    aliases = {
+        name,
+        _compact_mention_alias(user.name),
+        email_local,
+        _compact_mention_alias(email_local),
+    }
+    aliases.update(name_parts)
+    aliases.update(email_parts)
+    if len(name_parts) > 1:
+        aliases.add("".join(part[0] for part in name_parts))
+    if len(email_parts) > 1:
+        aliases.add("".join(part[0] for part in email_parts))
+    aliases.discard("")
+    return aliases
+
+
 def resolve_user_mentions(body: str, users: list[User]) -> tuple[list[User], bool]:
     tokens = extract_mention_tokens(body)
     illo_invoked = "illo" in tokens
@@ -75,21 +106,29 @@ def resolve_user_mentions(body: str, users: list[User]) -> tuple[list[User], boo
     if not user_tokens:
         return [], illo_invoked
 
-    matches: list[User] = []
-    seen: set[str] = set()
-    for user in users:
-        email_local = user.email.split("@", 1)[0].lower()
-        aliases = {
-            user.name.strip().lower(),
-            "".join(ch for ch in user.name.lower() if ch.isalnum()),
-            (user.name.split()[0].lower() if user.name.split() else ""),
-            email_local,
-        }
-        aliases.update(part for part in EMAIL_LOCAL_ALIAS_SPLIT_RE.split(email_local) if part)
-        aliases.discard("")
-        if user_tokens.intersection(aliases) and str(user.id) not in seen:
-            seen.add(str(user.id))
-            matches.append(user)
+    alias_rows = [(user, _mention_aliases_for_user(user)) for user in users]
+    matched_user_ids: set[str] = set()
+    for token in user_tokens:
+        direct_matches = [user for user, aliases in alias_rows if token in aliases]
+        if direct_matches:
+            direct_match_ids = {str(user.id) for user in direct_matches}
+            if len(direct_match_ids) == 1:
+                matched_user_ids.update(direct_match_ids)
+            continue
+
+        if len(token) < MIN_MENTION_PREFIX_LENGTH:
+            continue
+
+        prefix_matches = [
+            user
+            for user, aliases in alias_rows
+            if any(alias.startswith(token) for alias in aliases)
+        ]
+        prefix_match_ids = {str(user.id) for user in prefix_matches}
+        if len(prefix_match_ids) == 1:
+            matched_user_ids.update(prefix_match_ids)
+
+    matches = [user for user, _aliases in alias_rows if str(user.id) in matched_user_ids]
     return matches, illo_invoked
 
 
@@ -572,14 +611,25 @@ class ChatService(_ChatSerializationMixin):
         return [await self._serialize_notification(notification) for notification in notifications]
 
     async def list_unread_threads(self, *, limit: int) -> list[ChatUnreadThreadRead]:
-        rows = await self.notification_repo.a_list_unread_with_messages_for_user(
+        rows = list(await self.message_repo.a_list_unread_group_messages_for_user(
             self.viewer_user_id,
             limit=validated_limit(limit),
+        ))
+        messages = [message for message, _, _ in rows]
+        notification_rows = await self.notification_repo.a_list_unread_for_message_ids(
+            self.viewer_user_id,
+            [message.id for message in messages],
         )
+        notifications_by_message_id: dict[int, list[ChatNotification]] = {}
+        for notification in notification_rows:
+            if notification.message_id is None:
+                continue
+            notifications_by_message_id.setdefault(int(notification.message_id), []).append(notification)
+
         grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
         conversations_by_id: dict[str, ChatConversation] = {}
 
-        for notification, message in rows:
+        for message, unread_count, latest_unread_at in rows:
             conversation_id = str(message.conversation_id)
             conversation = conversations_by_id.get(conversation_id)
             if conversation is None:
@@ -606,13 +656,15 @@ class ChatService(_ChatSerializationMixin):
                     "root_message_id": root_message_id,
                     "notifications": [],
                     "messages": [],
-                    "latest_unread_at": notification.created_at,
+                    "unread_count": int(unread_count),
+                    "latest_unread_at": latest_unread_at,
                 },
             )
-            group["notifications"].append(notification)
+            group["notifications"].extend(notifications_by_message_id.get(message.id, []))
             group["messages"].append(message)
-            if notification.created_at > group["latest_unread_at"]:
-                group["latest_unread_at"] = notification.created_at
+            group["unread_count"] = max(group["unread_count"], int(unread_count))
+            if latest_unread_at > group["latest_unread_at"]:
+                group["latest_unread_at"] = latest_unread_at
 
         results: list[ChatUnreadThreadRead] = []
         for group in grouped.values():
@@ -634,7 +686,13 @@ class ChatService(_ChatSerializationMixin):
                     thread_preview_participants=thread_preview,
                 )
 
-            unread_messages = sorted(group["messages"], key=lambda entry: entry.conversation_seq)
+            unread_messages = sorted(
+                (message for message in group["messages"] if message.deleted_at is None),
+                key=lambda entry: entry.conversation_seq,
+            )
+            if not unread_messages:
+                continue
+
             notifications = sorted(group["notifications"], key=lambda entry: entry.created_at)
             results.append(
                 ChatUnreadThreadRead(
@@ -647,15 +705,14 @@ class ChatService(_ChatSerializationMixin):
                     unread_messages=[
                         self._serialize_message(message, user_by_id)
                         for message in unread_messages
-                        if message.deleted_at is None
                     ],
                     notification_ids=[notification.id for notification in notifications],
-                    unread_count=len(notifications),
+                    unread_count=group["unread_count"],
                     latest_unread_at=group["latest_unread_at"],
                 )
             )
 
-        return sorted(results, key=lambda item: item.latest_unread_at, reverse=True)
+        return sorted(results, key=lambda item: item.latest_unread_at, reverse=True)[:validated_limit(limit)]
 
     async def mark_notification_read(self, notification_id: int) -> bool:
         notification = await self.notification_repo.a_mark_read(notification_id, self.viewer_user_id)
