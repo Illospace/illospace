@@ -134,6 +134,30 @@ The PRD intentionally describes a broader product direction: external tools send
 6. **Add fine-grained Ilo action attribution** so receipt reconciliation can say which workspace tools/actions Ilo actually chose after triage, not only the terminal run status/final answer.
 7. **Add rule candidates / payload fingerprints** so repeated replay and receipt patterns can become explicit deterministic-policy suggestions.
 
+### Deployed E2E Test Ledger
+
+Date: 2026-05-19
+Environment: deployed dev server through local SSH tunnel
+Owner while testing: Reda's Codex session
+
+This section is the running ledger for post-deploy validation. Keep failures here until they are fixed, then update the row with the fix and retest result.
+
+| Test | Status | Result | Notes |
+| --- | --- | --- | --- |
+| MCP signal from Codex session | Passed with caveat | Hosted MCP accepted the active Codex token and stored events. Unique-origin signal `e778f9f5-7298-4845-bbe7-86ec27894c8d` returned `review_required`, created Cortex idea `4f03ebb8-2980-46bf-b3aa-33657660e233`, thread message `249`, and Ilo run `214`. | The default ambiguous MCP path works. Caveat: `origin=codex.progress` first matched existing policy `856ae76a-2974-4b6c-8fc0-d3fd5d557276` and quarantined event `bb114da0-d013-4f38-8fe3-7a39bdbc6007` because the policy schema expected `payload.checkpoint` and another `desired_outcome` path. Need inspect that policy before enabling real Codex hooks, or use a more specific hook origin. |
+| Webhook ambiguous signal | Passed | `POST /webhooks` returned `202` with event `849a179f-a787-4c7c-b8a2-9a5689ce1437`, `review_required`, no matched policy, Cortex idea `39798b40-84f3-42fb-ad78-88f3a0dedaab`, thread message `250`, and Ilo run `215`. | Ilo later inspected the event with `manage_inbound.get_event(include_receipts=true)` and confirmed reconciliation succeeded: event status `processed`, receipt `1b6c48ed-81e5-4940-838f-9b27f29b7504` status `processed`, run `215` completed, final answer `Triaged as no-op / resolved`, and `reconciled_at=2026-05-19T19:38:17.805159+00:00`. |
+| Webhook deterministic Domain Projection | Passed | Ilo configured policy `5e3f3b57-3765-4c04-93da-adea55541c80` and projection `63115940-b7a2-4139-92d3-495fce54ea3e` on connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b`, domain `11`, object key `ticket`. Webhook create event `82405008-04a3-469a-bb05-857bcc989809` processed and created Domain record `220`. Idempotency event `7d7a3de8-db39-4e9d-bd06-fc55900e2af3` replayed with `idempotent_replay=true` and reused record `221`. Update event `fce1281f-7bf0-4806-84c3-cf8c2b23d345` processed and updated record `221` to version `2`. | Ilo setup used `manage_inbound` plus Domain tools and returned dry-run success. Caveat: Ilo reported the reused connection status as `pending`, even though the token and projection path processed live webhooks. Need decide whether active tokens should imply configured/active connection state or whether `pending` is acceptable for reused personal-source connections. |
+| Replay harness and source card | Passed with expected drift | Ilo used `manage_inbound.replay_events`, `refresh_source_card`, `get_source_card`, and `list_events` for connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b`. Replay covered 5 requested events, was read-only (`mutates_workspace=false`), and predicted `processed: 3`, `review_required: 2`. Source card refreshed at `2026-05-19T19:45:23.608441+00:00` with tags `post-deploy-e2e`, `mcp`, `webhook`, `domain-projection`. | Projection events replayed stable. The 2 unmatched-path events replay as `review_required` while their stored status is now `processed` because Ilo triage/reconciliation completed them; this is expected drift, but the replay UI should explain “current preflight prediction” vs “historical post-Ilo outcome” clearly. Source card also surfaced the earlier `codex.progress` quarantine, which is useful operator feedback. |
+| MCP auth hardening | Passed | Invalid token call to `/api/mcp` returned HTTP `200` with MCP JSON-RPC error code `-32001`, message `MCP authentication failed: Invalid bridge token`, and data `{ "http_status": 401, "auth": "bearer" }`. | This confirms the deployed fix prevents the old client-side deserialize failure shape. |
+
+Post-deploy conclusion:
+
+- Core deployed E2E is green across hosted MCP signal submission, webhook ambiguous triage, deterministic Domain Projection create/update/idempotency, replay/source-card inspection, and MCP auth hardening.
+- Before enabling real automatic Codex hooks broadly, inspect the active `codex.progress` policy. It currently expects `payload.checkpoint`; a generic Codex progress signal without that field is quarantined.
+- Decide how source connection status should behave for reused personal/source connections. Connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b` processed real token traffic while Ilo reported status `pending`.
+- Improve replay/source-card language later so humans can distinguish current deterministic replay predictions from historical post-Ilo reconciled outcomes.
+- Next implementation slice remains **fine-grained Ilo action attribution**: receipts should capture which workspace tools/actions Ilo used after triage, not only terminal run status/final answer.
+
 ### Trace-Based Follow-Up
 
 After deployment, Codex sent a compatibility-thread update to Ilo and inspected the exported thread trace. Ilo correctly understood the rollout and could use general workspace tools (`manage_domain`, `manage_workspace_app`, `manage_cycle`, `manage_idea`), but it did not have native inbound-admin tools yet. That confirmed the next implementation slice should be the **Ilo Configuration Tool Surface**, not another manual UI. The `manage_inbound` tool in this branch is that slice.

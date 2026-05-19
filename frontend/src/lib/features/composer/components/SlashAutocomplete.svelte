@@ -1,19 +1,17 @@
 <script module lang="ts">
   import { slashCommands } from '$lib/features/cortex/api/cortexApi';
+  import {
+    anchoredShortcutMenuGeometry,
+    shortcutMenuCssVariables,
+    shortcutMenuPortal,
+    type ShortcutMenuGeometry,
+  } from '$lib/features/composer/domain/shortcutMenu';
 
   interface SlashCommand {
     name: string;
     description: string;
     tier?: string;
     model_tier?: string;
-  }
-
-  interface MenuGeometry {
-    maxHeight: number;
-    left: number;
-    width: number;
-    top: number | null;
-    bottom: number | null;
   }
 
   let slashCommandsPromise: Promise<SlashCommand[]> | null = null;
@@ -33,8 +31,9 @@
     return slashCommandsPromise;
   }
 
-  function defaultMenuGeometry(): MenuGeometry {
+  function defaultMenuGeometry(): ShortcutMenuGeometry {
     return {
+      placement: 'above',
       maxHeight: MENU_MAX_HEIGHT,
       left: 0,
       width: 0,
@@ -43,9 +42,6 @@
     };
   }
 
-  function menuCssLength(value: number | null) {
-    return value === null ? 'auto' : `${value}px`;
-  }
 </script>
 
 <script lang="ts">
@@ -70,37 +66,15 @@
   let loaded = $state(false);
   let loadError = $state<string | null>(null);
   let effectivePlacement = $state<'above' | 'below'>('above');
-  let menuGeometry = $state<MenuGeometry>(defaultMenuGeometry());
+  let menuGeometry = $state<ShortcutMenuGeometry>(defaultMenuGeometry());
   let geometryFrame: number | null = null;
 
   const shouldShowMenu = $derived(
     visible && active && (loading || Boolean(loadError) || loaded || filtered.length > 0),
   );
   const dropdownStyle = $derived(
-    [
-      `--slash-dropdown-max-height: ${menuGeometry.maxHeight}px`,
-      `--slash-dropdown-left: ${menuGeometry.left}px`,
-      `--slash-dropdown-width: ${menuGeometry.width}px`,
-      `--slash-dropdown-top: ${menuCssLength(menuGeometry.top)}`,
-      `--slash-dropdown-bottom: ${menuCssLength(menuGeometry.bottom)}`,
-    ].join(';'),
+    shortcutMenuCssVariables(menuGeometry, 'slash'),
   );
-
-  function portalToBody(node: HTMLElement) {
-    if (typeof document === 'undefined') return {};
-
-    const parent = node.parentNode;
-    const marker = document.createComment('slash-autocomplete-portal');
-    parent?.insertBefore(marker, node);
-    document.body.appendChild(node);
-
-    return {
-      destroy() {
-        marker.parentNode?.insertBefore(node, marker);
-        marker.remove();
-      },
-    };
-  }
 
   function updateMenuGeometry() {
     if (typeof window === 'undefined' || !anchor) {
@@ -110,30 +84,15 @@
     }
 
     const rect = anchor.getBoundingClientRect();
-    const spaceAbove = Math.max(0, rect.top - MENU_VIEWPORT_GAP);
-    const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - MENU_VIEWPORT_GAP);
-
-    let nextPlacement = placement;
-    if (placement === 'above' && spaceAbove < MENU_PREFERRED_HEIGHT && spaceBelow > spaceAbove) {
-      nextPlacement = 'below';
-    } else if (placement === 'below' && spaceBelow < MENU_PREFERRED_HEIGHT && spaceAbove > spaceBelow) {
-      nextPlacement = 'above';
-    }
-
-    const availableSpace = nextPlacement === 'above' ? spaceAbove : spaceBelow;
-    const viewportWidth = Math.max(window.innerWidth, rect.width + MENU_VIEWPORT_GAP * 2);
-    const width = Math.max(0, Math.min(rect.width, viewportWidth - MENU_VIEWPORT_GAP * 2));
-    const maxLeft = Math.max(MENU_VIEWPORT_GAP, viewportWidth - MENU_VIEWPORT_GAP - width);
-    const left = Math.min(Math.max(rect.left, MENU_VIEWPORT_GAP), maxLeft);
-
-    effectivePlacement = nextPlacement;
-    menuGeometry = {
-      maxHeight: Math.max(MENU_MIN_HEIGHT, Math.min(MENU_MAX_HEIGHT, availableSpace - MENU_ANCHOR_GAP)),
-      left,
-      width,
-      top: nextPlacement === 'below' ? rect.bottom + MENU_ANCHOR_GAP : null,
-      bottom: nextPlacement === 'above' ? window.innerHeight - rect.top + MENU_ANCHOR_GAP : null,
-    };
+    menuGeometry = anchoredShortcutMenuGeometry(rect, window.innerWidth, window.innerHeight, {
+      placement,
+      preferredHeight: MENU_PREFERRED_HEIGHT,
+      minHeight: MENU_MIN_HEIGHT,
+      maxHeight: MENU_MAX_HEIGHT,
+      viewportGap: MENU_VIEWPORT_GAP,
+      anchorGap: MENU_ANCHOR_GAP,
+    });
+    effectivePlacement = menuGeometry.placement;
   }
 
   function queueMenuGeometryUpdate() {
@@ -261,8 +220,8 @@
   }
 
   function select(cmd: SlashCommand) {
+    clear();
     oninput('/' + cmd.name + ' ');
-    filtered = [];
   }
 
   function commandDescription(cmd: SlashCommand) {
@@ -272,7 +231,7 @@
 
 {#if shouldShowMenu}
   <div
-    use:portalToBody
+    use:shortcutMenuPortal
     class="slash-dropdown"
     class:placement-below={effectivePlacement === 'below'}
     style={dropdownStyle}

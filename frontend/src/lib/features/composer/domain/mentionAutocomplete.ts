@@ -1,3 +1,8 @@
+import {
+  anchoredShortcutMenuGeometry,
+  shortcutMenuCssVariables,
+} from '$lib/features/composer/domain/shortcutMenu';
+
 export type MentionAutocompleteOption = {
   id?: string;
   name: string;
@@ -17,17 +22,11 @@ export type MentionDropdownGeometry = {
 
 const MENTION_HANDLE_SPLIT_RE = /[._+\-\s]+/;
 const MENTION_HANDLE_INVALID_RE = /[^a-z0-9._-]+/g;
-const DROPDOWN_VIEWPORT_GAP = 12;
-const DROPDOWN_GAP = 8;
 const DROPDOWN_PREFERRED_HEIGHT = 180;
 const DROPDOWN_MIN_HEIGHT = 96;
 const DROPDOWN_MAX_HEIGHT = 260;
 const DROPDOWN_MIN_WIDTH = 220;
 const DROPDOWN_MAX_WIDTH = 320;
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
-}
 
 export function normalizeMentionHandle(value: string | null | undefined) {
   return (value ?? '')
@@ -55,29 +54,17 @@ export function mentionDropdownGeometry(
   viewportWidth: number,
   viewportHeight: number,
 ): MentionDropdownGeometry {
-  const width = clamp(rect.width, DROPDOWN_MIN_WIDTH, DROPDOWN_MAX_WIDTH);
-  const maxLeft = Math.max(DROPDOWN_VIEWPORT_GAP, viewportWidth - width - DROPDOWN_VIEWPORT_GAP);
-  const left = clamp(rect.left, DROPDOWN_VIEWPORT_GAP, maxLeft);
-  const spaceAbove = Math.max(0, rect.top - DROPDOWN_VIEWPORT_GAP);
-  const spaceBelow = Math.max(0, viewportHeight - rect.bottom - DROPDOWN_VIEWPORT_GAP);
-  const placement =
-    spaceAbove < DROPDOWN_PREFERRED_HEIGHT && spaceBelow > spaceAbove ? 'below' : 'above';
-  const availableSpace = placement === 'above' ? spaceAbove : spaceBelow;
-  const top = placement === 'above' ? rect.top - DROPDOWN_GAP : rect.bottom + DROPDOWN_GAP;
-  const maxHeight = clamp(
-    availableSpace - DROPDOWN_GAP,
-    DROPDOWN_MIN_HEIGHT,
-    DROPDOWN_MAX_HEIGHT,
-  );
+  const geometry = anchoredShortcutMenuGeometry(rect, viewportWidth, viewportHeight, {
+    preferredHeight: DROPDOWN_PREFERRED_HEIGHT,
+    minHeight: DROPDOWN_MIN_HEIGHT,
+    maxHeight: DROPDOWN_MAX_HEIGHT,
+    minWidth: DROPDOWN_MIN_WIDTH,
+    maxWidth: DROPDOWN_MAX_WIDTH,
+  });
 
   return {
-    placement,
-    style: [
-      `--mention-dropdown-left:${left}px`,
-      `--mention-dropdown-top:${top}px`,
-      `--mention-dropdown-width:${width}px`,
-      `--mention-dropdown-max-height:${maxHeight}px`,
-    ].join(';'),
+    placement: geometry.placement,
+    style: shortcutMenuCssVariables(geometry, 'mention'),
   };
 }
 
