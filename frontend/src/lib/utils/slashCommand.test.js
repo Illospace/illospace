@@ -84,10 +84,18 @@ test('findFirstSlashCommandToken sees inline commands beyond the end cursor case
 test('slash autocomplete is anchored to the viewport instead of composer overflow boxes', () => {
   const source = readSource('lib/features/composer/components/SlashAutocomplete.svelte');
 
-  assert.match(source, /document\.body\.appendChild\(node\)/);
+  assert.match(source, /shortcutMenuPortal/);
   assert.match(source, /position:\s*fixed;/);
   assert.match(source, /--slash-dropdown-left/);
   assert.match(source, /--slash-dropdown-width/);
+});
+
+test('slash autocomplete uses the shared shortcut menu portal', () => {
+  const source = readSource('lib/features/composer/components/SlashAutocomplete.svelte');
+
+  assert.match(source, /use:shortcutMenuPortal/);
+  assert.doesNotMatch(source, /function\s+portalToBody/);
+  assert.doesNotMatch(source, /document\.createComment\(/);
 });
 
 test('thread composer editor does not clip overlay hosts', () => {

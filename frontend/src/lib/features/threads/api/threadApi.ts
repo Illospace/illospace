@@ -70,6 +70,7 @@ export const threadApi = pickTypedApiMethods<ThreadApiMethods>([
   'getIdea',
   'ideaConnections',
   'activityTimeline',
+  'generateTitle',
   'uploadFile',
   'previewUpload',
   'listIdeaProjectContext',
