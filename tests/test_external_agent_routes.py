@@ -112,6 +112,62 @@ async def test_connection_listing_is_owner_scoped_for_members_and_org_wide_for_a
     assert captured[1] == {"org_id": "org-1", "owner_user_id": None}
 
 
+async def test_connection_create_reuses_existing_personal_agent_connection():
+    session = _AsyncSession()
+    connection = SimpleNamespace(
+        id="conn-1",
+        org_id="org-1",
+        owner_user_id="user-1",
+        display_name="Codex Desktop",
+        agent_kind="codex",
+        transport="hosted_mcp",
+        status="configured",
+        endpoint_url="http://127.0.0.1:8080/mcp",
+        remote_agent_id=None,
+        remote_session_key=None,
+        remote_agent_card={},
+        capabilities={"mcp": True},
+        last_seen_at=None,
+        last_tested_at=None,
+        last_error=None,
+        metadata_={},
+        disabled_at=None,
+        created_at=None,
+        updated_at=None,
+    )
+
+    with patch(
+        "brain.app.api.routers.agent_connections.external_agents.find_reusable_connection",
+        return_value=connection,
+    ) as find_connection, patch(
+        "brain.app.api.routers.agent_connections.external_agents.create_connection",
+    ) as create_connection:
+        response = await _request(
+            "POST",
+            "/api/agent-connections",
+            session=session,
+            json={
+                "display_name": "Codex Desktop",
+                "agent_kind": "codex",
+                "transport": "hosted_mcp",
+                "endpoint_url": "http://127.0.0.1:8080/mcp",
+                "capabilities": {"mcp": True},
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["id"] == "conn-1"
+    find_connection.assert_awaited_once_with(
+        session,
+        org_id="org-1",
+        owner_user_id="user-1",
+        display_name="Codex Desktop",
+        agent_kind="codex",
+        transport="hosted_mcp",
+    )
+    create_connection.assert_not_called()
+
+
 async def test_connection_tokens_can_be_listed_for_managed_connection():
     session = _AsyncSession()
     token = SimpleNamespace(
@@ -364,6 +420,27 @@ async def test_hosted_mcp_lists_tools_for_scoped_bridge_token():
     assert "illo_create_thread" in names
     assert "illo_ask" in names
     assert "illo_search_workspace" in names
+
+
+async def test_hosted_mcp_invalid_token_returns_json_rpc_error():
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+        side_effect=external_agents.ExternalAgentAuthError("Invalid bridge token"),
+    ):
+        response = await _request(
+            "POST",
+            "/api/mcp",
+            headers={"Authorization": "Bearer revoked-token"},
+            json={"jsonrpc": "2.0", "id": 7, "method": "tools/list"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["jsonrpc"] == "2.0"
+    assert body["id"] == 7
+    assert body["error"]["code"] == -32001
+    assert body["error"]["message"] == "MCP authentication failed: Invalid bridge token"
+    assert body["error"]["data"] == {"http_status": 401, "auth": "bearer"}
 
 
 async def test_hosted_mcp_filters_tools_by_bridge_token_scope():

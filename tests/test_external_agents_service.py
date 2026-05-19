@@ -221,6 +221,34 @@ async def test_connection_tokens_can_be_listed_and_revoked(external_agent_sessio
 
 
 @pytest.mark.asyncio
+async def test_find_reusable_connection_matches_active_install_case_insensitively(external_agent_session):
+    disabled = ExternalAgentConnectionRow(
+        id="conn-disabled",
+        org_id="org-1",
+        owner_user_id="user-1",
+        display_name="Codex",
+        agent_kind="codex",
+        transport="hosted_mcp",
+        status="disabled",
+        disabled_at=service.utcnow(),
+    )
+    external_agent_session.add(disabled)
+    await external_agent_session.flush()
+
+    found = await service.find_reusable_connection(
+        external_agent_session,
+        org_id="org-1",
+        owner_user_id="user-1",
+        display_name="codex",
+        agent_kind="CODEX",
+        transport="HOSTED_MCP",
+    )
+
+    assert found is not None
+    assert found.id == "conn-1"
+
+
+@pytest.mark.asyncio
 async def test_signal_submit_backfill_only_updates_active_personal_agent_tokens(external_agent_session):
     now = service.utcnow()
     codex_token = ExternalAgentConnectionTokenRow(
