@@ -609,7 +609,12 @@ async def authenticate_bridge_token(
     scopes = frozenset(str(scope) for scope in _json_list(row.scopes))
     if required_scope and "*" not in scopes and required_scope not in scopes:
         raise ExternalAgentPermissionError(f"Bridge token is missing scope: {required_scope}")
-    row.last_used_at = utcnow()
+    now = utcnow()
+    row.last_used_at = now
+    connection.last_seen_at = now
+    connection.last_error = None
+    if str(connection.status or "").strip().lower() == "pending":
+        connection.status = "configured"
     return AgentBridgePrincipal(
         connection_id=str(row.connection_id),
         org_id=str(row.org_id),

@@ -52,7 +52,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 "Submit a progress or status signal from a personal tool into IloSpace. "
                 "This is the default tool for automatic hooks and routine work updates: "
                 "send what happened, plus hints like repo, branch, task, and files touched. "
-                "Do not choose a thread, project, or teammate target here; IloSpace and Ilo "
+                "Do not choose a thread, project, or teammate target here; IloSpace and Illo "
                 "decide whether to store, route, summarize, ask, or ignore the signal. "
                 "Use direct thread tools only when the user explicitly asks for a visible "
                 "thread/message in a known destination."
@@ -155,8 +155,8 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 "with teammates, publish findings into Illo, or start a team-visible "
                 "discussion. For automatic hooks and routine progress, prefer "
                 f"{SIGNAL_TOOL_NAME} so IloSpace can route the signal. Set trigger_illo "
-                "only when the user wants Ilo to actively respond or the message explicitly "
-                "mentions Ilo."
+                "only when the user wants Illo to actively respond or the message explicitly "
+                "mentions Illo."
             ),
             {
                 "title": {"type": "string", "description": "Thread title visible in Illo."},
@@ -317,6 +317,27 @@ def _signal_hints(arguments: dict[str, Any]) -> dict[str, Any]:
     return hints
 
 
+def _signal_payload(arguments: dict[str, Any], *, summary: str, origin: str, hints: dict[str, Any]) -> dict[str, Any]:
+    payload = _clean_dict(arguments.get("payload"))
+    source_tool = str(hints.get("source_tool") or arguments.get("source_tool") or "").strip().lower()
+    if "checkpoint" not in payload and (origin == "codex.progress" or source_tool == "codex"):
+        payload["checkpoint"] = {
+            key: value
+            for key, value in {
+                "summary": summary,
+                "source_tool": hints.get("source_tool") or "codex",
+                "repo": hints.get("repo"),
+                "branch": hints.get("branch"),
+                "task_title": hints.get("task_title"),
+                "files_touched": hints.get("files_touched"),
+                "session_id": hints.get("session_id"),
+                "run_id": hints.get("run_id"),
+            }.items()
+            if value not in (None, "", [])
+        }
+    return payload
+
+
 def _build_signal_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
     forbidden = sorted(_FORBIDDEN_SIGNAL_TARGET_FIELDS.intersection(arguments))
     if forbidden:
@@ -327,12 +348,14 @@ def _build_signal_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
     summary = _clean_optional_string(arguments.get("summary"))
     if not summary:
         raise ValueError(f"{SIGNAL_TOOL_NAME} requires a non-empty summary")
+    origin = _clean_optional_string(arguments.get("origin")) or "codex.progress"
+    hints = _signal_hints(arguments)
     return {
         "kind": "signal",
-        "origin": _clean_optional_string(arguments.get("origin")) or "codex.progress",
-        "payload": _clean_dict(arguments.get("payload")),
+        "origin": origin,
+        "payload": _signal_payload(arguments, summary=summary, origin=origin, hints=hints),
         "summary": summary,
-        "hints": _signal_hints(arguments),
+        "hints": hints,
         "desired_outcome": _clean_optional_string(arguments.get("desired_outcome")),
         "idempotency_key": _clean_optional_string(arguments.get("idempotency_key")),
     }

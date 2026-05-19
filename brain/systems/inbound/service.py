@@ -86,7 +86,7 @@ async def create_source_policy(
     metadata: Mapping[str, Any] | None = None,
     enabled: bool = True,
 ) -> InboundSourcePolicyRow:
-    """Create an Ilo-configurable source policy record."""
+    """Create an Illo-configurable source policy record."""
 
     policy = InboundSourcePolicyRow(
         org_id=str(org_id),
@@ -696,7 +696,7 @@ def _validate_schema_config(schema_config: Mapping[str, Any], envelope: Mapping[
             if path:
                 required_paths.append(str(path))
     root = _path_root(envelope)
-    missing = [path for path in required_paths if _extract_path(root, str(path)) is _MISSING]
+    missing = [path for path in required_paths if _required_path_missing(_extract_path(root, str(path)))]
     if missing:
         raise InboundValidationError(f"Missing required inbound field(s): {', '.join(sorted(missing))}")
 
@@ -787,11 +787,11 @@ async def _queue_illo_triage(
 
     origin = str(normalized.get("origin") or event.origin)
     source_name = context.display_name or context.source_kind or "external source"
-    title = _truncate(f"Inbound signal needs Ilo triage: {origin}", 180)
+    title = _truncate(f"Inbound signal needs Illo triage: {origin}", 180)
     idea = Idea(
         title=title,
         description=_truncate(
-            f"{source_name} sent an inbound signal that needs Ilo to decide the workspace outcome.",
+            f"{source_name} sent an inbound signal that needs Illo to decide the workspace outcome.",
             500,
         ),
         status="emerged",
@@ -893,7 +893,7 @@ def _triage_thread_message(
 ) -> str:
     origin = str(normalized.get("origin") or event.origin)
     lines = [
-        "An inbound signal needs Ilo triage.",
+        "An inbound signal needs Illo triage.",
         "",
         f"Reason: {reason}",
         f"Inbound event: {event.id}",
@@ -1060,12 +1060,19 @@ class _Missing:
 _MISSING = _Missing()
 
 
+def _required_path_missing(value: Any) -> bool:
+    if value is _MISSING or value is None:
+        return True
+    return isinstance(value, str) and not value.strip()
+
+
 def _path_root(envelope: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "envelope": dict(envelope),
         "payload": dict(envelope.get("payload") or {}),
         "hints": dict(envelope.get("hints") or {}),
         "summary": envelope.get("summary"),
+        "desired_outcome": envelope.get("desired_outcome"),
         "origin": envelope.get("origin"),
     }
 

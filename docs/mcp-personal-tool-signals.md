@@ -6,7 +6,7 @@ Parent PRD: `docs/prd-inbound-coordination-layer.md`
 ## Purpose
 
 Personal tools such as Codex, Claude Code, OpenCode, and local scripts should
-submit work progress to IloSpace as signals. They should not decide which Ilo
+submit work progress to IloSpace as signals. They should not decide which Illo
 thread, project, pin, or teammate should receive the update.
 
 The default hosted MCP tool is:
@@ -26,7 +26,19 @@ publishing only.
 {
   "kind": "signal",
   "origin": "codex.progress",
-  "payload": {},
+  "payload": {
+    "checkpoint": {
+      "summary": "Implemented the MCP submit-signal tool and tests.",
+      "source_tool": "codex",
+      "repo": "illospace-project",
+      "branch": "codex/mcp-submit-signal",
+      "task_title": "MCP personal-tool signal lane",
+      "files_touched": [
+        "brain/app/api/routers/agent_mcp.py",
+        "tests/test_external_agent_routes.py"
+      ]
+    }
+  },
   "summary": "Implemented the MCP submit-signal tool and tests.",
   "hints": {
     "source_tool": "codex",
@@ -69,6 +81,11 @@ has happened, such as:
 - a handoff summary is needed before stopping work.
 
 Hooks should avoid sending noise for every command, file read, or tiny edit.
+
+For `origin = codex.progress`, the hosted MCP adapter now backfills
+`payload.checkpoint` from the top-level summary and hints when callers do not
+provide one. This keeps simple hooks compatible with policies that require a
+Codex checkpoint while preserving any explicit payload fields the caller sends.
 
 ## Example Arguments
 

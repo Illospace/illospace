@@ -131,26 +131,36 @@ async def _maybe_await(value):
 
 
 async def _github_secret_names(user_id: str, org_id: str | None) -> list[str]:
+    def append_names(secrets: Any, *, github_like_only: bool = False) -> None:
+        for secret in (secrets if isinstance(secrets, list) else []):
+            name = _clean_text(secret.get("key_name") if isinstance(secret, dict) else None)
+            if not name or name in seen:
+                continue
+            if github_like_only and "github" not in name.lower() and name.upper() not in {"GH_TOKEN"}:
+                continue
+            seen.add(name)
+            names.append(name)
+
+    names: list[str] = []
+    seen: set[str] = set()
     try:
         candidates = await _maybe_await(list_secrets(user_id, category="github", org_id=org_id))
     except Exception:
         candidates = []
-    names: list[str] = []
-    seen: set[str] = set()
-    for secret in candidates:
-        name = _clean_text(secret.get("key_name") if isinstance(secret, dict) else None)
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        names.append(name)
+    append_names(candidates)
+    try:
+        general_candidates = await _maybe_await(list_secrets(user_id, org_id=org_id))
+    except Exception:
+        general_candidates = []
+    append_names(general_candidates, github_like_only=True)
     return names[:5]
 
 
 async def _token_candidates(resource: dict[str, Any], user_id: str | None, org_id: str | None) -> list[tuple[str | None, str | None]]:
     explicit_key = _vault_key_from_resource(resource)
-    candidates: list[tuple[str | None, str | None]] = [] if explicit_key else [(None, None)]
+    candidates: list[tuple[str | None, str | None]] = []
     if not user_id:
-        return candidates or [(None, None)]
+        return [(None, None)]
 
     key_names = []
     if explicit_key:
@@ -174,8 +184,7 @@ async def _token_candidates(resource: dict[str, Any], user_id: str | None, org_i
             token = None
         if token:
             candidates.append((key_name, token.strip()))
-    if explicit_key:
-        candidates.append((None, None))
+    candidates.append((None, None))
     return candidates
 
 

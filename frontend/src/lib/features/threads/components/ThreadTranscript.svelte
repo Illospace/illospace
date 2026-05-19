@@ -1414,9 +1414,14 @@
   }
 
   .thread-panel-header {
+    --thread-header-status-halo-clearance: 8px;
     display: grid;
     overflow: visible;
-    padding: 0 2px 14px 0;
+    padding:
+      var(--thread-header-status-halo-clearance)
+      2px
+      14px
+      var(--thread-header-status-halo-clearance);
   }
 
   .thread-header-title-row {
@@ -3049,7 +3054,11 @@
 
   @media (max-width: 720px) {
     .thread-panel-header {
-      padding: 0 0 8px;
+      padding:
+        var(--thread-header-status-halo-clearance)
+        0
+        8px
+        var(--thread-header-status-halo-clearance);
     }
 
     .run-compact-summary {

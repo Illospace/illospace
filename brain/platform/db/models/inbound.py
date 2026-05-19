@@ -332,7 +332,7 @@ class InboundEventRow(Base, CreatedAtMixin):
 
 
 class InboundDecisionReceiptRow(Base, CreatedAtMixin):
-    """Durable receipt for deterministic or Ilo-handled inbound decisions."""
+    """Durable receipt for deterministic or Illo-handled inbound decisions."""
 
     __tablename__ = "inbound_decision_receipts"
     __table_args__ = (
