@@ -1298,6 +1298,12 @@ async def _latest_run_artifact_text(session: AsyncSession, run_id: int) -> str:
     return str(getattr(row, "text", None) or "") if row is not None else ""
 
 
+async def _refresh_task_if_supported(session: AsyncSession, task: ExternalAgentTaskRow) -> None:
+    refresh = getattr(session, "refresh", None)
+    if refresh is not None:
+        await refresh(task)
+
+
 async def create_headless_ask(
     session: AsyncSession,
     principal: AgentBridgePrincipal,
@@ -1386,6 +1392,7 @@ async def create_headless_ask(
         producer="illo",
     )
     await session.flush()
+    await _refresh_task_if_supported(session, task)
     return task
 
 
@@ -1412,6 +1419,7 @@ async def get_headless_ask(
                 task.error = task.error or f"Illo ask ended with status {run_status.value}"
                 task.failed_at = task.failed_at or utcnow()
             await session.flush()
+            await _refresh_task_if_supported(session, task)
     return {
         "ask": await serialize_task(task, include_events=True, session=session),
         "run": {
