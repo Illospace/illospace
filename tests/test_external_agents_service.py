@@ -46,6 +46,7 @@ def test_bridge_token_helpers_are_stable_and_scoped():
         service.SCOPE_WORKSPACE_READ,
         service.SCOPE_ILLO_ASK,
         service.SCOPE_ILLO_THREAD_CREATE,
+        service.SCOPE_SIGNAL_SUBMIT,
     }.issubset(set(service.DEFAULT_BRIDGE_SCOPES))
 
 

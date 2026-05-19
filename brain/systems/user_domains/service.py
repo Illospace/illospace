@@ -414,6 +414,7 @@ class AsyncDomainService:
         actor_kind: str = "human",
         run_id: int | None = None,
         idea_id: str | None = None,
+        reason: str | None = None,
     ) -> DomainRecord:
         domain = await self.get_domain(org_id, domain_id)
         obj = await self.get_object_type(domain.id, object_key)
@@ -444,6 +445,7 @@ class AsyncDomainService:
             run_id=run_id,
             idea_id=idea_id,
             after=await self.serialize_record(record),
+            reason=reason,
         )
         await self.session.refresh(record)
         return record
@@ -461,6 +463,7 @@ class AsyncDomainService:
         actor_kind: str = "human",
         run_id: int | None = None,
         idea_id: str | None = None,
+        reason: str | None = None,
     ) -> DomainRecord:
         record = await self.get_record(org_id, domain_id, record_id)
         if expected_version is not None and record.version != expected_version:
@@ -497,6 +500,7 @@ class AsyncDomainService:
             before=before,
             after=await self.serialize_record(record),
             patch=data_patch,
+            reason=reason,
         )
         await self.session.refresh(record)
         return record

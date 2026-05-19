@@ -20,9 +20,12 @@ from brain.app.api.routers.agent_bridge import (
 from brain.app.api.routers.external_agent_errors import raise_external_agent_http_error
 from brain.app.mentions import classify_mention_intent
 from brain.systems.external_agents import service as external_agents
+from brain.systems.inbound.service import submit_inbound_envelope as _submit_inbound_envelope
 
 
 router = APIRouter(tags=["agent-mcp"], dependencies=[Depends(rate_limit)])
+
+SIGNAL_TOOL_NAME = "illo_submit_signal"
 
 
 ToolHandler = Callable[
@@ -43,6 +46,68 @@ def _tool_schema(description: str, properties: dict[str, Any], required: list[st
 
 
 MCP_TOOLS: dict[str, dict[str, Any]] = {
+    SIGNAL_TOOL_NAME: {
+        **_tool_schema(
+            (
+                "Submit a progress or status signal from a personal tool into IloSpace. "
+                "This is the default tool for automatic hooks and routine work updates: "
+                "send what happened, plus hints like repo, branch, task, and files touched. "
+                "Do not choose a thread, project, or teammate target here; IloSpace and Ilo "
+                "decide whether to store, route, summarize, ask, or ignore the signal. "
+                "Use direct thread tools only when the user explicitly asks for a visible "
+                "thread/message in a known destination."
+            ),
+            {
+                "summary": {
+                    "type": "string",
+                    "description": "Concise human-readable progress summary from the personal tool.",
+                },
+                "origin": {
+                    "type": "string",
+                    "description": "Stable source event name, for example codex.progress.",
+                    "default": "codex.progress",
+                },
+                "payload": {
+                    "type": "object",
+                    "description": "Optional structured event payload from the personal tool.",
+                    "default": {},
+                },
+                "hints": {
+                    "type": "object",
+                    "description": "Optional routing/context hints. These are not direct workspace targets.",
+                    "default": {},
+                },
+                "desired_outcome": {
+                    "type": "string",
+                    "description": "Optional intent for IloSpace, such as team_update, store_only, or ask_illo.",
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Optional stable key so repeated hook submissions do not duplicate work.",
+                },
+                "source_tool": {
+                    "type": "string",
+                    "description": "Personal tool name, for example codex, claude-code, or opencode.",
+                    "default": "codex",
+                },
+                "repo": {"type": "string", "description": "Repository or workspace hint."},
+                "branch": {"type": "string", "description": "Branch/worktree hint."},
+                "task_title": {"type": "string", "description": "Current task title or short objective."},
+                "files_touched": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Files or paths touched during the work session.",
+                    "default": [],
+                },
+                "session_id": {"type": "string", "description": "Optional personal-tool session id."},
+                "run_id": {"type": "string", "description": "Optional personal-tool run id."},
+                "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
+            },
+            ["summary"],
+        ),
+        "scope": external_agents.SCOPE_SIGNAL_SUBMIT,
+        "mutates_inbound": True,
+    },
     "illo_search_workspace": {
         **_tool_schema(
             (
@@ -85,10 +150,13 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
     "illo_create_thread": {
         **_tool_schema(
             (
-                "Create a visible Illo thread from personal-agent work. Use when the user "
-                "asks to share work with teammates, publish findings into Illo, or start "
-                "a team-visible discussion. Set trigger_illo only when the user wants Illo "
-                "to actively respond or the message explicitly mentions Illo."
+                "Advanced compatibility tool for creating a visible Illo thread from "
+                "personal-agent work. Use only when the user explicitly asks to share work "
+                "with teammates, publish findings into Illo, or start a team-visible "
+                "discussion. For automatic hooks and routine progress, prefer "
+                f"{SIGNAL_TOOL_NAME} so IloSpace can route the signal. Set trigger_illo "
+                "only when the user wants Ilo to actively respond or the message explicitly "
+                "mentions Ilo."
             ),
             {
                 "title": {"type": "string", "description": "Thread title visible in Illo."},
@@ -120,9 +188,10 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
     "illo_post_thread_message": {
         **_tool_schema(
             (
-                "Post a visible update into an existing Illo thread. Use for follow-ups, "
-                "status updates, final answers, or sharing new artifacts after reading "
-                "the thread with illo_get_thread."
+                "Advanced compatibility tool for posting a visible update into an existing "
+                "Illo thread. Use only when the user explicitly names or provides the thread "
+                "destination. For automatic hooks and routine progress, prefer "
+                f"{SIGNAL_TOOL_NAME} so IloSpace can route the signal."
             ),
             {
                 "idea_id": {"type": "string", "description": "Existing Illo idea/thread id."},
@@ -217,6 +286,118 @@ def _tool_metadata(arguments: dict[str, Any], *, tool_name: str, trigger_illo: b
     return metadata
 
 
+_FORBIDDEN_SIGNAL_TARGET_FIELDS = frozenset(
+    {
+        "idea_id",
+        "thread_id",
+        "target_id",
+        "target",
+        "project_id",
+        "pin_id",
+        "teammate_user_ids",
+        "trigger_illo",
+    }
+)
+
+
+def _clean_optional_string(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _signal_hints(arguments: dict[str, Any]) -> dict[str, Any]:
+    hints = _clean_dict(arguments.get("hints"))
+    for key in ("source_tool", "repo", "branch", "task_title", "session_id", "run_id"):
+        value = _clean_optional_string(arguments.get(key))
+        if value:
+            hints.setdefault(key, value)
+    files_touched = _clean_string_list(arguments.get("files_touched"))
+    if files_touched:
+        hints.setdefault("files_touched", files_touched)
+    return hints
+
+
+def _build_signal_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
+    forbidden = sorted(_FORBIDDEN_SIGNAL_TARGET_FIELDS.intersection(arguments))
+    if forbidden:
+        raise ValueError(
+            f"{SIGNAL_TOOL_NAME} accepts context hints, not direct workspace targets. "
+            f"Remove top-level field(s): {', '.join(forbidden)}"
+        )
+    summary = _clean_optional_string(arguments.get("summary"))
+    if not summary:
+        raise ValueError(f"{SIGNAL_TOOL_NAME} requires a non-empty summary")
+    return {
+        "kind": "signal",
+        "origin": _clean_optional_string(arguments.get("origin")) or "codex.progress",
+        "payload": _clean_dict(arguments.get("payload")),
+        "summary": summary,
+        "hints": _signal_hints(arguments),
+        "desired_outcome": _clean_optional_string(arguments.get("desired_outcome")),
+        "idempotency_key": _clean_optional_string(arguments.get("idempotency_key")),
+    }
+
+
+def _signal_connection(principal: external_agents.AgentBridgePrincipal) -> dict[str, Any]:
+    return {
+        "id": principal.connection_id,
+        "org_id": principal.org_id,
+        "owner_user_id": principal.owner_user_id,
+        "token_id": principal.token_id,
+        "display_name": principal.connection_display_name,
+        "agent_kind": principal.agent_kind,
+        "source_type": "personal_tool",
+        "capabilities": ["submit_signals"],
+    }
+
+
+def _signal_source_actor(principal: external_agents.AgentBridgePrincipal) -> dict[str, Any]:
+    return {
+        "kind": "external_source_connection",
+        "connection_id": principal.connection_id,
+        "display_name": principal.connection_display_name,
+        "agent_kind": principal.agent_kind,
+    }
+
+
+def _signal_ingress_context(
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "surface": "mcp_personal_tool",
+        "tool_name": SIGNAL_TOOL_NAME,
+        "source_actor": _signal_source_actor(principal),
+        "authority_principal": {
+            "kind": "user",
+            "user_id": principal.owner_user_id,
+            "org_id": principal.org_id,
+        },
+        "auth": {
+            "token_id": principal.token_id,
+            "scopes": sorted(principal.scopes),
+        },
+        "metadata": _tool_metadata(arguments, tool_name=SIGNAL_TOOL_NAME),
+    }
+
+
+async def submit_inbound_envelope(
+    db: AsyncSession,
+    *,
+    connection: dict[str, Any],
+    envelope: dict[str, Any],
+    ingress_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Adapter to the shared inbound service, kept patchable for route tests."""
+
+    return await _submit_inbound_envelope(
+        db,
+        connection=connection,
+        envelope=envelope,
+        ingress_context=ingress_context,
+    )
+
+
 async def require_mcp_principal(
     request: Request,
     x_illo_bridge_token: str | None = Header(default=None, alias="X-Illo-Bridge-Token"),
@@ -242,6 +423,20 @@ def _list_tools(principal: external_agents.AgentBridgePrincipal) -> list[dict[st
             }
         )
     return tools
+
+
+async def _tool_submit_signal(
+    db: AsyncSession,
+    principal: external_agents.AgentBridgePrincipal,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    envelope = _build_signal_envelope(arguments)
+    return await submit_inbound_envelope(
+        db,
+        connection=_signal_connection(principal),
+        envelope=envelope,
+        ingress_context=_signal_ingress_context(principal, arguments),
+    )
 
 
 async def _tool_search_workspace(
@@ -377,6 +572,7 @@ async def _add_thread_trigger_result_if_needed(
 
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
+    SIGNAL_TOOL_NAME: _tool_submit_signal,
     "illo_search_workspace": _tool_search_workspace,
     "illo_get_thread": _tool_get_thread,
     "illo_get_team_members": _tool_get_team_members,
@@ -456,6 +652,8 @@ async def _handle_mcp_request(
             tool_payload = await TOOL_HANDLERS[tool_name](db, principal, arguments)
         except Exception as exc:
             raise_external_agent_http_error(exc)
+        if spec.get("mutates_inbound"):
+            await db.commit()
         if spec.get("mutates_thread"):
             await _add_thread_trigger_result_if_needed(
                 db,
