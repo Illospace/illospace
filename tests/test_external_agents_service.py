@@ -2,25 +2,57 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompiler
+from sqlalchemy.schema import CreateTable
 
+from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
+from brain.platform.db.models.external_agent import (
+    ExternalAgentConnectionRow,
+    ExternalAgentTaskArtifactRow,
+    ExternalAgentTaskEventRow,
+    ExternalAgentTaskRow,
+)
 from brain.systems.external_agents import service
 from brain.platform.db.models.idea import Idea, IdeaThread, UserMention
 from brain.platform.db.models.notification import (
     NOTIFICATION_KIND_WORKSPACE_MENTION,
     NotificationEvent,
 )
-from brain.platform.db.models.org import User
+from brain.platform.db.models.org import Org, User
 
 
 ORG_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1"
 OWNER_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1"
 TEAMMATE_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2"
+
+
+def _patch_sqlite_for_external_agent_tables():
+    if not hasattr(SQLiteTypeCompiler, "visit_JSONB"):
+        SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_BIGINT = lambda self, type_, **kw: "INTEGER"
+
+    original = SQLiteDDLCompiler.get_column_default_string
+    if getattr(original, "_external_agent_patch", False):
+        return
+
+    def patched(self, column, **kw):
+        result = original(self, column, **kw)
+        if result:
+            result = re.sub(r"::jsonb", "", result)
+            result = result.replace("NOW()", "CURRENT_TIMESTAMP")
+            result = result.replace("TRUE", "1").replace("FALSE", "0")
+        return result
+
+    patched._external_agent_patch = True
+    SQLiteDDLCompiler.get_column_default_string = patched
 
 
 def _load_bridge_module():
@@ -116,6 +148,70 @@ async def test_headless_ask_blocks_thread_mutation_tools():
     assert request_source["surface"] == "personal_agent_bridge"
     assert request_source["personal_agent"] == "Hermes"
     assert request_source["visibility"] == "headless_private"
+
+
+@pytest.fixture
+async def external_agent_session(async_sqlite_session_factory):
+    _patch_sqlite_for_external_agent_tables()
+    session = await async_sqlite_session_factory(
+        [
+            Org.__table__,
+            User.__table__,
+            ExternalAgentConnectionRow.__table__,
+            ExternalAgentTaskRow.__table__,
+            ExternalAgentTaskEventRow.__table__,
+            ExternalAgentTaskArtifactRow.__table__,
+            AgentRunRow.__table__,
+            AgentRunEventRow.__table__,
+            AgentRunArtifactRow.__table__,
+        ]
+    )
+    session.add_all(
+        [
+            Org(id="org-1", name="Org", slug="org"),
+            User(id="user-1", org_id="org-1", name="User", email="user@example.com", approved=True),
+            ExternalAgentConnectionRow(
+                id="conn-1",
+                org_id="org-1",
+                owner_user_id="user-1",
+                display_name="Codex",
+                agent_kind="codex",
+                transport="hosted_mcp",
+            ),
+        ]
+    )
+    await session.flush()
+    return session
+
+
+@pytest.mark.asyncio
+async def test_headless_ask_serializes_after_run_admission_without_lazy_loading(
+    external_agent_session,
+):
+    principal = service.AgentBridgePrincipal(
+        connection_id="conn-1",
+        org_id="org-1",
+        owner_user_id="user-1",
+        token_id="token-1",
+        scopes=frozenset(service.DEFAULT_BRIDGE_SCOPES),
+        connection_display_name="Codex",
+        agent_kind="codex",
+    )
+
+    task = await service.create_headless_ask(
+        external_agent_session,
+        principal,
+        question="What context matters?",
+        context={"topic": "inbound smoke"},
+        metadata={"mcp_tool": "illo_ask"},
+    )
+    payload = await service.serialize_task(task, include_events=True, session=external_agent_session)
+
+    assert payload["id"] == task.id
+    assert payload["status"] == "submitted"
+    assert payload["illo_run_id"] is not None
+    assert payload["updated_at"]
+    assert [event["event_type"] for event in payload["events"]] == ["external_task.ask_illo_submitted"]
 
 
 class _ScalarResult:
