@@ -16,6 +16,7 @@ from brain.systems.runs.tool_catalog.handlers.cortex_reply import *  # noqa: F40
 from brain.systems.runs.tool_catalog.handlers.cycles import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.ideas import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.files import *  # noqa: F401,F403
+from brain.systems.runs.tool_catalog.handlers.inbound import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.projects import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.session_tools import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.skills import *  # noqa: F401,F403
@@ -51,6 +52,7 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_read_thread_messages",
     "_handle_manage_cycle",
     "_handle_manage_domain",
+    "_handle_manage_inbound",
     "_handle_manage_idea",
     "_handle_manage_project",
     "_handle_manage_skill",

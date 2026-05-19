@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.domain import DomainRecord
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
+from brain.platform.db.models.idea import Idea, IdeaThread
 from brain.platform.db.models.inbound import (
     InboundDecisionReceiptRow,
     InboundDomainProjectionKeyRow,
@@ -21,6 +23,7 @@ from brain.platform.db.models.inbound import (
     InboundSourcePolicyRow,
 )
 from brain.systems.external_agents import service as external_agents
+from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.user_domains.service import AsyncDomainService, DomainError, DomainNotFound
 
 
@@ -42,6 +45,8 @@ VALID_PROJECTION_FAILURE_STATUSES = frozenset(
 VALID_PROJECTION_UPSERT_MODES = frozenset({"upsert", "create_only", "update_only"})
 MAX_INBOUND_KIND_LENGTH = 40
 MAX_INBOUND_ORIGIN_LENGTH = 240
+MAX_TRIAGE_MESSAGE_CHARS = 8000
+MAX_TRIAGE_PAYLOAD_CHARS = 5000
 
 
 class InboundValidationError(ValueError):
@@ -191,9 +196,11 @@ async def submit_inbound_envelope(
             origin=normalized["origin"],
         )
         if policy is None:
-            return await _complete_event(
+            return await _complete_event_with_illo_triage(
                 session,
                 event,
+                context=context,
+                normalized=normalized,
                 policy=None,
                 status=STATUS_REVIEW_REQUIRED,
                 action_type=ACTION_ILO_REQUIRED,
@@ -206,23 +213,27 @@ async def submit_inbound_envelope(
         _validate_schema_config(policy.schema_config or {}, normalized)
         projection = await _projection_for_policy(session, policy)
         if projection is None:
-            return await _complete_event(
+            return await _complete_event_with_illo_triage(
                 session,
                 event,
+                context=context,
+                normalized=normalized,
                 policy=policy,
                 status=STATUS_REVIEW_REQUIRED,
-                action_type=ACTION_STORE_ONLY,
+                action_type=ACTION_ILO_REQUIRED,
                 action_result={"reason": "matched_policy_without_projection"},
                 confidence=None,
                 reasoning_summary="Source policy matched, but no deterministic projection is configured.",
             )
         if not _policy_allows_domain_projection(policy):
-            return await _complete_event(
+            return await _complete_event_with_illo_triage(
                 session,
                 event,
+                context=context,
+                normalized=normalized,
                 policy=policy,
                 status=STATUS_REVIEW_REQUIRED,
-                action_type=ACTION_STORE_ONLY,
+                action_type=ACTION_ILO_REQUIRED,
                 action_result={"reason": "domain_projection_not_allowed"},
                 confidence=None,
                 reasoning_summary="Source policy matched a projection, but the policy does not allow projection writes.",
@@ -257,6 +268,20 @@ async def submit_inbound_envelope(
         status = projection.validation_failure_status if projection is not None else STATUS_QUARANTINED
         if status not in VALID_PROJECTION_FAILURE_STATUSES:
             status = STATUS_REVIEW_REQUIRED
+        if status == STATUS_REVIEW_REQUIRED:
+            return await _complete_event_with_illo_triage(
+                session,
+                event,
+                context=context,
+                normalized=normalized,
+                policy=policy,
+                status=status,
+                action_type=ACTION_ILO_REQUIRED,
+                action_result={"reason": "validation_error"},
+                confidence=None,
+                error=str(exc),
+                reasoning_summary=str(exc),
+            )
         return await _complete_event(
             session,
             event,
@@ -706,6 +731,240 @@ async def _add_receipt(
     return receipt
 
 
+async def _complete_event_with_illo_triage(
+    session: AsyncSession,
+    event: InboundEventRow,
+    *,
+    context: _ConnectionContext,
+    normalized: Mapping[str, Any],
+    policy: InboundSourcePolicyRow | None,
+    status: str,
+    action_type: str,
+    action_result: Mapping[str, Any],
+    confidence: float | None,
+    error: str | None = None,
+    reasoning_summary: str | None = None,
+    reusable_pattern_candidate: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    triage = await _queue_illo_triage(
+        session,
+        context=context,
+        event=event,
+        normalized=normalized,
+        policy=policy,
+        reason=str(action_result.get("reason") or status),
+        reasoning_summary=reasoning_summary,
+    )
+    merged_result = {**dict(action_result), "triage": triage}
+    return await _complete_event(
+        session,
+        event,
+        policy=policy,
+        status=status,
+        action_type=action_type,
+        action_result=merged_result,
+        confidence=confidence,
+        error=error,
+        target=_triage_target(triage),
+        tool_use=_triage_tool_use(triage),
+        reasoning_summary=reasoning_summary,
+        reusable_pattern_candidate=reusable_pattern_candidate,
+    )
+
+
+async def _queue_illo_triage(
+    session: AsyncSession,
+    *,
+    context: _ConnectionContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+    policy: InboundSourcePolicyRow | None,
+    reason: str,
+    reasoning_summary: str | None,
+) -> dict[str, Any]:
+    if not context.owner_user_id:
+        return {"status": "skipped", "reason": "missing_authority_user"}
+
+    origin = str(normalized.get("origin") or event.origin)
+    source_name = context.display_name or context.source_kind or "external source"
+    title = _truncate(f"Inbound signal needs Ilo triage: {origin}", 180)
+    idea = Idea(
+        title=title,
+        description=_truncate(
+            f"{source_name} sent an inbound signal that needs Ilo to decide the workspace outcome.",
+            500,
+        ),
+        status="emerged",
+        origin="inbound_signal",
+        origin_ref=f"inbound_event:{event.id}",
+        user_id=context.owner_user_id,
+        org_id=context.org_id,
+        agent_details={
+            "inbound_triage": {
+                "event_id": str(event.id),
+                "origin": origin,
+                "reason": reason,
+                "connection_id": context.connection_id,
+                "policy_id": str(policy.id) if policy is not None else None,
+            }
+        },
+    )
+    session.add(idea)
+    await session.flush()
+
+    message = _triage_thread_message(
+        context=context,
+        event=event,
+        normalized=normalized,
+        policy=policy,
+        reason=reason,
+        reasoning_summary=reasoning_summary,
+    )
+    thread_message = IdeaThread(
+        idea_id=str(idea.id),
+        role="user",
+        content=message,
+        attachments=[],
+        metadata_={
+            "source": "inbound.triage",
+            "event_id": str(event.id),
+            "origin": origin,
+            "reason": reason,
+            "connection_id": context.connection_id,
+            "policy_id": str(policy.id) if policy is not None else None,
+            "authority_user_id": context.owner_user_id,
+        },
+        message_type="message",
+        user_id=context.owner_user_id,
+    )
+    session.add(thread_message)
+    await session.flush()
+
+    result = await admit_work(
+        session,
+        WorkIntakeEvent(
+            source="inbound",
+            event_type="inbound.triage_required",
+            org_id=context.org_id,
+            actor={
+                "id": context.owner_user_id,
+                "org_id": context.org_id,
+                "principal_type": "external_source_authority",
+                "name": source_name,
+            },
+            target={"kind": "cortex_idea", "idea_id": str(idea.id)},
+            payload={
+                "message": message,
+                "metadata": {
+                    "execution_profile": "fast",
+                    "thread_message_id": thread_message.id,
+                    "inbound_event": _inbound_event_metadata(context, event, normalized, policy),
+                },
+            },
+            policy={
+                "producer": "inbound",
+                "idempotency_key": f"inbound:triage:{event.id}",
+                "run_event": "inbound_triage_required",
+            },
+        ),
+    )
+
+    triage = {
+        "status": "queued" if result.ok else "run_admission_failed",
+        "idea_id": str(idea.id),
+        "thread_message_id": thread_message.id,
+        "event_id": str(event.id),
+    }
+    if result.run_id is not None:
+        triage["run_id"] = result.run_id
+    if result.skipped_reason:
+        triage["error"] = result.skipped_reason
+    return triage
+
+
+def _triage_thread_message(
+    *,
+    context: _ConnectionContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+    policy: InboundSourcePolicyRow | None,
+    reason: str,
+    reasoning_summary: str | None,
+) -> str:
+    origin = str(normalized.get("origin") or event.origin)
+    lines = [
+        "An inbound signal needs Ilo triage.",
+        "",
+        f"Reason: {reason}",
+        f"Inbound event: {event.id}",
+        f"Origin: {origin}",
+        f"Source: {context.display_name or context.source_kind or context.connection_id}",
+    ]
+    if normalized.get("summary"):
+        lines.append(f"Summary: {normalized.get('summary')}")
+    if normalized.get("desired_outcome"):
+        lines.append(f"Desired outcome from source: {normalized.get('desired_outcome')}")
+    if policy is not None:
+        lines.append(f"Matched policy: {policy.name} ({policy.id})")
+        if policy.instructions:
+            lines.extend(["", "Policy instructions:", str(policy.instructions)])
+    if reasoning_summary:
+        lines.extend(["", "Preflight note:", reasoning_summary])
+    hints = normalized.get("hints")
+    if hints:
+        lines.extend(["", "Hints:", _json_preview(hints, limit=1600)])
+    lines.extend(
+        [
+            "",
+            "Payload preview:",
+            _json_preview(normalized.get("payload") or {}, limit=MAX_TRIAGE_PAYLOAD_CHARS),
+            "",
+            "Decide the appropriate IloSpace outcome using the available tools and skills. "
+            "A workspace mutation is optional; store, summarize, ask, schedule, or no-op when that is best.",
+        ]
+    )
+    return _truncate("\n".join(lines), MAX_TRIAGE_MESSAGE_CHARS)
+
+
+def _inbound_event_metadata(
+    context: _ConnectionContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+    policy: InboundSourcePolicyRow | None,
+) -> dict[str, Any]:
+    return {
+        "event_id": str(event.id),
+        "origin": str(normalized.get("origin") or event.origin),
+        "kind": str(normalized.get("kind") or event.kind),
+        "connection_id": context.connection_id,
+        "token_id": context.token_id,
+        "display_name": context.display_name,
+        "source_kind": context.source_kind,
+        "authority_user_id": context.owner_user_id,
+        "policy_id": str(policy.id) if policy is not None else None,
+        "summary": normalized.get("summary"),
+        "desired_outcome": normalized.get("desired_outcome"),
+    }
+
+
+def _triage_target(triage: Mapping[str, Any]) -> dict[str, Any]:
+    if not triage.get("idea_id"):
+        return {}
+    return {
+        "kind": "cortex_idea",
+        "idea_id": triage.get("idea_id"),
+        **({"run_id": triage.get("run_id")} if triage.get("run_id") is not None else {}),
+    }
+
+
+def _triage_tool_use(triage: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "illo_triage",
+        "status": triage.get("status"),
+        **({"run_id": triage.get("run_id")} if triage.get("run_id") is not None else {}),
+    }
+
+
 async def _complete_event(
     session: AsyncSession,
     event: InboundEventRow,
@@ -853,6 +1112,21 @@ def _string_value(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _json_preview(value: Any, *, limit: int) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, default=str)
+    except TypeError:
+        text = str(value)
+    return _truncate(text, limit)
+
+
+def _truncate(value: Any, limit: int) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(0, limit - 3)].rstrip()}..."
 
 
 def _json_safe(value: Any) -> Any:

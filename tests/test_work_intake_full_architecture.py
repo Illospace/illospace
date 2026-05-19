@@ -15,6 +15,7 @@ PRODUCT_RUN_PRODUCERS = {
     "brain/app/api/routers/cortex/_misc.py",
     "brain/systems/cycles/service.py",
     "brain/systems/external_agents/service.py",
+    "brain/systems/inbound/service.py",
     "brain/systems/runs/cortex/__init__.py",
     "brain/systems/runs/tool_catalog/handlers/ideas.py",
 }

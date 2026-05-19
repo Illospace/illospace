@@ -167,6 +167,7 @@ class TestIntegration:
     def test_handlers_include_extended(self):
         from brain.systems.runs.direct_agent import _get_tool_handlers
         handlers = _get_tool_handlers()
+        assert "manage_inbound" in handlers
         assert "parallel_tool_batch" in handlers
         assert "semantic_search" in handlers
         assert "file_summary" in handlers
@@ -176,6 +177,22 @@ class TestIntegration:
         assert "summarize_files_for_task" in handlers
         assert "trace_symbol" in handlers
         assert "build_implementation_map" in handlers
+
+    def test_illo_can_see_inbound_configuration_tool(self):
+        from brain.systems.runs.direct_agent import COORDINATOR_TOOLS, WORKER_TOOLS
+        from brain.systems.runs.tool_catalog.registry import action_policy_for_tool
+
+        coordinator_names = [tool["name"] for tool in COORDINATOR_TOOLS]
+        worker_names = [tool["name"] for tool in WORKER_TOOLS]
+
+        assert "manage_inbound" in coordinator_names
+        assert "manage_inbound" in worker_names
+        assert action_policy_for_tool("manage_inbound", kwargs={"action": "list_connections"}) is None
+        assert action_policy_for_tool("manage_inbound", kwargs={"action": "mint_token"}) == {
+            "risk": "high",
+            "reversibility": "variable",
+            "expected_effect": "mint a scoped source token for inbound signal submission",
+        }
 
     async def test_brain_recall_handler_injects_agent_context(self):
         from brain.systems.runs.execution_context import AgentExecutionContext, bind_agent_context

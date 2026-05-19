@@ -33,6 +33,7 @@ from brain.systems.runs.tool_catalog.handlers.cortex_reply import (
 from brain.systems.runs.tool_catalog.handlers.chat import _handle_post_chat_message
 from brain.systems.runs.tool_catalog.handlers.cycles import _handle_manage_cycle
 from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
+from brain.systems.runs.tool_catalog.handlers.inbound import _handle_manage_inbound
 from brain.systems.runs.tool_catalog.handlers.ideas import _handle_manage_idea
 from brain.systems.runs.tool_catalog.handlers.projects import _handle_manage_project
 from brain.systems.runs.tool_catalog.handlers.skills import _handle_manage_skill
@@ -194,6 +195,7 @@ def _get_tool_handlers(
         )(**kw),
         "manage_cycle": lambda **kw: _patched_private("_handle_manage_cycle", _handle_manage_cycle)(**kw),
         "manage_domain": lambda **kw: _patched_private("_handle_manage_domain", _handle_manage_domain)(**kw),
+        "manage_inbound": lambda **kw: _patched_private("_handle_manage_inbound", _handle_manage_inbound)(**kw),
         "manage_idea": lambda **kw: _patched_private("_handle_manage_idea", _handle_manage_idea)(**kw),
         "manage_project": lambda **kw: _patched_private("_handle_manage_project", _handle_manage_project)(**kw),
         "manage_skill": lambda **kw: _patched_private("_handle_manage_skill", _handle_manage_skill)(**kw),

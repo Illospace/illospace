@@ -1,8 +1,112 @@
 # PRD: Inbound Coordination Layer for IloSpace
 
-Status: draft for review  
+Status: living PRD; foundation shipped in PR #113, Ilo-admin configuration tool and Phase 2 triage handoff implemented in `codex/illo-inbound-admin-tools`
 Date: 2026-05-18  
 Owner: product/architecture discussion  
+
+## Implementation Status After PR #113 And Admin Tool Slice
+
+PR #113 merged the first foundation slice. The follow-up admin tool slice adds the missing Ilo-facing configuration surface for the deterministic inbound lane. Phase 2 adds the first active Ilo triage handoff for ambiguous inbound signals. Together, they still do **not** complete the entire PRD.
+
+The PRD intentionally describes a broader product direction: external tools send signals into IloSpace, IloSpace records and preflights them, and Ilo can configure every integration behavior by chatting with the user. The merged work delivered the shared ingress foundation and two concrete ingress lanes. The admin tool slice makes the shipped deterministic lane configurable by Ilo, without adding a manual configuration UI.
+
+### Shipped In PR #113
+
+- Shared inbound models and migration for inbound source connections, inbound events, receipts/effects, source policies, and Domain Projection support.
+- Internal `submit_inbound_envelope` service used by both webhook and MCP lanes.
+- Public `POST /webhooks` ingress through the deployed proxy.
+- Source identity/auth checks for inbound sources.
+- Origin policy matching for configured webhook/source policies.
+- Raw inbound event storage, status tracking, and idempotency behavior.
+- Domain Projection execution for configured projections that create/update existing IloSpace Domain records.
+- Hosted MCP `illo_submit_signal` tool for Codex-like personal tools.
+- MCP signal envelope construction with summary, origin, payload, hints, desired outcome, repo/branch/task/files/session metadata, and idempotency key.
+- MCP scope gate for signal submission using `signal:submit`.
+- Existing direct thread MCP tools preserved as advanced/compatibility surfaces and described as non-default for routine progress hooks.
+- Tests for webhook receipt, auth/scope behavior, origin policy matching, idempotency, Domain Projection, MCP signal envelope construction, MCP tool descriptions, async DB boundaries, models, migrations, and deploy safety.
+- Local real Docker smoke test covering webhook receipt, MCP-style signal receipt, idempotent replay, and Domain Projection before deployment.
+
+### Shipped In `codex/illo-inbound-admin-tools`
+
+- Ilo-facing `manage_inbound` tool registered for coordinator and worker agents.
+- Chat-configurable External Source Connections with user/org authority context.
+- Least-privilege token minting for inbound signal sources, defaulting to `signal:submit`.
+- Source token metadata listing/get and token revocation without re-exposing raw token secrets.
+- Source policy creation/update/list/get with origin patterns, envelope kinds, instructions, schema config, allowed actions, thresholds, review mode, metadata, and enabled/priority controls.
+- Domain Projection creation/update/list/get for deterministic writes into existing IloSpace Domains.
+- Policy/projection safety check that a projection policy belongs to the same connection.
+- Automatic `domain_projection.upsert` permission on the policy when Ilo creates a projection for that policy.
+- Inbound event listing/get with optional raw payload and normalized envelope details.
+- Decision receipt listing/get through event detail inspection.
+- Dry-run matching so Ilo can test a sample origin/payload against the current policy/projection config without storing an event.
+- Action manifest/read-only policy metadata so read operations stay inspectable and mutating config/token operations remain high-risk audited actions.
+- Tests proving Ilo can configure a connection, mint a scoped token, create policy/projection config, dry-run routing, process a real inbound envelope through that config, and inspect logs/receipts.
+
+### Shipped In Phase 2 Triage Handoff
+
+- Review-required inbound outcomes now create an inbound-origin Cortex Idea and seed a thread message for Ilo.
+- The triage thread message carries the signal reason, source identity, origin, summary, desired outcome, policy instructions when present, hints, and a bounded payload preview.
+- The inbound service admits an Ilo Cortex run through the shared `work_intake` API instead of writing to the run store directly.
+- Decision receipts for ambiguous events now persist the triage target (`cortex_idea`) and tool-use handoff (`illo_triage`) with run id when admission succeeds.
+- Webhook and MCP signals share the same triage path when no source policy matches.
+- Matched policies without a deterministic projection, and policies whose projection action is not allowed, route into Ilo triage instead of stopping as passive store-only review.
+- Projection validation failures configured as `review_required` route into Ilo triage; `quarantined` and `failed` outcomes remain terminal.
+- Tests prove ambiguous webhook/MCP signals queue triage runs, create thread context, persist receipt target/tool-use metadata, and preserve the work-intake architecture boundary.
+
+### Latest Progress In This Branch
+
+- Ran a behavior-preserving simplification pass over the new admin service and tool handler.
+- Simplified repeated response serialization in `manage_inbound`.
+- Consolidated repeated string-list cleanup in the inbound admin service.
+- Removed dead helper code from the admin service.
+- Added Phase 2 triage handoff for review-required inbound signals.
+- Kept the public tool schema, return payloads, auth behavior, and deterministic processing semantics unchanged.
+- Verification after simplification:
+  - `git diff --check`: passed.
+  - Python compile check for touched modules/tests: passed.
+  - Focused inbound/admin/triage safety suite: `63 passed, 1 skipped`.
+
+### Partially Shipped
+
+- **Decision receipts/effects**: inbound processing stores receipts/effects, including Phase 2 triage handoff targets, but receipts do not yet close the loop with Ilo's final post-run decision/action outcome.
+- **Source policies**: deterministic policy matching exists and Ilo can configure it, but learned rule promotion and payload fingerprinting are still future work.
+- **Domain Projection**: deterministic configured projection works and Ilo can create/edit it, but projection targets still require an existing Domain/schema.
+- **Ilo Action Runtime**: ambiguous events now enter Ilo's normal Cortex run path, but final action-result capture, run completion reconciliation, and learned-rule promotion are still future work.
+- **MCP token scopes**: newly minted/default bridge tokens include `signal:submit`, but old tokens minted before PR #113 need rotation or migration.
+- **Observability**: Ilo can inspect stored events and receipts, but there is not yet a first-class inbound monitor, replay surface, or UI.
+
+### Not Yet Shipped
+
+- Ilo-facing tools for replay jobs, rule candidates, learned payload fingerprints, and automatic rule promotion.
+- Final-result reconciliation after an Ilo triage run completes: updating the inbound receipt/event with the actual action, no-op, question, summary, or scheduled follow-up Ilo chose.
+- Rule learner / payload fingerprint promotion from repeated Decision Receipts into deterministic policy.
+- Replay harness for historical inbound signals against current policy without mutating workspace state.
+- Source cards or a durable summary of what each connection sends, common payload shapes, known rules, and current errors.
+- Native monitoring Cycle/app/Domain setup for inbound webhook/MCP activity.
+- A production backfill/migration that automatically grants `signal:submit` to existing safe personal-agent tokens.
+
+### Recommended Next Slice
+
+1. **Merge and deploy `manage_inbound`** so Ilo can actually configure the inbound layer in production chat.
+2. **Run one real Ilo-driven configuration smoke test**:
+   - Ask Ilo to create or inspect a source connection.
+   - Ask Ilo to mint a `signal:submit` token.
+   - Ask Ilo to create a policy and Domain Projection for a known test payload.
+   - Send a webhook or MCP signal through the configured lane.
+   - Ask Ilo to inspect the event and receipt.
+3. **Run one real ambiguous-signal smoke test**:
+   - Send a webhook or MCP signal that has no matching deterministic policy.
+   - Confirm the inbound event stores `review_required`.
+   - Confirm a Cortex Idea/thread/run is created for Ilo triage.
+   - Let the run processor act and inspect what Ilo decides.
+4. **Close the triage result loop** so completed Ilo runs update the inbound decision receipt with the final outcome, not only the handoff.
+5. **Add a replay/dry-run harness beyond single-event matching** so historical inbound events can be evaluated against current policies without mutating Domains.
+6. **Add Source Cards / connection summaries** so Ilo can remember common origins, payload shapes, configured rules, recent failures, and what each external source is for.
+7. **Decide token migration/backfill policy** for old personal-agent tokens that predate `signal:submit`.
+
+### Trace-Based Follow-Up
+
+After deployment, Codex sent a compatibility-thread update to Ilo and inspected the exported thread trace. Ilo correctly understood the rollout and could use general workspace tools (`manage_domain`, `manage_workspace_app`, `manage_cycle`, `manage_idea`), but it did not have native inbound-admin tools yet. That confirmed the next implementation slice should be the **Ilo Configuration Tool Surface**, not another manual UI. The `manage_inbound` tool in this branch is that slice.
 
 ## Naming And Scope
 
@@ -309,15 +413,15 @@ Reda should not own in this PR:
 - Domain Projection execution.
 - Inbound persistence migrations, unless JB explicitly asks Reda to take the shared foundation first.
 
-### After Both PRs Merge
+### After PR #113 And Admin Tool Slice Merge
 
-These tests are expected to be blocked until both PRs are merged together:
+The original split expected these tests to be blocked until the webhook/MCP foundation and admin surface were merged together. Current status:
 
-- Real MCP `illo_submit_signal` persists through JB's real `submit_inbound_envelope` service.
-- Webhook and MCP inputs produce the same internal record types and status transitions.
-- `origin = jira.ticket_created` and `origin = codex.progress` both exercise the same Inbound Event store and Decision Receipt path.
-- Ilo can configure a source policy / Domain Projection, then a webhook event uses that configuration without per-event Ilo reasoning.
-- Replay works for both webhook-created and MCP-created inbound events.
+- Real MCP `illo_submit_signal` persists through JB's real `submit_inbound_envelope` service: shipped in PR #113 and covered by tests.
+- Webhook and MCP inputs produce the same internal record types and status transitions: shipped in PR #113 and covered by tests.
+- `origin = jira.ticket_created` and `origin = codex.progress` both exercise the same Inbound Event store and Decision Receipt path: shipped in PR #113 and covered by tests.
+- Ilo can configure a source policy / Domain Projection, then a webhook event uses that configuration without per-event Ilo reasoning: implemented in `codex/illo-inbound-admin-tools` and covered by tests.
+- Replay works for both webhook-created and MCP-created inbound events: still future work.
 - Provenance shows both source actor and authority principal for webhook and MCP lanes.
 
 ## Architecture Diagrams
