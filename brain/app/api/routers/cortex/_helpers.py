@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 UPLOAD_DIR = Path(__file__).resolve().parents[4] / "uploads"
 IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "avif"}
 VIDEO_EXTENSIONS = {"mp4", "m4v", "mov", "webm"}
-TEXT_EXTENSIONS = {"txt", "md", "csv", "json"}
+TEXT_EXTENSIONS = {"txt", "md", "csv", "json", "log", "text", "tsv", "xml", "yaml", "yml"}
 DOCUMENT_EXTENSIONS = {"doc", "docx", "odt", "pdf", "ppt", "pptx", "rtf", "xls", "xlsx"}
 ARCHIVE_EXTENSIONS = {"7z", "rar", "zip"}
 ALLOWED_EXTENSIONS = {
@@ -47,6 +47,7 @@ UPLOAD_FALLBACK_CONTENT_TYPES = {
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
     "json": "application/json",
+    "log": "text/plain",
     "m4v": "video/mp4",
     "md": "text/markdown",
     "mov": "video/quicktime",
@@ -58,11 +59,16 @@ UPLOAD_FALLBACK_CONTENT_TYPES = {
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "rar": "application/vnd.rar",
     "rtf": "application/rtf",
+    "text": "text/plain",
+    "tsv": "text/tab-separated-values",
     "txt": "text/plain",
     "webm": "video/webm",
     "webp": "image/webp",
     "xls": "application/vnd.ms-excel",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xml": "application/xml",
+    "yaml": "application/x-yaml",
+    "yml": "application/x-yaml",
     "zip": "application/zip",
 }
 

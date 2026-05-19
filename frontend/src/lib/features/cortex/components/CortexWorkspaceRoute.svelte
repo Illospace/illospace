@@ -39,7 +39,7 @@
   import WorkspacePageModal from '$lib/features/cortex/components/WorkspacePageModal.svelte';
   import WorkspaceChatDock from '$lib/features/cortex/components/chat/WorkspaceChatDock.svelte';
   import type { CortexChatDockTopLevelMode } from '$lib/features/cortex/components/chat/ChatDockSeam.svelte';
-  import { api } from '$lib/api/client';
+  import { api, type ChatConversationSummary } from '$lib/api/client';
   import {
     WORKSPACE_PAGE_MODAL_PARAM,
     WORKSPACE_PAGE_MODAL_SECTIONS,
@@ -562,6 +562,30 @@
     chatSelectedConversationId = null;
   }
 
+  function syncChatSelectionFromConversation(conversation: ChatConversationSummary | null) {
+    chatSelectedPreviewMemberId = null;
+    chatSelectedThreadRootId = null;
+
+    if (conversation?.type === 'dm') {
+      chatTopLevelMode = 'dms';
+      chatSelectedConversationId = conversation.id;
+      return;
+    }
+
+    chatTopLevelMode = 'room';
+    chatSelectedConversationId = null;
+  }
+
+  async function openChatToMostRecentConversation() {
+    workspaceOverlay.closeWorkspaceApp();
+    chatDockExpanded = true;
+    try {
+      syncChatSelectionFromConversation(await chat.openMostRecentConversation());
+    } catch {
+      // The chat store records and surfaces bootstrap/load failures.
+    }
+  }
+
   function compactWorkspaceChat() {
     chatDockExpanded = false;
     chatDockForeground = false;
@@ -823,8 +847,7 @@
         compactChat: compactWorkspaceChat,
         closeChat: () => (chatDockExpanded = false),
         openChat: () => {
-          workspaceOverlay.closeWorkspaceApp();
-          chatDockExpanded = true;
+          void openChatToMostRecentConversation();
         },
         closeCanvas: () => (cortex.canvasOpen = false),
         closeWorkspaceApp: () => workspaceOverlay.closeWorkspaceApp(),
@@ -1118,6 +1141,7 @@
         previewMembers={chatPreviewMembers}
         SeamComponent={CortexChatDockSeamComponent}
         onForegroundChange={(foreground: boolean) => (chatDockForeground = foreground)}
+        onExpandChat={openChatToMostRecentConversation}
         onTopLevelModeChange={handleChatTopLevelModeChange}
         onOpenRoomThread={handleChatOpenRoomThread}
         onCloseRoomThread={handleChatCloseRoomThread}

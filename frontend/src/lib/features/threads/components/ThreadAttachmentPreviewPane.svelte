@@ -10,6 +10,7 @@
     CortexThreadStageImageAttachment,
   } from '$lib/features/threads/domain/threadTranscriptAdapter';
   import { attachmentDownloadUrl, formatAttachmentBytes } from '$lib/utils/attachmentPreview';
+  import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
 
   type PreviewAttachment = CortexThreadStageImageAttachment | CortexThreadStageFileAttachment;
 
@@ -37,6 +38,10 @@
   const previewUrl = $derived(preview?.url || attachmentUrl);
   const previewMode = $derived(preview?.preview_mode ?? '');
   const fileKind = $derived(preview?.kind ?? (attachment?.kind === 'image' ? 'image' : attachment?.previewKind ?? 'file'));
+  const isMarkdownPreview = $derived(
+    previewMode === 'text'
+      && (preview?.extension === 'md' || preview?.content_type === 'text/markdown'),
+  );
   const fileSize = $derived(
     typeof preview?.size === 'number' ? formatAttachmentBytes(preview.size) : '',
   );
@@ -152,6 +157,10 @@
             </section>
           {/each}
         </div>
+      {:else if isMarkdownPreview && preview?.text}
+        <div class="preview-pane-document constellation-prose">
+          {@html renderReadableMarkdown(preview.text)}
+        </div>
       {:else if preview?.text}
         <pre class="preview-pane-text">{preview.text}</pre>
       {:else}
@@ -262,6 +271,15 @@
     font-family: var(--constellation-font-mono, var(--font-mono));
     font-size: 11px;
     line-height: 1.55;
+  }
+
+  .preview-pane-document {
+    width: 100%;
+    height: 100%;
+    padding: 20px;
+    overflow: auto;
+    color: rgba(248, 251, 255, 0.92);
+    background: rgba(255, 255, 255, 0.025);
   }
 
   .preview-sheet-stack,
@@ -405,6 +423,7 @@
   }
 
   :global(:root[data-color-scheme='light']) .preview-pane-text,
+  :global(:root[data-color-scheme='light']) .preview-pane-document,
   :global(:root[data-color-scheme='light']) .preview-sheet td {
     color: rgba(24, 35, 49, 0.84);
   }

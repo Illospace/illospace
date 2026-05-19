@@ -329,10 +329,66 @@ async def test_brain_vault_requests_grant_before_reading():
     assert result == {
         "error": "Vault grant required before this agent can read the secret",
         "grant_id": 123,
+        "key_name": "OPENAI_API_KEY",
+        "reason": "Need provider access for this run",
+        "requested_by": "agent",
+        "run_id": 42,
         "status": "pending",
+        "target_user_id": USER["id"],
     }
     authorize.assert_awaited_once()
     get_secret.assert_not_awaited()
+
+
+async def test_brain_vault_publishes_grant_prompt_for_thread_approval():
+    from brain.app.mcp.server import tool_brain_vault
+
+    requested_at = datetime(2026, 5, 19, 14, 0, tzinfo=timezone.utc)
+    grant = {
+        "id": 123,
+        "key_name": "GITHUB_TOKEN",
+        "run_id": 42,
+        "requested_by": "illo",
+        "reason": "Need GitHub access for this run",
+        "requested_at": requested_at,
+        "expires_at": datetime(2026, 5, 19, 14, 30, tzinfo=timezone.utc),
+    }
+    with patch("brain.systems.vault.authorize_agent_secret_read", new=AsyncMock(return_value={
+        "allowed": False,
+        "status": "pending",
+        "grant": grant,
+    })), \
+         patch("brain.systems.vault.get_secret", new=AsyncMock()) as get_secret, \
+         patch("brain.systems.cortex.events.publish_safe") as publish:
+        result = await tool_brain_vault(
+            "GITHUB_TOKEN",
+            reason="Need GitHub access for this run",
+            user_id=USER["id"],
+            org_id=USER["org_id"],
+            run_id=42,
+            idea_id="idea-1",
+            requested_by="illo",
+        )
+
+    assert result["status"] == "pending"
+    get_secret.assert_not_awaited()
+    publish.assert_called_once()
+    event_type, payload = publish.call_args.args
+    assert event_type == "vault_agent_grant_prompt"
+    assert payload["idea_id"] == "idea-1"
+    assert payload["run_id"] == 42
+    assert payload["target_user_id"] == USER["id"]
+    assert payload["grant"] == {
+        **grant,
+        "requested_at": requested_at.isoformat(),
+        "expires_at": "2026-05-19T14:30:00+00:00",
+    }
+    assert payload["prompt"]["target_user_id"] == USER["id"]
+    assert payload["prompt"]["grant_id"] == 123
+    assert payload["prompt"]["key_name"] == "GITHUB_TOKEN"
+    assert payload["prompt"]["reason"] == "Need GitHub access for this run"
+    assert payload["prompt"]["requested_at"] == requested_at.isoformat()
+    assert "value" not in payload["prompt"]
 
 
 async def test_brain_vault_uses_scoped_agent_read_after_grant():
@@ -367,3 +423,17 @@ def test_vault_tool_trace_result_is_redacted():
         )
         == "[secret redacted]"
     )
+    pending = redact_tool_call_result(
+        "brain_vault",
+        {
+            "error": "Vault grant required before this agent can read the secret",
+            "grant_id": 123,
+            "key_name": "OPENAI_API_KEY",
+            "reason": "Need provider access for this run",
+            "run_id": 42,
+            "status": "pending",
+            "target_user_id": USER["id"],
+            "value": "sk-secret",
+        },
+    )
+    assert pending == "[secret redacted]"

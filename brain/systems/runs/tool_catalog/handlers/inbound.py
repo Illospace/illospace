@@ -83,6 +83,9 @@ async def _handle_manage_inbound(
     payload: dict | None = None,
     include_payload: bool = False,
     include_receipts: bool = False,
+    source_purpose: str | None = None,
+    source_notes: str | None = None,
+    source_tags: list[str] | None = None,
     limit: int = 25,
 ) -> str:
     action = str(action or "").strip().lower()
@@ -385,6 +388,45 @@ async def _handle_manage_inbound(
                     payload=payload,
                 )
                 return _dump({"dry_run": result})
+
+            if action == "replay_events":
+                result = await inbound_admin.replay_events(
+                    session,
+                    org_id=org_id,
+                    event_id=event_id,
+                    connection_id=connection_id,
+                    policy_id=policy_id,
+                    status=status,
+                    origin=origin,
+                    limit=limit,
+                    include_payload=include_payload,
+                )
+                return _dump({"replay": result})
+
+            if action == "get_source_card":
+                if not connection_id:
+                    return _error("get_source_card requires: connection_id")
+                result = await inbound_admin.get_source_card(
+                    session,
+                    org_id=org_id,
+                    connection_id=connection_id,
+                    limit=limit,
+                )
+                return _dump(result)
+
+            if action == "refresh_source_card":
+                if not connection_id:
+                    return _error("refresh_source_card requires: connection_id")
+                result = await inbound_admin.refresh_source_card(
+                    session,
+                    org_id=org_id,
+                    connection_id=connection_id,
+                    purpose=source_purpose,
+                    notes=source_notes,
+                    tags=source_tags,
+                    limit=limit,
+                )
+                return _dump(result)
 
             return _error(f"Unknown action: {action}")
     except (

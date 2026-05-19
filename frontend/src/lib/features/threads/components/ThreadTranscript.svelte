@@ -10,7 +10,15 @@
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
   import AttachmentPreviewDialog from '$lib/components/chat/AttachmentPreviewDialog.svelte';
   import type { ConstellationIconName } from '$lib/components/constellation/ConstellationIcon.svelte';
-  import type { AttachmentPreviewKind } from '$lib/utils/attachmentPreview';
+  import {
+    attachmentDetail,
+    attachmentKindLabel,
+    attachmentLabel,
+    attachmentPreviewKind,
+    attachmentUrl,
+    normalizeServerUploadPreviewUrl,
+    type AttachmentPreviewKind,
+  } from '$lib/utils/attachmentPreview';
   import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
   import StreamVisualBlock from '$lib/features/threads/components/StreamVisualBlock.svelte';
 
@@ -73,7 +81,6 @@
   const previewAttachmentLabel = $derived(previewAttachment ? attachmentPreviewLabel(previewAttachment) : '');
   const previewAttachmentDetail = $derived(previewAttachment?.kind === 'file' ? (previewAttachment.detail ?? '') : '');
   const previewAttachmentKind = $derived(previewAttachment ? attachmentPreviewType(previewAttachment) : 'file');
-
   function getMessageTone(item: CortexThreadStageMessageItem): CortexThreadStageTone {
     return item.tone ?? 'spectral';
   }
@@ -378,6 +385,44 @@
     previewAttachment = null;
   }
 
+  function normalizeServerPreviewUrl(rawHref: string | null | undefined): string {
+    const base = typeof window === 'undefined' ? 'http://illo.local' : window.location.origin;
+    return normalizeServerUploadPreviewUrl(rawHref, base);
+  }
+
+  function previewAttachmentFromLink(anchor: HTMLAnchorElement): CortexThreadStageFileAttachment | null {
+    const url = normalizeServerPreviewUrl(anchor.getAttribute('href') || anchor.href);
+    if (!url) return null;
+    const label = anchor.textContent?.trim() || attachmentLabel({ url });
+    const source = { url, filename: label };
+    return {
+      kind: 'file',
+      url: attachmentUrl(source) || url,
+      label,
+      detail: attachmentKindLabel(source) || attachmentDetail(source),
+      previewKind: attachmentPreviewKind(source),
+    };
+  }
+
+  function handleThreadContentClick(event: MouseEvent) {
+    const target = event.target as HTMLElement | null;
+    const anchor = target?.closest?.('a');
+    if (!(anchor instanceof HTMLAnchorElement)) return;
+    const attachment = previewAttachmentFromLink(anchor);
+    if (!attachment) return;
+    event.preventDefault();
+    openAttachmentPreview(attachment);
+  }
+
+  function previewServerFileLinks(node: HTMLElement) {
+    node.addEventListener('click', handleThreadContentClick);
+    return {
+      destroy() {
+        node.removeEventListener('click', handleThreadContentClick);
+      },
+    };
+  }
+
   $effect(() => {
     onTranscriptReady?.(transcriptContainerEl);
   });
@@ -523,7 +568,7 @@
     </header>
   {/if}
 
-  <div class="thread-content" bind:this={transcriptContainerEl} onscroll={onTranscriptScroll}>
+  <div class="thread-content" bind:this={transcriptContainerEl} onscroll={onTranscriptScroll} use:previewServerFileLinks>
     <div class="thread-column message-stack">
       {#if transcriptSlot}
         {@render transcriptSlot()}

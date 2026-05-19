@@ -8,6 +8,8 @@ export type AttachmentPreviewKind =
   | 'link'
   | 'file';
 
+export const SERVER_UPLOAD_PREVIEW_PATH_PREFIX = '/static/uploads/';
+
 export const ATTACHMENT_INPUT_ACCEPT = [
   'image/jpeg',
   'image/png',
@@ -45,6 +47,12 @@ export const ATTACHMENT_INPUT_ACCEPT = [
   '.md',
   '.csv',
   '.json',
+  '.log',
+  '.text',
+  '.tsv',
+  '.xml',
+  '.yaml',
+  '.yml',
   '.7z',
   '.rar',
   '.zip',
@@ -53,7 +61,7 @@ export const ATTACHMENT_INPUT_ACCEPT = [
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['avif', 'gif', 'jpeg', 'jpg', 'png', 'svg', 'webp']);
 const VIDEO_ATTACHMENT_EXTENSIONS = new Set(['m4v', 'mov', 'mp4', 'webm']);
 const PDF_ATTACHMENT_EXTENSIONS = new Set(['pdf']);
-const TEXT_ATTACHMENT_EXTENSIONS = new Set(['csv', 'json', 'md', 'txt']);
+const TEXT_ATTACHMENT_EXTENSIONS = new Set(['csv', 'json', 'log', 'md', 'text', 'tsv', 'txt', 'xml', 'yaml', 'yml']);
 const DOCUMENT_ATTACHMENT_EXTENSIONS = new Set([
   'doc',
   'docx',
@@ -73,6 +81,23 @@ const MESSAGE_URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
 export function attachmentUrl(attachment: any): string {
   const url = attachment?.url ?? attachment?.href ?? attachment?.previewUrl ?? attachment?.download_url ?? attachment?.downloadUrl;
   return typeof url === 'string' ? url.trim() : '';
+}
+
+export function normalizeServerUploadPreviewUrl(
+  rawHref: string | null | undefined,
+  baseOrigin = 'http://illo.local',
+): string {
+  const href = String(rawHref ?? '').trim();
+  if (!href) return '';
+  try {
+    const base = new URL(baseOrigin);
+    const parsed = new URL(href, base);
+    if (parsed.origin !== base.origin) return '';
+    if (!parsed.pathname.startsWith(SERVER_UPLOAD_PREVIEW_PATH_PREFIX)) return '';
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return href.startsWith(SERVER_UPLOAD_PREVIEW_PATH_PREFIX) ? href : '';
+  }
 }
 
 export function attachmentDownloadUrl(attachment: any): string {

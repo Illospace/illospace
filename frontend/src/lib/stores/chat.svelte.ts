@@ -128,10 +128,34 @@ function sortMessages(messages: ChatMessage[]): ChatMessage[] {
 }
 
 function sortDms(conversations: ChatConversationSummary[]): ChatConversationSummary[] {
-  return [...conversations].sort((a, b) => {
-    if (a.last_message_seq !== b.last_message_seq) return b.last_message_seq - a.last_message_seq;
-    return parseServerTimeMs(b.updated_at) - parseServerTimeMs(a.updated_at);
-  });
+  return [...conversations].sort(compareConversationsByActivityDesc);
+}
+
+function conversationHasMessages(conversation: ChatConversationSummary): boolean {
+  return conversation.last_message_seq > 0 || conversation.last_message != null;
+}
+
+function conversationActivityTimeMs(conversation: ChatConversationSummary): number {
+  return Math.max(
+    parseServerTimeMs(conversation.last_message?.created_at),
+    parseServerTimeMs(conversation.updated_at),
+    parseServerTimeMs(conversation.created_at),
+  );
+}
+
+function compareConversationsByActivityDesc(
+  a: ChatConversationSummary,
+  b: ChatConversationSummary,
+): number {
+  const aHasMessages = conversationHasMessages(a);
+  const bHasMessages = conversationHasMessages(b);
+  if (aHasMessages !== bHasMessages) return aHasMessages ? -1 : 1;
+
+  const activityDiff = conversationActivityTimeMs(b) - conversationActivityTimeMs(a);
+  if (activityDiff !== 0) return activityDiff;
+
+  if (a.last_message_seq !== b.last_message_seq) return b.last_message_seq - a.last_message_seq;
+  return a.id.localeCompare(b.id);
 }
 
 function sortNotifications(notifications: ChatNotification[]): ChatNotification[] {
@@ -210,6 +234,10 @@ class ChatStore {
 
   get conversations(): ChatConversationSummary[] {
     return this.room ? [this.room, ...this.dms] : [...this.dms];
+  }
+
+  get mostRecentConversation(): ChatConversationSummary | null {
+    return [...this.conversations].sort(compareConversationsByActivityDesc)[0] ?? null;
   }
 
   get activeConversationId(): string | null {
@@ -469,6 +497,34 @@ class ChatStore {
       }
     }
     this._syncSubscriptions();
+  }
+
+  async openMostRecentConversation(): Promise<ChatConversationSummary | null> {
+    this.isOpen = true;
+    this._persistState();
+
+    if (!this.bootstrapped) {
+      await this.bootstrap();
+    }
+
+    const conversation = this.mostRecentConversation ?? this.room;
+    if (!conversation) {
+      this._syncSubscriptions();
+      return null;
+    }
+
+    if (conversation.type === 'dm') {
+      await this.selectDm(conversation.id);
+      return conversation;
+    }
+
+    this.mode = 'room';
+    this.roomSubview = 'timeline';
+    this.activeThreadRootId = null;
+    this._persistState();
+    await this.loadConversation(conversation.id, { silent: true });
+    this._syncSubscriptions();
+    return conversation;
   }
 
   closeDock() {

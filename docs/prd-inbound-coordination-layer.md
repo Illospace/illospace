@@ -1,12 +1,12 @@
 # PRD: Inbound Coordination Layer for IloSpace
 
-Status: living PRD; foundation shipped in PR #113, Ilo-admin configuration tool and Phase 2 triage handoff implemented in `codex/illo-inbound-admin-tools`; triage reconciliation and token compatibility backfill implemented in `codex/inbound-token-reconcile`
+Status: living PRD; foundation shipped in PR #113, Ilo-admin configuration tool and Phase 2 triage handoff implemented in `codex/illo-inbound-admin-tools`; triage reconciliation and token compatibility backfill implemented in `codex/inbound-token-reconcile`; stored-event replay harness and source cards implemented in `codex/inbound-replay-harness`
 Date: 2026-05-18  
 Owner: product/architecture discussion  
 
 ## Implementation Status After PR #113 And Admin Tool Slice
 
-PR #113 merged the first foundation slice. The follow-up admin tool slice adds the missing Ilo-facing configuration surface for the deterministic inbound lane. Phase 2 adds the first active Ilo triage handoff for ambiguous inbound signals. Together, they still do **not** complete the entire PRD.
+PR #113 merged the first foundation slice. The follow-up admin tool slice adds the missing Ilo-facing configuration surface for the deterministic inbound lane. Phase 2 adds the first active Ilo triage handoff for ambiguous inbound signals. The replay harness slice lets Ilo evaluate historical inbound events against current policy/projection configuration without mutating workspace state. The source-card slice gives Ilo a durable, connection-level summary of what a source is for, how it is configured, what it sends, and where it is failing. Together, they still do **not** complete the entire PRD.
 
 The PRD intentionally describes a broader product direction: external tools send signals into IloSpace, IloSpace records and preflights them, and Ilo can configure every integration behavior by chatting with the user. The merged work delivered the shared ingress foundation and two concrete ingress lanes. The admin tool slice makes the shipped deterministic lane configurable by Ilo, without adding a manual configuration UI.
 
@@ -75,22 +75,43 @@ The PRD intentionally describes a broader product direction: external tools send
   - Focused triage reconciliation tests for completed and failed runs: passed.
   - Focused token backfill test: passed.
 
+### Shipped In Replay Harness Slice
+
+- Added `manage_inbound(action="replay_events")` as an Ilo-facing read-only replay operation.
+- Replay can inspect one event by `event_id` or a batch of stored events filtered by connection, policy, status, origin, and limit.
+- Replay reuses the same policy/projection preview logic as `dry_run_match`, but the input comes from stored inbound event envelopes instead of a new sample payload.
+- Replay returns original decision metadata, current replay prediction, change flags for policy/projection/status drift, and an aggregate summary.
+- Replay can optionally include stored raw/normalized payloads for inspection, but omits payloads by default.
+- Replay does not call `submit_inbound_envelope`, does not create decision receipts, does not mutate inbound event state, and does not write Domain records.
+- `replay_events` is marked as a read-only `manage_inbound` action in action policy metadata, so Ilo can use it without a high-risk mutation approval path.
+- Tests prove replay can compare processed historical events against changed policy config without mutating Domain records or event state, and can include payloads for single-event inspection.
+
+### Shipped In Source Cards Slice
+
+- Added `manage_inbound(action="get_source_card")` as a read-only Ilo-facing summary of one inbound source connection.
+- Added `manage_inbound(action="refresh_source_card")` so Ilo can persist the latest source card on the connection metadata.
+- Source cards summarize connection identity/capabilities, Ilo-authored purpose/notes/tags, configured policies, Domain Projections, sampled origins, sampled statuses, payload shape paths, recent events, and recent failures.
+- Source cards reuse existing connection metadata instead of adding a new table in this slice. This keeps the slice small and avoids schema churn while preserving a durable summary Ilo can read later.
+- Payload values are not stored in the card; the card stores payload shape paths and event ids/statuses. Raw payload inspection remains behind event/replay reads with `include_payload`.
+- `get_source_card` is read-only in action policy metadata. `refresh_source_card` mutates only connection metadata and remains a high-risk audited action under the existing `manage_inbound` mutation gate.
+- Tests prove Ilo can refresh a source card with purpose/notes/tags, persist it on the connection, summarize policies/projections/events/failures, and later read the persisted card.
+
 ### Partially Shipped
 
 - **Decision receipts/effects**: inbound processing stores receipts/effects and now reconciles terminal Ilo triage run status/final answer back onto the event and receipt. Rich action-level capture is still future work because Ilo's later tool calls are not yet attributed back to the inbound event.
-- **Source policies**: deterministic policy matching exists and Ilo can configure it, but learned rule promotion and payload fingerprinting are still future work.
+- **Source policies**: deterministic policy matching exists, Ilo can configure it, and Ilo can replay historical events against current policy config. Learned rule promotion and payload fingerprinting are still future work.
 - **Domain Projection**: deterministic configured projection works and Ilo can create/edit it, but projection targets still require an existing Domain/schema.
 - **Ilo Action Runtime**: ambiguous events now enter Ilo's normal Cortex run path, and run completion reconciles the inbound receipt. Fine-grained action-result capture and learned-rule promotion are still future work.
 - **MCP token scopes**: newly minted/default bridge tokens include `signal:submit`, and a compatibility migration/backfill grants it to old active personal-agent tokens. Arbitrary non-agent webhook/custom tokens still require explicit configuration.
-- **Observability**: Ilo can inspect stored events and receipts, but there is not yet a first-class inbound monitor, replay surface, or UI.
+- **Observability**: Ilo can inspect stored events and receipts, run read-only replay, and maintain connection-level source cards through `manage_inbound`. There is not yet a first-class inbound monitor or UI.
 
 ### Not Yet Shipped
 
-- Ilo-facing tools for replay jobs, rule candidates, learned payload fingerprints, and automatic rule promotion.
+- Ilo-facing tools for durable replay jobs, rule candidates, learned payload fingerprints, and automatic rule promotion.
 - Fine-grained final action reconciliation after an Ilo triage run completes: attributing actual workspace tool calls, no-op decisions, questions, summaries, or scheduled follow-ups back to the inbound event beyond the run's final answer/status.
 - Rule learner / payload fingerprint promotion from repeated Decision Receipts into deterministic policy.
-- Replay harness for historical inbound signals against current policy without mutating workspace state.
-- Source cards or a durable summary of what each connection sends, common payload shapes, known rules, and current errors.
+- Persisted replay reports with named replay runs, saved diffs, and promotion candidates.
+- Source-card promotion into a richer monitor/domain/app view with trend history, ownership workflows, and suggested rule changes.
 - Native monitoring Cycle/app/Domain setup for inbound webhook/MCP activity.
 - A richer token rollout report/observability view showing which legacy personal-agent tokens were backfilled and which non-agent tokens still need explicit configuration.
 
@@ -109,9 +130,9 @@ The PRD intentionally describes a broader product direction: external tools send
    - Confirm a Cortex Idea/thread/run is created for Ilo triage.
    - Let the run processor act and inspect what Ilo decides.
 4. **Deploy the token backfill/reconciliation slice** and confirm the existing Codex MCP token can call `illo_submit_signal` without rotation.
-5. **Add a replay/dry-run harness beyond single-event matching** so historical inbound events can be evaluated against current policies without mutating Domains.
-6. **Add Source Cards / connection summaries** so Ilo can remember common origins, payload shapes, configured rules, recent failures, and what each external source is for.
-7. **Add fine-grained Ilo action attribution** so receipt reconciliation can say which workspace tools/actions Ilo actually chose after triage, not only the terminal run status/final answer.
+5. **Deploy the replay harness + source-card slice** and ask Ilo to replay a few real inbound events, refresh the source card for the tested MCP/webhook connection, and explain what it learned.
+6. **Add fine-grained Ilo action attribution** so receipt reconciliation can say which workspace tools/actions Ilo actually chose after triage, not only the terminal run status/final answer.
+7. **Add rule candidates / payload fingerprints** so repeated replay and receipt patterns can become explicit deterministic-policy suggestions.
 
 ### Trace-Based Follow-Up
 
@@ -430,7 +451,7 @@ The original split expected these tests to be blocked until the webhook/MCP foun
 - Webhook and MCP inputs produce the same internal record types and status transitions: shipped in PR #113 and covered by tests.
 - `origin = jira.ticket_created` and `origin = codex.progress` both exercise the same Inbound Event store and Decision Receipt path: shipped in PR #113 and covered by tests.
 - Ilo can configure a source policy / Domain Projection, then a webhook event uses that configuration without per-event Ilo reasoning: implemented in `codex/illo-inbound-admin-tools` and covered by tests.
-- Replay works for both webhook-created and MCP-created inbound events: still future work.
+- Ilo can replay stored webhook/MCP-created inbound events through current policy/projection config without mutating workspace state: implemented in `codex/inbound-replay-harness` and covered by tests.
 - Provenance shows both source actor and authority principal for webhook and MCP lanes.
 
 ## Architecture Diagrams
@@ -710,7 +731,9 @@ flowchart TD
 - Add Domain Projection policies for configured structured ingestion. A projection binds a source/origin pattern to a Domain, object type, field mapping, external id strategy, upsert mode, validation mode, owner principal, and review/quarantine behavior.
 - Add payload fingerprints that hash stable source/event/schema/features rather than full payload content. Fingerprints should support fast recognition of repeated payload shapes.
 - Add source cards as an operator-facing summary of each connection: what it sends, common payloads, known rules, examples, recent errors, and current capabilities.
+- The first source-card slice stores a generated card inside connection metadata, with Ilo-authored purpose/notes/tags and computed policy/projection/event summaries. This avoids a new table until source cards need history, ownership, or workflow.
 - Add a replay harness that can run historical signals against current policy and handling settings without mutating the workspace.
+- The first replay slice is a synchronous, read-only Ilo tool over stored event envelopes. It previews current policy/projection outcomes and reports drift, but durable replay jobs, saved reports, and rule-promotion candidates remain later work.
 - Keep personal-agent connection tokens and scoped auth as the template for future connection security. Do not use broad internal service tokens for external sources.
 - Add connection capabilities rather than separate tables per source type wherever practical. Capabilities should make Codex, Hermes, OpenClaw, Jira, GitHub, and Figma differ by behavior, not by bespoke architecture.
 - For personal agents that can receive tasks, the existing outbound bridge model remains valid: IloSpace creates an External Task; the worker claims or receives it; task events and results return as bound inbound envelopes.
@@ -777,6 +800,7 @@ Deliverables:
 - Allowed outcomes/tool use and auto-execute thresholds.
 - Event logs, dry-run, replay.
 - Read-only observability for event logs, dry-run results, replay results, and config snapshots.
+- Source cards for source purpose, configured rules, sampled payload shapes, recent failures, and source health summary.
 - Jira-like fixture proving ticket handling into a configured Tickets Domain, review, or an Ilo-created thread depending on policy.
 
 #### Package C: MCP / Personal Tool Signals V1

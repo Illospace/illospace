@@ -18,7 +18,7 @@ from brain.systems.runs.actions import (
     result_failure_summary,
 )
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType, EventVisibility
-from brain.systems.runs.events import activity_event, run_event
+from brain.systems.runs.events import activity_event, redact_tool_call_result, run_event
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.runs.tool_catalog.metadata import ActionPolicyResult
 
@@ -53,7 +53,7 @@ def _event_stream_payload(event, row) -> dict[str, Any]:
 
 def redact_tool_result(tool_name: str, result: Any) -> str:
     if _tool_is_secret(tool_name):
-        return "[secret redacted]"
+        return redact_tool_call_result(tool_name, result)
     return _result_to_text(result)
 
 

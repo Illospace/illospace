@@ -320,6 +320,21 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
             "optional": ["kind", "payload"],
             "effect": "preview policy and projection matching without storing an event",
         },
+        "replay_events": {
+            "required": [],
+            "optional": ["event_id", "connection_id", "policy_id", "status", "origin", "include_payload", "limit"],
+            "effect": "replay stored inbound events against current config without mutating workspace state",
+        },
+        "get_source_card": {
+            "required": ["connection_id"],
+            "optional": ["limit"],
+            "effect": "read computed and persisted source-card summary for one inbound connection",
+        },
+        "refresh_source_card": {
+            "required": ["connection_id"],
+            "optional": ["source_purpose", "source_notes", "source_tags", "limit"],
+            "effect": "refresh the persisted source-card summary on an inbound connection",
+        },
     },
     "manage_skill": {
         "list": {"required": [], "optional": ["include_archived", "limit"], "effect": "read available skills"},

@@ -251,11 +251,10 @@ def test_chat_dock_light_mode_is_tokenized_at_shell_boundary():
         for line in source.splitlines()
         if "data-color-scheme='light'" in line
     ]
+    preview_source = (REPO_ROOT / "frontend/src/lib/components/chat/AttachmentPreviewDialog.svelte").read_text()
 
-    assert light_lines == [
-        ":global(:root[data-color-scheme='light']) .chat-dock-shell,",
-        ":global(:root[data-color-scheme='light']) .chat-image-preview-layer {",
-    ]
+    assert light_lines == [":global(:root[data-color-scheme='light']) .chat-dock-shell {"]
+    assert ":global(:root[data-color-scheme='light']) .attachment-preview-dialog-layer {" in preview_source
     assert "--chat-message-body-text" in source
     assert "--chat-attachment-preview-background" in source
     assert ":global(:root[data-color-scheme='light']) .chat-message" not in source
@@ -356,6 +355,7 @@ def test_project_context_picker_light_mode_is_component_tokenized():
     assert light_lines == [
         ":root[data-color-scheme='light'] .project-context-composer {",
         ":root[data-color-scheme='light'] .project-context-modal-backdrop {",
+        ":root[data-color-scheme='light'] .project-access-menu {",
     ]
     assert "--project-context-popover-background" in source
     assert "--project-context-repo-option-hover-background" in source

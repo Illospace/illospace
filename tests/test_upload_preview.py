@@ -20,6 +20,15 @@ def test_upload_preview_extracts_text_upload(tmp_path, monkeypatch):
     assert preview["download_url"] == "https://illo.example.com/static/uploads/notes.md"
 
 
+def test_uploads_disallow_same_origin_html_files():
+    from brain.app.api.routers.cortex import _helpers
+
+    assert "html" not in _helpers.ALLOWED_EXTENSIONS
+    assert "htm" not in _helpers.ALLOWED_EXTENSIONS
+    assert "html" not in _helpers.UPLOAD_FALLBACK_CONTENT_TYPES
+    assert "htm" not in _helpers.UPLOAD_FALLBACK_CONTENT_TYPES
+
+
 def test_upload_preview_extracts_docx_text(tmp_path):
     from brain.systems.cortex.upload_preview import build_upload_preview
 

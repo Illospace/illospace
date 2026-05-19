@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any
 
 from fastapi import WebSocket
 
@@ -12,6 +13,17 @@ from brain.app.api.ws.auth import WsTokenClaims
 from brain.app.api.ws.events import ServerEvent
 
 logger = logging.getLogger(__name__)
+
+
+def _target_user_ids(data: Mapping[str, Any]) -> set[str]:
+    targets: set[str] = set()
+    single = str(data.get("target_user_id") or "").strip()
+    if single:
+        targets.add(single)
+    raw_many = data.get("target_user_ids")
+    if isinstance(raw_many, Iterable) and not isinstance(raw_many, (str, bytes, bytearray, Mapping)):
+        targets.update(str(item).strip() for item in raw_many if str(item).strip())
+    return targets
 
 
 @dataclass(slots=True)
@@ -137,16 +149,48 @@ class ConnectionManager:
     ) -> bool:
         """Broadcast a product event, requiring org scope unless explicitly global."""
         payload = dict(data)
+        target_user_ids = _target_user_ids(payload)
         scoped_org_id = str(org_id or payload.get("org_id") or "").strip()
         if scoped_org_id:
             payload["org_id"] = scoped_org_id
-            await self.broadcast_to_org(scoped_org_id, event_type, payload)
+            if target_user_ids:
+                await self.broadcast_to_org_users(scoped_org_id, target_user_ids, event_type, payload)
+            else:
+                await self.broadcast_to_org(scoped_org_id, event_type, payload)
             return True
         if allow_global:
-            await self.broadcast(event_type, payload)
+            if target_user_ids:
+                for user_id in sorted(target_user_ids):
+                    await self.send_to(user_id, event_type, payload)
+            else:
+                await self.broadcast(event_type, payload)
             return True
         logger.warning("ws_drop_unscoped_product_event event_type=%s", event_type)
         return False
+
+    async def broadcast_to_org_users(
+        self,
+        org_id: str,
+        user_ids: Iterable[str],
+        event_type: str,
+        data: Mapping[str, Any],
+    ) -> None:
+        normalized_org_id = str(org_id or "").strip()
+        target_user_ids = {str(user_id).strip() for user_id in user_ids if str(user_id).strip()}
+        if not normalized_org_id or not target_user_ids:
+            logger.warning("ws_drop_unscoped_user_broadcast event_type=%s", event_type)
+            return
+        message = {"type": str(event_type), **dict(data)}
+        stale: list[tuple[str, WebSocket]] = []
+        for state in self._iter_target_states():
+            if state.org_id != normalized_org_id or state.user_id not in target_user_ids:
+                continue
+            try:
+                await state.websocket.send_json(message)
+            except Exception:
+                stale.append((state.user_id, state.websocket))
+        for uid, ws in stale:
+            await self.disconnect(uid, ws)
 
     async def send_to(
         self,
