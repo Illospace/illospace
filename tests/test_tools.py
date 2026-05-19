@@ -188,6 +188,7 @@ class TestIntegration:
         assert "manage_inbound" in coordinator_names
         assert "manage_inbound" in worker_names
         assert action_policy_for_tool("manage_inbound", kwargs={"action": "list_connections"}) is None
+        assert action_policy_for_tool("manage_inbound", kwargs={"action": "replay_events"}) is None
         assert action_policy_for_tool("manage_inbound", kwargs={"action": "mint_token"}) == {
             "risk": "high",
             "reversibility": "variable",

@@ -691,6 +691,7 @@ def action_policy_for_tool(
         "get_event",
         "list_receipts",
         "dry_run_match",
+        "replay_events",
     }:
         return None
     if tool_name == "manage_inbound":

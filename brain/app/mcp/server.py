@@ -77,6 +77,15 @@ def _jsonish(value: Any, default: Any) -> Any:
     return value
 
 
+def _json_safe(value: Any) -> Any:
+    def convert(item: Any) -> str:
+        if hasattr(item, "isoformat"):
+            return item.isoformat()
+        return str(item)
+
+    return json.loads(json.dumps(value, default=convert))
+
+
 def _truncate_text(value: str, max_chars: int) -> tuple[str, bool]:
     if max_chars <= 0:
         max_chars = 12000
@@ -1013,18 +1022,23 @@ async def tool_brain_vault(
     user_id: str | None = None,
     org_id: str | None = None,
     run_id: int | None = None,
+    idea_id: str | None = None,
     requested_by: str = "agent",
     project_slug: str | None = None,
     project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
     target_registry_id: int | None = None,
 ) -> dict:
     """Retrieve a secret from the vault."""
+    from brain.systems.cortex.events import publish_safe
     from brain.systems.vault import authorize_agent_secret_read, get_secret
     if not user_id:
         return {"error": "Vault access requires an authenticated user context"}
+    target_user_id = str(user_id).strip()
+    if not target_user_id:
+        return {"error": "Vault access requires an authenticated user context"}
     authorization = await authorize_agent_secret_read(
         key,
-        user_id=user_id,
+        user_id=target_user_id,
         org_id=org_id,
         run_id=run_id,
         reason=reason,
@@ -1034,8 +1048,32 @@ async def tool_brain_vault(
         target_registry_id=target_registry_id,
     )
     if not authorization.get("allowed"):
-        grant = authorization.get("grant") or {}
+        grant = _json_safe(authorization.get("grant") or {})
+        grant_user_id = str(grant.get("user_id") or target_user_id).strip() or target_user_id
         if authorization.get("status") == "pending":
+            normalized_idea_id = (str(idea_id).strip() if idea_id else "") or None
+            if normalized_idea_id:
+                prompt = {
+                    "id": f"vault-grant-{grant.get('id') or run_id or 'thread'}",
+                    "idea_id": normalized_idea_id,
+                    "org_id": org_id,
+                    "target_user_id": grant_user_id,
+                    "run_id": grant.get("run_id") or run_id,
+                    "grant_id": grant.get("id"),
+                    "key_name": grant.get("key_name") or key,
+                    "requested_by": grant.get("requested_by") or requested_by,
+                    "reason": grant.get("reason") or reason,
+                    "requested_at": grant.get("requested_at"),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+                publish_safe("vault_agent_grant_prompt", {
+                    "idea_id": normalized_idea_id,
+                    "org_id": org_id,
+                    "target_user_id": grant_user_id,
+                    "run_id": grant.get("run_id") or run_id,
+                    "grant": grant,
+                    "prompt": prompt,
+                })
             return {
                 "error": "Vault grant required before this agent can read the secret",
                 "grant_id": grant.get("id"),
@@ -1044,7 +1082,7 @@ async def tool_brain_vault(
         return {"error": authorization.get("reason") or "Vault grant denied"}
     value = await get_secret(
         key,
-        user_id=user_id,
+        user_id=target_user_id,
         org_id=org_id,
         accessed_by="agent",
     )

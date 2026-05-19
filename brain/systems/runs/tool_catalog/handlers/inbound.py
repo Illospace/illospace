@@ -386,6 +386,20 @@ async def _handle_manage_inbound(
                 )
                 return _dump({"dry_run": result})
 
+            if action == "replay_events":
+                result = await inbound_admin.replay_events(
+                    session,
+                    org_id=org_id,
+                    event_id=event_id,
+                    connection_id=connection_id,
+                    policy_id=policy_id,
+                    status=status,
+                    origin=origin,
+                    limit=limit,
+                    include_payload=include_payload,
+                )
+                return _dump({"replay": result})
+
             return _error(f"Unknown action: {action}")
     except (
         inbound_admin.InboundAdminError,

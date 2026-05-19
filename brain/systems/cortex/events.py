@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Callable
 
-from sqlalchemy import false, select
+from sqlalchemy import false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.run import CortexEvent
@@ -38,6 +38,7 @@ _LIVE_AFTER_DURABLE_EVENT_TYPES = {
     "browser_session_error",
     "browser_session_closed",
     "vault_secret_prompt",
+    "vault_agent_grant_prompt",
 }
 
 
@@ -383,12 +384,15 @@ def _cortex_event_replay_stmt(
     )
     if not _principal_can_replay_all(principal):
         org_id = str(principal.get("org_id") or "").strip()
+        user_id = str(principal.get("id") or principal.get("user_id") or "").strip()
         if not org_id:
             stmt = stmt.where(false())
         else:
             stmt = stmt.join(Idea, Idea.id == CortexEvent.idea_id).where(
                 Idea.org_id == org_id
             )
+            target_user_id = CortexEvent.metadata_["target_user_id"].as_string()
+            stmt = stmt.where(or_(target_user_id.is_(None), target_user_id == "", target_user_id == user_id))
     return stmt
 
 

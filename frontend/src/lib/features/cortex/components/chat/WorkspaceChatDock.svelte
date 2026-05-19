@@ -51,6 +51,7 @@
     previewMembers = [],
     SeamComponent = null,
     onForegroundChange,
+    onExpandChat,
     onTopLevelModeChange,
     onOpenRoomThread,
     onCloseRoomThread,
@@ -67,6 +68,7 @@
     previewMembers?: ChatDockPreviewMember[];
     SeamComponent?: CortexChatDockSeamComponent | null;
     onForegroundChange?: (foreground: boolean) => void;
+    onExpandChat?: () => void;
     onTopLevelModeChange?: (mode: CortexChatDockTopLevelMode) => void;
     onOpenRoomThread?: (threadRootId: string) => void;
     onCloseRoomThread?: () => void;
@@ -101,7 +103,12 @@
   });
 
   function toggleChatDockSize() {
-    if (!expanded) endChatDockResize();
+    if (!expanded) {
+      endChatDockResize();
+      expanded = true;
+      onExpandChat?.();
+      return;
+    }
     expanded = !expanded;
   }
 

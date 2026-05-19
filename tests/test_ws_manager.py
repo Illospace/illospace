@@ -109,6 +109,35 @@ async def test_broadcast_product_event_only_sends_to_matching_org(manager):
 
 
 @pytest.mark.asyncio
+async def test_broadcast_product_event_target_user_id_only_sends_to_that_user(manager):
+    ws1, ws2, ws3 = AsyncMock(), AsyncMock(), AsyncMock()
+    await manager.connect(_claims("user-1", org_id="org-1"), ws1)
+    await manager.connect(_claims("user-2", org_id="org-1"), ws2)
+    await manager.connect(_claims("user-1", org_id="org-2"), ws3)
+    ws1.send_json.reset_mock()
+    ws2.send_json.reset_mock()
+    ws3.send_json.reset_mock()
+
+    delivered = await manager.broadcast_product_event(
+        "vault_agent_grant_prompt",
+        {"target_user_id": "user-1", "grant_id": 123},
+        org_id="org-1",
+    )
+
+    assert delivered is True
+    ws1.send_json.assert_called_once_with(
+        {
+            "type": "vault_agent_grant_prompt",
+            "target_user_id": "user-1",
+            "grant_id": 123,
+            "org_id": "org-1",
+        }
+    )
+    ws2.send_json.assert_not_called()
+    ws3.send_json.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_broadcast_product_event_drops_missing_scope(manager):
     ws1, ws2 = AsyncMock(), AsyncMock()
     await manager.connect(_claims("user-1", org_id="org-1"), ws1)

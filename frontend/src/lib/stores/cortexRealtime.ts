@@ -15,6 +15,7 @@ import type {
   Connection,
   Idea,
   StreamItem,
+  VaultAgentGrantPrompt,
   VaultSecretPrompt,
 } from '$lib/types/cortex';
 
@@ -29,6 +30,7 @@ export interface CortexRealtimeStoreBindings {
   browserDiscovery: BrowserDiscoveryResult | null;
   browserExtraction: BrowserExtractResult | null;
   vaultSecretPrompt: VaultSecretPrompt | null;
+  vaultAgentGrantPrompt: VaultAgentGrantPrompt | null;
   archivedIdeas: Idea[];
   typingUsers: Map<string, { user_id: string; idea_id: string; timeout: ReturnType<typeof setTimeout> }>;
 
@@ -48,6 +50,7 @@ export interface CortexRealtimeStoreBindings {
   _handleCycleChanged(msg: any): void;
   _handleBrowserSessionEvent(msg: any, frame?: BrowserFrame | null): void;
   _handleVaultSecretPrompt(msg: any): void;
+  _handleVaultAgentGrantPrompt(msg: any): void;
   _upsertIdea(idea: Idea): void;
   _registerArchivedIdea(idea: Pick<Idea, 'id' | 'user_id'> | null | undefined): void;
   _rememberArchivedIdea(idea: Idea | null | undefined): void;
@@ -281,6 +284,12 @@ export function setupCortexRealtimeBindings(options: {
   unsubs.push(
     wsClient.on('vault_secret_prompt', (msg) => {
       store._handleVaultSecretPrompt(msg);
+    }),
+  );
+
+  unsubs.push(
+    wsClient.on('vault_agent_grant_prompt', (msg) => {
+      store._handleVaultAgentGrantPrompt(msg);
     }),
   );
 

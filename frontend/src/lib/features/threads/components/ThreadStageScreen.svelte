@@ -138,6 +138,7 @@
   let nextBrowserTabIndex = $state(1);
   let lastAutoOpenedBrowserSessionId = $state<string | null>(null);
   let lastAutoOpenedVaultPromptId = $state<string | null>(null);
+  let lastAutoOpenedVaultGrantPromptId = $state<string | null>(null);
   let lastAutoOpenedCycleSignal = $state<number | null>(null);
   let lastAutoOpenedCodeReviewSignature = $state<string | null>(null);
   let lastAutoSelectedAppId = $state<string | null>(null);
@@ -222,6 +223,9 @@
   );
   const activeVaultSecretPrompt = $derived(
     String(cortex.vaultSecretPrompt?.idea_id ?? '') === String(idea?.id ?? '') ? cortex.vaultSecretPrompt : null,
+  );
+  const activeVaultAgentGrantPrompt = $derived(
+    String(cortex.vaultAgentGrantPrompt?.idea_id ?? '') === String(idea?.id ?? '') ? cortex.vaultAgentGrantPrompt : null,
   );
   const codeReviewFiles = $derived.by(() =>
     deriveCodeReviewFilesFromRuns(
@@ -938,6 +942,18 @@
   });
 
   $effect(() => {
+    const prompt = cortex.vaultAgentGrantPrompt;
+    const promptId = prompt && String(prompt.idea_id ?? '') === String(idea?.id ?? '') ? prompt.id : null;
+    if (!promptId) {
+      lastAutoOpenedVaultGrantPromptId = null;
+      return;
+    }
+    if (promptId === lastAutoOpenedVaultGrantPromptId) return;
+    lastAutoOpenedVaultGrantPromptId = promptId;
+    openVaultTab();
+  });
+
+  $effect(() => {
     const signal = cortex.cyclePanelSignal;
     if (!signal || signal.ideaId !== idea?.id) return;
     if (signal.serial === lastAutoOpenedCycleSignal) return;
@@ -1223,8 +1239,19 @@
               category: activeVaultSecretPrompt.category,
             }
           : null}
+        initialAgentGrantPrompt={activeVaultAgentGrantPrompt
+          ? {
+              id: activeVaultAgentGrantPrompt.id,
+              grantId: activeVaultAgentGrantPrompt.grant_id,
+              keyName: activeVaultAgentGrantPrompt.key_name,
+              reason: activeVaultAgentGrantPrompt.reason,
+            }
+          : null}
         onInitialCreateSaved={(promptId) => {
           if (promptId) cortex.clearVaultSecretPrompt(promptId);
+        }}
+        onInitialAgentGrantHandled={(promptId) => {
+          if (promptId) cortex.clearVaultAgentGrantPrompt(promptId);
         }}
       />
     </div>

@@ -44,6 +44,7 @@ function decodeHrefEntities(text: string): string {
 function safeHref(url: string): string | null {
   const trimmed = decodeHrefEntities(url || '').trim();
   if (/^https?:\/\//i.test(trimmed) || /^mailto:/i.test(trimmed)) return escapeHtml(trimmed);
+  if (/^\/(?!\/)/.test(trimmed)) return escapeHtml(trimmed);
   return null;
 }
 

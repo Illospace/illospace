@@ -2,6 +2,7 @@ export type AttachmentPreviewKind =
   | 'image'
   | 'video'
   | 'pdf'
+  | 'html'
   | 'text'
   | 'document'
   | 'archive'
@@ -21,6 +22,7 @@ export const ATTACHMENT_INPUT_ACCEPT = [
   'text/plain',
   'text/markdown',
   'text/csv',
+  'text/html',
   'application/json',
   '.avif',
   '.gif',
@@ -32,6 +34,8 @@ export const ATTACHMENT_INPUT_ACCEPT = [
   '.mov',
   '.mp4',
   '.webm',
+  '.htm',
+  '.html',
   '.doc',
   '.docx',
   '.odt',
@@ -45,6 +49,12 @@ export const ATTACHMENT_INPUT_ACCEPT = [
   '.md',
   '.csv',
   '.json',
+  '.log',
+  '.text',
+  '.tsv',
+  '.xml',
+  '.yaml',
+  '.yml',
   '.7z',
   '.rar',
   '.zip',
@@ -53,7 +63,8 @@ export const ATTACHMENT_INPUT_ACCEPT = [
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['avif', 'gif', 'jpeg', 'jpg', 'png', 'svg', 'webp']);
 const VIDEO_ATTACHMENT_EXTENSIONS = new Set(['m4v', 'mov', 'mp4', 'webm']);
 const PDF_ATTACHMENT_EXTENSIONS = new Set(['pdf']);
-const TEXT_ATTACHMENT_EXTENSIONS = new Set(['csv', 'json', 'md', 'txt']);
+const HTML_ATTACHMENT_EXTENSIONS = new Set(['htm', 'html']);
+const TEXT_ATTACHMENT_EXTENSIONS = new Set(['csv', 'json', 'log', 'md', 'text', 'tsv', 'txt', 'xml', 'yaml', 'yml']);
 const DOCUMENT_ATTACHMENT_EXTENSIONS = new Set([
   'doc',
   'docx',
@@ -134,6 +145,7 @@ export function attachmentPreviewKind(attachment: any): AttachmentPreviewKind {
   if (type.startsWith('image/') || IMAGE_ATTACHMENT_EXTENSIONS.has(extension)) return 'image';
   if (type.startsWith('video/') || VIDEO_ATTACHMENT_EXTENSIONS.has(extension)) return 'video';
   if (type === 'application/pdf' || PDF_ATTACHMENT_EXTENSIONS.has(extension)) return 'pdf';
+  if (type === 'text/html' || HTML_ATTACHMENT_EXTENSIONS.has(extension)) return 'html';
   if (type === 'text/uri-list') return 'link';
   if (type.startsWith('text/') || TEXT_ATTACHMENT_EXTENSIONS.has(extension)) return 'text';
   if (DOCUMENT_ATTACHMENT_EXTENSIONS.has(extension)) return 'document';
@@ -149,6 +161,7 @@ export function attachmentKindLabel(attachment: any): string {
   if (extension) return extension.toUpperCase();
   if (kind === 'video') return 'Video';
   if (kind === 'pdf') return 'PDF';
+  if (kind === 'html') return 'HTML';
   if (kind === 'text') return 'Text';
   if (kind === 'archive') return 'Archive';
   if (kind === 'document') return 'Document';

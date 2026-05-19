@@ -154,6 +154,7 @@ def _get_tool_handlers(
             user_id=_current_agent_value("user_id"),
             org_id=_current_agent_value("org_id"),
             run_id=_current_run_id(),
+            idea_id=_current_idea_id(),
             requested_by=_current_requested_by(),
             **_current_project_token_context(),
         ),

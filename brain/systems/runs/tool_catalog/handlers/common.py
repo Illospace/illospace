@@ -320,6 +320,11 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
             "optional": ["kind", "payload"],
             "effect": "preview policy and projection matching without storing an event",
         },
+        "replay_events": {
+            "required": [],
+            "optional": ["event_id", "connection_id", "policy_id", "status", "origin", "include_payload", "limit"],
+            "effect": "replay stored inbound events against current config without mutating workspace state",
+        },
     },
     "manage_skill": {
         "list": {"required": [], "optional": ["include_archived", "limit"], "effect": "read available skills"},

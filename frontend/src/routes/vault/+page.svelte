@@ -133,6 +133,12 @@
     description?: string | null;
     category?: string | null;
   };
+  type VaultInitialAgentGrantPrompt = {
+    id?: string | null;
+    grantId: number;
+    keyName?: string | null;
+    reason?: string | null;
+  };
   type VaultRow =
     | { id: string; kind: 'secret'; secret: Secret }
     | { id: string; kind: 'grant'; grant: AgentGrant }
@@ -176,11 +182,15 @@
   let {
     embedded = false,
     initialCreatePrefill = null,
+    initialAgentGrantPrompt = null,
     onInitialCreateSaved,
+    onInitialAgentGrantHandled,
   }: {
     embedded?: boolean;
     initialCreatePrefill?: VaultInitialCreatePrefill | null;
+    initialAgentGrantPrompt?: VaultInitialAgentGrantPrompt | null;
     onInitialCreateSaved?: (prefillId?: string | null) => void;
+    onInitialAgentGrantHandled?: (promptId?: string | null) => void;
   } = $props();
 
   let secrets = $state<Secret[]>([]);
@@ -192,6 +202,9 @@
   let filterText = $state('');
   let activeVaultTab = $state<VaultTab>('library');
   let selectedRowId = $state<string | null>(null);
+  let approvalModalGrantId = $state<number | null>(null);
+  let initialAgentGrantFocusAppliedFor = $state<string | null>(null);
+  let initialAgentGrantRefreshRequestedFor = $state<string | null>(null);
 
   const workspacePageModalContext = getContext<ConstellationPageFrameModalContext | undefined>(
     CONSTELLATION_PAGE_FRAME_MODAL_CONTEXT,
@@ -299,6 +312,9 @@
     () => (typeof window === 'undefined' ? '/mcp' : `${window.location.origin}/mcp`),
   );
   const pendingAgentGrants = $derived.by(() => agentGrants.filter((grant) => grant.status === 'pending'));
+  const approvalModalGrant = $derived.by(() =>
+    pendingAgentGrants.find((grant) => grant.id === approvalModalGrantId) ?? null,
+  );
   const staleSecrets = $derived.by(() => secrets.filter((secret) => secretAgeNumber(secret.updated_at) >= 180));
   const vaultRows = $derived.by<VaultRow[]>(() => [
     ...(!hasPin ? [{ id: 'pin:setup', kind: 'pin' as const }] : []),
@@ -370,6 +386,33 @@
   $effect(() => {
     if (!initialCreatePrefill?.keyName || loading || vaultLocked) return;
     maybeApplyInitialCreatePrefill();
+  });
+
+  $effect(() => {
+    const grantId = Number(initialAgentGrantPrompt?.grantId ?? 0);
+    const promptId = initialAgentGrantPrompt?.id || (grantId > 0 ? `grant:${grantId}` : '');
+    if (!Number.isSafeInteger(grantId) || grantId <= 0) {
+      initialAgentGrantFocusAppliedFor = null;
+      initialAgentGrantRefreshRequestedFor = null;
+      return;
+    }
+    if (loading || vaultLocked) return;
+
+    const grant = pendingAgentGrants.find((candidate) => candidate.id === grantId);
+    if (!grant) {
+      if (initialAgentGrantRefreshRequestedFor !== promptId) {
+        initialAgentGrantRefreshRequestedFor = promptId;
+        void loadData();
+      }
+      return;
+    }
+    if (initialAgentGrantFocusAppliedFor === promptId) return;
+
+    initialAgentGrantFocusAppliedFor = promptId;
+    activeVaultTab = 'library';
+    filterText = '';
+    selectedRowId = `grant:${grant.id}`;
+    approvalModalGrantId = grant.id;
   });
 
   function previewIso(daysAgo: number, hoursAgo = 0): string {
@@ -1425,16 +1468,25 @@
     }
   }
 
+  function clearInitialAgentGrantPrompt(grantId: number) {
+    approvalModalGrantId = null;
+    if (Number(initialAgentGrantPrompt?.grantId ?? 0) === grantId) {
+      onInitialAgentGrantHandled?.(initialAgentGrantPrompt?.id ?? null);
+    }
+  }
+
   async function approveAgentGrant(grantId: number) {
     if (isVaultPreview) {
       agentGrants = agentGrants.map((grant) =>
         grant.id === grantId ? { ...grant, status: 'approved', expires_at: previewIso(-1), max_reads: 1 } : grant,
       );
+      clearInitialAgentGrantPrompt(grantId);
       ui.toast('Preview grant approved', 'success');
       return;
     }
     try {
       await api.vaultApproveGrant(grantId, { ttl_minutes: 15, max_reads: 1 }, vaultToken);
+      clearInitialAgentGrantPrompt(grantId);
       ui.toast('Agent grant approved', 'success');
       await loadData();
     } catch (err: any) {
@@ -1447,11 +1499,13 @@
       agentGrants = agentGrants.map((grant) =>
         grant.id === grantId ? { ...grant, status: 'denied' } : grant,
       );
+      clearInitialAgentGrantPrompt(grantId);
       ui.toast('Preview grant denied', 'success');
       return;
     }
     try {
       await api.vaultDenyGrant(grantId, vaultToken);
+      clearInitialAgentGrantPrompt(grantId);
       ui.toast('Agent grant denied', 'success');
       await loadData();
     } catch (err: any) {
@@ -2036,6 +2090,51 @@
           </ConstellationButton>
         </div>
       </form>
+    </div>
+  </div>
+{/if}
+
+<!-- Agent Grant Approval Modal -->
+{#if approvalModalGrant}
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="modal-overlay" onclick={() => (approvalModalGrantId = null)} role="dialog" aria-modal="true" tabindex="-1">
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal approval-modal" onclick={(e) => e.stopPropagation()}>
+      <div class="modal-header">
+        <span class="modal-title">Approve Vault Access</span>
+        <ConstellationIconButton label="Close" title="Close" size="sm" onclick={() => (approvalModalGrantId = null)}>
+          <ConstellationIcon name="x" />
+        </ConstellationIconButton>
+      </div>
+
+      <div class="approval-modal-body">
+        <div class="approval-key-block">
+          <span>Secret</span>
+          <code>{approvalModalGrant.key_name}</code>
+        </div>
+        <div class="expanded-facts">
+          <span>{approvalModalGrant.requested_by || 'agent'}</span>
+          <span>run {approvalModalGrant.run_id ?? 'unknown'}</span>
+          <span>requested {timeAgo(approvalModalGrant.requested_at)}</span>
+        </div>
+        <div class="vault-region approval-reason">
+          <div class="approval-reason-header">
+            <span>Request reason</span>
+          </div>
+          <p class="empty-inline">{approvalModalGrant.reason}</p>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <ConstellationButton variant="secondary" onclick={() => denyAgentGrant(approvalModalGrant.id)}>
+          Deny
+        </ConstellationButton>
+        <ConstellationButton onclick={() => approveAgentGrant(approvalModalGrant.id)}>
+          Approve once
+        </ConstellationButton>
+      </div>
     </div>
   </div>
 {/if}
@@ -2829,6 +2928,52 @@
 
   :global(.agent-modal-notice) {
     margin-bottom: var(--sp-3);
+  }
+
+  .approval-modal {
+    max-width: min(100%, 440px);
+  }
+
+  .approval-modal-body {
+    display: grid;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .approval-key-block {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--constellation-surface-panel-separator);
+    border-radius: 8px;
+    background: var(--constellation-surface-nested-background);
+  }
+
+  .approval-key-block span,
+  .approval-reason-header {
+    color: var(--constellation-label-eyebrow);
+    font-family: var(--constellation-font-mono);
+    font-size: var(--constellation-type-meta);
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .approval-key-block code {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--content-code-text);
+    font-family: var(--constellation-font-mono);
+    font-size: 13px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .approval-reason {
+    gap: 8px;
+    padding: 10px 12px;
   }
 
   .inline-action {

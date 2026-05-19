@@ -519,6 +519,200 @@ async def test_dry_run_schema_errors_match_runtime_quarantine(
     assert dry_run["schema_error"] == "Missing required inbound field(s): payload.issue.key"
 
 
+async def test_replay_events_previews_current_config_without_mutating_domains(
+    seeded_session,
+    patch_unit_of_work,
+):
+    domain = await _create_issue_domain(seeded_session)
+
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        connection = _decode(
+            await _handle_manage_inbound(
+                action="create_connection",
+                display_name="Jira webhook",
+                agent_kind="jira",
+                transport="webhook",
+            )
+        )["connection"]
+        policy = _decode(
+            await _handle_manage_inbound(
+                action="create_policy",
+                connection_id=connection["id"],
+                name="Jira issue events",
+                origin_patterns=["jira.issue_*"],
+                allowed_actions=[inbound_service.ACTION_DOMAIN_PROJECTION_UPSERT],
+            )
+        )["policy"]
+        await _handle_manage_inbound(
+            action="create_projection",
+            connection_id=connection["id"],
+            policy_id=policy["id"],
+            domain_id=domain.id,
+            object_key="issue",
+            external_id_path="payload.issue.key",
+            external_id_field="external_id",
+            field_mapping={"summary": "payload.issue.summary"},
+            title_path="payload.issue.summary",
+        )
+
+    first = await inbound_service.submit_inbound_envelope(
+        seeded_session,
+        connection={
+            "connection_id": connection["id"],
+            "org_id": ORG_ID,
+            "owner_user_id": USER_ID,
+            "display_name": "Jira webhook",
+            "agent_kind": "jira",
+            "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
+        },
+        envelope={
+            "kind": "signal",
+            "origin": "jira.issue_created",
+            "payload": {"issue": {"key": "ILO-7", "summary": "First"}},
+            "idempotency_key": "jira:ILO-7:created",
+        },
+        ingress_context={"surface": "webhook"},
+    )
+    second = await inbound_service.submit_inbound_envelope(
+        seeded_session,
+        connection={
+            "connection_id": connection["id"],
+            "org_id": ORG_ID,
+            "owner_user_id": USER_ID,
+            "display_name": "Jira webhook",
+            "agent_kind": "jira",
+            "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
+        },
+        envelope={
+            "kind": "signal",
+            "origin": "jira.issue_updated",
+            "payload": {"issue": {"key": "ILO-8", "summary": "Second"}},
+            "idempotency_key": "jira:ILO-8:updated",
+        },
+        ingress_context={"surface": "webhook"},
+    )
+    assert first["status"] == inbound_service.STATUS_PROCESSED
+    assert second["status"] == inbound_service.STATUS_PROCESSED
+    records_before = list((await seeded_session.scalars(select(DomainRecord))).all())
+
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        await _handle_manage_inbound(
+            action="update_policy",
+            policy_id=policy["id"],
+            enabled=False,
+        )
+        replay = _decode(
+            await _handle_manage_inbound(
+                action="replay_events",
+                connection_id=connection["id"],
+                limit=10,
+            )
+        )["replay"]
+
+    records_after = list((await seeded_session.scalars(select(DomainRecord))).all())
+    reloaded_first = await seeded_session.get(InboundEventRow, first["event_id"])
+    assert len(records_before) == 2
+    assert [record.id for record in records_after] == [record.id for record in records_before]
+    assert reloaded_first.status == inbound_service.STATUS_PROCESSED
+    assert replay["mode"] == "dry_run_replay"
+    assert replay["mutates_workspace"] is False
+    assert replay["event_count"] == 2
+    assert replay["summary"]["would_statuses"] == {inbound_service.STATUS_REVIEW_REQUIRED: 2}
+    assert replay["summary"]["would_require_ilo"] == 2
+    assert replay["summary"]["would_project_domain_record"] == 0
+    assert replay["summary"]["changed"] == {
+        "policy_match": 2,
+        "domain_projection_match": 2,
+        "status": 2,
+    }
+    assert {result["original"]["status"] for result in replay["results"]} == {
+        inbound_service.STATUS_PROCESSED,
+    }
+    assert {result["replay"]["reason"] for result in replay["results"]} == {
+        "no_matching_source_policy",
+    }
+    assert all("raw_payload" not in result["event"] for result in replay["results"])
+
+
+async def test_replay_event_can_include_payload_for_single_event_inspection(
+    seeded_session,
+    patch_unit_of_work,
+):
+    domain = await _create_issue_domain(seeded_session)
+
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        connection = _decode(
+            await _handle_manage_inbound(
+                action="create_connection",
+                display_name="Jira webhook",
+                agent_kind="jira",
+                transport="webhook",
+            )
+        )["connection"]
+        policy = _decode(
+            await _handle_manage_inbound(
+                action="create_policy",
+                connection_id=connection["id"],
+                name="Jira issue events",
+                origin_patterns=["jira.issue_*"],
+            )
+        )["policy"]
+        projection = _decode(
+            await _handle_manage_inbound(
+                action="create_projection",
+                connection_id=connection["id"],
+                policy_id=policy["id"],
+                domain_id=domain.id,
+                object_key="issue",
+                external_id_path="payload.issue.key",
+                external_id_field="external_id",
+                field_mapping={"summary": "payload.issue.summary"},
+                title_path="payload.issue.summary",
+            )
+        )["projection"]
+
+    result = await inbound_service.submit_inbound_envelope(
+        seeded_session,
+        connection={
+            "connection_id": connection["id"],
+            "org_id": ORG_ID,
+            "owner_user_id": USER_ID,
+            "display_name": "Jira webhook",
+            "agent_kind": "jira",
+            "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
+        },
+        envelope={
+            "kind": "signal",
+            "origin": "jira.issue_created",
+            "payload": {"issue": {"key": "ILO-9", "summary": "Payload replay"}},
+            "idempotency_key": "jira:ILO-9:created",
+        },
+        ingress_context={"surface": "webhook"},
+    )
+
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        replay = _decode(
+            await _handle_manage_inbound(
+                action="replay_events",
+                event_id=result["event_id"],
+                include_payload=True,
+            )
+        )["replay"]
+
+    replayed = replay["results"][0]
+    assert replay["event_count"] == 1
+    assert replayed["event"]["raw_payload"] == {"issue": {"key": "ILO-9", "summary": "Payload replay"}}
+    assert replayed["original"]["matched_policy_id"] == policy["id"]
+    assert replayed["replay"]["matched_policy_id"] == policy["id"]
+    assert replayed["replay"]["domain_projection_id"] == projection["id"]
+    assert replayed["replay"]["would_status"] == inbound_service.STATUS_PROCESSED
+    assert replayed["changed"] == {
+        "policy_match": False,
+        "domain_projection_match": False,
+        "status": False,
+    }
+
+
 async def test_manage_inbound_requires_org_scoped_run(patch_unit_of_work):
     with bind_agent_context(AgentExecutionContext(user_id=USER_ID)):
         result = _decode(await _handle_manage_inbound(action="list_connections"))

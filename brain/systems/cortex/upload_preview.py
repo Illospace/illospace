@@ -20,6 +20,7 @@ MAX_SHEET_COLUMNS = 16
 MAX_SHEETS = 4
 
 _TEXT_EXTENSIONS = {"csv", "json", "log", "md", "text", "tsv", "txt", "xml", "yaml", "yml"}
+_HTML_EXTENSIONS = {"html", "htm"}
 _IMAGE_EXTENSIONS = {"avif", "gif", "jpeg", "jpg", "png", "svg", "webp"}
 _VIDEO_EXTENSIONS = {"m4v", "mov", "mp4", "webm"}
 _DOCUMENT_EXTENSIONS = {"doc", "docx", "key", "numbers", "odt", "pages", "ppt", "pptx", "rtf", "xls", "xlsx"}
@@ -131,6 +132,11 @@ def build_upload_preview(
         payload["preview_mode"] = "embed"
         return payload
 
+    if extension in _HTML_EXTENSIONS:
+        text, truncated = _read_text_preview(path)
+        payload.update({"preview_mode": "html", "text": text, "truncated": truncated})
+        return payload
+
     if extension in _TEXT_EXTENSIONS:
         text, truncated = _read_text_preview(path)
         payload.update({"preview_mode": "text", "text": text, "truncated": truncated})
@@ -177,6 +183,8 @@ def _content_type_for_extension(extension: str) -> str:
     return {
         "doc": "application/msword",
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "htm": "text/html",
+        "html": "text/html",
         "pdf": "application/pdf",
         "ppt": "application/vnd.ms-powerpoint",
         "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -193,6 +201,8 @@ def _preview_kind(extension: str, content_type: str) -> str:
         return "video"
     if content_type == "application/pdf" or extension == "pdf":
         return "pdf"
+    if content_type == "text/html" or extension in _HTML_EXTENSIONS:
+        return "html"
     if extension in _TEXT_EXTENSIONS:
         return "text"
     if extension in _DOCUMENT_EXTENSIONS:

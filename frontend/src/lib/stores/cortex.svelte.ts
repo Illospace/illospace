@@ -61,6 +61,9 @@ import {
   vaultSecretPromptFromRunToolEvent,
   vaultSecretPromptFromStream,
 } from '$lib/utils/vaultSecretPrompt';
+import {
+  normalizeVaultAgentGrantPromptMessage,
+} from '$lib/utils/vaultAgentGrantPrompt';
 import type {
   AgentRunOptions,
   BrowserDiscoveryResult,
@@ -73,6 +76,7 @@ import type {
   CortexIntelligenceTier,
   Idea,
   StreamItem,
+  VaultAgentGrantPrompt,
   VaultSecretPrompt,
 } from '$lib/types/cortex';
 
@@ -91,6 +95,7 @@ export type {
   CortexIntelligenceTier,
   Idea,
   StreamItem,
+  VaultAgentGrantPrompt,
   VaultSecretPrompt,
 } from '$lib/types/cortex';
 
@@ -120,6 +125,7 @@ class CortexStore {
   browserDiscovery = $state<BrowserDiscoveryResult | null>(null);
   browserExtraction = $state<BrowserExtractResult | null>(null);
   vaultSecretPrompt = $state<VaultSecretPrompt | null>(null);
+  vaultAgentGrantPrompt = $state<VaultAgentGrantPrompt | null>(null);
   cyclePanelSignal = $state<{
     ideaId: string;
     toolName: string;
@@ -153,8 +159,11 @@ class CortexStore {
     frame?: BrowserFrame | null;
   }>();
   private _vaultPromptFocusLoads = new Set<string>();
+  private _vaultAgentGrantPromptFocusLoads = new Set<string>();
   private _pendingVaultSecretPrompts = new Map<string, VaultSecretPrompt>();
+  private _pendingVaultAgentGrantPrompts = new Map<string, VaultAgentGrantPrompt>();
   private _dismissedVaultSecretPromptIds = new Set<string>();
+  private _dismissedVaultAgentGrantPromptIds = new Set<string>();
   private _teamMembersPromise: Promise<TeamMember[]> | null = null;
   private _seenIdeaRevisions = new Map<string, string>();
   private _archivedIdeaIds = new Set<string>();
@@ -369,6 +378,10 @@ class CortexStore {
     return normalizeVaultSecretPromptMessage(msg);
   }
 
+  private _normalizeVaultAgentGrantPrompt(msg: any): VaultAgentGrantPrompt | null {
+    return normalizeVaultAgentGrantPromptMessage(msg);
+  }
+
   private _applyVaultSecretPrompt(prompt: VaultSecretPrompt) {
     if (this._dismissedVaultSecretPromptIds.has(prompt.id)) return;
     if (this.vaultSecretPrompt?.id === prompt.id) {
@@ -405,6 +418,42 @@ class CortexStore {
     this._applyVaultSecretPrompt(prompt);
   }
 
+  private _applyVaultAgentGrantPrompt(prompt: VaultAgentGrantPrompt) {
+    if (this._dismissedVaultAgentGrantPromptIds.has(prompt.id)) return;
+    if (this.vaultAgentGrantPrompt?.id === prompt.id) {
+      this.panelOpen = true;
+      return;
+    }
+    this.vaultAgentGrantPrompt = prompt;
+    this.panelOpen = true;
+  }
+
+  private _focusThreadForVaultAgentGrantPrompt(ideaId: string, prompt: VaultAgentGrantPrompt) {
+    this._pendingVaultAgentGrantPrompts.set(ideaId, prompt);
+    if (this._vaultAgentGrantPromptFocusLoads.has(ideaId)) return;
+    this._vaultAgentGrantPromptFocusLoads.add(ideaId);
+    void this.selectIdea(ideaId).finally(() => {
+      this._vaultAgentGrantPromptFocusLoads.delete(ideaId);
+      const pending = this._pendingVaultAgentGrantPrompts.get(ideaId);
+      this._pendingVaultAgentGrantPrompts.delete(ideaId);
+      if (!pending || this.selectedIdeaId !== ideaId) return;
+      this._applyVaultAgentGrantPrompt(pending);
+    });
+  }
+
+  _handleVaultAgentGrantPrompt(msg: any) {
+    const prompt = this._normalizeVaultAgentGrantPrompt(msg);
+    const ideaId = prompt?.idea_id ?? null;
+    if (!prompt || !ideaId) return;
+
+    if (ideaId !== this.selectedIdeaId) {
+      this._focusThreadForVaultAgentGrantPrompt(ideaId, prompt);
+      return;
+    }
+
+    this._applyVaultAgentGrantPrompt(prompt);
+  }
+
   private _handleVaultSecretPromptFromRunEvent(msg: any) {
     const prompt = vaultSecretPromptFromRunToolEvent(msg) as VaultSecretPrompt | null;
     const ideaId = prompt?.idea_id ?? null;
@@ -432,6 +481,13 @@ class CortexStore {
     if (promptId) this._dismissedVaultSecretPromptIds.add(promptId);
     if (!promptId || this.vaultSecretPrompt?.id === promptId) {
       this.vaultSecretPrompt = null;
+    }
+  }
+
+  clearVaultAgentGrantPrompt(promptId?: string | null) {
+    if (promptId) this._dismissedVaultAgentGrantPromptIds.add(promptId);
+    if (!promptId || this.vaultAgentGrantPrompt?.id === promptId) {
+      this.vaultAgentGrantPrompt = null;
     }
   }
 
@@ -1080,6 +1136,9 @@ class CortexStore {
     if (this.vaultSecretPrompt?.idea_id && this.vaultSecretPrompt.idea_id !== id) {
       this.vaultSecretPrompt = null;
     }
+    if (this.vaultAgentGrantPrompt?.idea_id && this.vaultAgentGrantPrompt.idea_id !== id) {
+      this.vaultAgentGrantPrompt = null;
+    }
     this.selectedIdeaId = id;
     this.panelOpen = true;
     this.canvasOpen = false;
@@ -1142,6 +1201,7 @@ class CortexStore {
       this.browserDiscovery = null;
       this.browserExtraction = null;
       this.vaultSecretPrompt = null;
+      this.vaultAgentGrantPrompt = null;
       this.stream = [];
       return;
     }
@@ -1156,6 +1216,9 @@ class CortexStore {
     this._seenRunUiEvents.clear();
     if (this.vaultSecretPrompt?.idea_id && this.vaultSecretPrompt.idea_id !== id) {
       this.vaultSecretPrompt = null;
+    }
+    if (this.vaultAgentGrantPrompt?.idea_id && this.vaultAgentGrantPrompt.idea_id !== id) {
+      this.vaultAgentGrantPrompt = null;
     }
     this.selectedIdeaId = id;
     this.panelOpen = true;

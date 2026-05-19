@@ -170,6 +170,18 @@ export interface VaultSecretPrompt {
   created_at?: string | null;
 }
 
+export interface VaultAgentGrantPrompt {
+  id: string;
+  idea_id?: string | null;
+  grant_id: number;
+  key_name: string;
+  run_id?: number | string | null;
+  reason?: string | null;
+  requested_by?: string | null;
+  requested_at?: string | null;
+  created_at?: string | null;
+}
+
 export type CortexExecutionProfile = 'fast' | 'deep';
 export type CortexIntelligenceTier = 'low' | 'medium' | 'high';
 export type CortexEffortLevel = 'low' | 'medium' | 'high' | 'xhigh';
