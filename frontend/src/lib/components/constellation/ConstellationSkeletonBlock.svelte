@@ -84,9 +84,9 @@
 
 <style>
   .constellation-skeleton-block {
-    --skeleton-fill: rgba(255, 255, 255, 0.07);
-    --skeleton-fill-soft: rgba(255, 255, 255, 0.04);
-    --skeleton-shimmer: rgba(255, 255, 255, 0.14);
+    --skeleton-fill: var(--constellation-skeleton-fill);
+    --skeleton-fill-soft: var(--constellation-skeleton-fill-soft);
+    --skeleton-shimmer: var(--constellation-skeleton-shimmer);
     position: relative;
     overflow: hidden;
     display: grid;
@@ -107,13 +107,9 @@
   .constellation-skeleton-block-metric {
     padding: 18px;
     border-radius: var(--constellation-radius-panel);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    background:
-      radial-gradient(circle at 16% 0%, rgba(141, 183, 255, 0.08), transparent 34%),
-      linear-gradient(180deg, rgba(11, 15, 24, 0.9), rgba(8, 11, 18, 0.82));
-    box-shadow:
-      0 14px 36px rgba(0, 0, 0, 0.2),
-      inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--constellation-skeleton-panel-border);
+    background: var(--constellation-skeleton-panel-background);
+    box-shadow: var(--constellation-skeleton-panel-shadow);
   }
 
   .constellation-skeleton-block-text {

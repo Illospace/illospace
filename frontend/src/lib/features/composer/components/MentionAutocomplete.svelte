@@ -245,9 +245,12 @@
   .mention-dropdown {
     position: fixed;
     top: var(--mention-dropdown-top, 0);
+    right: auto;
+    bottom: auto;
     left: var(--mention-dropdown-left, 12px);
     width: min(var(--mention-dropdown-width, 260px), calc(100vw - 24px));
     max-height: var(--mention-dropdown-max-height, 260px);
+    box-sizing: border-box;
     overflow-y: auto;
     transform: translateY(-100%);
     background: var(--constellation-select-chip-menu-background, rgba(12, 15, 22, 0.96));
@@ -258,6 +261,8 @@
     min-width: 220px;
     box-shadow: var(--constellation-select-chip-menu-shadow, 0 12px 40px rgba(0, 0, 0, 0.5));
     z-index: var(--constellation-layer-popover, 1000);
+    opacity: 1;
+    animation: none;
     scrollbar-color: var(--constellation-utility-panel-scrollbar, rgba(255, 255, 255, 0.14)) transparent;
   }
 

@@ -14,6 +14,8 @@
     ConstellationPanel,
     ConstellationPill,
     ConstellationSearchField,
+    ConstellationSelect,
+    ConstellationTextarea,
     ConstellationTextInput,
   } from '$lib/components/constellation';
   import {
@@ -161,6 +163,15 @@
     { key: 'available', label: 'Agent Available' },
     { key: 'manual', label: 'Manual Only' },
   ];
+  const CATEGORY_SELECT_OPTIONS = CATEGORIES.map((category) => ({ value: category, label: category }));
+  const AGENT_KIND_SELECT_OPTIONS = AGENT_KIND_OPTIONS.map((option) => ({
+    value: option.key,
+    label: option.label,
+  }));
+  const ACCESS_LEVEL_SELECT_OPTIONS = ACCESS_LEVELS.map((level) => ({
+    value: level.key,
+    label: level.label,
+  }));
 
   let {
     embedded = false,
@@ -237,6 +248,13 @@
   let orgUsers = $state<OrgUser[]>([]);
   let shareUserId = $state('');
   let shareSaving = $state(false);
+  const shareUserOptions = $derived(
+    orgUsers.map((user) => ({
+      value: user.id,
+      label: user.name,
+      description: user.email,
+    })),
+  );
 
   // Project binding state
   let showBindModal = $state(false);
@@ -253,6 +271,9 @@
   let agentConnectionSaving = $state(false);
   let mintedAgentToken = $state<ExternalAgentTokenRead | null>(null);
   let mintedAgentTokenConnection = $state<ExternalAgentConnection | null>(null);
+  let agentConnectionTokens = $state<Record<string, ExternalAgentTokenRead[]>>({});
+  let revokingAgentTokenIds = $state<string[]>([]);
+  let deletingAgentConnectionIds = $state<string[]>([]);
 
   // Reveal state
   let revealed = $state<Record<string, string>>({});
@@ -706,8 +727,10 @@
 
       if (connectionsResult.status === 'fulfilled') {
         agentConnections = connectionsResult.value;
+        await loadAgentConnectionTokens(agentConnections);
       } else {
         agentConnections = [];
+        agentConnectionTokens = {};
       }
 
       maybeApplyInitialCreatePrefill();
@@ -763,14 +786,6 @@
 
   function agentKindLabel(kind: string | undefined): string {
     return AGENT_KIND_OPTIONS.find((item) => item.key === (kind || '').toLowerCase())?.label || kind || 'Personal agent';
-  }
-
-  function connectionStatusVariant(status: string | undefined): PillTone {
-    const normalized = (status || '').toLowerCase();
-    if (normalized === 'online' || normalized === 'configured') return 'success';
-    if (normalized === 'disabled') return 'danger';
-    if (normalized === 'pending') return 'warning';
-    return 'muted';
   }
 
   function rowTitle(row: VaultRow): string {
@@ -1186,7 +1201,7 @@
     showAgentConnectionModal = true;
   }
 
-  function mcpTokenFacts(connection: ExternalAgentConnection): string {
+  function mcpConnectionFacts(connection: ExternalAgentConnection): string {
     const parts = [
       agentKindLabel(connection.agent_kind),
       connection.last_seen_at ? `last used ${timeAgo(connection.last_seen_at)}` : 'never used',
@@ -1194,6 +1209,37 @@
     if (connection.created_at) parts.push(`created ${timeAgo(connection.created_at)}`);
     if (connection.last_error) parts.push('error');
     return parts.join(' · ');
+  }
+
+  function mcpConnectionTokenFacts(token: ExternalAgentTokenRead): string {
+    const parts = [
+      token.token_prefix ? `prefix ${token.token_prefix}` : 'token saved',
+      token.last_used_at ? `last used ${timeAgo(token.last_used_at)}` : 'never used',
+    ];
+    if (token.created_at) parts.push(`created ${timeAgo(token.created_at)}`);
+    if (token.expires_at) parts.push(`expires ${relativeTime(token.expires_at)}`);
+    return parts.join(' · ');
+  }
+
+  async function loadAgentConnectionTokens(connections: ExternalAgentConnection[]) {
+    if (isVaultPreview || !connections.length) {
+      agentConnectionTokens = {};
+      return;
+    }
+
+    const results = await Promise.allSettled(
+      connections.map(async (connection) => ({
+        connectionId: connection.id,
+        tokens: await api.listAgentConnectionTokens(connection.id),
+      })),
+    );
+    const next: Record<string, ExternalAgentTokenRead[]> = {};
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        next[result.value.connectionId] = result.value.tokens;
+      }
+    }
+    agentConnectionTokens = next;
   }
 
   function previewAgentConnection(displayName: string, kind: string): ExternalAgentConnection {
@@ -1242,6 +1288,16 @@
     mintedAgentTokenConnection = connection;
   }
 
+  function rememberConnectionToken(connectionId: string, token: ExternalAgentTokenRead) {
+    agentConnectionTokens = {
+      ...agentConnectionTokens,
+      [connectionId]: [
+        token,
+        ...(agentConnectionTokens[connectionId] || []).filter((item) => item.id !== token.id),
+      ],
+    };
+  }
+
   async function submitAgentConnection() {
     const displayName = agentFormDisplayName.trim();
     if (!displayName) {
@@ -1250,11 +1306,13 @@
     }
     if (isVaultPreview) {
       const connection = previewAgentConnection(displayName, agentFormKind);
+      const token = previewAgentToken(connection);
       agentConnections = [
         connection,
         ...agentConnections.filter((item) => item.id !== connection.id),
       ];
-      showMintedAgentToken(connection, previewAgentToken(connection));
+      rememberConnectionToken(connection.id, token);
+      showMintedAgentToken(connection, token);
       showAgentConnectionModal = false;
       ui.toast('Preview MCP token created', 'success');
       return;
@@ -1276,6 +1334,7 @@
         connection,
         ...agentConnections.filter((item) => item.id !== connection.id),
       ];
+      rememberConnectionToken(connection.id, token);
       showMintedAgentToken(connection, token);
       showAgentConnectionModal = false;
       ui.toast('MCP token created', 'success');
@@ -1288,7 +1347,9 @@
 
   async function mintTokenForConnection(connection: ExternalAgentConnection) {
     if (isVaultPreview) {
-      showMintedAgentToken(connection, previewAgentToken(connection));
+      const token = previewAgentToken(connection);
+      rememberConnectionToken(connection.id, token);
+      showMintedAgentToken(connection, token);
       ui.toast('Preview MCP token created', 'success');
       return;
     }
@@ -1296,10 +1357,59 @@
       const token: ExternalAgentTokenRead = await api.mintAgentConnectionToken(connection.id, {
         name: `${connection.display_name} MCP token`,
       });
+      rememberConnectionToken(connection.id, token);
       showMintedAgentToken(connection, token);
       ui.toast('MCP token created', 'success');
     } catch (err: any) {
       ui.toast(err?.detail || 'Failed to mint token', 'error');
+    }
+  }
+
+  async function revokeTokenForConnection(connection: ExternalAgentConnection, token: ExternalAgentTokenRead) {
+    if (!confirm(`Revoke token "${token.name}" for ${connection.display_name}? This token will stop working.`)) return;
+
+    revokingAgentTokenIds = [...revokingAgentTokenIds, token.id];
+    try {
+      if (!isVaultPreview) {
+        await api.revokeAgentConnectionToken(connection.id, token.id);
+      }
+      agentConnectionTokens = {
+        ...agentConnectionTokens,
+        [connection.id]: (agentConnectionTokens[connection.id] || []).filter((item) => item.id !== token.id),
+      };
+      if (mintedAgentToken?.id === token.id) {
+        mintedAgentToken = null;
+        mintedAgentTokenConnection = null;
+      }
+      ui.toast('MCP token revoked', 'success');
+    } catch (err: any) {
+      ui.toast(err?.detail || 'Failed to revoke token', 'error');
+    } finally {
+      revokingAgentTokenIds = revokingAgentTokenIds.filter((id) => id !== token.id);
+    }
+  }
+
+  async function removeAgentConnection(connection: ExternalAgentConnection) {
+    if (!confirm(`Remove ${connection.display_name}? Active tokens for this connection will stop working.`)) return;
+
+    deletingAgentConnectionIds = [...deletingAgentConnectionIds, connection.id];
+    try {
+      if (!isVaultPreview) {
+        await api.deleteAgentConnection(connection.id);
+      }
+      agentConnections = agentConnections.filter((item) => item.id !== connection.id);
+      const remainingTokens = { ...agentConnectionTokens };
+      delete remainingTokens[connection.id];
+      agentConnectionTokens = remainingTokens;
+      if (mintedAgentTokenConnection?.id === connection.id) {
+        mintedAgentToken = null;
+        mintedAgentTokenConnection = null;
+      }
+      ui.toast('MCP connection removed', 'success');
+    } catch (err: any) {
+      ui.toast(err?.detail || 'Failed to remove MCP connection', 'error');
+    } finally {
+      deletingAgentConnectionIds = deletingAgentConnectionIds.filter((id) => id !== connection.id);
     }
   }
 
@@ -1519,20 +1629,20 @@
             </div>
           </div>
 
-          <section class="mcp-token-section" aria-label="MCP tokens">
+          <section class="mcp-token-section" aria-label="MCP connections">
             {#if agentConnections.length}
               <div class="mcp-token-heading">
-                <h2>MCP tokens</h2>
+                <h2>MCP connections</h2>
                 <ConstellationButton variant="secondary" size="sm" onclick={openAgentConnection}>
-                  New token
+                  New connection token
                 </ConstellationButton>
               </div>
             {/if}
 
             {#if mintedAgentToken?.token}
-              <div class="mcp-token-reveal" aria-label="One-time MCP token">
+              <div class="mcp-token-reveal" aria-label="One-time MCP connection token">
                 <ConstellationNotice
-                  title="Copy this before leaving"
+                  title="Copy this token before leaving"
                   description="Illo only shows the raw MCP token once."
                   tone="warning"
                   compact
@@ -1558,27 +1668,60 @@
               <div class="mcp-token-list">
                 {#each agentConnections as connection (connection.id)}
                   <div class="mcp-token-row">
-                    <div>
-                      <strong>{connection.display_name}</strong>
-                      <span>{mcpTokenFacts(connection)}</span>
+                    <div class="mcp-token-row-main">
+                      <div>
+                        <strong>{connection.display_name}</strong>
+                        <span>{mcpConnectionFacts(connection)}</span>
+                      </div>
+                      <div class="mcp-token-actions">
+                        <ConstellationButton variant="quiet" size="sm" onclick={() => mintTokenForConnection(connection)}>
+                          Mint token
+                        </ConstellationButton>
+                        <ConstellationButton
+                          variant="quiet"
+                          size="sm"
+                          disabled={deletingAgentConnectionIds.includes(connection.id)}
+                          onclick={() => removeAgentConnection(connection)}
+                        >
+                          Remove
+                        </ConstellationButton>
+                      </div>
                     </div>
-                    <ConstellationPill variant={connectionStatusVariant(connection.status)}>{connection.status || 'pending'}</ConstellationPill>
-                    <ConstellationButton variant="quiet" size="sm" onclick={() => mintTokenForConnection(connection)}>
-                      Mint token
-                    </ConstellationButton>
+                    <div class="mcp-token-metadata-list" aria-label={`Active tokens for ${connection.display_name}`}>
+                      {#if (agentConnectionTokens[connection.id] || []).length}
+                        {#each agentConnectionTokens[connection.id] || [] as token (token.id)}
+                          <div class="mcp-token-metadata-row">
+                            <div>
+                              <strong>{token.name}</strong>
+                              <span>{mcpConnectionTokenFacts(token)}</span>
+                            </div>
+                            <ConstellationButton
+                              variant="quiet"
+                              size="sm"
+                              disabled={revokingAgentTokenIds.includes(token.id)}
+                              onclick={() => revokeTokenForConnection(connection, token)}
+                            >
+                              Revoke
+                            </ConstellationButton>
+                          </div>
+                        {/each}
+                      {:else}
+                        <span class="mcp-token-empty">No active tokens</span>
+                      {/if}
+                    </div>
                   </div>
                 {/each}
               </div>
             {:else}
               <ConstellationEmptyState
-                title="No MCP tokens"
-                description="Create a token so a personal agent can connect to this endpoint."
+                title="No MCP connections"
+                description="Create a connection token so a personal agent can use this endpoint."
                 size="sm"
                 surface="plain"
               >
                 {#snippet actions()}
                   <ConstellationButton variant="secondary" size="sm" onclick={openAgentConnection}>
-                    New token
+                    New connection token
                   </ConstellationButton>
                 {/snippet}
               </ConstellationEmptyState>
@@ -1861,25 +2004,23 @@
     <div class="modal" onclick={(e) => e.stopPropagation()}>
       <div class="modal-header">
         <span class="modal-title">Connect Personal Agent</span>
-        <button class="modal-close" onclick={() => (showAgentConnectionModal = false)}>&times;</button>
+        <ConstellationIconButton label="Close" title="Close" size="sm" onclick={() => (showAgentConnectionModal = false)}>
+          <ConstellationIcon name="x" />
+        </ConstellationIconButton>
       </div>
 
       <form onsubmit={(e) => { e.preventDefault(); submitAgentConnection(); }}>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="agent-name">Agent Name</label>
-          <input id="agent-name" class="input" type="text" placeholder="Hermes" bind:value={agentFormDisplayName} required />
+          <ConstellationTextInput id="agent-name" type="text" placeholder="Hermes" bind:value={agentFormDisplayName} required />
         </div>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="agent-kind">Agent Type</label>
-          <select id="agent-kind" class="tier-select" bind:value={agentFormKind}>
-            {#each AGENT_KIND_OPTIONS as option}
-              <option value={option.key}>{option.label}</option>
-            {/each}
-          </select>
+          <ConstellationSelect id="agent-kind" options={AGENT_KIND_SELECT_OPTIONS} bind:value={agentFormKind} />
         </div>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="agent-mcp-url">MCP Endpoint</label>
-          <input id="agent-mcp-url" class="input" type="text" value={hostedMcpUrl} readonly />
+          <ConstellationTextInput id="agent-mcp-url" type="text" value={hostedMcpUrl} readonly mono />
         </div>
         <ConstellationNotice
           title="Token appears once"
@@ -1889,10 +2030,10 @@
           className="agent-modal-notice"
         />
         <div class="modal-actions">
-          <button type="button" class="btn" onclick={() => (showAgentConnectionModal = false)}>Cancel</button>
-          <button type="submit" class="btn btn-primary" disabled={agentConnectionSaving}>
-            {agentConnectionSaving ? 'Creating...' : 'Create token'}
-          </button>
+          <ConstellationButton variant="secondary" onclick={() => (showAgentConnectionModal = false)}>Cancel</ConstellationButton>
+          <ConstellationButton type="submit" loading={agentConnectionSaving} loadingLabel="Creating">
+            Create token
+          </ConstellationButton>
         </div>
       </form>
     </div>
@@ -1909,57 +2050,58 @@
     <div class="modal" onclick={(e) => e.stopPropagation()}>
       <div class="modal-header">
         <span class="modal-title">Add Secret</span>
-        <button class="modal-close" onclick={() => (showCreateModal = false)}>&times;</button>
+        <ConstellationIconButton label="Close" title="Close" size="sm" onclick={() => (showCreateModal = false)}>
+          <ConstellationIcon name="x" />
+        </ConstellationIconButton>
       </div>
 
       <form onsubmit={(e) => { e.preventDefault(); submitCreate(); }}>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="vault-key">Key Name</label>
-          <input id="vault-key" class="input" type="text" placeholder="e.g. OPENAI_API_KEY" bind:value={formKeyName} required />
+          <ConstellationTextInput id="vault-key" type="text" placeholder="e.g. OPENAI_API_KEY" bind:value={formKeyName} required mono />
         </div>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="vault-val">Value</label>
-          <div style="position:relative;">
-            <input
-              id="vault-val"
-              class="input"
-              type={showPassword ? 'text' : 'password'}
-              placeholder="Secret value"
-              bind:value={formValue}
-              required
-            />
-            <button
-              type="button"
-              class="vault-toggle-vis"
-              onclick={() => (showPassword = !showPassword)}
-            >{showPassword ? 'Hide' : 'Show'}</button>
-          </div>
+          <ConstellationTextInput
+            id="vault-val"
+            type={showPassword ? 'text' : 'password'}
+            placeholder="Secret value"
+            bind:value={formValue}
+            required
+            mono
+            trailingInteractive
+          >
+            {#snippet trailingVisual()}
+              <ConstellationIconButton
+                label={showPassword ? 'Hide value' : 'Show value'}
+                title={showPassword ? 'Hide value' : 'Show value'}
+                size="sm"
+                variant="quiet"
+                onclick={(event) => {
+                  event.preventDefault();
+                  showPassword = !showPassword;
+                }}
+              >
+                <ConstellationIcon name={showPassword ? 'eye-off' : 'eye'} />
+              </ConstellationIconButton>
+            {/snippet}
+          </ConstellationTextInput>
         </div>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="vault-desc">Description</label>
-          <textarea id="vault-desc" class="input" rows="2" placeholder="Optional description" bind:value={formDescription}></textarea>
+          <ConstellationTextarea id="vault-desc" rows={2} placeholder="Optional description" bind:value={formDescription} />
         </div>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="vault-cat">Category</label>
-          <select id="vault-cat" class="tier-select" bind:value={formCategory}>
-            {#each CATEGORIES as cat}
-              <option value={cat}>{cat}</option>
-            {/each}
-          </select>
+          <ConstellationSelect id="vault-cat" options={CATEGORY_SELECT_OPTIONS} bind:value={formCategory} />
         </div>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="vault-agent-access">Agent Access</label>
-          <select id="vault-agent-access" class="tier-select" bind:value={formAgentAccessLevel}>
-            {#each ACCESS_LEVELS as level}
-              <option value={level.key}>{level.label}</option>
-            {/each}
-          </select>
+          <ConstellationSelect id="vault-agent-access" options={ACCESS_LEVEL_SELECT_OPTIONS} bind:value={formAgentAccessLevel} />
         </div>
         <div class="modal-actions">
-          <button type="button" class="btn" onclick={() => (showCreateModal = false)}>Cancel</button>
-          <button type="submit" class="btn btn-primary" disabled={formSaving}>
-            {formSaving ? 'Saving...' : 'Save'}
-          </button>
+          <ConstellationButton variant="secondary" onclick={() => (showCreateModal = false)}>Cancel</ConstellationButton>
+          <ConstellationButton type="submit" loading={formSaving} loadingLabel="Saving">Save</ConstellationButton>
         </div>
       </form>
     </div>
@@ -1976,52 +2118,53 @@
     <div class="modal" onclick={(e) => e.stopPropagation()}>
       <div class="modal-header">
         <span class="modal-title">Edit: {editKey}</span>
-        <button class="modal-close" onclick={() => (showEditModal = false)}>&times;</button>
+        <ConstellationIconButton label="Close" title="Close" size="sm" onclick={() => (showEditModal = false)}>
+          <ConstellationIcon name="x" />
+        </ConstellationIconButton>
       </div>
 
       <form onsubmit={(e) => { e.preventDefault(); submitEdit(); }}>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="edit-val">New Value (leave blank to keep)</label>
-          <div style="position:relative;">
-            <input
-              id="edit-val"
-              class="input"
-              type={showEditPassword ? 'text' : 'password'}
-              placeholder="New secret value (optional)"
-              bind:value={editValue}
-            />
-            <button
-              type="button"
-              class="vault-toggle-vis"
-              onclick={() => (showEditPassword = !showEditPassword)}
-            >{showEditPassword ? 'Hide' : 'Show'}</button>
-          </div>
+          <ConstellationTextInput
+            id="edit-val"
+            type={showEditPassword ? 'text' : 'password'}
+            placeholder="New secret value (optional)"
+            bind:value={editValue}
+            mono
+            trailingInteractive
+          >
+            {#snippet trailingVisual()}
+              <ConstellationIconButton
+                label={showEditPassword ? 'Hide value' : 'Show value'}
+                title={showEditPassword ? 'Hide value' : 'Show value'}
+                size="sm"
+                variant="quiet"
+                onclick={(event) => {
+                  event.preventDefault();
+                  showEditPassword = !showEditPassword;
+                }}
+              >
+                <ConstellationIcon name={showEditPassword ? 'eye-off' : 'eye'} />
+              </ConstellationIconButton>
+            {/snippet}
+          </ConstellationTextInput>
         </div>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="edit-desc">Description</label>
-          <textarea id="edit-desc" class="input" rows="2" bind:value={editDescription}></textarea>
+          <ConstellationTextarea id="edit-desc" rows={2} bind:value={editDescription} />
         </div>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="edit-cat">Category</label>
-          <select id="edit-cat" class="tier-select" bind:value={editCategory}>
-            {#each CATEGORIES as cat}
-              <option value={cat}>{cat}</option>
-            {/each}
-          </select>
+          <ConstellationSelect id="edit-cat" options={CATEGORY_SELECT_OPTIONS} bind:value={editCategory} />
         </div>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="edit-agent-access">Agent Access</label>
-          <select id="edit-agent-access" class="tier-select" bind:value={editAgentAccessLevel}>
-            {#each ACCESS_LEVELS as level}
-              <option value={level.key}>{level.label}</option>
-            {/each}
-          </select>
+          <ConstellationSelect id="edit-agent-access" options={ACCESS_LEVEL_SELECT_OPTIONS} bind:value={editAgentAccessLevel} />
         </div>
         <div class="modal-actions">
-          <button type="button" class="btn" onclick={() => (showEditModal = false)}>Cancel</button>
-          <button type="submit" class="btn btn-primary" disabled={editSaving}>
-            {editSaving ? 'Saving...' : 'Update'}
-          </button>
+          <ConstellationButton variant="secondary" onclick={() => (showEditModal = false)}>Cancel</ConstellationButton>
+          <ConstellationButton type="submit" loading={editSaving} loadingLabel="Saving">Update</ConstellationButton>
         </div>
       </form>
     </div>
@@ -2038,7 +2181,9 @@
     <div class="modal" onclick={(e) => e.stopPropagation()}>
       <div class="modal-header">
         <span class="modal-title">Share: {shareSecretName}</span>
-        <button class="modal-close" onclick={() => (showShareModal = false)}>&times;</button>
+        <ConstellationIconButton label="Close" title="Close" size="sm" onclick={() => (showShareModal = false)}>
+          <ConstellationIcon name="x" />
+        </ConstellationIconButton>
       </div>
 
       <form onsubmit={(e) => { e.preventDefault(); submitShare(); }}>
@@ -2047,19 +2192,19 @@
           {#if orgUsers.length === 0}
             <p class="share-empty">No other team members available</p>
           {:else}
-            <select id="share-user" class="tier-select" bind:value={shareUserId}>
-              <option value="">Select a teammate...</option>
-              {#each orgUsers as u}
-                <option value={u.id}>{u.name} ({u.email})</option>
-              {/each}
-            </select>
+            <ConstellationSelect
+              id="share-user"
+              options={shareUserOptions}
+              bind:value={shareUserId}
+              placeholder="Select a teammate..."
+            />
           {/if}
         </div>
         <div class="modal-actions">
-          <button type="button" class="btn" onclick={() => (showShareModal = false)}>Cancel</button>
-          <button type="submit" class="btn btn-primary" disabled={shareSaving || !shareUserId}>
-            {shareSaving ? 'Sharing...' : 'Share'}
-          </button>
+          <ConstellationButton variant="secondary" onclick={() => (showShareModal = false)}>Cancel</ConstellationButton>
+          <ConstellationButton type="submit" loading={shareSaving} disabled={!shareUserId} loadingLabel="Sharing">
+            Share
+          </ConstellationButton>
         </div>
       </form>
     </div>
@@ -2076,23 +2221,23 @@
     <div class="modal" onclick={(e) => e.stopPropagation()}>
       <div class="modal-header">
         <span class="modal-title">Bind Project: {bindSecretName}</span>
-        <button class="modal-close" onclick={() => (showBindModal = false)}>&times;</button>
+        <ConstellationIconButton label="Close" title="Close" size="sm" onclick={() => (showBindModal = false)}>
+          <ConstellationIcon name="x" />
+        </ConstellationIconButton>
       </div>
 
       <form onsubmit={(e) => { e.preventDefault(); submitProjectBinding(); }}>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="bind-project">Project</label>
-          <input id="bind-project" class="input" type="text" placeholder="e.g. example-repo" bind:value={bindProjectSlug} required />
+          <ConstellationTextInput id="bind-project" type="text" placeholder="e.g. example-repo" bind:value={bindProjectSlug} required />
         </div>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="bind-env">Env Name</label>
-          <input id="bind-env" class="input" type="text" placeholder="GITHUB_TOKEN" bind:value={bindEnvName} required />
+          <ConstellationTextInput id="bind-env" type="text" placeholder="GITHUB_TOKEN" bind:value={bindEnvName} required mono />
         </div>
         <div class="modal-actions">
-          <button type="button" class="btn" onclick={() => (showBindModal = false)}>Cancel</button>
-          <button type="submit" class="btn btn-primary" disabled={bindSaving}>
-            {bindSaving ? 'Binding...' : 'Bind'}
-          </button>
+          <ConstellationButton variant="secondary" onclick={() => (showBindModal = false)}>Cancel</ConstellationButton>
+          <ConstellationButton type="submit" loading={bindSaving} loadingLabel="Binding">Bind</ConstellationButton>
         </div>
       </form>
     </div>
@@ -2109,29 +2254,29 @@
     <div class="modal" onclick={(e) => e.stopPropagation()}>
       <div class="modal-header">
         <span class="modal-title">{hasPin ? 'Change PIN' : 'Setup PIN'}</span>
-        <button class="modal-close" onclick={() => (showPinSetup = false)}>&times;</button>
+        <ConstellationIconButton label="Close" title="Close" size="sm" onclick={() => (showPinSetup = false)}>
+          <ConstellationIcon name="x" />
+        </ConstellationIconButton>
       </div>
 
       <form onsubmit={(e) => { e.preventDefault(); setupPin(); }}>
         {#if hasPin}
           <div class="form-field" style="margin-bottom: var(--sp-3)">
             <label class="form-label" for="cur-pin">Current PIN</label>
-            <input id="cur-pin" class="input" type="password" placeholder="Current PIN" bind:value={currentPin} required />
+            <ConstellationTextInput id="cur-pin" type="password" placeholder="Current PIN" bind:value={currentPin} required mono />
           </div>
         {/if}
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="new-pin">New PIN (min 4 chars)</label>
-          <input id="new-pin" class="input" type="password" placeholder="New PIN" bind:value={newPin} minlength="4" required />
+          <ConstellationTextInput id="new-pin" type="password" placeholder="New PIN" bind:value={newPin} minlength={4} required mono />
         </div>
         <div class="form-field" style="margin-bottom: var(--sp-3)">
           <label class="form-label" for="confirm-pin">Confirm PIN</label>
-          <input id="confirm-pin" class="input" type="password" placeholder="Confirm PIN" bind:value={confirmPin} minlength="4" required />
+          <ConstellationTextInput id="confirm-pin" type="password" placeholder="Confirm PIN" bind:value={confirmPin} minlength={4} required mono />
         </div>
         <div class="modal-actions">
-          <button type="button" class="btn" onclick={() => (showPinSetup = false)}>Cancel</button>
-          <button type="submit" class="btn btn-primary" disabled={pinSaving}>
-            {pinSaving ? 'Saving...' : 'Set PIN'}
-          </button>
+          <ConstellationButton variant="secondary" onclick={() => (showPinSetup = false)}>Cancel</ConstellationButton>
+          <ConstellationButton type="submit" loading={pinSaving} loadingLabel="Saving">Set PIN</ConstellationButton>
         </div>
       </form>
     </div>
@@ -2361,8 +2506,8 @@
 
   .vault-row-skeleton {
     background:
-      linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent),
-      var(--constellation-surface-nested-background);
+      linear-gradient(90deg, transparent, var(--constellation-skeleton-row-shimmer), transparent),
+      var(--constellation-skeleton-row-background);
     background-size: 200% 100%;
     animation: vault-pulse 1.4s ease-in-out infinite;
   }
@@ -2598,14 +2743,16 @@
   }
 
   .mcp-token-secret div,
-  .mcp-token-row div {
+  .mcp-token-row-main div,
+  .mcp-token-metadata-row div {
     display: grid;
     gap: 4px;
     min-width: 0;
   }
 
   .mcp-token-secret strong,
-  .mcp-token-row strong {
+  .mcp-token-row-main strong,
+  .mcp-token-metadata-row strong {
     min-width: 0;
     color: var(--constellation-color-text-primary);
     font-size: 13px;
@@ -2614,7 +2761,9 @@
   }
 
   .mcp-token-secret code,
-  .mcp-token-row span {
+  .mcp-token-row-main span,
+  .mcp-token-metadata-row span,
+  .mcp-token-empty {
     min-width: 0;
     overflow: hidden;
     color: var(--constellation-color-text-secondary);
@@ -2637,9 +2786,7 @@
 
   .mcp-token-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    align-items: center;
-    gap: 10px;
+    gap: 12px;
     min-width: 0;
     padding: 10px 12px;
     border: 1px solid var(--constellation-surface-panel-separator);
@@ -2647,7 +2794,33 @@
     background: var(--constellation-surface-nested-background);
   }
 
-  .mcp-token-row strong {
+  .mcp-token-row-main,
+  .mcp-token-metadata-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .mcp-token-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .mcp-token-metadata-list {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+    padding-top: 10px;
+    border-top: 1px solid var(--constellation-surface-panel-separator);
+  }
+
+  .mcp-token-row-main strong,
+  .mcp-token-metadata-row strong {
     overflow: hidden;
     color: var(--constellation-color-text-primary);
     text-overflow: ellipsis;
@@ -2684,28 +2857,6 @@
     to {
       background-position: -200% 0;
     }
-  }
-
-  /* Form elements */
-  .vault-toggle-vis {
-    position: absolute;
-    right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
-    background: none;
-    border: none;
-    color: var(--text-3);
-    cursor: pointer;
-    font-size: var(--text-xs);
-    font-family: inherit;
-  }
-
-  .vault-toggle-vis:hover {
-    color: var(--text-1);
-  }
-
-  textarea.input {
-    resize: vertical;
   }
 
   .share-empty {
@@ -2752,12 +2903,20 @@
 
     .mcp-endpoint-copy,
     .mcp-token-secret,
-    .mcp-token-row {
+    .mcp-token-row,
+    .mcp-token-row-main,
+    .mcp-token-metadata-row {
       grid-template-columns: 1fr;
     }
 
-    .mcp-token-row {
+    .mcp-token-row,
+    .mcp-token-row-main,
+    .mcp-token-metadata-row {
       align-items: start;
+    }
+
+    .mcp-token-actions {
+      justify-content: flex-start;
     }
   }
 </style>

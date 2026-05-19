@@ -101,6 +101,14 @@ async def test_vault_secret_prompt_requires_user_context():
     assert "authenticated user context" in result["error"]
 
 
+async def test_vault_inventory_requires_user_context():
+    from brain.app.mcp.server import tool_vault_inventory
+
+    result = await tool_vault_inventory()
+
+    assert "authenticated user context" in result["error"]
+
+
 async def test_vault_secret_prompt_records_missing_and_broadcasts_thread_event():
     from brain.app.mcp.server import tool_vault_secret_prompt
 
@@ -143,6 +151,119 @@ async def test_vault_secret_prompt_records_missing_and_broadcasts_thread_event()
     assert payload["prompt"]["key_name"] == "EXAMPLE_API_KEY"
     assert payload["prompt"]["category"] == "api"
     assert "value" not in payload["prompt"]
+
+
+async def test_vault_inventory_returns_metadata_without_values():
+    from brain.app.mcp.server import tool_vault_inventory
+
+    with patch("brain.systems.vault.async_list_secrets", new=AsyncMock(return_value=[
+        {
+            "key_name": "GITHUB_TOKEN",
+            "description": "GitHub token for agent use.",
+            "category": "api",
+            "agent_access_level": "available",
+            "value": "ghp-secret",
+            "encrypted_value": "encrypted-secret",
+            "access_count": 3,
+        }
+    ])) as list_secrets:
+        result = await tool_vault_inventory(
+            category="api",
+            user_id=USER["id"],
+            org_id=USER["org_id"],
+        )
+
+    assert result["metadata_only"] is True
+    assert result["count"] == 1
+    assert result["secrets"] == [
+        {
+            "key_name": "GITHUB_TOKEN",
+            "description": "GitHub token for agent use.",
+            "category": "api",
+            "agent_access_level": "available",
+        }
+    ]
+    assert "value" not in result["secrets"][0]
+    assert "encrypted_value" not in result["secrets"][0]
+    assert "access_count" not in result["secrets"][0]
+    list_secrets.assert_awaited_once_with(
+        user_id=USER["id"],
+        org_id=USER["org_id"],
+        category="api",
+    )
+
+
+async def test_vault_inventory_filters_by_agent_access_level():
+    from brain.app.mcp.server import tool_vault_inventory
+
+    with patch("brain.systems.vault.async_list_secrets", new=AsyncMock(return_value=[
+        {
+            "key_name": "GITHUB_TOKEN",
+            "description": "Main GitHub PAT for repo automation.",
+            "category": "api",
+            "agent_access_level": "available",
+        },
+        {
+            "key_name": "STRIPE_API_KEY",
+            "description": "Stripe key requiring explicit approval.",
+            "category": "payments",
+            "agent_access_level": "ask",
+        }
+    ])):
+        result = await tool_vault_inventory(
+            access_level="available",
+            user_id=USER["id"],
+            org_id=USER["org_id"],
+        )
+
+    assert result["count"] == 1
+    assert result["secrets"] == [
+        {
+            "key_name": "GITHUB_TOKEN",
+            "description": "Main GitHub PAT for repo automation.",
+            "category": "api",
+            "agent_access_level": "available",
+        }
+    ]
+
+
+async def test_vault_inventory_handler_uses_execution_metadata_context(monkeypatch):
+    from brain.systems.runs.execution_context import _agent_context
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+
+    captured = {}
+
+    async def fake_inventory(**kwargs):
+        captured.update(kwargs)
+        return {"metadata_only": True, "secrets": []}
+
+    monkeypatch.setattr("brain.app.mcp.server.tool_vault_inventory", fake_inventory)
+
+    previous = vars(_agent_context).copy()
+    for key in list(vars(_agent_context).keys()):
+        delattr(_agent_context, key)
+    try:
+        with bind_agent_context({
+            "execution_metadata": {
+                "user_id": "user-from-metadata",
+                "org_id": "org-from-metadata",
+            },
+        }):
+            result = await _get_tool_handlers()["vault_inventory"](access_level="available")
+    finally:
+        for key in list(vars(_agent_context).keys()):
+            delattr(_agent_context, key)
+        for key, value in previous.items():
+            setattr(_agent_context, key, value)
+
+    assert result == {"metadata_only": True, "secrets": []}
+    assert captured == {
+        "category": None,
+        "access_level": "available",
+        "user_id": "user-from-metadata",
+        "org_id": "org-from-metadata",
+    }
 
 
 async def test_vault_secret_prompt_handler_uses_execution_metadata_context(monkeypatch):

@@ -1232,11 +1232,17 @@ export const api = {
   listAgentConnections: () => fetchJson<any[]>('/api/agent-connections'),
   createAgentConnection: (data: any) =>
     fetchJson<any>('/api/agent-connections', { method: 'POST', body: JSON.stringify(data) }),
+  deleteAgentConnection: (connectionId: string) =>
+    fetchJson<any>(`/api/agent-connections/${connectionId}`, { method: 'DELETE' }),
+  listAgentConnectionTokens: (connectionId: string) =>
+    fetchJson<any[]>(`/api/agent-connections/${connectionId}/tokens`),
   mintAgentConnectionToken: (connectionId: string, data: any) =>
     fetchJson<any>(`/api/agent-connections/${connectionId}/tokens`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  revokeAgentConnectionToken: (connectionId: string, tokenId: string) =>
+    fetchJson<any>(`/api/agent-connections/${connectionId}/tokens/${tokenId}`, { method: 'DELETE' }),
   markAgentConnectionTested: (connectionId: string) =>
     fetchJson<any>(`/api/agent-connections/${connectionId}/test`, { method: 'POST' }),
 

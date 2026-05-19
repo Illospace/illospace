@@ -183,6 +183,18 @@
     0 0 0 1px rgba(255, 255, 255, 0.02) inset,
     0 0 28px rgba(141, 183, 255, 0.08);
   --constellation-surface-floating-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 18%);
+  --constellation-skeleton-fill: rgba(255, 255, 255, 0.07);
+  --constellation-skeleton-fill-soft: rgba(255, 255, 255, 0.04);
+  --constellation-skeleton-shimmer: rgba(255, 255, 255, 0.14);
+  --constellation-skeleton-row-background: var(--constellation-surface-panel-background);
+  --constellation-skeleton-row-shimmer: rgba(255, 255, 255, 0.06);
+  --constellation-skeleton-panel-border: rgba(255, 255, 255, 0.06);
+  --constellation-skeleton-panel-background:
+    radial-gradient(circle at 16% 0%, rgba(141, 183, 255, 0.08), transparent 34%),
+    linear-gradient(180deg, rgba(11, 15, 24, 0.9), rgba(8, 11, 18, 0.82));
+  --constellation-skeleton-panel-shadow:
+    0 14px 36px rgba(0, 0, 0, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
 
   --constellation-button-primary-background: rgba(238, 240, 246, 0.92);
   --constellation-button-primary-background-hover: rgba(250, 251, 255, 0.96);
@@ -704,6 +716,16 @@
   --constellation-surface-floating-background: rgba(255, 253, 247, 0.98);
   --constellation-surface-floating-shadow: 0 24px 56px rgba(54, 70, 82, 0.15);
   --constellation-surface-floating-highlight: none;
+  --constellation-skeleton-fill: rgba(49, 63, 76, 0.1);
+  --constellation-skeleton-fill-soft: rgba(126, 92, 52, 0.055);
+  --constellation-skeleton-shimmer: rgba(255, 255, 255, 0.62);
+  --constellation-skeleton-row-background: var(--constellation-neutral-surface-muted);
+  --constellation-skeleton-row-shimmer: rgba(255, 253, 247, 0.68);
+  --constellation-skeleton-panel-border: rgba(126, 92, 52, 0.09);
+  --constellation-skeleton-panel-background: rgba(239, 237, 231, 0.72);
+  --constellation-skeleton-panel-shadow:
+    0 16px 34px rgba(54, 70, 82, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.44);
 
   --constellation-button-primary-background: rgba(33, 47, 61, 0.98);
   --constellation-button-primary-background-hover: rgba(42, 58, 73, 0.98);

@@ -189,6 +189,34 @@ def test_constellation_global_foundation_light_mode_is_root_tokenized():
     assert ":root[data-color-scheme='light'] ." not in source
 
 
+def test_constellation_skeletons_use_theme_tokens():
+    constellation_css = (REPO_ROOT / "frontend/src/lib/styles/constellation.css").read_text()
+    components_css = (REPO_ROOT / "frontend/src/lib/styles/components.css").read_text()
+    skeleton_component = (
+        REPO_ROOT / "frontend/src/lib/components/constellation/ConstellationSkeletonBlock.svelte"
+    ).read_text()
+
+    for token in [
+        "--constellation-skeleton-fill",
+        "--constellation-skeleton-fill-soft",
+        "--constellation-skeleton-shimmer",
+        "--constellation-skeleton-row-background",
+        "--constellation-skeleton-row-shimmer",
+        "--constellation-skeleton-panel-background",
+    ]:
+        assert constellation_css.count(token) >= 2
+        assert f"var({token})" in skeleton_component or token.endswith("row-background") or token.endswith("row-shimmer")
+
+    assert "var(--skeleton-base)" in components_css
+    assert "var(--skeleton-highlight)" in components_css
+    assert "rgba(255, 255, 255" not in _last_style_block(skeleton_component)
+
+    for route in ["vault", "cycles", "skills"]:
+        route_source = (REPO_ROOT / f"frontend/src/routes/{route}/+page.svelte").read_text()
+        assert "var(--constellation-skeleton-row-shimmer)" in route_source
+        assert "var(--constellation-skeleton-row-background)" in route_source
+
+
 def test_daylight_signal_blob_root_tokens_do_not_depend_on_blob_locals():
     source = (REPO_ROOT / "frontend/src/lib/styles/constellation.css").read_text()
     light_block = re.search(r":root\[data-color-scheme='light'\] \{(?P<body>.*?)\n\}", source, re.DOTALL)

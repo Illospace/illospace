@@ -17,6 +17,7 @@ MCP Tools Exposed:
     skill_view(name, section?)        — load a skill card/summary/procedure section
     skill_asset(name, path)           — load a versioned skill bundle asset
     brain_encode(content, type, salience?) — record a memory
+    vault_inventory()                 — list safe vault metadata for agent reasoning
     brain_vault(key)                  — retrieve a secret from the vault
     vault_secret_prompt(key_name)     — open a guided vault prompt for missing keys
 
@@ -1080,6 +1081,15 @@ def _normalize_vault_key_name(key_name: str) -> str:
     return cleaned.upper()
 
 
+def _safe_vault_secret_summary(secret: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "key_name": str(secret.get("key_name") or ""),
+        "description": str(secret.get("description") or ""),
+        "category": str(secret.get("category") or "general"),
+        "agent_access_level": str(secret.get("agent_access_level") or "ask"),
+    }
+
+
 def _vault_prompt_url(
     *,
     key_name: str,
@@ -1091,6 +1101,50 @@ def _vault_prompt_url(
         "description": description,
         "category": category,
     })
+
+
+async def tool_vault_inventory(
+    category: str | None = None,
+    access_level: str | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict:
+    """List safe Vault metadata so the agent can choose an existing key."""
+    from brain.systems.vault import async_list_secrets
+
+    if not user_id:
+        return {"error": "Vault inventory requires an authenticated user context"}
+    normalized_user_id = str(user_id).strip()
+    if not normalized_user_id:
+        return {"error": "Vault inventory requires an authenticated user context"}
+    normalized_org_id = (str(org_id).strip() if org_id else "") or None
+    normalized_category = str(category or "").strip().lower() or None
+    normalized_access_level = str(access_level or "").strip().lower() or None
+
+    secrets = [
+        _safe_vault_secret_summary(secret)
+        for secret in await async_list_secrets(
+            user_id=normalized_user_id,
+            org_id=normalized_org_id,
+            category=normalized_category,
+        )
+    ]
+    if normalized_access_level:
+        secrets = [
+            secret
+            for secret in secrets
+            if secret["agent_access_level"].strip().lower() == normalized_access_level
+        ]
+    secrets.sort(key=lambda secret: (secret["category"], secret["key_name"]))
+    return {
+        "secrets": secrets,
+        "count": len(secrets),
+        "metadata_only": True,
+        "guidance": (
+            "Use these names/descriptions/categories to decide which exact key to request with brain_vault. "
+            "If no suitable key exists, ask the user or call vault_secret_prompt."
+        ),
+    }
 
 
 async def tool_vault_secret_prompt(
@@ -1130,6 +1184,7 @@ async def tool_vault_secret_prompt(
     )
     clean_reason = _clean_vault_prompt_text(reason or clean_description, max_chars=360)
     clean_requested_by = _clean_vault_prompt_text(requested_by or "agent", max_chars=80) or "agent"
+
     prompt = {
         "id": f"vault-secret-{run_id or 'thread'}-{uuid.uuid4().hex[:10]}",
         "idea_id": normalized_idea_id,
@@ -1285,6 +1340,40 @@ TOOLS = {
             "required": ["content"],
         },
     },
+    "vault_inventory": {
+        "function": tool_vault_inventory,
+        "description": (
+            "List metadata-only Vault secrets for agent reasoning. Returns key names, descriptions, "
+            "categories, and agent access levels, never secret values. Use this before requesting a "
+            "credential so the agent can choose an exact existing key or ask the user when ambiguous."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": [
+                        "general",
+                        "api",
+                        "aws",
+                        "auth",
+                        "analytics",
+                        "database",
+                        "messaging",
+                        "monitoring",
+                        "payments",
+                        "service",
+                    ],
+                    "description": "Optional Vault category filter.",
+                },
+                "access_level": {
+                    "type": "string",
+                    "enum": ["available", "ask", "manual"],
+                    "description": "Optional agent access level filter.",
+                },
+            },
+        },
+    },
     "brain_vault": {
         "function": tool_brain_vault,
         "description": "Request task-scoped access to a secret from the encrypted vault.",
@@ -1299,7 +1388,11 @@ TOOLS = {
     },
     "vault_secret_prompt": {
         "function": tool_vault_secret_prompt,
-        "description": "Open a guided Vault form for the user to add a missing secret value.",
+        "description": (
+            "Open a guided Vault form for the user to add a missing secret value. Call vault_inventory "
+            "first; use this only when no suitable existing secret exists or the user explicitly asked "
+            "to add a new key."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {

@@ -81,6 +81,14 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "action_manifest": True,
         "expected_effect": "request or consume a one-use vault grant for an exact secret key",
     },
+    "vault_inventory": {
+        "permission": "read_secret",
+        "risk_class": "low",
+        "side_effect_class": "read_only",
+        "reversibility": "read_mostly",
+        "action_manifest": True,
+        "expected_effect": "list safe vault secret metadata without values",
+    },
     "vault_secret_prompt": {
         "permission": "write_session",
         "risk_class": "medium",

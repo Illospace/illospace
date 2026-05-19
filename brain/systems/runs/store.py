@@ -21,7 +21,7 @@ from brain.systems.runs.domain import (
 )
 from brain.systems.runs.events import run_event, status_changed_event
 from brain.systems.runs.ids import trace_id_for_run_id
-from brain.systems.runs.status import RunStatus, coerce_run_status, ensure_run_transition
+from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status, ensure_run_transition
 from brain.systems.runs.steering import SteeringMessage
 from brain.platform.db.models.agent_run import (
     AgentRunArtifactRow,
@@ -101,6 +101,16 @@ def _deferred_run_target_id(row: AgentRunRow) -> int | None:
             continue
         return target_id if target_id != int(row.id) else None
     return None
+
+
+async def _reconcile_inbound_triage_run_if_needed(session: AsyncSession, row: AgentRunRow) -> None:
+    metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}
+    inbound_event = metadata.get("inbound_event")
+    if not isinstance(inbound_event, dict) or not inbound_event.get("event_id"):
+        return
+    from brain.systems.inbound.reconciliation import reconcile_inbound_triage_run
+
+    await reconcile_inbound_triage_run(session, row)
 
 
 class AsyncAgentRunStore:
@@ -408,6 +418,8 @@ class AsyncAgentRunStore:
                 reason=reason,
             )
         )
+        if target in TERMINAL_RUN_STATUSES:
+            await _reconcile_inbound_triage_run_if_needed(self.session, row)
         return to_domain(row)
 
     async def append_steering(

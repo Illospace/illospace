@@ -139,6 +139,7 @@ class TestToolDefinitionContracts:
             "manage_skill",
             "skill_asset",
             "brain_encode",
+            "vault_inventory",
             "brain_vault",
             "vault_secret_prompt",
             "runtime_settings",

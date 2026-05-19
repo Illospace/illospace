@@ -626,9 +626,9 @@
 .skeleton {
   background: linear-gradient(
     90deg,
-    var(--bg-3) 25%,
-    var(--bg-4) 50%,
-    var(--bg-3) 75%
+    var(--skeleton-base) 25%,
+    var(--skeleton-highlight) 50%,
+    var(--skeleton-base) 75%
   );
   background-size: 200% 100%;
   animation: shimmer 1.5s ease-in-out infinite;

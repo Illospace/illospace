@@ -134,6 +134,7 @@ def _get_tool_handlers(
         async_tool_skill_asset,
         async_tool_brain_encode,
         tool_brain_vault,
+        tool_vault_inventory,
         tool_vault_secret_prompt,
         tool_runtime_settings,
     )
@@ -155,6 +156,12 @@ def _get_tool_handlers(
             run_id=_current_run_id(),
             requested_by=_current_requested_by(),
             **_current_project_token_context(),
+        ),
+        "vault_inventory": lambda category=None, access_level=None: tool_vault_inventory(
+            category=category,
+            access_level=access_level,
+            user_id=_current_agent_value("user_id"),
+            org_id=_current_agent_value("org_id"),
         ),
         "vault_secret_prompt": (
             lambda key_name, description=None, category="api", reason=None: tool_vault_secret_prompt(
