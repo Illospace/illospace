@@ -23,6 +23,8 @@ export { default as ConstellationPanel } from './ConstellationPanel.svelte';
 export { default as ConstellationPill } from './ConstellationPill.svelte';
 export { default as ConstellationPresenceSeed } from './ConstellationPresenceSeed.svelte';
 export { default as ConstellationPresenceStack } from './ConstellationPresenceStack.svelte';
+export { default as ConstellationSelect } from './ConstellationSelect.svelte';
+export type { ConstellationSelectOption } from './ConstellationSelect.svelte';
 export { default as ConstellationSelectChip } from './ConstellationSelectChip.svelte';
 export { default as ConstellationSection } from './ConstellationSection.svelte';
 export { default as ConstellationSectionHeader } from './ConstellationSectionHeader.svelte';
@@ -34,6 +36,7 @@ export type {
 export { default as ConstellationSkeletonBlock } from './ConstellationSkeletonBlock.svelte';
 export { default as ConstellationSplitLayout } from './ConstellationSplitLayout.svelte';
 export { default as ConstellationTextInput } from './ConstellationTextInput.svelte';
+export { default as ConstellationTextarea } from './ConstellationTextarea.svelte';
 export { default as ConstellationAddressField } from './ConstellationAddressField.svelte';
 export { default as ConstellationSearchField } from './ConstellationSearchField.svelte';
 export { default as ConstellationSegmentedToggle } from './ConstellationSegmentedToggle.svelte';

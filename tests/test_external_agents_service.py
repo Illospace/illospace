@@ -15,6 +15,7 @@ from sqlalchemy.schema import CreateTable
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.external_agent import (
     ExternalAgentConnectionRow,
+    ExternalAgentConnectionTokenRow,
     ExternalAgentTaskArtifactRow,
     ExternalAgentTaskEventRow,
     ExternalAgentTaskRow,
@@ -158,6 +159,7 @@ async def external_agent_session(async_sqlite_session_factory):
             Org.__table__,
             User.__table__,
             ExternalAgentConnectionRow.__table__,
+            ExternalAgentConnectionTokenRow.__table__,
             ExternalAgentTaskRow.__table__,
             ExternalAgentTaskEventRow.__table__,
             ExternalAgentTaskArtifactRow.__table__,
@@ -182,6 +184,125 @@ async def external_agent_session(async_sqlite_session_factory):
     )
     await session.flush()
     return session
+
+
+@pytest.mark.asyncio
+async def test_connection_tokens_can_be_listed_and_revoked(external_agent_session):
+    raw_token, token = await service.mint_connection_token(
+        external_agent_session,
+        connection_id="conn-1",
+        org_id="org-1",
+        name="Codex MCP token",
+    )
+
+    tokens = await service.list_connection_tokens(
+        external_agent_session,
+        connection_id="conn-1",
+        org_id="org-1",
+    )
+
+    assert raw_token.startswith("illo_conn_")
+    assert [row.id for row in tokens] == [token.id]
+
+    revoked = await service.revoke_connection_token(
+        external_agent_session,
+        connection_id="conn-1",
+        token_id=token.id,
+        org_id="org-1",
+    )
+    active_tokens = await service.list_connection_tokens(
+        external_agent_session,
+        connection_id="conn-1",
+        org_id="org-1",
+    )
+
+    assert revoked.revoked_at is not None
+    assert active_tokens == []
+
+
+@pytest.mark.asyncio
+async def test_signal_submit_backfill_only_updates_active_personal_agent_tokens(external_agent_session):
+    now = service.utcnow()
+    codex_token = ExternalAgentConnectionTokenRow(
+        id="token-codex-active",
+        connection_id="conn-1",
+        org_id="org-1",
+        owner_user_id="user-1",
+        token_hash="hash-codex-active",
+        token_prefix="illo_conn_codex",
+        name="Old Codex MCP token",
+        scopes=[service.SCOPE_ILLO_ASK],
+    )
+    revoked_codex_token = ExternalAgentConnectionTokenRow(
+        id="token-codex-revoked",
+        connection_id="conn-1",
+        org_id="org-1",
+        owner_user_id="user-1",
+        token_hash="hash-codex-revoked",
+        token_prefix="illo_conn_revoke",
+        name="Revoked Codex MCP token",
+        scopes=[service.SCOPE_ILLO_ASK],
+        revoked_at=now,
+    )
+    webhook_connection = ExternalAgentConnectionRow(
+        id="conn-webhook",
+        org_id="org-1",
+        owner_user_id="user-1",
+        display_name="Webhook Source",
+        agent_kind="webhook",
+        transport="webhook",
+    )
+    webhook_token = ExternalAgentConnectionTokenRow(
+        id="token-webhook",
+        connection_id="conn-webhook",
+        org_id="org-1",
+        owner_user_id="user-1",
+        token_hash="hash-webhook",
+        token_prefix="illo_conn_webhk",
+        name="Webhook source token",
+        scopes=[service.SCOPE_ILLO_ASK],
+    )
+    external_agent_session.add_all(
+        [webhook_connection, codex_token, revoked_codex_token, webhook_token]
+    )
+    await external_agent_session.flush()
+
+    changed = await service.backfill_signal_submit_scope_for_personal_agent_tokens(
+        external_agent_session,
+        org_id="org-1",
+    )
+
+    assert changed == 1
+    assert codex_token.scopes == [service.SCOPE_ILLO_ASK, service.SCOPE_SIGNAL_SUBMIT]
+    assert revoked_codex_token.scopes == [service.SCOPE_ILLO_ASK]
+    assert webhook_token.scopes == [service.SCOPE_ILLO_ASK]
+
+
+@pytest.mark.asyncio
+async def test_disable_connection_hides_connection_and_revokes_tokens(external_agent_session):
+    raw_token, token = await service.mint_connection_token(
+        external_agent_session,
+        connection_id="conn-1",
+        org_id="org-1",
+        name="Codex MCP token",
+    )
+
+    connection = await service.disable_connection(
+        external_agent_session,
+        connection_id="conn-1",
+        org_id="org-1",
+    )
+
+    assert raw_token.startswith("illo_conn_")
+    assert connection.status == "disabled"
+    assert connection.disabled_at is not None
+    assert token.revoked_at is not None
+    assert await service.list_connections(external_agent_session, org_id="org-1") == []
+    assert [row.id for row in await service.list_connections(
+        external_agent_session,
+        org_id="org-1",
+        include_disabled=True,
+    )] == ["conn-1"]
 
 
 @pytest.mark.asyncio

@@ -1657,8 +1657,8 @@
 
   .skill-row-skeleton {
     background:
-      linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent),
-      var(--constellation-surface-panel-background);
+      linear-gradient(90deg, transparent, var(--constellation-skeleton-row-shimmer), transparent),
+      var(--constellation-skeleton-row-background);
     background-size: 200% 100%;
     animation: skills-pulse 1.4s ease-in-out infinite;
   }

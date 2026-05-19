@@ -36,6 +36,8 @@ from brain.platform.db.models.inbound import (
 from brain.platform.db.models.org import Org, User
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import service as inbound
+from brain.systems.runs.status import RunStatus
+from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.user_domains.service import AsyncDomainService
 
 
@@ -206,6 +208,46 @@ async def _assert_queued_triage(session, outcome: dict, *, reason: str) -> dict:
     return triage
 
 
+async def _queue_unmatched_webhook_triage(
+    session,
+    *,
+    origin: str,
+    issue_key: str,
+    idempotency_key: str,
+) -> dict:
+    await _seed_connection(session)
+    response = await _post_webhook(
+        session,
+        headers={"Authorization": f"Bearer {RAW_TOKEN}"},
+        json={
+            "origin": origin,
+            "payload": {"issue": {"key": issue_key}},
+            "idempotency_key": idempotency_key,
+        },
+    )
+    return await _assert_queued_triage(
+        session,
+        response.json()["ilo_outcome"],
+        reason="no_matching_source_policy",
+    )
+
+
+async def _finish_triage_run(
+    session,
+    triage: dict,
+    *,
+    status: RunStatus,
+    final_answer: str,
+    reason: str | None = None,
+) -> None:
+    store = AsyncAgentRunStore(session)
+    run_id = int(triage["run_id"])
+    await store.set_status(run_id, RunStatus.STARTING)
+    await store.set_status(run_id, RunStatus.RUNNING)
+    await store.append_final_answer_once(run_id, final_answer, root_run_id=run_id)
+    await store.set_status(run_id, status, reason=reason)
+
+
 async def test_webhook_requires_authenticated_source_identity(session):
     response = await _post_webhook(
         session,
@@ -330,6 +372,63 @@ async def test_webhook_and_mcp_signals_share_inbound_event_path(session):
     assert all(receipt.outcome["triage"]["status"] == "queued" for receipt in receipts)
     assert all(receipt.target["kind"] == "cortex_idea" for receipt in receipts)
     assert all(receipt.tool_use["type"] == "illo_triage" for receipt in receipts)
+
+
+async def test_inbound_triage_receipt_reconciles_when_illo_run_completes(session):
+    final_answer = "Ilo reviewed the inbound signal and decided no workspace mutation is needed."
+    triage = await _queue_unmatched_webhook_triage(
+        session,
+        origin="jira.ticket_created",
+        issue_key="PROJ-1",
+        idempotency_key="jira:PROJ-1:created",
+    )
+    await _finish_triage_run(session, triage, status=RunStatus.COMPLETED, final_answer=final_answer)
+
+    event = (await session.scalars(select(InboundEventRow))).one()
+    receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+
+    assert event.status == "processed"
+    assert event.action_result["triage"]["status"] == "completed"
+    assert event.action_result["triage"]["result"] == {
+        "status": "completed",
+        "final_answer": final_answer,
+    }
+    assert event.processed_at is not None
+    assert receipt.status == "processed"
+    assert receipt.outcome["triage"]["status"] == "completed"
+    assert receipt.outcome["triage"]["run_status"] == "completed"
+    assert receipt.tool_use["status"] == "completed"
+    assert receipt.tool_use["type"] == "illo_triage"
+
+
+async def test_inbound_triage_receipt_reconciles_when_illo_run_fails(session):
+    final_answer = "Ilo triage failed before it could decide on the signal."
+    triage = await _queue_unmatched_webhook_triage(
+        session,
+        origin="jira.ticket_updated",
+        issue_key="PROJ-2",
+        idempotency_key="jira:PROJ-2:updated",
+    )
+    await _finish_triage_run(
+        session,
+        triage,
+        status=RunStatus.FAILED,
+        final_answer=final_answer,
+        reason="triage worker crashed",
+    )
+
+    event = (await session.scalars(select(InboundEventRow))).one()
+    receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+
+    assert event.status == "failed"
+    assert event.error == final_answer
+    assert event.action_result["triage"]["status"] == "failed"
+    assert receipt.status == "failed"
+    assert receipt.outcome["triage"]["result"] == {
+        "status": "failed",
+        "final_answer": final_answer,
+    }
+    assert receipt.tool_use["status"] == "failed"
 
 
 async def test_mcp_signal_rejects_overlong_origin_before_inbound_processing(session):

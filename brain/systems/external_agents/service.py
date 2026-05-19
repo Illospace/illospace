@@ -75,6 +75,10 @@ HEADLESS_ASK_BLOCKED_TOOLS = (
 
 TASK_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "canceled"}
 CONNECTION_ADMIN_ROLES = {"owner", "admin"}
+SIGNAL_SUBMIT_BACKFILL_TRANSPORTS = frozenset({"hosted_mcp", "bridge_pull"})
+SIGNAL_SUBMIT_BACKFILL_AGENT_KINDS = frozenset(
+    {"codex", "hermes", "openclaw", "claude-code", "opencode"}
+)
 
 
 @dataclass(frozen=True)
@@ -393,6 +397,7 @@ async def list_connections(
     *,
     org_id: str,
     owner_user_id: str | None = None,
+    include_disabled: bool = False,
 ) -> list[ExternalAgentConnectionRow]:
     stmt = (
         select(ExternalAgentConnectionRow)
@@ -401,7 +406,39 @@ async def list_connections(
     )
     if owner_user_id:
         stmt = stmt.where(ExternalAgentConnectionRow.owner_user_id == str(owner_user_id))
+    if not include_disabled:
+        stmt = stmt.where(
+            ExternalAgentConnectionRow.disabled_at.is_(None),
+            func.lower(ExternalAgentConnectionRow.status) != "disabled",
+        )
     return list((await session.scalars(stmt)).all())
+
+
+async def disable_connection(
+    session: AsyncSession,
+    *,
+    connection_id: str,
+    org_id: str,
+) -> ExternalAgentConnectionRow:
+    connection = await _require_connection(session, connection_id=str(connection_id), org_id=str(org_id))
+    now = utcnow()
+    connection.status = "disabled"
+    connection.disabled_at = connection.disabled_at or now
+
+    tokens = (
+        await session.scalars(
+            select(ExternalAgentConnectionTokenRow).where(
+                ExternalAgentConnectionTokenRow.connection_id == str(connection.id),
+                ExternalAgentConnectionTokenRow.org_id == str(org_id),
+                ExternalAgentConnectionTokenRow.revoked_at.is_(None),
+            )
+        )
+    ).all()
+    for token in tokens:
+        token.revoked_at = now
+
+    await session.flush()
+    return connection
 
 
 async def mint_connection_token(
@@ -431,6 +468,91 @@ async def mint_connection_token(
     session.add(row)
     await session.flush()
     return raw_token, row
+
+
+async def list_connection_tokens(
+    session: AsyncSession,
+    *,
+    connection_id: str,
+    org_id: str,
+    include_revoked: bool = False,
+) -> list[ExternalAgentConnectionTokenRow]:
+    await _require_connection(session, connection_id=str(connection_id), org_id=str(org_id))
+    stmt = (
+        select(ExternalAgentConnectionTokenRow)
+        .where(
+            ExternalAgentConnectionTokenRow.connection_id == str(connection_id),
+            ExternalAgentConnectionTokenRow.org_id == str(org_id),
+        )
+        .order_by(ExternalAgentConnectionTokenRow.created_at.desc(), ExternalAgentConnectionTokenRow.id.desc())
+    )
+    if not include_revoked:
+        stmt = stmt.where(ExternalAgentConnectionTokenRow.revoked_at.is_(None))
+    return list((await session.scalars(stmt)).all())
+
+
+async def revoke_connection_token(
+    session: AsyncSession,
+    *,
+    connection_id: str,
+    token_id: str,
+    org_id: str,
+) -> ExternalAgentConnectionTokenRow:
+    await _require_connection(session, connection_id=str(connection_id), org_id=str(org_id))
+    row = await session.get(ExternalAgentConnectionTokenRow, str(token_id))
+    if (
+        row is None
+        or str(row.org_id) != str(org_id)
+        or str(row.connection_id) != str(connection_id)
+    ):
+        raise ExternalAgentNotFound("Connection token not found")
+    row.revoked_at = row.revoked_at or utcnow()
+    await session.flush()
+    return row
+
+
+def _should_backfill_signal_submit_scope(connection: ExternalAgentConnectionRow) -> bool:
+    if _connection_disabled(connection):
+        return False
+    transport = str(connection.transport or "").strip().lower()
+    agent_kind = str(connection.agent_kind or "").strip().lower()
+    return (
+        transport in SIGNAL_SUBMIT_BACKFILL_TRANSPORTS
+        or agent_kind in SIGNAL_SUBMIT_BACKFILL_AGENT_KINDS
+    )
+
+
+async def backfill_signal_submit_scope_for_personal_agent_tokens(
+    session: AsyncSession,
+    *,
+    org_id: str | None = None,
+) -> int:
+    """Grant signal submission to old active personal-agent bridge tokens."""
+
+    stmt = (
+        select(ExternalAgentConnectionTokenRow, ExternalAgentConnectionRow)
+        .join(
+            ExternalAgentConnectionRow,
+            ExternalAgentConnectionRow.id == ExternalAgentConnectionTokenRow.connection_id,
+        )
+        .where(ExternalAgentConnectionTokenRow.revoked_at.is_(None))
+    )
+    if org_id is not None:
+        stmt = stmt.where(ExternalAgentConnectionTokenRow.org_id == str(org_id))
+
+    changed = 0
+    for token, connection in (await session.execute(stmt)).all():
+        if not _should_backfill_signal_submit_scope(connection):
+            continue
+        scopes = {str(scope).strip() for scope in _json_list(token.scopes) if str(scope).strip()}
+        if "*" in scopes or SCOPE_SIGNAL_SUBMIT in scopes:
+            continue
+        token.scopes = sorted(scopes | {SCOPE_SIGNAL_SUBMIT})
+        changed += 1
+
+    if changed:
+        await session.flush()
+    return changed
 
 
 async def authenticate_bridge_token(
@@ -1451,6 +1573,7 @@ __all__ = [
     "ExternalAgentPermissionError",
     "append_artifact",
     "authenticate_bridge_token",
+    "backfill_signal_submit_scope_for_personal_agent_tokens",
     "claim_tasks",
     "complete_task",
     "create_connection",

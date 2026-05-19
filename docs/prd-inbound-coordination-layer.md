@@ -1,6 +1,6 @@
 # PRD: Inbound Coordination Layer for IloSpace
 
-Status: living PRD; foundation shipped in PR #113, Ilo-admin configuration tool and Phase 2 triage handoff implemented in `codex/illo-inbound-admin-tools`
+Status: living PRD; foundation shipped in PR #113, Ilo-admin configuration tool and Phase 2 triage handoff implemented in `codex/illo-inbound-admin-tools`; triage reconciliation and token compatibility backfill implemented in `codex/inbound-token-reconcile`
 Date: 2026-05-18  
 Owner: product/architecture discussion  
 
@@ -55,6 +55,12 @@ The PRD intentionally describes a broader product direction: external tools send
 
 ### Latest Progress In This Branch
 
+- Added final-result reconciliation for inbound triage runs when Ilo reaches a terminal run status.
+- Inbound events that were handed to Ilo now move from `review_required` to `processed` after a completed Ilo run, or `failed` after a failed/canceled/expired run.
+- Decision receipts now retain the original triage handoff and also record run status, reconciliation timestamp, completion timestamp when available, and final answer text when Ilo produced one.
+- Added a compatibility service and Alembic migration to grant `signal:submit` to old active personal-agent bridge tokens that predate PR #113.
+- Backfill is restricted to active personal-agent-like connections (`hosted_mcp`, `bridge_pull`, or known personal-agent kinds such as Codex/Hermes/OpenClaw/OpenCode/Claude Code), and does not widen arbitrary webhook/custom tokens.
+- Migration downgrade deliberately does not remove `signal:submit`, because post-upgrade user grants cannot be distinguished from automatic backfill safely.
 - Ran a behavior-preserving simplification pass over the new admin service and tool handler.
 - Simplified repeated response serialization in `manage_inbound`.
 - Consolidated repeated string-list cleanup in the inbound admin service.
@@ -65,25 +71,28 @@ The PRD intentionally describes a broader product direction: external tools send
   - `git diff --check`: passed.
   - Python compile check for touched modules/tests: passed.
   - Focused inbound/admin/triage safety suite: `63 passed, 1 skipped`.
+  - Focused inbound/external-agent/MCP/migration suite: `80 passed, 2 skipped`.
+  - Focused triage reconciliation tests for completed and failed runs: passed.
+  - Focused token backfill test: passed.
 
 ### Partially Shipped
 
-- **Decision receipts/effects**: inbound processing stores receipts/effects, including Phase 2 triage handoff targets, but receipts do not yet close the loop with Ilo's final post-run decision/action outcome.
+- **Decision receipts/effects**: inbound processing stores receipts/effects and now reconciles terminal Ilo triage run status/final answer back onto the event and receipt. Rich action-level capture is still future work because Ilo's later tool calls are not yet attributed back to the inbound event.
 - **Source policies**: deterministic policy matching exists and Ilo can configure it, but learned rule promotion and payload fingerprinting are still future work.
 - **Domain Projection**: deterministic configured projection works and Ilo can create/edit it, but projection targets still require an existing Domain/schema.
-- **Ilo Action Runtime**: ambiguous events now enter Ilo's normal Cortex run path, but final action-result capture, run completion reconciliation, and learned-rule promotion are still future work.
-- **MCP token scopes**: newly minted/default bridge tokens include `signal:submit`, but old tokens minted before PR #113 need rotation or migration.
+- **Ilo Action Runtime**: ambiguous events now enter Ilo's normal Cortex run path, and run completion reconciles the inbound receipt. Fine-grained action-result capture and learned-rule promotion are still future work.
+- **MCP token scopes**: newly minted/default bridge tokens include `signal:submit`, and a compatibility migration/backfill grants it to old active personal-agent tokens. Arbitrary non-agent webhook/custom tokens still require explicit configuration.
 - **Observability**: Ilo can inspect stored events and receipts, but there is not yet a first-class inbound monitor, replay surface, or UI.
 
 ### Not Yet Shipped
 
 - Ilo-facing tools for replay jobs, rule candidates, learned payload fingerprints, and automatic rule promotion.
-- Final-result reconciliation after an Ilo triage run completes: updating the inbound receipt/event with the actual action, no-op, question, summary, or scheduled follow-up Ilo chose.
+- Fine-grained final action reconciliation after an Ilo triage run completes: attributing actual workspace tool calls, no-op decisions, questions, summaries, or scheduled follow-ups back to the inbound event beyond the run's final answer/status.
 - Rule learner / payload fingerprint promotion from repeated Decision Receipts into deterministic policy.
 - Replay harness for historical inbound signals against current policy without mutating workspace state.
 - Source cards or a durable summary of what each connection sends, common payload shapes, known rules, and current errors.
 - Native monitoring Cycle/app/Domain setup for inbound webhook/MCP activity.
-- A production backfill/migration that automatically grants `signal:submit` to existing safe personal-agent tokens.
+- A richer token rollout report/observability view showing which legacy personal-agent tokens were backfilled and which non-agent tokens still need explicit configuration.
 
 ### Recommended Next Slice
 
@@ -99,10 +108,10 @@ The PRD intentionally describes a broader product direction: external tools send
    - Confirm the inbound event stores `review_required`.
    - Confirm a Cortex Idea/thread/run is created for Ilo triage.
    - Let the run processor act and inspect what Ilo decides.
-4. **Close the triage result loop** so completed Ilo runs update the inbound decision receipt with the final outcome, not only the handoff.
+4. **Deploy the token backfill/reconciliation slice** and confirm the existing Codex MCP token can call `illo_submit_signal` without rotation.
 5. **Add a replay/dry-run harness beyond single-event matching** so historical inbound events can be evaluated against current policies without mutating Domains.
 6. **Add Source Cards / connection summaries** so Ilo can remember common origins, payload shapes, configured rules, recent failures, and what each external source is for.
-7. **Decide token migration/backfill policy** for old personal-agent tokens that predate `signal:submit`.
+7. **Add fine-grained Ilo action attribution** so receipt reconciliation can say which workspace tools/actions Ilo actually chose after triage, not only the terminal run status/final answer.
 
 ### Trace-Based Follow-Up
 

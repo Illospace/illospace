@@ -110,6 +110,95 @@ async def mint_agent_connection_token(
         raise_external_agent_http_error(exc)
 
 
+@router.get("/{connection_id}/tokens", response_model=list[ExternalAgentTokenRead])
+async def list_agent_connection_tokens(
+    connection_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    org_id = require_org_context(user)
+    user_id = str(user.get("id") or "")
+    role = str(user.get("role") or "")
+
+    try:
+        await external_agents.require_connection_for_user(
+            db,
+            connection_id=connection_id,
+            org_id=org_id,
+            user_id=user_id,
+            role=role,
+            require_manage=True,
+        )
+        rows = await external_agents.list_connection_tokens(
+            db,
+            connection_id=connection_id,
+            org_id=org_id,
+        )
+        return [external_agents.serialize_token(row) for row in rows]
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
+
+
+@router.delete("/{connection_id}/tokens/{token_id}", response_model=ExternalAgentTokenRead)
+async def revoke_agent_connection_token(
+    connection_id: str,
+    token_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    org_id = require_org_context(user)
+    user_id = str(user.get("id") or "")
+    role = str(user.get("role") or "")
+
+    try:
+        await external_agents.require_connection_for_user(
+            db,
+            connection_id=connection_id,
+            org_id=org_id,
+            user_id=user_id,
+            role=role,
+            require_manage=True,
+        )
+        row = await external_agents.revoke_connection_token(
+            db,
+            connection_id=connection_id,
+            token_id=token_id,
+            org_id=org_id,
+        )
+        return external_agents.serialize_token(row)
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
+
+
+@router.delete("/{connection_id}", response_model=ExternalAgentConnectionRead)
+async def delete_agent_connection(
+    connection_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    org_id = require_org_context(user)
+    user_id = str(user.get("id") or "")
+    role = str(user.get("role") or "")
+
+    try:
+        await external_agents.require_connection_for_user(
+            db,
+            connection_id=connection_id,
+            org_id=org_id,
+            user_id=user_id,
+            role=role,
+            require_manage=True,
+        )
+        connection = await external_agents.disable_connection(
+            db,
+            connection_id=connection_id,
+            org_id=org_id,
+        )
+        return external_agents.serialize_connection(connection)
+    except Exception as exc:
+        raise_external_agent_http_error(exc)
+
+
 @router.post("/{connection_id}/test")
 async def mark_agent_connection_tested(
     connection_id: str,

@@ -231,6 +231,42 @@ BRAIN_TOOLS = [
         },
     },
     {
+        "name": "vault_inventory",
+        "description": (
+            "List metadata-only Vault secrets for credential reasoning. Returns key names, "
+            "descriptions, categories, and agent_access_level, never secret values. Call this before "
+            "brain_vault or vault_secret_prompt when a task needs a credential. Use a returned exact "
+            "key with brain_vault; if multiple candidates fit, ask the user; only call "
+            "vault_secret_prompt when no suitable existing secret exists."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": [
+                        "general",
+                        "api",
+                        "aws",
+                        "auth",
+                        "analytics",
+                        "database",
+                        "messaging",
+                        "monitoring",
+                        "payments",
+                        "service",
+                    ],
+                    "description": "Optional Vault category filter.",
+                },
+                "access_level": {
+                    "type": "string",
+                    "enum": ["available", "ask", "manual"],
+                    "description": "Optional agent access level filter.",
+                },
+            },
+        },
+    },
+    {
         "name": "brain_vault",
         "description": (
             "Request task-scoped access to a secret (API key, token, etc.) from the encrypted vault. "
@@ -252,6 +288,8 @@ BRAIN_TOOLS = [
         "name": "vault_secret_prompt",
         "description": (
             "Open a guided Vault form in the current Cortex thread for a user-supplied secret. "
+            "Call vault_inventory first, then use this only when no suitable existing secret exists "
+            "or the user explicitly asked to add a new key. "
             "Use before asking the user to paste an API key in chat, when a task needs a missing credential "
             "or a newly created skill/API integration needs a named key. Do not use this before producing "
             "the main requested deliverable when the credential is only needed for a deferred connector or "

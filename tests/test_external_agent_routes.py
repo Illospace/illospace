@@ -112,6 +112,149 @@ async def test_connection_listing_is_owner_scoped_for_members_and_org_wide_for_a
     assert captured[1] == {"org_id": "org-1", "owner_user_id": None}
 
 
+async def test_connection_tokens_can_be_listed_for_managed_connection():
+    session = _AsyncSession()
+    token = SimpleNamespace(
+        id="token-1",
+        connection_id="conn-1",
+        token_prefix="illo_conn_abc",
+        name="Codex MCP token",
+        scopes=[],
+        created_at=None,
+        last_used_at=None,
+        expires_at=None,
+        revoked_at=None,
+    )
+
+    with patch(
+        "brain.app.api.routers.agent_connections.external_agents.require_connection_for_user",
+        return_value=SimpleNamespace(id="conn-1"),
+    ) as require_connection, patch(
+        "brain.app.api.routers.agent_connections.external_agents.list_connection_tokens",
+        return_value=[token],
+    ) as list_tokens:
+        response = await _request(
+            "GET",
+            "/api/agent-connections/conn-1/tokens",
+            session=session,
+        )
+
+    assert response.status_code == 200
+    assert response.json()[0]["id"] == "token-1"
+    require_connection.assert_awaited_once_with(
+        session,
+        connection_id="conn-1",
+        org_id="org-1",
+        user_id="user-1",
+        role="member",
+        require_manage=True,
+    )
+    list_tokens.assert_awaited_once_with(
+        session,
+        connection_id="conn-1",
+        org_id="org-1",
+    )
+
+
+async def test_connection_token_can_be_revoked_for_managed_connection():
+    session = _AsyncSession()
+    token = SimpleNamespace(
+        id="token-1",
+        connection_id="conn-1",
+        token_prefix="illo_conn_abc",
+        name="Codex MCP token",
+        scopes=[],
+        created_at=None,
+        last_used_at=None,
+        expires_at=None,
+        revoked_at=datetime.now(timezone.utc),
+    )
+
+    with patch(
+        "brain.app.api.routers.agent_connections.external_agents.require_connection_for_user",
+        return_value=SimpleNamespace(id="conn-1"),
+    ) as require_connection, patch(
+        "brain.app.api.routers.agent_connections.external_agents.revoke_connection_token",
+        return_value=token,
+    ) as revoke_token:
+        response = await _request(
+            "DELETE",
+            "/api/agent-connections/conn-1/tokens/token-1",
+            session=session,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["revoked_at"] is not None
+    require_connection.assert_awaited_once_with(
+        session,
+        connection_id="conn-1",
+        org_id="org-1",
+        user_id="user-1",
+        role="member",
+        require_manage=True,
+    )
+    revoke_token.assert_awaited_once_with(
+        session,
+        connection_id="conn-1",
+        token_id="token-1",
+        org_id="org-1",
+    )
+
+
+async def test_connection_can_be_removed_for_managed_connection():
+    session = _AsyncSession()
+    connection = SimpleNamespace(
+        id="conn-1",
+        org_id="org-1",
+        owner_user_id="user-1",
+        display_name="Codex",
+        agent_kind="codex",
+        transport="hosted_mcp",
+        status="disabled",
+        endpoint_url=None,
+        remote_agent_id=None,
+        remote_session_key=None,
+        remote_agent_card={},
+        capabilities={},
+        last_seen_at=None,
+        last_tested_at=None,
+        last_error=None,
+        metadata_={},
+        disabled_at=datetime.now(timezone.utc),
+        created_at=None,
+        updated_at=None,
+    )
+
+    with patch(
+        "brain.app.api.routers.agent_connections.external_agents.require_connection_for_user",
+        return_value=connection,
+    ) as require_connection, patch(
+        "brain.app.api.routers.agent_connections.external_agents.disable_connection",
+        return_value=connection,
+    ) as disable_connection:
+        response = await _request(
+            "DELETE",
+            "/api/agent-connections/conn-1",
+            session=session,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "disabled"
+    require_connection.assert_awaited_once_with(
+        session,
+        connection_id="conn-1",
+        org_id="org-1",
+        user_id="user-1",
+        role="member",
+        require_manage=True,
+    )
+    disable_connection.assert_awaited_once_with(
+        session,
+        connection_id="conn-1",
+        org_id="org-1",
+    )
+
+
 async def test_bridge_complete_commits_before_broadcasting_thread_message():
     order: list[str] = []
     session = _AsyncSession(order)

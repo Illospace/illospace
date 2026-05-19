@@ -1300,6 +1300,14 @@ def _grant_to_dict(grant: VaultAgentGrant) -> dict:
     }
 
 
+def _pending_grant_is_actionable(grant: VaultAgentGrant, secret: Secret | None) -> bool:
+    if grant.status != "pending":
+        return True
+    if secret is None:
+        return False
+    return normalize_agent_access_level(getattr(secret, "agent_access_level", None)) == VAULT_AGENT_ACCESS_ASK
+
+
 async def list_agent_grants(
     user_id: str,
     *,
@@ -1387,6 +1395,7 @@ async def async_authorize_agent_secret_read(
     if not user_id:
         return {"allowed": False, "status": "denied", "reason": "authenticated user context required"}
     clean_org_id = org_id or None
+    secret_found = False
 
     async with UnitOfWork() as uow:
         secret = (
@@ -1397,6 +1406,7 @@ async def async_authorize_agent_secret_read(
             )
         ).first()
         if secret:
+            secret_found = True
             access_level = normalize_agent_access_level(getattr(secret, "agent_access_level", None))
             if access_level == VAULT_AGENT_ACCESS_AVAILABLE:
                 return {"allowed": True, "status": "available", "policy": {"agent_access_level": access_level}}
@@ -1428,6 +1438,14 @@ async def async_authorize_agent_secret_read(
                     "policy": {"agent_access_level": access_level},
                     "binding": _binding_to_dict(binding, secret),
                 }
+
+    if not secret_found:
+        await _async_record_missing(key_name, user_id=user_id, org_id=clean_org_id)
+        return {
+            "allowed": False,
+            "status": "missing",
+            "reason": f"Secret '{key_name}' not found in Vault",
+        }
 
     if not run_id:
         return {"allowed": False, "status": "denied", "reason": "run-scoped grant required"}
@@ -1609,7 +1627,20 @@ async def async_list_agent_grants(
         if statuses:
             stmt = stmt.where(VaultAgentGrant.status.in_(tuple(statuses)))
         stmt = stmt.order_by(VaultAgentGrant.requested_at.desc()).limit(limit)
-        return [_grant_to_dict(grant) for grant in (await uow.session.scalars(stmt)).all()]
+        grants = list((await uow.session.scalars(stmt)).all())
+        pending_keys = sorted({grant.key_name for grant in grants if grant.status == "pending"})
+        secrets_by_key: dict[str, Secret] = {}
+        if pending_keys:
+            secrets_stmt = select(Secret).where(Secret.user_id == user_id, Secret.key_name.in_(pending_keys))
+            secrets_by_key = {
+                secret.key_name: secret
+                for secret in (await uow.session.scalars(secrets_stmt)).all()
+            }
+        return [
+            _grant_to_dict(grant)
+            for grant in grants
+            if _pending_grant_is_actionable(grant, secrets_by_key.get(grant.key_name))
+        ]
 
 
 async def async_approve_agent_grant(
@@ -1631,6 +1662,15 @@ async def async_approve_agent_grant(
         if org_id and str(grant.org_id) != str(org_id):
             return None
         if org_id is None and grant.org_id is not None:
+            return None
+        secret = (
+            await uow.session.scalars(
+                select(Secret)
+                .where(Secret.user_id == approved_by_user_id, Secret.key_name == grant.key_name)
+                .limit(1)
+            )
+        ).first()
+        if not _pending_grant_is_actionable(grant, secret):
             return None
         grant.status = "approved"
         grant.approved_by_user_id = approved_by_user_id

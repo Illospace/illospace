@@ -1070,6 +1070,10 @@
     --panel-utility-divider-border: rgba(255, 255, 255, 0.06);
     --panel-utility-card-border: rgba(255, 255, 255, 0.04);
     --panel-utility-card-background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015));
+    --panel-utility-info-card-border: var(--panel-utility-card-border);
+    --panel-utility-info-card-background: var(--panel-utility-card-background);
+    --panel-utility-info-card-primary-border: color-mix(in srgb, var(--thread-accent, #57CFA0) 18%, var(--panel-utility-info-card-border));
+    --panel-utility-info-card-primary-background: var(--panel-utility-info-card-background);
     --panel-utility-link-dot-shadow: 0 0 0 4px rgba(255, 255, 255, 0.03);
     --panel-utility-eval-button-border: rgba(255, 255, 255, 0.08);
     --panel-utility-eval-button-background: rgba(255, 255, 255, 0.03);
@@ -1091,6 +1095,10 @@
     --panel-utility-divider-border: rgba(126, 92, 52, 0.12);
     --panel-utility-card-border: rgba(126, 92, 52, 0.1);
     --panel-utility-card-background: rgba(248, 250, 248, 0.58);
+    --panel-utility-info-card-border: rgba(126, 92, 52, 0.12);
+    --panel-utility-info-card-background: rgba(255, 253, 247, 0.72);
+    --panel-utility-info-card-primary-border: rgba(126, 92, 52, 0.16);
+    --panel-utility-info-card-primary-background: rgba(255, 253, 247, 0.84);
     --panel-utility-link-dot-shadow: 0 0 0 4px rgba(54, 70, 82, 0.06);
     --panel-utility-eval-button-border: var(--constellation-control-button-secondary-border);
     --panel-utility-eval-button-background: var(--constellation-control-button-secondary-background);
@@ -1383,13 +1391,14 @@
   .handoff-summary-section {
     min-width: 0;
     padding: 12px 13px 13px;
-    border: 1px solid var(--panel-utility-card-border);
+    border: 1px solid var(--panel-utility-info-card-border);
     border-radius: 16px;
-    background: var(--panel-utility-card-background);
+    background: var(--panel-utility-info-card-background);
   }
 
   .handoff-summary-section-primary {
-    border-color: color-mix(in srgb, var(--thread-accent, #57CFA0) 18%, var(--panel-utility-card-border));
+    border-color: var(--panel-utility-info-card-primary-border);
+    background: var(--panel-utility-info-card-primary-background);
   }
 
   .handoff-summary-lead,
