@@ -20,6 +20,22 @@ def test_upload_preview_extracts_text_upload(tmp_path, monkeypatch):
     assert preview["download_url"] == "https://illo.example.com/static/uploads/notes.md"
 
 
+def test_upload_preview_extracts_html_upload(tmp_path):
+    from brain.systems.cortex.upload_preview import build_upload_preview
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    target = upload_dir / "prd.html"
+    target.write_text("<!doctype html><h1>Product requirements</h1>", encoding="utf-8")
+
+    preview = build_upload_preview("/static/uploads/prd.html", upload_dir=upload_dir)
+
+    assert preview["kind"] == "html"
+    assert preview["preview_mode"] == "html"
+    assert preview["content_type"] == "text/html"
+    assert "Product requirements" in preview["text"]
+
+
 def test_upload_preview_extracts_docx_text(tmp_path):
     from brain.systems.cortex.upload_preview import build_upload_preview
 

@@ -424,6 +424,15 @@
     openAttachmentPreview(attachment);
   }
 
+  function previewServerFileLinks(node: HTMLElement) {
+    node.addEventListener('click', handleThreadContentClick);
+    return {
+      destroy() {
+        node.removeEventListener('click', handleThreadContentClick);
+      },
+    };
+  }
+
   $effect(() => {
     onTranscriptReady?.(transcriptContainerEl);
   });
@@ -569,7 +578,7 @@
     </header>
   {/if}
 
-  <div class="thread-content" bind:this={transcriptContainerEl} onscroll={onTranscriptScroll} onclick={handleThreadContentClick}>
+  <div class="thread-content" bind:this={transcriptContainerEl} onscroll={onTranscriptScroll} use:previewServerFileLinks>
     <div class="thread-column message-stack">
       {#if transcriptSlot}
         {@render transcriptSlot()}

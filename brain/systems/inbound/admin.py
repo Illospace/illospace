@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
 from typing import Any, Mapping, Sequence
 
@@ -599,6 +600,62 @@ async def replay_events(
     }
 
 
+async def get_source_card(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    connection_id: str,
+    limit: int | None = 50,
+) -> dict[str, Any]:
+    """Return the current computed source card plus the last persisted card."""
+
+    connection = await require_connection_for_org(session, org_id=org_id, connection_id=connection_id)
+    metadata = _json_dict(connection.metadata_)
+    return {
+        "source_card": await _build_source_card(
+            session,
+            org_id=org_id,
+            connection=connection,
+            limit=limit,
+            manual=_json_dict(metadata.get("source_card_manual")),
+        ),
+        "persisted_source_card": _json_dict(metadata.get("source_card")) or None,
+    }
+
+
+async def refresh_source_card(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    connection_id: str,
+    purpose: str | None = None,
+    notes: str | None = None,
+    tags: Sequence[str] | None = None,
+    limit: int | None = 50,
+) -> dict[str, Any]:
+    """Persist a refreshed source card summary on the connection metadata."""
+
+    connection = await require_connection_for_org(session, org_id=org_id, connection_id=connection_id)
+    metadata = _json_dict(connection.metadata_)
+    manual = _source_card_manual(metadata, purpose=purpose, notes=notes, tags=tags)
+    card = await _build_source_card(
+        session,
+        org_id=org_id,
+        connection=connection,
+        limit=limit,
+        manual=manual,
+        refreshed=True,
+    )
+    connection.metadata_ = {
+        **metadata,
+        "source_card_manual": manual,
+        "source_card": card,
+    }
+    await session.flush()
+    await session.refresh(connection)
+    return {"source_card": card}
+
+
 async def _preview_envelope(
     session: AsyncSession,
     *,
@@ -754,6 +811,199 @@ def _summarize_replay(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "would_require_ilo": would_require_ilo,
         "would_project_domain_record": would_project_domain_record,
         "changed": changed,
+    }
+
+
+async def _build_source_card(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    connection: ExternalAgentConnectionRow,
+    limit: int | None,
+    manual: Mapping[str, Any] | None = None,
+    refreshed: bool = False,
+) -> dict[str, Any]:
+    events = await list_events(
+        session,
+        org_id=org_id,
+        connection_id=str(connection.id),
+        limit=limit,
+    )
+    policies = await list_policies(
+        session,
+        org_id=org_id,
+        connection_id=str(connection.id),
+        include_disabled=True,
+        limit=READ_LIMIT_MAX,
+    )
+    projections = await list_projections(
+        session,
+        org_id=org_id,
+        connection_id=str(connection.id),
+        include_disabled=True,
+        limit=READ_LIMIT_MAX,
+    )
+    manual = _json_dict(manual)
+    return {
+        "version": 1,
+        "generated_at": _iso(inbound_service.utcnow()),
+        "refreshed": bool(refreshed),
+        "connection": _source_card_connection(connection),
+        "purpose": manual.get("purpose"),
+        "notes": manual.get("notes"),
+        "tags": _stripped_strings(_json_list(manual.get("tags"))),
+        "configured_rules": {
+            "policy_count": len(policies),
+            "projection_count": len(projections),
+            "policies": [_source_card_policy(row) for row in policies],
+            "projections": [_source_card_projection(row) for row in projections],
+        },
+        "traffic": _source_card_traffic(events),
+    }
+
+
+def _source_card_manual(
+    metadata: Mapping[str, Any],
+    *,
+    purpose: str | None,
+    notes: str | None,
+    tags: Sequence[str] | None,
+) -> dict[str, Any]:
+    existing = _json_dict(metadata.get("source_card_manual"))
+    if purpose is not None:
+        existing["purpose"] = str(purpose).strip() or None
+    if notes is not None:
+        existing["notes"] = str(notes).strip() or None
+    if tags is not None:
+        existing["tags"] = _stripped_strings(tags)
+    return {key: value for key, value in existing.items() if value not in (None, "", [])}
+
+
+def _source_card_connection(row: ExternalAgentConnectionRow) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "display_name": row.display_name,
+        "agent_kind": row.agent_kind,
+        "transport": row.transport,
+        "status": row.status,
+        "capabilities": _json_dict(row.capabilities),
+        "last_seen_at": _iso(row.last_seen_at),
+        "last_tested_at": _iso(row.last_tested_at),
+        "last_error": row.last_error,
+    }
+
+
+def _source_card_policy(row: InboundSourcePolicyRow) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "name": row.name,
+        "enabled": bool(row.enabled),
+        "priority": int(row.priority),
+        "origin_patterns": _json_list(row.origin_patterns),
+        "envelope_kinds": _json_list(row.envelope_kinds),
+        "allowed_actions": _json_list(row.allowed_actions),
+        "auto_execute_actions": _json_list(row.auto_execute_actions),
+        "review_mode": row.review_mode,
+        "has_instructions": bool(str(row.instructions or "").strip()),
+        "schema_required_paths": _schema_required_paths(row.schema_config),
+    }
+
+
+def _source_card_projection(row: InboundDomainProjectionRow) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "policy_id": str(row.policy_id) if row.policy_id else None,
+        "enabled": bool(row.enabled),
+        "domain_id": row.domain_id,
+        "object_key": row.object_key,
+        "external_id_path": row.external_id_path,
+        "external_id_field": row.external_id_field,
+        "field_mapping_keys": sorted(str(key) for key in _json_dict(row.field_mapping)),
+        "title_path": row.title_path,
+        "upsert_mode": row.upsert_mode,
+        "validation_failure_status": row.validation_failure_status,
+    }
+
+
+def _schema_required_paths(schema_config: Mapping[str, Any] | None) -> list[str]:
+    config = _json_dict(schema_config)
+    paths = _stripped_strings(_json_list(config.get("required_paths")))
+    for field in _json_list(config.get("fields")):
+        field_config = _json_dict(field)
+        if field_config.get("required"):
+            path = str(field_config.get("path") or field_config.get("field") or "").strip()
+            if path:
+                paths.append(path)
+    return sorted(set(paths))
+
+
+def _source_card_traffic(events: Sequence[InboundEventRow]) -> dict[str, Any]:
+    status_counts = Counter(str(row.status or "unknown") for row in events)
+    origin_counts = Counter(str(row.origin or "unknown") for row in events)
+    shape_counts: Counter[str] = Counter()
+    for row in events:
+        for path in _payload_shape_paths(_json_dict(row.raw_payload)):
+            shape_counts[path] += 1
+    return {
+        "event_count_sampled": len(events),
+        "common_origins": _counter_rows(origin_counts),
+        "statuses": _counter_rows(status_counts),
+        "payload_shapes": _counter_rows(shape_counts, limit=30),
+        "recent_failures": [_source_card_event_summary(row) for row in events if _event_needs_attention(row)][:10],
+        "recent_events": [_source_card_event_summary(row) for row in events[:10]],
+    }
+
+
+def _counter_rows(counter: Counter[str], *, limit: int = 10) -> list[dict[str, Any]]:
+    return [
+        {"value": value, "count": count}
+        for value, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
+
+
+def _payload_shape_paths(value: Any, *, prefix: str = "payload", depth: int = 0) -> list[str]:
+    if depth >= 4:
+        return [prefix]
+    if isinstance(value, Mapping):
+        paths: list[str] = []
+        for key in sorted(str(item) for item in value.keys()):
+            child = value.get(key)
+            child_prefix = f"{prefix}.{key}" if prefix else key
+            if isinstance(child, Mapping | list):
+                paths.extend(_payload_shape_paths(child, prefix=child_prefix, depth=depth + 1))
+            else:
+                paths.append(child_prefix)
+        return paths or [prefix]
+    if isinstance(value, list):
+        if not value:
+            return [f"{prefix}[]"]
+        paths: list[str] = []
+        for item in value[:3]:
+            paths.extend(_payload_shape_paths(item, prefix=f"{prefix}[]", depth=depth + 1))
+        return paths
+    return [prefix]
+
+
+def _event_needs_attention(row: InboundEventRow) -> bool:
+    return row.status in {
+        inbound_service.STATUS_FAILED,
+        inbound_service.STATUS_QUARANTINED,
+        inbound_service.STATUS_REVIEW_REQUIRED,
+    } or bool(row.error)
+
+
+def _source_card_event_summary(row: InboundEventRow) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "origin": row.origin,
+        "kind": row.kind,
+        "status": row.status,
+        "policy_id": str(row.policy_id) if row.policy_id else None,
+        "domain_projection_id": str(row.domain_projection_id) if row.domain_projection_id else None,
+        "action_type": row.action_type,
+        "error": row.error,
+        "created_at": _iso(row.created_at),
+        "processed_at": _iso(row.processed_at),
     }
 
 

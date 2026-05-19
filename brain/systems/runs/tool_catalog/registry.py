@@ -692,6 +692,7 @@ def action_policy_for_tool(
         "list_receipts",
         "dry_run_match",
         "replay_events",
+        "get_source_card",
     }:
         return None
     if tool_name == "manage_inbound":
@@ -707,6 +708,7 @@ def action_policy_for_tool(
             "update_policy": "update an inbound source policy",
             "create_projection": "create an inbound Domain Projection",
             "update_projection": "update an inbound Domain Projection",
+            "refresh_source_card": "refresh persisted inbound source-card metadata",
         }
         return {
             "risk": "high",

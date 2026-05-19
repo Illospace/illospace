@@ -856,6 +856,8 @@ INBOUND_TOOLS = [
                         "list_receipts",
                         "dry_run_match",
                         "replay_events",
+                        "get_source_card",
+                        "refresh_source_card",
                     ],
                     "description": "The inbound coordination operation to run.",
                 },
@@ -980,6 +982,19 @@ INBOUND_TOOLS = [
                     "description": "Include stored raw/normalized payloads in event reads or replay output.",
                 },
                 "include_receipts": {"type": "boolean", "default": False},
+                "source_purpose": {
+                    "type": "string",
+                    "description": "Optional human/Ilo-authored purpose to store on a refreshed source card.",
+                },
+                "source_notes": {
+                    "type": "string",
+                    "description": "Optional notes to store on a refreshed source card.",
+                },
+                "source_tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional tags to store on a refreshed source card.",
+                },
                 "limit": {"type": "integer", "default": 25, "description": "Maximum rows to return."},
             },
             "required": ["action"],

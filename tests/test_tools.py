@@ -189,6 +189,12 @@ class TestIntegration:
         assert "manage_inbound" in worker_names
         assert action_policy_for_tool("manage_inbound", kwargs={"action": "list_connections"}) is None
         assert action_policy_for_tool("manage_inbound", kwargs={"action": "replay_events"}) is None
+        assert action_policy_for_tool("manage_inbound", kwargs={"action": "get_source_card"}) is None
+        assert action_policy_for_tool("manage_inbound", kwargs={"action": "refresh_source_card"}) == {
+            "risk": "high",
+            "reversibility": "variable",
+            "expected_effect": "refresh persisted inbound source-card metadata",
+        }
         assert action_policy_for_tool("manage_inbound", kwargs={"action": "mint_token"}) == {
             "risk": "high",
             "reversibility": "variable",

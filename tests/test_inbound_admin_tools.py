@@ -713,6 +713,134 @@ async def test_replay_event_can_include_payload_for_single_event_inspection(
     }
 
 
+async def test_source_card_summarizes_connection_and_persists_manual_context(
+    seeded_session,
+    patch_unit_of_work,
+):
+    domain = await _create_issue_domain(seeded_session)
+
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        connection = _decode(
+            await _handle_manage_inbound(
+                action="create_connection",
+                display_name="Jira webhook",
+                agent_kind="jira",
+                transport="webhook",
+            )
+        )["connection"]
+        policy = _decode(
+            await _handle_manage_inbound(
+                action="create_policy",
+                connection_id=connection["id"],
+                name="Jira issue events",
+                origin_patterns=["jira.issue_*"],
+                schema_config={"required_paths": ["payload.issue.key"]},
+                allowed_actions=[inbound_service.ACTION_DOMAIN_PROJECTION_UPSERT],
+                instructions="Store Jira issues in the incoming issues Domain.",
+            )
+        )["policy"]
+        projection = _decode(
+            await _handle_manage_inbound(
+                action="create_projection",
+                connection_id=connection["id"],
+                policy_id=policy["id"],
+                domain_id=domain.id,
+                object_key="issue",
+                external_id_path="payload.issue.key",
+                external_id_field="external_id",
+                field_mapping={"summary": "payload.issue.summary"},
+                title_path="payload.issue.summary",
+            )
+        )["projection"]
+
+    await inbound_service.submit_inbound_envelope(
+        seeded_session,
+        connection={
+            "connection_id": connection["id"],
+            "org_id": ORG_ID,
+            "owner_user_id": USER_ID,
+            "display_name": "Jira webhook",
+            "agent_kind": "jira",
+            "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
+        },
+        envelope={
+            "kind": "signal",
+            "origin": "jira.issue_created",
+            "payload": {"issue": {"key": "ILO-10", "summary": "Source card"}},
+            "idempotency_key": "jira:ILO-10:created",
+        },
+        ingress_context={"surface": "webhook"},
+    )
+    await inbound_service.submit_inbound_envelope(
+        seeded_session,
+        connection={
+            "connection_id": connection["id"],
+            "org_id": ORG_ID,
+            "owner_user_id": USER_ID,
+            "display_name": "Jira webhook",
+            "agent_kind": "jira",
+            "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
+        },
+        envelope={
+            "kind": "signal",
+            "origin": "jira.issue_updated",
+            "payload": {"issue": {"summary": "Missing key"}},
+            "idempotency_key": "jira:missing-key",
+        },
+        ingress_context={"surface": "webhook"},
+    )
+
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        before = _decode(
+            await _handle_manage_inbound(
+                action="get_source_card",
+                connection_id=connection["id"],
+                limit=10,
+            )
+        )
+        refreshed = _decode(
+            await _handle_manage_inbound(
+                action="refresh_source_card",
+                connection_id=connection["id"],
+                source_purpose="Mirror Jira issues into IloSpace for team awareness.",
+                source_notes="Created from the inbound coordination smoke slice.",
+                source_tags=["jira", "tickets"],
+                limit=10,
+            )
+        )["source_card"]
+        after = _decode(
+            await _handle_manage_inbound(
+                action="get_source_card",
+                connection_id=connection["id"],
+                limit=10,
+            )
+        )
+
+    persisted_connection = await seeded_session.get(ExternalAgentConnectionRow, connection["id"])
+    source_card = persisted_connection.metadata_["source_card"]
+    assert before["persisted_source_card"] is None
+    assert refreshed["connection"]["display_name"] == "Jira webhook"
+    assert refreshed["purpose"] == "Mirror Jira issues into IloSpace for team awareness."
+    assert refreshed["notes"] == "Created from the inbound coordination smoke slice."
+    assert refreshed["tags"] == ["jira", "tickets"]
+    assert refreshed["configured_rules"]["policy_count"] == 1
+    assert refreshed["configured_rules"]["projection_count"] == 1
+    assert refreshed["configured_rules"]["policies"][0]["id"] == policy["id"]
+    assert refreshed["configured_rules"]["policies"][0]["has_instructions"] is True
+    assert refreshed["configured_rules"]["policies"][0]["schema_required_paths"] == ["payload.issue.key"]
+    assert refreshed["configured_rules"]["projections"][0]["id"] == projection["id"]
+    assert refreshed["traffic"]["event_count_sampled"] == 2
+    assert {"value": "jira.issue_created", "count": 1} in refreshed["traffic"]["common_origins"]
+    assert {"value": inbound_service.STATUS_PROCESSED, "count": 1} in refreshed["traffic"]["statuses"]
+    assert {"value": inbound_service.STATUS_QUARANTINED, "count": 1} in refreshed["traffic"]["statuses"]
+    assert {"value": "payload.issue.key", "count": 1} in refreshed["traffic"]["payload_shapes"]
+    assert {"value": "payload.issue.summary", "count": 2} in refreshed["traffic"]["payload_shapes"]
+    assert refreshed["traffic"]["recent_failures"][0]["status"] == inbound_service.STATUS_QUARANTINED
+    assert source_card["generated_at"] == refreshed["generated_at"]
+    assert after["persisted_source_card"]["generated_at"] == refreshed["generated_at"]
+    assert after["source_card"]["purpose"] == refreshed["purpose"]
+
+
 async def test_manage_inbound_requires_org_scoped_run(patch_unit_of_work):
     with bind_agent_context(AgentExecutionContext(user_id=USER_ID)):
         result = _decode(await _handle_manage_inbound(action="list_connections"))

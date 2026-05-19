@@ -66,6 +66,15 @@ test('renders bare urls without double-linking markdown links', () => {
   );
 });
 
+test('preserves server-relative markdown links', () => {
+  const html = renderReadableMarkdown('Open [PRD](/static/uploads/prd.md).');
+
+  assert.equal(
+    html,
+    '<p>Open <a href="/static/uploads/prd.md" target="_blank" rel="noopener">PRD</a>.</p>',
+  );
+});
+
 test('preserves query parameters in bare url hrefs', () => {
   const html = renderReadableMarkdown('Open https://example.com/search?q=illo&sort=new');
 
