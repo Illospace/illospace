@@ -15,6 +15,7 @@ from brain.systems.runs.tool_definitions import (
     CORTEX_IDEA_TOOLS,
     DOMAIN_TOOLS,
     EXEC_TOOLS,
+    INBOUND_TOOLS,
     LIFECYCLE_TOOLS,
     MY_ACTIVITY_TOOL,
     PROJECT_TOOLS,
@@ -237,6 +238,15 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "expected_effect": "read or mutate org-wide domain schema and records",
         "output_budget_chars": 14_000,
     },
+    "manage_inbound": {
+        "permission": "manage_inbound",
+        "risk_class": "high",
+        "side_effect_class": "inbound_configuration",
+        "reversibility": "variable",
+        "action_manifest": True,
+        "expected_effect": "read or mutate inbound source connections, tokens, policies, and Domain Projections",
+        "output_budget_chars": 18_000,
+    },
     "manage_idea": {
         "permission": "write_idea",
         "risk_class": "medium",
@@ -425,6 +435,7 @@ def _definition_sources() -> list[tuple[str, tuple[str, ...], list[Mapping[str, 
         ("brain", ("coordinator", "worker"), BRAIN_TOOLS),
         ("soul", ("coordinator",), SOUL_TOOLS),
         ("domains", ("coordinator", "worker"), DOMAIN_TOOLS),
+        ("inbound", ("coordinator", "worker"), INBOUND_TOOLS),
         ("ideas", ("coordinator", "worker"), CORTEX_IDEA_TOOLS),
         ("chat", ("coordinator", "worker"), CHAT_TOOLS),
         ("projects", ("coordinator", "worker"), PROJECT_TOOLS),
@@ -657,6 +668,42 @@ def action_policy_for_tool(
         return None
     if tool_name == "manage_domain" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "query_records", "get_record", "events"}:
         return None
+    if tool_name == "manage_inbound" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {
+        "help",
+        "schema",
+        "list_connections",
+        "get_connection",
+        "list_tokens",
+        "get_token",
+        "list_policies",
+        "get_policy",
+        "list_projections",
+        "get_projection",
+        "list_events",
+        "get_event",
+        "list_receipts",
+        "dry_run_match",
+    }:
+        return None
+    if tool_name == "manage_inbound":
+        inbound_action = str(_arg_at(args_tuple, kwargs_dict, "action", 0, "") or "").strip().lower()
+        effect_by_action = {
+            "create_connection": "create an external source connection for inbound signals",
+            "update_connection": "update an external source connection",
+            "mint_token": "mint a scoped source token for inbound signal submission",
+            "list_tokens": "read source token metadata",
+            "get_token": "read source token metadata",
+            "revoke_token": "revoke an inbound source token",
+            "create_policy": "create an inbound source policy",
+            "update_policy": "update an inbound source policy",
+            "create_projection": "create an inbound Domain Projection",
+            "update_projection": "update an inbound Domain Projection",
+        }
+        return {
+            "risk": "high",
+            "reversibility": "variable",
+            "expected_effect": effect_by_action.get(inbound_action, "mutate inbound coordination configuration"),
+        }
     if tool_name == "manage_skill" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get", "list_assets", "get_asset"}:
         return None
     if tool_name == "manage_skill":

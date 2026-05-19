@@ -11,6 +11,7 @@ from sqlalchemy.dialects.sqlite.base import SQLiteDDLCompiler, SQLiteTypeCompile
 
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.main import app
+from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.domain import (
     Domain,
     DomainEvent,
@@ -24,6 +25,7 @@ from brain.platform.db.models.external_agent import (
     ExternalAgentConnectionRow,
     ExternalAgentConnectionTokenRow,
 )
+from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
 from brain.platform.db.models.inbound import (
     InboundDecisionReceiptRow,
     InboundDomainProjectionKeyRow,
@@ -31,6 +33,7 @@ from brain.platform.db.models.inbound import (
     InboundEventRow,
     InboundSourcePolicyRow,
 )
+from brain.platform.db.models.org import Org, User
 from brain.systems.external_agents import service as external_agents
 from brain.systems.inbound import service as inbound
 from brain.systems.user_domains.service import AsyncDomainService
@@ -49,8 +52,14 @@ def _patch_sqlite_for_pg_types():
     if not hasattr(SQLiteTypeCompiler, "visit_JSONB"):
         SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"
     SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "TEXT"
+    SQLiteTypeCompiler.visit_BIGINT = lambda self, type_, **kw: "INTEGER"
+    for name in ("visit_VECTOR", "visit_Vector"):
+        if not hasattr(SQLiteTypeCompiler, name):
+            setattr(SQLiteTypeCompiler, name, lambda self, type_, **kw: "TEXT")
 
     original = SQLiteDDLCompiler.get_column_default_string
+    if getattr(original, "_inbound_webhooks_patch", False):
+        return
 
     def patched(self, column, **kw):
         result = original(self, column, **kw)
@@ -60,6 +69,7 @@ def _patch_sqlite_for_pg_types():
             result = result.replace("TRUE", "1").replace("FALSE", "0")
         return result
 
+    patched._inbound_webhooks_patch = True
     SQLiteDDLCompiler.get_column_default_string = patched
 
 
@@ -68,6 +78,8 @@ async def session(async_sqlite_session_factory):
     _patch_sqlite_for_pg_types()
     return await async_sqlite_session_factory(
         [
+            Org.__table__,
+            User.__table__,
             ExternalAgentConnectionRow.__table__,
             ExternalAgentConnectionTokenRow.__table__,
             Domain.__table__,
@@ -77,6 +89,12 @@ async def session(async_sqlite_session_factory):
             DomainRecord.__table__,
             DomainRelation.__table__,
             DomainEvent.__table__,
+            Idea.__table__,
+            IdeaThread.__table__,
+            IdeaStateLog.__table__,
+            AgentRunRow.__table__,
+            AgentRunEventRow.__table__,
+            AgentRunArtifactRow.__table__,
             InboundSourcePolicyRow.__table__,
             InboundDomainProjectionRow.__table__,
             InboundDomainProjectionKeyRow.__table__,
@@ -94,6 +112,10 @@ async def _seed_connection(
     raw_token: str = RAW_TOKEN,
     scopes: list[str] | None = None,
 ) -> external_agents.AgentBridgePrincipal:
+    if await session.get(Org, ORG_ID) is None:
+        session.add(Org(id=ORG_ID, name="Test Org", slug="test-org"))
+    if await session.get(User, USER_ID) is None:
+        session.add(User(id=USER_ID, org_id=ORG_ID, name="Reda", email="reda@example.com"))
     connection = ExternalAgentConnectionRow(
         id=connection_id,
         org_id=ORG_ID,
@@ -156,6 +178,34 @@ async def _post_mcp(session, *, headers: dict[str, str] | None = None, json_body
         app.dependency_overrides.update(overrides)
 
 
+async def _assert_queued_triage(session, outcome: dict, *, reason: str) -> dict:
+    assert outcome["reason"] == reason
+    triage = outcome["triage"]
+    assert triage["status"] == "queued"
+    assert triage["event_id"]
+    assert triage["idea_id"]
+    assert triage["thread_message_id"]
+    assert triage["run_id"]
+
+    idea = await session.get(Idea, triage["idea_id"])
+    thread_message = await session.get(IdeaThread, triage["thread_message_id"])
+    run = await session.get(AgentRunRow, triage["run_id"])
+    assert idea is not None
+    assert idea.origin == "inbound_signal"
+    assert idea.origin_ref == f"inbound_event:{triage['event_id']}"
+    assert idea.status == "working"
+    assert thread_message is not None
+    assert thread_message.idea_id == triage["idea_id"]
+    assert thread_message.role == "user"
+    assert "An inbound signal needs Ilo triage." in thread_message.content
+    assert run is not None
+    assert run.thread_id == triage["idea_id"]
+    assert run.status == "queued"
+    assert run.metadata_["producer"] == "inbound"
+    assert run.metadata_["inbound_event"]["event_id"] == triage["event_id"]
+    return triage
+
+
 async def test_webhook_requires_authenticated_source_identity(session):
     response = await _post_webhook(
         session,
@@ -183,7 +233,11 @@ async def test_post_webhook_stores_event_even_without_policy(session):
     body = response.json()
     assert body["status"] == "review_required"
     assert body["matched_policy_id"] is None
-    assert body["ilo_outcome"] == {"reason": "no_matching_source_policy"}
+    triage = await _assert_queued_triage(
+        session,
+        body["ilo_outcome"],
+        reason="no_matching_source_policy",
+    )
 
     event = (await session.scalars(select(InboundEventRow))).one()
     assert event.origin == "jira.ticket_created"
@@ -192,6 +246,7 @@ async def test_post_webhook_stores_event_even_without_policy(session):
     assert event.token_id == TOKEN_ID
     assert event.authority_user_id == USER_ID
     assert event.source_actor["connection_id"] == CONNECTION_ID
+    assert triage["event_id"] == str(event.id)
 
 
 async def test_webhook_and_mcp_signals_share_inbound_event_path(session):
@@ -238,7 +293,16 @@ async def test_webhook_and_mcp_signals_share_inbound_event_path(session):
     assert webhook_response.json()["status"] == "review_required"
     assert mcp_payload["status"] == "review_required"
     assert mcp_payload["matched_policy_id"] is None
-    assert mcp_payload["ilo_outcome"] == {"reason": "no_matching_source_policy"}
+    webhook_triage = await _assert_queued_triage(
+        session,
+        webhook_response.json()["ilo_outcome"],
+        reason="no_matching_source_policy",
+    )
+    mcp_triage = await _assert_queued_triage(
+        session,
+        mcp_payload["ilo_outcome"],
+        reason="no_matching_source_policy",
+    )
 
     events = (await session.scalars(select(InboundEventRow).order_by(InboundEventRow.created_at))).all()
     assert [event.origin for event in events] == ["jira.ticket_created", "codex.progress"]
@@ -253,6 +317,7 @@ async def test_webhook_and_mcp_signals_share_inbound_event_path(session):
     assert events[1].normalized_payload["hints"]["files_touched"] == [
         "brain/app/api/routers/agent_mcp.py"
     ]
+    assert [webhook_triage["event_id"], mcp_triage["event_id"]] == [str(event.id) for event in events]
 
     receipts = (
         await session.scalars(
@@ -261,7 +326,10 @@ async def test_webhook_and_mcp_signals_share_inbound_event_path(session):
     ).all()
     assert len(receipts) == 2
     assert [receipt.event_id for receipt in receipts] == [str(event.id) for event in events]
-    assert all(receipt.outcome == {"reason": "no_matching_source_policy"} for receipt in receipts)
+    assert all(receipt.outcome["reason"] == "no_matching_source_policy" for receipt in receipts)
+    assert all(receipt.outcome["triage"]["status"] == "queued" for receipt in receipts)
+    assert all(receipt.target["kind"] == "cortex_idea" for receipt in receipts)
+    assert all(receipt.tool_use["type"] == "illo_triage" for receipt in receipts)
 
 
 async def test_mcp_signal_rejects_overlong_origin_before_inbound_processing(session):
@@ -411,6 +479,11 @@ async def test_source_policy_matching_uses_connection_scope_and_priority(session
     assert result["status"] == "review_required"
     assert result["matched_policy_id"] == str(specific.id)
     assert result["matched_policy_id"] != str(generic.id)
+    await _assert_queued_triage(
+        session,
+        result["ilo_outcome"],
+        reason="matched_policy_without_projection",
+    )
 
 
 async def test_domain_projection_creates_updates_and_dedupes_domain_records(session):
@@ -586,7 +659,11 @@ async def test_domain_projection_requires_explicit_policy_action_permission(sess
     )
 
     assert result["status"] == "review_required"
-    assert result["ilo_outcome"] == {"reason": "domain_projection_not_allowed"}
+    await _assert_queued_triage(
+        session,
+        result["ilo_outcome"],
+        reason="domain_projection_not_allowed",
+    )
     assert await session.scalar(select(func.count()).select_from(DomainRecord)) == 0
 
 
