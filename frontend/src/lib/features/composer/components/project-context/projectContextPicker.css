@@ -336,11 +336,50 @@
   }
 
   .project-context-profile-access-stack {
+    position: relative;
     display: inline-flex;
     flex: 0 0 auto;
     align-items: center;
     margin-left: auto;
-    padding-left: 2px;
+    margin-block: -4px;
+    padding: 4px 0 4px 2px;
+  }
+
+  .project-context-profile-access-stack::after {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 7px);
+    z-index: 30;
+    width: max-content;
+    max-width: min(260px, calc(100vw - 48px));
+    box-sizing: border-box;
+    border: 1px solid var(--project-context-section-divider);
+    border-radius: 7px;
+    padding: 6px 8px;
+    background: var(--project-context-popover-background);
+    box-shadow: var(--shadow-lg);
+    color: var(--project-context-card-text);
+    content: attr(data-tooltip);
+    font-family: var(--constellation-font-sans);
+    font-size: 11px;
+    font-weight: 560;
+    letter-spacing: 0;
+    line-height: 1.25;
+    opacity: 0;
+    pointer-events: none;
+    text-transform: none;
+    transform: translateY(3px);
+    transition:
+      opacity 120ms ease,
+      transform 120ms ease;
+    white-space: normal;
+  }
+
+  .project-context-profile-access-stack:hover::after,
+  .project-context-profile-access-stack:focus-visible::after,
+  .project-context-profile-access-stack:focus-within::after {
+    opacity: 1;
+    transform: translateY(0);
   }
 
   .project-context-profile-access-avatar {

@@ -118,15 +118,23 @@
                 <span
                   class="project-context-profile-access-stack"
                   title={accessSummary.tooltip}
+                  data-tooltip={accessSummary.tooltip}
                   aria-label={accessSummary.ariaLabel}
                 >
                   {#each accessSummary.visibleMembers as member, index (projectAccessMemberKey(member, index))}
-                    <span class="project-context-profile-access-avatar" aria-hidden="true">
+                    <span
+                      class="project-context-profile-access-avatar"
+                      aria-hidden="true"
+                    >
                       {projectAccessInitial(member)}
                     </span>
                   {/each}
                   {#if accessSummary.overflowCount > 0}
-                    <span class="project-context-profile-access-avatar overflow" aria-hidden="true">
+                    <span
+                      class="project-context-profile-access-avatar overflow"
+                      title={accessSummary.tooltip}
+                      aria-hidden="true"
+                    >
                       +{accessSummary.overflowCount}
                     </span>
                   {/if}
