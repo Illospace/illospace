@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import select
@@ -300,6 +301,222 @@ async def test_configured_projection_processes_signal_and_illo_can_inspect_logs(
     assert event_detail["event"]["raw_payload"] == {"issue": {"key": "ILO-7", "summary": "Webhook config"}}
     assert event_detail["receipts"][0]["status"] == inbound_service.STATUS_PROCESSED
     assert receipts["receipts"][0]["event_id"] == result["event_id"]
+
+
+async def test_dry_run_uses_same_projection_order_as_runtime(
+    seeded_session,
+    patch_unit_of_work,
+):
+    domain = await _create_issue_domain(seeded_session)
+
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        connection = _decode(
+            await _handle_manage_inbound(
+                action="create_connection",
+                display_name="Jira webhook",
+                agent_kind="jira",
+                transport="webhook",
+            )
+        )["connection"]
+        policy = _decode(
+            await _handle_manage_inbound(
+                action="create_policy",
+                connection_id=connection["id"],
+                name="Jira issue events",
+                origin_patterns=["jira.issue_*"],
+                allowed_actions=[inbound_service.ACTION_DOMAIN_PROJECTION_UPSERT],
+            )
+        )["policy"]
+        first_projection = _decode(
+            await _handle_manage_inbound(
+                action="create_projection",
+                connection_id=connection["id"],
+                policy_id=policy["id"],
+                domain_id=domain.id,
+                object_key="issue",
+                external_id_path="payload.issue.key",
+                external_id_field="external_id",
+                field_mapping={"summary": "payload.issue.summary"},
+            )
+        )["projection"]
+        second_projection = _decode(
+            await _handle_manage_inbound(
+                action="create_projection",
+                connection_id=connection["id"],
+                policy_id=policy["id"],
+                domain_id=domain.id,
+                object_key="issue",
+                external_id_path="payload.issue.newer_key",
+                external_id_field="external_id",
+                field_mapping={"summary": "payload.issue.summary"},
+            )
+        )["projection"]
+        first_row = await seeded_session.get(InboundDomainProjectionRow, first_projection["id"])
+        second_row = await seeded_session.get(InboundDomainProjectionRow, second_projection["id"])
+        first_row.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        second_row.created_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        await seeded_session.flush()
+        dry_run = _decode(
+            await _handle_manage_inbound(
+                action="dry_run_match",
+                connection_id=connection["id"],
+                origin="jira.issue_created",
+                payload={"issue": {"key": "ILO-7", "newer_key": "ILO-NEW", "summary": "Order"}},
+            )
+        )["dry_run"]
+
+    assert dry_run["domain_projection_id"] == first_projection["id"]
+    assert dry_run["would_project_domain_record"] is True
+
+
+async def test_dry_run_honors_projection_permission_and_required_external_id(
+    seeded_session,
+    patch_unit_of_work,
+):
+    domain = await _create_issue_domain(seeded_session)
+
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        connection = _decode(
+            await _handle_manage_inbound(
+                action="create_connection",
+                display_name="Jira webhook",
+                agent_kind="jira",
+                transport="webhook",
+            )
+        )["connection"]
+        policy = _decode(
+            await _handle_manage_inbound(
+                action="create_policy",
+                connection_id=connection["id"],
+                name="Jira issue events",
+                origin_patterns=["jira.issue_*"],
+            )
+        )["policy"]
+        projection = _decode(
+            await _handle_manage_inbound(
+                action="create_projection",
+                connection_id=connection["id"],
+                policy_id=policy["id"],
+                domain_id=domain.id,
+                object_key="issue",
+                external_id_path="payload.issue.key",
+                external_id_field="external_id",
+                field_mapping={"summary": "payload.issue.summary"},
+                auto_allow_policy_action=False,
+            )
+        )["projection"]
+        blocked = _decode(
+            await _handle_manage_inbound(
+                action="dry_run_match",
+                connection_id=connection["id"],
+                origin="jira.issue_created",
+                payload={"issue": {"key": "ILO-7", "summary": "Blocked"}},
+            )
+        )["dry_run"]
+        await _handle_manage_inbound(
+            action="update_policy",
+            policy_id=policy["id"],
+            allowed_actions=[inbound_service.ACTION_DOMAIN_PROJECTION_UPSERT],
+        )
+        missing_external_id = _decode(
+            await _handle_manage_inbound(
+                action="dry_run_match",
+                connection_id=connection["id"],
+                origin="jira.issue_created",
+                payload={"issue": {"summary": "Missing key"}},
+            )
+        )["dry_run"]
+        await _handle_manage_inbound(
+            action="update_projection",
+            projection_id=projection["id"],
+            validation_failure_status=inbound_service.STATUS_QUARANTINED,
+        )
+        quarantined_missing_external_id = _decode(
+            await _handle_manage_inbound(
+                action="dry_run_match",
+                connection_id=connection["id"],
+                origin="jira.issue_created",
+                payload={"issue": {"summary": "Missing key"}},
+            )
+        )["dry_run"]
+        await _handle_manage_inbound(
+            action="update_projection",
+            projection_id=projection["id"],
+            validation_failure_status=inbound_service.STATUS_FAILED,
+        )
+        failed_missing_external_id = _decode(
+            await _handle_manage_inbound(
+                action="dry_run_match",
+                connection_id=connection["id"],
+                origin="jira.issue_created",
+                payload={"issue": {"summary": "Missing key"}},
+            )
+        )["dry_run"]
+
+    assert blocked["would_project_domain_record"] is False
+    assert blocked["would_require_ilo"] is True
+    assert blocked["projection_error"] == "domain_projection_not_allowed"
+    assert missing_external_id["would_project_domain_record"] is False
+    assert missing_external_id["would_require_ilo"] is True
+    assert missing_external_id["projection_error"] == "Missing projection external id at 'payload.issue.key'"
+    assert quarantined_missing_external_id["would_project_domain_record"] is False
+    assert quarantined_missing_external_id["would_require_ilo"] is False
+    assert quarantined_missing_external_id["projection_error"] == (
+        "Missing projection external id at 'payload.issue.key'"
+    )
+    assert failed_missing_external_id["would_project_domain_record"] is False
+    assert failed_missing_external_id["would_require_ilo"] is False
+    assert failed_missing_external_id["projection_error"] == "Missing projection external id at 'payload.issue.key'"
+
+
+async def test_dry_run_schema_errors_match_runtime_quarantine(
+    seeded_session,
+    patch_unit_of_work,
+):
+    domain = await _create_issue_domain(seeded_session)
+
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        connection = _decode(
+            await _handle_manage_inbound(
+                action="create_connection",
+                display_name="Jira webhook",
+                agent_kind="jira",
+                transport="webhook",
+            )
+        )["connection"]
+        policy = _decode(
+            await _handle_manage_inbound(
+                action="create_policy",
+                connection_id=connection["id"],
+                name="Jira issue events",
+                origin_patterns=["jira.issue_*"],
+                schema_config={"required_paths": ["payload.issue.key"]},
+                allowed_actions=[inbound_service.ACTION_DOMAIN_PROJECTION_UPSERT],
+            )
+        )["policy"]
+        await _handle_manage_inbound(
+            action="create_projection",
+            connection_id=connection["id"],
+            policy_id=policy["id"],
+            domain_id=domain.id,
+            object_key="issue",
+            external_id_path="payload.issue.key",
+            external_id_field="external_id",
+            field_mapping={"summary": "payload.issue.summary"},
+        )
+        dry_run = _decode(
+            await _handle_manage_inbound(
+                action="dry_run_match",
+                connection_id=connection["id"],
+                origin="jira.issue_created",
+                payload={"issue": {"summary": "Missing key"}},
+            )
+        )["dry_run"]
+
+    assert dry_run["matched_policy_id"] == policy["id"]
+    assert dry_run["would_project_domain_record"] is False
+    assert dry_run["would_require_ilo"] is False
+    assert dry_run["schema_error"] == "Missing required inbound field(s): payload.issue.key"
 
 
 async def test_manage_inbound_requires_org_scoped_run(patch_unit_of_work):

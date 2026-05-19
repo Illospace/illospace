@@ -581,23 +581,60 @@ async def dry_run_match(
         schema_error = None
     except Exception as exc:
         schema_error = str(exc)
-    projections = await list_projections(
-        session,
-        org_id=org_id,
-        connection_id=connection_id,
-        policy_id=str(policy.id),
-        include_disabled=False,
-        limit=1,
-    )
-    projection = projections[0] if projections else None
+    projection = await inbound_service._projection_for_policy(session, policy)
+    projection_error = _dry_run_projection_error(policy, projection, envelope)
     return {
         "matched_policy_id": str(policy.id),
         "domain_projection_id": str(projection.id) if projection else None,
         "would_store_event": True,
-        "would_require_ilo": projection is None or schema_error is not None,
-        "would_project_domain_record": projection is not None and schema_error is None,
+        "would_require_ilo": _dry_run_would_require_ilo(
+            projection,
+            schema_error=schema_error,
+            projection_error=projection_error,
+        ),
+        "would_project_domain_record": (
+            projection is not None and schema_error is None and projection_error is None
+        ),
         "schema_error": schema_error,
+        "projection_error": projection_error,
     }
+
+
+def _dry_run_projection_error(
+    policy: InboundSourcePolicyRow,
+    projection: InboundDomainProjectionRow | None,
+    envelope: Mapping[str, Any],
+) -> str | None:
+    if projection is None:
+        return None
+    if not inbound_service._policy_allows_domain_projection(policy):
+        return "domain_projection_not_allowed"
+    root = inbound_service._path_root(envelope)
+    value = inbound_service._extract_path(root, projection.external_id_path)
+    external_id = inbound_service._string_value(value)
+    if not external_id:
+        return f"Missing projection external id at '{projection.external_id_path}'"
+    return None
+
+
+def _dry_run_would_require_ilo(
+    projection: InboundDomainProjectionRow | None,
+    *,
+    schema_error: str | None,
+    projection_error: str | None,
+) -> bool:
+    if schema_error is not None:
+        return False
+    if projection is None:
+        return True
+    if projection_error is None:
+        return False
+    if projection_error == "domain_projection_not_allowed":
+        return True
+    status = projection.validation_failure_status
+    if status not in inbound_service.VALID_PROJECTION_FAILURE_STATUSES:
+        status = inbound_service.STATUS_REVIEW_REQUIRED
+    return status == inbound_service.STATUS_REVIEW_REQUIRED
 
 
 def serialize_connection(row: ExternalAgentConnectionRow) -> dict[str, Any]:
