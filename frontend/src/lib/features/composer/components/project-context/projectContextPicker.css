@@ -292,6 +292,92 @@
     min-width: 0;
   }
 
+  .project-context-profile-option-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .project-context-profile-option-title strong {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .project-context-profile-visibility-pill {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    min-height: 17px;
+    box-sizing: border-box;
+    border: 1px solid var(--project-context-pill-border);
+    border-radius: 999px;
+    padding: 0 7px;
+    background: var(--project-context-pill-background);
+    color: var(--project-context-pill-text);
+    font-family: var(--constellation-font-mono);
+    font-size: 8.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .project-context-profile-visibility-pill.public {
+    border-color: color-mix(in srgb, var(--thread-accent, #57CFA0) 32%, var(--project-context-pill-border));
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 12%, transparent);
+    color: color-mix(in srgb, var(--thread-accent, #57CFA0) 58%, var(--project-context-card-text));
+  }
+
+  .project-context-profile-visibility-pill.private {
+    opacity: 0.84;
+  }
+
+  .project-context-profile-access-stack {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    margin-left: auto;
+    padding-left: 2px;
+  }
+
+  .project-context-profile-access-avatar {
+    position: relative;
+    display: inline-flex;
+    width: 18px;
+    height: 18px;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    border: 1px solid color-mix(in srgb, var(--thread-accent, #57CFA0) 24%, var(--project-context-pill-border));
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--thread-accent, #57CFA0) 14%, var(--project-context-popover-background));
+    color: var(--project-context-card-text);
+    font-family: var(--constellation-font-mono);
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    text-transform: uppercase;
+    box-shadow: 0 0 0 1px var(--project-context-popover-background);
+  }
+
+  .project-context-profile-access-avatar + .project-context-profile-access-avatar {
+    margin-left: -4px;
+  }
+
+  .project-context-profile-access-avatar.overflow {
+    width: auto;
+    min-width: 18px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--project-context-pill-background);
+    color: var(--project-context-pill-text);
+    font-size: 7.5px;
+  }
+
   .project-context-profile-option-copy strong,
   .project-context-profile-option-copy small {
     overflow: hidden;

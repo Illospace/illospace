@@ -6,6 +6,7 @@ export type ProjectContextProfile = {
   description: string;
   resources: ProjectContextResource[];
   serverProfileId?: string;
+  userId?: string;
   visibility?: ProjectVisibility;
   access?: ProjectProfileAccess[];
 };
@@ -17,6 +18,8 @@ export type ProjectProfileAccess = {
   user_id: string;
   name: string;
   email?: string | null;
+  shared_by_user_id?: string | null;
+  created_at?: string | null;
 };
 
 const RESOURCE_TYPE_LABELS: Record<string, string> = {
@@ -49,6 +52,7 @@ export function mapServerProjectProfile(profile: any): ProjectContextProfile {
   return {
     id: `server:${profile.id}`,
     serverProfileId: profile.id,
+    userId: profile.user_id,
     name: profile.name,
     description: profile.description ?? 'Saved project profile',
     visibility: profile.visibility === 'public' ? 'public' : 'private',
