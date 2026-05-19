@@ -35,7 +35,9 @@ from brain.platform.db.models.inbound import (
 )
 from brain.platform.db.models.org import Org, User
 from brain.systems.external_agents import service as external_agents
+from brain.systems.inbound import admin as inbound_admin
 from brain.systems.inbound import service as inbound
+from brain.systems.runs.events import run_event
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.systems.user_domains.service import AsyncDomainService
@@ -113,6 +115,7 @@ async def _seed_connection(
     token_id: str = TOKEN_ID,
     raw_token: str = RAW_TOKEN,
     scopes: list[str] | None = None,
+    status: str = "online",
 ) -> external_agents.AgentBridgePrincipal:
     if await session.get(Org, ORG_ID) is None:
         session.add(Org(id=ORG_ID, name="Test Org", slug="test-org"))
@@ -125,7 +128,7 @@ async def _seed_connection(
         display_name="Jira webhook",
         agent_kind="jira",
         transport="webhook",
-        status="online",
+        status=status,
         remote_agent_card={},
         capabilities={"submit_signals": True},
         auth_metadata={},
@@ -199,7 +202,7 @@ async def _assert_queued_triage(session, outcome: dict, *, reason: str) -> dict:
     assert thread_message is not None
     assert thread_message.idea_id == triage["idea_id"]
     assert thread_message.role == "user"
-    assert "An inbound signal needs Ilo triage." in thread_message.content
+    assert "An inbound signal needs Illo triage." in thread_message.content
     assert run is not None
     assert run.thread_id == triage["idea_id"]
     assert run.status == "queued"
@@ -291,6 +294,28 @@ async def test_post_webhook_stores_event_even_without_policy(session):
     assert triage["event_id"] == str(event.id)
 
 
+async def test_authenticated_source_traffic_marks_pending_connection_configured(session):
+    await _seed_connection(session, status="pending")
+
+    response = await _post_webhook(
+        session,
+        headers={"Authorization": f"Bearer {RAW_TOKEN}"},
+        json={
+            "origin": "jira.ticket_created",
+            "payload": {"issue": {"key": "PROJ-1"}},
+            "idempotency_key": "jira:PROJ-1:created",
+        },
+    )
+
+    connection = await session.get(ExternalAgentConnectionRow, CONNECTION_ID)
+    token = await session.get(ExternalAgentConnectionTokenRow, TOKEN_ID)
+    assert response.status_code == 202
+    assert connection.status == "configured"
+    assert connection.last_seen_at is not None
+    assert connection.last_error is None
+    assert token.last_used_at is not None
+
+
 async def test_webhook_and_mcp_signals_share_inbound_event_path(session):
     await _seed_connection(session)
 
@@ -374,8 +399,53 @@ async def test_webhook_and_mcp_signals_share_inbound_event_path(session):
     assert all(receipt.tool_use["type"] == "illo_triage" for receipt in receipts)
 
 
+async def test_mcp_codex_progress_signal_satisfies_default_checkpoint_policy(session):
+    await _seed_connection(session)
+    policy = await inbound.create_source_policy(
+        session,
+        org_id=ORG_ID,
+        connection_id=CONNECTION_ID,
+        name="Codex progress checkpoints",
+        origin_patterns=["codex.progress"],
+        schema_config={"required_paths": ["payload.checkpoint", "desired_outcome"]},
+    )
+
+    response = await _post_mcp(
+        session,
+        headers={"Authorization": f"Bearer {RAW_TOKEN}"},
+        json_body={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "illo_submit_signal",
+                "arguments": {
+                    "summary": "Implemented inbound follow-up fixes.",
+                    "source_tool": "codex",
+                    "repo": "illospace-project",
+                    "branch": "codex/inbound-followups",
+                    "task_title": "E2E followups",
+                    "files_touched": ["brain/app/api/routers/agent_mcp.py"],
+                    "desired_outcome": "team_update",
+                    "idempotency_key": "codex:e2e-followups:1",
+                },
+            },
+        },
+    )
+
+    body = json.loads(response.json()["result"]["content"][0]["text"])
+    event = (await session.scalars(select(InboundEventRow))).one()
+    assert response.status_code == 200
+    assert body["status"] == "review_required"
+    assert body["matched_policy_id"] == str(policy.id)
+    assert body["error"] is None
+    assert event.status == "review_required"
+    assert event.raw_payload["checkpoint"]["summary"] == "Implemented inbound follow-up fixes."
+    assert event.normalized_payload["desired_outcome"] == "team_update"
+
+
 async def test_inbound_triage_receipt_reconciles_when_illo_run_completes(session):
-    final_answer = "Ilo reviewed the inbound signal and decided no workspace mutation is needed."
+    final_answer = "Illo reviewed the inbound signal and decided no workspace mutation is needed."
     triage = await _queue_unmatched_webhook_triage(
         session,
         origin="jira.ticket_created",
@@ -383,7 +453,7 @@ async def test_inbound_triage_receipt_reconciles_when_illo_run_completes(session
         idempotency_key="jira:PROJ-1:created",
     )
     event = (await session.scalars(select(InboundEventRow))).one()
-    event.error = "schema validation required Ilo triage"
+    event.error = "schema validation required Illo triage"
     await session.flush()
     await _finish_triage_run(session, triage, status=RunStatus.COMPLETED, final_answer=final_answer)
 
@@ -403,10 +473,69 @@ async def test_inbound_triage_receipt_reconciles_when_illo_run_completes(session
     assert receipt.outcome["triage"]["run_status"] == "completed"
     assert receipt.tool_use["status"] == "completed"
     assert receipt.tool_use["type"] == "illo_triage"
+    assert receipt.tool_use["attribution"]["tags"] == ["no_workspace_change"]
+    assert event.action_result["triage"]["attribution"]["summary"] == (
+        "Illo resolved the signal without a workspace tool action."
+    )
+
+
+async def test_inbound_triage_receipt_records_tool_attribution(session):
+    triage = await _queue_unmatched_webhook_triage(
+        session,
+        origin="jira.ticket_created",
+        issue_key="PROJ-3",
+        idempotency_key="jira:PROJ-3:created",
+    )
+    store = AsyncAgentRunStore(session)
+    run_id = int(triage["run_id"])
+    await store.set_status(run_id, RunStatus.STARTING)
+    await store.set_status(run_id, RunStatus.RUNNING)
+    tool_event = await store.append_event(
+        run_event(
+            run_id,
+            "run.tool_completed",
+            {
+                "tool_name": "manage_domain",
+                "args": {"action": "create_record"},
+                "result": json.dumps(
+                    {
+                        "operation": "created",
+                        "record": {"id": 220, "domain_id": 11},
+                    }
+                ),
+            },
+            root_run_id=run_id,
+        )
+    )
+    await store.append_final_answer_once(run_id, "Created the projected ticket record.", root_run_id=run_id)
+    await store.set_status(run_id, RunStatus.COMPLETED)
+
+    event = (await session.scalars(select(InboundEventRow))).one()
+    receipt = (await session.scalars(select(InboundDecisionReceiptRow))).one()
+    attribution = receipt.tool_use["attribution"]
+    assert attribution == event.action_result["triage"]["attribution"]
+    assert attribution["summary"] == "Illo created domain_record, domain using manage_domain."
+    assert attribution["tool_names"] == ["manage_domain"]
+    assert "domain_management" in attribution["tags"]
+    assert "created" in attribution["tags"]
+    assert attribution["run_event_ids"] == [tool_event.id]
+    assert {"kind": "domain_record", "id": "220", "source": "manage_domain"} in attribution["target_refs"]
+    assert {"kind": "domain", "id": "11", "source": "manage_domain"} in attribution["target_refs"]
+
+    source_card = await inbound_admin.get_source_card(
+        session,
+        org_id=ORG_ID,
+        connection_id=CONNECTION_ID,
+    )
+    observed = source_card["source_card"]["traffic"]["observed_outcomes"]
+    assert observed["event_count_sampled"] == 1
+    assert {"value": "manage_domain", "count": 1} in observed["tool_names"]
+    assert {"value": "domain_management", "count": 1} in observed["common_tags"]
+    assert observed["by_origin"][0]["summaries"] == [attribution["summary"]]
 
 
 async def test_inbound_triage_receipt_reconciles_when_illo_run_fails(session):
-    final_answer = "Ilo triage failed before it could decide on the signal."
+    final_answer = "Illo triage failed before it could decide on the signal."
     triage = await _queue_unmatched_webhook_triage(
         session,
         origin="jira.ticket_updated",

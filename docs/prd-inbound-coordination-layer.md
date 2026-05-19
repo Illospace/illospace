@@ -1,6 +1,6 @@
 # PRD: Inbound Coordination Layer for IloSpace
 
-Status: living PRD; foundation shipped in PR #113, Illo-admin configuration tool and Phase 2 triage handoff implemented in `codex/illo-inbound-admin-tools`; triage reconciliation and token compatibility backfill implemented in `codex/inbound-token-reconcile`; stored-event replay harness and source cards implemented in `codex/inbound-replay-harness`
+Status: living PRD; foundation shipped in PR #113, Illo-admin configuration tool and Phase 2 triage handoff implemented in `codex/illo-inbound-admin-tools`; triage reconciliation and token compatibility backfill implemented in `codex/inbound-token-reconcile`; stored-event replay harness and source cards implemented in `codex/inbound-replay-harness`; E2E follow-up fixes implemented in the current branch
 Date: 2026-05-18  
 Owner: product/architecture discussion  
 
@@ -96,20 +96,33 @@ The PRD intentionally describes a broader product direction: external tools send
 - `get_source_card` is read-only in action policy metadata. `refresh_source_card` mutates only connection metadata and remains a high-risk audited action under the existing `manage_inbound` mutation gate.
 - Tests prove Illo can refresh a source card with purpose/notes/tags, persist it on the connection, summarize policies/projections/events/failures, and later read the persisted card.
 
+### Shipped In E2E Follow-Up Fix Slice
+
+- Hosted MCP `illo_submit_signal` now backfills `payload.checkpoint` for `origin=codex.progress`/Codex sources when callers only provide a top-level summary and hints. Explicit caller payload fields are preserved.
+- Inbound schema validation now supports top-level `desired_outcome` paths, so policies can require `desired_outcome` without forcing callers to duplicate it inside `payload`.
+- Successful bridge-token authentication now updates token `last_used_at`, connection `last_seen_at`, clears `last_error`, and moves a `pending` connection to `configured`. This resolves the deployed E2E caveat where a connection processed live traffic while still appearing pending.
+- Terminal Illo triage reconciliation now records compact observed-outcome attribution on the Decision Receipt tool use and copies it into the inbound event triage result.
+- Attribution uses existing `agent_run_events` only. It stores a deterministic summary, open-ended tags, tool names, target references, and run event ids; it does not store raw tool args/results or add a new table.
+- Source cards now aggregate observed outcome summaries, tags, tool names, and recent event ids by origin. This informs Illo about historical handling without auto-promoting rules or constraining future actions.
+- User-visible inbound/MCP strings touched in this slice use **Illo** for the agent name.
+- Verification for this slice:
+  - `venv/bin/python -m pytest tests/test_inbound_webhooks.py tests/test_external_agent_routes.py::test_hosted_mcp_submit_signal_builds_shared_envelope`: `17 passed`.
+  - `venv/bin/python -m pytest tests/test_inbound_admin_tools.py`: `9 passed`.
+  - `venv/bin/python -m pytest tests/test_external_agents_service.py tests/test_external_agent_routes.py`: `31 passed, 1 skipped`.
+
 ### Partially Shipped
 
-- **Decision receipts/effects**: inbound processing stores receipts/effects and now reconciles terminal Illo triage run status/final answer back onto the event and receipt. Rich action-level capture is still future work because Illo's later tool calls are not yet attributed back to the inbound event.
-- **Source policies**: deterministic policy matching exists, Illo can configure it, and Illo can replay historical events against current policy config. Observed handling summaries and source-card pattern memory are still future work.
+- **Decision receipts/effects**: inbound processing stores receipts/effects and now reconciles terminal Illo triage run status/final answer plus compact observed-outcome attribution back onto the event and receipt. Richer review workflows around those outcomes are still future work.
+- **Source policies**: deterministic policy matching exists, Illo can configure it, Illo can replay historical events against current policy config, and source cards can summarize observed outcomes. Source-card pattern memory is still informational only and does not change routing behavior.
 - **Domain Projection**: deterministic configured projection works and Illo can create/edit it, but projection targets still require an existing Domain/schema.
-- **Illo Action Runtime**: ambiguous events now enter Illo's normal Cortex run path, and run completion reconciles the inbound receipt. Fine-grained observed outcome attribution is still future work.
+- **Illo Action Runtime**: ambiguous events now enter Illo's normal Cortex run path, run completion reconciles the inbound receipt, and minimal observed outcome attribution captures what Illo did or inspected.
 - **MCP token scopes**: newly minted/default bridge tokens include `signal:submit`, and a compatibility migration/backfill grants it to old active personal-agent tokens. Arbitrary non-agent webhook/custom tokens still require explicit configuration.
 - **Observability**: Illo can inspect stored events and receipts, run read-only replay, and maintain connection-level source cards through `manage_inbound`. There is not yet a first-class inbound monitor or UI.
 
 ### Not Yet Shipped
 
 - Illo-facing tools for durable replay jobs and richer observed outcome review.
-- Fine-grained final action reconciliation after an Illo triage run completes: attributing the observed outcome, open tags, tool names, and target references back to the inbound event beyond the run's final answer/status.
-- Source-card pattern memory from repeated Decision Receipts, without automatically changing routing behavior.
+- Richer observed-outcome review workflows and source-card pattern memory from repeated Decision Receipts, without automatically changing routing behavior.
 - Persisted replay reports with named replay runs, saved diffs, and promotion candidates.
 - Source-card promotion into a richer monitor/domain/app view with trend history, ownership workflows, and suggested rule changes.
 - Native monitoring Cycle/app/Domain setup for inbound webhook/MCP activity.
@@ -131,10 +144,12 @@ The PRD intentionally describes a broader product direction: external tools send
    - Let the run processor act and inspect what Illo decides.
 4. **Deploy the token backfill/reconciliation slice** and confirm the existing Codex MCP token can call `illo_submit_signal` without rotation.
 5. **Deploy the replay harness + source-card slice** and ask Illo to replay a few real inbound events, refresh the source card for the tested MCP/webhook connection, and explain what it learned.
-6. **Add fine-grained Illo action attribution** so receipt reconciliation can say what Illo observed or did after triage, not only the terminal run status/final answer. This should store a deterministic plain-language summary, open-ended tags, tool names, and target references.
-7. **Add source-card observed outcome summaries** so Illo can see how similar events have been handled before. These summaries should inform Illo, not automatically promote deterministic rules or constrain Illo's future choices.
+6. **Deploy and retest the E2E follow-up fixes**: Codex MCP signal against the existing `codex.progress` policy, pending-to-configured connection state after live token traffic, and source-card observed outcome summaries after a completed Illo triage run.
+7. **Design the next observability layer** only after the deployed retest: persisted replay reports, richer source monitors, or a lightweight inbound activity app.
 
 ### Next Implementation Slice: Minimal Illo Action Attribution
+
+Status: implemented in the E2E follow-up fix slice; keep this section as the decision record for the implementation.
 
 The next implementation slice should be intentionally small. Attribution exists to improve Illo's awareness, not to constrain Illo's future choices or create a second decision-maker inside the deterministic layer.
 
@@ -176,19 +191,19 @@ This section is the running ledger for post-deploy validation. Keep failures her
 
 | Test | Status | Result | Notes |
 | --- | --- | --- | --- |
-| MCP signal from Codex session | Passed with caveat | Hosted MCP accepted the active Codex token and stored events. Unique-origin signal `e778f9f5-7298-4845-bbe7-86ec27894c8d` returned `review_required`, created Cortex idea `4f03ebb8-2980-46bf-b3aa-33657660e233`, thread message `249`, and Illo run `214`. | The default ambiguous MCP path works. Caveat: `origin=codex.progress` first matched existing policy `856ae76a-2974-4b6c-8fc0-d3fd5d557276` and quarantined event `bb114da0-d013-4f38-8fe3-7a39bdbc6007` because the policy schema expected `payload.checkpoint` and another `desired_outcome` path. Need inspect that policy before enabling real Codex hooks, or use a more specific hook origin. |
+| MCP signal from Codex session | Passed; follow-up fix implemented | Hosted MCP accepted the active Codex token and stored events. Unique-origin signal `e778f9f5-7298-4845-bbe7-86ec27894c8d` returned `review_required`, created Cortex idea `4f03ebb8-2980-46bf-b3aa-33657660e233`, thread message `249`, and Illo run `214`. | The default ambiguous MCP path works. The deployed caveat was that `origin=codex.progress` first matched existing policy `856ae76a-2974-4b6c-8fc0-d3fd5d557276` and quarantined event `bb114da0-d013-4f38-8fe3-7a39bdbc6007` because the policy schema expected `payload.checkpoint` and top-level `desired_outcome`. Fix implemented in code: MCP Codex signals now backfill `payload.checkpoint`, and schema validation can read `desired_outcome`. Needs post-deploy retest against the live policy. |
 | Webhook ambiguous signal | Passed | `POST /webhooks` returned `202` with event `849a179f-a787-4c7c-b8a2-9a5689ce1437`, `review_required`, no matched policy, Cortex idea `39798b40-84f3-42fb-ad78-88f3a0dedaab`, thread message `250`, and Illo run `215`. | Illo later inspected the event with `manage_inbound.get_event(include_receipts=true)` and confirmed reconciliation succeeded: event status `processed`, receipt `1b6c48ed-81e5-4940-838f-9b27f29b7504` status `processed`, run `215` completed, final answer `Triaged as no-op / resolved`, and `reconciled_at=2026-05-19T19:38:17.805159+00:00`. |
-| Webhook deterministic Domain Projection | Passed | Illo configured policy `5e3f3b57-3765-4c04-93da-adea55541c80` and projection `63115940-b7a2-4139-92d3-495fce54ea3e` on connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b`, domain `11`, object key `ticket`. Webhook create event `82405008-04a3-469a-bb05-857bcc989809` processed and created Domain record `220`. Idempotency event `7d7a3de8-db39-4e9d-bd06-fc55900e2af3` replayed with `idempotent_replay=true` and reused record `221`. Update event `fce1281f-7bf0-4806-84c3-cf8c2b23d345` processed and updated record `221` to version `2`. | Illo setup used `manage_inbound` plus Domain tools and returned dry-run success. Caveat: Illo reported the reused connection status as `pending`, even though the token and projection path processed live webhooks. Need decide whether active tokens should imply configured/active connection state or whether `pending` is acceptable for reused personal-source connections. |
+| Webhook deterministic Domain Projection | Passed; follow-up fix implemented | Illo configured policy `5e3f3b57-3765-4c04-93da-adea55541c80` and projection `63115940-b7a2-4139-92d3-495fce54ea3e` on connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b`, domain `11`, object key `ticket`. Webhook create event `82405008-04a3-469a-bb05-857bcc989809` processed and created Domain record `220`. Idempotency event `7d7a3de8-db39-4e9d-bd06-fc55900e2af3` replayed with `idempotent_replay=true` and reused record `221`. Update event `fce1281f-7bf0-4806-84c3-cf8c2b23d345` processed and updated record `221` to version `2`. | Illo setup used `manage_inbound` plus Domain tools and returned dry-run success. The deployed caveat was that Illo reported the reused connection status as `pending` despite live token traffic. Fix implemented in code: successful token authentication marks `pending` connections as `configured`, updates `last_seen_at`, updates token `last_used_at`, and clears `last_error`. Needs post-deploy retest. |
 | Replay harness and source card | Passed with expected drift | Illo used `manage_inbound.replay_events`, `refresh_source_card`, `get_source_card`, and `list_events` for connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b`. Replay covered 5 requested events, was read-only (`mutates_workspace=false`), and predicted `processed: 3`, `review_required: 2`. Source card refreshed at `2026-05-19T19:45:23.608441+00:00` with tags `post-deploy-e2e`, `mcp`, `webhook`, `domain-projection`. | Projection events replayed stable. The 2 unmatched-path events replay as `review_required` while their stored status is now `processed` because Illo triage/reconciliation completed them; this is expected drift, but the replay UI should explain “current preflight prediction” vs “historical post-Illo outcome” clearly. Source card also surfaced the earlier `codex.progress` quarantine, which is useful operator feedback. |
 | MCP auth hardening | Passed | Invalid token call to `/api/mcp` returned HTTP `200` with MCP JSON-RPC error code `-32001`, message `MCP authentication failed: Invalid bridge token`, and data `{ "http_status": 401, "auth": "bearer" }`. | This confirms the deployed fix prevents the old client-side deserialize failure shape. |
 
 Post-deploy conclusion:
 
 - Core deployed E2E is green across hosted MCP signal submission, webhook ambiguous triage, deterministic Domain Projection create/update/idempotency, replay/source-card inspection, and MCP auth hardening.
-- Before enabling real automatic Codex hooks broadly, inspect the active `codex.progress` policy. It currently expects `payload.checkpoint`; a generic Codex progress signal without that field is quarantined.
-- Decide how source connection status should behave for reused personal/source connections. Connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b` processed real token traffic while Illo reported status `pending`.
+- The active `codex.progress` policy caveat has a code fix: Codex MCP signals now generate a checkpoint payload and schema validation can read top-level `desired_outcome`. Retest after deploy before enabling automatic hooks broadly.
+- The reused source connection `pending` caveat has a code fix: successful authenticated token traffic now marks pending connections configured and updates seen/used timestamps. Retest after deploy.
 - Improve replay/source-card language later so humans can distinguish current deterministic replay predictions from historical post-Illo reconciled outcomes.
-- Next implementation slice remains **fine-grained Illo action attribution**: receipts should capture a minimal observed outcome summary, open tags, tool names, and target references after triage, not only terminal run status/final answer.
+- Minimal Illo action attribution and source-card observed outcome summaries are implemented in code and covered by local tests. Retest after deploy with a live completed Illo triage run.
 
 ### Trace-Based Follow-Up
 

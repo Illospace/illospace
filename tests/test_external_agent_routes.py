@@ -533,7 +533,17 @@ async def test_hosted_mcp_submit_signal_builds_shared_envelope():
     assert captured["envelope"] == {
         "kind": "signal",
         "origin": "codex.progress",
-        "payload": {"tests": "targeted"},
+        "payload": {
+            "tests": "targeted",
+            "checkpoint": {
+                "summary": "Implemented the submit signal tool.",
+                "source_tool": "codex",
+                "repo": "illospace-project",
+                "branch": "codex/mcp-submit-signal",
+                "task_title": "MCP signal lane",
+                "files_touched": ["brain/app/api/routers/agent_mcp.py"],
+            },
+        },
         "summary": "Implemented the submit signal tool.",
         "hints": {
             "source_tool": "codex",

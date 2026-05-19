@@ -1,4 +1,4 @@
-"""Reconcile inbound decision receipts after Ilo triage runs finish."""
+"""Reconcile inbound decision receipts after Illo triage runs finish."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunRow
 from brain.platform.db.models.inbound import InboundDecisionReceiptRow, InboundEventRow
+from brain.systems.inbound.attribution import summarize_inbound_run_attribution
 from brain.systems.runs.domain import AgentRun, ArtifactType
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 
@@ -133,7 +134,7 @@ async def reconcile_inbound_triage_run(
     """Close the decision receipt loop for an inbound triage run.
 
     Triage admission starts with an inbound event in ``review_required``. Once the
-    admitted Ilo run reaches a terminal state, the event and receipt should show
+    admitted Illo run reaches a terminal state, the event and receipt should show
     the final run outcome instead of only the queued handoff.
     """
 
@@ -162,6 +163,7 @@ async def reconcile_inbound_triage_run(
     now = datetime.now(timezone.utc)
     terminal_at = _run_datetime(row, status)
     final_answer = await _latest_final_answer(session, run_id)
+    attribution = await summarize_inbound_run_attribution(session, run_id=run_id, status=status)
     terminal_status = _receipt_terminal_status(status)
     triage_terminal = _triage_terminal_payload(
         run_id=run_id,
@@ -177,6 +179,7 @@ async def reconcile_inbound_triage_run(
         **triage,
         **triage_terminal,
         "result": _triage_result(status, final_answer),
+        "attribution": attribution,
     }
 
     tool_use = _json_dict(receipt.tool_use)
@@ -189,6 +192,7 @@ async def reconcile_inbound_triage_run(
             reconciled_at=now,
             terminal_at=terminal_at,
         ),
+        "attribution": attribution,
     }
 
     event.status = terminal_status
@@ -200,7 +204,7 @@ async def reconcile_inbound_triage_run(
     if status == RunStatus.COMPLETED:
         event.error = None
     else:
-        event.error = final_answer or f"Ilo triage run ended with status {status.value}"
+        event.error = final_answer or f"Illo triage run ended with status {status.value}"
 
     await session.flush()
     return receipt

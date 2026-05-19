@@ -1,4 +1,4 @@
-"""Ilo-facing administration helpers for inbound coordination."""
+"""Illo-facing administration helpers for inbound coordination."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ READ_LIMIT_MAX = 100
 
 
 class InboundAdminError(RuntimeError):
-    """Raised when an Ilo-facing inbound admin operation is invalid."""
+    """Raised when an Illo-facing inbound admin operation is invalid."""
 
 
 def _iso(value: Any) -> str | None:
@@ -954,9 +954,71 @@ def _source_card_traffic(events: Sequence[InboundEventRow]) -> dict[str, Any]:
         "common_origins": _counter_rows(origin_counts),
         "statuses": _counter_rows(status_counts),
         "payload_shapes": _counter_rows(shape_counts, limit=30),
+        "observed_outcomes": _source_card_observed_outcomes(events),
         "recent_failures": [_source_card_event_summary(row) for row in events if _event_needs_attention(row)][:10],
         "recent_events": [_source_card_event_summary(row) for row in events[:10]],
     }
+
+
+def _source_card_observed_outcomes(events: Sequence[InboundEventRow]) -> dict[str, Any]:
+    by_origin: dict[str, dict[str, Any]] = {}
+    tag_counts: Counter[str] = Counter()
+    tool_counts: Counter[str] = Counter()
+    total = 0
+    for row in events:
+        attribution = _event_attribution(row)
+        if not attribution:
+            continue
+        total += 1
+        origin = str(row.origin or "unknown")
+        bucket = by_origin.setdefault(
+            origin,
+            {
+                "origin": origin,
+                "count": 0,
+                "tags": Counter(),
+                "tool_names": Counter(),
+                "summaries": [],
+                "recent_event_ids": [],
+            },
+        )
+        bucket["count"] += 1
+        bucket["recent_event_ids"].append(str(row.id))
+        summary = str(attribution.get("summary") or "").strip()
+        if summary and summary not in bucket["summaries"] and len(bucket["summaries"]) < 5:
+            bucket["summaries"].append(summary)
+        for tag in _stripped_strings(_json_list(attribution.get("tags"))):
+            tag_counts[tag] += 1
+            bucket["tags"][tag] += 1
+        for tool_name in _stripped_strings(_json_list(attribution.get("tool_names"))):
+            tool_counts[tool_name] += 1
+            bucket["tool_names"][tool_name] += 1
+
+    origins = []
+    for bucket in sorted(by_origin.values(), key=lambda item: (-int(item["count"]), item["origin"]))[:10]:
+        origins.append(
+            {
+                "origin": bucket["origin"],
+                "count": bucket["count"],
+                "tags": _counter_rows(bucket["tags"]),
+                "tool_names": _counter_rows(bucket["tool_names"]),
+                "summaries": bucket["summaries"],
+                "recent_event_ids": bucket["recent_event_ids"][:10],
+            }
+        )
+    return {
+        "event_count_sampled": total,
+        "common_tags": _counter_rows(tag_counts),
+        "tool_names": _counter_rows(tool_counts),
+        "by_origin": origins,
+    }
+
+
+def _event_attribution(row: InboundEventRow) -> dict[str, Any]:
+    action_result = _json_dict(row.action_result)
+    triage = _json_dict(action_result.get("triage"))
+    attribution = _json_dict(triage.get("attribution"))
+    return attribution or _json_dict(action_result.get("attribution"))
 
 
 def _counter_rows(counter: Counter[str], *, limit: int = 10) -> list[dict[str, Any]]:
