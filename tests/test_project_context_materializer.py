@@ -156,6 +156,93 @@ async def test_materialize_github_project_context_uses_vault_key_without_persist
     assert "test-private-token" not in str(run.target_metadata)
 
 
+async def test_materialize_github_project_context_finds_general_github_token(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    run = SimpleNamespace(
+        id=52,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={},
+        target_metadata={
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "kind": "github_repo",
+                        "name": "example-org/private-repo",
+                        "uri": "https://github.com/example-org/private-repo",
+                    },
+                ],
+            },
+        },
+        target_status="resolved",
+        target_validation_error=None,
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    def fake_list_secrets(user_id, category=None, *, org_id=None):
+        assert user_id == "user-1"
+        assert org_id == "org-1"
+        if category == "github":
+            return []
+        assert category is None
+        return [
+            {"key_name": "STRIPE_SECRET", "category": "general"},
+            {"key_name": "GITHUB_TOKEN", "category": "general"},
+        ]
+
+    def fake_get_secret(key_name, **kwargs):
+        assert key_name == "GITHUB_TOKEN"
+        assert kwargs["user_id"] == "user-1"
+        assert kwargs["org_id"] == "org-1"
+        assert kwargs["accessed_by"] == "api"
+        return "general-github-token"
+
+    clone_calls = []
+
+    def fake_clone(slug, destination, *, token, branch):
+        clone_calls.append({"slug": slug, "token": token, "branch": branch})
+        destination.mkdir(parents=True)
+        return {"path": str(destination), "branch": branch or "main", "commit": "abc123"}
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(materializer, "list_secrets", fake_list_secrets)
+    monkeypatch.setattr(materializer, "get_secret", fake_get_secret)
+    monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
+
+    result = await materialize_project_context_workspaces(
+        52,
+        workspace_root=str(tmp_path),
+        user_id="user-1",
+        org_id="org-1",
+    )
+
+    assert result.ok
+    assert clone_calls == [
+        {
+            "slug": "example-org/private-repo",
+            "token": "general-github-token",
+            "branch": None,
+        }
+    ]
+    assert "general-github-token" not in str(run.metadata_)
+    assert "general-github-token" not in str(run.target_metadata)
+
+
 async def test_materialize_github_project_context_fails_closed_when_clone_unavailable(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
