@@ -1,5 +1,13 @@
 <script lang="ts">
   import { ConstellationIcon } from '$lib/components/constellation';
+  import { auth } from '$lib/stores/auth.svelte';
+  import {
+    projectAccessInitial,
+    projectAccessMemberKey,
+    projectAccessMemberName,
+    summarizeProjectAccess,
+    type ProjectAccessMember,
+  } from '$lib/utils/projectProfileAccess';
   import type { ProjectContextProfile } from './projectContextProfiles';
 
   let {
@@ -28,6 +36,8 @@
       const searchable = [
         profile.name,
         profile.description,
+        profile.id === 'none' ? '' : profile.visibility === 'public' ? 'public' : 'private',
+        ...(profile.id === 'none' ? [] : (profile.access ?? []).map(projectAccessMemberName)),
         ...profile.resources.flatMap((resource) => [
           resource.label,
           resource.name,
@@ -51,12 +61,17 @@
 
   function profileMeta(profile: ProjectContextProfile): string {
     if (profile.id === 'none') return profile.description;
-    const visibility = profile.visibility === 'public' ? 'Public' : 'Private';
-    const sharedCount = profile.visibility === 'private' ? (profile.access?.length ?? 0) : 0;
-    const access = sharedCount > 0 ? `${visibility} · ${sharedCount} shared` : visibility;
-    return [access, profile.description || `${profile.resources.length} resource${profile.resources.length === 1 ? '' : 's'}`]
-      .filter(Boolean)
-      .join(' · ');
+    return profile.description || `${profile.resources.length} resource${profile.resources.length === 1 ? '' : 's'}`;
+  }
+
+  function profileOwner(profile: ProjectContextProfile): ProjectAccessMember | null {
+    const currentUser = auth.user;
+    if (!currentUser || !profile.userId || String(profile.userId) !== String(currentUser.id)) return null;
+    return {
+      user_id: String(currentUser.id),
+      name: currentUser.name,
+      email: currentUser.email,
+    };
   }
 </script>
 
@@ -75,6 +90,7 @@
   {:else if filteredProfiles.length}
     {#each filteredProfiles as profile}
       {@const isSelected = profile.id === selectedProfile?.id || profile.id === selectedProfileId}
+      {@const accessSummary = summarizeProjectAccess(profile, undefined, profileOwner(profile))}
       <button
         type="button"
         class="project-context-profile-option"
@@ -89,7 +105,49 @@
           stroke={1.8}
         />
         <span class="project-context-profile-option-copy">
-          <strong>{profile.name}</strong>
+          <span class="project-context-profile-option-title">
+            <strong>{profile.name}</strong>
+            {#if profile.id !== 'none'}
+              {#if accessSummary.isPublic}
+                <span
+                  class="project-context-profile-visibility-pill public"
+                  title={accessSummary.tooltip}
+                  aria-label={accessSummary.ariaLabel}
+                >Public</span>
+              {:else if accessSummary.members.length}
+                <span
+                  class="project-context-profile-access-stack"
+                  title={accessSummary.tooltip}
+                  data-tooltip={accessSummary.tooltip}
+                  aria-label={accessSummary.ariaLabel}
+                >
+                  {#each accessSummary.visibleMembers as member, index (projectAccessMemberKey(member, index))}
+                    <span
+                      class="project-context-profile-access-avatar"
+                      aria-hidden="true"
+                    >
+                      {projectAccessInitial(member)}
+                    </span>
+                  {/each}
+                  {#if accessSummary.overflowCount > 0}
+                    <span
+                      class="project-context-profile-access-avatar overflow"
+                      title={accessSummary.tooltip}
+                      aria-hidden="true"
+                    >
+                      +{accessSummary.overflowCount}
+                    </span>
+                  {/if}
+                </span>
+              {:else}
+                <span
+                  class="project-context-profile-visibility-pill private"
+                  title={accessSummary.tooltip}
+                  aria-label={accessSummary.ariaLabel}
+                >Private</span>
+              {/if}
+            {/if}
+          </span>
           <small>{profileMeta(profile)}</small>
         </span>
         {#if isSelected}
