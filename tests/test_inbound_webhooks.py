@@ -444,6 +444,47 @@ async def test_mcp_codex_progress_signal_satisfies_default_checkpoint_policy(ses
     assert event.normalized_payload["desired_outcome"] == "team_update"
 
 
+async def test_mcp_codex_progress_signal_requires_non_empty_desired_outcome(session):
+    await _seed_connection(session)
+    await inbound.create_source_policy(
+        session,
+        org_id=ORG_ID,
+        connection_id=CONNECTION_ID,
+        name="Codex progress checkpoints",
+        origin_patterns=["codex.progress"],
+        schema_config={"required_paths": ["payload.checkpoint", "desired_outcome"]},
+    )
+
+    response = await _post_mcp(
+        session,
+        headers={"Authorization": f"Bearer {RAW_TOKEN}"},
+        json_body={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "illo_submit_signal",
+                "arguments": {
+                    "summary": "Implemented inbound follow-up fixes.",
+                    "source_tool": "codex",
+                    "repo": "illospace-project",
+                    "branch": "codex/inbound-followups",
+                    "task_title": "E2E followups",
+                    "files_touched": ["brain/app/api/routers/agent_mcp.py"],
+                    "idempotency_key": "codex:e2e-followups:missing-outcome",
+                },
+            },
+        },
+    )
+
+    body = json.loads(response.json()["result"]["content"][0]["text"])
+    event = (await session.scalars(select(InboundEventRow))).one()
+    assert response.status_code == 200
+    assert body["status"] == "quarantined"
+    assert "desired_outcome" in body["error"]
+    assert event.status == "quarantined"
+
+
 async def test_inbound_triage_receipt_reconciles_when_illo_run_completes(session):
     final_answer = "Illo reviewed the inbound signal and decided no workspace mutation is needed."
     triage = await _queue_unmatched_webhook_triage(
@@ -490,6 +531,23 @@ async def test_inbound_triage_receipt_records_tool_attribution(session):
     run_id = int(triage["run_id"])
     await store.set_status(run_id, RunStatus.STARTING)
     await store.set_status(run_id, RunStatus.RUNNING)
+    read_event = await store.append_event(
+        run_event(
+            run_id,
+            "run.tool_completed",
+            {
+                "tool_name": "manage_inbound",
+                "args": {"action": "get_event"},
+                "result": json.dumps(
+                    {
+                        "event_id": "999",
+                        "status": "review_required",
+                    }
+                ),
+            },
+            root_run_id=run_id,
+        )
+    )
     tool_event = await store.append_event(
         run_event(
             run_id,
@@ -515,12 +573,17 @@ async def test_inbound_triage_receipt_records_tool_attribution(session):
     attribution = receipt.tool_use["attribution"]
     assert attribution == event.action_result["triage"]["attribution"]
     assert attribution["summary"] == "Illo created domain_record, domain using manage_domain."
-    assert attribution["tool_names"] == ["manage_domain"]
+    assert attribution["tool_names"] == ["manage_inbound", "manage_domain"]
     assert "domain_management" in attribution["tags"]
     assert "created" in attribution["tags"]
-    assert attribution["run_event_ids"] == [tool_event.id]
+    assert "inspected" in attribution["tags"]
+    assert attribution["run_event_ids"] == [read_event.id, tool_event.id]
+    assert {"kind": "inbound_event", "id": "999", "source": "manage_inbound"} in attribution["target_refs"]
     assert {"kind": "domain_record", "id": "220", "source": "manage_domain"} in attribution["target_refs"]
     assert {"kind": "domain", "id": "11", "source": "manage_domain"} in attribution["target_refs"]
+    assert {"kind": "inbound_event", "id": "999", "source": "manage_inbound"} not in attribution["mutated_target_refs"]
+    assert {"kind": "domain_record", "id": "220", "source": "manage_domain"} in attribution["mutated_target_refs"]
+    assert {"kind": "domain", "id": "11", "source": "manage_domain"} in attribution["mutated_target_refs"]
 
     source_card = await inbound_admin.get_source_card(
         session,

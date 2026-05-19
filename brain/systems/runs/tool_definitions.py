@@ -812,8 +812,8 @@ DOMAIN_TOOLS = [
 ]
 
 # ── Inbound Coordination Tools ────────────────────────────────
-# Ilo-facing configuration for external source signals. External systems submit
-# to /webhooks or hosted MCP; Ilo configures that lane through this tool.
+# Illo-facing configuration for external source signals. External systems submit
+# to /webhooks or hosted MCP; Illo configures that lane through this tool.
 
 INBOUND_TOOLS = [
     {
@@ -821,10 +821,10 @@ INBOUND_TOOLS = [
         "description": (
             "Configure and inspect the inbound coordination layer on behalf of the current user: "
             "external source connections, scoped signal tokens, origin policies, Domain Projections, "
-            "event logs, and decision receipts. Use this when a user asks Ilo to set up or adjust "
+            "event logs, and decision receipts. Use this when a user asks Illo to set up or adjust "
             "webhooks, MCP personal-tool signals, Jira/GitHub/Stripe-style sources, routing rules, "
             "or deterministic storage into Domains. External tools should submit signals through "
-            "hosted MCP or POST /webhooks; this tool is Ilo's chat-based admin/configuration surface. "
+            "hosted MCP or POST /webhooks; this tool is Illo's chat-based admin/configuration surface. "
             "Use action='help' or action='schema' with operation before mutating unfamiliar configs."
         ),
         "input_schema": {
@@ -914,7 +914,7 @@ INBOUND_TOOLS = [
                 },
                 "instructions": {
                     "type": "string",
-                    "description": "Natural-language instructions for Ilo when this policy needs agent handling.",
+                    "description": "Natural-language instructions for Illo when this policy needs agent handling.",
                 },
                 "schema_config": {
                     "type": "object",
@@ -984,7 +984,7 @@ INBOUND_TOOLS = [
                 "include_receipts": {"type": "boolean", "default": False},
                 "source_purpose": {
                     "type": "string",
-                    "description": "Optional human/Ilo-authored purpose to store on a refreshed source card.",
+                    "description": "Optional human/Illo-authored purpose to store on a refreshed source card.",
                 },
                 "source_notes": {
                     "type": "string",

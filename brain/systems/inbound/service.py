@@ -696,7 +696,7 @@ def _validate_schema_config(schema_config: Mapping[str, Any], envelope: Mapping[
             if path:
                 required_paths.append(str(path))
     root = _path_root(envelope)
-    missing = [path for path in required_paths if _extract_path(root, str(path)) is _MISSING]
+    missing = [path for path in required_paths if _required_path_missing(_extract_path(root, str(path)))]
     if missing:
         raise InboundValidationError(f"Missing required inbound field(s): {', '.join(sorted(missing))}")
 
@@ -1058,6 +1058,12 @@ class _Missing:
 
 
 _MISSING = _Missing()
+
+
+def _required_path_missing(value: Any) -> bool:
+    if value is _MISSING or value is None:
+        return True
+    return isinstance(value, str) and not value.strip()
 
 
 def _path_root(envelope: Mapping[str, Any]) -> dict[str, Any]:

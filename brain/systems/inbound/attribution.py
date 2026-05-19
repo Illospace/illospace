@@ -16,6 +16,17 @@ from brain.systems.runs.tool_catalog.registry import action_policy_for_tool, get
 
 _TOOL_COMPLETED_EVENT = "run.tool_completed"
 _MAX_TARGET_REFS = 20
+_SUMMARY_OPERATION_TAGS = {
+    "created",
+    "updated",
+    "deleted",
+    "archived",
+    "restored",
+    "minted",
+    "revoked",
+    "refreshed",
+    "posted",
+}
 
 _DIRECT_REF_KINDS = {
     "idea_id": "idea",
@@ -50,10 +61,6 @@ _OBJECT_REF_KINDS = {
 
 def _json_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _json_list(value: Any) -> list[Any]:
-    return list(value) if isinstance(value, list) else []
 
 
 def _unique(values: list[str]) -> list[str]:
@@ -231,7 +238,7 @@ def _summary(
     target_kinds = _unique([str(ref.get("kind") or "") for ref in refs])[:3]
     target_text = ", ".join(target_kinds) if target_kinds else "workspace state"
     tool_text = ", ".join(mutating_tools[:3])
-    operation = next((tag for tag in tags if tag in {"created", "updated", "deleted", "archived", "restored", "minted", "revoked", "refreshed", "posted"}), "updated")
+    operation = next((tag for tag in tags if tag in _SUMMARY_OPERATION_TAGS), "updated")
     return f"Illo {operation} {target_text} using {tool_text}."
 
 
@@ -263,6 +270,7 @@ async def summarize_inbound_run_attribution(
         ]
     )
     mutating_tools: list[str] = []
+    mutating_tool_events: list[AgentRunEventRow] = []
     read_only_seen = False
     for row in tool_events:
         payload = _json_dict(row.payload)
@@ -273,20 +281,23 @@ async def summarize_inbound_run_attribution(
             read_only_seen = True
         else:
             mutating_tools.append(tool_name)
+            mutating_tool_events.append(row)
     mutating_tools = _unique(mutating_tools)
     refs = _target_refs(tool_events)
+    mutating_refs = _target_refs(mutating_tool_events)
     tags = _tags(tool_events, mutating_tools=mutating_tools, read_only_seen=read_only_seen, status=status)
     return {
         "summary": _summary(
             status=status,
             tool_names=tool_names,
             mutating_tools=mutating_tools,
-            refs=refs,
+            refs=mutating_refs,
             tags=tags,
         ),
         "tags": tags,
         "tool_names": tool_names,
         "target_refs": refs,
+        "mutated_target_refs": mutating_refs,
         "run_event_ids": [int(row.id) for row in tool_events if row.id is not None],
     }
 
