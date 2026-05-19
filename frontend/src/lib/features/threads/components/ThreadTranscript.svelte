@@ -195,6 +195,8 @@
   }
 
   function getTimelineToolTarget(item: Extract<CortexThreadStageWorkTimelineItem, { kind: 'tool' }>) {
+    const displayTarget = typeof item.display?.target === 'string' ? item.display.target.trim() : '';
+    if (displayTarget) return compactTimelineTarget(displayTarget);
     const args = parseTimelineToolArgs(item.args);
     if (!args) return undefined;
     return compactTimelineTarget(
@@ -210,6 +212,8 @@
   }
 
   function getTimelineToolLabel(item: Extract<CortexThreadStageWorkTimelineItem, { kind: 'tool' }>) {
+    const displayLabel = typeof item.display?.label === 'string' ? item.display.label.trim() : '';
+    if (displayLabel) return displayLabel;
     const tool = item.tool.trim() || 'tool';
     const target = getTimelineToolTarget(item);
     const normalized = tool.toLowerCase();
@@ -249,12 +253,16 @@
   }
 
   function getTimelineToolTitle(item: Extract<CortexThreadStageWorkTimelineItem, { kind: 'tool' }>) {
-    const parts = [item.tool, item.status, item.time].filter(Boolean);
+    const parts = [getTimelineToolLabel(item), item.tool, item.status, item.time].filter(Boolean);
     return parts.join(' · ');
   }
 
+  function getTimelineToolDetail(item: Extract<CortexThreadStageWorkTimelineItem, { kind: 'tool' }>) {
+    return typeof item.display?.detail === 'string' ? item.display.detail.trim() : '';
+  }
+
   function shouldShowTimelineToolArgs(item: Extract<CortexThreadStageWorkTimelineItem, { kind: 'tool' }>) {
-    return Boolean(item.args && !getTimelineToolTarget(item));
+    return Boolean(item.args && !item.display?.label && !getTimelineToolTarget(item));
   }
 
   function stripReflectionPrefix(text: string) {
@@ -262,7 +270,33 @@
   }
 
   function getWorkThoughtText(text: string) {
-    return stripReflectionPrefix(text) || text.trim();
+    const cleaned = stripReflectionPrefix(text) || text.trim();
+    const boldMatch = cleaned.match(/^\*\*([^*]+)\*\*\s*([\s\S]*)$/);
+    if (!boldMatch) return cleaned;
+
+    const title = boldMatch[1]?.trim();
+    const tail = (boldMatch[2] ?? '').trim();
+    if (!title) return cleaned;
+    if (!tail || tail.length < 12 || /^[A-Za-z][.,;:]?$/.test(tail)) return `**${title}**`;
+    return cleaned;
+  }
+
+  function getToolCallDisplay(call: NonNullable<CortexThreadStageRunItem['toolCalls']>[number]) {
+    return call.display && typeof call.display === 'object' ? call.display : null;
+  }
+
+  function getToolCallLabel(call: NonNullable<CortexThreadStageRunItem['toolCalls']>[number]) {
+    const display = getToolCallDisplay(call);
+    const label = typeof display?.label === 'string' ? display.label.trim() : '';
+    if (label) return label;
+    return call.tool;
+  }
+
+  function getToolCallDetail(call: NonNullable<CortexThreadStageRunItem['toolCalls']>[number]) {
+    const display = getToolCallDisplay(call);
+    const detail = typeof display?.detail === 'string' ? display.detail.trim() : '';
+    if (detail) return detail;
+    return call.args;
   }
 
   function getWorkThoughtHtml(text: string) {
@@ -718,11 +752,14 @@
                           {#if workItem.kind === 'tool'}
                             <div class={`run-work-item run-work-tool run-work-tool-${workItem.status ?? 'used'}`} title={getTimelineToolTitle(workItem)}>
                               <span class="run-work-tool-icon" aria-hidden="true">
-                                <ConstellationIcon name="tool" size={13} stroke={1.7} />
+                                {workItem.display?.icon ?? '🔧'}
                               </span>
 
                               <span class="run-work-tool-copy">
                                 <span class="run-work-tool-label">{getTimelineToolLabel(workItem)}</span>
+                                {#if getTimelineToolDetail(workItem)}
+                                  <span class="run-work-tool-detail">{getTimelineToolDetail(workItem)}</span>
+                                {/if}
                                 {#if shouldShowTimelineToolArgs(workItem)}
                                   <code class="run-work-tool-args">{workItem.args}</code>
                                 {/if}
@@ -857,11 +894,14 @@
                         {#if workItem.kind === 'tool'}
                           <div class={`run-work-item run-work-tool run-work-tool-${workItem.status ?? 'used'}`} title={getTimelineToolTitle(workItem)}>
                             <span class="run-work-tool-icon" aria-hidden="true">
-                              <ConstellationIcon name="tool" size={13} stroke={1.7} />
+                              {workItem.display?.icon ?? '🔧'}
                             </span>
 
                             <span class="run-work-tool-copy">
                               <span class="run-work-tool-label">{getTimelineToolLabel(workItem)}</span>
+                              {#if getTimelineToolDetail(workItem)}
+                                <span class="run-work-tool-detail">{getTimelineToolDetail(workItem)}</span>
+                              {/if}
                               {#if shouldShowTimelineToolArgs(workItem)}
                                 <code class="run-work-tool-args">{workItem.args}</code>
                               {/if}
@@ -981,9 +1021,12 @@
                         {#each item.toolCalls as call, callIndex (`${call.tool}-${callIndex}`)}
                           <article class="run-tool-summary-item">
                             <div class="run-tool-summary-item-main">
-                              <span class="run-tool-summary-tool">{call.tool}</span>
-                              {#if call.args}
-                                <span class="run-tool-summary-args">{call.args}</span>
+                              <span class="run-tool-summary-tool">
+                                <span aria-hidden="true">{call.display?.icon ?? '🔧'}</span>
+                                <span>{getToolCallLabel(call)}</span>
+                              </span>
+                              {#if getToolCallDetail(call)}
+                                <span class="run-tool-summary-args">{getToolCallDetail(call)}</span>
                               {/if}
                               {#if call.status}
                                 <span class={`run-tool-summary-status run-tool-summary-status-${call.status}`}>
@@ -2247,6 +2290,13 @@
     overflow-wrap: anywhere;
   }
 
+  .run-work-tool-detail {
+    min-width: 0;
+    color: var(--thread-run-muted-text);
+    font-size: 11.5px;
+    overflow-wrap: anywhere;
+  }
+
   .run-work-tool-args {
     max-width: 100%;
     overflow: hidden;
@@ -2624,7 +2674,6 @@
     gap: 4px;
   }
 
-  .run-tool-summary-tool,
   .run-tool-summary-time {
     font-family: var(--thread-font-mono);
     font-size: 10px;
@@ -2633,7 +2682,16 @@
   }
 
   .run-tool-summary-tool {
+    display: inline-flex;
+    min-width: 0;
+    align-items: baseline;
+    gap: 6px;
     color: var(--thread-run-state-text);
+    font-family: var(--thread-font-sans);
+    font-size: 12px;
+    font-weight: 550;
+    letter-spacing: 0;
+    text-transform: none;
   }
 
   .run-tool-summary-time {

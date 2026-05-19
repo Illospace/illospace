@@ -15,6 +15,7 @@ from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_model_tier
+from brain.systems.runs.presentation import public_tool_event_payload
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,7 @@ async def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_cur
             select(
                 AgentRunEventRow.payload,
                 AgentRunEventRow.created_at,
+                AgentRunEventRow.event_type,
                 AgentRunRow.id.label("run_id"),
             )
             .join(AgentRunRow, AgentRunEventRow.run_id == AgentRunRow.id)
@@ -120,19 +122,19 @@ async def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_cur
         tool_rows = await uow.session.execute(stmt)
         for row in tool_rows.all():
             ts = row.created_at
-            payload = row.payload or {}
-            try:
-                args_obj = payload.get("args") if isinstance(payload.get("args"), dict) else {}
-                arg_parts = [f"{v}"[:50] for k, v in list(args_obj.items())[:2]]
-                arg_label = " - ".join(arg_parts)
-            except Exception:
-                arg_label = ""
+            raw_payload = row.payload or {}
+            payload = public_tool_event_payload(
+                raw_payload if isinstance(raw_payload, dict) else {},
+                str(row.event_type or ""),
+            )
             tool_name = str(payload.get("tool_name") or "tool")
-            label = f"{tool_name}" + (f": {arg_label}" if arg_label else "")
+            display = payload.get("tool_display") if isinstance(payload.get("tool_display"), dict) else {}
+            label = str(display.get("label") or tool_name)
             events.append({
                 "type": "tool_call",
                 "label": label,
                 "tool_name": tool_name,
+                "display": display or None,
                 "run_id": row.run_id,
                 "timestamp": ts.isoformat() if isinstance(ts, datetime) else ts,
             })

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from brain.systems.runs.presentation import public_tool_event_payload
+
 STABLE_RUN_EVENT_TYPES = frozenset(
     {
         "run_started",
@@ -45,6 +47,8 @@ def run_event_to_ui_message(
         return None
 
     payload = dict(getattr(event, "payload", None) or {})
+    if source_type in {"run.tool_started", "run.tool_completed", "run.tool_failed"}:
+        payload = public_tool_event_payload(payload, source_type)
     event_id = int(getattr(event, "id", 0) or payload.get("event_id") or 0)
     run_id = int(getattr(event, "run_id", 0) or payload.get("run_id") or 0)
     root_run_id = int(getattr(event, "root_run_id", None) or payload.get("root_run_id") or run_id)

@@ -799,15 +799,58 @@ def test_run_events_build_codex_style_work_summary():
         "args": '{"path": "README.md"}',
         "at": started.isoformat(),
         "status": "completed",
+        "display": {
+            "kind": "read",
+            "tool": "read_file",
+            "icon": "🔧",
+            "label": "Read README.md",
+            "status": "completed",
+            "sensitive": False,
+            "target": "README.md",
+        },
         "finished_at": finished.isoformat(),
-        "result": "ok",
     }]
     assert [entry["activity"] for entry in item["activity_trace"]] == [
         "Reading context",
-        "Using read_file",
-        "read_file completed",
+        "Read README.md",
+        "Read context",
         "Completed",
     ]
+
+
+def test_run_events_public_tool_summary_hides_command_secrets():
+    from brain.app.api.routers.cortex._idea_ops import _apply_run_events_to_item
+
+    started = datetime(2026, 5, 3, 22, 0, 0, tzinfo=timezone.utc)
+    item = {
+        "type": "run",
+        "id": "7",
+        "run_id": 7,
+        "profile": "fast",
+        "status": "running",
+        "started_at": started.isoformat(),
+    }
+    events = [
+        SimpleNamespace(
+            event_type="run.tool_started",
+            payload={
+                "tool_name": "run_script",
+                "args": {
+                    "description": "Check GitHub token identity, scopes, and visible repos.",
+                    "script": "TOKEN='ghp_abcdefghijklmnopqrstuvwxyz1234567890'",
+                    "timeout": "60",
+                },
+            },
+            created_at=started,
+            sequence_no=1,
+        ),
+    ]
+
+    _apply_run_events_to_item(item, events)
+
+    assert item["tool_calls"][0]["args"] == '{"description": "Check GitHub token identity, scopes, and visible repos."}'
+    assert item["tool_calls"][0]["display"]["label"] == "Check GitHub token identity, scopes, and visible repos"
+    assert "ghp_" not in json.dumps(item["tool_calls"])
 
 
 def test_unified_stream_run_work_events_query_is_bounded():

@@ -1212,7 +1212,7 @@
   .thread-mode .composer-editor {
     min-height: 34px;
     max-height: 120px;
-    overflow: hidden;
+    overflow: visible;
   }
 
   .thread-mode .composer-textarea {

@@ -145,6 +145,14 @@ function chooseToolStatus(left: unknown, right: unknown): string | undefined {
     : leftStatus || rightStatus || undefined;
 }
 
+function mergeToolDisplay(existingDisplay: any, nextDisplay: any, status: string | undefined): Record<string, any> {
+  const display = nextDisplay?.target || !existingDisplay ? nextDisplay ?? existingDisplay : existingDisplay;
+  return {
+    ...display,
+    ...(status ? { status } : {}),
+  };
+}
+
 function mergeToolCalls(snapshotCalls: any[] | undefined, liveCalls: any[] | undefined): any[] {
   const merged: any[] = [];
   const indexes = new Map<string, number>();
@@ -157,12 +165,15 @@ function mergeToolCalls(snapshotCalls: any[] | undefined, liveCalls: any[] | und
       continue;
     }
     const existing = merged[existingIndex];
+    const status = chooseToolStatus(existing?.status, call?.status);
     merged[existingIndex] = {
       ...existing,
       ...call,
-      status: chooseToolStatus(existing?.status, call?.status),
+      status,
       error: existing?.error ?? call?.error,
       result: existing?.result ?? call?.result,
+      result_preview: existing?.result_preview ?? call?.result_preview,
+      display: mergeToolDisplay(existing?.display, call?.display, status),
       finished_at: existing?.finished_at ?? call?.finished_at,
     };
   }
@@ -381,6 +392,7 @@ export interface AgentRunWorkToolItem {
   error?: string;
   result?: string;
   finishedAt?: string;
+  display?: Record<string, any>;
 }
 
 export type AgentRunWorkTimelineItem = AgentRunWorkThoughtItem | AgentRunWorkToolItem;
@@ -437,6 +449,10 @@ function workEntryText(entry: any): string {
   if (typeof entry === 'string') return entry.trim();
   if (typeof entry?.text === 'string') return entry.text.trim();
   return activityLabel(entry);
+}
+
+function displayObject(value: any): Record<string, any> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
 }
 
 function workEntryTool(entry: any): string {
@@ -497,6 +513,17 @@ function volatileThoughtKey(text: string): string {
   if (normalized.startsWith('writing response')) return 'writing';
   if (normalized.startsWith('streaming')) return 'streaming';
   return '';
+}
+
+function stableWorkThoughtText(text: string): string {
+  const cleaned = text.trim();
+  const boldMatch = cleaned.match(/^\*\*([^*]+)\*\*\s*([\s\S]*)$/);
+  if (!boldMatch) return cleaned;
+  const title = boldMatch[1]?.trim();
+  const tail = (boldMatch[2] ?? '').trim();
+  if (!title) return cleaned;
+  if (!tail || tail.length < 12 || /^[A-Za-z][.,;:]?$/.test(tail)) return `**${title}**`;
+  return cleaned;
 }
 
 function thoughtsAreProgressive(left: AgentRunWorkThoughtItem, right: AgentRunWorkThoughtItem): boolean {
@@ -590,7 +617,7 @@ export function runWorkTimelineItems(
     if (RUN_LIFECYCLE_WORK_KINDS.has(kind)) continue;
     if (RUN_TOOL_WORK_KINDS.has(kind)) continue;
 
-    const text = workEntryText(entry);
+    const text = stableWorkThoughtText(workEntryText(entry));
     if (!text) continue;
     if (isDuplicateToolActivity(entry, kind, text, structuredToolNames)) continue;
     const at = workEntryTime(entry);
@@ -617,6 +644,7 @@ export function runWorkTimelineItems(
       error: typeof call?.error === 'string' && call.error.trim() ? call.error : undefined,
       result: typeof call?.result === 'string' && call.result.trim() ? call.result : undefined,
       finishedAt: typeof call?.finished_at === 'string' && call.finished_at.trim() ? call.finished_at : undefined,
+      display: displayObject(call?.display),
       order: toolStartOrder.get(key) ?? workEntries.length + index,
       key: `tool:${key}:${call?.args ?? ''}`,
     });
@@ -634,6 +662,7 @@ export function runWorkTimelineItems(
       at,
       tool,
       status: 'running',
+      display: displayObject(entry?.display),
       order: index,
       key: `tool:${key}`,
     });
@@ -641,7 +670,7 @@ export function runWorkTimelineItems(
 
   if (records.length === 0) {
     for (const [index, line] of (source?.live_lines || []).entries()) {
-      const text = workEntryText(line);
+      const text = stableWorkThoughtText(workEntryText(line));
       if (!text) continue;
       const at = workEntryTime(line);
       pushRecord({

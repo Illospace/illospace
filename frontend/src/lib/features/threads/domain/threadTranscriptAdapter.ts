@@ -108,6 +108,7 @@ export interface CortexThreadStageToolCall {
   args?: string;
   at?: string;
   status?: string;
+  display?: Record<string, any>;
 }
 
 export type CortexThreadStageWorkTimelineItem =
@@ -127,6 +128,7 @@ export type CortexThreadStageWorkTimelineItem =
       error?: string;
       result?: string;
       finishedAt?: string;
+      display?: Record<string, any>;
     };
 
 export interface CortexThreadStageRunTelemetryItem {

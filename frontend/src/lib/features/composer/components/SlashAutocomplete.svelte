@@ -43,18 +43,54 @@
   let loaded = $state(false);
   let loadError = $state<string | null>(null);
   let effectivePlacement = $state<'above' | 'below'>('above');
-  let menuMaxHeight = $state(220);
+  let menuGeometry = $state({
+    maxHeight: 220,
+    left: 0,
+    width: 0,
+    top: null as number | null,
+    bottom: null as number | null,
+  });
   let geometryFrame: number | null = null;
 
   const shouldShowMenu = $derived(
     visible && active && (loading || Boolean(loadError) || loaded || filtered.length > 0),
   );
-  const dropdownStyle = $derived(`--slash-dropdown-max-height: ${menuMaxHeight}px;`);
+  const dropdownStyle = $derived(
+    [
+      `--slash-dropdown-max-height: ${menuGeometry.maxHeight}px`,
+      `--slash-dropdown-left: ${menuGeometry.left}px`,
+      `--slash-dropdown-width: ${menuGeometry.width}px`,
+      `--slash-dropdown-top: ${menuGeometry.top === null ? 'auto' : `${menuGeometry.top}px`}`,
+      `--slash-dropdown-bottom: ${menuGeometry.bottom === null ? 'auto' : `${menuGeometry.bottom}px`}`,
+    ].join(';'),
+  );
+
+  function portalToBody(node: HTMLElement) {
+    if (typeof document === 'undefined') return {};
+
+    const parent = node.parentNode;
+    const marker = document.createComment('slash-autocomplete-portal');
+    parent?.insertBefore(marker, node);
+    document.body.appendChild(node);
+
+    return {
+      destroy() {
+        marker.parentNode?.insertBefore(node, marker);
+        marker.remove();
+      },
+    };
+  }
 
   function updateMenuGeometry() {
     if (typeof window === 'undefined' || !anchor) {
       effectivePlacement = placement;
-      menuMaxHeight = 220;
+      menuGeometry = {
+        maxHeight: 220,
+        left: 0,
+        width: 0,
+        top: null,
+        bottom: null,
+      };
       return;
     }
 
@@ -75,8 +111,19 @@
     }
 
     const availableSpace = nextPlacement === 'above' ? spaceAbove : spaceBelow;
+    const viewportWidth = Math.max(window.innerWidth, rect.width + viewportGap * 2);
+    const width = Math.max(0, Math.min(rect.width, viewportWidth - viewportGap * 2));
+    const maxLeft = Math.max(viewportGap, viewportWidth - viewportGap - width);
+    const left = Math.min(Math.max(rect.left, viewportGap), maxLeft);
+
     effectivePlacement = nextPlacement;
-    menuMaxHeight = Math.max(minHeight, Math.min(maxHeight, availableSpace - menuGap));
+    menuGeometry = {
+      maxHeight: Math.max(minHeight, Math.min(maxHeight, availableSpace - menuGap)),
+      left,
+      width,
+      top: nextPlacement === 'below' ? rect.bottom + menuGap : null,
+      bottom: nextPlacement === 'above' ? window.innerHeight - rect.top + menuGap : null,
+    };
   }
 
   function queueMenuGeometryUpdate() {
@@ -116,7 +163,7 @@
     if (commands.length > 0 || loading || loaded) return;
     loading = true;
     loadError = null;
-    queueMenuGeometryUpdate();
+    updateMenuGeometry();
     try {
       commands = await loadSlashCommands();
       loaded = true;
@@ -131,14 +178,14 @@
     if (active) {
       applyFilter(query, false);
     }
-    queueMenuGeometryUpdate();
+    updateMenuGeometry();
   }
 
   function applyFilter(text: string, resetSelection = true) {
     if (/\s/.test(text)) {
       filtered = [];
       selectedIndex = 0;
-      queueMenuGeometryUpdate();
+      updateMenuGeometry();
       return;
     }
     const q = text.toLowerCase();
@@ -148,7 +195,7 @@
         String(c.description ?? '').toLowerCase().includes(q),
     );
     selectedIndex = resetSelection ? 0 : Math.min(selectedIndex, Math.max(filtered.length - 1, 0));
-    queueMenuGeometryUpdate();
+    updateMenuGeometry();
   }
 
   export function filter(text: string) {
@@ -160,7 +207,7 @@
       filtered = [];
       selectedIndex = 0;
       void ensureCommandsLoaded();
-      queueMenuGeometryUpdate();
+      updateMenuGeometry();
       return;
     }
     applyFilter(normalized, resetSelection);
@@ -215,6 +262,7 @@
 
 {#if shouldShowMenu}
   <div
+    use:portalToBody
     class="slash-dropdown"
     class:placement-below={effectivePlacement === 'below'}
     style={dropdownStyle}
@@ -247,27 +295,24 @@
 
 <style>
   .slash-dropdown {
-    position: absolute;
-    bottom: 100%;
-    left: 0;
-    right: 0;
+    position: fixed;
+    top: var(--slash-dropdown-top, auto);
+    bottom: var(--slash-dropdown-bottom, auto);
+    left: var(--slash-dropdown-left, 0);
+    width: var(--slash-dropdown-width, min(480px, calc(100vw - 24px)));
     max-height: var(--slash-dropdown-max-height, 220px);
     overflow-y: auto;
     padding: 5px;
     background: var(--constellation-select-chip-menu-background, var(--constellation-surface-floating-background, var(--bg-2)));
     border: 1px solid var(--constellation-select-chip-menu-border, var(--constellation-surface-floating-border, var(--border-2)));
     border-radius: 8px;
-    margin-bottom: 4px;
+    margin: 0;
     box-shadow: var(--constellation-select-chip-menu-shadow, var(--constellation-surface-floating-shadow, 0 -4px 16px rgba(0, 0, 0, 0.4)));
     z-index: var(--constellation-layer-popover, 1000);
     scrollbar-color: var(--constellation-utility-panel-scrollbar, rgba(255, 255, 255, 0.14)) transparent;
   }
 
   .slash-dropdown.placement-below {
-    top: 100%;
-    bottom: auto;
-    margin-top: 4px;
-    margin-bottom: 0;
     box-shadow: var(--constellation-select-chip-menu-shadow, var(--constellation-surface-floating-shadow, 0 14px 34px rgba(0, 0, 0, 0.28)));
   }
 

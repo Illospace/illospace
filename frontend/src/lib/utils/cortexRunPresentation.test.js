@@ -116,6 +116,33 @@ test('drops duplicate tool activity prose when a structured tool call exists', (
   assert.equal(items[0].tool, 'exec_command');
 });
 
+test('uses public tool display labels instead of raw arguments', () => {
+  const items = runWorkTimelineItems({
+    work_log: [
+      { time: '2026-05-03T22:00:01.000Z', text: 'Using run_script', kind: 'run.tool_started' },
+    ],
+    tool_calls: [
+      {
+        tool: 'run_script',
+        args: '{"description":"Check GitHub access"}',
+        at: '2026-05-03T22:00:01.000Z',
+        status: 'completed',
+        display: {
+          icon: '🔧',
+          label: 'Checked GitHub access',
+          kind: 'command',
+          status: 'completed',
+        },
+      },
+    ],
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].kind, 'tool');
+  assert.equal(items[0].display.label, 'Checked GitHub access');
+  assert.equal(items[0].display.icon, '🔧');
+});
+
 test('drops persisted tool activity prose even when work log omits tool metadata', () => {
   const items = runWorkTimelineItems({
     work_log: [
@@ -161,6 +188,44 @@ test('compacts progressive reflection snippets into the latest thought', () => {
     items[0].text,
     'Assessing API usage guidelines and checking whether the app can fetch public JSON directly',
   );
+});
+
+test('keeps short partial thought tails from replacing fuller thoughts', () => {
+  const items = runWorkTimelineItems({
+    work_log: [
+      {
+        time: '2026-05-03T22:00:01.000Z',
+        text: '**Considering GitHub response details** I',
+        kind: 'run.activity',
+      },
+      {
+        time: '2026-05-03T22:00:04.000Z',
+        text: '**Considering GitHub response details** I need to summarize what the API returned.',
+        kind: 'run.activity',
+      },
+    ],
+  });
+
+  assert.deepEqual(items.map((item) => item.kind), ['thought']);
+  assert.equal(
+    items[0].text,
+    '**Considering GitHub response details** I need to summarize what the API returned.',
+  );
+});
+
+test('collapses one-letter partial thought tails to the stable header', () => {
+  const items = runWorkTimelineItems({
+    work_log: [
+      {
+        time: '2026-05-03T22:00:01.000Z',
+        text: '**Considering GitHub response details** I',
+        kind: 'run.activity',
+      },
+    ],
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].text, '**Considering GitHub response details**');
 });
 
 test('compacts adjacent duplicate tool rows with the same arguments', () => {
