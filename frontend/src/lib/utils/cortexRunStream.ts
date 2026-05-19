@@ -14,8 +14,24 @@ export type CortexRunStreamItem = {
   completed_at?: string;
   duration_sec?: number;
   last_activity?: string;
-  tool_calls?: Array<{ tool: string; args?: string; at?: string; status?: string; error?: string; result?: string }>;
-  activity_trace?: Array<{ at?: string; activity: string; kind?: string; tool_name?: string; status?: string }>;
+  tool_calls?: Array<{
+    tool: string;
+    args?: string;
+    at?: string;
+    status?: string;
+    error?: string;
+    result?: string;
+    result_preview?: string;
+    display?: Record<string, any>;
+  }>;
+  activity_trace?: Array<{
+    at?: string;
+    activity: string;
+    kind?: string;
+    tool_name?: string;
+    status?: string;
+    display?: Record<string, any>;
+  }>;
   work_log?: Array<{ time?: string; text: string; kind?: string }>;
   work_summary?: Record<string, any>;
   live_lines?: Array<string | { time?: string; text: string }>;
@@ -70,6 +86,12 @@ export function eventAt(msg: any, fallback: string = new Date().toISOString()): 
   return typeof msg?.event_created_at === 'string' ? msg.event_created_at : fallback;
 }
 
+function toolDisplayFromMessage(msg: any, existingDisplay?: Record<string, any>, status?: string): Record<string, any> | undefined {
+  const incomingDisplay = msg?.tool_display || msg?.display;
+  const display = incomingDisplay?.target || !existingDisplay ? incomingDisplay || existingDisplay : existingDisplay;
+  return display ? { ...display, ...(status ? { status } : {}) } : undefined;
+}
+
 export function appendRunToolCall(
   item: CortexRunStreamItem,
   msg: any,
@@ -84,6 +106,8 @@ export function appendRunToolCall(
       existing.status = status;
       existing.error = typeof msg.error === 'string' ? msg.error : existing.error;
       existing.result = typeof msg.result === 'string' ? msg.result : existing.result;
+      existing.result_preview = typeof msg.result_preview === 'string' ? msg.result_preview : existing.result_preview;
+      existing.display = toolDisplayFromMessage(msg, existing.display, status);
       return { ...item, tool_calls: calls };
     }
   }
@@ -94,6 +118,8 @@ export function appendRunToolCall(
     status,
     error: typeof msg?.error === 'string' ? msg.error : undefined,
     result: typeof msg?.result === 'string' ? msg.result : undefined,
+    result_preview: typeof msg?.result_preview === 'string' ? msg.result_preview : undefined,
+    display: toolDisplayFromMessage(msg),
   });
   return { ...item, tool_calls: calls };
 }
@@ -214,6 +240,7 @@ export function applyAgentActivityToStream(
     kind: typeof msg.source_event_type === 'string' ? msg.source_event_type : msg.type,
     tool_name: typeof msg.tool_name === 'string' ? msg.tool_name : undefined,
     status: typeof msg.status === 'string' ? msg.status : undefined,
+    display: msg.tool_display || msg.display || undefined,
   };
   const workEntry = { time: now, text: activity, kind: activityEntry.kind };
   const appendLine = (lines: CortexRunStreamItem['live_lines']) => [...(lines || []), activity].slice(-16);

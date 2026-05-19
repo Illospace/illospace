@@ -803,6 +803,10 @@ class CortexStore {
     }
     const toolName = typeof msg.tool_name === 'string' ? msg.tool_name.trim() : '';
     const label = typeof msg.label === 'string' ? msg.label.trim() : '';
+    let displayLabel = typeof msg.display_label === 'string' ? msg.display_label.trim() : '';
+    if (!displayLabel && typeof msg.tool_display?.label === 'string') {
+      displayLabel = msg.tool_display.label.trim();
+    }
 
     if (msg.type === 'text_delta') {
       this._handleAgentTextDelta(msg);
@@ -823,7 +827,7 @@ class CortexStore {
     }
 
     if (msg.type === 'tool_started') {
-      this._handleAgentActivity({ ...msg, activity: toolName ? `Using ${toolName}` : 'Using a tool' });
+      this._handleAgentActivity({ ...msg, activity: displayLabel || (toolName ? `Using ${toolName}` : 'Using a tool') });
       this._ensureSelectedIdeaReconcile();
       this._scheduleSelectedBrowserSessionRefresh();
       return;
@@ -833,7 +837,7 @@ class CortexStore {
       const status = msg.status === 'failed' ? 'failed' : 'completed';
       this._handleAgentActivity({
         ...msg,
-        activity: toolName ? `${toolName} ${status}` : `Tool ${status}`,
+        activity: displayLabel || (toolName ? `${toolName} ${status}` : `Tool ${status}`),
       });
       this._ensureSelectedIdeaReconcile();
       this._scheduleSelectedBrowserSessionRefresh();

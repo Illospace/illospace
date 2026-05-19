@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import aliased
 
 from brain.systems.runs.events import run_event
+from brain.systems.runs.presentation import public_tool_event_payload
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.app.api.auth import get_current_user
@@ -265,6 +266,14 @@ def _duration_from_item(item: dict[str, Any]) -> int | None:
         return None
 
 
+def _tool_display_label(payload: dict[str, Any]) -> str | None:
+    display = payload.get("tool_display")
+    if not isinstance(display, dict):
+        return None
+    label = str(display.get("label") or "").strip()
+    return label or None
+
+
 def _activity_from_event(event_type: str, payload: dict[str, Any]) -> str | None:
     if event_type == "run.started":
         return "Started"
@@ -272,9 +281,15 @@ def _activity_from_event(event_type: str, payload: dict[str, Any]) -> str | None
         label = payload.get("label") or payload.get("activity") or payload.get("step") or payload.get("step_key")
         return str(label).strip() if label else None
     if event_type == "run.tool_started":
+        label = _tool_display_label(payload)
+        if label:
+            return label
         tool_name = str(payload.get("tool_name") or "tool").strip()
         return f"Using {tool_name}" if tool_name else "Using a tool"
     if event_type in {"run.tool_completed", "run.tool_failed"}:
+        label = _tool_display_label(payload)
+        if label:
+            return label
         tool_name = str(payload.get("tool_name") or "tool").strip()
         status = "failed" if event_type == "run.tool_failed" else "completed"
         return f"{tool_name} {status}" if tool_name else f"Tool {status}"
@@ -297,6 +312,8 @@ def _apply_run_events_to_item(item: dict[str, Any], events: list[Any]) -> None:
         if event_type not in _RUN_WORK_EVENT_TYPES:
             continue
         payload = dict(getattr(event, "payload", None) or {})
+        if event_type in {"run.tool_started", "run.tool_completed", "run.tool_failed"}:
+            payload = public_tool_event_payload(payload, event_type)
         at = _event_created_at(event)
         label = _activity_from_event(event_type, payload)
         if label:
@@ -319,6 +336,7 @@ def _apply_run_events_to_item(item: dict[str, Any], events: list[Any]) -> None:
                 "args": _compact_json(payload.get("args")),
                 "at": at,
                 "status": "running",
+                "display": payload.get("tool_display"),
             })
         elif event_type in {"run.tool_completed", "run.tool_failed"}:
             tool = str(payload.get("tool_name") or "tool")
@@ -329,6 +347,11 @@ def _apply_run_events_to_item(item: dict[str, Any], events: list[Any]) -> None:
                 tool_calls.append(match)
             match["status"] = status
             match["finished_at"] = at
+            display = payload.get("tool_display")
+            if display and (not match.get("display") or display.get("target")):
+                match["display"] = payload.get("tool_display")
+            if isinstance(match.get("display"), dict):
+                match["display"]["status"] = status
             if payload.get("error"):
                 match["error"] = str(payload.get("error"))[:500]
             elif payload.get("result"):

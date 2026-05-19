@@ -57,6 +57,17 @@ async def create_agent_connection(
     user_id = str(user.get("id"))
 
     try:
+        existing = await external_agents.find_reusable_connection(
+            db,
+            org_id=org_id,
+            owner_user_id=user_id,
+            display_name=payload.display_name,
+            agent_kind=payload.agent_kind,
+            transport=payload.transport,
+        )
+        if existing is not None:
+            return external_agents.serialize_connection(existing)
+
         row = await external_agents.create_connection(
             db,
             org_id=org_id,

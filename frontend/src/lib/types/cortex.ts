@@ -52,8 +52,24 @@ export interface StreamItem {
   requires_approval?: boolean;
   interactive_mode?: string;
   last_activity?: string;
-  tool_calls?: { tool: string; args?: string; at?: string; status?: string; error?: string; result?: string }[];
-  activity_trace?: { at?: string; activity: string; kind?: string; tool_name?: string; status?: string }[];
+  tool_calls?: {
+    tool: string;
+    args?: string;
+    at?: string;
+    status?: string;
+    error?: string;
+    result?: string;
+    result_preview?: string;
+    display?: Record<string, any>;
+  }[];
+  activity_trace?: {
+    at?: string;
+    activity: string;
+    kind?: string;
+    tool_name?: string;
+    status?: string;
+    display?: Record<string, any>;
+  }[];
   work_log?: { time?: string; text: string; kind?: string }[];
   work_summary?: Record<string, any>;
   run_steps?: any[];

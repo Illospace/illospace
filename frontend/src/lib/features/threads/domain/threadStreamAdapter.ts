@@ -457,6 +457,7 @@ export function buildThreadTranscriptItems({
           args: toolCall.args || undefined,
           at: toolCall.at || undefined,
           status: toolCall.status || undefined,
+          display: toolCall.display || undefined,
         })),
         toolCallsDefaultOpen: activeRun,
         evidenceDebug: buildRunEvidenceDebug(item) ?? undefined,

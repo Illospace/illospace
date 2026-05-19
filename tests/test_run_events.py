@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -144,6 +145,57 @@ def test_run_event_to_message_projects_non_streaming_final_text():
     assert message["delta"] == "Hi! How can I help?"
     assert message["idea_id"] == "idea-1"
     assert message["profile"] == "fast"
+
+
+def test_run_event_to_message_projects_public_tool_display_without_raw_script():
+    event = SimpleNamespace(
+        id=9,
+        run_id=42,
+        root_run_id=None,
+        sequence_no=5,
+        event_type="run.tool_started",
+        payload={
+            "tool_name": "run_script",
+            "args": {
+                "description": "Check GitHub token identity and visible repos.",
+                "script": "TOKEN='ghp_abcdefghijklmnopqrstuvwxyz1234567890'",
+            },
+        },
+        created_at=None,
+        _agent_run_thread_id="idea-1",
+        _agent_run_profile="fast",
+        _agent_run_org_id="org-1",
+    )
+
+    message = run_event_to_message(event)
+
+    assert message["type"] == "tool_started"
+    assert message["args"] == {"description": "Check GitHub token identity and visible repos."}
+    assert message["tool_display"]["icon"] == "🔧"
+    assert message["tool_display"]["label"] == "Check GitHub token identity and visible repos"
+    assert "ghp_" not in json.dumps(message)
+
+
+def test_public_tool_projection_strips_sensitive_url_parts():
+    from brain.systems.runs.presentation import public_tool_event_payload
+
+    message = public_tool_event_payload(
+        {
+            "tool_name": "fetch_url",
+            "args": {
+                "url": "https://user:secret@example.com/private/file?token=abc123&X-Amz-Signature=sig#fragment",
+            },
+        },
+        "run.tool_started",
+    )
+
+    serialized = json.dumps(message)
+    assert message["args"]["url"] == "example.com/private/file"
+    assert message["tool_display"]["target"] == "example.com/private/file"
+    assert "secret" not in serialized
+    assert "abc123" not in serialized
+    assert "X-Amz-Signature" not in serialized
+
 
 def test_publish_live_fans_out_without_durable_storage(monkeypatch):
     from brain.systems.cortex import events

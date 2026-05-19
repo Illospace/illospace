@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Awaitable, Callable
 
-from fastapi import APIRouter, Depends, Header, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
@@ -398,16 +398,14 @@ async def submit_inbound_envelope(
     )
 
 
-async def require_mcp_principal(
+async def _authenticate_mcp_principal(
     request: Request,
-    x_illo_bridge_token: str | None = Header(default=None, alias="X-Illo-Bridge-Token"),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession,
 ) -> external_agents.AgentBridgePrincipal:
-    token = _bearer_token(request, x_illo_bridge_token)
-    try:
-        return await external_agents.authenticate_bridge_token(db, token)
-    except Exception as exc:
-        raise_external_agent_http_error(exc)
+    return await external_agents.authenticate_bridge_token(
+        db,
+        _bearer_token(request, request.headers.get("X-Illo-Bridge-Token")),
+    )
 
 
 def _list_tools(principal: external_agents.AgentBridgePrincipal) -> list[dict[str, Any]]:
@@ -587,6 +585,29 @@ def _result(req_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": req_id, "result": payload}
 
 
+def _error_response(req_id: Any, *, code: int, message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    error: dict[str, Any] = {"code": code, "message": message}
+    if data:
+        error["data"] = data
+    return {"jsonrpc": "2.0", "id": req_id, "error": error}
+
+
+def _request_id(message: Any) -> Any:
+    return message.get("id") if isinstance(message, dict) else None
+
+
+def _mcp_auth_error_response(payload: Any, message: str) -> JSONResponse:
+    data = {"http_status": 401, "auth": "bearer"}
+    if isinstance(payload, list):
+        responses = [
+            _error_response(_request_id(item), code=-32001, message=message, data=data)
+            for item in payload
+            if not isinstance(item, dict) or "id" in item
+        ]
+        return JSONResponse(responses)
+    return JSONResponse(_error_response(_request_id(payload), code=-32001, message=message, data=data))
+
+
 def _tool_result(value: dict[str, Any]) -> dict[str, Any]:
     return {
         "content": [
@@ -673,9 +694,15 @@ async def _handle_mcp_request(
 async def _mcp_endpoint(
     request: Request,
     db: AsyncSession,
-    principal: external_agents.AgentBridgePrincipal,
 ):
     payload = await request.json()
+    try:
+        principal = await _authenticate_mcp_principal(request, db)
+    except external_agents.ExternalAgentAuthError as exc:
+        return _mcp_auth_error_response(payload, f"MCP authentication failed: {exc}")
+    except external_agents.ExternalAgentPermissionError as exc:
+        return _mcp_auth_error_response(payload, f"MCP authentication failed: {exc}")
+
     if isinstance(payload, list):
         responses: list[dict[str, Any]] = []
         for item in payload:
@@ -700,15 +727,13 @@ async def _mcp_endpoint(
 async def hosted_mcp(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    principal: external_agents.AgentBridgePrincipal = Depends(require_mcp_principal),
 ):
-    return await _mcp_endpoint(request, db, principal)
+    return await _mcp_endpoint(request, db)
 
 
 @router.post("/api/mcp")
 async def hosted_api_mcp(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    principal: external_agents.AgentBridgePrincipal = Depends(require_mcp_principal),
 ):
-    return await _mcp_endpoint(request, db, principal)
+    return await _mcp_endpoint(request, db)

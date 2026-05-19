@@ -1,11 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 
 import {
   findFirstSlashCommandToken,
   findSlashCommandToken,
   replaceSlashCommandToken,
 } from './slashCommand.ts';
+
+const utilsDir = dirname(fileURLToPath(import.meta.url));
+const srcDir = resolve(utilsDir, '..', '..');
+
+function readSource(relativePath) {
+  return readFileSync(resolve(srcDir, relativePath), 'utf8');
+}
+
+function cssRule(source, selector) {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = source.match(new RegExp(`${escapedSelector}\\s*\\{(?<body>[^}]*)\\}`, 'm'));
+  return match?.groups?.body ?? '';
+}
 
 test('findSlashCommandToken detects a slash command at the cursor inside a sentence', () => {
   const value = 'can you use /dev to fix this?';
@@ -63,4 +79,21 @@ test('findFirstSlashCommandToken sees inline commands beyond the end cursor case
 
   assert.ok(token);
   assert.equal(value.slice(token.start, token.end), '/develop');
+});
+
+test('slash autocomplete is anchored to the viewport instead of composer overflow boxes', () => {
+  const source = readSource('lib/features/composer/components/SlashAutocomplete.svelte');
+
+  assert.match(source, /document\.body\.appendChild\(node\)/);
+  assert.match(source, /position:\s*fixed;/);
+  assert.match(source, /--slash-dropdown-left/);
+  assert.match(source, /--slash-dropdown-width/);
+});
+
+test('thread composer editor does not clip overlay hosts', () => {
+  const source = readSource('lib/features/composer/components/WorkspaceComposerAdapter.svelte');
+  const rule = cssRule(source, '.thread-mode .composer-editor');
+
+  assert.match(rule, /overflow:\s*visible/);
+  assert.doesNotMatch(rule, /overflow:\s*hidden/);
 });
