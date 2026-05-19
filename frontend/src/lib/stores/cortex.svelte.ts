@@ -63,6 +63,8 @@ import {
 } from '$lib/utils/vaultSecretPrompt';
 import {
   normalizeVaultAgentGrantPromptMessage,
+  vaultAgentGrantPromptFromRunToolEvent,
+  vaultAgentGrantPromptFromStream,
 } from '$lib/utils/vaultAgentGrantPrompt';
 import type {
   AgentRunOptions,
@@ -454,6 +456,19 @@ class CortexStore {
     this._applyVaultAgentGrantPrompt(prompt);
   }
 
+  private _handleVaultAgentGrantPromptFromRunEvent(msg: any) {
+    const prompt = vaultAgentGrantPromptFromRunToolEvent(msg, auth.user?.id) as VaultAgentGrantPrompt | null;
+    const ideaId = prompt?.idea_id ?? null;
+    if (!prompt || !ideaId) return;
+
+    if (ideaId !== this.selectedIdeaId) {
+      this._focusThreadForVaultAgentGrantPrompt(ideaId, prompt);
+      return;
+    }
+
+    this._applyVaultAgentGrantPrompt(prompt);
+  }
+
   private _handleVaultSecretPromptFromRunEvent(msg: any) {
     const prompt = vaultSecretPromptFromRunToolEvent(msg) as VaultSecretPrompt | null;
     const ideaId = prompt?.idea_id ?? null;
@@ -475,6 +490,17 @@ class CortexStore {
       this._dismissedVaultSecretPromptIds,
     ) as VaultSecretPrompt | null;
     if (prompt) this._applyVaultSecretPrompt(prompt);
+  }
+
+  private _maybeApplyVaultAgentGrantPromptFromStream(ideaId: string, stream: StreamItem[]) {
+    if (this.vaultAgentGrantPrompt?.idea_id === ideaId) return;
+    const prompt = vaultAgentGrantPromptFromStream(
+      stream,
+      ideaId,
+      this._dismissedVaultAgentGrantPromptIds,
+      auth.user?.id,
+    ) as VaultAgentGrantPrompt | null;
+    if (prompt) this._applyVaultAgentGrantPrompt(prompt);
   }
 
   clearVaultSecretPrompt(promptId?: string | null) {
@@ -767,6 +793,7 @@ class CortexStore {
     this._maybeTriggerCyclePanelFromRunUiEvent(msg);
     if (msg.type === 'tool_finished' && isRootRunEvent) {
       this._handleVaultSecretPromptFromRunEvent(msg);
+      this._handleVaultAgentGrantPromptFromRunEvent(msg);
     }
     if (msg.idea_id !== this.selectedIdeaId || !isRootRunEvent) return;
     const eventKey = runUiEventKey(msg);
@@ -1095,6 +1122,7 @@ class CortexStore {
     const mergedItems = this._mergeLiveStreamState(items, id);
     this.stream = mergedItems;
     this._maybeApplyVaultSecretPromptFromStream(id, mergedItems);
+    this._maybeApplyVaultAgentGrantPromptFromStream(id, mergedItems);
     this._reconcileIdeaStatusFromStream(id, mergedItems);
     this.browserFrame = null;
     this.browserDiscovery = null;

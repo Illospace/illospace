@@ -1052,6 +1052,7 @@ async def tool_brain_vault(
         grant_user_id = str(grant.get("user_id") or target_user_id).strip() or target_user_id
         if authorization.get("status") == "pending":
             normalized_idea_id = (str(idea_id).strip() if idea_id else "") or None
+            prompt = None
             if normalized_idea_id:
                 prompt = {
                     "id": f"vault-grant-{grant.get('id') or run_id or 'thread'}",
@@ -1074,11 +1075,19 @@ async def tool_brain_vault(
                     "grant": grant,
                     "prompt": prompt,
                 })
-            return {
+            response = {
                 "error": "Vault grant required before this agent can read the secret",
                 "grant_id": grant.get("id"),
+                "key_name": grant.get("key_name") or key,
+                "reason": grant.get("reason") or reason,
+                "requested_by": grant.get("requested_by") or requested_by,
+                "run_id": grant.get("run_id") or run_id,
                 "status": "pending",
+                "target_user_id": grant_user_id,
             }
+            if prompt:
+                response["prompt"] = prompt
+            return response
         return {"error": authorization.get("reason") or "Vault grant denied"}
     value = await get_secret(
         key,

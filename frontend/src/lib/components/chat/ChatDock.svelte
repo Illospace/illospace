@@ -630,7 +630,6 @@
     if (kind === 'image') return 'image';
     if (kind === 'video') return 'video';
     if (kind === 'pdf') return 'pdf';
-    if (kind === 'html') return 'code';
     if (kind === 'link') return 'link';
     if (kind === 'archive') return 'archive';
     if (kind === 'text') return 'code';

@@ -1207,6 +1207,34 @@ async def test_runtime_tool_executor_records_public_events_and_redacted_artifact
     assert _stream_has(runtime.stream.messages, "run.tool_completed", completed.payload | {"run_id": 42})
 
 
+async def test_runtime_tool_executor_redacts_vault_grant_metadata_from_public_run_event():
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    runtime = _runtime("worker")
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+
+    result = await executor.execute(
+        42,
+        ToolExecution(
+            name="brain_vault",
+            args={"key": "OPENAI_API_KEY"},
+            handler=lambda **kwargs: {
+                "error": "Vault grant required before this agent can read the secret",
+                "grant_id": 123,
+                "key_name": "OPENAI_API_KEY",
+                "status": "pending",
+                "value": "sk-secret",
+            },
+        ),
+        root_run_id=42,
+    )
+
+    completed = next(event for event in runtime.store.events if event.event_type == "run.tool_completed")
+    assert result["value"] == "sk-secret"
+    assert completed.payload["result"] == "[secret redacted]"
+    assert runtime.store.artifacts[-1].text == completed.payload["result"]
+
+
 async def test_runtime_tool_executor_blocks_out_of_scope_worker_mutation():
     import pytest
 

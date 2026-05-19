@@ -197,7 +197,9 @@ async def reconcile_inbound_triage_run(
         "triage": outcome["triage"],
     }
     event.processed_at = event.processed_at or now
-    if status != RunStatus.COMPLETED:
+    if status == RunStatus.COMPLETED:
+        event.error = None
+    else:
         event.error = final_answer or f"Ilo triage run ended with status {status.value}"
 
     await session.flush()

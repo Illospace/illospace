@@ -702,10 +702,15 @@ async def _preview_envelope(
         schema_error = str(exc)
     projection = await inbound_service._projection_for_policy(session, policy)
     projection_error = _dry_run_projection_error(policy, projection, envelope)
+    would_assign_projection = (
+        projection is not None
+        and schema_error is None
+        and inbound_service._policy_allows_domain_projection(policy)
+    )
     would_project = projection is not None and schema_error is None and projection_error is None
     return {
         "matched_policy_id": str(policy.id),
-        "domain_projection_id": str(projection.id) if projection else None,
+        "domain_projection_id": str(projection.id) if would_assign_projection else None,
         "would_store_event": True,
         "would_require_ilo": _dry_run_would_require_ilo(
             projection,

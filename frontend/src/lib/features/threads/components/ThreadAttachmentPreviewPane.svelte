@@ -76,7 +76,6 @@
     if (kind === 'image') return 'image';
     if (kind === 'video') return 'video';
     if (kind === 'pdf') return 'pdf';
-    if (kind === 'html') return 'code';
     if (kind === 'archive') return 'archive';
     if (kind === 'text') return 'code';
     if (kind === 'file') return 'file';
@@ -128,13 +127,6 @@
         <video class="preview-pane-media" src={previewUrl} controls playsinline preload="metadata"></video>
       {:else if previewMode === 'embed'}
         <iframe src={previewUrl} title={attachmentLabel} referrerpolicy="no-referrer"></iframe>
-      {:else if previewMode === 'html' && preview?.text}
-        <iframe
-          srcdoc={preview.text}
-          title={attachmentLabel}
-          referrerpolicy="no-referrer"
-          sandbox="allow-popups"
-        ></iframe>
       {:else if previewMode === 'sheet' && preview?.sheets?.length}
         <div class="preview-sheet-stack">
           {#each preview.sheets as sheet (`sheet-${sheet.index}`)}

@@ -14,12 +14,16 @@ from urllib.parse import unquote, urlsplit
 
 from brain.app.api.routers.cortex._helpers import UPLOAD_DIR
 
-READABLE_TEXT_EXTENSIONS = {"csv", "json", "md", "txt"}
+READABLE_TEXT_EXTENSIONS = {"csv", "json", "md", "txt", "xml", "yaml", "yml"}
 READABLE_TEXT_MIME_TYPES = {
     "application/json",
+    "application/xml",
+    "application/x-yaml",
     "text/csv",
     "text/markdown",
     "text/plain",
+    "text/xml",
+    "text/yaml",
 }
 IMAGE_EXTENSIONS = {"avif", "gif", "jpeg", "jpg", "png", "webp"}
 MAX_TEXT_ATTACHMENT_CHARS = 18_000

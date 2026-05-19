@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   normalizeVaultAgentGrantPromptMessage,
+  vaultAgentGrantPromptFromRunToolEvent,
+  vaultAgentGrantPromptFromStream,
   vaultAgentGrantPromptFromToolResult,
 } from './vaultAgentGrantPrompt.ts';
 
@@ -65,3 +67,70 @@ test('can recover a grant prompt from a pending brain_vault result when metadata
   assert.equal(prompt?.run_id, 199);
 });
 
+test('does not recover grant prompts from redacted durable brain_vault run events', () => {
+  const prompt = vaultAgentGrantPromptFromRunToolEvent({
+    type: 'tool_finished',
+    tool_name: 'brain_vault',
+    idea_id: 'idea-1',
+    run_id: 199,
+    event_created_at: '2026-05-19T14:00:00Z',
+    result: '[secret redacted]',
+  });
+
+  assert.equal(prompt, null);
+});
+
+test('requires matching target user when recovering grant prompts from run events', () => {
+  const event = {
+    type: 'tool_finished',
+    tool_name: 'brain_vault',
+    idea_id: 'idea-1',
+    run_id: 199,
+    result: JSON.stringify({
+      error: 'Vault grant required before this agent can read the secret',
+      status: 'pending',
+      grant_id: 7,
+      key_name: 'GITHUB_TOKEN',
+      target_user_id: 'user-1',
+    }),
+  };
+
+  assert.equal(vaultAgentGrantPromptFromRunToolEvent(event, 'user-1')?.grant_id, 7);
+  assert.equal(vaultAgentGrantPromptFromRunToolEvent(event, 'user-2'), null);
+  assert.equal(
+    vaultAgentGrantPromptFromRunToolEvent(
+      {
+        ...event,
+        result: JSON.stringify({
+          error: 'Vault grant required before this agent can read the secret',
+          status: 'pending',
+          grant_id: 7,
+          key_name: 'GITHUB_TOKEN',
+        }),
+      },
+      'user-1',
+    ),
+    null,
+  );
+});
+
+test('ignores redacted brain_vault results in loaded run streams', () => {
+  const stream = [
+    {
+      type: 'run',
+      id: 199,
+      idea_id: 'idea-1',
+      tool_calls: [
+        {
+          tool_name: 'brain_vault',
+          finished_at: '2026-05-19T14:00:00Z',
+          result: '[secret redacted]',
+        },
+      ],
+    },
+  ];
+
+  const prompt = vaultAgentGrantPromptFromStream(stream, 'idea-1', new Set(), 'user-1');
+  assert.equal(vaultAgentGrantPromptFromStream(stream, 'idea-1', new Set(), 'user-2'), null);
+  assert.equal(prompt, null);
+});

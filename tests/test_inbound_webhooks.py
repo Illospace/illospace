@@ -382,6 +382,9 @@ async def test_inbound_triage_receipt_reconciles_when_illo_run_completes(session
         issue_key="PROJ-1",
         idempotency_key="jira:PROJ-1:created",
     )
+    event = (await session.scalars(select(InboundEventRow))).one()
+    event.error = "schema validation required Ilo triage"
+    await session.flush()
     await _finish_triage_run(session, triage, status=RunStatus.COMPLETED, final_answer=final_answer)
 
     event = (await session.scalars(select(InboundEventRow))).one()
@@ -393,6 +396,7 @@ async def test_inbound_triage_receipt_reconciles_when_illo_run_completes(session
         "status": "completed",
         "final_answer": final_answer,
     }
+    assert event.error is None
     assert event.processed_at is not None
     assert receipt.status == "processed"
     assert receipt.outcome["triage"]["status"] == "completed"

@@ -216,20 +216,25 @@ def test_thread_attachment_context_promotes_text_and_image(tmp_path, monkeypatch
     upload_dir.mkdir()
     note = upload_dir / "note.md"
     note.write_text("hello attachment", encoding="utf-8")
+    config = upload_dir / "config.yaml"
+    config.write_text("feature: enabled", encoding="utf-8")
     image = upload_dir / "screenshot.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
     monkeypatch.setattr(thread_attachments, "UPLOAD_DIR", upload_dir)
 
     context = thread_attachments.build_thread_attachment_context([
         {"url": "/static/uploads/note.md", "filename": "note.md", "type": "text/markdown"},
+        {"url": "/static/uploads/config.yaml", "filename": "config.yaml", "type": "application/x-yaml"},
         {"url": "/static/uploads/screenshot.png", "filename": "screenshot.png", "type": "image/png"},
     ])
     blocks = thread_attachments.initial_user_content_blocks("Read these", context)
 
-    assert context["attachment_count"] == 2
+    assert context["attachment_count"] == 3
     assert context["items"][0]["text"] == "hello attachment"
+    assert context["items"][1]["text"] == "feature: enabled"
     assert blocks[0]["type"] == "text"
     assert "hello attachment" in blocks[0]["text"]
+    assert "feature: enabled" in blocks[0]["text"]
     assert blocks[1]["type"] == "image"
     assert blocks[1]["source"]["media_type"] == "image/png"
 

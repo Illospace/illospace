@@ -4,7 +4,30 @@ type PromptFallback = {
   ideaId?: unknown;
   runId?: unknown;
   createdAt?: unknown;
+  currentUserId?: unknown;
 };
+
+type ToolCallLike = {
+  tool?: unknown;
+  tool_name?: unknown;
+  result?: unknown;
+  at?: unknown;
+  finished_at?: unknown;
+};
+
+type StreamItemLike = {
+  type?: unknown;
+  id?: unknown;
+  run_id?: unknown;
+  idea_id?: unknown;
+  thread_id?: unknown;
+  timestamp?: unknown;
+  started_at?: unknown;
+  completed_at?: unknown;
+  tool_calls?: ToolCallLike[];
+};
+
+const BRAIN_VAULT_TOOL = 'brain_vault';
 
 function objectValue(value: any): Record<string, any> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
@@ -50,8 +73,32 @@ function parseJsonObject(value: unknown): Record<string, any> | null {
   }
 }
 
+function toolName(value: ToolCallLike | Record<string, any>): string | null {
+  return firstText(value.tool_name, value.tool);
+}
+
+function isBrainVaultTool(value: ToolCallLike | Record<string, any>): boolean {
+  return toolName(value) === BRAIN_VAULT_TOOL;
+}
+
 function fallbackId(ideaId: string, grantId: number): string {
   return `vault-grant-${ideaId}-${grantId}`;
+}
+
+function targetUserMatches(payload: Record<string, any>, fallback: PromptFallback): boolean {
+  const currentUserId = textValue(fallback.currentUserId);
+  if (!currentUserId) return true;
+  const prompt = objectValue(payload.prompt) ?? {};
+  const grant = objectValue(payload.grant) ?? {};
+  const targetUserId = firstText(
+    payload.target_user_id,
+    payload.targetUserId,
+    prompt.target_user_id,
+    prompt.targetUserId,
+    grant.user_id,
+    grant.userId,
+  );
+  return targetUserId === currentUserId;
 }
 
 export function normalizeVaultAgentGrantPromptMessage(
@@ -102,6 +149,7 @@ export function vaultAgentGrantPromptFromToolResult(
 ): VaultAgentGrantPrompt | null {
   const parsed = parseJsonObject(result);
   if (!parsed || parsed.error !== 'Vault grant required before this agent can read the secret') return null;
+  if (!targetUserMatches(parsed, fallback)) return null;
   return normalizeVaultAgentGrantPromptMessage(
     {
       ...parsed,
@@ -111,3 +159,55 @@ export function vaultAgentGrantPromptFromToolResult(
   );
 }
 
+export function vaultAgentGrantPromptFromRunToolEvent(
+  msg: unknown,
+  currentUserId?: unknown,
+): VaultAgentGrantPrompt | null {
+  const payload = objectValue(msg);
+  if (!payload || !isBrainVaultTool(payload)) return null;
+  return vaultAgentGrantPromptFromToolResult(payload.result, {
+    ideaId: payload.idea_id ?? payload.thread_id,
+    runId: payload.run_id ?? payload.root_run_id ?? payload.id,
+    createdAt: payload.event_created_at,
+    currentUserId,
+  });
+}
+
+export function vaultAgentGrantPromptFromStream(
+  stream: readonly StreamItemLike[],
+  ideaId: string | null | undefined,
+  ignoredPromptIds: ReadonlySet<string> = new Set(),
+  currentUserId?: unknown,
+): VaultAgentGrantPrompt | null {
+  const selectedIdeaId = textValue(ideaId);
+  if (!selectedIdeaId) return null;
+
+  let latest: { prompt: VaultAgentGrantPrompt; at: number; order: number } | null = null;
+  let order = 0;
+
+  for (const item of stream) {
+    if (textValue(item?.type) !== 'run') continue;
+    const itemIdeaId = firstText(item.idea_id, item.thread_id);
+    if (itemIdeaId && itemIdeaId !== selectedIdeaId) continue;
+
+    for (const call of item.tool_calls || []) {
+      order += 1;
+      if (!isBrainVaultTool(call)) continue;
+
+      const prompt = vaultAgentGrantPromptFromToolResult(call.result, {
+        ideaId: selectedIdeaId,
+        runId: item.run_id ?? item.id,
+        createdAt: call.finished_at ?? call.at ?? item.completed_at ?? item.started_at ?? item.timestamp,
+        currentUserId,
+      });
+      if (!prompt || ignoredPromptIds.has(prompt.id)) continue;
+
+      const at = Date.parse(prompt.created_at || '') || Date.parse(textValue(call.finished_at) || '') || order;
+      if (!latest || at > latest.at || (at === latest.at && order > latest.order)) {
+        latest = { prompt, at, order };
+      }
+    }
+  }
+
+  return latest?.prompt ?? null;
+}

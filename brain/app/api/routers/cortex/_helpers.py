@@ -26,13 +26,11 @@ UPLOAD_DIR = Path(__file__).resolve().parents[4] / "uploads"
 IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "avif"}
 VIDEO_EXTENSIONS = {"mp4", "m4v", "mov", "webm"}
 TEXT_EXTENSIONS = {"txt", "md", "csv", "json", "log", "text", "tsv", "xml", "yaml", "yml"}
-HTML_EXTENSIONS = {"html", "htm"}
 DOCUMENT_EXTENSIONS = {"doc", "docx", "odt", "pdf", "ppt", "pptx", "rtf", "xls", "xlsx"}
 ARCHIVE_EXTENSIONS = {"7z", "rar", "zip"}
 ALLOWED_EXTENSIONS = {
     *ARCHIVE_EXTENSIONS,
     *DOCUMENT_EXTENSIONS,
-    *HTML_EXTENSIONS,
     *IMAGE_EXTENSIONS,
     *TEXT_EXTENSIONS,
     *VIDEO_EXTENSIONS,
@@ -46,8 +44,6 @@ UPLOAD_FALLBACK_CONTENT_TYPES = {
     "doc": "application/msword",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "gif": "image/gif",
-    "htm": "text/html",
-    "html": "text/html",
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
     "json": "application/json",

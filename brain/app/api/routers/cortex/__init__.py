@@ -21,7 +21,6 @@ from brain.app.api.routers.cortex._helpers import (  # noqa: F401
     ALLOWED_EXTENSIONS,
     ARCHIVE_EXTENSIONS,
     DOCUMENT_EXTENSIONS,
-    HTML_EXTENSIONS,
     IMAGE_EXTENSIONS,
     MAX_VIDEO_UPLOAD_SIZE,
     MAX_UPLOAD_SIZE,

@@ -329,7 +329,12 @@ async def test_brain_vault_requests_grant_before_reading():
     assert result == {
         "error": "Vault grant required before this agent can read the secret",
         "grant_id": 123,
+        "key_name": "OPENAI_API_KEY",
+        "reason": "Need provider access for this run",
+        "requested_by": "agent",
+        "run_id": 42,
         "status": "pending",
+        "target_user_id": USER["id"],
     }
     authorize.assert_awaited_once()
     get_secret.assert_not_awaited()
@@ -418,3 +423,17 @@ def test_vault_tool_trace_result_is_redacted():
         )
         == "[secret redacted]"
     )
+    pending = redact_tool_call_result(
+        "brain_vault",
+        {
+            "error": "Vault grant required before this agent can read the secret",
+            "grant_id": 123,
+            "key_name": "OPENAI_API_KEY",
+            "reason": "Need provider access for this run",
+            "run_id": 42,
+            "status": "pending",
+            "target_user_id": USER["id"],
+            "value": "sk-secret",
+        },
+    )
+    assert pending == "[secret redacted]"

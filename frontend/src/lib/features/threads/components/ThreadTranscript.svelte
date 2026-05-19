@@ -16,6 +16,7 @@
     attachmentLabel,
     attachmentPreviewKind,
     attachmentUrl,
+    normalizeServerUploadPreviewUrl,
     type AttachmentPreviewKind,
   } from '$lib/utils/attachmentPreview';
   import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
@@ -80,8 +81,6 @@
   const previewAttachmentLabel = $derived(previewAttachment ? attachmentPreviewLabel(previewAttachment) : '');
   const previewAttachmentDetail = $derived(previewAttachment?.kind === 'file' ? (previewAttachment.detail ?? '') : '');
   const previewAttachmentKind = $derived(previewAttachment ? attachmentPreviewType(previewAttachment) : 'file');
-  const SERVER_PREVIEW_PATH_PREFIX = '/static/uploads/';
-
   function getMessageTone(item: CortexThreadStageMessageItem): CortexThreadStageTone {
     return item.tone ?? 'spectral';
   }
@@ -367,7 +366,6 @@
     if (kind === 'image') return 'image';
     if (kind === 'video') return 'video';
     if (kind === 'pdf') return 'pdf';
-    if (kind === 'html') return 'code';
     if (kind === 'link') return 'link';
     if (kind === 'archive') return 'archive';
     if (kind === 'text') return 'code';
@@ -388,16 +386,8 @@
   }
 
   function normalizeServerPreviewUrl(rawHref: string | null | undefined): string {
-    const href = String(rawHref ?? '').trim();
-    if (!href) return '';
-    try {
-      const base = typeof window === 'undefined' ? 'http://illo.local' : window.location.origin;
-      const parsed = new URL(href, base);
-      if (!parsed.pathname.startsWith(SERVER_PREVIEW_PATH_PREFIX)) return '';
-      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
-    } catch {
-      return href.startsWith(SERVER_PREVIEW_PATH_PREFIX) ? href : '';
-    }
+    const base = typeof window === 'undefined' ? 'http://illo.local' : window.location.origin;
+    return normalizeServerUploadPreviewUrl(rawHref, base);
   }
 
   function previewAttachmentFromLink(anchor: HTMLAnchorElement): CortexThreadStageFileAttachment | null {

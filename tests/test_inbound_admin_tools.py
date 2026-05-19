@@ -139,6 +139,38 @@ async def _create_issue_domain(session) -> Domain:
     )
 
 
+def _bridge_connection(connection: dict) -> dict:
+    return {
+        "connection_id": connection["id"],
+        "org_id": ORG_ID,
+        "owner_user_id": USER_ID,
+        "display_name": connection["display_name"],
+        "agent_kind": connection["agent_kind"],
+        "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
+    }
+
+
+async def _submit_issue_signal(
+    session,
+    connection: dict,
+    *,
+    origin: str,
+    issue: dict,
+    idempotency_key: str,
+) -> dict:
+    return await inbound_service.submit_inbound_envelope(
+        session,
+        connection=_bridge_connection(connection),
+        envelope={
+            "kind": "signal",
+            "origin": origin,
+            "payload": {"issue": issue},
+            "idempotency_key": idempotency_key,
+        },
+        ingress_context={"surface": "webhook"},
+    )
+
+
 async def test_illo_can_configure_connection_policy_projection_and_token(
     seeded_session,
     patch_unit_of_work,
@@ -262,23 +294,12 @@ async def test_configured_projection_processes_signal_and_illo_can_inspect_logs(
             title_path="payload.issue.summary",
         )
 
-    result = await inbound_service.submit_inbound_envelope(
+    result = await _submit_issue_signal(
         seeded_session,
-        connection={
-            "connection_id": connection["id"],
-            "org_id": ORG_ID,
-            "owner_user_id": USER_ID,
-            "display_name": "Jira webhook",
-            "agent_kind": "jira",
-            "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
-        },
-        envelope={
-            "kind": "signal",
-            "origin": "jira.issue_created",
-            "payload": {"issue": {"key": "ILO-7", "summary": "Webhook config"}},
-            "idempotency_key": "jira:ILO-7:created",
-        },
-        ingress_context={"surface": "webhook"},
+        connection,
+        origin="jira.issue_created",
+        issue={"key": "ILO-7", "summary": "Webhook config"},
+        idempotency_key="jira:ILO-7:created",
     )
 
     with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
@@ -455,9 +476,11 @@ async def test_dry_run_honors_projection_permission_and_required_external_id(
 
     assert blocked["would_project_domain_record"] is False
     assert blocked["would_require_ilo"] is True
+    assert blocked["domain_projection_id"] is None
     assert blocked["projection_error"] == "domain_projection_not_allowed"
     assert missing_external_id["would_project_domain_record"] is False
     assert missing_external_id["would_require_ilo"] is True
+    assert missing_external_id["domain_projection_id"] == projection["id"]
     assert missing_external_id["projection_error"] == "Missing projection external id at 'payload.issue.key'"
     assert quarantined_missing_external_id["would_project_domain_record"] is False
     assert quarantined_missing_external_id["would_require_ilo"] is False
@@ -514,6 +537,7 @@ async def test_dry_run_schema_errors_match_runtime_quarantine(
         )["dry_run"]
 
     assert dry_run["matched_policy_id"] == policy["id"]
+    assert dry_run["domain_projection_id"] is None
     assert dry_run["would_project_domain_record"] is False
     assert dry_run["would_require_ilo"] is False
     assert dry_run["schema_error"] == "Missing required inbound field(s): payload.issue.key"
@@ -555,41 +579,19 @@ async def test_replay_events_previews_current_config_without_mutating_domains(
             title_path="payload.issue.summary",
         )
 
-    first = await inbound_service.submit_inbound_envelope(
+    first = await _submit_issue_signal(
         seeded_session,
-        connection={
-            "connection_id": connection["id"],
-            "org_id": ORG_ID,
-            "owner_user_id": USER_ID,
-            "display_name": "Jira webhook",
-            "agent_kind": "jira",
-            "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
-        },
-        envelope={
-            "kind": "signal",
-            "origin": "jira.issue_created",
-            "payload": {"issue": {"key": "ILO-7", "summary": "First"}},
-            "idempotency_key": "jira:ILO-7:created",
-        },
-        ingress_context={"surface": "webhook"},
+        connection,
+        origin="jira.issue_created",
+        issue={"key": "ILO-7", "summary": "First"},
+        idempotency_key="jira:ILO-7:created",
     )
-    second = await inbound_service.submit_inbound_envelope(
+    second = await _submit_issue_signal(
         seeded_session,
-        connection={
-            "connection_id": connection["id"],
-            "org_id": ORG_ID,
-            "owner_user_id": USER_ID,
-            "display_name": "Jira webhook",
-            "agent_kind": "jira",
-            "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
-        },
-        envelope={
-            "kind": "signal",
-            "origin": "jira.issue_updated",
-            "payload": {"issue": {"key": "ILO-8", "summary": "Second"}},
-            "idempotency_key": "jira:ILO-8:updated",
-        },
-        ingress_context={"surface": "webhook"},
+        connection,
+        origin="jira.issue_updated",
+        issue={"key": "ILO-8", "summary": "Second"},
+        idempotency_key="jira:ILO-8:updated",
     )
     assert first["status"] == inbound_service.STATUS_PROCESSED
     assert second["status"] == inbound_service.STATUS_PROCESSED
@@ -671,23 +673,12 @@ async def test_replay_event_can_include_payload_for_single_event_inspection(
             )
         )["projection"]
 
-    result = await inbound_service.submit_inbound_envelope(
+    result = await _submit_issue_signal(
         seeded_session,
-        connection={
-            "connection_id": connection["id"],
-            "org_id": ORG_ID,
-            "owner_user_id": USER_ID,
-            "display_name": "Jira webhook",
-            "agent_kind": "jira",
-            "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
-        },
-        envelope={
-            "kind": "signal",
-            "origin": "jira.issue_created",
-            "payload": {"issue": {"key": "ILO-9", "summary": "Payload replay"}},
-            "idempotency_key": "jira:ILO-9:created",
-        },
-        ingress_context={"surface": "webhook"},
+        connection,
+        origin="jira.issue_created",
+        issue={"key": "ILO-9", "summary": "Payload replay"},
+        idempotency_key="jira:ILO-9:created",
     )
 
     with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
@@ -753,41 +744,19 @@ async def test_source_card_summarizes_connection_and_persists_manual_context(
             )
         )["projection"]
 
-    await inbound_service.submit_inbound_envelope(
+    await _submit_issue_signal(
         seeded_session,
-        connection={
-            "connection_id": connection["id"],
-            "org_id": ORG_ID,
-            "owner_user_id": USER_ID,
-            "display_name": "Jira webhook",
-            "agent_kind": "jira",
-            "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
-        },
-        envelope={
-            "kind": "signal",
-            "origin": "jira.issue_created",
-            "payload": {"issue": {"key": "ILO-10", "summary": "Source card"}},
-            "idempotency_key": "jira:ILO-10:created",
-        },
-        ingress_context={"surface": "webhook"},
+        connection,
+        origin="jira.issue_created",
+        issue={"key": "ILO-10", "summary": "Source card"},
+        idempotency_key="jira:ILO-10:created",
     )
-    await inbound_service.submit_inbound_envelope(
+    await _submit_issue_signal(
         seeded_session,
-        connection={
-            "connection_id": connection["id"],
-            "org_id": ORG_ID,
-            "owner_user_id": USER_ID,
-            "display_name": "Jira webhook",
-            "agent_kind": "jira",
-            "scopes": [external_agents.SCOPE_SIGNAL_SUBMIT],
-        },
-        envelope={
-            "kind": "signal",
-            "origin": "jira.issue_updated",
-            "payload": {"issue": {"summary": "Missing key"}},
-            "idempotency_key": "jira:missing-key",
-        },
-        ingress_context={"surface": "webhook"},
+        connection,
+        origin="jira.issue_updated",
+        issue={"summary": "Missing key"},
+        idempotency_key="jira:missing-key",
     )
 
     with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
