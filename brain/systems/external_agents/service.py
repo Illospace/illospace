@@ -414,6 +414,34 @@ async def list_connections(
     return list((await session.scalars(stmt)).all())
 
 
+async def find_reusable_connection(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    owner_user_id: str,
+    display_name: str,
+    agent_kind: str,
+    transport: str,
+) -> ExternalAgentConnectionRow | None:
+    """Find an active personal-agent connection that represents the same install."""
+
+    stmt = (
+        select(ExternalAgentConnectionRow)
+        .where(
+            ExternalAgentConnectionRow.org_id == str(org_id),
+            ExternalAgentConnectionRow.owner_user_id == str(owner_user_id),
+            func.lower(ExternalAgentConnectionRow.display_name) == str(display_name).strip().lower(),
+            func.lower(ExternalAgentConnectionRow.agent_kind) == str(agent_kind or "custom").strip().lower(),
+            func.lower(ExternalAgentConnectionRow.transport) == str(transport or "bridge_pull").strip().lower(),
+            ExternalAgentConnectionRow.disabled_at.is_(None),
+            func.lower(ExternalAgentConnectionRow.status) != "disabled",
+        )
+        .order_by(ExternalAgentConnectionRow.created_at.desc(), ExternalAgentConnectionRow.id.desc())
+        .limit(1)
+    )
+    return (await session.scalars(stmt)).first()
+
+
 async def disable_connection(
     session: AsyncSession,
     *,
@@ -1580,6 +1608,7 @@ __all__ = [
     "create_external_task_for_idea",
     "create_headless_ask",
     "create_thread_from_agent",
+    "find_reusable_connection",
     "request_source_context",
     "fail_task",
     "generate_connection_token",
