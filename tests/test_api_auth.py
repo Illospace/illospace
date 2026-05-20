@@ -43,7 +43,6 @@ async def test_me_without_session_ignores_localhost_human_fallback(client):
             "org_name": "Example",
             "approved": True,
             "attribution_enabled": True,
-            "default_provider": "anthropic",
         },
     ) as get_localhost_user:
         resp = await client.get("/api/me")
@@ -86,7 +85,6 @@ async def test_register_can_request_access_to_invited_workspace(client):
         "org_slug": "design",
         "approved": False,
         "attribution_enabled": True,
-        "default_provider": None,
     }
     with patch("brain.app.api.routers.auth.async_get_user_by_email", return_value=None), \
         patch("brain.app.api.routers.auth.async_has_any_users", return_value=True), \
@@ -146,7 +144,6 @@ async def test_register_can_create_workspace_after_first_setup(client):
         "org_slug": "new-lab",
         "approved": True,
         "attribution_enabled": True,
-        "default_provider": None,
     }
     with patch("brain.app.api.routers.auth.async_get_user_by_email", return_value=None), \
         patch("brain.app.api.routers.auth.async_has_any_users", return_value=True), \
@@ -181,7 +178,6 @@ async def test_register_workspace_name_wins_over_stale_invite_state(client):
         "org_slug": "fresh-workspace",
         "approved": True,
         "attribution_enabled": True,
-        "default_provider": None,
     }
     with patch("brain.app.api.routers.auth.async_get_user_by_email", return_value=None), \
         patch("brain.app.api.routers.auth.async_has_any_users", return_value=True), \
@@ -306,7 +302,6 @@ async def test_session_auth_preserves_existing_user_context_with_identity_metada
         "org_name": "Example",
         "approved": True,
         "attribution_enabled": False,
-        "default_provider": "anthropic",
     }
     request = _Request(session={"user_id": "user-1"})
 

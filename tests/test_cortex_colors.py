@@ -46,10 +46,6 @@ class TestUserProfileUpdate:
         u = UserProfileUpdate(color="#FF6B35")
         assert u.color == "#FF6B35"
 
-    def test_provider_update(self):
-        u = UserProfileUpdate(default_provider="openai")
-        assert u.default_provider == "openai"
-
     def test_partial_update(self):
         u = UserProfileUpdate()
         dumped = u.model_dump(exclude_unset=True)

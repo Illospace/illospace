@@ -112,7 +112,7 @@ async def test_materialize_github_project_context_uses_vault_key_without_persist
 
     def fake_get_secret(key_name, **kwargs):
         assert key_name == "GITHUB_EXAMPLE_TOKEN"
-        assert kwargs["user_id"] == "user-1"
+        assert kwargs["actor_user_id"] == "user-1"
         assert kwargs["org_id"] == "org-1"
         assert kwargs["accessed_by"] == "api"
         return "test-private-token"
@@ -194,8 +194,8 @@ async def test_materialize_github_project_context_finds_general_github_token(tmp
         async def __aexit__(self, *_args):
             return False
 
-    def fake_list_secrets(user_id, category=None, *, org_id=None):
-        assert user_id == "user-1"
+    def fake_list_secrets(actor_user_id, category=None, *, org_id=None):
+        assert actor_user_id == "user-1"
         assert org_id == "org-1"
         if category == "github":
             return []
@@ -207,7 +207,7 @@ async def test_materialize_github_project_context_finds_general_github_token(tmp
 
     def fake_get_secret(key_name, **kwargs):
         assert key_name == "GITHUB_TOKEN"
-        assert kwargs["user_id"] == "user-1"
+        assert kwargs["actor_user_id"] == "user-1"
         assert kwargs["org_id"] == "org-1"
         assert kwargs["accessed_by"] == "api"
         return "general-github-token"

@@ -368,7 +368,6 @@ async def _query_team_members(
             "role": user.role,
             "approved": bool(user.approved),
             "attribution_enabled": bool(user.attribution_enabled),
-            "default_provider": user.default_provider,
             "provenance": {"table": "users", "id": str(user.id)},
         }
         for user in rows

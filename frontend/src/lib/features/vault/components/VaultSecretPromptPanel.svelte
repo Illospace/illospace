@@ -47,7 +47,7 @@
   let showSecret = $state(false);
 
   const canSave = $derived(
-    Boolean(keyName.trim() && secretValue.trim() && !saving && !vaultLocked),
+    Boolean(keyName.trim() && secretValue.trim() && hasPin && !saving && !vaultLocked),
   );
 
   $effect(() => {
@@ -106,6 +106,13 @@
 
   function handleVaultError(err: any, fallback: string) {
     if (err?.status === 423) {
+      if (err?.detail === 'Vault PIN setup required') {
+        hasPin = false;
+        vaultToken = null;
+        vaultLocked = false;
+        ui.toast('Set your Vault PIN in Vault before saving secrets.', 'error');
+        return;
+      }
       vaultToken = null;
       vaultLocked = true;
       ui.toast('Vault locked. Unlock to continue.', 'error');

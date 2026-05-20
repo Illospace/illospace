@@ -55,14 +55,12 @@ from brain.platform.db.repositories.team import (
     OrgApiKeyRepository,
     OrgRepository,
     TeamRepository,
-    UserApiKeyRepository,
 )
 from brain.platform.db.repositories.scratchpad import ScratchpadRepository
 from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
 from brain.platform.db.repositories.vault import (
     VaultAccessLogRepository,
     VaultRepository,
-    VaultShareRepository,
 )
 
 RepoT = TypeVar("RepoT")
@@ -210,10 +208,6 @@ class UnitOfWork:
         return self._repo(VaultRepository)
 
     @cached_property
-    def vault_shares(self):
-        return self._repo(VaultShareRepository)
-
-    @cached_property
     def vault_access_log(self):
         return self._repo(VaultAccessLogRepository)
 
@@ -235,10 +229,6 @@ class UnitOfWork:
     @cached_property
     def team(self):
         return self._repo(TeamRepository)
-
-    @cached_property
-    def user_api_keys(self):
-        return self._repo(UserApiKeyRepository)
 
     @cached_property
     def org_api_keys(self):

@@ -34,7 +34,7 @@ class _AsyncSession:
 
 
 def _personal_openai_status():
-    return {"runtime_key_available": True, "runtime_key_source": "user_default"}
+    return {"runtime_key_available": True, "runtime_key_source": "codex_subscription"}
 
 
 async def test_runtime_ready_intro_reuses_existing_thread():

@@ -118,13 +118,13 @@ async def async_get_context(
     try:
         from brain.systems.vault import async_list_secrets, async_get_missing_requests
         if user_id:
-            vault_secrets = await async_list_secrets(user_id=user_id, org_id=org_id)
+            vault_secrets = await async_list_secrets(actor_user_id=user_id, org_id=org_id)
             vault_names_by_category = {}
             for s in vault_secrets:
                 cat = s.get('category', 'general')
                 vault_names_by_category.setdefault(cat, []).append(s['key_name'])
             result["vault_inventory"] = vault_names_by_category
-        result["vault_missing"] = await async_get_missing_requests(user_id=user_id, org_id=org_id)
+        result["vault_missing"] = await async_get_missing_requests(actor_user_id=user_id, org_id=org_id)
     except Exception:
         pass  # vault not available, skip
 

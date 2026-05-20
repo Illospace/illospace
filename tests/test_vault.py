@@ -1,13 +1,20 @@
-"""Tests for brain.systems.vault — Secret Vault (ORM-based)."""
+"""Tests for the org-owned secret vault service."""
 
-import os
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-
 from cryptography.fernet import Fernet
 
-# Generate a stable test key
+from brain.platform.db.models.vault import Secret, VaultAccessLog
+from brain.platform import vault_crypto
+from brain.systems import vault
+
 TEST_KEY = Fernet.generate_key().decode()
+ORG_ID = "org-1"
+ACTOR_ID = "user-1"
 
 
 @pytest.fixture(autouse=True)
@@ -15,203 +22,250 @@ def set_vault_key(monkeypatch):
     monkeypatch.setenv("VAULT_MASTER_KEY", TEST_KEY)
 
 
-def _make_awaitable_attr(obj, name: str) -> None:
-    current = getattr(obj, name)
-    if isinstance(current, AsyncMock):
-        return
-    replacement = AsyncMock()
-    replacement.return_value = current.return_value
-    replacement.side_effect = current.side_effect
-    setattr(obj, name, replacement)
+class _Session:
+    def __init__(self) -> None:
+        self.added = []
+        self.deleted = []
+        self.flushes = 0
+
+    def add(self, obj) -> None:
+        self.added.append(obj)
+
+    async def delete(self, obj) -> None:
+        self.deleted.append(obj)
+
+    async def flush(self) -> None:
+        self.flushes += 1
+        for obj in self.added:
+            if getattr(obj, "id", None) is None:
+                obj.id = 11
 
 
-def _async_uow(mock_uow):
-    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
-    mock_uow.__aexit__ = AsyncMock(return_value=False)
-    _make_awaitable_attr(mock_uow.vault, "get_by_key")
-    _make_awaitable_attr(mock_uow.session, "scalars")
-    _make_awaitable_attr(mock_uow.session, "execute")
-    mock_uow.session.flush = AsyncMock()
-    mock_uow.session.delete = AsyncMock()
-    return mock_uow
+class _UoW:
+    def __init__(self, session: _Session) -> None:
+        self.session = session
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def _patch_uow(monkeypatch, session: _Session) -> None:
+    monkeypatch.setattr(vault, "UnitOfWork", lambda: _UoW(session))
+
+
+def _patch_secret_lookup(monkeypatch, secret) -> None:
+    async def fake_secret_by_key(*_args, **_kwargs):
+        return secret
+
+    monkeypatch.setattr(vault, "_async_secret_by_key", fake_secret_by_key)
 
 
 def test_encrypt_decrypt_roundtrip():
-    from brain.systems.vault import _encrypt, _decrypt
     plaintext = "super-secret-api-key-12345"
-    encrypted = _encrypt(plaintext)
+    encrypted = vault._encrypt(plaintext)
     assert isinstance(encrypted, bytes)
-    assert _decrypt(encrypted) == plaintext
+    assert vault._decrypt(encrypted) == plaintext
 
 
 def test_encrypt_decrypt_special_chars():
-    from brain.systems.vault import _encrypt, _decrypt
-    value = "p@$$w0rd!\U0001f511 with spaces & symbols=+/"
-    assert _decrypt(_encrypt(value)) == value
-
-
-async def test_set_secret(mock_uow):
-    from brain.systems.vault import set_secret
-    mock_uow.vault.get_by_key.return_value = None
-    _async_uow(mock_uow)
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        await set_secret("MY_KEY", "my_value", user_id="user-1", description="test", category="api")
-    # Should add the Secret and the VaultAccessLog
-    assert mock_uow.session.add.call_count >= 1
-
-
-async def test_get_secret_found(mock_uow):
-    from brain.systems.vault import get_secret, _encrypt
-    encrypted = _encrypt("found_value")
-    mock_secret = MagicMock()
-    mock_secret.encrypted_value = encrypted
-    mock_secret.id = 1
-    mock_secret.last_accessed_at = None
-    mock_secret.access_count = 0
-    mock_uow.vault.get_by_key.return_value = mock_secret
-    _async_uow(mock_uow)
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = await get_secret("MY_KEY", user_id="user-1")
-    assert result == "found_value"
-
-
-async def test_get_secret_normalizes_integration_access_actor(mock_uow):
-    from brain.platform.db.models.vault import VaultAccessLog
-    from brain.systems.vault import get_secret, _encrypt
-
-    encrypted = _encrypt("github-token")
-    mock_secret = MagicMock()
-    mock_secret.encrypted_value = encrypted
-    mock_secret.id = 40
-    mock_secret.last_accessed_at = None
-    mock_secret.access_count = 0
-    mock_uow.vault.get_by_key.return_value = mock_secret
-    _async_uow(mock_uow)
-
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = await get_secret("GITHUB_EXAMPLE_TOKEN", user_id="user-1", accessed_by="github_connector")
-
-    assert result == "github-token"
-    access_logs = [
-        call.args[0]
-        for call in mock_uow.session.add.call_args_list
-        if isinstance(call.args[0], VaultAccessLog)
-    ]
-    assert len(access_logs) == 1
-    assert access_logs[0].accessed_by == "api"
-
-
-async def test_get_secret_not_found_fallback_env(mock_uow, monkeypatch):
-    from brain.systems.vault import get_secret
-    mock_uow.vault.get_by_key.return_value = None
-    mock_uow.session.scalars.return_value.first.return_value = None
-    monkeypatch.setenv("FALLBACK_KEY", "env_value")
-    _async_uow(mock_uow)
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow), \
-         patch("brain.systems.vault._async_record_missing", new=AsyncMock()):
-        result = await get_secret("FALLBACK_KEY", user_id="user-1", allow_env_fallback=True)
-    assert result == "env_value"
-
-
-async def test_get_secret_missing_returns_none(mock_uow):
-    from brain.systems.vault import get_secret
-    mock_uow.vault.get_by_key.return_value = None
-    mock_uow.session.scalars.return_value.first.return_value = None
-    _async_uow(mock_uow)
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow), \
-         patch("brain.systems.vault._async_record_missing", new=AsyncMock()) as record_missing:
-        result = await get_secret("NONEXISTENT_KEY_XYZ", user_id="user-1", org_id="org-1")
-    assert result is None
-    record_missing.assert_awaited_once_with("NONEXISTENT_KEY_XYZ", user_id="user-1", org_id="org-1")
-
-
-async def test_delete_secret_existed(mock_uow):
-    from brain.systems.vault import delete_secret
-    mock_secret = MagicMock()
-    mock_secret.id = 1
-    mock_uow.vault.get_by_key.return_value = mock_secret
-    _async_uow(mock_uow)
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        assert await delete_secret("MY_KEY", user_id="user-1") is True
-
-
-async def test_delete_secret_not_found(mock_uow):
-    from brain.systems.vault import delete_secret
-    mock_uow.vault.get_by_key.return_value = None
-    _async_uow(mock_uow)
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        assert await delete_secret("NOPE", user_id="user-1") is False
-
-
-async def test_list_secrets_no_values(mock_uow):
-    from brain.systems.vault import list_secrets
-    mock_uow.session.scalars.return_value.all.return_value = []
-    mock_uow.session.execute.return_value.all.return_value = []
-    _async_uow(mock_uow)
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = await list_secrets(user_id="user-1")
-    assert isinstance(result, list)
-
-
-async def test_list_secrets_with_category_filter(mock_uow):
-    from brain.systems.vault import list_secrets
-    mock_uow.session.scalars.return_value.all.return_value = []
-    _async_uow(mock_uow)
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = await list_secrets(user_id="user-1", category="api")
-    assert isinstance(result, list)
-
-
-async def test_list_secrets_no_category(mock_uow):
-    from brain.systems.vault import list_secrets
-    mock_uow.session.scalars.return_value.all.return_value = []
-    _async_uow(mock_uow)
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = await list_secrets(user_id="user-1")
-    assert isinstance(result, list)
-
-
-async def test_set_secret_upsert(mock_uow):
-    """set_secret should upsert via ORM."""
-    from brain.systems.vault import set_secret
-    # First call: no existing
-    mock_uow.vault.get_by_key.return_value = None
-    _async_uow(mock_uow)
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        await set_secret("KEY", "val1", user_id="user-1")
-    # Second call: existing
-    existing = MagicMock()
-    mock_uow.vault.get_by_key.return_value = existing
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        await set_secret("KEY", "val2", user_id="user-1")
-    # Existing should have been updated
-    assert existing.encrypted_value is not None
-
-
-async def test_reveal_secret_calls_get_secret(mock_uow):
-    from brain.systems.vault import reveal_secret, _encrypt
-    encrypted = _encrypt("revealed")
-    mock_secret = MagicMock()
-    mock_secret.encrypted_value = encrypted
-    mock_secret.id = 1
-    mock_secret.last_accessed_at = None
-    mock_secret.access_count = 0
-    mock_uow.vault.get_by_key.return_value = mock_secret
-    _async_uow(mock_uow)
-    with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-        result = await reveal_secret("MY_KEY", user_id="user-1")
-    assert result == "revealed"
+    value = "p@$$w0rd! with spaces & symbols=+/"
+    assert vault._decrypt(vault._encrypt(value)) == value
 
 
 def test_missing_master_key_raises(monkeypatch, tmp_path):
     monkeypatch.delenv("VAULT_MASTER_KEY", raising=False)
     env_file = tmp_path / ".env"
-    with patch("brain.systems.vault.Path") as MockPath:
-        mock_path = MagicMock()
-        mock_path.resolve.return_value.parent.__truediv__ = lambda self, x: env_file if x == ".env" else tmp_path / x
-        MockPath.return_value = mock_path
 
-        from brain.systems.vault import _get_fernet
-        monkeypatch.delenv("VAULT_MASTER_KEY", raising=False)
-        with pytest.raises(RuntimeError, match="VAULT_MASTER_KEY is required"):
-            _get_fernet()
+    class _MockPath:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __truediv__(self, value):
+            return env_file if value == ".env" else tmp_path / value
+
+    monkeypatch.setattr(vault_crypto, "Path", _MockPath)
+
+    with pytest.raises(RuntimeError, match="VAULT_MASTER_KEY is required"):
+        vault._get_fernet()
+
+
+@pytest.mark.asyncio
+async def test_set_secret_creates_org_secret_and_audit_log(monkeypatch):
+    session = _Session()
+    _patch_uow(monkeypatch, session)
+    monkeypatch.setattr(vault, "_encrypt", lambda value: b"ciphertext")
+    _patch_secret_lookup(monkeypatch, None)
+
+    resolved_missing = []
+
+    async def fake_resolve_missing(*args, **kwargs):
+        resolved_missing.append((args, kwargs))
+
+    monkeypatch.setattr(vault, "async_resolve_missing", fake_resolve_missing)
+
+    await vault.async_set_secret(
+        "OPENAI_API_KEY",
+        "sk-test",
+        ACTOR_ID,
+        org_id=ORG_ID,
+        description="OpenAI",
+        category="api",
+        agent_access_level=vault.VAULT_AGENT_ACCESS_AVAILABLE,
+    )
+
+    secret = next(obj for obj in session.added if isinstance(obj, Secret))
+    audit = next(obj for obj in session.added if isinstance(obj, VaultAccessLog))
+    assert secret.org_id == ORG_ID
+    assert secret.created_by_user_id == ACTOR_ID
+    assert secret.updated_by_user_id == ACTOR_ID
+    assert secret.key_name == "OPENAI_API_KEY"
+    assert secret.encrypted_value == b"ciphertext"
+    assert secret.agent_access_level == vault.VAULT_AGENT_ACCESS_AVAILABLE
+    assert audit.org_id == ORG_ID
+    assert audit.actor_user_id == ACTOR_ID
+    assert audit.key_name == "OPENAI_API_KEY"
+    assert audit.action == "write"
+    assert resolved_missing == [(("OPENAI_API_KEY",), {"actor_user_id": ACTOR_ID, "org_id": ORG_ID})]
+
+
+@pytest.mark.asyncio
+async def test_set_secret_updates_org_secret_in_place(monkeypatch):
+    session = _Session()
+    existing = SimpleNamespace(
+        id=22,
+        encrypted_value=b"old",
+        description="old",
+        category="old",
+        org_id=ORG_ID,
+        created_by_user_id="user-2",
+        updated_by_user_id="user-2",
+        agent_access_level=vault.VAULT_AGENT_ACCESS_ASK,
+        updated_at=datetime.now(timezone.utc),
+    )
+    _patch_uow(monkeypatch, session)
+    monkeypatch.setattr(vault, "_encrypt", lambda value: b"new")
+    _patch_secret_lookup(monkeypatch, existing)
+
+    async def fake_resolve_missing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(vault, "async_resolve_missing", fake_resolve_missing)
+
+    await vault.async_set_secret("KEY", "value", ACTOR_ID, org_id=ORG_ID, category="api")
+
+    assert existing.encrypted_value == b"new"
+    assert existing.org_id == ORG_ID
+    assert existing.created_by_user_id == "user-2"
+    assert existing.updated_by_user_id == ACTOR_ID
+    assert existing.category == "api"
+    assert not any(isinstance(obj, Secret) for obj in session.added)
+
+
+@pytest.mark.asyncio
+async def test_get_secret_reads_org_secret_and_normalizes_integration_audit(monkeypatch):
+    session = _Session()
+    secret = SimpleNamespace(
+        id=9,
+        encrypted_value=b"ciphertext",
+        last_accessed_at=None,
+        access_count=0,
+    )
+    _patch_uow(monkeypatch, session)
+    _patch_secret_lookup(monkeypatch, secret)
+    monkeypatch.setattr(vault, "_decrypt", lambda value: "plain")
+
+    value = await vault.async_get_secret(
+        "GITHUB_TOKEN",
+        ACTOR_ID,
+        org_id=ORG_ID,
+        accessed_by="github_connector",
+    )
+
+    audit = next(obj for obj in session.added if isinstance(obj, VaultAccessLog))
+    assert value == "plain"
+    assert secret.access_count == 1
+    assert secret.last_accessed_at is not None
+    assert audit.org_id == ORG_ID
+    assert audit.actor_user_id == ACTOR_ID
+    assert audit.accessed_by == "api"
+
+
+@pytest.mark.asyncio
+async def test_get_secret_missing_records_org_request(monkeypatch):
+    session = _Session()
+    _patch_uow(monkeypatch, session)
+    _patch_secret_lookup(monkeypatch, None)
+    recorded = []
+
+    async def fake_record_missing(*args, **kwargs):
+        recorded.append((args, kwargs))
+
+    monkeypatch.setattr(vault, "_async_record_missing", fake_record_missing)
+
+    result = await vault.async_get_secret("MISSING_KEY", ACTOR_ID, org_id=ORG_ID)
+
+    assert result is None
+    assert recorded == [(("MISSING_KEY",), {"actor_user_id": ACTOR_ID, "org_id": ORG_ID})]
+
+
+@pytest.mark.asyncio
+async def test_get_secret_env_fallback_does_not_create_missing_request(monkeypatch):
+    session = _Session()
+    _patch_uow(monkeypatch, session)
+    _patch_secret_lookup(monkeypatch, None)
+    monkeypatch.setenv("FALLBACK_KEY", "env-value")
+
+    async def fail_record_missing(*_args, **_kwargs):
+        raise AssertionError("env fallback should not record a missing vault secret")
+
+    monkeypatch.setattr(vault, "_async_record_missing", fail_record_missing)
+
+    assert (
+        await vault.async_get_secret(
+            "FALLBACK_KEY",
+            ACTOR_ID,
+            org_id=ORG_ID,
+            allow_env_fallback=True,
+        )
+        == "env-value"
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_secret_deletes_org_secret_and_audits(monkeypatch):
+    session = _Session()
+    secret = SimpleNamespace(id=12)
+    _patch_uow(monkeypatch, session)
+    _patch_secret_lookup(monkeypatch, secret)
+
+    deleted = await vault.async_delete_secret("OPENAI_API_KEY", ACTOR_ID, org_id=ORG_ID)
+
+    audit = next(obj for obj in session.added if isinstance(obj, VaultAccessLog))
+    assert deleted is True
+    assert session.deleted == [secret]
+    assert audit.org_id == ORG_ID
+    assert audit.actor_user_id == ACTOR_ID
+    assert audit.action == "delete"
+
+
+@pytest.mark.asyncio
+async def test_delete_secret_returns_false_when_missing(monkeypatch):
+    session = _Session()
+    _patch_uow(monkeypatch, session)
+    _patch_secret_lookup(monkeypatch, None)
+
+    assert await vault.async_delete_secret("NOPE", ACTOR_ID, org_id=ORG_ID) is False
+    assert session.added == []
+    assert session.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_vault_operations_require_org_and_real_actor():
+    with pytest.raises(ValueError, match="org_id is required"):
+        await vault.async_get_secret("KEY", ACTOR_ID, org_id=None)
+
+    with pytest.raises(ValueError, match="actor_user_id is required"):
+        await vault.async_set_secret("KEY", "value", "service:worker", org_id=ORG_ID)

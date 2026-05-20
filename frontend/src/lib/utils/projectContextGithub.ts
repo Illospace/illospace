@@ -16,7 +16,6 @@ export type VaultSecret = {
   key_name: string;
   description?: string;
   category?: string;
-  is_shared?: boolean;
 };
 
 export function normalizeGitHubToken(value: string): string {

@@ -339,30 +339,11 @@ async def async_resolve_provider_selection(
     preferred = (preferred_provider or "").strip().lower()
     fallback_provider = normalize_default_provider(fallback or get_active_provider())
     try:
-        effective_org_id = org_id
-        if user_id:
-            user_row = (
-                await session.execute(
-                    text(
-                        """
-                        SELECT u.org_id, u.default_provider, k.provider AS key_provider
-                        FROM users u
-                        LEFT JOIN user_api_keys k ON k.id = u.default_api_key_id
-                        WHERE u.id = :user_id
-                        LIMIT 1
-                        """
-                    ),
-                    {"user_id": user_id},
-                )
-            ).mappings().first()
-            if user_row:
-                explicit_provider = (user_row.get("default_provider") or "").strip().lower()
-                if explicit_provider in DEFAULT_PROVIDER_MODEL_MAPS:
-                    return ProviderResolution(provider=normalize_default_provider(explicit_provider), source="user_default", explicit=True)
-                key_provider = (user_row.get("key_provider") or "").strip().lower()
-                if key_provider in DEFAULT_PROVIDER_MODEL_MAPS:
-                    return ProviderResolution(provider=normalize_default_provider(key_provider), source="user_default_api_key", explicit=True)
-                effective_org_id = effective_org_id or user_row.get("org_id")
+        effective_org_id = await async_resolve_effective_org_id(
+            session,
+            user_id=user_id,
+            org_id=org_id,
+        )
         if effective_org_id:
             org_row = (
                 await session.execute(
@@ -392,10 +373,9 @@ def resolve_default_provider(
     """Resolve the effective provider for a user/org context.
 
     Order:
-    1. User explicit default_provider
-    2. User default API key provider
-    3. Org memory_model_config.default_provider
-    4. Fallback / env active provider
+    1. Org memory_model_config.default_provider
+    2. Preferred provider
+    3. Fallback / env active provider
     """
     return resolve_provider_selection(
         user_id=user_id,

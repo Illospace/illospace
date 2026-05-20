@@ -137,12 +137,6 @@ class TestModelPolicy:
 
         def execute_side_effect(stmt, params=None):
             sql = str(stmt)
-            if "FROM users u" in sql:
-                return _AsyncMappingResult(first={
-                    "org_id": "org-1",
-                    "default_provider": "openai",
-                    "key_provider": None,
-                })
             if "SELECT model_tier, thinking_tier" in sql:
                 return _AsyncMappingResult(first=row)
             if "SELECT org_id FROM users" in sql:
@@ -172,16 +166,14 @@ class TestModelPolicy:
         assert thinking == "medium"
 
     @pytest.mark.asyncio
-    async def test_resolve_default_provider_prefers_user_override_then_org(self):
+    async def test_resolve_default_provider_uses_org_default(self):
         from brain.platform.providers.model_policy import async_resolve_default_provider
 
-        session = _AsyncPolicySession(
-            lambda stmt, params=None: _AsyncMappingResult(first={
-                "org_id": "org-1",
-                "default_provider": "openai",
-                "key_provider": "anthropic",
-            })
-        )
+        results = [
+            _AsyncMappingResult(first={"org_id": "org-1"}),
+            _AsyncMappingResult(first={"memory_model_config": {"default_provider": "openai"}}),
+        ]
+        session = _AsyncPolicySession(lambda stmt, params=None: results.pop(0))
         assert await async_resolve_default_provider(session, user_id="user-1") == "openai"
 
     @pytest.mark.asyncio
@@ -189,11 +181,7 @@ class TestModelPolicy:
         from brain.platform.providers.model_policy import async_resolve_default_provider
 
         results = [
-            _AsyncMappingResult(first={
-                "org_id": "org-1",
-                "default_provider": None,
-                "key_provider": None,
-            }),
+            _AsyncMappingResult(first={"org_id": "org-1"}),
             _AsyncMappingResult(first={
                 "memory_model_config": {"default_provider": "anthropic"},
             }),
@@ -206,11 +194,7 @@ class TestModelPolicy:
         from brain.platform.providers.model_policy import async_resolve_default_provider
 
         results = [
-            _AsyncMappingResult(first={
-                "org_id": "org-1",
-                "default_provider": None,
-                "key_provider": None,
-            }),
+            _AsyncMappingResult(first={"org_id": "org-1"}),
             _AsyncMappingResult(first={"memory_model_config": {}}),
         ]
         session = _AsyncPolicySession(lambda stmt, params=None: results.pop(0))

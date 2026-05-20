@@ -911,13 +911,11 @@ async def _get_llm_info(user: dict, db: AsyncSession | None = None) -> dict | No
         from brain.platform.provider_health import provider_health_snapshot
 
         org = await db.get(Org, org_id)
-        db_user = await db.get(User, user.get("id")) if user.get("id") else None
         if not org:
             return None
         config = org.memory_model_config or {}
         effective_provider = await async_resolve_default_provider(db, user_id=user.get("id"), org_id=org_id)
         org_default = config.get("default_provider") or effective_provider
-        user_default = getattr(db_user, "default_provider", None) if db_user else None
         low_model = _normalize_llm_model_value(
             await async_get_model_for_tier(
                 db,
@@ -933,7 +931,6 @@ async def _get_llm_info(user: dict, db: AsyncSession | None = None) -> dict | No
         return {
             "default_provider": org_default,
             "org_default_provider": org_default,
-            "user_default_provider": user_default,
             "effective_provider": effective_provider,
             "harvest_model": low_model,
             "consolidation_model": low_model,

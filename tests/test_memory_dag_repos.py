@@ -76,7 +76,7 @@ async def session():
                 id TEXT PRIMARY KEY, org_id TEXT, name TEXT, email TEXT,
                 color TEXT, role TEXT, password_hash TEXT, vault_salt BLOB,
                 attribution_enabled INTEGER, approved INTEGER,
-                default_api_key_id INTEGER, created_at TEXT
+                created_at TEXT
             )
         """))
         await conn.execute(text("""

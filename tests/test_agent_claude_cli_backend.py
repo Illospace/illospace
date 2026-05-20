@@ -8,7 +8,7 @@ def _make_llm_mock(is_oauth: bool, client: MagicMock):
     llm = MagicMock()
     llm.client = client
     llm.provider = "anthropic"
-    llm.source = "user_default"
+    llm.source = "org_main"
     llm.is_oauth = is_oauth
     llm.extra_headers = {"anthropic-beta": "oauth-2025-04-20"} if is_oauth else {}
     llm.token_prefix = "sk-ant-oat01-real" if is_oauth else "sk-ant-api03-test"

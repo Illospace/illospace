@@ -8,14 +8,12 @@ from brain.app.api.authorization import (
     PERMISSION_SKILLS_MANAGE,
     PERMISSION_SYSTEM_MANAGE,
     PERMISSION_VAULT_AUDIT,
-    PERMISSION_VAULT_SHARE,
     can_manage_run,
     can_manage_memory,
     can_manage_scheduler,
     can_manage_skills,
     can_manage_system,
     can_audit_vault,
-    can_share_vault,
     has_permission,
     require_org_context,
     require_permission,
@@ -48,7 +46,6 @@ def test_service_principal_context_has_audit_identity_and_permissions():
     assert can_manage_memory(user) is True
     assert can_manage_skills(user) is True
     assert can_manage_system(user) is True
-    assert can_share_vault(user) is True
     assert can_audit_vault(user) is True
 
 
@@ -61,7 +58,6 @@ def test_owner_and_admin_roles_keep_management_permissions():
     assert has_permission(admin, PERMISSION_SCHEDULER_MANAGE) is True
     assert has_permission(owner, PERMISSION_SKILLS_MANAGE) is True
     assert has_permission(admin, PERMISSION_SYSTEM_MANAGE) is True
-    assert has_permission(owner, PERMISSION_VAULT_SHARE) is True
     assert has_permission(admin, PERMISSION_VAULT_AUDIT) is True
     assert has_permission(member, PERMISSION_MEMORY_MANAGE) is False
 

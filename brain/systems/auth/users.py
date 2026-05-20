@@ -55,7 +55,6 @@ def _user_to_dict(user: User, org: Org | None = None) -> dict:
         "org_id": str(user.org_id),
         "attribution_enabled": user.attribution_enabled,
         "approved": user.approved,
-        "default_provider": user.default_provider,
         "password_hash": user.password_hash,
     }
     if org:
@@ -324,7 +323,6 @@ def safe_user_context(user: dict) -> dict:
         "org_slug":            user.get("org_slug", ""),
         "attribution_enabled": user.get("attribution_enabled", True),
         "approved":            user.get("approved", False),
-        "default_provider":    user.get("default_provider"),
     }
 
 

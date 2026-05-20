@@ -32,7 +32,7 @@ def _mock_llm_client(mock_anthropic_client, provider="anthropic"):
     llm = MagicMock()
     llm.client = mock_anthropic_client
     llm.provider = provider
-    llm.source = "user_default"
+    llm.source = "org_main"
     llm.is_oauth = False
     llm.extra_headers = {}
     llm.token_prefix = "sk-ant-api03-test" if provider == "anthropic" else "sk-openai-test"

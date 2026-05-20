@@ -156,6 +156,7 @@ class FastRecipe(BaseRunRecipe):
                 "org_id": runtime.request.org_id,
                 "profile": "fast",
                 "recipe": self.name,
+                "execution_provenance": runtime.request.metadata,
                 "target_ref": runtime.request.target_ref,
                 "workspace_ref": runtime.request.workspace_ref,
                 "thread_attachment_context": _thread_attachment_context(runtime),

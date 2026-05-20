@@ -14,7 +14,7 @@ async def test_add_api_key_trusts_failed_setup_token_verification():
     from brain.app.api.routers.cortex import add_api_key
 
     request = _mock_request({"provider": "anthropic", "label": "default", "api_key": "sk-ant-oat01-test-token"})
-    user = {"id": "user-1"}
+    user = {"id": "user-1", "org_id": "org-1", "role": "owner"}
 
     with patch("brain.app.api.routers.cortex._auth_keys._verify_provider_api_key", side_effect=RuntimeError("401 invalid x-api-key")), \
          patch("brain.app.api.routers.cortex._auth_keys._should_trust_failed_key_verification", return_value=True), \
@@ -25,7 +25,7 @@ async def test_add_api_key_trusts_failed_setup_token_verification():
         resp = await add_api_key(request, user, db=_AsyncSession(session))
 
     assert resp["id"] == 42
-    assert resp["status"] == "stored"
+    assert resp["status"] == "org_key_stored"
     assert resp["verified"] is False
     assert "401 invalid x-api-key" in resp["verify_error"]
     session.add.assert_called_once()
@@ -47,7 +47,7 @@ async def test_set_org_main_key_trusts_failed_setup_token_verification():
     assert resp["status"] == "org_key_stored"
     assert resp["verified"] is False
     assert "401 invalid x-api-key" in resp["verify_error"]
-    mock_session.execute.assert_called_once()
+    assert resp["id"] is not None
 
 
 def test_parse_provider_connect_token_accepts_openai_codex_payload():

@@ -11,7 +11,6 @@ interface User {
   org_slug?: string;
   attribution_enabled: boolean;
   approved: boolean;
-  default_provider?: string | null;
 }
 
 class AuthStore {

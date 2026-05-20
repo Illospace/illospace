@@ -7,24 +7,19 @@ import pytest
 async def test_provider_auth_status_reports_openai_codex_runtime():
     from types import SimpleNamespace
 
-    from brain.platform.db.models.org import UserApiKey
+    from brain.platform.db.models.org import UserCodexConnection
     from brain.systems.services.runtime_introspection import async_get_provider_auth_status
 
     mock_session = MagicMock()
-    mock_session.get = AsyncMock(
-        side_effect=[
-            SimpleNamespace(default_api_key_id=123),
-            SimpleNamespace(id=123, provider="openai", is_active=True, label=None),
-        ]
-    )
     mock_session.scalars = AsyncMock(
         side_effect=[
             SimpleNamespace(first=lambda: 1),
             SimpleNamespace(first=lambda: None),
+            SimpleNamespace(first=lambda: SimpleNamespace(id=123, label=None)),
         ]
     )
 
-    mock_llm = MagicMock(source="user_default", auth_mode="chatgpt", is_oauth=False)
+    mock_llm = MagicMock(source="codex_subscription", auth_mode="chatgpt", is_oauth=False)
 
     with patch("brain.systems.services.runtime_introspection.async_resolve_llm_client", AsyncMock(return_value=mock_llm)), \
          patch("brain.systems.services.runtime_introspection.async_resolve_default_provider", AsyncMock(return_value="openai")):
@@ -34,8 +29,9 @@ async def test_provider_auth_status_reports_openai_codex_runtime():
     assert data["effective_provider"] == "openai"
     assert data["status"] == "in_use"
     assert data["method"] == "chatgpt"
-    assert data["runtime_key_source"] == "user_default"
-    assert mock_session.get.await_args_list[-1].args[0] is UserApiKey
+    assert data["runtime_key_source"] == "codex_subscription"
+    stmt = mock_session.scalars.await_args_list[-1].args[0]
+    assert UserCodexConnection.__tablename__ in str(stmt)
 
 
 @pytest.mark.asyncio
@@ -92,7 +88,7 @@ async def test_store_openai_connection_reports_missing_vault_master_key(monkeypa
         raise RuntimeError("VAULT_MASTER_KEY is required. Refusing to auto-generate a vault key.")
 
     monkeypatch.setattr(auth_settings, "verify_provider_api_key", lambda *args, **kwargs: None)
-    monkeypatch.setattr(auth_settings, "async_set_api_key", raise_missing_vault_key)
+    monkeypatch.setattr(auth_settings, "async_set_org_api_key", raise_missing_vault_key)
 
     with pytest.raises(Exception) as exc:
         await auth_settings.async_store_openai_connection(
@@ -135,7 +131,7 @@ async def test_connect_openai_embedding_key_updates_memory_and_org_runtime(monke
 
     monkeypatch.setattr(auth_settings, "parse_provider_connect_token", lambda token, provider: (token, "api_key"))
     monkeypatch.setattr(auth_settings, "verify_provider_api_key", lambda *args, **kwargs: None)
-    monkeypatch.setattr(auth_settings, "async_set_api_key", AsyncMock(side_effect=AssertionError("runtime key should not be stored")))
+    monkeypatch.setattr(auth_settings, "async_set_user_codex_connection", AsyncMock(side_effect=AssertionError("runtime key should not be stored")))
     monkeypatch.setattr(auth_settings, "_async_store_org_openai_api_key", store_org_key)
     monkeypatch.setattr(memory_settings, "async_configure_openai_embedding_api_key", configure)
     monkeypatch.setattr(memory_settings, "async_get_runtime_memory", AsyncMock(return_value=memory_read))
@@ -164,27 +160,20 @@ async def test_owner_openai_api_key_is_stored_as_org_runtime_key(monkeypatch):
 
     import brain.systems.runtime_settings.auth as auth_settings
 
-    captured = {}
-
-    class FakeSession:
-        async def execute(self, statement, params):
-            captured["params"] = params
-
-    monkeypatch.setattr("brain.systems.vault._encrypt", lambda token: b"encrypted-openai")
+    set_org_key = AsyncMock(return_value=5)
+    monkeypatch.setattr(auth_settings, "async_set_org_api_key", set_org_key)
 
     stored = await auth_settings._async_store_org_openai_api_key(
-        FakeSession(),
+        MagicMock(),
         SimpleNamespace(id="user-1", org_id="org-1", role="owner"),
         "sk-test",
     )
 
     assert stored is True
-    assert captured["params"] == {
-        "org_id": "org-1",
-        "provider": "openai",
-        "encrypted": b"encrypted-openai",
-        "label": "Workspace OpenAI key",
-    }
+    set_org_key.assert_awaited_once()
+    assert set_org_key.await_args.args[:2] == ("org-1", "sk-test")
+    assert set_org_key.await_args.kwargs["provider"] == "openai"
+    assert set_org_key.await_args.kwargs["label"] == "Workspace OpenAI key"
 
 
 @pytest.mark.asyncio

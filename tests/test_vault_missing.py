@@ -1,149 +1,198 @@
-"""Tests for vault missing secret detection and brain context integration.
+"""Tests for org-scoped missing vault secret tracking."""
 
-These tests require a real database connection since they test ORM operations
-end-to-end. Mark them with requires_db to skip when no DB is available.
-"""
-import os
-import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from __future__ import annotations
+
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
-from tests.conftest import requires_db
+import pytest
 
+from brain.platform.db.models.vault import VaultMissingRequest
+from brain.systems import vault
 
-def _make_awaitable_attr(obj, name: str) -> None:
-    current = getattr(obj, name)
-    if isinstance(current, AsyncMock):
-        return
-    replacement = AsyncMock()
-    replacement.return_value = current.return_value
-    replacement.side_effect = current.side_effect
-    setattr(obj, name, replacement)
+ORG_ID = "org-1"
+ACTOR_ID = "user-1"
 
 
-def _async_uow(mock_uow):
-    mock_uow.__aenter__ = AsyncMock(return_value=mock_uow)
-    mock_uow.__aexit__ = AsyncMock(return_value=False)
-    _make_awaitable_attr(mock_uow.session, "scalars")
-    _make_awaitable_attr(mock_uow.session, "execute")
-    _make_awaitable_attr(mock_uow.vault, "get_by_key")
-    mock_uow.session.flush = AsyncMock()
-    mock_uow.session.delete = AsyncMock()
-    return mock_uow
+class _ScalarResult:
+    def __init__(self, first_value=None, all_values=None) -> None:
+        self._first = first_value
+        self._all = all_values if all_values is not None else []
+
+    def first(self):
+        return self._first
+
+    def all(self):
+        return self._all
 
 
-# ---------------------------------------------------------------------------
-# Unit tests with mocked UnitOfWork
-# ---------------------------------------------------------------------------
+class _Session:
+    def __init__(self, *, first_value=None, all_values=None, fail_scalars: Exception | None = None) -> None:
+        self.added = []
+        self.first_value = first_value
+        self.all_values = all_values if all_values is not None else []
+        self.fail_scalars = fail_scalars
 
-class TestRecordMissing:
-    """Test _record_missing() tracking with mocked UnitOfWork."""
+    def add(self, obj) -> None:
+        self.added.append(obj)
 
-    async def test_creates_entry_on_first_call(self, mock_uow):
-        """_record_missing should create a new VaultMissingRequest when none exists."""
-        mock_uow.session.scalars.return_value.first.return_value = None
-        _async_uow(mock_uow)
-        with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-            from brain.systems.vault import _async_record_missing
-            await _async_record_missing("TEST_KEY", user_id="user-1", org_id="org-1")
-        mock_uow.session.add.assert_called_once()
+    async def scalars(self, _stmt):
+        if self.fail_scalars is not None:
+            raise self.fail_scalars
+        return _ScalarResult(self.first_value, self.all_values)
 
-    async def test_increments_count_on_repeat(self, mock_uow):
-        """_record_missing should increment request_count on existing entry."""
-        existing = MagicMock()
-        existing.request_count = 1
-        mock_uow.session.scalars.return_value.first.return_value = existing
-        _async_uow(mock_uow)
-        with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-            from brain.systems.vault import _async_record_missing
-            await _async_record_missing("TEST_KEY", user_id="user-1", org_id="org-1")
-        assert existing.request_count == 2
+    async def flush(self) -> None:
+        for obj in self.added:
+            if getattr(obj, "id", None) is None:
+                obj.id = 11
 
 
-class TestGetMissingRequests:
-    """Test get_missing_requests with mocked UnitOfWork."""
+class _UoW:
+    def __init__(self, session: _Session) -> None:
+        self.session = session
 
-    async def test_returns_unresolved(self, mock_uow):
-        mock_entry = MagicMock()
-        mock_entry.key_name = "MISSING_KEY"
-        mock_entry.request_count = 3
-        mock_entry.first_requested = datetime.now(timezone.utc)
-        mock_entry.last_requested = datetime.now(timezone.utc)
-        mock_entry.user_id = "user-1"
-        mock_entry.org_id = "org-1"
-        mock_uow.session.scalars.return_value.all.return_value = [mock_entry]
-        _async_uow(mock_uow)
-        with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-            from brain.systems.vault import get_missing_requests
-            result = await get_missing_requests(user_id="user-1", org_id="org-1")
-        assert len(result) == 1
-        assert result[0]["key_name"] == "MISSING_KEY"
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
-class TestResolveMissing:
-    """Test resolve_missing with mocked UnitOfWork."""
-
-    async def test_marks_resolved(self, mock_uow):
-        existing = MagicMock()
-        existing.resolved = False
-        mock_uow.session.scalars.return_value.all.return_value = [existing]
-        _async_uow(mock_uow)
-        with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-            from brain.systems.vault import resolve_missing
-            await resolve_missing("TEST_KEY", user_id="user-1", org_id="org-1")
-        assert existing.resolved is True
-
-    async def test_best_effort_when_missing_table_schema_drifts(self, mock_uow):
-        mock_uow.session.scalars.side_effect = RuntimeError("schema drift")
-        _async_uow(mock_uow)
-        with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-            from brain.systems.vault import resolve_missing
-            await resolve_missing("TEST_KEY", user_id="user-1", org_id="org-1")
+def _patch_uow(monkeypatch, session: _Session) -> None:
+    monkeypatch.setattr(vault, "UnitOfWork", lambda: _UoW(session))
 
 
-class TestGetSecretMissingTracking:
-    """Test that get_secret() records missing when not found."""
+@pytest.mark.asyncio
+async def test_record_missing_creates_org_entry(monkeypatch):
+    session = _Session(first_value=None)
+    _patch_uow(monkeypatch, session)
 
-    async def test_get_secret_records_missing_when_not_found(self, mock_uow):
-        from cryptography.fernet import Fernet
-        mock_uow.vault.get_by_key.return_value = None
-        mock_uow.session.scalars.return_value.first.return_value = None
-        _async_uow(mock_uow)
-        with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow), \
-             patch("brain.systems.vault._async_record_missing", new=AsyncMock()) as mock_record, \
-             patch.dict(os.environ, {"TEST_NOTFOUND_KEY": ""}, clear=False):
-            os.environ.pop("TEST_NOTFOUND_KEY", None)
-            from brain.systems.vault import get_secret
-            result = await get_secret("TEST_NOTFOUND_KEY", user_id="user-1", org_id="org-1")
-        assert result is None
-        mock_record.assert_awaited_once_with("TEST_NOTFOUND_KEY", user_id="user-1", org_id="org-1")
+    await vault._async_record_missing("TEST_KEY", actor_user_id=ACTOR_ID, org_id=ORG_ID)
+
+    missing = next(obj for obj in session.added if isinstance(obj, VaultMissingRequest))
+    assert missing.org_id == ORG_ID
+    assert missing.actor_user_id == ACTOR_ID
+    assert missing.key_name == "TEST_KEY"
+    assert missing.request_count == 1
+    assert missing.resolved is False
 
 
-class TestSetSecretResolveMissing:
-    """Test that set_secret() resolves missing requests."""
+@pytest.mark.asyncio
+async def test_record_missing_increments_existing_org_entry(monkeypatch):
+    existing = SimpleNamespace(
+        actor_user_id=None,
+        request_count=1,
+        last_requested=None,
+        resolved=True,
+    )
+    session = _Session(first_value=existing)
+    _patch_uow(monkeypatch, session)
 
-    async def test_set_secret_resolves_missing(self, mock_uow, monkeypatch):
-        from cryptography.fernet import Fernet
-        monkeypatch.setenv("VAULT_MASTER_KEY", Fernet.generate_key().decode())
-        mock_uow.vault.get_by_key.return_value = None
-        _async_uow(mock_uow)
-        with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow), \
-             patch("brain.systems.vault.async_resolve_missing", new=AsyncMock()) as mock_resolve:
-            from brain.systems.vault import set_secret
-            await set_secret("TEST_KEY", "test_value", user_id="user-1", org_id="org-1")
-        mock_resolve.assert_awaited_once_with("TEST_KEY", user_id="user-1", org_id="org-1")
+    await vault._async_record_missing("TEST_KEY", actor_user_id=ACTOR_ID, org_id=ORG_ID)
+
+    assert existing.actor_user_id == ACTOR_ID
+    assert existing.request_count == 2
+    assert existing.last_requested is not None
+    assert existing.resolved is False
+    assert session.added == []
 
 
-class TestBrainContextVault:
-    """Test that brain context includes vault inventory."""
+@pytest.mark.asyncio
+async def test_record_missing_ignores_calls_without_org(monkeypatch):
+    session = _Session(first_value=None)
+    _patch_uow(monkeypatch, session)
 
-    async def test_brain_context_includes_vault(self, mock_uow):
-        """Verify vault functions return proper types when mocked."""
-        mock_uow.session.scalars.return_value.all.return_value = []
-        _async_uow(mock_uow)
-        with patch("brain.systems.vault.UnitOfWork", return_value=mock_uow):
-            from brain.systems.vault import list_secrets, get_missing_requests
-            secrets = await list_secrets(user_id="user-1")
-            missing = await get_missing_requests(user_id="user-1", org_id="org-1")
-            assert isinstance(secrets, list)
-            assert isinstance(missing, list)
+    await vault._async_record_missing("TEST_KEY", actor_user_id=ACTOR_ID, org_id=None)
+
+    assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_get_missing_requests_returns_org_rows(monkeypatch):
+    now = datetime.now(timezone.utc)
+    entry = SimpleNamespace(
+        key_name="MISSING_KEY",
+        request_count=3,
+        first_requested=now,
+        last_requested=now,
+        actor_user_id=ACTOR_ID,
+        org_id=ORG_ID,
+    )
+    session = _Session(all_values=[entry])
+    _patch_uow(monkeypatch, session)
+
+    result = await vault.async_get_missing_requests(actor_user_id=ACTOR_ID, org_id=ORG_ID)
+
+    assert result == [
+        {
+            "key_name": "MISSING_KEY",
+            "request_count": 3,
+            "first_requested": now,
+            "last_requested": now,
+            "actor_user_id": ACTOR_ID,
+            "org_id": ORG_ID,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_missing_marks_all_org_rows_resolved(monkeypatch):
+    existing = SimpleNamespace(resolved=False)
+    session = _Session(all_values=[existing])
+    _patch_uow(monkeypatch, session)
+
+    await vault.async_resolve_missing("TEST_KEY", actor_user_id=ACTOR_ID, org_id=ORG_ID)
+
+    assert existing.resolved is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_missing_is_best_effort_when_schema_drifts(monkeypatch):
+    session = _Session(fail_scalars=RuntimeError("schema drift"))
+    _patch_uow(monkeypatch, session)
+
+    await vault.async_resolve_missing("TEST_KEY", actor_user_id=ACTOR_ID, org_id=ORG_ID)
+
+
+@pytest.mark.asyncio
+async def test_get_secret_records_missing_when_not_found(monkeypatch):
+    session = _Session()
+    _patch_uow(monkeypatch, session)
+
+    async def fake_secret_by_key(*_args, **_kwargs):
+        return None
+
+    recorded = []
+
+    async def fake_record_missing(*args, **kwargs):
+        recorded.append((args, kwargs))
+
+    monkeypatch.setattr(vault, "_async_secret_by_key", fake_secret_by_key)
+    monkeypatch.setattr(vault, "_async_record_missing", fake_record_missing)
+
+    result = await vault.async_get_secret("TEST_NOTFOUND_KEY", ACTOR_ID, org_id=ORG_ID)
+
+    assert result is None
+    assert recorded == [(("TEST_NOTFOUND_KEY",), {"actor_user_id": ACTOR_ID, "org_id": ORG_ID})]
+
+
+@pytest.mark.asyncio
+async def test_set_secret_resolves_org_missing_request(monkeypatch):
+    session = _Session()
+    _patch_uow(monkeypatch, session)
+
+    async def fake_secret_by_key(*_args, **_kwargs):
+        return None
+
+    resolved = []
+
+    async def fake_resolve_missing(*args, **kwargs):
+        resolved.append((args, kwargs))
+
+    monkeypatch.setattr(vault, "_async_secret_by_key", fake_secret_by_key)
+    monkeypatch.setattr(vault, "_encrypt", lambda value: b"ciphertext")
+    monkeypatch.setattr(vault, "async_resolve_missing", fake_resolve_missing)
+
+    await vault.async_set_secret("TEST_KEY", "test_value", ACTOR_ID, org_id=ORG_ID)
+
+    assert resolved == [(("TEST_KEY",), {"actor_user_id": ACTOR_ID, "org_id": ORG_ID})]

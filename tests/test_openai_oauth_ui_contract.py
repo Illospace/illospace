@@ -47,7 +47,7 @@ def test_onboarding_routes_require_personal_openai_connection():
     layout = (ROOT / "frontend/src/routes/+layout.svelte").read_text()
     onboarding = (ROOT / "frontend/src/routes/onboarding/+page.svelte").read_text()
 
-    assert "connection?.source === 'user_default'" in helper
+    assert "connection?.source === 'codex_subscription'" in helper
     assert "requiresPersonalOpenAIOnboarding(runtime)" in login
     assert "requiresPersonalOpenAIOnboarding(runtime)" in layout
     assert "hasPersonalOpenAIRuntimeConnection(runtime)" in onboarding

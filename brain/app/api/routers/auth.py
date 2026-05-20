@@ -38,7 +38,6 @@ def _populate_session(request: Request, ctx: dict):
     request.session["org_name"] = ctx.get("org_name", "")
     request.session["attribution_enabled"] = ctx.get("attribution_enabled", True)
     request.session["approved"] = ctx.get("approved", False)
-    request.session["default_provider"] = ctx.get("default_provider") or ""
 
 
 def _current_user_response(ctx: dict) -> dict:
@@ -52,7 +51,6 @@ def _current_user_response(ctx: dict) -> dict:
         "org_name": ctx.get("org_name", ""),
         "attribution_enabled": ctx.get("attribution_enabled", True),
         "approved": ctx.get("approved", True),
-        "default_provider": ctx.get("default_provider"),
     }
 
 
