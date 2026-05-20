@@ -1549,19 +1549,25 @@ async def async_delete_project_binding(
 
 
 # ---------------------------------------------------------------------------
-# Org vault PIN protection
+# Per-user org vault PIN protection
 # ---------------------------------------------------------------------------
 
-def _pin_hash_key(org_id: str) -> str:
-    return f"pin:org:{org_id}:hash"
+def _pin_scope_key(org_id: str, actor_user_id: str) -> str:
+    clean_org_id = _require_org_id(org_id)
+    clean_actor_user_id = _require_actor_user_id(actor_user_id)
+    return f"pin:org:{clean_org_id}:user:{clean_actor_user_id}"
 
 
-def _pin_failures_key(org_id: str) -> str:
-    return f"pin:org:{org_id}:failures"
+def _pin_hash_key(org_id: str, actor_user_id: str) -> str:
+    return f"{_pin_scope_key(org_id, actor_user_id)}:hash"
 
 
-def _pin_lockout_key(org_id: str) -> str:
-    return f"pin:org:{org_id}:lockout"
+def _pin_failures_key(org_id: str, actor_user_id: str) -> str:
+    return f"{_pin_scope_key(org_id, actor_user_id)}:failures"
+
+
+def _pin_lockout_key(org_id: str, actor_user_id: str) -> str:
+    return f"{_pin_scope_key(org_id, actor_user_id)}:lockout"
 
 
 def _token_hash(token: str) -> str:
@@ -1586,13 +1592,16 @@ def _as_db_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-async def get_pin_status(org_id: str) -> dict:
-    return await async_get_pin_status(org_id)
+async def get_pin_status(org_id: str, actor_user_id: str) -> dict:
+    return await async_get_pin_status(org_id, actor_user_id)
 
 
-async def async_get_pin_status(org_id: str) -> dict:
+async def async_get_pin_status(org_id: str, actor_user_id: str) -> dict:
     clean_org_id = _require_org_id(org_id)
-    lockout = await async_get_config(_pin_lockout_key(clean_org_id))
+    clean_actor_user_id = _require_actor_user_id(actor_user_id)
+    lockout_key = _pin_lockout_key(clean_org_id, clean_actor_user_id)
+    failures_key = _pin_failures_key(clean_org_id, clean_actor_user_id)
+    lockout = await async_get_config(lockout_key)
     locked_until = None
     if lockout:
         try:
@@ -1600,64 +1609,77 @@ async def async_get_pin_status(org_id: str) -> dict:
             if datetime.now(timezone.utc) < lockout_time:
                 locked_until = lockout_time
         except ValueError:
-            await async_delete_config(_pin_lockout_key(clean_org_id))
+            await async_delete_config(lockout_key)
     return {
-        "has_pin": await async_has_pin(clean_org_id),
-        "failed_attempts": int(await async_get_config(_pin_failures_key(clean_org_id)) or "0"),
+        "has_pin": await async_has_pin(clean_org_id, clean_actor_user_id),
+        "failed_attempts": int(await async_get_config(failures_key) or "0"),
         "locked_until": locked_until,
     }
 
 
-async def set_pin(org_id: str, new_pin: str, current_pin: str | None = None) -> bool:
-    return await async_set_pin(org_id, new_pin, current_pin)
+async def set_pin(org_id: str, actor_user_id: str, new_pin: str, current_pin: str | None = None) -> bool:
+    return await async_set_pin(org_id, actor_user_id, new_pin, current_pin)
 
 
-async def async_set_pin(org_id: str, new_pin: str, current_pin: str | None = None) -> bool:
+async def async_set_pin(
+    org_id: str,
+    actor_user_id: str,
+    new_pin: str,
+    current_pin: str | None = None,
+) -> bool:
     clean_org_id = _require_org_id(org_id)
-    if await async_has_pin(clean_org_id) and not await async_verify_pin(clean_org_id, current_pin or ""):
+    clean_actor_user_id = _require_actor_user_id(actor_user_id)
+    if await async_has_pin(clean_org_id, clean_actor_user_id) and not await async_verify_pin(
+        clean_org_id,
+        clean_actor_user_id,
+        current_pin or "",
+    ):
         return False
     pin_hash = bcrypt.hashpw(new_pin.encode(), bcrypt.gensalt()).decode()
-    await async_set_config(_pin_hash_key(clean_org_id), pin_hash)
-    await async_set_config(_pin_failures_key(clean_org_id), "0")
-    await async_delete_config(_pin_lockout_key(clean_org_id))
+    await async_set_config(_pin_hash_key(clean_org_id, clean_actor_user_id), pin_hash)
+    await async_set_config(_pin_failures_key(clean_org_id, clean_actor_user_id), "0")
+    await async_delete_config(_pin_lockout_key(clean_org_id, clean_actor_user_id))
     return True
 
 
-async def has_pin(org_id: str) -> bool:
-    return await async_has_pin(org_id)
+async def has_pin(org_id: str, actor_user_id: str) -> bool:
+    return await async_has_pin(org_id, actor_user_id)
 
 
-async def async_has_pin(org_id: str) -> bool:
-    return await async_get_config(_pin_hash_key(_require_org_id(org_id))) is not None
+async def async_has_pin(org_id: str, actor_user_id: str) -> bool:
+    return await async_get_config(_pin_hash_key(org_id, actor_user_id)) is not None
 
 
-async def verify_pin(org_id: str, pin: str) -> bool:
-    return await async_verify_pin(org_id, pin)
+async def verify_pin(org_id: str, actor_user_id: str, pin: str) -> bool:
+    return await async_verify_pin(org_id, actor_user_id, pin)
 
 
-async def async_verify_pin(org_id: str, pin: str) -> bool:
+async def async_verify_pin(org_id: str, actor_user_id: str, pin: str) -> bool:
     clean_org_id = _require_org_id(org_id)
-    lockout = await async_get_config(_pin_lockout_key(clean_org_id))
+    clean_actor_user_id = _require_actor_user_id(actor_user_id)
+    lockout_key = _pin_lockout_key(clean_org_id, clean_actor_user_id)
+    failures_key = _pin_failures_key(clean_org_id, clean_actor_user_id)
+    lockout = await async_get_config(lockout_key)
     if lockout:
         lockout_time = datetime.fromisoformat(lockout)
         if datetime.now(timezone.utc) < lockout_time:
             return False
-        await async_delete_config(_pin_lockout_key(clean_org_id))
-        await async_set_config(_pin_failures_key(clean_org_id), "0")
+        await async_delete_config(lockout_key)
+        await async_set_config(failures_key, "0")
 
-    stored_hash = await async_get_config(_pin_hash_key(clean_org_id))
+    stored_hash = await async_get_config(_pin_hash_key(clean_org_id, clean_actor_user_id))
     if not stored_hash:
-        return True
+        return False
 
     if bcrypt.checkpw(pin.encode(), stored_hash.encode()):
-        await async_set_config(_pin_failures_key(clean_org_id), "0")
+        await async_set_config(failures_key, "0")
         return True
 
-    attempts = int(await async_get_config(_pin_failures_key(clean_org_id)) or "0") + 1
-    await async_set_config(_pin_failures_key(clean_org_id), str(attempts))
+    attempts = int(await async_get_config(failures_key) or "0") + 1
+    await async_set_config(failures_key, str(attempts))
     if attempts >= VAULT_LOCKOUT_AFTER_FAILURES:
         lockout_until = datetime.now(timezone.utc) + VAULT_LOCKOUT_DURATION
-        await async_set_config(_pin_lockout_key(clean_org_id), lockout_until.isoformat())
+        await async_set_config(lockout_key, lockout_until.isoformat())
     return False
 
 
@@ -1687,23 +1709,28 @@ async def unlock_vault(org_id: str, actor_user_id: str, pin: str) -> tuple[str, 
 
 
 async def async_unlock_vault(org_id: str, actor_user_id: str, pin: str) -> tuple[str, datetime] | None:
-    if not await async_verify_pin(org_id, pin):
+    if not await async_verify_pin(org_id, actor_user_id, pin):
         return None
     return await async_generate_vault_token(org_id, actor_user_id)
 
 
-async def validate_vault_token(org_id: str, token: str | None) -> bool:
-    return await async_validate_vault_token(org_id, token)
+async def validate_vault_token(org_id: str, actor_user_id: str, token: str | None) -> bool:
+    return await async_validate_vault_token(org_id, actor_user_id, token)
 
 
-async def async_validate_vault_token(org_id: str, token: str | None) -> bool:
+async def async_validate_vault_token(org_id: str, actor_user_id: str, token: str | None) -> bool:
     if not token:
         return False
     clean_org_id = _require_org_id(org_id)
+    clean_actor_user_id = _require_actor_user_id(actor_user_id)
     now = _utcnow()
     async with UnitOfWork() as uow:
         session = await uow.session.get(VaultSession, _token_hash(token))
-        if not session or str(session.org_id) != str(clean_org_id):
+        if (
+            not session
+            or str(session.org_id) != str(clean_org_id)
+            or str(session.actor_user_id) != str(clean_actor_user_id)
+        ):
             return False
         if session.revoked_at is not None:
             return False
@@ -1714,17 +1741,23 @@ async def async_validate_vault_token(org_id: str, token: str | None) -> bool:
         return True
 
 
-async def revoke_vault_token(org_id: str, token: str | None) -> None:
-    await async_revoke_vault_token(org_id, token)
+async def revoke_vault_token(org_id: str, actor_user_id: str, token: str | None) -> None:
+    await async_revoke_vault_token(org_id, actor_user_id, token)
 
 
-async def async_revoke_vault_token(org_id: str, token: str | None) -> None:
+async def async_revoke_vault_token(org_id: str, actor_user_id: str, token: str | None) -> None:
     if not token:
         return
     clean_org_id = _require_org_id(org_id)
+    clean_actor_user_id = _require_actor_user_id(actor_user_id)
     async with UnitOfWork() as uow:
         session = await uow.session.get(VaultSession, _token_hash(token))
-        if session and str(session.org_id) == str(clean_org_id) and session.revoked_at is None:
+        if (
+            session
+            and str(session.org_id) == str(clean_org_id)
+            and str(session.actor_user_id) == str(clean_actor_user_id)
+            and session.revoked_at is None
+        ):
             session.revoked_at = _utcnow()
 
 

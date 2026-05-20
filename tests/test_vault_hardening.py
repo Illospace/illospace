@@ -45,6 +45,17 @@ def test_reveal_requires_unlock_when_pin_is_configured():
     reveal.assert_not_called()
 
 
+def test_reveal_requires_personal_pin_setup_before_unlock():
+    with _client() as client, \
+         patch("brain.systems.vault.async_has_pin", return_value=False), \
+         patch("brain.systems.vault.async_reveal_secret") as reveal:
+        response = client.get("/api/vault/OPENAI_API_KEY")
+
+    assert response.status_code == 423
+    assert response.json()["detail"] == "Vault PIN setup required"
+    reveal.assert_not_called()
+
+
 def test_list_returns_metadata_without_unlock_when_pin_is_configured():
     secret = {
         "id": 1,

@@ -110,7 +110,8 @@ async def test_member_cannot_use_privileged_vault_surfaces(client, method, url, 
     c, app = client
     _act_as(app, MEMBER)
 
-    with patch("brain.systems.vault.async_has_pin", return_value=False):
+    with patch("brain.systems.vault.async_has_pin", return_value=True), \
+         patch("brain.systems.vault.async_validate_vault_token", return_value=True):
         response = await c.request(method, url, json=body)
 
     assert response.status_code == 403

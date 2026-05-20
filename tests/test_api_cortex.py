@@ -1754,7 +1754,8 @@ async def test_project_context_github_connect_uses_server_side_vault_token(clien
 @pytest.mark.asyncio
 async def test_project_context_github_connect_logs_vault_read_as_api_actor(client):
     with (
-        patch("brain.systems.cortex.project_context.vault.async_has_pin", AsyncMock(return_value=False)),
+        patch("brain.systems.cortex.project_context.vault.async_has_pin", AsyncMock(return_value=True)),
+        patch("brain.systems.cortex.project_context.vault.async_validate_vault_token", AsyncMock(return_value=True)),
         patch("brain.systems.cortex.project_context.vault.async_get_secret", AsyncMock(return_value="ghp_secret")) as get_secret,
         patch("brain.app.api.routers.cortex._project_context.async_connect_with_token", AsyncMock(return_value={
             "login": "alex",

@@ -82,9 +82,10 @@ async def _async_require_unlocked(request: Request, user: dict[str, Any]) -> Non
     from brain.systems.vault import async_has_pin, async_validate_vault_token
 
     org_id = _require_org_id(user)
-    if not await async_has_pin(org_id):
-        return
-    if not await async_validate_vault_token(org_id, _vault_token(request)):
+    actor_user_id = _require_actor_user_id(user)
+    if not await async_has_pin(org_id, actor_user_id):
+        raise HTTPException(status_code=423, detail="Vault PIN setup required")
+    if not await async_validate_vault_token(org_id, actor_user_id, _vault_token(request)):
         raise HTTPException(status_code=423, detail="Vault locked")
 
 
@@ -92,14 +93,14 @@ async def _async_require_unlocked(request: Request, user: dict[str, Any]) -> Non
 async def get_pin_status(user: dict[str, Any] = Depends(get_current_user)):
     from brain.systems.vault import async_get_pin_status as _status
 
-    return await _status(_require_org_id(user))
+    return await _status(_require_org_id(user), _require_actor_user_id(user))
 
 
 @router.post("/setup-pin")
 async def setup_pin(body: PinSetup, user: dict[str, Any] = Depends(get_current_user)):
     from brain.systems.vault import async_set_pin
 
-    if not await async_set_pin(_require_org_id(user), body.new_pin, body.current_pin):
+    if not await async_set_pin(_require_org_id(user), _require_actor_user_id(user), body.new_pin, body.current_pin):
         raise HTTPException(status_code=403, detail="Current PIN is incorrect")
     return {"success": True}
 
@@ -119,7 +120,7 @@ async def unlock_vault(body: PinUnlock, user: dict[str, Any] = Depends(get_curre
 async def lock_vault(request: Request, user: dict[str, Any] = Depends(get_current_user)):
     from brain.systems.vault import async_revoke_vault_token
 
-    await async_revoke_vault_token(_require_org_id(user), _vault_token(request))
+    await async_revoke_vault_token(_require_org_id(user), _require_actor_user_id(user), _vault_token(request))
     return {"locked": True}
 
 

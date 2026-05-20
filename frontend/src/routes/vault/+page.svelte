@@ -282,7 +282,9 @@
     ['vault-page', embedded ? 'is-embedded' : ''].filter(Boolean).join(' '),
   );
   const vaultSessionStorageKey = $derived(
-    auth.user?.id ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.id)}` : '',
+    auth.user?.org_id && auth.user?.id
+      ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.org_id)}:${String(auth.user.id)}`
+      : '',
   );
   const vaultLockoutMessage = $derived(
     vaultLockedUntil ? `Too many attempts. Try again ${relativeTime(vaultLockedUntil)}.` : '',
@@ -688,6 +690,15 @@
 
   function handleVaultError(err: any, fallback: string) {
     if (err?.status === 423) {
+      if (err?.detail === 'Vault PIN setup required') {
+        hasPin = false;
+        vaultLocked = false;
+        vaultToken = null;
+        clearPersistedVaultSession();
+        showPinSetup = true;
+        ui.toast('Set your Vault PIN before changing protected secrets.', 'error');
+        return;
+      }
       markVaultLocked(true);
       return;
     }

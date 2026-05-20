@@ -32,7 +32,8 @@ def client():
 
     app.dependency_overrides[get_current_user] = lambda: USER_A
     app.dependency_overrides[get_db] = lambda: MagicMock()
-    with patch("brain.systems.vault.async_has_pin", return_value=False):
+    with patch("brain.systems.vault.async_has_pin", return_value=True), \
+         patch("brain.systems.vault.async_validate_vault_token", return_value=True):
         yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
 

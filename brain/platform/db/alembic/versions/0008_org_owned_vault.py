@@ -328,11 +328,40 @@ def _normalize_sessions() -> None:
     _create_index_if_missing("vault_sessions", "ix_vault_sessions_org_id", ["org_id"])
 
 
+def _normalize_vault_config() -> None:
+    if not _table_exists("vault_config"):
+        return
+
+    op.alter_column(
+        "vault_config",
+        "key",
+        existing_type=sa.String(length=64),
+        type_=sa.String(length=160),
+        existing_nullable=False,
+    )
+    op.execute(
+        sa.text(
+            """
+            UPDATE vault_config AS config
+            SET key = 'pin:org:' || users.org_id::text || ':user:' || users.id::text
+                || ':' || substring(config.key from ':(hash|failures|lockout)$')
+            FROM users
+            WHERE config.key IN (
+                'pin:' || users.id::text || ':hash',
+                'pin:' || users.id::text || ':failures',
+                'pin:' || users.id::text || ':lockout'
+            )
+            """
+        )
+    )
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
 
+    _normalize_vault_config()
     _normalize_secrets()
     _normalize_project_bindings()
     _normalize_access_log()

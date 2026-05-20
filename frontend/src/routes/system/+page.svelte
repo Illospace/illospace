@@ -103,7 +103,9 @@
   const hasRuntimeChanges = $derived(Boolean(settings) && (modelDraftDirty() || memoryDraftDirty()));
   const runCheckDisabled = $derived(!canManageSettings || memoryChangeNeedsRebuild());
   const vaultSessionStorageKey = $derived(
-    auth.user?.id ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.id)}` : '',
+    auth.user?.org_id && auth.user?.id
+      ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.org_id)}:${String(auth.user.id)}`
+      : '',
   );
 
   onMount(() => {
@@ -124,9 +126,11 @@
   });
 
   $effect(() => {
-    const userId = auth.user?.id ?? '';
-    if (!userId || userId === lastVaultLoadUserId) return;
-    lastVaultLoadUserId = userId;
+    const vaultScope = auth.user?.org_id && auth.user?.id
+      ? `${String(auth.user.org_id)}:${String(auth.user.id)}`
+      : '';
+    if (!vaultScope || vaultScope === lastVaultLoadUserId) return;
+    lastVaultLoadUserId = vaultScope;
     void loadVaultSecrets();
   });
 
