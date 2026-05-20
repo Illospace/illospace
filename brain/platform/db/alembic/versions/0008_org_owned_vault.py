@@ -343,13 +343,16 @@ def _normalize_vault_config() -> None:
         sa.text(
             """
             UPDATE vault_config AS config
-            SET key = 'pin:org:' || users.org_id::text || ':user:' || users.id::text
-                || ':' || substring(config.key from ':(hash|failures|lockout)$')
+            SET key = concat(
+                'pin', ':', 'org', ':', users.org_id::text,
+                ':', 'user', ':', users.id::text,
+                ':', substring(config.key from ':(hash|failures|lockout)$')
+            )
             FROM users
             WHERE config.key IN (
-                'pin:' || users.id::text || ':hash',
-                'pin:' || users.id::text || ':failures',
-                'pin:' || users.id::text || ':lockout'
+                concat('pin', ':', users.id::text, ':', 'hash'),
+                concat('pin', ':', users.id::text, ':', 'failures'),
+                concat('pin', ':', users.id::text, ':', 'lockout')
             )
             """
         )
