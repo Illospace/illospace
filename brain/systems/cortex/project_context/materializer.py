@@ -15,8 +15,13 @@ from brain.platform.async_io import check_output_sync, run_subprocess_sync
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.project_context.github import parse_github_repo_slug
+from brain.systems.cortex.project_context.drafts import load_draft_metadata, sync_draft_from_root
 from brain.systems.cortex.project_context.permissions import derive_project_permission_scope
 from brain.systems.cortex.project_context.snapshot import snapshot_from_project_context
+from brain.systems.cortex.project_context.workspace_manifest import (
+    ThreadDraftIdentity,
+    normalize_project_workspace_manifest,
+)
 from brain.systems.vault import get_secret, list_secrets
 
 
@@ -27,6 +32,7 @@ _REPO_RESOURCE_KINDS = {
     "github_repo",
     "github_repository",
 }
+_LOCAL_FIRST_RESOURCE_KINDS = {"file", "folder", "directory", "workspace", "docs", "doc"}
 
 
 @dataclass
@@ -51,7 +57,7 @@ def _clean_text(value: Any) -> str | None:
 
 
 def _resource_kind(resource: dict[str, Any]) -> str:
-    return (_clean_text(resource.get("kind") or resource.get("type") or resource.get("resource_type")) or "").lower()
+    return (_clean_text(resource.get("kind") or resource.get("type") or resource.get("resource_type")) or "resource").lower()
 
 
 def _looks_like_github_remote(value: str) -> bool:
@@ -98,7 +104,11 @@ def project_context_has_materializable_resources(context: dict[str, Any] | None)
     if not isinstance(resources, list):
         return False
     return any(
-        isinstance(resource, dict) and _github_slug_from_resource(resource)
+        isinstance(resource, dict)
+        and (
+            _resource_kind(resource) in _LOCAL_FIRST_RESOURCE_KINDS
+            or _github_slug_from_resource(resource)
+        )
         for resource in resources
     )
 
@@ -224,7 +234,7 @@ def _should_use_existing_resource_path(existing_path: str | None, workspace_root
     if not existing_path:
         return None
     path = Path(existing_path).expanduser()
-    if not path.exists() or not path.is_dir():
+    if not path.exists():
         return None
     if _path_is_relative_to(path, workspace_root):
         return path
@@ -346,19 +356,270 @@ def _merge_workspaces(existing: Any, additions: list[dict[str, str]]) -> list[di
     return merged
 
 
+def _resource_workspace_name(resource: dict[str, Any], path: Path) -> str:
+    return (
+        _clean_text(resource.get("mount_path"))
+        or _clean_text(resource.get("project_path"))
+        or _clean_text(resource.get("name"))
+        or _clean_text(resource.get("label"))
+        or _clean_text(resource.get("repo"))
+        or path.name
+        or str(path)
+    )
+
+
+def _workspace_entry_from_resource(resource: dict[str, Any], path: Path | str) -> dict[str, str]:
+    workspace_path = Path(path)
+    return {"name": _resource_workspace_name(resource, workspace_path), "path": str(workspace_path)}
+
+
+def _draft_equivalent_path(value: Any, source_path: Path, draft_path: Path) -> str | None:
+    text = _clean_text(value)
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        return text
+    try:
+        if source_path.is_file():
+            if path.resolve() == source_path.resolve():
+                return str(draft_path)
+            return text
+        relative = path.resolve().relative_to(source_path.resolve())
+    except Exception:
+        return text
+    return str(draft_path / relative)
+
+
+def _rewrite_scope_paths_to_draft(resource: dict[str, Any], source_path: Path, draft_path: Path) -> None:
+    def rewrite_list(values: Any) -> Any:
+        if not isinstance(values, list):
+            return values
+        rewritten = []
+        for value in values:
+            mapped = _draft_equivalent_path(value, source_path, draft_path)
+            rewritten.append(mapped if mapped is not None else value)
+        return rewritten
+
+    for key in ("allowed_paths", "files", "folders", "forbidden_paths", "denied_paths"):
+        if key in resource:
+            resource[key] = rewrite_list(resource.get(key))
+
+    path_keys = (
+        "allowed_paths",
+        "read",
+        "write",
+        "read_write",
+        "files",
+        "folders",
+        "forbidden_paths",
+        "deny",
+        "denied_paths",
+    )
+    for key in ("permissions", "scope"):
+        nested = resource.get(key)
+        if not isinstance(nested, dict):
+            continue
+        for path_key in path_keys:
+            if path_key in nested:
+                nested[path_key] = rewrite_list(nested.get(path_key))
+
+
+def _runtime_workspace_path(path: Path) -> Path:
+    return path if path.is_dir() else path.parent
+
+
+def _sync_resource_to_draft(source_path: Path, draft_path: Path) -> dict[str, list[str]]:
+    draft_workspace_path = draft_path.parent if source_path.is_file() else draft_path
+    had_base_manifest = bool(load_draft_metadata(draft_workspace_path).get("base_manifest"))
+    result = sync_draft_from_root(source_path, draft_workspace_path)
+    if not had_base_manifest:
+        return {"updated_from_root": [], "removed_from_root": [], "conflicts": [], "out_of_date": []}
+    return {
+        "updated_from_root": result.copied,
+        "removed_from_root": result.removed,
+        "conflicts": result.conflicts,
+        "out_of_date": result.out_of_date,
+    }
+
+
+def _path_texts_from_uploaded_files(resource: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    uploaded_files = resource.get("uploaded_files")
+    if not isinstance(uploaded_files, list):
+        return paths
+    for item in uploaded_files:
+        if not isinstance(item, dict):
+            continue
+        value = _clean_text(item.get("storage_path") or item.get("path") or item.get("local_path"))
+        if value:
+            paths.append(value)
+    return paths
+
+
+def _path_texts_from_resource_scope(resource: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    for key in ("allowed_paths", "files", "folders"):
+        values = resource.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            value = _clean_text(item)
+            if value:
+                paths.append(value)
+    return paths
+
+
+def _common_runtime_workspace_path(paths: list[Path]) -> Path | None:
+    if not paths:
+        return None
+    workspace_paths = [_runtime_workspace_path(path).resolve() for path in paths]
+    try:
+        common = Path(os.path.commonpath([str(path) for path in workspace_paths]))
+    except ValueError:
+        return None
+    return common if common.exists() else None
+
+
+def _backend_readable_resource_path(
+    resource: dict[str, Any],
+    *,
+    workspace_root: Path,
+) -> tuple[Path | None, bool]:
+    for key in ("path", "local_path", "storage_path"):
+        value = _clean_text(resource.get(key))
+        existing_path = _should_use_existing_resource_path(value, workspace_root)
+        if existing_path:
+            return existing_path, True
+
+    scoped_paths: list[Path] = []
+    path_texts = [*_path_texts_from_uploaded_files(resource), *_path_texts_from_resource_scope(resource)]
+    for value in path_texts:
+        existing_path = _should_use_existing_resource_path(value, workspace_root)
+        if existing_path:
+            scoped_paths.append(existing_path)
+
+    common_path = _common_runtime_workspace_path(scoped_paths)
+    if common_path:
+        return common_path, True
+    return None, bool(path_texts)
+
+
+def _materialize_backend_readable_resource(
+    resource: dict[str, Any],
+    *,
+    workspace_root: Path,
+    project_context: dict[str, Any] | None = None,
+) -> tuple[dict[str, str] | None, str | None, bool]:
+    materialization = resource.get("materialization") if isinstance(resource.get("materialization"), dict) else {}
+    previous_source = _should_use_existing_resource_path(_clean_text(materialization.get("source_path")), workspace_root)
+    previous_draft = _should_use_existing_resource_path(
+        _clean_text(resource.get("path") or materialization.get("path")),
+        workspace_root,
+    )
+    if previous_source and previous_draft and _path_is_relative_to(previous_draft, workspace_root):
+        existing_path = previous_draft
+        source_path = previous_source
+        checked = True
+    else:
+        existing_path, checked = _backend_readable_resource_path(resource, workspace_root=workspace_root)
+        source_path = existing_path
+    if not existing_path:
+        return None, None, checked
+
+    if source_path is None:
+        source_path = existing_path
+    draft = False
+    draft_status: dict[str, list[str]] | None = None
+    draft_identity: ThreadDraftIdentity | None = None
+    if not _path_is_relative_to(existing_path, workspace_root):
+        draft_identity = ThreadDraftIdentity.from_project_resource(
+            {**resource, "path": str(existing_path)},
+            thread_workspace_root=workspace_root,
+            project_context=project_context,
+        )
+        draft_path = Path(draft_identity.draft_resource_path)
+        try:
+            draft_status = _sync_resource_to_draft(existing_path, draft_path)
+        except Exception as exc:
+            message = f"Could not create Project draft workspace for {existing_path}: {exc}"
+            resource["materialization"] = {
+                "status": "failed",
+                "provider": "local",
+                "kind": _resource_kind(resource),
+                "source_path": str(existing_path),
+                "error": message,
+            }
+            return None, message, True
+        existing_path = draft_path
+        draft = True
+        _rewrite_scope_paths_to_draft(resource, source_path, draft_path)
+    elif previous_source and source_path != existing_path:
+        try:
+            draft_status = _sync_resource_to_draft(source_path, existing_path)
+        except Exception as exc:
+            message = f"Could not refresh Project draft workspace for {existing_path}: {exc}"
+            resource["materialization"] = {
+                "status": "failed",
+                "provider": "local",
+                "kind": _resource_kind(resource),
+                "source_path": str(source_path),
+                "path": str(existing_path),
+                "error": message,
+            }
+            return None, message, True
+        draft = True
+        _rewrite_scope_paths_to_draft(resource, source_path, existing_path)
+
+    workspace_path = _runtime_workspace_path(existing_path)
+    kind = _resource_kind(resource)
+    resource["path"] = str(existing_path)
+    materialization = {
+        "status": "ready",
+        "provider": "local",
+        "kind": kind,
+        "path": str(existing_path),
+        "workspace_path": str(workspace_path),
+    }
+    if draft:
+        materialization["source_path"] = str(source_path)
+        materialization["draft"] = True
+        if draft_identity and draft_identity.project_key:
+            materialization["project_key"] = draft_identity.project_key
+    if draft_status and any(draft_status.values()):
+        materialization["draft_status"] = draft_status
+    resource["materialization"] = materialization
+    return _workspace_entry_from_resource(resource, workspace_path), None, True
+
+
 async def _materialize_resource(
     resource: dict[str, Any],
     *,
     workspace_root: Path,
     user_id: str | None,
     org_id: str | None,
+    project_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str] | None, str | None]:
+    if _resource_kind(resource) in _LOCAL_FIRST_RESOURCE_KINDS:
+        workspace, error, checked = _materialize_backend_readable_resource(
+            resource,
+            workspace_root=workspace_root,
+            project_context=project_context,
+        )
+        if checked:
+            return workspace, error
+
     slug = _github_slug_from_resource(resource)
     if not slug:
-        return None, None
+        workspace, error, _checked = _materialize_backend_readable_resource(
+            resource,
+            workspace_root=workspace_root,
+            project_context=project_context,
+        )
+        return workspace, error
     existing_path = _should_use_existing_resource_path(_clean_text(resource.get("path")), workspace_root)
-    if existing_path:
-        return {"name": slug, "path": str(existing_path)}, None
+    if existing_path and _path_is_relative_to(existing_path, workspace_root):
+        return _workspace_entry_from_resource(resource, existing_path), None
 
     destination = _safe_repo_destination(workspace_root, slug)
     branch = _clean_text(resource.get("branch") or resource.get("default_branch") or resource.get("branch_hint"))
@@ -376,7 +637,7 @@ async def _materialize_resource(
             "credential": "existing",
             "reused": True,
         }
-        return {"name": slug, "path": clone["path"]}, None
+        return _workspace_entry_from_resource(resource, clone["path"]), None
     if destination.exists() and any(destination.iterdir()):
         message = (
             f"Project context destination {destination} already exists but is not a matching GitHub "
@@ -414,7 +675,7 @@ async def _materialize_resource(
                 "provider": "github",
                 "key_name": key_name,
             }
-        return {"name": slug, "path": clone["path"]}, None
+        return _workspace_entry_from_resource(resource, clone["path"]), None
 
     resource["materialization"] = {
         "status": "failed",
@@ -492,24 +753,29 @@ async def materialize_project_context_workspaces(
 
     workspaces: list[dict[str, str]] = []
     for resource in resources:
-        slug = _github_slug_from_resource(resource)
-        if not slug:
-            continue
-        result.resources_checked += 1
         workspace, error = await _materialize_resource(
             resource,
             workspace_root=root,
             user_id=user_id,
             org_id=org_id,
+            project_context=snapshot,
         )
+        if workspace or error or isinstance(resource.get("materialization"), dict):
+            result.resources_checked += 1
         if workspace:
             workspaces.append(workspace)
         if error:
             result.errors.append(error)
 
     if not result.resources_checked:
-        return result.fail("Project Context resources do not include a supported repository.")
+        return result.fail("Project Context resources do not include a supported repository or local workspace.")
 
+    workspace_manifest = normalize_project_workspace_manifest(
+        snapshot,
+        workspaces=workspaces,
+        thread_workspace_root=root,
+    )
+    workspace_manifest_payload = workspace_manifest.to_dict()
     result.workspaces = workspaces
     status = "materialized" if not result.errors else "failed"
     snapshot["permission_scope"] = derive_project_permission_scope(snapshot)
@@ -531,6 +797,7 @@ async def materialize_project_context_workspaces(
         current_target_payload["project_context_permission_scope"] = permission_scope
         current_workspace_payload["project_context_snapshot"] = snapshot
         current_workspace_payload["project_context_permission_scope"] = permission_scope
+        current_workspace_payload["project_workspace_manifest"] = workspace_manifest_payload
         current_workspace_payload["workspaces"] = _merge_workspaces(current_workspace_payload.get("workspaces"), workspaces)
         if workspaces:
             default_workspace = workspaces[0]["path"]
@@ -539,13 +806,16 @@ async def materialize_project_context_workspaces(
         current_workspace_payload["project_context_materialization"] = {
             "status": status,
             "workspaces": workspaces,
+            "workspace_manifest": workspace_manifest_payload,
             "errors": result.errors[:10],
         }
 
         current_metadata["workspaces"] = _merge_workspaces(current_metadata.get("workspaces"), workspaces)
+        current_metadata["project_workspace_manifest"] = workspace_manifest_payload
         current_metadata["project_context_materialization"] = {
             "status": status,
             "workspaces": workspaces,
+            "workspace_manifest": workspace_manifest_payload,
             "errors": result.errors[:10],
         }
         run.metadata_ = current_metadata

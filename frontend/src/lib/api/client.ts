@@ -594,6 +594,142 @@ export interface CortexBootstrapOptions {
   provider?: string | null;
 }
 
+export type ProjectDraftChangeKey =
+  | 'changed_paths'
+  | 'new_paths'
+  | 'deleted_paths'
+  | 'conflicted_paths';
+
+export interface ProjectDraftChangeSet {
+  changed_paths: string[];
+  new_paths: string[];
+  deleted_paths: string[];
+  conflicted_paths: string[];
+  out_of_date_paths?: string[];
+}
+
+export interface ProjectDraftResourceState {
+  id: string;
+  label?: string | null;
+  mount_path?: string | null;
+  kind?: string | null;
+  provider?: string | null;
+  repo?: string | null;
+  workspace_path?: string | null;
+  resource_path?: string | null;
+  source_path?: string | null;
+  is_draft_workspace?: boolean;
+  status?: string | null;
+  metadata_available?: boolean;
+  change_source?: string | null;
+  out_of_date?: boolean;
+  out_of_date_paths?: string[];
+  change_counts?: Partial<Record<ProjectDraftChangeKey, number>>;
+  changes?: ProjectDraftChangeSet;
+  root_versions_summary?: Record<string, any> | null;
+  root_versions?: Record<string, any> | null;
+}
+
+export interface ProjectRootVersionState {
+  id?: string;
+  version_id?: string;
+  label?: string | null;
+  created_at?: string | null;
+  root?: string | null;
+  root_kind?: string | null;
+  file_count?: number;
+  total_size?: number;
+  paths?: string[];
+  metadata?: Record<string, any>;
+}
+
+export interface ProjectDraftRootVersionGroup {
+  resource_id?: string | null;
+  mount_path?: string | null;
+  label?: string | null;
+  source_path?: string | null;
+  workspace_path?: string | null;
+  versions?: ProjectRootVersionState[];
+  history?: Record<string, any> | null;
+}
+
+export interface ProjectDraftPublishOperation {
+  operation?: string | null;
+  path?: string | null;
+  draft_path?: string | null;
+  target_path?: string | null;
+}
+
+export interface ProjectDraftPublishGroup {
+  resource_id?: string | null;
+  mount_path?: string | null;
+  label?: string | null;
+  workspace_path?: string | null;
+  publish_target?: {
+    kind?: string | null;
+    path?: string | null;
+    repo?: string | null;
+  } | null;
+  status?: string | null;
+  blocked_reasons?: string[];
+  change_counts?: Partial<Record<ProjectDraftChangeKey, number>>;
+  operations?: ProjectDraftPublishOperation[];
+}
+
+export interface ProjectDraftStateRead {
+  ok: boolean;
+  action?: string;
+  code?: string;
+  error?: string;
+  run_id?: string | number | null;
+  idea_id?: string | null;
+  workspaces?: Array<Record<string, any>>;
+  materialization?: Record<string, any>;
+  resources?: ProjectDraftResourceState[];
+  changes?: {
+    counts?: Partial<Record<ProjectDraftChangeKey, number>>;
+    total?: number;
+    changed_paths?: Array<Record<string, any>>;
+    new_paths?: Array<Record<string, any>>;
+    deleted_paths?: Array<Record<string, any>>;
+    conflicted_paths?: Array<Record<string, any>>;
+    out_of_date_paths?: Array<Record<string, any>>;
+  };
+  root_versions?: {
+    groups?: ProjectDraftRootVersionGroup[];
+    summary?: Record<string, any>;
+  };
+  root_versions_summary?: Record<string, any>;
+  summary?: Record<string, any>;
+}
+
+export interface ProjectDraftStateResponse {
+  ok: boolean;
+  code?: string;
+  error?: string;
+  run_id?: string | number | null;
+  idea_id?: string | null;
+  draft_status?: ProjectDraftStateRead;
+  plan_publish?: {
+    ok?: boolean;
+    action?: string;
+    code?: string;
+    error?: string;
+    mutates_project_root?: boolean;
+    plan_only?: boolean;
+    summary?: Record<string, any>;
+    groups?: ProjectDraftPublishGroup[];
+  };
+  root_versions?: {
+    ok?: boolean;
+    action?: string;
+    code?: string;
+    error?: string;
+    groups?: ProjectDraftRootVersionGroup[];
+    summary?: Record<string, any>;
+  };
+}
+
 export const api = {
   // Auth
   getMe: () => fetchJson<any>('/api/me'),
@@ -807,6 +943,15 @@ export const api = {
     fetchJson<any[]>(`/api/cortex/ideas/${ideaId}/project-context`),
   attachIdeaProjectContext: (ideaId: string, data: { project_profile_id?: string; project_context?: any; environment_binding_id?: number | null; metadata?: Record<string, any> }) =>
     fetchJson<any>(`/api/cortex/ideas/${ideaId}/project-context`, { method: 'POST', body: JSON.stringify(data) }),
+  getIdeaProjectDraftState: (
+    ideaId: string,
+    options: { runId?: string | number | null } = {},
+  ) =>
+    fetchJson<ProjectDraftStateResponse>(
+      withQuery(`/api/cortex/ideas/${ideaId}/project-context/draft-state`, {
+        run_id: options.runId,
+      }),
+    ),
   deleteIdea: (id: string) =>
     fetchJson<any>(`/api/cortex/ideas/${id}`, { method: 'DELETE' }),
   restoreIdea: (id: string) =>

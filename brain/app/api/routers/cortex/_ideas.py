@@ -1,6 +1,7 @@
 """Cortex ideas CRUD and notification endpoints."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import BackgroundTasks, Depends, HTTPException, Request
@@ -46,6 +47,9 @@ from brain.systems.cortex.thought_lifecycle import (
     transition_thought_status,
 )
 from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
+
+
+logger = logging.getLogger(__name__)
 
 
 async def _last_human_thread_author(idea_id: str, db: AsyncSession):
@@ -643,6 +647,19 @@ async def archive_idea(
         ),
     )
     archived = await _idea_read_with_author(idea, db)
+    project_draft_cleanup: dict[str, Any] | None = None
+    try:
+        from brain.systems.cortex.project_context.draft_lifecycle import (
+            apply_project_draft_cleanup_for_thread,
+        )
+
+        project_draft_cleanup = await apply_project_draft_cleanup_for_thread(
+            db,
+            idea_id,
+            archived_at=idea.archived_at,
+        )
+    except Exception as exc:
+        logger.warning("project_draft_archive_cleanup_failed: %s", exc)
     event_org_id = _product_event_org_id(idea, user)
     await db.commit()
     await ws_manager.broadcast_product_event(
@@ -650,7 +667,7 @@ async def archive_idea(
         {"idea_id": idea_id, "idea": archived.model_dump(mode="json")},
         org_id=event_org_id,
     )
-    return {"ok": True}
+    return {"ok": True, "project_draft_cleanup": project_draft_cleanup}
 
 
 @router.post("/ideas/{idea_id}/restore", response_model=IdeaRead)

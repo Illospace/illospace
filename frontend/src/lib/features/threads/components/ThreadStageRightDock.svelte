@@ -16,6 +16,7 @@
   const DEFAULT_TABS: ThreadStageRightDockTab[] = [
     { id: 'activity', label: 'Activity', kind: 'activity', closeable: true },
     { id: 'handoff-summary', label: 'Handoff', kind: 'handoff-summary', closeable: true },
+    { id: 'project', label: 'Project', kind: 'project', closeable: true },
   ];
 
   function clamp(value: number, min: number, max: number) {
@@ -47,6 +48,7 @@
     browserPane,
     previewPane,
     utilityPane,
+    projectPane,
     appsPane,
     vaultPane,
     cyclesPane,
@@ -69,6 +71,7 @@
     browserPane?: Snippet;
     previewPane?: Snippet;
     utilityPane?: Snippet;
+    projectPane?: Snippet;
     appsPane?: Snippet;
     vaultPane?: Snippet;
     cyclesPane?: Snippet;
@@ -79,6 +82,7 @@
   const hasBrowserPane = $derived(!!browserPane);
   const hasPreviewPane = $derived(!!previewPane);
   const hasUtilityPane = $derived(!!utilityPane);
+  const hasProjectPane = $derived(!!projectPane);
   const hasAppsPane = $derived(!!appsPane);
   const hasVaultPane = $derived(!!vaultPane);
   const hasCyclesPane = $derived(!!cyclesPane);
@@ -93,15 +97,17 @@
             ? hasUtilityPane
             : tab.kind === 'handoff-summary'
               ? hasUtilityPane
-              : tab.kind === 'app'
-                ? hasAppsPane
-                : tab.kind === 'vault'
-                  ? hasVaultPane
-                  : tab.kind === 'cycles'
-                    ? hasCyclesPane
-                    : tab.kind === 'code-review'
-                      ? hasCodeReviewPane
-                      : true
+              : tab.kind === 'project'
+                ? hasProjectPane
+                : tab.kind === 'app'
+                  ? hasAppsPane
+                  : tab.kind === 'vault'
+                    ? hasVaultPane
+                    : tab.kind === 'cycles'
+                      ? hasCyclesPane
+                      : tab.kind === 'code-review'
+                        ? hasCodeReviewPane
+                        : true
     )),
   );
   const resolvedActiveTab = $derived(
@@ -204,6 +210,7 @@
     if (kind === 'preview') return 'document';
     if (kind === 'activity') return 'activity';
     if (kind === 'handoff-summary') return 'document';
+    if (kind === 'project') return 'folder';
     if (kind === 'vault') return 'vault';
     if (kind === 'cycles') return 'cycles';
     if (kind === 'code-review') return 'code';
@@ -324,6 +331,10 @@
         {:else if resolvedActiveTab?.kind === 'handoff-summary' && hasUtilityPane}
           <section class="right-dock-pane right-dock-handoff-summary" aria-label="Handoff summary">
             {@render utilityPane?.()}
+          </section>
+        {:else if resolvedActiveTab?.kind === 'project' && hasProjectPane}
+          <section class="right-dock-pane right-dock-project" aria-label="Project draft state">
+            {@render projectPane?.()}
           </section>
         {:else if resolvedActiveTab?.kind === 'app' && hasAppsPane}
           <section class="right-dock-pane right-dock-apps" aria-label="Generated apps">
@@ -617,6 +628,7 @@
 
   .right-dock-content[data-active-tab='activity'],
   .right-dock-content[data-active-tab='handoff-summary'],
+  .right-dock-content[data-active-tab='project'],
   .right-dock-content[data-active-tab='vault'],
   .right-dock-content[data-active-tab='cycles'] {
     overflow-y: auto;
@@ -658,6 +670,10 @@
     overflow: visible;
   }
 
+  .right-dock-project {
+    overflow: visible;
+  }
+
   .right-dock-vault {
     overflow: visible;
   }
@@ -672,6 +688,7 @@
 
   .right-dock-content[data-active-tab='activity']::-webkit-scrollbar,
   .right-dock-content[data-active-tab='handoff-summary']::-webkit-scrollbar,
+  .right-dock-content[data-active-tab='project']::-webkit-scrollbar,
   .right-dock-content[data-active-tab='vault']::-webkit-scrollbar,
   .right-dock-content[data-active-tab='cycles']::-webkit-scrollbar {
     width: 4px;
@@ -679,6 +696,7 @@
 
   .right-dock-content[data-active-tab='activity']::-webkit-scrollbar-thumb,
   .right-dock-content[data-active-tab='handoff-summary']::-webkit-scrollbar-thumb,
+  .right-dock-content[data-active-tab='project']::-webkit-scrollbar-thumb,
   .right-dock-content[data-active-tab='vault']::-webkit-scrollbar-thumb,
   .right-dock-content[data-active-tab='cycles']::-webkit-scrollbar-thumb {
     border-radius: 999px;

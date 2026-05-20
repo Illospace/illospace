@@ -68,6 +68,7 @@
   import SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
   import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
   import ThreadCodeReviewPane from '$lib/features/threads/components/ThreadCodeReviewPane.svelte';
+  import ProjectDraftStatePanel from '$lib/features/threads/components/ProjectDraftStatePanel.svelte';
   import ThreadStageShell, { type ThreadPeripherySignal } from '$lib/features/threads/components/ThreadStageShell.svelte';
   import ThreadUtilityContent from '$lib/features/threads/components/ThreadUtilityContent.svelte';
   import WorkspaceComposerAdapter from '$lib/features/composer/components/WorkspaceComposerAdapter.svelte';
@@ -213,6 +214,11 @@
     ].join(';'),
   );
   const activeSidePanelTab = $derived(activeThreadSidePanelTab(sidePanelTabs, activeSidePanelTabId));
+  const projectDraftRunId = $derived.by(() => {
+    const run = runInfo ?? latestRun;
+    const id = run?.run_id ?? run?.id ?? null;
+    return id === '' ? null : id;
+  });
   const selectedThreadApp = $derived(
     activeSidePanelTab?.kind === 'app' && activeSidePanelTab.appId
       ? workspaceApps.appById(activeSidePanelTab.appId)
@@ -832,6 +838,10 @@
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'handoff-summary'));
   }
 
+  function openProjectTab() {
+    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'project'));
+  }
+
   function openVaultTab() {
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'vault'));
   }
@@ -886,6 +896,10 @@
     }
     if (item.kind === 'handoff-summary') {
       openHandoffSummaryTab();
+      return;
+    }
+    if (item.kind === 'project') {
+      openProjectTab();
       return;
     }
     if (item.kind === 'vault') {
@@ -1211,6 +1225,14 @@
     </div>
   {/snippet}
 
+  {#snippet projectPane()}
+    <div class="thread-utility-surface">
+      <div class="thread-utility-surface-body">
+        <ProjectDraftStatePanel {idea} runId={projectDraftRunId} />
+      </div>
+    </div>
+  {/snippet}
+
   {#snippet previewPane()}
     <ThreadAttachmentPreviewPane attachment={dockPreviewAttachment} />
   {/snippet}
@@ -1316,6 +1338,7 @@
               browserPane={browserPane}
               previewPane={previewPane}
               utilityPane={utilityPane}
+              projectPane={projectPane}
               appsPane={appsPane}
               vaultPane={vaultPane}
               cyclesPane={cyclesPane}

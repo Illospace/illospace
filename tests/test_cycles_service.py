@@ -74,14 +74,17 @@ class _RouterCycleSession:
         self._cycle = cycle
         self.flushed = False
 
-    def scalars(self, statement):
+    async def scalars(self, statement):
         return _RouterCycleResult(self._cycle)
 
-    def execute(self, statement):
+    async def execute(self, statement):
         return _FirstResult((self._cycle.target_idea_id,))
 
-    def flush(self):
+    async def flush(self):
         self.flushed = True
+
+    async def commit(self):
+        pass
 
 
 class _ExecuteCycleSession:

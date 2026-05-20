@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+import re as _re
+import shlex as _shlex
+
+from brain.systems.cortex.project_context.workspace_manifest import (
+    ProjectWorkspaceManifest,
+    normalize_project_workspace_manifest,
+)
 from brain.systems.runs.tool_catalog.handlers.common import *
 from brain.systems.runs.project_execution_env import (
     annotate_project_execution_result as _annotate_project_execution_result,
@@ -11,7 +19,228 @@ from brain.systems.runs.project_execution_env import (
 from brain.platform.async_io import run_subprocess_sync
 
 
-def _resolve_path(path: str, working_dir: str | None = None) -> str:
+def _path_is_within(path: str, root: str) -> bool:
+    return path == root or path.startswith(root + os.sep)
+
+
+def _context_mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _run_mapping_attr(name: str) -> Mapping[str, object]:
+    run = getattr(_agent_context, "run", None)
+    return _context_mapping(getattr(run, name, None))
+
+
+def _metadata_mapping() -> Mapping[str, object]:
+    run = getattr(_agent_context, "run", None)
+    metadata = getattr(run, "metadata_", None) or getattr(run, "metadata", None)
+    if callable(metadata):
+        try:
+            metadata = metadata()
+        except Exception:
+            metadata = None
+    return _context_mapping(metadata)
+
+
+def _agent_context_payloads() -> list[Mapping[str, object]]:
+    payloads: list[Mapping[str, object]] = []
+    for value in (
+        getattr(_agent_context, "workspace_ref", None),
+        getattr(_agent_context, "target_ref", None),
+        _run_mapping_attr("workspace_ref"),
+        _run_mapping_attr("target_ref"),
+        _metadata_mapping(),
+        getattr(_agent_context, "execution_metadata", None),
+    ):
+        payload = _context_mapping(value)
+        if payload and not any(payload is existing for existing in payloads):
+            payloads.append(payload)
+    return payloads
+
+
+def _manifest_from_project_workspace_payload(
+    payload: Mapping[str, object],
+    *,
+    include_workspace_entries: bool = True,
+) -> ProjectWorkspaceManifest | None:
+    mounts = payload.get("mounts")
+    if isinstance(mounts, list) and mounts:
+        resources = []
+        for index, raw_mount in enumerate(mounts):
+            mount = _context_mapping(raw_mount)
+            workspace_path = mount.get("workspace_path") or mount.get("path")
+            mount_path = mount.get("mount_path") or mount.get("name") or mount.get("id")
+            if not isinstance(workspace_path, str) or not workspace_path.strip():
+                continue
+            if not isinstance(mount_path, str) or not mount_path.strip():
+                continue
+            resource_path = mount.get("resource_path") or workspace_path
+            source_path = mount.get("source_path")
+            materialization = _context_mapping(mount.get("metadata")).get("materialization")
+            materialization_payload = dict(_context_mapping(materialization))
+            materialization_payload.update({
+                "workspace_path": workspace_path,
+                "path": resource_path,
+            })
+            if isinstance(source_path, str) and source_path.strip():
+                materialization_payload["source_path"] = source_path
+            resources.append({
+                "id": mount.get("resource_id") or mount.get("id") or f"resource-{index + 1}",
+                "kind": mount.get("kind") or "workspace",
+                "mount_path": mount_path,
+                "name": mount.get("label") or mount_path,
+                "path": resource_path,
+                "source_path": source_path,
+                "materialization": materialization_payload,
+            })
+        if resources:
+            return normalize_project_workspace_manifest(
+                {
+                    "id": payload.get("project_id") or payload.get("project_key"),
+                    "resources": resources,
+                    "workspace_root": payload.get("workspace_root"),
+                    "resolved_workspace_root": payload.get("resolved_workspace_root"),
+                },
+                workspaces=payload.get("workspaces") if isinstance(payload.get("workspaces"), list) else None,
+            )
+
+    workspaces = payload.get("workspaces")
+    if include_workspace_entries and isinstance(workspaces, list) and workspaces:
+        return normalize_project_workspace_manifest(payload, workspaces=workspaces)
+    return None
+
+
+def _project_workspace_manifest_payloads(payloads: list[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    manifests: list[Mapping[str, object]] = []
+    for payload in payloads:
+        workspace_manifest = payload.get("project_workspace_manifest")
+        if isinstance(workspace_manifest, Mapping):
+            manifests.append(workspace_manifest)
+        materialization = payload.get("project_context_materialization")
+        if isinstance(materialization, Mapping):
+            materialized_manifest = materialization.get("workspace_manifest")
+            if isinstance(materialized_manifest, Mapping):
+                manifests.append(materialized_manifest)
+    return manifests
+
+
+def _first_project_workspace_manifest(
+    payloads: list[Mapping[str, object]],
+    *,
+    include_workspace_entries: bool,
+) -> ProjectWorkspaceManifest | None:
+    for workspace_manifest in _project_workspace_manifest_payloads(payloads):
+        manifest = _manifest_from_project_workspace_payload(
+            workspace_manifest,
+            include_workspace_entries=include_workspace_entries,
+        )
+        if manifest and manifest.mounts:
+            return manifest
+    return None
+
+
+def _current_project_workspace_manifest() -> ProjectWorkspaceManifest | None:
+    workspace_payloads = _agent_context_payloads()
+    manifest = _first_project_workspace_manifest(workspace_payloads, include_workspace_entries=False)
+    if manifest:
+        return manifest
+
+    workspaces = None
+    for payload in workspace_payloads:
+        if isinstance(payload.get("workspaces"), list):
+            workspaces = payload.get("workspaces")
+            break
+    for payload in workspace_payloads:
+        snapshot = payload.get("project_context_snapshot")
+        if isinstance(snapshot, Mapping):
+            manifest = normalize_project_workspace_manifest(snapshot, workspaces=workspaces)
+            if manifest.mounts:
+                return manifest
+
+    return _first_project_workspace_manifest(workspace_payloads, include_workspace_entries=True)
+
+
+def _project_mount_resolution(path: str) -> tuple[str, object] | None:
+    manifest = _current_project_workspace_manifest()
+    if manifest is None:
+        return None
+    mount = manifest.mount_for_agent_path(path)
+    if mount is None:
+        return None
+    resolved = mount.resolve_agent_path(path)
+    if not resolved:
+        return None
+    resolved_real = os.path.realpath(resolved)
+    workspace_real = os.path.realpath(mount.workspace_path)
+    if not _path_is_within(resolved_real, workspace_real):
+        raise ValueError(
+            f"Path escapes Project draft workspace: {path} → {resolved_real} "
+            f"(workspace: {workspace_real})"
+        )
+    return resolved_real, mount
+
+
+def _block_project_source_write(resolved: str) -> None:
+    manifest = _current_project_workspace_manifest()
+    if manifest is None:
+        return
+    resolved_real = os.path.realpath(resolved)
+    for mount in manifest.mounts:
+        if not mount.source_path:
+            continue
+        source_real = os.path.realpath(mount.source_path)
+        workspace_real = os.path.realpath(mount.workspace_path)
+        if _path_is_within(resolved_real, source_real) and not _path_is_within(resolved_real, workspace_real):
+            raise ValueError(
+                f"Blocked write to Project source path: {resolved_real}. "
+                f"Use the draft mount {mount.mount_path} instead."
+            )
+
+
+def _project_source_mounts() -> list[object]:
+    manifest = _current_project_workspace_manifest()
+    if manifest is None:
+        return []
+    return [mount for mount in manifest.mounts if mount.source_path]
+
+
+_PROJECT_SOURCE_WRITE_PATTERNS = [
+    _re.compile(
+        r"(^|\s)"
+        r"(rm|mv|cp|touch|mkdir|rmdir|chmod|chown|truncate|tee|sed|perl|python|python3|node|npm|pnpm|yarn|git)\b"
+    ),
+    _re.compile(r"(^|\s)(>|>>|2>|&>)"),
+    _re.compile(r"\b(open|write_text|write_bytes|unlink|remove|rmtree|rename|replace|mkdir)\s*\("),
+]
+
+
+def _command_or_script_may_write(text: str) -> bool:
+    lowered = text.lower()
+    return any(pattern.search(lowered) for pattern in _PROJECT_SOURCE_WRITE_PATTERNS)
+
+
+def _block_project_source_command_write(text: str, *, operation: str, cwd: str | None = None) -> None:
+    if not text or not _command_or_script_may_write(text):
+        return
+    cwd_real = os.path.realpath(cwd) if cwd else None
+    for mount in _project_source_mounts():
+        source_path = getattr(mount, "source_path", None)
+        if not isinstance(source_path, str) or not source_path.strip():
+            continue
+        source_real = os.path.realpath(source_path)
+        workspace_real = os.path.realpath(getattr(mount, "workspace_path", "") or "")
+        names_source_path = source_path in text or source_real in text
+        runs_in_source_path = bool(cwd_real and _path_is_within(cwd_real, source_real))
+        runs_in_draft_path = bool(cwd_real and workspace_real and _path_is_within(cwd_real, workspace_real))
+        if names_source_path or (runs_in_source_path and not runs_in_draft_path):
+            raise ValueError(
+                f"Blocked {operation} that may write to Project source path: {source_real}. "
+                f"Use the draft mount {getattr(mount, 'mount_path', '<project mount>')} instead."
+            )
+
+
+def _resolve_path(path: str, working_dir: str | None = None, *, for_write: bool = False) -> str:
     """Resolve a path relative to workspace root. Enforces containment.
 
     Args:
@@ -19,19 +248,25 @@ def _resolve_path(path: str, working_dir: str | None = None) -> str:
         working_dir: Override workspace root (used by worktree isolation).
     """
     base = os.path.realpath(working_dir or _patched_workspace_root())
+    project_resolution = _project_mount_resolution(path)
+    if project_resolution is not None:
+        resolved, _mount = project_resolution
+        if for_write:
+            _block_project_source_write(resolved)
+        return resolved
+
     if os.path.isabs(path):
         resolved = os.path.realpath(path)
     else:
         resolved = os.path.realpath(os.path.join(base, path))
 
+    if for_write:
+        _block_project_source_write(resolved)
+
     # Path containment: must stay within workspace
-    if not resolved.startswith(base + os.sep) and resolved != base:
+    if not _path_is_within(resolved, base):
         raise ValueError(f"Path escapes workspace: {path} → {resolved} (workspace: {base})")
     return resolved
-
-
-import re as _re
-import shlex as _shlex
 
 _BLOCKED_PATTERNS = [
     _re.compile(r"rm\s+-[a-z]*r[a-z]*f?\s+/"),  # rm -rf /
@@ -70,6 +305,11 @@ def _handle_exec_command(
             return result
     else:
         cwd = working_dir or _patched_workspace_root()
+    try:
+        _block_project_source_command_write(command, operation="command", cwd=cwd)
+    except ValueError as e:
+        result = {"exit_code": -1, "stdout": "", "stderr": str(e), "error": str(e), "blocked": True}
+        return result
 
     # Use shell=True only when the command requires shell features (pipes, redirects, &&).
     # Otherwise split into a list for safer execution.
@@ -142,6 +382,7 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
     project_execution = _prepare_project_execution_env()
 
     try:
+        _block_project_source_command_write(script, operation="script", cwd=cwd)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, prefix="_illo_script_") as f:
             f.write(script)
             script_path = f.name
@@ -285,7 +526,7 @@ def _handle_read_file(path: str, start_line: int | None = None, end_line: int | 
 def _handle_write_file(path: str, content: str, _workspace: str | None = None) -> dict:
     """Write content to a file, creating directories as needed."""
     try:
-        resolved = _resolve_path(path, _workspace)
+        resolved = _resolve_path(path, _workspace, for_write=True)
     except ValueError as e:
         result = {"error": str(e), "path": path}
         _record_tool_evidence("write_file", {"path": path, "content": content, "workspace": _workspace}, result)
@@ -321,7 +562,7 @@ def _handle_write_file(path: str, content: str, _workspace: str | None = None) -
 def _handle_edit_file(path: str, old_text: str, new_text: str, _workspace: str | None = None) -> dict:
     """Surgical string replacement in a file."""
     try:
-        resolved = _resolve_path(path, _workspace)
+        resolved = _resolve_path(path, _workspace, for_write=True)
     except ValueError as e:
         result = {"error": str(e), "path": path}
         _record_tool_evidence(

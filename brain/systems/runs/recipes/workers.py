@@ -10,7 +10,7 @@ from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
 from brain.systems.runs.recipes.base import BaseRunRecipe
-from brain.systems.runs.recipes.shared import workspace_root_from_ref
+from brain.systems.runs.recipes.shared import project_runtime_workspace_from_ref
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.tools import AsyncRunToolExecutor, ToolRecord, ToolScope, wrap_tool_handlers
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
@@ -60,7 +60,8 @@ class WorkerRecipe(BaseRunRecipe):
             workspace_ref=runtime.request.workspace_ref,
             metadata=runtime.request.metadata,
         )
-        workspace_root = _workspace_root(runtime.request.workspace_ref)
+        project_workspace = project_runtime_workspace_from_ref(runtime.request.workspace_ref)
+        workspace_root = project_workspace.workspace_root
         await runtime.activity(
             "Reading worker assignment",
             assignment_id=assignment.id,
@@ -72,7 +73,10 @@ class WorkerRecipe(BaseRunRecipe):
         tool_records: list[ToolRecord] = []
         executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
         handlers = wrap_tool_handlers(
-            build_tool_handlers(workspace_root=workspace_root),
+            build_tool_handlers(
+                workspace_root=workspace_root,
+                allowed_workspaces=project_workspace.allowed_workspaces,
+            ),
             executor=executor,
             run_id=runtime.run.id,
             root_run_id=runtime.run.root_run_id,
@@ -265,10 +269,6 @@ def _assignment_payload(metadata: dict[str, Any], target_ref: dict[str, Any]) ->
         if isinstance(source, dict):
             return dict(source)
     return {}
-
-
-def _workspace_root(workspace_ref: dict[str, Any]) -> str | None:
-    return workspace_root_from_ref(workspace_ref)
 
 
 def _tool_scope_from_assignment(assignment: WorkerAssignment) -> ToolScope:

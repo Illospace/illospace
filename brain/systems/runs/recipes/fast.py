@@ -13,7 +13,7 @@ from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_
 from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.base import BaseRunRecipe
-from brain.systems.runs.recipes.shared import workspace_root_from_ref
+from brain.systems.runs.recipes.shared import project_runtime_workspace_from_ref
 from brain.systems.personality import soul_prompt_section
 
 logger = logging.getLogger(__name__)
@@ -58,10 +58,6 @@ def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:
     ]
 
 
-def _workspace_root(workspace_ref: dict[str, Any]) -> str | None:
-    return workspace_root_from_ref(workspace_ref)
-
-
 def _json_block(title: str, value: Any) -> str:
     if not value:
         return ""
@@ -91,7 +87,8 @@ class FastRecipe(BaseRunRecipe):
             metadata=runtime.request.metadata,
         )
         await runtime.activity("Reading context")
-        workspace_root = _workspace_root(runtime.request.workspace_ref)
+        project_workspace = project_runtime_workspace_from_ref(runtime.request.workspace_ref)
+        workspace_root = project_workspace.workspace_root
         model_policy = dict(runtime.request.model_policy or {})
         model = model_policy.get("model") or get_model_for_tier(
             model_policy.get("tier") or "high",
@@ -111,7 +108,10 @@ class FastRecipe(BaseRunRecipe):
             return await runtime.drain_steering()
 
         disabled_tools = _disabled_tool_names(runtime)
-        raw_tool_handlers = build_tool_handlers(workspace_root=workspace_root)
+        raw_tool_handlers = build_tool_handlers(
+            workspace_root=workspace_root,
+            allowed_workspaces=project_workspace.allowed_workspaces,
+        )
         if disabled_tools:
             raw_tool_handlers = {
                 name: handler for name, handler in raw_tool_handlers.items() if name not in disabled_tools

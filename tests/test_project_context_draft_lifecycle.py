@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+
+def _run_with_local_project_draft(source_dir, draft_dir):
+    resource = {
+        "id": "reports",
+        "kind": "folder",
+        "mount_path": "/reports",
+        "path": str(draft_dir),
+        "source_path": str(source_dir),
+        "materialization": {
+            "provider": "local",
+            "draft": True,
+            "path": str(draft_dir),
+            "workspace_path": str(draft_dir),
+            "source_path": str(source_dir),
+        },
+    }
+    manifest = {
+        "mounts": [
+            {
+                "id": "/reports",
+                "resource_id": "reports",
+                "kind": "folder",
+                "mount_path": "/reports",
+                "workspace_path": str(draft_dir),
+                "resource_path": str(draft_dir),
+                "source_path": str(source_dir),
+            }
+        ],
+        "workspaces": [{"name": "/reports", "path": str(draft_dir)}],
+    }
+    return SimpleNamespace(
+        id=7,
+        thread_id="idea-1",
+        workspace_ref={
+            "project_context_snapshot": {"resources": [resource]},
+            "project_workspace_manifest": manifest,
+            "workspaces": manifest["workspaces"],
+        },
+        target_ref={"project_context_snapshot": {"resources": [resource]}},
+        metadata_={},
+    )
+
+
+def test_archived_clean_project_draft_is_deleted_immediately(tmp_path):
+    from brain.systems.cortex.project_context.draft_lifecycle import cleanup_project_draft_for_run
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "root"
+    source_dir.mkdir()
+    (source_dir / "brief.md").write_text("Published\n")
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    sync_draft_from_root(source_dir, draft_dir)
+    run = _run_with_local_project_draft(source_dir, draft_dir)
+
+    result = cleanup_project_draft_for_run(
+        run,
+        archived_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+    )
+
+    assert result.status == "deleted"
+    assert result.deleted_count == 1
+    assert not (tmp_path / "thread" / ".illo-project-context").exists()
+    assert run.metadata_["project_draft_cleanup"]["status"] == "deleted"
+
+
+def test_archived_unpublished_project_draft_is_retained_with_grace_deadline(tmp_path):
+    from brain.systems.cortex.project_context.draft_lifecycle import cleanup_project_draft_for_run
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "root"
+    source_dir.mkdir()
+    (source_dir / "brief.md").write_text("Published\n")
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    sync_draft_from_root(source_dir, draft_dir)
+    (draft_dir / "brief.md").write_text("Unpublished draft\n")
+    run = _run_with_local_project_draft(source_dir, draft_dir)
+    archived_at = datetime(2026, 5, 21, tzinfo=timezone.utc)
+
+    result = cleanup_project_draft_for_run(run, archived_at=archived_at)
+
+    assert result.status == "retained_unpublished"
+    assert result.deleted_count == 0
+    assert result.retained_count == 1
+    assert (tmp_path / "thread" / ".illo-project-context").exists()
+    cleanup = run.metadata_["project_draft_cleanup"]
+    assert cleanup["has_unpublished_changes"] is True
+    assert cleanup["cleanup_after"] == (archived_at + timedelta(days=7)).isoformat()
+
+
+def test_expired_unpublished_project_draft_is_deleted_after_grace_period(tmp_path):
+    from brain.systems.cortex.project_context.draft_lifecycle import cleanup_project_draft_for_run
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "root"
+    source_dir.mkdir()
+    (source_dir / "brief.md").write_text("Published\n")
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    sync_draft_from_root(source_dir, draft_dir)
+    (draft_dir / "brief.md").write_text("Unpublished draft\n")
+    run = _run_with_local_project_draft(source_dir, draft_dir)
+    archived_at = datetime(2026, 5, 21, tzinfo=timezone.utc)
+    cleanup_project_draft_for_run(run, archived_at=archived_at)
+
+    result = cleanup_project_draft_for_run(
+        run,
+        archived_at=archived_at,
+        now=archived_at + timedelta(days=8),
+        force_expired=True,
+    )
+
+    assert result.status == "deleted"
+    assert result.deleted_count == 1
+    assert not (tmp_path / "thread" / ".illo-project-context").exists()
+    assert result.paths[0].reason == "expired_unpublished_project_draft"
+
+
+@pytest.mark.asyncio
+async def test_thread_cleanup_updates_all_project_runs(tmp_path):
+    from brain.systems.cortex.project_context.draft_lifecycle import apply_project_draft_cleanup_for_thread
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "root"
+    source_dir.mkdir()
+    (source_dir / "brief.md").write_text("Published\n")
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    sync_draft_from_root(source_dir, draft_dir)
+    run = _run_with_local_project_draft(source_dir, draft_dir)
+
+    result = MagicMock()
+    result.all.return_value = [run]
+    session = MagicMock()
+    session.scalars = AsyncMock(return_value=result)
+    session.flush = AsyncMock()
+
+    payload = await apply_project_draft_cleanup_for_thread(
+        session,
+        "idea-1",
+        archived_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+    )
+
+    assert payload["run_count"] == 1
+    assert payload["deleted_count"] == 1
+    assert run.metadata_["project_draft_cleanup"]["status"] == "deleted"
+    session.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_expired_cleanup_reaps_retained_unpublished_project_drafts(tmp_path):
+    from brain.systems.cortex.project_context.draft_lifecycle import (
+        cleanup_expired_project_draft_workspaces,
+        cleanup_project_draft_for_run,
+    )
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "root"
+    source_dir.mkdir()
+    (source_dir / "brief.md").write_text("Published\n")
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    sync_draft_from_root(source_dir, draft_dir)
+    (draft_dir / "brief.md").write_text("Unpublished draft\n")
+    run = _run_with_local_project_draft(source_dir, draft_dir)
+    archived_at = datetime(2026, 5, 21, tzinfo=timezone.utc)
+    cleanup_project_draft_for_run(run, archived_at=archived_at)
+
+    result = MagicMock()
+    result.all.return_value = [run]
+    session = MagicMock()
+    session.scalars = AsyncMock(return_value=result)
+    session.flush = AsyncMock()
+
+    payload = await cleanup_expired_project_draft_workspaces(
+        session,
+        now=archived_at + timedelta(days=8),
+    )
+
+    assert payload["deleted_count"] == 1
+    assert run.metadata_["project_draft_cleanup"]["status"] == "deleted"
+    assert not (tmp_path / "thread" / ".illo-project-context").exists()
+    session.flush.assert_awaited_once()

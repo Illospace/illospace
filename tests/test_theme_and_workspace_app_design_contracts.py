@@ -382,6 +382,36 @@ def test_cortex_thread_stage_screen_light_mode_is_boundary_tokenized():
     assert "data-color-scheme='light']) .thread-stage-dock" not in source
 
 
+def test_cortex_panel_light_mode_is_boundary_tokenized():
+    stage = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageScreen.svelte").read_text()
+    utility = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadUtilityContent.svelte").read_text()
+    composer = (REPO_ROOT / "frontend/src/lib/features/composer/components/WorkspaceComposerAdapter.svelte").read_text()
+
+    assert ":global(:root[data-color-scheme='light']) .thread-stage-panel {" in stage
+    assert ":global(:root[data-color-scheme='light']) .composer-chip-group {" in composer
+    assert "--thread-bridge-mention-dropdown-background" in stage
+    assert "--panel-utility-card-background" in utility
+    assert "data-color-scheme='light']) .audit-card" not in utility
+
+
+def test_cortex_thread_stage_main_column_light_mode_is_boundary_tokenized():
+    source = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadTranscript.svelte").read_text()
+    light_lines = [
+        line.strip()
+        for line in source.splitlines()
+        if "data-color-scheme='light'" in line
+    ]
+
+    assert light_lines == [
+        ":global(:root[data-color-scheme='light']) .thread-transcript {",
+    ]
+    assert "--thread-run-border-running" in source
+    assert "--thread-run-chevron-text" in source
+    assert "--thread-reply-placeholder-background" in source
+    assert "data-color-scheme='light']) .thread-transcript .run-" not in source
+    assert "data-color-scheme='light']) .thread-transcript .thread-thinking" not in source
+
+
 def test_cortex_thread_stage_surfaces_keep_light_mode_at_root_boundary():
     expected_boundaries = {
         "frontend/src/lib/features/threads/components/ThreadStageRightDock.svelte": [
@@ -406,8 +436,10 @@ def test_cortex_thread_stage_surfaces_keep_light_mode_at_root_boundary():
 
     assert "--right-dock-add-menu-background" in right_dock
     assert "--thread-stage-panel-before-filter" in stage_screen
+    assert "--thread-bridge-mention-dropdown-background" in stage_screen
     assert "data-color-scheme='light']) .right-dock-tab" not in right_dock
     assert "data-color-scheme='light']) .thread-stage-layout" not in stage_screen
+    assert "data-color-scheme='light']) .mention-dropdown" not in stage_screen
 
 
 def test_cortex_auxiliary_surfaces_keep_light_mode_at_root_boundary():
@@ -420,6 +452,9 @@ def test_cortex_auxiliary_surfaces_keep_light_mode_at_root_boundary():
         ],
         "frontend/src/lib/features/cortex/components/menus/WorkspacePinMenu.svelte": [
             ":global(:root[data-color-scheme='light']) .cortex-workspace-pin-menu {",
+        ],
+        "frontend/src/lib/features/cortex/components/menus/UserMenu.svelte": [
+            ":global(:root[data-color-scheme='light']) .cortex-user-menu {",
         ],
     }
 
