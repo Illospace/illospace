@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime
 from typing import Any, Mapping, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.external_agent import (
@@ -25,6 +25,11 @@ from brain.systems.inbound import service as inbound_service
 
 DEFAULT_SIGNAL_TOKEN_SCOPES = (external_agents.SCOPE_SIGNAL_SUBMIT,)
 READ_LIMIT_MAX = 100
+ATTENTION_EVENT_STATUSES = (
+    inbound_service.STATUS_FAILED,
+    inbound_service.STATUS_QUARANTINED,
+    inbound_service.STATUS_REVIEW_REQUIRED,
+)
 
 
 class InboundAdminError(RuntimeError):
@@ -511,6 +516,43 @@ async def list_events(
     return list((await session.scalars(stmt)).all())
 
 
+async def list_attention_events(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    connection_id: str | None = None,
+    policy_id: str | None = None,
+    origin: str | None = None,
+    limit: int | None = 25,
+    include_payload: bool = False,
+) -> dict[str, Any]:
+    """List inbound events that need Illo/operator attention."""
+
+    stmt = (
+        select(InboundEventRow)
+        .where(InboundEventRow.org_id == str(org_id))
+        .where(
+            or_(
+                InboundEventRow.status.in_(ATTENTION_EVENT_STATUSES),
+                InboundEventRow.error.is_not(None),
+            )
+        )
+        .order_by(InboundEventRow.created_at.desc(), InboundEventRow.id.desc())
+        .limit(_limit(limit))
+    )
+    if connection_id:
+        stmt = stmt.where(InboundEventRow.connection_id == str(connection_id))
+    if policy_id:
+        stmt = stmt.where(InboundEventRow.policy_id == str(policy_id))
+    if origin:
+        stmt = stmt.where(InboundEventRow.origin == str(origin))
+    rows = list((await session.scalars(stmt)).all())
+    return {
+        "events": [serialize_event(row, include_payload=include_payload) for row in rows],
+        "summary": _attention_summary(rows),
+    }
+
+
 async def require_event_for_org(
     session: AsyncSession,
     *,
@@ -955,7 +997,8 @@ def _source_card_traffic(events: Sequence[InboundEventRow]) -> dict[str, Any]:
         "statuses": _counter_rows(status_counts),
         "payload_shapes": _counter_rows(shape_counts, limit=30),
         "observed_outcomes": _source_card_observed_outcomes(events),
-        "recent_failures": [_source_card_event_summary(row) for row in events if _event_needs_attention(row)][:10],
+        "recent_attention": [_source_card_event_summary(row) for row in events if _event_needs_attention(row)][:10],
+        "recent_failures": [_source_card_event_summary(row) for row in events if _event_failed(row)][:10],
         "recent_events": [_source_card_event_summary(row) for row in events[:10]],
     }
 
@@ -1028,6 +1071,17 @@ def _counter_rows(counter: Counter[str], *, limit: int = 10) -> list[dict[str, A
     ]
 
 
+def _attention_summary(events: Sequence[InboundEventRow]) -> dict[str, Any]:
+    return {
+        "event_count": len(events),
+        "statuses": _counter_rows(Counter(str(row.status or "unknown") for row in events)),
+        "origins": _counter_rows(Counter(str(row.origin or "unknown") for row in events)),
+        "connections": _counter_rows(Counter(str(row.connection_id) for row in events)),
+        "oldest_created_at": _iso(min((row.created_at for row in events), default=None)),
+        "newest_created_at": _iso(max((row.created_at for row in events), default=None)),
+    }
+
+
 def _payload_shape_paths(value: Any, *, prefix: str = "payload", depth: int = 0) -> list[str]:
     if depth >= 4:
         return [prefix]
@@ -1052,10 +1106,13 @@ def _payload_shape_paths(value: Any, *, prefix: str = "payload", depth: int = 0)
 
 
 def _event_needs_attention(row: InboundEventRow) -> bool:
+    return row.status in ATTENTION_EVENT_STATUSES or bool(row.error)
+
+
+def _event_failed(row: InboundEventRow) -> bool:
     return row.status in {
         inbound_service.STATUS_FAILED,
         inbound_service.STATUS_QUARANTINED,
-        inbound_service.STATUS_REVIEW_REQUIRED,
     } or bool(row.error)
 
 

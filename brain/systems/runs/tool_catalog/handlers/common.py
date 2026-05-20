@@ -305,6 +305,11 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
             "optional": ["connection_id", "policy_id", "status", "origin", "include_payload", "limit"],
             "effect": "read inbound event logs",
         },
+        "list_attention_events": {
+            "required": [],
+            "optional": ["connection_id", "policy_id", "origin", "include_payload", "limit"],
+            "effect": "read stuck or attention-needed inbound events across review_required, quarantined, failed, or errored statuses",
+        },
         "get_event": {
             "required": ["event_id"],
             "optional": ["include_receipts", "limit"],

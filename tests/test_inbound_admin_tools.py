@@ -324,6 +324,72 @@ async def test_configured_projection_processes_signal_and_illo_can_inspect_logs(
     assert receipts["receipts"][0]["event_id"] == result["event_id"]
 
 
+async def test_illo_can_list_attention_events_for_recovery(
+    seeded_session,
+    patch_unit_of_work,
+):
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        connection = _decode(
+            await _handle_manage_inbound(
+                action="create_connection",
+                display_name="Webhook recovery source",
+                agent_kind="custom",
+                transport="webhook",
+            )
+        )["connection"]
+
+    def event(status: str, *, origin: str, error: str | None = None) -> InboundEventRow:
+        return InboundEventRow(
+            org_id=ORG_ID,
+            connection_id=connection["id"],
+            kind="signal",
+            origin=origin,
+            raw_payload={"case": origin},
+            normalized_payload={},
+            envelope={},
+            ingress_context={"surface": "webhook"},
+            source_actor={"connection_id": connection["id"]},
+            status=status,
+            action_type="ilo_required" if status == inbound_service.STATUS_REVIEW_REQUIRED else None,
+            error=error,
+        )
+
+    seeded_session.add_all(
+        [
+            event(inbound_service.STATUS_PROCESSED, origin="custom.ok"),
+            event(inbound_service.STATUS_REVIEW_REQUIRED, origin="custom.needs_illo"),
+            event(inbound_service.STATUS_QUARANTINED, origin="custom.bad_schema", error="missing key"),
+            event(inbound_service.STATUS_FAILED, origin="custom.failed_run", error="Illo run failed"),
+            event(inbound_service.STATUS_PROCESSED, origin="custom.processed_with_error", error="late warning"),
+        ]
+    )
+    await seeded_session.flush()
+
+    with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
+        attention = _decode(
+            await _handle_manage_inbound(
+                action="list_attention_events",
+                connection_id=connection["id"],
+                include_payload=False,
+                limit=10,
+            )
+        )
+
+    statuses = {row["status"] for row in attention["events"]}
+    origins = {row["origin"] for row in attention["events"]}
+    assert len(attention["events"]) == 4
+    assert inbound_service.STATUS_REVIEW_REQUIRED in statuses
+    assert inbound_service.STATUS_QUARANTINED in statuses
+    assert inbound_service.STATUS_FAILED in statuses
+    assert "custom.processed_with_error" in origins
+    assert "custom.ok" not in origins
+    assert "raw_payload" not in attention["events"][0]
+    assert attention["summary"]["event_count"] == 4
+    assert {"value": inbound_service.STATUS_REVIEW_REQUIRED, "count": 1} in attention["summary"]["statuses"]
+    assert {"value": inbound_service.STATUS_QUARANTINED, "count": 1} in attention["summary"]["statuses"]
+    assert {"value": inbound_service.STATUS_FAILED, "count": 1} in attention["summary"]["statuses"]
+
+
 async def test_dry_run_uses_same_projection_order_as_runtime(
     seeded_session,
     patch_unit_of_work,
@@ -758,6 +824,22 @@ async def test_source_card_summarizes_connection_and_persists_manual_context(
         issue={"summary": "Missing key"},
         idempotency_key="jira:missing-key",
     )
+    seeded_session.add(
+        InboundEventRow(
+            org_id=ORG_ID,
+            connection_id=connection["id"],
+            kind="signal",
+            origin="jira.issue_needs_triage",
+            raw_payload={},
+            normalized_payload={},
+            envelope={},
+            ingress_context={"surface": "webhook"},
+            source_actor={"connection_id": connection["id"]},
+            status=inbound_service.STATUS_REVIEW_REQUIRED,
+            action_type="ilo_required",
+        )
+    )
+    await seeded_session.flush()
 
     with bind_agent_context(AgentExecutionContext(user_id=USER_ID, org_id=ORG_ID)):
         before = _decode(
@@ -798,13 +880,22 @@ async def test_source_card_summarizes_connection_and_persists_manual_context(
     assert refreshed["configured_rules"]["policies"][0]["has_instructions"] is True
     assert refreshed["configured_rules"]["policies"][0]["schema_required_paths"] == ["payload.issue.key"]
     assert refreshed["configured_rules"]["projections"][0]["id"] == projection["id"]
-    assert refreshed["traffic"]["event_count_sampled"] == 2
+    assert refreshed["traffic"]["event_count_sampled"] == 3
     assert {"value": "jira.issue_created", "count": 1} in refreshed["traffic"]["common_origins"]
     assert {"value": inbound_service.STATUS_PROCESSED, "count": 1} in refreshed["traffic"]["statuses"]
     assert {"value": inbound_service.STATUS_QUARANTINED, "count": 1} in refreshed["traffic"]["statuses"]
+    assert {"value": inbound_service.STATUS_REVIEW_REQUIRED, "count": 1} in refreshed["traffic"]["statuses"]
     assert {"value": "payload.issue.key", "count": 1} in refreshed["traffic"]["payload_shapes"]
     assert {"value": "payload.issue.summary", "count": 2} in refreshed["traffic"]["payload_shapes"]
+    assert {
+        inbound_service.STATUS_QUARANTINED,
+        inbound_service.STATUS_REVIEW_REQUIRED,
+    }.issubset({row["status"] for row in refreshed["traffic"]["recent_attention"]})
     assert refreshed["traffic"]["recent_failures"][0]["status"] == inbound_service.STATUS_QUARANTINED
+    assert all(
+        row["status"] != inbound_service.STATUS_REVIEW_REQUIRED
+        for row in refreshed["traffic"]["recent_failures"]
+    )
     assert source_card["generated_at"] == refreshed["generated_at"]
     assert after["persisted_source_card"]["generated_at"] == refreshed["generated_at"]
     assert after["source_card"]["purpose"] == refreshed["purpose"]

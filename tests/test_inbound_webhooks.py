@@ -183,6 +183,19 @@ async def _post_mcp(session, *, headers: dict[str, str] | None = None, json_body
         app.dependency_overrides.update(overrides)
 
 
+async def _post_mcp_raw(session, *, headers: dict[str, str] | None = None, content: str):
+    overrides = dict(app.dependency_overrides)
+    app.dependency_overrides[get_db] = lambda: session
+    app.dependency_overrides[rate_limit] = lambda: None
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/mcp", headers=headers or {}, content=content)
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(overrides)
+
+
 async def _assert_queued_triage(session, outcome: dict, *, reason: str) -> dict:
     assert outcome["reason"] == reason
     triage = outcome["triage"]
@@ -397,6 +410,25 @@ async def test_webhook_and_mcp_signals_share_inbound_event_path(session):
     assert all(receipt.outcome["triage"]["status"] == "queued" for receipt in receipts)
     assert all(receipt.target["kind"] == "cortex_idea" for receipt in receipts)
     assert all(receipt.tool_use["type"] == "illo_triage" for receipt in receipts)
+
+
+async def test_malformed_mcp_json_fails_without_creating_event(session):
+    response = await _post_mcp_raw(
+        session,
+        headers={
+            "Authorization": f"Bearer {RAW_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        content='{"jsonrpc":"2.0","id":2}{"extra":true}',
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32600, "message": "Invalid Request"},
+    }
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
 
 
 async def test_mcp_codex_progress_signal_satisfies_default_checkpoint_policy(session):
@@ -670,6 +702,73 @@ async def test_webhook_rejects_overlong_idempotency_header(session):
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
 
 
+async def test_webhook_provider_delivery_header_becomes_idempotency_key(session):
+    await _seed_connection(session)
+
+    first = await _post_webhook(
+        session,
+        headers={
+            "Authorization": f"Bearer {RAW_TOKEN}",
+            "X-GitHub-Delivery": "delivery-123",
+        },
+        json={
+            "origin": "github.issue_created",
+            "payload": {"issue": {"key": "GH-1"}},
+        },
+    )
+    replay = await _post_webhook(
+        session,
+        headers={
+            "Authorization": f"Bearer {RAW_TOKEN}",
+            "X-GitHub-Delivery": "delivery-123",
+        },
+        json={
+            "origin": "github.issue_created",
+            "payload": {"issue": {"key": "GH-1"}},
+        },
+    )
+
+    first_body = first.json()
+    replay_body = replay.json()
+    event = (await session.scalars(select(InboundEventRow))).one()
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert first_body["idempotent_replay"] is False
+    assert replay_body["idempotent_replay"] is True
+    assert replay_body["event_id"] == first_body["event_id"]
+    assert event.idempotency_key == "x-github-delivery:delivery-123"
+    assert event.ingress_context["provider_delivery"] == {
+        "header": "x-github-delivery",
+        "value": "delivery-123",
+    }
+    assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 1
+
+
+async def test_explicit_webhook_idempotency_header_wins_over_provider_delivery(session):
+    await _seed_connection(session)
+
+    response = await _post_webhook(
+        session,
+        headers={
+            "Authorization": f"Bearer {RAW_TOKEN}",
+            "X-Illo-Idempotency-Key": "explicit-key",
+            "X-GitHub-Delivery": "delivery-ignored",
+        },
+        json={
+            "origin": "github.issue_created",
+            "payload": {"issue": {"key": "GH-2"}},
+        },
+    )
+
+    event = (await session.scalars(select(InboundEventRow))).one()
+    assert response.status_code == 202
+    assert event.idempotency_key == "explicit-key"
+    assert event.ingress_context["provider_delivery"] == {
+        "header": "x-github-delivery",
+        "value": "delivery-ignored",
+    }
+
+
 async def test_webhook_rejects_empty_kind_before_inbound_processing(session):
     await _seed_connection(session)
 
@@ -778,6 +877,51 @@ async def test_source_policy_matching_uses_connection_scope_and_priority(session
         session,
         result["ilo_outcome"],
         reason="matched_policy_without_projection",
+    )
+
+
+async def test_payload_cannot_spoof_another_connections_source_policy(session):
+    principal = await _seed_connection(session)
+    other_connection_id = "55555555-5555-4555-8555-555555555555"
+    await _seed_connection(
+        session,
+        connection_id=other_connection_id,
+        token_id="66666666-6666-4666-8666-666666666666",
+        raw_token="illo_conn_other",
+    )
+    other_policy = await inbound.create_source_policy(
+        session,
+        org_id=ORG_ID,
+        connection_id=other_connection_id,
+        name="Other connection Jira policy",
+        origin_patterns=["jira.ticket_*"],
+        priority=1,
+    )
+
+    result = await inbound.submit_inbound_envelope(
+        session,
+        connection=principal,
+        envelope={
+            "origin": "jira.ticket_created",
+            "payload": {
+                "source": {"connection_id": other_connection_id},
+                "issue": {"key": "PROJ-SPOOF"},
+            },
+            "idempotency_key": "jira:PROJ-SPOOF:create",
+        },
+        ingress_context={"surface": "test"},
+    )
+
+    assert result["status"] == "review_required"
+    assert result["matched_policy_id"] is None
+    assert result["matched_policy_id"] != str(other_policy.id)
+    event = (await session.scalars(select(InboundEventRow))).one()
+    assert event.connection_id == CONNECTION_ID
+    assert event.raw_payload["source"]["connection_id"] == other_connection_id
+    await _assert_queued_triage(
+        session,
+        result["ilo_outcome"],
+        reason="no_matching_source_policy",
     )
 
 

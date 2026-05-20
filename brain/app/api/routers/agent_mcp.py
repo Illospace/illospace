@@ -718,7 +718,13 @@ async def _mcp_endpoint(
     request: Request,
     db: AsyncSession,
 ):
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}},
+            status_code=400,
+        )
     try:
         principal = await _authenticate_mcp_principal(request, db)
     except external_agents.ExternalAgentAuthError as exc:
