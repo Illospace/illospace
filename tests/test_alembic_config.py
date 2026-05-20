@@ -28,6 +28,8 @@ REVIEWED_DESTRUCTIVE_MIGRATIONS = {
     "0005_project_profile_privacy.py",
     # Upgrade removes the replaced user-to-user vault share table.
     "0008_org_owned_vault.py",
+    # Upgrade removes replaced user API key/share tables after migrating data.
+    "0009_org_owned_provider_credentials.py",
 }
 
 

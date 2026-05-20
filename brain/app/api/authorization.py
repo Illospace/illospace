@@ -82,7 +82,6 @@ class PrincipalIdentity:
             "org_id": self.org_id,
             "org_name": self.org_name,
             "attribution_enabled": True,
-            "default_provider": None,
             "internal": self.internal,
             "principal_type": self.principal_type,
             "permissions": sorted(self.permissions),

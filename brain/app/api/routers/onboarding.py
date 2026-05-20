@@ -46,7 +46,7 @@ def _intro_ref(user_id: str) -> str:
 def _has_personal_openai_connection(status: dict[str, Any]) -> bool:
     return bool(
         status.get("runtime_key_available")
-        and status.get("runtime_key_source") == "user_default"
+        and status.get("runtime_key_source") == "codex_subscription"
     )
 
 

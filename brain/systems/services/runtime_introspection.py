@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.platform.db.models.org import OrgApiKey, User, UserApiKey
+from brain.platform.db.models.org import OrgApiKey, UserCodexConnection
 from brain.platform.integrations.llm import async_resolve_llm_client
 from brain.systems.learning.budget import LearningBudgetPolicy
 from brain.systems.learning.policy import build_learning_policy_from_env
@@ -32,9 +32,8 @@ def _provider_auth_payload(
     *,
     provider: str,
     effective_provider: str,
-    has_personal_key: bool,
     has_org_key: bool,
-    personal_default_key_id: int | None,
+    has_codex_subscription: bool,
     runtime_available: bool,
     runtime_source: str,
     runtime_auth_mode: str | None,
@@ -58,7 +57,7 @@ def _provider_auth_payload(
 
     is_selected_provider = provider == effective_provider
     runtime_scope = (
-        "personal" if runtime_source == "user_default"
+        "codex_subscription" if runtime_source == "codex_subscription"
         else "org" if runtime_source == "org_main"
         else "external" if runtime_source == "codex_cache"
         else "env" if runtime_source in {"env", "dotenv"}
@@ -67,13 +66,13 @@ def _provider_auth_payload(
 
     if is_selected_provider and runtime_available:
         status = "in_use"
-    elif has_personal_key or has_org_key or runtime_uses_external_auth:
+    elif has_codex_subscription or has_org_key or runtime_uses_external_auth:
         status = "available"
     else:
         status = "not_configured"
 
     runtime_label = (
-        "your personal credential" if runtime_scope == "personal"
+        "your Codex subscription" if runtime_scope == "codex_subscription"
         else "the org default credential" if runtime_scope == "org"
         else "a local Codex session fallback" if runtime_scope == "external"
         else "an environment credential" if runtime_scope == "env"
@@ -88,19 +87,18 @@ def _provider_auth_payload(
         "authenticated": runtime_available,
         "method": method,
         "auth_mode": runtime_auth_mode,
-        "has_personal_db_key": has_personal_key,
+        "has_codex_subscription": has_codex_subscription,
         "has_org_db_key": has_org_key,
-        "has_db_keys": has_personal_key or has_org_key,
+        "has_db_keys": has_codex_subscription or has_org_key,
         "runtime_key_available": runtime_available,
         "runtime_key_source": runtime_source,
         "runtime_key_scope": runtime_scope,
         "runtime_key_label": runtime_label,
         "runtime_credential_id": runtime_credential_id,
         "runtime_credential_name": runtime_credential_name,
-        "runtime_uses_db_key": runtime_source in ("user_default", "org_main"),
+        "runtime_uses_db_key": runtime_source in ("codex_subscription", "org_main"),
         "runtime_uses_external_auth": runtime_uses_external_auth,
-        "personal_default_key_id": personal_default_key_id,
-        "setup_required": not runtime_available and not (has_personal_key or has_org_key),
+        "setup_required": not runtime_available and not (has_codex_subscription or has_org_key),
         "supports_db_api_keys": provider in {"anthropic", "openai"},
         "supports_external_auth": provider == "openai",
         "connect_instructions": connect_instructions,
@@ -138,39 +136,38 @@ async def async_get_provider_auth_status(
     if provider not in {"anthropic", "openai"}:
         raise ValueError(f"Unsupported provider: {provider}")
 
-    has_personal_key = False
+    has_codex_subscription = False
     has_org_key = False
-    personal_default_key_id = None
     runtime_credential_id = None
     runtime_credential_name = None
 
     if user_id:
         try:
-            db_user = await session.get(User, user_id)
-            if db_user:
-                personal_default_key_id = db_user.default_api_key_id
-            stmt = (
-                select(UserApiKey.id)
-                .where(
-                    UserApiKey.user_id == user_id,
-                    UserApiKey.provider == provider,
-                    UserApiKey.is_active == True,  # noqa: E712
-                )
-                .limit(1)
-            )
-            if (await session.scalars(stmt)).first():
-                has_personal_key = True
-            if org_id:
+            if provider == "openai":
                 stmt = (
-                    select(OrgApiKey.id)
+                    select(UserCodexConnection.id)
                     .where(
-                        OrgApiKey.org_id == org_id,
-                        OrgApiKey.provider == provider,
+                        UserCodexConnection.user_id == user_id,
+                        UserCodexConnection.is_active == True,  # noqa: E712
                     )
                     .limit(1)
                 )
                 if (await session.scalars(stmt)).first():
-                    has_org_key = True
+                    has_codex_subscription = True
+        except Exception:
+            pass
+    if org_id:
+        try:
+            stmt = (
+                select(OrgApiKey.id)
+                .where(
+                    OrgApiKey.org_id == org_id,
+                    OrgApiKey.provider == provider,
+                )
+                .limit(1)
+            )
+            if (await session.scalars(stmt)).first():
+                has_org_key = True
         except Exception:
             pass
 
@@ -179,7 +176,7 @@ async def async_get_provider_auth_status(
     runtime_source = "none"
     runtime_auth_mode = None
     runtime_uses_external_auth = False
-    if user_id:
+    if user_id or org_id:
         try:
             llm = await async_resolve_llm_client(
                 user_id=user_id,
@@ -195,20 +192,28 @@ async def async_get_provider_auth_status(
             pass
 
     runtime_scope = (
-        "personal" if runtime_source == "user_default"
+        "codex_subscription" if runtime_source == "codex_subscription"
         else "org" if runtime_source == "org_main"
         else "external" if runtime_source == "codex_cache"
         else "env" if runtime_source in {"env", "dotenv"}
         else "none"
     )
 
-    if user_id and runtime_scope in {"personal", "org"}:
+    if user_id and runtime_scope in {"codex_subscription", "org"}:
         try:
-            if runtime_scope == "personal" and personal_default_key_id is not None:
-                key_row = await session.get(UserApiKey, personal_default_key_id)
-                if key_row and key_row.provider == provider and key_row.is_active:
+            if runtime_scope == "codex_subscription":
+                stmt = (
+                    select(UserCodexConnection)
+                    .where(
+                        UserCodexConnection.user_id == user_id,
+                        UserCodexConnection.is_active == True,  # noqa: E712
+                    )
+                    .limit(1)
+                )
+                key_row = (await session.scalars(stmt)).first()
+                if key_row:
                     runtime_credential_id = key_row.id
-                    runtime_credential_name = key_row.label or "default"
+                    runtime_credential_name = key_row.label or "Codex / ChatGPT"
             elif runtime_scope == "org" and org_id:
                 stmt = (
                     select(OrgApiKey)
@@ -228,9 +233,8 @@ async def async_get_provider_auth_status(
     return _provider_auth_payload(
         provider=provider,
         effective_provider=effective_provider,
-        has_personal_key=has_personal_key,
         has_org_key=has_org_key,
-        personal_default_key_id=personal_default_key_id,
+        has_codex_subscription=has_codex_subscription,
         runtime_available=runtime_available,
         runtime_source=runtime_source,
         runtime_auth_mode=runtime_auth_mode,

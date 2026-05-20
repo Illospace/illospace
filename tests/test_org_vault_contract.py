@@ -57,3 +57,14 @@ def test_vault_actor_fields_are_not_owner_fields():
 
 def test_user_to_user_vault_sharing_is_removed_from_public_model():
     assert "vault_shares" not in Base.metadata.tables
+
+
+def test_provider_keys_are_org_owned_with_only_codex_user_exception():
+    tables = Base.metadata.tables
+
+    assert "user_api_keys" not in tables
+    assert "api_key_shares" not in tables
+    assert "org_api_keys" in tables
+    assert "user_codex_connections" in tables
+    assert "default_api_key_id" not in tables["users"].c
+    assert "default_provider" not in tables["users"].c

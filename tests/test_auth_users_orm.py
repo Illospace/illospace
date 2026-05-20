@@ -342,10 +342,9 @@ class TestSafeUserContext:
             "role": "owner", "color": "#aaa", "org_id": "o1",
             "org_name": "Org", "org_slug": "org",
             "password_hash": "SECRET", "attribution_enabled": True,
-            "approved": True, "default_provider": "openai",
+            "approved": True,
         }
         result = safe_user_context(user)
         assert "password_hash" not in result
         assert result["name"] == "Alice"
         assert result["approved"] is True
-        assert result["default_provider"] == "openai"

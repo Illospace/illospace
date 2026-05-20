@@ -153,7 +153,7 @@ class TestRouterEndpoints:
         routes = self._get_route_set()
         assert ("/api/cortex/keys", ("GET",)) in routes
         assert ("/api/cortex/keys", ("POST",)) in routes
-        assert ("/api/cortex/keys/default", ("PUT",)) in routes
+        assert ("/api/cortex/keys/default", ("PUT",)) not in routes
         assert ("/api/cortex/keys/org", ("POST",)) in routes
         assert ("/api/cortex/keys/{key_id}", ("DELETE",)) in routes
 

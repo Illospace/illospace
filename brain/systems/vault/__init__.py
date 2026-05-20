@@ -13,11 +13,11 @@ from pathlib import Path
 
 import bcrypt
 from cryptography.fernet import Fernet
-from sqlalchemy import case, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.kernel import config
-from brain.platform.db.models.org import OrgApiKey, User, UserApiKey, ApiKeyShare
+from brain.platform.db.models.org import OrgApiKey, User, UserCodexConnection
 from brain.platform.db.models.vault import (
     Secret,
     VaultAccessLog,
@@ -739,65 +739,54 @@ async def async_resolve_project_bound_env_tokens(
 
 
 # ---------------------------------------------------------------------------
-# Per-user API key management
+# Runtime provider credentials
 # ---------------------------------------------------------------------------
 
 async def resolve_api_key(
     user_id: str | None = None,
     org_id: str | None = None,
     provider: str = "anthropic",
+    auth_mode: str | None = None,
 ) -> tuple[str | None, str]:
-    """Resolve API key with fallback chain:
+    """Resolve a runtime provider credential.
 
-    1. User's chosen default key (set via Settings UI)
-    2. Org main key (set by org owner)
-    3. Environment variable (dev convenience)
+    Provider API keys are org-owned. The only user-owned credential lane is a
+    user's OpenAI Codex/ChatGPT subscription connection.
 
     Returns (key, source) where source describes which level resolved.
     """
-    return await async_resolve_api_key(user_id=user_id, org_id=org_id, provider=provider)
+    return await async_resolve_api_key(
+        user_id=user_id,
+        org_id=org_id,
+        provider=provider,
+        auth_mode=auth_mode,
+    )
 
 
 async def async_resolve_api_key(
     user_id: str | None = None,
     org_id: str | None = None,
     provider: str = "anthropic",
+    auth_mode: str | None = None,
     *,
     session: AsyncSession | None = None,
 ) -> tuple[str | None, str]:
-    """Resolve API key using the async DB path."""
+    """Resolve a provider credential using the async DB path."""
 
     async def _resolve(active_session: AsyncSession) -> tuple[str | None, str]:
-        if user_id:
+        normalized_provider = provider.strip().lower()
+        if normalized_provider == "openai" and auth_mode != "api_key" and user_id:
             stmt = (
-                select(UserApiKey)
-                .join(User, User.default_api_key_id == UserApiKey.id)
+                select(UserCodexConnection)
                 .where(
-                    User.id == user_id,
-                    UserApiKey.provider == provider,
-                    UserApiKey.is_active == True,  # noqa: E712
-                )
-            )
-            key_row = (await active_session.scalars(stmt)).first()
-            if key_row:
-                return _decrypt(bytes(key_row.encrypted_key)), "user_default"
-
-            stmt = (
-                select(UserApiKey)
-                .where(
-                    UserApiKey.user_id == user_id,
-                    UserApiKey.provider == provider,
-                    UserApiKey.is_active == True,  # noqa: E712
-                )
-                .order_by(
-                    case((UserApiKey.label == "default", 0), else_=1),
-                    UserApiKey.id.desc(),
+                    UserCodexConnection.user_id == user_id,
+                    UserCodexConnection.is_active == True,  # noqa: E712
                 )
                 .limit(1)
             )
-            key_row = (await active_session.scalars(stmt)).first()
-            if key_row:
-                return _decrypt(bytes(key_row.encrypted_key)), "user_default"
+            codex_connection = (await active_session.scalars(stmt)).first()
+            if codex_connection:
+                return _decrypt(bytes(codex_connection.encrypted_credential)), "codex_subscription"
 
         effective_org_id = org_id
         if not effective_org_id and user_id:
@@ -808,13 +797,13 @@ async def async_resolve_api_key(
         if effective_org_id:
             stmt = select(OrgApiKey).where(
                 OrgApiKey.org_id == effective_org_id,
-                OrgApiKey.provider == provider,
+                OrgApiKey.provider == normalized_provider,
             )
             org_key = (await active_session.scalars(stmt)).first()
             if org_key:
                 return _decrypt(bytes(org_key.encrypted_key)), "org_main"
 
-        env_key = os.environ.get(f"{provider.upper()}_API_KEY")
+        env_key = os.environ.get(f"{normalized_provider.upper()}_API_KEY")
         if env_key:
             return env_key, "env"
         return None, "none"
@@ -833,7 +822,7 @@ async def update_resolved_api_key(
     source: str,
     api_key: str,
 ) -> bool:
-    """Update the DB key row that ``resolve_api_key`` would select.
+    """Update the DB credential row that ``resolve_api_key`` selected.
 
     This is used by OAuth-style providers when a refresh returns a rotated
     token bundle. Environment-backed keys are intentionally not writable.
@@ -856,44 +845,27 @@ async def async_update_resolved_api_key(
     api_key: str,
     session: AsyncSession | None = None,
 ) -> bool:
-    """Update the key row selected by ``async_resolve_api_key``."""
-    if source not in {"user_default", "org_main"}:
+    """Update the credential row selected by ``async_resolve_api_key``."""
+    if source not in {"codex_subscription", "org_main"}:
         return False
 
     encrypted = _encrypt(api_key)
 
     async def _update(active_session: AsyncSession) -> bool:
-        if source == "user_default" and user_id:
+        normalized_provider = provider.strip().lower()
+        if source == "codex_subscription" and user_id and normalized_provider == "openai":
             stmt = (
-                select(UserApiKey)
-                .join(User, User.default_api_key_id == UserApiKey.id)
+                select(UserCodexConnection)
                 .where(
-                    User.id == user_id,
-                    UserApiKey.provider == provider,
-                    UserApiKey.is_active == True,  # noqa: E712
+                    UserCodexConnection.user_id == user_id,
+                    UserCodexConnection.is_active == True,  # noqa: E712
                 )
+                .limit(1)
             )
-            key_row = (await active_session.scalars(stmt)).first()
-
-            if not key_row:
-                stmt = (
-                    select(UserApiKey)
-                    .where(
-                        UserApiKey.user_id == user_id,
-                        UserApiKey.provider == provider,
-                        UserApiKey.is_active == True,  # noqa: E712
-                    )
-                    .order_by(
-                        case((UserApiKey.label == "default", 0), else_=1),
-                        UserApiKey.id.desc(),
-                    )
-                    .limit(1)
-                )
-                key_row = (await active_session.scalars(stmt)).first()
-
-            if key_row:
-                key_row.encrypted_key = encrypted
-                key_row.is_active = True
+            connection = (await active_session.scalars(stmt)).first()
+            if connection:
+                connection.encrypted_credential = encrypted
+                connection.is_active = True
                 await active_session.flush()
                 return True
 
@@ -907,7 +879,7 @@ async def async_update_resolved_api_key(
             if effective_org_id:
                 stmt = select(OrgApiKey).where(
                     OrgApiKey.org_id == effective_org_id,
-                    OrgApiKey.provider == provider,
+                    OrgApiKey.provider == normalized_provider,
                 )
                 org_key = (await active_session.scalars(stmt)).first()
                 if org_key:
@@ -923,43 +895,44 @@ async def async_update_resolved_api_key(
         return await _update(uow.session)  # type: ignore[arg-type]
 
 
-async def set_api_key(
-    user_id: str,
+async def set_org_api_key(
+    org_id: str,
     api_key: str,
     provider: str = "anthropic",
-    label: str = "default",
+    label: str = "main",
 ) -> int:
-    """Store an encrypted API key for a user. Returns the key ID."""
-    return await async_set_api_key(user_id, api_key, provider=provider, label=label)
+    """Store an encrypted provider API key for an org. Returns the key ID."""
+    return await async_set_org_api_key(org_id, api_key, provider=provider, label=label)
 
 
-async def async_set_api_key(
-    user_id: str,
+async def async_set_org_api_key(
+    org_id: str,
     api_key: str,
     provider: str = "anthropic",
-    label: str = "default",
+    label: str = "main",
     *,
     session: AsyncSession | None = None,
 ) -> int:
-    """Store an encrypted user API key using the async DB path."""
+    """Store an encrypted org provider API key using the async DB path."""
     encrypted = _encrypt(api_key)
 
     async def _set(active_session: AsyncSession) -> int:
-        stmt = select(UserApiKey).where(
-            UserApiKey.user_id == user_id,
-            UserApiKey.provider == provider,
-            UserApiKey.label == label,
+        clean_org_id = _require_org_id(org_id)
+        normalized_provider = provider.strip().lower()
+        stmt = select(OrgApiKey).where(
+            OrgApiKey.org_id == clean_org_id,
+            OrgApiKey.provider == normalized_provider,
         )
         existing = (await active_session.scalars(stmt)).first()
         if existing:
             existing.encrypted_key = encrypted
-            existing.is_active = True
+            existing.label = label
             await active_session.flush()
             return int(existing.id)
 
-        key_obj = UserApiKey(
-            user_id=user_id,
-            provider=provider,
+        key_obj = OrgApiKey(
+            org_id=clean_org_id,
+            provider=normalized_provider,
             encrypted_key=encrypted,
             label=label,
         )
@@ -973,80 +946,52 @@ async def async_set_api_key(
         return await _set(uow.session)  # type: ignore[arg-type]
 
 
-async def share_api_key(
-    api_key_id: int,
-    shared_with_user_id: str,
-    shared_by_user_id: str,
+async def set_user_codex_connection(
+    user_id: str,
+    credential_payload: str,
+    *,
+    label: str = "Codex / ChatGPT",
 ) -> int:
-    """Share an API key with another user. Returns the share ID."""
-    return await async_share_api_key(api_key_id, shared_with_user_id, shared_by_user_id)
+    """Store the one supported user-owned credential: Codex subscription auth."""
+    return await async_set_user_codex_connection(user_id, credential_payload, label=label)
 
 
-async def async_share_api_key(
-    api_key_id: int,
-    shared_with_user_id: str,
-    shared_by_user_id: str,
+async def async_set_user_codex_connection(
+    user_id: str,
+    credential_payload: str,
+    *,
+    label: str = "Codex / ChatGPT",
+    session: AsyncSession | None = None,
 ) -> int:
-    """Share an API key with another user using async DB access."""
-    async with UnitOfWork() as uow:
-        stmt = select(UserApiKey).where(
-            UserApiKey.id == api_key_id,
-            UserApiKey.user_id == shared_by_user_id,
-        )
-        key_row = (await uow.session.scalars(stmt)).first()
-        if not key_row:
-            raise ValueError(f"API key {api_key_id} not found or not owned by {shared_by_user_id}")
+    """Store the one supported user-owned credential using async DB access."""
+    clean_user_id = _require_actor_user_id(user_id)
+    encrypted = _encrypt(credential_payload)
 
-        sharer = await uow.session.get(User, shared_by_user_id)
-        recipient = await uow.session.get(User, shared_with_user_id)
-        if (
-            not sharer
-            or not recipient
-            or not getattr(sharer, "org_id", None)
-            or str(sharer.org_id) != str(recipient.org_id)
-        ):
-            raise ValueError("API keys can only be shared with users in the same org")
-
-        stmt = select(ApiKeyShare).where(
-            ApiKeyShare.api_key_id == api_key_id,
-            ApiKeyShare.shared_with_user_id == shared_with_user_id,
+    async def _set(active_session: AsyncSession) -> int:
+        stmt = select(UserCodexConnection).where(
+            UserCodexConnection.user_id == clean_user_id,
         )
-        existing = (await uow.session.scalars(stmt)).first()
-        now = datetime.now(timezone.utc)
+        existing = (await active_session.scalars(stmt)).first()
         if existing:
-            existing.revoked_at = None
-            existing.shared_at = now
-            await uow.session.flush()
-            return existing.id
-        share = ApiKeyShare(
-            api_key_id=api_key_id,
-            shared_with_user_id=shared_with_user_id,
-            shared_by_user_id=shared_by_user_id,
-            shared_at=now,
+            existing.encrypted_credential = encrypted
+            existing.label = label
+            existing.is_active = True
+            await active_session.flush()
+            return int(existing.id)
+
+        connection = UserCodexConnection(
+            user_id=clean_user_id,
+            encrypted_credential=encrypted,
+            label=label,
         )
-        uow.session.add(share)
-        await uow.session.flush()
-        return share.id
+        active_session.add(connection)
+        await active_session.flush()
+        return int(connection.id)
 
-
-async def revoke_api_key_share(share_id: int, user_id: str) -> bool:
-    """Revoke a shared API key. Only the original sharer can revoke."""
-    return await async_revoke_api_key_share(share_id, user_id)
-
-
-async def async_revoke_api_key_share(share_id: int, user_id: str) -> bool:
-    """Revoke a shared API key using async DB access."""
+    if session is not None:
+        return await _set(session)
     async with UnitOfWork() as uow:
-        stmt = select(ApiKeyShare).where(
-            ApiKeyShare.id == share_id,
-            ApiKeyShare.shared_by_user_id == user_id,
-            ApiKeyShare.revoked_at.is_(None),
-        )
-        share = (await uow.session.scalars(stmt)).first()
-        if share:
-            share.revoked_at = datetime.now(timezone.utc)
-            return True
-        return False
+        return await _set(uow.session)  # type: ignore[arg-type]
 
 
 async def record_api_key_usage(
@@ -1063,9 +1008,9 @@ async def async_record_api_key_usage(
     tokens_used: int,
     cost_usd: float,
 ) -> None:
-    """Record token usage for spend tracking using async DB access."""
+    """Record org provider-key usage for spend tracking using async DB access."""
     async with UnitOfWork() as uow:
-        key_obj = await uow.session.get(UserApiKey, api_key_id)
+        key_obj = await uow.session.get(OrgApiKey, api_key_id)
         if key_obj:
             key_obj.last_used_at = datetime.now(timezone.utc)
             key_obj.total_tokens_used = (key_obj.total_tokens_used or 0) + tokens_used

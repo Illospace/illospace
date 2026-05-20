@@ -7,7 +7,6 @@ import time
 from urllib.parse import urlparse, urlunparse
 
 from fastapi import HTTPException, Request
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.routers.cortex._key_utils import (
@@ -22,7 +21,7 @@ from brain.platform.integrations.openai_codex_auth import (
 )
 from brain.platform.db.models.org import User
 from brain.systems.services.runtime_introspection import async_get_provider_auth_status
-from brain.systems.vault import async_set_api_key
+from brain.systems.vault import async_set_org_api_key, async_set_user_codex_connection
 
 from .oauth_callback_server import (
     CALLBACK_REDIRECT_URI,
@@ -80,22 +79,12 @@ async def _async_store_org_openai_api_key(
     if not org_id or not _can_manage_installation_memory(user):
         return False
     try:
-        from brain.systems.vault import _encrypt
-
-        await session.execute(
-            text("""
-                INSERT INTO org_api_keys (org_id, provider, encrypted_key, label)
-                VALUES (:org_id, :provider, :encrypted, :label)
-                ON CONFLICT (org_id, provider) DO UPDATE SET
-                    encrypted_key = EXCLUDED.encrypted_key,
-                    label = EXCLUDED.label
-            """),
-            {
-                "org_id": str(org_id),
-                "provider": OPENAI_PROVIDER,
-                "encrypted": _encrypt(api_token),
-                "label": OPENAI_ORG_KEY_LABEL,
-            },
+        await async_set_org_api_key(
+            str(org_id),
+            api_token,
+            provider=OPENAI_PROVIDER,
+            label=OPENAI_ORG_KEY_LABEL,
+            session=session,
         )
         return True
     except RuntimeError as exc:
@@ -144,13 +133,22 @@ async def async_store_openai_connection(
         raise HTTPException(status_code=400, detail=f"OpenAI credential verification failed: {exc}") from exc
 
     try:
-        key_id = await async_set_api_key(
-            str(user.id),
-            api_token,
-            provider=OPENAI_PROVIDER,
-            label=label or _connection_label(method),
-            session=session,
-        )
+        if method == "chatgpt":
+            await async_set_user_codex_connection(
+                str(user.id),
+                api_token,
+                label=label or _connection_label(method),
+                session=session,
+            )
+        elif method == "api_key":
+            stored = await _async_store_org_openai_api_key(session, user, api_token)
+            if not stored:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only workspace owners and admins can connect an org OpenAI API key.",
+                )
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported OpenAI credential method")
     except RuntimeError as exc:
         _raise_if_vault_not_configured(exc)
         raise
@@ -158,12 +156,9 @@ async def async_store_openai_connection(
     refreshed = await session.get(User, user.id)
     if not refreshed:
         raise HTTPException(status_code=404, detail="User not found")
-    refreshed.default_provider = OPENAI_PROVIDER
-    refreshed.default_api_key_id = key_id
     await session.flush()
     await session.refresh(refreshed)
     if method == "api_key" and _can_manage_installation_memory(refreshed):
-        await _async_store_org_openai_api_key(session, refreshed, api_token)
         from .memory import async_configure_openai_embedding_api_key
 
         await async_configure_openai_embedding_api_key(session, api_token)

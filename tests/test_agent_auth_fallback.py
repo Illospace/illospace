@@ -11,7 +11,7 @@ async def test_async_resolve_llm_client_uses_stored_anthropic_key():
     """User/org credentials are only resolved through the async auth path."""
     from brain.platform.integrations.llm import async_resolve_llm_client
 
-    mock_resolve = AsyncMock(return_value=("sk-ant-api03-test-key", "user_default"))
+    mock_resolve = AsyncMock(return_value=("sk-ant-api03-test-key", "org_main"))
     with patch("brain.platform.integrations.llm._async_resolve_key_from_db", mock_resolve), \
          patch("brain.platform.integrations.llm._build_anthropic_client") as mock_build:
         mock_build.return_value = MagicMock(
@@ -21,7 +21,7 @@ async def test_async_resolve_llm_client_uses_stored_anthropic_key():
         )
         result = await async_resolve_llm_client(user_id="user-1", provider="anthropic", session=object())
 
-    assert result.source == "user_default"
+    assert result.source == "org_main"
     mock_build.assert_called_once_with("sk-ant-api03-test-key")
     mock_resolve.assert_awaited_once()
 
@@ -151,7 +151,7 @@ async def test_async_resolve_openai_client_refreshes_expired_codex_credential():
     )
     mock_client = MagicMock()
 
-    mock_resolve = AsyncMock(return_value=(expired_payload, "user_default"))
+    mock_resolve = AsyncMock(return_value=(expired_payload, "codex_subscription"))
     mock_persist = AsyncMock()
     with patch("brain.platform.integrations.llm._async_resolve_key_from_db", mock_resolve), \
          patch("brain.platform.integrations.llm.refresh_codex_access_token", return_value=refreshed) as mock_refresh, \
@@ -162,12 +162,12 @@ async def test_async_resolve_openai_client_refreshes_expired_codex_credential():
     mock_refresh.assert_called_once_with("refresh-token-123")
     mock_persist.assert_awaited_once()
     assert mock_persist.call_args.kwargs["user_id"] == "user-1"
-    assert mock_persist.call_args.kwargs["source"] == "user_default"
+    assert mock_persist.call_args.kwargs["source"] == "codex_subscription"
     assert mock_persist.call_args.kwargs["cred"].access_token == "fresh-access"
     assert mock_persist.call_args.kwargs["cred"].refresh_token == "refresh-token-456"
     assert result.provider == "openai"
     assert result.auth_mode == "chatgpt"
-    assert result.source == "user_default"
+    assert result.source == "codex_subscription"
     assert result.token_prefix == "fresh-access"[:18]
     assert mock_codex_cls.call_args.args[0] == "fresh-access"
 
@@ -197,7 +197,7 @@ async def test_async_resolve_openai_client_continues_when_refreshed_credential_p
     )
     mock_client = MagicMock()
 
-    mock_resolve = AsyncMock(return_value=(expired_payload, "user_default"))
+    mock_resolve = AsyncMock(return_value=(expired_payload, "codex_subscription"))
     mock_persist = AsyncMock(side_effect=RuntimeError("db unavailable"))
     with patch("brain.platform.integrations.llm._async_resolve_key_from_db", mock_resolve), \
          patch("brain.platform.integrations.llm.refresh_codex_access_token", return_value=refreshed), \
@@ -225,7 +225,7 @@ def test_resolve_openai_client_does_not_use_codex_cache_in_production_by_default
     with patch.dict(os.environ, {"ILLO_ENV": "production"}, clear=False), \
          patch("brain.platform.integrations.llm.load_codex_auth_json", return_value=codex_auth), \
          patch("brain.platform.integrations.llm._resolve_key_from_env", return_value=(None, "none")):
-        with pytest.raises(RuntimeError, match="user-scoped OpenAI/Codex credential"):
+        with pytest.raises(RuntimeError, match="user Codex subscription"):
             resolve_llm_client(user_id="user-1", provider="openai")
 
 

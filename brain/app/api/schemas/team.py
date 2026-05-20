@@ -64,4 +64,3 @@ class UserProfileUpdate(BaseModel):
     name: str | None = None
     color: str | None = None
     attribution_enabled: bool | None = None
-    default_provider: str | None = None
