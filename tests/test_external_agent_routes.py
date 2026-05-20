@@ -443,6 +443,30 @@ async def test_hosted_mcp_invalid_token_returns_json_rpc_error():
     assert body["error"]["data"] == {"http_status": 401, "auth": "bearer"}
 
 
+async def test_hosted_mcp_malformed_json_returns_invalid_request_without_auth():
+    with patch(
+        "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
+    ) as authenticate:
+        response = await _request(
+            "POST",
+            "/api/mcp",
+            headers={
+                "Authorization": "Bearer bridge-token",
+                "Content-Type": "application/json",
+            },
+            content='{"jsonrpc":"2.0","id":7}{"extra":true}',
+        )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32600, "message": "Invalid Request"},
+    }
+    authenticate.assert_not_called()
+
+
 async def test_hosted_mcp_filters_tools_by_bridge_token_scope():
     principal = external_agents.AgentBridgePrincipal(
         connection_id="conn-1",

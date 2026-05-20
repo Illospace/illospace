@@ -352,6 +352,18 @@ async def _handle_manage_inbound(
                     ]
                 })
 
+            if action == "list_attention_events":
+                result = await inbound_admin.list_attention_events(
+                    session,
+                    org_id=org_id,
+                    connection_id=connection_id,
+                    policy_id=policy_id,
+                    origin=origin,
+                    limit=limit,
+                    include_payload=include_payload,
+                )
+                return _dump(result)
+
             if action == "get_event":
                 if not event_id:
                     return _error("get_event requires: event_id")

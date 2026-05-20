@@ -852,6 +852,7 @@ INBOUND_TOOLS = [
                         "create_projection",
                         "update_projection",
                         "list_events",
+                        "list_attention_events",
                         "get_event",
                         "list_receipts",
                         "dry_run_match",

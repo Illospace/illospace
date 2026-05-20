@@ -1,6 +1,6 @@
 # PRD: Inbound Coordination Layer for IloSpace
 
-Status: living PRD; foundation shipped in PR #113, Illo-admin configuration tool and Phase 2 triage handoff implemented in `codex/illo-inbound-admin-tools`; triage reconciliation and token compatibility backfill implemented in `codex/inbound-token-reconcile`; stored-event replay harness and source cards implemented in `codex/inbound-replay-harness`; E2E follow-up fixes implemented in the current branch
+Status: living PRD; foundation shipped in PR #113, Illo-admin configuration tool and Phase 2 triage handoff implemented in `codex/illo-inbound-admin-tools`; triage reconciliation and token compatibility backfill implemented in `codex/inbound-token-reconcile`; stored-event replay harness and source cards implemented in `codex/inbound-replay-harness`; E2E follow-up fixes shipped; ship-to-all-users readiness hardening is in progress in `codex/inbound-readiness-hardening`
 Date: 2026-05-18  
 Owner: product/architecture discussion  
 
@@ -110,6 +110,20 @@ The PRD intentionally describes a broader product direction: external tools send
   - `venv/bin/python -m pytest tests/test_inbound_admin_tools.py`: `9 passed`.
   - `venv/bin/python -m pytest tests/test_external_agents_service.py tests/test_external_agent_routes.py`: `31 passed, 1 skipped`.
 
+### Implemented In Readiness Hardening Branch
+
+- Hosted MCP now catches malformed JSON request bodies and returns a structured JSON-RPC invalid request response (`-32600`, HTTP 400) instead of a generic 500.
+- Malformed MCP bodies are rejected before bridge-token authentication and before any inbound event can be stored.
+- Generic webhook ingress now maps common provider delivery-id headers (`X-GitHub-Delivery`, Atlassian/Jira-style delivery ids, Linear-style delivery ids, and generic webhook id headers) into inbound idempotency keys when callers do not provide an explicit IloSpace idempotency key.
+- Explicit `X-Illo-Idempotency-Key` still wins over provider delivery headers, while provider delivery metadata remains in ingress context for debugging.
+- Added `manage_inbound(action="list_attention_events")` so Illo can quickly inspect stuck or operator-relevant events across `review_required`, `quarantined`, `failed`, or errored rows.
+- Source cards now split `recent_attention` from `recent_failures`: `review_required` events remain visible as attention-needed context, while true failures/quarantines/errors stay in the failure list.
+- Added a connection-scope spoofing regression test proving a payload that claims another connection id cannot match another connection's source policy.
+- Product decision after E2E: a simulated provider-shaped webhook is sufficient for this readiness phase. A real Jira account is not required before the next rollout as long as token auth, delivery-id idempotency, spoof resistance, and recovery visibility are covered.
+- Verification for this slice so far:
+  - `venv/bin/python -m pytest tests/test_inbound_webhooks.py::test_webhook_provider_delivery_header_becomes_idempotency_key tests/test_inbound_webhooks.py::test_explicit_webhook_idempotency_header_wins_over_provider_delivery tests/test_inbound_webhooks.py::test_payload_cannot_spoof_another_connections_source_policy tests/test_inbound_admin_tools.py::test_illo_can_list_attention_events_for_recovery tests/test_inbound_admin_tools.py::test_source_card_summarizes_connection_and_persists_manual_context tests/test_external_agent_routes.py::test_hosted_mcp_malformed_json_returns_invalid_request_without_auth`: `6 passed`.
+  - `venv/bin/python -m pytest tests/test_external_agent_routes.py tests/test_inbound_webhooks.py tests/test_inbound_admin_tools.py tests/test_tools.py`: `81 passed`.
+
 ### Partially Shipped
 
 - **Decision receipts/effects**: inbound processing stores receipts/effects and now reconciles terminal Illo triage run status/final answer plus compact observed-outcome attribution back onto the event and receipt. Richer review workflows around those outcomes are still future work.
@@ -191,19 +205,158 @@ This section is the running ledger for post-deploy validation. Keep failures her
 
 | Test | Status | Result | Notes |
 | --- | --- | --- | --- |
-| MCP signal from Codex session | Passed; follow-up fix implemented | Hosted MCP accepted the active Codex token and stored events. Unique-origin signal `e778f9f5-7298-4845-bbe7-86ec27894c8d` returned `review_required`, created Cortex idea `4f03ebb8-2980-46bf-b3aa-33657660e233`, thread message `249`, and Illo run `214`. | The default ambiguous MCP path works. The deployed caveat was that `origin=codex.progress` first matched existing policy `856ae76a-2974-4b6c-8fc0-d3fd5d557276` and quarantined event `bb114da0-d013-4f38-8fe3-7a39bdbc6007` because the policy schema expected `payload.checkpoint` and top-level `desired_outcome`. Fix implemented in code: MCP Codex signals now backfill `payload.checkpoint`, and schema validation can read `desired_outcome`. Needs post-deploy retest against the live policy. |
+| MCP signal from Codex session | Passed after post-deploy retest | Hosted MCP accepted the active Codex token and stored events. Unique-origin signal `e778f9f5-7298-4845-bbe7-86ec27894c8d` returned `review_required`, created Cortex idea `4f03ebb8-2980-46bf-b3aa-33657660e233`, thread message `249`, and Illo run `214`. Post-fix `codex.progress` retest event `61eeea43-4ade-4806-a720-9ed5287dbd6c` matched policy `856ae76a-2974-4b6c-8fc0-d3fd5d557276`, generated `payload.checkpoint`, preserved top-level `desired_outcome=team_update`, queued Illo run `238`, and reconciled to `processed`. | The previous `codex.progress` quarantine caveat is fixed in production. The default ambiguous MCP path still works, and the live policy path no longer requires callers to duplicate checkpoint or desired-outcome fields manually. |
 | Webhook ambiguous signal | Passed | `POST /webhooks` returned `202` with event `849a179f-a787-4c7c-b8a2-9a5689ce1437`, `review_required`, no matched policy, Cortex idea `39798b40-84f3-42fb-ad78-88f3a0dedaab`, thread message `250`, and Illo run `215`. | Illo later inspected the event with `manage_inbound.get_event(include_receipts=true)` and confirmed reconciliation succeeded: event status `processed`, receipt `1b6c48ed-81e5-4940-838f-9b27f29b7504` status `processed`, run `215` completed, final answer `Triaged as no-op / resolved`, and `reconciled_at=2026-05-19T19:38:17.805159+00:00`. |
-| Webhook deterministic Domain Projection | Passed; follow-up fix implemented | Illo configured policy `5e3f3b57-3765-4c04-93da-adea55541c80` and projection `63115940-b7a2-4139-92d3-495fce54ea3e` on connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b`, domain `11`, object key `ticket`. Webhook create event `82405008-04a3-469a-bb05-857bcc989809` processed and created Domain record `220`. Idempotency event `7d7a3de8-db39-4e9d-bd06-fc55900e2af3` replayed with `idempotent_replay=true` and reused record `221`. Update event `fce1281f-7bf0-4806-84c3-cf8c2b23d345` processed and updated record `221` to version `2`. | Illo setup used `manage_inbound` plus Domain tools and returned dry-run success. The deployed caveat was that Illo reported the reused connection status as `pending` despite live token traffic. Fix implemented in code: successful token authentication marks `pending` connections as `configured`, updates `last_seen_at`, updates token `last_used_at`, and clears `last_error`. Needs post-deploy retest. |
-| Replay harness and source card | Passed with expected drift | Illo used `manage_inbound.replay_events`, `refresh_source_card`, `get_source_card`, and `list_events` for connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b`. Replay covered 5 requested events, was read-only (`mutates_workspace=false`), and predicted `processed: 3`, `review_required: 2`. Source card refreshed at `2026-05-19T19:45:23.608441+00:00` with tags `post-deploy-e2e`, `mcp`, `webhook`, `domain-projection`. | Projection events replayed stable. The 2 unmatched-path events replay as `review_required` while their stored status is now `processed` because Illo triage/reconciliation completed them; this is expected drift, but the replay UI should explain “current preflight prediction” vs “historical post-Illo outcome” clearly. Source card also surfaced the earlier `codex.progress` quarantine, which is useful operator feedback. |
+| Webhook deterministic Domain Projection | Passed after post-deploy retest | Illo configured policy `5e3f3b57-3765-4c04-93da-adea55541c80` and projection `63115940-b7a2-4139-92d3-495fce54ea3e` on connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b`, domain `11`, object key `ticket`. Webhook create event `82405008-04a3-469a-bb05-857bcc989809` processed and created Domain record `220`. Idempotency event `7d7a3de8-db39-4e9d-bd06-fc55900e2af3` replayed with `idempotent_replay=true` and reused record `221`. Update event `fce1281f-7bf0-4806-84c3-cf8c2b23d345` processed and updated record `221` to version `2`. | Illo setup used `manage_inbound` plus Domain tools and returned dry-run success. The connection-status caveat is fixed in production: live Codex and Jira traffic now marks connections `configured`, updates `last_seen_at`, updates token `last_used_at`, and clears `last_error`. |
+| Realistic Jira workflow configured by Illo | Passed | Headless Illo configured connection `303d8e60-b200-4a1b-9d18-b8b62279ab8e`, token `5f55c2a4-9825-4ea2-b7cf-036c68c5a297`, policy `707c62e9-cced-4d91-8154-b9df52a2cde7`, and Domain `12` / object `ticket` for `Jira Routing E2E 2026-05-19`. Dry-run for `jira.issue_created` matched the policy and predicted `review_required`. | Illo deliberately chose no deterministic projection because the workflow needed synthesis, possible solutions, owner routing, Cortex follow-up creation, and unknown-repo caution. That is the right behavior for this test; projection-only remains valid for simpler storage workflows. |
+| Jira known backend ticket | Passed | Webhook event `47f82afa-4e0c-4215-a53f-c2659713d328` for `JIRA-E2E-BE-001` returned `review_required`, queued Illo run `234`, reconciled to `processed`, created Domain record `222`, set `routing_status=routed`, stored analysis and possible solutions, and set `assignee_email=axel@uwear.ai`. Illo also created Axel-owned Cortex follow-up `ce8a3ad2-d56a-451f-88cd-edf6db35fa7f`. Duplicate replay with the same idempotency key returned `idempotent_replay=true` and reused the same event. | This proves the user-instructed Jira policy can route known repo tickets and that idempotency works on the live webhook endpoint. |
+| Jira repeated known-source frontend ticket | Passed | Webhook event `4f822245-18fd-420d-936d-cb2896ed6551` for `JIRA-E2E-FE-002` returned `review_required`, queued Illo run `235`, reconciled to `processed`, created Domain record `223`, set `routing_status=routed`, stored analysis and possible solutions, and set `assignee_email=axel@uwear.ai`. Illo created Axel-owned Cortex follow-up `797fc37c-df5f-4de0-9b98-e56b855e9e86`. | This covers “Illo receives something from a source it already knows” after the policy was configured. |
+| Jira known source with unknown repo | Passed | Webhook event `e1ef4c65-6276-43fe-8ca3-6c83b5243011` for `JIRA-E2E-UNK-003` returned `review_required`, queued Illo run `236`, reconciled to `processed`, created Domain record `224`, set `routing_status=needs-routing`, stored analysis and possible next steps, and left assignee blank. | Illo followed the instruction not to guess ownership for `unknown-ai/unknown-service`. |
+| Completely new origin through existing source token | Passed | Webhook event `285cc518-098a-4ac5-8c04-74b4dd9ee4a9` used origin `linear.issue_created`, matched no policy, queued Illo run `237`, reconciled to `processed`, and Illo resolved it as a safe no-op / informational test signal without applying the Jira routing policy. | This proves no-policy fallback enters Illo triage safely and does not over-apply a known Jira rule to a new origin. |
+| Replay harness and source card | Passed with expected drift; post-fix source-card retest passed | Illo used `manage_inbound.replay_events`, `refresh_source_card`, `get_source_card`, and `list_events` for connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b`. Replay covered 5 requested events, was read-only (`mutates_workspace=false`), and predicted `processed: 3`, `review_required: 2`. Source card refreshed at `2026-05-19T19:45:23.608441+00:00` with tags `post-deploy-e2e`, `mcp`, `webhook`, `domain-projection`. Post-fix retest refreshed Jira connection `303d8e60-b200-4a1b-9d18-b8b62279ab8e` at `2026-05-19T23:36:23.539482+00:00` and Codex connection `5b046c7e-4fc9-4a38-8b3f-0a3c4fdc638b` at `2026-05-19T23:36:23.597820+00:00`. | Source cards now summarize observed outcomes from completed Illo runs. Jira card showed `jira.issue_created`/`linear.issue_created`, all sampled events `processed`, and observed tools including `manage_domain`, `manage_idea`, `manage_inbound`, and `read_team_members`. Codex card explained the new `codex.progress` outcome and preserved the earlier quarantine as recent operator feedback. Minor follow-up: the card's `recent_failures` label can include `review_required` rows with no error, which is useful context but may read too harshly. |
 | MCP auth hardening | Passed | Invalid token call to `/api/mcp` returned HTTP `200` with MCP JSON-RPC error code `-32001`, message `MCP authentication failed: Invalid bridge token`, and data `{ "http_status": 401, "auth": "bearer" }`. | This confirms the deployed fix prevents the old client-side deserialize failure shape. |
+| MCP malformed JSON body | Failed in deployed E2E; fixed in readiness branch | A malformed `POST /api/mcp` body returned generic `{"error":"Internal server error"}` and API logs showed `JSONDecodeError: Extra data`. A valid retry immediately after passed. Current branch fixes this to return JSON-RPC `Invalid Request` (`-32600`) with HTTP 400, before auth and before event creation. | Needs post-deploy retest after `codex/inbound-readiness-hardening` ships. |
 
 Post-deploy conclusion:
 
-- Core deployed E2E is green across hosted MCP signal submission, webhook ambiguous triage, deterministic Domain Projection create/update/idempotency, replay/source-card inspection, and MCP auth hardening.
-- The active `codex.progress` policy caveat has a code fix: Codex MCP signals now generate a checkpoint payload and schema validation can read top-level `desired_outcome`. Retest after deploy before enabling automatic hooks broadly.
-- The reused source connection `pending` caveat has a code fix: successful authenticated token traffic now marks pending connections configured and updates seen/used timestamps. Retest after deploy.
-- Improve replay/source-card language later so humans can distinguish current deterministic replay predictions from historical post-Illo reconciled outcomes.
-- Minimal Illo action attribution and source-card observed outcome summaries are implemented in code and covered by local tests. Retest after deploy with a live completed Illo triage run.
+- Core deployed E2E is green across hosted MCP signal submission, webhook ambiguous triage, deterministic Domain Projection create/update/idempotency, realistic Illo-configured Jira routing, replay/source-card inspection, source-card observed outcomes, token status reconciliation, and MCP auth hardening.
+- The active `codex.progress` policy caveat is fixed in production: live event `61eeea43-4ade-4806-a720-9ed5287dbd6c` generated checkpoint data, preserved top-level `desired_outcome`, matched the policy, queued Illo, and reconciled to `processed`.
+- The reused source connection `pending` caveat is fixed in production: live Codex and Jira token traffic marked connections `configured`, updated `last_seen_at`, updated token `last_used_at`, and cleared `last_error`.
+- Realistic Jira routing shows the intended product shape: Illo can configure the source, choose an Illo-handled policy instead of projection when reasoning is needed, create Domain records, summarize/solution issues, route known repos to Axel, avoid guessing unknown repos, and safely no-op a completely new origin.
+- Improve replay/source-card language later so humans can distinguish current deterministic replay predictions from historical post-Illo reconciled outcomes, and consider renaming or splitting source-card `recent_failures` so `review_required` context does not look like an error.
+- Hosted MCP malformed JSON handling is fixed in the readiness branch and needs post-deploy retest.
+
+### Phase: Ship-To-All-Users Readiness Gate
+
+Status: next phase after deployed architecture validation.
+
+The realistic Jira/MCP E2E proves the foundation and product direction. It is enough confidence to keep building on this architecture. It is not yet enough confidence to enable the feature for all users without guardrails. This phase defines what would make the team comfortable saying, "we can ship this broadly tomorrow."
+
+The bar is not "Illo always chooses the perfect action." The bar is:
+
+- bad input fails cleanly;
+- source identity and user/org authority are enforced;
+- repeated known events are cheap and stable;
+- ambiguous or new events enter Illo safely;
+- Illo can configure, inspect, replay, and explain the system through tools;
+- operators can see what happened when something gets stuck;
+- rollback is simple if a source behaves badly.
+
+#### Required Before Broad Rollout
+
+1. **Fix user-caused request failures**
+   - Hosted MCP malformed JSON must return a structured JSON-RPC invalid request response, not a generic 500.
+   - Webhook and MCP invalid body, missing auth, bad token, missing scope, schema failure, and oversized payload responses should be predictable and documented.
+   - These failures should not create half-written workspace state.
+
+2. **Test a provider-shaped webhook contract**
+   - Use a realistic Jira/GitHub/Linear-style webhook delivery shape, including a provider delivery id header.
+   - Map provider delivery id into the inbound idempotency key.
+   - Prove origin cannot be spoofed by payload content alone.
+   - Keep raw secrets out of events, source cards, receipts, Domain records, and Illo answers.
+   - A real Jira account is not required for this rollout gate; source-token auth plus provider-shaped delivery-id simulation is enough.
+
+3. **Run the product behavior matrix**
+   - User asks Illo to configure a workflow before events arrive.
+   - A known source sends repeated known events.
+   - A known source sends an unknown repo/project/owner.
+   - A completely new origin/source sends an event.
+   - A simple storage workflow uses deterministic Domain Projection.
+   - A complex workflow deliberately bypasses projection and lets Illo synthesize, route, and decide.
+   - A Codex-style MCP progress signal follows the same envelope and receipt path.
+
+4. **Verify permissions and authority**
+   - Every connection resolves to an org and authority user.
+   - Illo configuration tools enforce that authority.
+   - Cross-org token use fails.
+   - A signal-only connection cannot call direct workspace mutation tools.
+   - Direct thread tools remain compatibility surfaces, not the default automatic hook path.
+
+5. **Make stuck work visible and recoverable**
+   - Illo can list stuck `review_required`, `quarantined`, and `failed` events.
+   - Illo can inspect the event, receipt, policy, source card, and relevant run.
+   - Illo can retry/replay safely when retry is appropriate.
+   - Operators can distinguish current replay prediction from historical post-Illo outcome.
+
+6. **Harden source-card language**
+   - Rename or split `recent_failures` so `review_required` rows without errors do not look like system failures.
+   - Source cards should keep observed outcomes as context, not as automatic rule promotion.
+   - Source cards should make it obvious when a source is healthy, ambiguous, failing validation, or waiting on Illo.
+
+7. **Add a minimal rollout and rollback plan**
+   - Start with a small internal/beta allowlist.
+   - Keep source tokens scoped to `signal:submit` by default.
+   - Document how to revoke one token, disable one connection, disable one policy, and pause inbound processing for one source.
+   - Confirm disabling a source stops new handling without deleting historical events.
+
+8. **Write the operator runbook**
+   - How to ask Illo to create a connection, mint a token, configure a policy, configure a Domain Projection, dry-run a sample, inspect logs, replay events, and refresh a source card.
+   - How to debug "webhook arrived but nothing happened."
+   - How to debug "Illo created the wrong thing."
+   - How to rotate or revoke a leaked token.
+
+#### Confidence Tests For This Phase
+
+| Test | Required Result |
+| --- | --- |
+| Malformed MCP JSON | Returns structured JSON-RPC invalid request response, no 500, no event created. |
+| Provider-shaped webhook auth | Valid token-authenticated delivery accepted; invalid token rejected; no origin spoofing through payload-only changes. |
+| Jira delivery id replay | Duplicate provider delivery id returns idempotent replay and does not create duplicate Domain records or ideas. |
+| Illo-configured projection | Illo configures a simple Jira-to-Domain storage flow; event creates/updates a record without per-event Illo reasoning. |
+| Illo-handled routing | Illo configures a complex Jira routing flow; event creates Domain record, analysis, solution notes, and clear ownership outcome. |
+| Unknown repo | Illo marks `needs-routing` or asks for clarification without guessing an owner. |
+| Unknown origin | No-policy event enters Illo triage safely and does not borrow an unrelated policy. |
+| Cross-org token attempt | Request is rejected and no event/workspace mutation is created. |
+| Signal-only token direct mutation attempt | Request is rejected; compatibility tools do not become automatic-hook guidance. |
+| Stuck run recovery | Failed or expired Illo run is visible from `manage_inbound`, and replay/inspection gives enough context for a human or Illo to recover. |
+| Source card after traffic | Source card explains sampled origins, statuses, payload shapes, observed outcomes, and real failures without exposing raw secrets. |
+| Disable connection/policy | New deliveries stop being handled; historical events remain inspectable. |
+
+#### Minimal Operator Runbook
+
+This runbook is intentionally Illo-chat-first. It documents the operations Illo should perform with `manage_inbound` on behalf of an authorized user.
+
+1. **Create or inspect a source**
+   - Ask Illo to `list_connections` for similar sources.
+   - If none exists, ask Illo to `create_connection` with `display_name`, `agent_kind`, and `transport=webhook` or `hosted_mcp`.
+   - Ask Illo to `mint_token` with default `signal:submit` scope.
+
+2. **Configure routing**
+   - Ask Illo to `create_policy` with origin patterns and natural-language instructions.
+   - For simple storage, ask Illo to create or reuse a Domain and then `create_projection`.
+   - For reasoning workflows, skip projection and let matching events enter Illo triage.
+   - Ask Illo to `dry_run_match` with a sample payload before sending real traffic.
+
+3. **Send a simulated provider delivery**
+   - Send `POST /webhooks` with bearer token auth.
+   - Include a stable provider delivery header such as `X-GitHub-Delivery: simulated-delivery-1`.
+   - Do not include a direct workspace target in the payload; the source sends facts, and Illo/IloSpace decide what to do.
+
+4. **Inspect and recover**
+   - Ask Illo to `list_attention_events` to find events that are `review_required`, `quarantined`, `failed`, or otherwise errored.
+   - Ask Illo to `get_event(include_receipts=true)` for any concerning event.
+   - Ask Illo to `replay_events` when checking whether current policy/projection config would handle the historical event differently.
+   - Ask Illo to `refresh_source_card` after meaningful traffic so future sessions can understand what the source sends and how it was handled.
+
+5. **Rollback**
+   - Revoke a leaked or bad token with `revoke_token`.
+   - Disable a bad policy with `update_policy(enabled=false)`.
+   - Disable a bad projection with `update_projection(enabled=false)`.
+   - Disable the connection with `update_connection(status="disabled")` when the whole source should stop being handled.
+   - Historical events remain inspectable after rollback.
+
+#### Non-Blockers For First Broad Rollout
+
+- A full manual configuration UI. Configuration can remain Illo-chat-first.
+- Automatic promotion from observed outcomes into deterministic rules. Illo should review and configure those intentionally.
+- Perfect provider coverage. One provider-shaped simulated webhook plus the generic webhook path is enough for the next rollout.
+- A large closed taxonomy of possible Illo outcomes. Open summaries and tags remain the right model.
+
+#### Current Readiness Call
+
+Current state is **architecture validated, not broad-rollout ready**.
+
+The current readiness branch handles malformed MCP JSON, provider-shaped delivery-id idempotency, source-card attention/failure wording, connection-scope spoofing regression coverage, stuck-event listing for Illo recovery, and the minimal operator runbook. The remaining broad-rollout work is a final live smoke using a simulated provider delivery plus one Codex MCP signal, and then an intentional beta rollout decision.
 
 ### Trace-Based Follow-Up
 

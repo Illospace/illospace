@@ -688,6 +688,7 @@ def action_policy_for_tool(
         "list_projections",
         "get_projection",
         "list_events",
+        "list_attention_events",
         "get_event",
         "list_receipts",
         "dry_run_match",
