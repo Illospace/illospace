@@ -1558,16 +1558,9 @@ def _pin_scope_key(org_id: str, actor_user_id: str) -> str:
     return f"pin:org:{clean_org_id}:user:{clean_actor_user_id}"
 
 
-def _pin_hash_key(org_id: str, actor_user_id: str) -> str:
-    return f"{_pin_scope_key(org_id, actor_user_id)}:hash"
-
-
-def _pin_failures_key(org_id: str, actor_user_id: str) -> str:
-    return f"{_pin_scope_key(org_id, actor_user_id)}:failures"
-
-
-def _pin_lockout_key(org_id: str, actor_user_id: str) -> str:
-    return f"{_pin_scope_key(org_id, actor_user_id)}:lockout"
+def _pin_config_keys(org_id: str, actor_user_id: str) -> tuple[str, str, str]:
+    scope = _pin_scope_key(org_id, actor_user_id)
+    return f"{scope}:hash", f"{scope}:failures", f"{scope}:lockout"
 
 
 def _token_hash(token: str) -> str:
@@ -1597,10 +1590,7 @@ async def get_pin_status(org_id: str, actor_user_id: str) -> dict:
 
 
 async def async_get_pin_status(org_id: str, actor_user_id: str) -> dict:
-    clean_org_id = _require_org_id(org_id)
-    clean_actor_user_id = _require_actor_user_id(actor_user_id)
-    lockout_key = _pin_lockout_key(clean_org_id, clean_actor_user_id)
-    failures_key = _pin_failures_key(clean_org_id, clean_actor_user_id)
+    hash_key, failures_key, lockout_key = _pin_config_keys(org_id, actor_user_id)
     lockout = await async_get_config(lockout_key)
     locked_until = None
     if lockout:
@@ -1611,7 +1601,7 @@ async def async_get_pin_status(org_id: str, actor_user_id: str) -> dict:
         except ValueError:
             await async_delete_config(lockout_key)
     return {
-        "has_pin": await async_has_pin(clean_org_id, clean_actor_user_id),
+        "has_pin": await async_get_config(hash_key) is not None,
         "failed_attempts": int(await async_get_config(failures_key) or "0"),
         "locked_until": locked_until,
     }
@@ -1627,18 +1617,17 @@ async def async_set_pin(
     new_pin: str,
     current_pin: str | None = None,
 ) -> bool:
-    clean_org_id = _require_org_id(org_id)
-    clean_actor_user_id = _require_actor_user_id(actor_user_id)
-    if await async_has_pin(clean_org_id, clean_actor_user_id) and not await async_verify_pin(
-        clean_org_id,
-        clean_actor_user_id,
+    hash_key, failures_key, lockout_key = _pin_config_keys(org_id, actor_user_id)
+    if await async_get_config(hash_key) is not None and not await async_verify_pin(
+        org_id,
+        actor_user_id,
         current_pin or "",
     ):
         return False
     pin_hash = bcrypt.hashpw(new_pin.encode(), bcrypt.gensalt()).decode()
-    await async_set_config(_pin_hash_key(clean_org_id, clean_actor_user_id), pin_hash)
-    await async_set_config(_pin_failures_key(clean_org_id, clean_actor_user_id), "0")
-    await async_delete_config(_pin_lockout_key(clean_org_id, clean_actor_user_id))
+    await async_set_config(hash_key, pin_hash)
+    await async_set_config(failures_key, "0")
+    await async_delete_config(lockout_key)
     return True
 
 
@@ -1647,7 +1636,8 @@ async def has_pin(org_id: str, actor_user_id: str) -> bool:
 
 
 async def async_has_pin(org_id: str, actor_user_id: str) -> bool:
-    return await async_get_config(_pin_hash_key(org_id, actor_user_id)) is not None
+    hash_key, _, _ = _pin_config_keys(org_id, actor_user_id)
+    return await async_get_config(hash_key) is not None
 
 
 async def verify_pin(org_id: str, actor_user_id: str, pin: str) -> bool:
@@ -1655,10 +1645,7 @@ async def verify_pin(org_id: str, actor_user_id: str, pin: str) -> bool:
 
 
 async def async_verify_pin(org_id: str, actor_user_id: str, pin: str) -> bool:
-    clean_org_id = _require_org_id(org_id)
-    clean_actor_user_id = _require_actor_user_id(actor_user_id)
-    lockout_key = _pin_lockout_key(clean_org_id, clean_actor_user_id)
-    failures_key = _pin_failures_key(clean_org_id, clean_actor_user_id)
+    hash_key, failures_key, lockout_key = _pin_config_keys(org_id, actor_user_id)
     lockout = await async_get_config(lockout_key)
     if lockout:
         lockout_time = datetime.fromisoformat(lockout)
@@ -1667,7 +1654,7 @@ async def async_verify_pin(org_id: str, actor_user_id: str, pin: str) -> bool:
         await async_delete_config(lockout_key)
         await async_set_config(failures_key, "0")
 
-    stored_hash = await async_get_config(_pin_hash_key(clean_org_id, clean_actor_user_id))
+    stored_hash = await async_get_config(hash_key)
     if not stored_hash:
         return False
 

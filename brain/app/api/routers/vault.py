@@ -58,6 +58,10 @@ def _require_org_id(user: dict[str, Any]) -> str:
     return require_org_context(user)
 
 
+def _vault_identity(user: dict[str, Any]) -> tuple[str, str]:
+    return _require_org_id(user), _require_actor_user_id(user)
+
+
 def _require_vault_audit(user: dict[str, Any]) -> None:
     if not can_audit_vault(user):
         raise HTTPException(status_code=403, detail="Permission denied")
@@ -81,8 +85,7 @@ def _raise_if_vault_not_configured(exc: RuntimeError) -> None:
 async def _async_require_unlocked(request: Request, user: dict[str, Any]) -> None:
     from brain.systems.vault import async_has_pin, async_validate_vault_token
 
-    org_id = _require_org_id(user)
-    actor_user_id = _require_actor_user_id(user)
+    org_id, actor_user_id = _vault_identity(user)
     if not await async_has_pin(org_id, actor_user_id):
         raise HTTPException(status_code=423, detail="Vault PIN setup required")
     if not await async_validate_vault_token(org_id, actor_user_id, _vault_token(request)):
@@ -93,14 +96,16 @@ async def _async_require_unlocked(request: Request, user: dict[str, Any]) -> Non
 async def get_pin_status(user: dict[str, Any] = Depends(get_current_user)):
     from brain.systems.vault import async_get_pin_status as _status
 
-    return await _status(_require_org_id(user), _require_actor_user_id(user))
+    org_id, actor_user_id = _vault_identity(user)
+    return await _status(org_id, actor_user_id)
 
 
 @router.post("/setup-pin")
 async def setup_pin(body: PinSetup, user: dict[str, Any] = Depends(get_current_user)):
     from brain.systems.vault import async_set_pin
 
-    if not await async_set_pin(_require_org_id(user), _require_actor_user_id(user), body.new_pin, body.current_pin):
+    org_id, actor_user_id = _vault_identity(user)
+    if not await async_set_pin(org_id, actor_user_id, body.new_pin, body.current_pin):
         raise HTTPException(status_code=403, detail="Current PIN is incorrect")
     return {"success": True}
 
@@ -109,7 +114,8 @@ async def setup_pin(body: PinSetup, user: dict[str, Any] = Depends(get_current_u
 async def unlock_vault(body: PinUnlock, user: dict[str, Any] = Depends(get_current_user)):
     from brain.systems.vault import async_unlock_vault as _unlock
 
-    unlocked = await _unlock(_require_org_id(user), _require_actor_user_id(user), body.pin)
+    org_id, actor_user_id = _vault_identity(user)
+    unlocked = await _unlock(org_id, actor_user_id, body.pin)
     if not unlocked:
         raise HTTPException(status_code=403, detail="Incorrect PIN or vault locked")
     token, expires = unlocked
@@ -120,7 +126,8 @@ async def unlock_vault(body: PinUnlock, user: dict[str, Any] = Depends(get_curre
 async def lock_vault(request: Request, user: dict[str, Any] = Depends(get_current_user)):
     from brain.systems.vault import async_revoke_vault_token
 
-    await async_revoke_vault_token(_require_org_id(user), _require_actor_user_id(user), _vault_token(request))
+    org_id, actor_user_id = _vault_identity(user)
+    await async_revoke_vault_token(org_id, actor_user_id, _vault_token(request))
     return {"locked": True}
 
 
@@ -135,8 +142,7 @@ async def update_secret(
     await _async_require_unlocked(request, user)
     from brain.systems.vault import async_set_secret, normalize_agent_access_level
 
-    actor_user_id = _require_actor_user_id(user)
-    org_id = _require_org_id(user)
+    org_id, actor_user_id = _vault_identity(user)
     from brain.platform.db.repositories.vault import VaultRepository
 
     repo = VaultRepository(db)
@@ -176,7 +182,8 @@ async def list_missing(
     _require_vault_audit(user)
     from brain.systems.vault import async_get_missing_requests
 
-    return await async_get_missing_requests(actor_user_id=_require_actor_user_id(user), org_id=_require_org_id(user))
+    org_id, actor_user_id = _vault_identity(user)
+    return await async_get_missing_requests(actor_user_id=actor_user_id, org_id=org_id)
 
 
 @router.get("/log", response_model=list)
@@ -188,7 +195,8 @@ async def get_access_log(
     _require_vault_audit(user)
     from brain.systems.vault import async_get_vault_access_log
 
-    return await async_get_vault_access_log(_require_actor_user_id(user), org_id=_require_org_id(user), limit=100)
+    org_id, actor_user_id = _vault_identity(user)
+    return await async_get_vault_access_log(actor_user_id, org_id=org_id, limit=100)
 
 
 @router.get("/agent-grants")
@@ -201,7 +209,8 @@ async def list_agent_grants(
     from brain.systems.vault import async_list_agent_grants as _list_grants
 
     statuses = [part.strip() for part in status.split(",") if part.strip()] if status else None
-    return await _list_grants(_require_actor_user_id(user), org_id=_require_org_id(user), statuses=statuses)
+    org_id, actor_user_id = _vault_identity(user)
+    return await _list_grants(actor_user_id, org_id=org_id, statuses=statuses)
 
 
 @router.post("/agent-grants/{grant_id}/approve")
@@ -214,10 +223,11 @@ async def approve_agent_grant(
     await _async_require_unlocked(request, user)
     from brain.systems.vault import async_approve_agent_grant as _approve
 
+    org_id, actor_user_id = _vault_identity(user)
     result = await _approve(
         grant_id,
-        approved_by_user_id=_require_actor_user_id(user),
-        org_id=_require_org_id(user),
+        approved_by_user_id=actor_user_id,
+        org_id=org_id,
         ttl_minutes=body.ttl_minutes,
         max_reads=body.max_reads,
     )
@@ -235,7 +245,8 @@ async def deny_agent_grant(
     await _async_require_unlocked(request, user)
     from brain.systems.vault import async_deny_agent_grant as _deny
 
-    result = await _deny(grant_id, denied_by_user_id=_require_actor_user_id(user), org_id=_require_org_id(user))
+    org_id, actor_user_id = _vault_identity(user)
+    result = await _deny(grant_id, denied_by_user_id=actor_user_id, org_id=org_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Grant not found")
     return result
@@ -249,7 +260,8 @@ async def list_project_bindings(
     await _async_require_unlocked(request, user)
     from brain.systems.vault import async_list_project_bindings as _list_bindings
 
-    return await _list_bindings(actor_user_id=_require_actor_user_id(user), org_id=_require_org_id(user))
+    org_id, actor_user_id = _vault_identity(user)
+    return await _list_bindings(actor_user_id=actor_user_id, org_id=org_id)
 
 
 @router.post("/{secret_id}/project-bindings", response_model=VaultProjectBindingRead, status_code=201)
@@ -262,11 +274,12 @@ async def bind_project_secret(
     await _async_require_unlocked(request, user)
     from brain.systems.vault import async_bind_project_secret as _bind_project_secret
 
+    org_id, actor_user_id = _vault_identity(user)
     try:
         result = await _bind_project_secret(
             secret_id,
-            actor_user_id=_require_actor_user_id(user),
-            org_id=_require_org_id(user),
+            actor_user_id=actor_user_id,
+            org_id=org_id,
             project_slug=body.project_slug,
             env_name=body.env_name,
             target_registry_id=body.target_registry_id,
@@ -287,7 +300,12 @@ async def delete_project_binding(
     await _async_require_unlocked(request, user)
     from brain.systems.vault import async_delete_project_binding as _delete_project_binding
 
-    deleted = await _delete_project_binding(binding_id, actor_user_id=_require_actor_user_id(user), org_id=_require_org_id(user))
+    org_id, actor_user_id = _vault_identity(user)
+    deleted = await _delete_project_binding(
+        binding_id,
+        actor_user_id=actor_user_id,
+        org_id=org_id,
+    )
     if not deleted:
         raise HTTPException(status_code=404, detail="Project binding not found")
     return {"deleted": True}
@@ -300,7 +318,8 @@ async def list_secrets(
 ):
     from brain.systems.vault import async_list_secrets as _list
 
-    return await _list(_require_actor_user_id(user), category=category, org_id=_require_org_id(user))
+    org_id, actor_user_id = _vault_identity(user)
+    return await _list(actor_user_id, category=category, org_id=org_id)
 
 
 @router.get("/{key_name}", response_model=SecretReveal)
@@ -312,8 +331,9 @@ async def reveal_secret(
     await _async_require_unlocked(request, user)
     from brain.systems.vault import async_reveal_secret as _reveal
 
+    org_id, actor_user_id = _vault_identity(user)
     try:
-        value = await _reveal(key_name, actor_user_id=_require_actor_user_id(user), org_id=_require_org_id(user))
+        value = await _reveal(key_name, actor_user_id=actor_user_id, org_id=org_id)
     except RuntimeError as exc:
         _raise_if_vault_not_configured(exc)
         raise
@@ -331,8 +351,7 @@ async def create_secret(
     await _async_require_unlocked(request, user)
     from brain.systems.vault import async_get_secret_record, async_set_secret
 
-    actor_user_id = _require_actor_user_id(user)
-    org_id = _require_org_id(user)
+    org_id, actor_user_id = _vault_identity(user)
     try:
         await async_set_secret(
             key_name=body.key_name,
@@ -363,7 +382,8 @@ async def delete_secret(
     await _async_require_unlocked(request, user)
     from brain.systems.vault import async_delete_secret as _delete
 
-    deleted = await _delete(key_name, actor_user_id=_require_actor_user_id(user), org_id=_require_org_id(user))
+    org_id, actor_user_id = _vault_identity(user)
+    deleted = await _delete(key_name, actor_user_id=actor_user_id, org_id=org_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Secret not found")
     return {"deleted": True}
