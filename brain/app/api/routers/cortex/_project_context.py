@@ -640,7 +640,6 @@ async def bind_github_project_token(
             body.vault_key,
             user=user,
             unlock_token=request.headers.get(project_context_vault.VAULT_UNLOCK_HEADER),
-            allow_shared=False,
         )
     except project_context_vault.ProjectContextVaultError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
@@ -657,7 +656,7 @@ async def bind_github_project_token(
     try:
         binding = await async_bind_project_secret_by_key(
             body.vault_key,
-            user_id=user_id,
+            actor_user_id=user_id,
             org_id=str(user.get("org_id")) if user.get("org_id") else None,
             project_slug=repo_slug,
             env_name=body.env_name,
@@ -665,7 +664,7 @@ async def bind_github_project_token(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if binding is None:
-        raise HTTPException(status_code=404, detail="Project agent access requires a GitHub token you own")
+        raise HTTPException(status_code=404, detail="Project agent access requires an org GitHub token")
 
     permissions = repo.get("permissions") if isinstance(repo.get("permissions"), dict) else {}
     return {

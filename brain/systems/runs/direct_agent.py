@@ -1376,6 +1376,8 @@ async def run_agent_async(
         _agent_context.session_id = session_id
         _agent_context.final_reply_review = None
         execution_metadata = metadata.get("execution_provenance") if isinstance(metadata, dict) else None
+        if not isinstance(execution_metadata, dict):
+            execution_metadata = metadata if isinstance(metadata, dict) else None
         if execution_metadata:
             _agent_context.execution_metadata = execution_metadata
             if getattr(_agent_context, "execution_artifacts", None) is None:

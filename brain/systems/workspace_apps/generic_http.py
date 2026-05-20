@@ -160,9 +160,8 @@ async def _resolve_secret(
 
         return await get_secret(
             key,
-            context.user_id,
+            actor_user_id=context.user_id,
             org_id=context.org_id,
-            allow_shared=True,
             accessed_by="workspace_app_connector",
         )
     if source in {"project_env", "project_vault_binding"}:
@@ -180,7 +179,7 @@ async def _resolve_secret(
         from brain.systems.vault import resolve_project_bound_env_tokens
 
         env = await resolve_project_bound_env_tokens(
-            user_id=context.user_id,
+            actor_user_id=context.user_id,
             org_id=context.org_id,
             project_slug=project_slugs[0],
             project_slugs=project_slugs,

@@ -1769,7 +1769,7 @@ async def test_project_context_github_connect_logs_vault_read_as_api_actor(clien
     assert resp.status_code == 200
     get_secret.assert_awaited_once_with(
         "GITHUB_TOKEN",
-        user_id="user-1",
+        actor_user_id="user-1",
         org_id="test-org",
         accessed_by="api",
     )
@@ -1836,12 +1836,11 @@ async def test_project_context_github_bind_token_verifies_repo_and_binds_owned_v
         "GITHUB_TOKEN",
         user=ANY,
         unlock_token=None,
-        allow_shared=False,
     )
     get_repo.assert_awaited_once_with("example-org/example-repo", token="ghp_secret")
     bind.assert_awaited_once_with(
         "GITHUB_TOKEN",
-        user_id="user-1",
+        actor_user_id="user-1",
         org_id="test-org",
         project_slug="example-org/example-repo",
         env_name="GH_TOKEN",

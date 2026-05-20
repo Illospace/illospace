@@ -85,7 +85,7 @@
         <option value="">Choose Vault token</option>
         <optgroup label="Saved tokens">
           {#each vaultSecrets as secret}
-            <option value={secret.key_name}>{secret.key_name}{secret.is_shared ? ' - shared' : ''}</option>
+            <option value={secret.key_name}>{secret.key_name}</option>
           {/each}
         </optgroup>
       {/if}

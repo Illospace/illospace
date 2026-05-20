@@ -14,7 +14,6 @@ PERMISSION_SCHEDULER_MANAGE = "scheduler:manage"
 PERMISSION_MEMORY_MANAGE = "memory:manage"
 PERMISSION_SKILLS_MANAGE = "skills:manage"
 PERMISSION_SYSTEM_MANAGE = "system:manage"
-PERMISSION_VAULT_SHARE = "vault:share"
 PERMISSION_VAULT_AUDIT = "vault:audit"
 PERMISSION_DOMAIN_READ = "domain:read"
 PERMISSION_DOMAIN_WRITE = "domain:write"
@@ -30,7 +29,6 @@ OWNER_PERMISSIONS = frozenset(
         PERMISSION_MEMORY_MANAGE,
         PERMISSION_SKILLS_MANAGE,
         PERMISSION_SYSTEM_MANAGE,
-        PERMISSION_VAULT_SHARE,
         PERMISSION_VAULT_AUDIT,
         PERMISSION_DOMAIN_READ,
         PERMISSION_DOMAIN_WRITE,
@@ -49,7 +47,6 @@ INTERNAL_SERVICE_PERMISSIONS = frozenset(
         PERMISSION_MEMORY_MANAGE,
         PERMISSION_SKILLS_MANAGE,
         PERMISSION_SYSTEM_MANAGE,
-        PERMISSION_VAULT_SHARE,
         PERMISSION_VAULT_AUDIT,
         PERMISSION_DOMAIN_READ,
         PERMISSION_DOMAIN_WRITE,
@@ -277,10 +274,6 @@ def can_manage_skills(user: Mapping[str, Any] | None) -> bool:
 
 def can_manage_system(user: Mapping[str, Any] | None) -> bool:
     return has_permission(user, PERMISSION_SYSTEM_MANAGE)
-
-
-def can_share_vault(user: Mapping[str, Any] | None) -> bool:
-    return has_permission(user, PERMISSION_VAULT_SHARE)
 
 
 def can_audit_vault(user: Mapping[str, Any] | None) -> bool:

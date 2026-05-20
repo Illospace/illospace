@@ -62,7 +62,6 @@ from brain.platform.db.repositories.skill_bundles import SkillBundleRepository
 from brain.platform.db.repositories.vault import (
     VaultAccessLogRepository,
     VaultRepository,
-    VaultShareRepository,
 )
 
 RepoT = TypeVar("RepoT")
@@ -208,10 +207,6 @@ class UnitOfWork:
     @cached_property
     def vault(self):
         return self._repo(VaultRepository)
-
-    @cached_property
-    def vault_shares(self):
-        return self._repo(VaultShareRepository)
 
     @cached_property
     def vault_access_log(self):

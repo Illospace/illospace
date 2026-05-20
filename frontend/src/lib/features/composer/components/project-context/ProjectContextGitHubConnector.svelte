@@ -241,10 +241,6 @@
       githubError = 'Choose a Vault token first.';
       return false;
     }
-    if (selectedGitHubVaultSecret?.is_shared) {
-      githubError = 'Project agent access requires a GitHub token you own.';
-      return false;
-    }
     githubBindingSaving = true;
     githubError = '';
     try {

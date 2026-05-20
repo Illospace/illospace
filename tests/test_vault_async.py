@@ -5,17 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from brain.platform.db.models.vault import Secret, VaultAccessLog
 from brain.systems import vault
 
-
-class _VaultRepo:
-    def __init__(self, secret=None) -> None:
-        self.secret = secret
-        self.keys: list[tuple[str, str]] = []
-
-    async def get_by_key(self, user_id: str, key_name: str):
-        self.keys.append((user_id, key_name))
-        return self.secret
+ORG_ID = "org-1"
+ACTOR_ID = "user-1"
 
 
 class _Session:
@@ -32,13 +26,13 @@ class _Session:
 
     async def flush(self) -> None:
         self.flushes += 1
-        if self.added and getattr(self.added[-1], "id", None) is None:
-            self.added[-1].id = 11
+        for obj in self.added:
+            if getattr(obj, "id", None) is None:
+                obj.id = 11
 
 
 class _UoW:
-    def __init__(self, repo: _VaultRepo, session: _Session) -> None:
-        self.vault = repo
+    def __init__(self, session: _Session) -> None:
         self.session = session
 
     async def __aenter__(self):
@@ -48,77 +42,79 @@ class _UoW:
         return False
 
 
-@pytest.mark.asyncio
-async def test_async_set_secret_creates_secret(monkeypatch):
-    repo = _VaultRepo()
-    session = _Session()
-    audit = []
+def _patch_uow(monkeypatch, session: _Session) -> None:
+    monkeypatch.setattr(vault, "UnitOfWork", lambda: _UoW(session))
 
-    monkeypatch.setattr(vault, "UnitOfWork", lambda: _UoW(repo, session))
+
+def _patch_secret_lookup(monkeypatch, secret) -> None:
+    async def fake_secret_by_key(*_args, **_kwargs):
+        return secret
+
+    monkeypatch.setattr(vault, "_async_secret_by_key", fake_secret_by_key)
+
+
+@pytest.mark.asyncio
+async def test_async_set_secret_creates_secret_without_sync_uow_bridge(monkeypatch):
+    session = _Session()
+    _patch_uow(monkeypatch, session)
+    _patch_secret_lookup(monkeypatch, None)
     monkeypatch.setattr(vault, "_encrypt", lambda value: b"ciphertext")
 
-    async def fake_log(*args, **kwargs):
-        audit.append((args, kwargs))
+    async def fake_resolve_missing(*_args, **_kwargs):
+        return None
 
-    monkeypatch.setattr(vault, "_async_log_access", fake_log)
+    monkeypatch.setattr(vault, "async_resolve_missing", fake_resolve_missing)
 
-    await vault.async_set_secret("OPENAI_API_KEY", "sk-test", "user-1")
+    await vault.async_set_secret("OPENAI_API_KEY", "sk-test", ACTOR_ID, org_id=ORG_ID)
 
-    assert repo.keys == [("user-1", "OPENAI_API_KEY")]
+    secret = next(obj for obj in session.added if isinstance(obj, Secret))
+    audit = next(obj for obj in session.added if isinstance(obj, VaultAccessLog))
+    assert secret.org_id == ORG_ID
+    assert secret.created_by_user_id == ACTOR_ID
     assert session.flushes == 1
-    assert session.added[0].key_name == "OPENAI_API_KEY"
-    assert session.added[0].encrypted_value == b"ciphertext"
-    assert audit[0][0][:4] == ("user-1", 11, "OPENAI_API_KEY", "write")
+    assert audit.org_id == ORG_ID
+    assert audit.actor_user_id == ACTOR_ID
+    assert audit.action == "write"
 
 
 @pytest.mark.asyncio
-async def test_async_get_secret_reads_and_audits(monkeypatch):
+async def test_async_get_secret_reads_and_audits_actor(monkeypatch):
     secret = SimpleNamespace(
         id=9,
         encrypted_value=b"ciphertext",
         last_accessed_at=None,
         access_count=0,
     )
-    repo = _VaultRepo(secret=secret)
     session = _Session()
-    audit = []
-
-    monkeypatch.setattr(vault, "UnitOfWork", lambda: _UoW(repo, session))
+    _patch_uow(monkeypatch, session)
+    _patch_secret_lookup(monkeypatch, secret)
     monkeypatch.setattr(vault, "_decrypt", lambda value: "plain")
 
-    async def fake_log(*args, **kwargs):
-        audit.append((args, kwargs))
+    value = await vault.async_get_secret("OPENAI_API_KEY", ACTOR_ID, org_id=ORG_ID)
 
-    monkeypatch.setattr(vault, "_async_log_access", fake_log)
-
-    value = await vault.async_get_secret("OPENAI_API_KEY", "user-1")
-
+    audit = next(obj for obj in session.added if isinstance(obj, VaultAccessLog))
     assert value == "plain"
     assert secret.access_count == 1
-    assert secret.last_accessed_at is not None
-    assert audit[0][0][:4] == ("user-1", 9, "OPENAI_API_KEY", "read")
+    assert audit.org_id == ORG_ID
+    assert audit.actor_user_id == ACTOR_ID
+    assert audit.action == "read"
 
 
 @pytest.mark.asyncio
 async def test_async_delete_secret_uses_native_async_uow(monkeypatch):
     secret = SimpleNamespace(id=12)
-    repo = _VaultRepo(secret=secret)
     session = _Session()
-    audit = []
+    _patch_uow(monkeypatch, session)
+    _patch_secret_lookup(monkeypatch, secret)
 
-    monkeypatch.setattr(vault, "UnitOfWork", lambda: _UoW(repo, session))
+    deleted = await vault.async_delete_secret("OPENAI_API_KEY", ACTOR_ID, org_id=ORG_ID)
 
-    async def fake_log(*args, **kwargs):
-        audit.append((args, kwargs))
-
-    monkeypatch.setattr(vault, "_async_log_access", fake_log)
-
-    deleted = await vault.async_delete_secret("OPENAI_API_KEY", "user-1")
-
+    audit = next(obj for obj in session.added if isinstance(obj, VaultAccessLog))
     assert deleted is True
-    assert repo.keys == [("user-1", "OPENAI_API_KEY")]
     assert session.deleted == [secret]
-    assert audit[0][0][:4] == ("user-1", 12, "OPENAI_API_KEY", "delete")
+    assert audit.org_id == ORG_ID
+    assert audit.actor_user_id == ACTOR_ID
+    assert audit.action == "delete"
 
 
 def test_async_vault_entrypoints_do_not_use_sync_uow_bridges():

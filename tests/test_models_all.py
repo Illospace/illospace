@@ -103,7 +103,6 @@ EXPECTED_TABLES = {
     "vault_missing_requests",
     "vault_project_bindings",
     "vault_sessions",
-    "vault_shares",
     "visual_blocks",
     "workspace_app_states",
     "workspace_app_versions",

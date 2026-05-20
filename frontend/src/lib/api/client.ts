@@ -1195,12 +1195,6 @@ export const api = {
     fetchJson<any>('/api/vault/unlock', { method: 'POST', body: JSON.stringify({ pin }) }),
   vaultLock: (vaultToken?: string | null) =>
     fetchJson<any>('/api/vault/lock', { method: 'POST', headers: vaultHeaders(vaultToken) }),
-  vaultOrgUsers: (vaultToken?: string | null) =>
-    fetchJson<any[]>('/api/vault/org-users', { headers: vaultHeaders(vaultToken) }),
-  vaultShare: (id: number, data: any, vaultToken?: string | null) =>
-    fetchJson<any>(`/api/vault/${id}/share`, { method: 'POST', body: JSON.stringify(data), headers: vaultHeaders(vaultToken) }),
-  vaultRevokeShare: (shareId: number, vaultToken?: string | null) =>
-    fetchJson<any>(`/api/vault/shares/${shareId}`, { method: 'DELETE', headers: vaultHeaders(vaultToken) }),
   vaultLog: (vaultToken?: string | null) =>
     fetchJson<any[]>('/api/vault/log', { headers: vaultHeaders(vaultToken) }),
   missingSecrets: (vaultToken?: string | null) =>

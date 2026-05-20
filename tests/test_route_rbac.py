@@ -9,10 +9,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from brain.app.api.auth import get_current_user
-from brain.app.api.authorization import (
-    PERMISSION_SCHEDULER_MANAGE,
-    PERMISSION_VAULT_SHARE,
-)
+from brain.app.api.authorization import PERMISSION_SCHEDULER_MANAGE
 from brain.app.api.deps import get_db
 
 
@@ -105,11 +102,8 @@ async def test_member_cannot_mutate_scheduler(client, method, url, body):
 @pytest.mark.parametrize(
     ("method", "url", "body"),
     [
-        ("GET", "/api/vault/org-users", None),
-        ("DELETE", "/api/vault/shares/1", None),
         ("GET", "/api/vault/missing", None),
         ("GET", "/api/vault/log", None),
-        ("POST", "/api/vault/1/share", {"shared_with_user_id": "user-2"}),
     ],
 )
 async def test_member_cannot_use_privileged_vault_surfaces(client, method, url, body):
@@ -123,7 +117,7 @@ async def test_member_cannot_use_privileged_vault_surfaces(client, method, url, 
 
 
 @pytest.mark.asyncio
-async def test_personal_vault_crud_remains_user_owned(client):
+async def test_org_vault_crud_is_available_to_team_members(client):
     c, app = client
     _act_as(app, MEMBER)
 
@@ -218,17 +212,3 @@ async def test_member_cannot_mutate_installation_memory(client, method, url, bod
     response = await c.request(method, url, json=body)
 
     assert response.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_explicit_vault_share_permission_can_share(client):
-    c, app = client
-    _act_as(app, {**MEMBER, "permissions": [PERMISSION_VAULT_SHARE]})
-
-    with patch("brain.systems.vault.async_has_pin", return_value=False), \
-         patch("brain.systems.vault.async_share_secret", return_value={"id": 7}) as share:
-        response = await c.post("/api/vault/1/share", json={"shared_with_user_id": "user-2"})
-
-    assert response.status_code == 200
-    assert response.json() == {"id": 7}
-    share.assert_called_once_with(1, "user-2", "user-1", org_id="org-1")

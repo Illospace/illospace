@@ -134,6 +134,7 @@ class WorkerRecipe(BaseRunRecipe):
                 "org_id": runtime.request.org_id,
                 "profile": str(runtime.request.normalized_profile.value),
                 "recipe": self.name,
+                "execution_provenance": runtime.request.metadata,
                 "parent_run_id": runtime.run.parent_run_id,
                 "root_run_id": runtime.run.root_run_id,
                 "worker_assignment": assignment.to_payload(),

@@ -144,12 +144,12 @@ async def _github_secret_names(user_id: str, org_id: str | None) -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
     try:
-        candidates = await _maybe_await(list_secrets(user_id, category="github", org_id=org_id))
+        candidates = await _maybe_await(list_secrets(actor_user_id=user_id, category="github", org_id=org_id))
     except Exception:
         candidates = []
     append_names(candidates)
     try:
-        general_candidates = await _maybe_await(list_secrets(user_id, org_id=org_id))
+        general_candidates = await _maybe_await(list_secrets(actor_user_id=user_id, org_id=org_id))
     except Exception:
         general_candidates = []
     append_names(general_candidates, github_like_only=True)
@@ -176,7 +176,7 @@ async def _token_candidates(resource: dict[str, Any], user_id: str | None, org_i
         try:
             token = await _maybe_await(get_secret(
                 key_name,
-                user_id=user_id,
+                actor_user_id=user_id,
                 org_id=org_id,
                 accessed_by="api",
             ))

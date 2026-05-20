@@ -6,6 +6,7 @@ import base64
 from dataclasses import dataclass
 import logging
 import os
+import re
 from types import SimpleNamespace
 
 from brain.systems.runs.execution_context import _agent_context
@@ -277,7 +278,7 @@ async def async_current_project_bound_env() -> dict[str, str]:
         from brain.systems.vault import async_resolve_project_bound_env_tokens
 
         resolved = await async_resolve_project_bound_env_tokens(
-            user_id=user_id,
+            actor_user_id=user_id,
             org_id=getattr(_agent_context, "org_id", None),
             project_slug=project_context.get("project_slug"),
             project_slugs=project_context.get("project_slugs"),
@@ -302,6 +303,8 @@ def prepare_project_execution_env() -> ProjectExecutionEnv:
     run_env = os.environ.copy()
     run_env.update(project_env)
     git_auth_hosts, git_sensitive_values = _configure_project_bound_git_auth(run_env, project_env)
+    if git_auth_hosts:
+        _configure_project_bound_git_identity(run_env)
     return ProjectExecutionEnv(
         env=run_env,
         injected_env=sorted(project_env),
@@ -323,6 +326,8 @@ async def async_prepare_project_execution_env() -> ProjectExecutionEnv:
     run_env = os.environ.copy()
     run_env.update(project_env)
     git_auth_hosts, git_sensitive_values = _configure_project_bound_git_auth(run_env, project_env)
+    if git_auth_hosts:
+        _configure_project_bound_git_identity(run_env)
     return ProjectExecutionEnv(
         env=run_env,
         injected_env=sorted(project_env),
@@ -366,6 +371,102 @@ def _append_git_config_env(env: dict[str, str], key: str, value: str) -> None:
     env[f"GIT_CONFIG_KEY_{count}"] = key
     env[f"GIT_CONFIG_VALUE_{count}"] = value
     env["GIT_CONFIG_COUNT"] = str(count + 1)
+
+
+def _clean_git_identity_text(value: object, *, limit: int = 120) -> str | None:
+    text = " ".join(str(value or "").replace("\x00", " ").split()).strip()
+    return text[:limit] if text else None
+
+
+def _fallback_git_email(user_id: str) -> str:
+    local = re.sub(r"[^a-zA-Z0-9._-]+", "-", user_id).strip("._-").lower()
+    return f"{local or 'unknown'}@users.noreply.illospace.local"
+
+
+def _context_metadata_candidates() -> list[dict]:
+    candidates: list[dict] = []
+    for attr in ("execution_metadata", "metadata"):
+        value = getattr(_agent_context, attr, None)
+        if isinstance(value, dict):
+            candidates.append(value)
+    run = getattr(_agent_context, "run", None)
+    for attr in ("metadata", "metadata_"):
+        value = getattr(run, attr, None) if run is not None else None
+        if isinstance(value, dict):
+            candidates.append(value)
+    return candidates
+
+
+def _nested_dict(payload: dict, path: tuple[str, ...]) -> dict | None:
+    current: object = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current if isinstance(current, dict) else None
+
+
+def _metadata_actor(payload: dict) -> dict | None:
+    for path in (
+        ("actor",),
+        ("illo_trigger", "actor"),
+        ("work_intake", "actor"),
+        ("execution_provenance", "actor"),
+    ):
+        actor = _nested_dict(payload, path)
+        if actor:
+            return actor
+    return None
+
+
+def _current_git_actor_identity() -> tuple[str, str] | None:
+    user_id = _clean_git_identity_text(getattr(_agent_context, "user_id", None))
+    org_id = _clean_git_identity_text(getattr(_agent_context, "org_id", None))
+    name = (
+        _clean_git_identity_text(getattr(_agent_context, "git_author_name", None))
+        or _clean_git_identity_text(getattr(_agent_context, "actor_name", None))
+        or _clean_git_identity_text(getattr(_agent_context, "user_name", None))
+    )
+    email = (
+        _clean_git_identity_text(getattr(_agent_context, "git_author_email", None))
+        or _clean_git_identity_text(getattr(_agent_context, "actor_email", None))
+        or _clean_git_identity_text(getattr(_agent_context, "user_email", None))
+    )
+
+    for metadata in _context_metadata_candidates():
+        actor = _metadata_actor(metadata)
+        if not actor or actor.get("internal") is True:
+            continue
+        actor_org_id = _clean_git_identity_text(actor.get("org_id"))
+        if org_id and actor_org_id and actor_org_id != org_id:
+            continue
+        actor_user_id = _clean_git_identity_text(actor.get("id") or actor.get("user_id"))
+        if user_id and actor_user_id and actor_user_id != user_id:
+            continue
+        user_id = user_id or actor_user_id
+        name = name or _clean_git_identity_text(actor.get("name") or actor.get("display_name"))
+        email = email or _clean_git_identity_text(actor.get("email"))
+        if name and email:
+            break
+
+    if not user_id and not name:
+        return None
+    name = name or user_id or "Illo user"
+    if not email or "@" not in email:
+        email = _fallback_git_email(user_id or name)
+    return name, email
+
+
+def _configure_project_bound_git_identity(env: dict[str, str]) -> bool:
+    identity = _current_git_actor_identity()
+    if not identity:
+        return False
+    name, email = identity
+    env["GIT_AUTHOR_NAME"] = name
+    env["GIT_AUTHOR_EMAIL"] = email
+    env["GIT_COMMITTER_NAME"] = name
+    env["GIT_COMMITTER_EMAIL"] = email
+    return True
 
 
 def _configure_project_bound_git_auth(

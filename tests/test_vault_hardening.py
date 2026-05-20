@@ -17,7 +17,7 @@ USER = {
     "role": "owner",
     "org_id": "org00000-0000-0000-0000-000000000001",
     "org_name": "Example",
-    "permissions": ["vault:share", "vault:audit"],
+    "permissions": ["vault:audit"],
 }
 
 
@@ -55,9 +55,9 @@ def test_list_returns_metadata_without_unlock_when_pin_is_configured():
         "updated_at": datetime.now(timezone.utc),
         "last_accessed_at": None,
         "access_count": 0,
-        "user_id": USER["id"],
-        "is_shared": False,
-        "shared_by_name": None,
+        "org_id": USER["org_id"],
+        "created_by_user_id": USER["id"],
+        "updated_by_user_id": USER["id"],
         "agent_access_level": "ask",
     }
     with _client() as client, \
@@ -138,7 +138,7 @@ async def test_vault_secret_prompt_records_missing_and_broadcasts_thread_event()
     assert "secret" not in result
     record_missing.assert_awaited_once_with(
         "EXAMPLE_API_KEY",
-        user_id=USER["id"],
+        actor_user_id=USER["id"],
         org_id=USER["org_id"],
     )
     assert published
@@ -187,7 +187,7 @@ async def test_vault_inventory_returns_metadata_without_values():
     assert "encrypted_value" not in result["secrets"][0]
     assert "access_count" not in result["secrets"][0]
     list_secrets.assert_awaited_once_with(
-        user_id=USER["id"],
+        actor_user_id=USER["id"],
         org_id=USER["org_id"],
         category="api",
     )
@@ -407,7 +407,7 @@ async def test_brain_vault_uses_scoped_agent_read_after_grant():
     assert result == {"key": "OPENAI_API_KEY", "value": "secret-value"}
     get_secret.assert_awaited_once_with(
         "OPENAI_API_KEY",
-        user_id=USER["id"],
+        actor_user_id=USER["id"],
         org_id=USER["org_id"],
         accessed_by="agent",
     )

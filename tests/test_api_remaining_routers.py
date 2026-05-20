@@ -25,7 +25,7 @@ VAULT_USER = {
     "id": "user-1",
     "org_id": "org-1",
     "role": "owner",
-    "permissions": ["vault:share", "vault:audit"],
+    "permissions": ["vault:audit"],
 }
 
 
@@ -136,9 +136,9 @@ async def test_vault_list_secrets(client, mock_session_factory):
         "updated_at": datetime.now(timezone.utc),
         "last_accessed_at": None,
         "access_count": 0,
-        "user_id": VAULT_USER["id"],
-        "is_shared": False,
-        "shared_by_name": None,
+        "org_id": VAULT_USER["org_id"],
+        "created_by_user_id": VAULT_USER["id"],
+        "updated_by_user_id": VAULT_USER["id"],
     }
     with _vault_user(), \
          patch("brain.systems.vault.async_has_pin", return_value=False), \

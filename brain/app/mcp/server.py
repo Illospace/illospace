@@ -1038,7 +1038,7 @@ async def tool_brain_vault(
         return {"error": "Vault access requires an authenticated user context"}
     authorization = await authorize_agent_secret_read(
         key,
-        user_id=target_user_id,
+        actor_user_id=target_user_id,
         org_id=org_id,
         run_id=run_id,
         reason=reason,
@@ -1049,7 +1049,7 @@ async def tool_brain_vault(
     )
     if not authorization.get("allowed"):
         grant = _json_safe(authorization.get("grant") or {})
-        grant_user_id = str(grant.get("user_id") or target_user_id).strip() or target_user_id
+        grant_user_id = str(grant.get("requested_by_user_id") or target_user_id).strip() or target_user_id
         if authorization.get("status") == "pending":
             normalized_idea_id = (str(idea_id).strip() if idea_id else "") or None
             prompt = None
@@ -1091,7 +1091,7 @@ async def tool_brain_vault(
         return {"error": authorization.get("reason") or "Vault grant denied"}
     value = await get_secret(
         key,
-        user_id=target_user_id,
+        actor_user_id=target_user_id,
         org_id=org_id,
         accessed_by="agent",
     )
@@ -1171,7 +1171,7 @@ async def tool_vault_inventory(
     secrets = [
         _safe_vault_secret_summary(secret)
         for secret in await async_list_secrets(
-            user_id=normalized_user_id,
+            actor_user_id=normalized_user_id,
             org_id=normalized_org_id,
             category=normalized_category,
         )
@@ -1245,7 +1245,7 @@ async def tool_vault_secret_prompt(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    await record_missing_request(normalized_key, user_id=normalized_user_id, org_id=normalized_org_id)
+    await record_missing_request(normalized_key, actor_user_id=normalized_user_id, org_id=normalized_org_id)
 
     if normalized_idea_id:
         publish_safe("vault_secret_prompt", {
