@@ -9,6 +9,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from brain.platform.db.models.vault import Secret, VaultAccessLog
+from brain.platform import vault_crypto
 from brain.systems import vault
 
 TEST_KEY = Fernet.generate_key().decode()
@@ -85,7 +86,7 @@ def test_missing_master_key_raises(monkeypatch, tmp_path):
         def __truediv__(self, value):
             return env_file if value == ".env" else tmp_path / value
 
-    monkeypatch.setattr(vault, "Path", _MockPath)
+    monkeypatch.setattr(vault_crypto, "Path", _MockPath)
 
     with pytest.raises(RuntimeError, match="VAULT_MASTER_KEY is required"):
         vault._get_fernet()

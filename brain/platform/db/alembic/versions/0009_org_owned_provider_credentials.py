@@ -54,7 +54,7 @@ def _classify_legacy_user_key(provider: str, encrypted_key: Any) -> str:
         return "org_api_key"
     try:
         from brain.platform.integrations.openai_codex_auth import parse_codex_auth_payload
-        from brain.systems.vault import _decrypt
+        from brain.platform.vault_crypto import _decrypt
 
         credential = parse_codex_auth_payload(_decrypt(_encrypted_bytes(encrypted_key)))
         if credential.auth_mode == "chatgpt":
