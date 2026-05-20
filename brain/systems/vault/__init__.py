@@ -13,7 +13,7 @@ from pathlib import Path
 
 import bcrypt
 from cryptography.fernet import Fernet
-from sqlalchemy import case, inspect, or_, select, text
+from sqlalchemy import and_, case, inspect, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -181,6 +181,95 @@ async def _async_table_exists(uow: UnitOfWork, table_name: str) -> bool:
         return True
 
 
+def _secret_org_id(secret: Secret) -> str | None:
+    value = getattr(secret, "org_id", None)
+    if value is None or not isinstance(value, (str, int)):
+        return None
+    return str(value) if value else None
+
+
+def _secret_read_dict(
+    secret: Secret,
+    *,
+    is_shared: bool = False,
+    shared_by_name: str | None = None,
+) -> dict:
+    return {
+        "id": secret.id,
+        "key_name": secret.key_name,
+        "description": secret.description,
+        "category": secret.category,
+        "created_at": secret.created_at,
+        "updated_at": secret.updated_at,
+        "last_accessed_at": secret.last_accessed_at,
+        "access_count": secret.access_count,
+        "user_id": secret.user_id,
+        "org_id": getattr(secret, "org_id", None),
+        "agent_access_level": (
+            getattr(secret, "agent_access_level", None)
+            or DEFAULT_VAULT_AGENT_ACCESS_LEVEL
+        ),
+        "shared_by_name": shared_by_name,
+        "is_shared": is_shared,
+    }
+
+
+async def _async_secret_by_key_for_write(
+    uow: UnitOfWork,
+    *,
+    user_id: str,
+    key_name: str,
+    org_id: str | None = None,
+) -> Secret | None:
+    if org_id:
+        secret = (
+            await uow.session.scalars(
+                select(Secret)
+                .where(Secret.org_id == org_id, Secret.key_name == key_name)
+                .order_by(Secret.id.desc())
+                .limit(1)
+            )
+        ).first()
+        if secret:
+            return secret
+
+    repo = getattr(uow, "vault", None)
+    if repo is not None:
+        try:
+            return await repo.get_by_key(user_id, key_name)
+        except (AttributeError, TypeError):
+            pass
+
+    legacy_stmt = select(Secret).where(
+        Secret.user_id == user_id,
+        Secret.key_name == key_name,
+    )
+    if org_id:
+        legacy_stmt = legacy_stmt.where(Secret.org_id.is_(None))
+    return (await uow.session.scalars(legacy_stmt.limit(1))).first()
+
+
+def _secret_bindable_by_actor(secret: Secret, *, user_id: str, org_id: str | None) -> bool:
+    secret_org_id = _secret_org_id(secret)
+    if org_id and secret_org_id == str(org_id):
+        return True
+    secret_user_id = getattr(secret, "user_id", user_id)
+    if not isinstance(secret_user_id, (str, int)):
+        secret_user_id = user_id
+    return secret_org_id is None and str(secret_user_id) == str(user_id)
+
+
+async def _async_secret_by_id_for_actor(
+    uow: UnitOfWork,
+    *,
+    secret_id: int,
+    user_id: str,
+    org_id: str | None = None,
+) -> Secret | None:
+    secret = await uow.session.get(Secret, secret_id)
+    if secret and _secret_bindable_by_actor(secret, user_id=user_id, org_id=org_id):
+        return secret
+    return None
 
 
 async def _async_log_access(
@@ -189,6 +278,7 @@ async def _async_log_access(
     key_name: str,
     action: str,
     accessed_by: str = "user",
+    org_id: str | None = None,
     uow: UnitOfWork | None = None,
 ) -> None:
     """Async variant of vault audit logging. Fail-silent."""
@@ -200,6 +290,7 @@ async def _async_log_access(
             key_name=key_name,
             action=action,
             accessed_by=_normalize_accessed_by(accessed_by),
+            org_id=org_id,
         )
         if uow:
             uow.session.add(entry)
@@ -243,32 +334,31 @@ async def async_get_secret(
     allow_env_fallback: bool = False,
     accessed_by: str = "user",
 ) -> str | None:
-    """Async retrieve/decrypt path for user-scoped secrets."""
+    """Async retrieve/decrypt path for org-scoped secrets with legacy fallback."""
 
     if not user_id:
         raise ValueError("user_id is required to read a vault secret")
     async with UnitOfWork() as uow:
-        secret = await uow.vault.get_by_key(user_id, key_name)
-        if not secret and allow_shared:
-            stmt = (
-                select(Secret)
-                .join(VaultShare, VaultShare.secret_id == Secret.id)
-                .where(
-                    Secret.key_name == key_name,
-                    VaultShare.shared_with_user_id == user_id,
-                    VaultShare.revoked_at.is_(None),
-                )
-                .limit(1)
-            )
-            if org_id:
-                stmt = stmt.join(User, User.id == Secret.user_id).where(User.org_id == org_id)
-            result = await uow.session.scalars(stmt)
-            secret = result.first()
+        secret = await _visible_secret_by_key(
+            uow,
+            user_id=user_id,
+            key_name=key_name,
+            org_id=org_id,
+            include_shared=allow_shared,
+        )
 
         if secret:
             secret.last_accessed_at = datetime.now(timezone.utc)
             secret.access_count = (secret.access_count or 0) + 1
-            await _async_log_access(user_id, secret.id, key_name, "read", accessed_by, uow=uow)
+            await _async_log_access(
+                user_id,
+                secret.id,
+                key_name,
+                "read",
+                accessed_by,
+                org_id=_secret_org_id(secret) or org_id,
+                uow=uow,
+            )
             return _decrypt(bytes(secret.encrypted_value))
 
     if allow_env_fallback and (env_val := os.environ.get(key_name)):
@@ -309,7 +399,7 @@ async def async_set_secret(
     category: str = "general",
     agent_access_level: str | None = None,
 ) -> None:
-    """Async encrypt/upsert path for user-scoped secrets."""
+    """Async encrypt/upsert path for org-scoped secrets with legacy fallback."""
 
     encrypted = _encrypt(value)
     now = datetime.now(timezone.utc)
@@ -321,16 +411,30 @@ async def async_set_secret(
         else None
     )
     async with UnitOfWork() as uow:
-        existing = await uow.vault.get_by_key(user_id, key_name)
+        existing = await _async_secret_by_key_for_write(
+            uow,
+            user_id=user_id,
+            key_name=key_name,
+            org_id=org_id,
+        )
         if existing:
             existing.encrypted_value = encrypted
             existing.description = description
             existing.category = category
+            if org_id and not getattr(existing, "org_id", None):
+                existing.org_id = org_id
             if normalized_agent_access is not None:
                 existing.agent_access_level = normalized_agent_access
             existing.updated_at = now
             await uow.session.flush()
-            await _async_log_access(user_id, existing.id, key_name, "write", uow=uow)
+            await _async_log_access(
+                user_id,
+                existing.id,
+                key_name,
+                "write",
+                org_id=_secret_org_id(existing) or org_id,
+                uow=uow,
+            )
         else:
             secret = Secret(
                 key_name=key_name,
@@ -339,18 +443,19 @@ async def async_set_secret(
                 category=category,
                 agent_access_level=normalized_agent_access or DEFAULT_VAULT_AGENT_ACCESS_LEVEL,
                 user_id=user_id,
+                org_id=org_id,
                 created_at=now,
                 updated_at=now,
             )
             uow.session.add(secret)
             await uow.session.flush()
-            await _async_log_access(user_id, secret.id, key_name, "write", uow=uow)
+            await _async_log_access(user_id, secret.id, key_name, "write", org_id=org_id, uow=uow)
     await async_resolve_missing(key_name, user_id=user_id, org_id=org_id)
 
 
-async def delete_secret(key_name: str, user_id: str) -> bool:
+async def delete_secret(key_name: str, user_id: str, *, org_id: str | None = None) -> bool:
     """Delete a secret. Returns True if it existed."""
-    return await async_delete_secret(key_name, user_id)
+    return await async_delete_secret(key_name, user_id, org_id=org_id)
 
 
 async def list_secrets(
@@ -369,61 +474,71 @@ async def async_list_secrets(
     *,
     org_id: str | None = None,
 ) -> list[dict]:
-    """Async metadata listing for user's own + shared secrets."""
+    """Async metadata listing for org vault secrets plus legacy personal/shared rows."""
 
     if not user_id:
         raise ValueError("user_id is required to list vault secrets")
     async with UnitOfWork() as uow:
         results = []
+        seen: set[int] = set()
 
-        stmt = select(Secret).where(Secret.user_id == user_id)
+        if org_id:
+            stmt = select(Secret).where(
+                or_(
+                    Secret.org_id == org_id,
+                    and_(Secret.org_id.is_(None), Secret.user_id == user_id),
+                )
+            )
+        else:
+            stmt = select(Secret).where(Secret.user_id == user_id)
         if category:
             stmt = stmt.where(Secret.category == category)
         own_result = await uow.session.scalars(stmt)
         for s in own_result.all():
-            results.append({
-                "id": s.id, "key_name": s.key_name, "description": s.description,
-                "category": s.category, "created_at": s.created_at,
-                "updated_at": s.updated_at, "last_accessed_at": s.last_accessed_at,
-                "access_count": s.access_count, "user_id": s.user_id,
-                "agent_access_level": getattr(s, "agent_access_level", None) or DEFAULT_VAULT_AGENT_ACCESS_LEVEL,
-                "shared_by_name": None, "is_shared": False,
-            })
+            seen.add(s.id)
+            results.append(_secret_read_dict(s))
 
-        shared_stmt = (
-            select(Secret, User.name.label("shared_by_name"))
-            .join(VaultShare, VaultShare.secret_id == Secret.id)
-            .join(User, User.id == VaultShare.shared_by_user_id)
-            .where(
-                VaultShare.shared_with_user_id == user_id,
-                VaultShare.revoked_at.is_(None),
+        if await _async_table_exists(uow, "vault_shares"):
+            shared_stmt = (
+                select(Secret, User.name.label("shared_by_name"))
+                .join(VaultShare, VaultShare.secret_id == Secret.id)
+                .join(User, User.id == VaultShare.shared_by_user_id)
+                .where(
+                    VaultShare.shared_with_user_id == user_id,
+                    VaultShare.revoked_at.is_(None),
+                )
             )
-        )
-        if category:
-            shared_stmt = shared_stmt.where(Secret.category == category)
-        if org_id:
-            shared_stmt = shared_stmt.where(User.org_id == org_id)
-        shared_result = await uow.session.execute(shared_stmt)
-        for s, shared_by_name in shared_result.all():
-            results.append({
-                "id": s.id, "key_name": s.key_name, "description": s.description,
-                "category": s.category, "created_at": s.created_at,
-                "updated_at": s.updated_at, "last_accessed_at": s.last_accessed_at,
-                "access_count": s.access_count, "user_id": s.user_id,
-                "agent_access_level": getattr(s, "agent_access_level", None) or DEFAULT_VAULT_AGENT_ACCESS_LEVEL,
-                "shared_by_name": shared_by_name, "is_shared": True,
-            })
+            if category:
+                shared_stmt = shared_stmt.where(Secret.category == category)
+            if org_id:
+                shared_stmt = shared_stmt.where(User.org_id == org_id)
+            shared_result = await uow.session.execute(shared_stmt)
+            for s, shared_by_name in shared_result.all():
+                if s.id in seen:
+                    continue
+                seen.add(s.id)
+                results.append(_secret_read_dict(s, is_shared=True, shared_by_name=shared_by_name))
         results.sort(key=lambda r: (r["category"], r["key_name"], r["is_shared"]))
         return results
 
 
-async def async_get_secret_record(key_name: str, user_id: str) -> Secret | None:
+async def async_get_secret_record(
+    key_name: str,
+    user_id: str,
+    *,
+    org_id: str | None = None,
+) -> Secret | None:
     """Async fetch of an owned secret metadata row."""
 
     if not user_id:
         raise ValueError("user_id is required to read a vault secret")
     async with UnitOfWork() as uow:
-        return await uow.vault.get_by_key(user_id, key_name)
+        return await _async_secret_by_key_for_write(
+            uow,
+            user_id=user_id,
+            key_name=key_name,
+            org_id=org_id,
+        )
 
 
 async def reveal_secret(key_name: str, user_id: str, *, org_id: str | None = None) -> str | None:
@@ -515,15 +630,37 @@ def _project_binding_rows_stmt(
         select(VaultProjectBinding, Secret)
         .join(Secret, Secret.id == VaultProjectBinding.secret_id)
         .where(
-            VaultProjectBinding.user_id == user_id,
-            Secret.user_id == user_id,
             VaultProjectBinding.active == True,  # noqa: E712
         )
     )
     if org_id:
-        stmt = stmt.where(or_(VaultProjectBinding.org_id == org_id, VaultProjectBinding.org_id.is_(None)))
+        stmt = stmt.where(
+            or_(
+                and_(
+                    VaultProjectBinding.org_id == org_id,
+                    Secret.org_id == org_id,
+                ),
+                and_(
+                    VaultProjectBinding.org_id == org_id,
+                    VaultProjectBinding.user_id == user_id,
+                    Secret.org_id.is_(None),
+                    Secret.user_id == user_id,
+                ),
+                and_(
+                    VaultProjectBinding.org_id.is_(None),
+                    VaultProjectBinding.user_id == user_id,
+                    Secret.org_id.is_(None),
+                    Secret.user_id == user_id,
+                ),
+            )
+        )
     else:
-        stmt = stmt.where(VaultProjectBinding.org_id.is_(None))
+        stmt = stmt.where(
+            VaultProjectBinding.org_id.is_(None),
+            VaultProjectBinding.user_id == user_id,
+            Secret.org_id.is_(None),
+            Secret.user_id == user_id,
+        )
     if secret_id is not None:
         stmt = stmt.where(VaultProjectBinding.secret_id == secret_id)
     return stmt.order_by(VaultProjectBinding.project_slug, VaultProjectBinding.env_name)
@@ -578,10 +715,16 @@ async def _async_upsert_project_binding(
     clean_env_name = _normalize_env_name(env_name)
     now = datetime.now(timezone.utc)
     stmt = select(VaultProjectBinding).where(
-        VaultProjectBinding.user_id == user_id,
         VaultProjectBinding.project_slug == clean_project_slug,
         VaultProjectBinding.env_name == clean_env_name,
     )
+    if org_id:
+        stmt = stmt.where(VaultProjectBinding.org_id == org_id)
+    else:
+        stmt = stmt.where(
+            VaultProjectBinding.org_id.is_(None),
+            VaultProjectBinding.user_id == user_id,
+        )
     existing = (await uow.session.scalars(stmt.limit(1))).first()
     if existing:
         existing.secret_id = secret.id
@@ -614,7 +757,7 @@ async def bind_project_secret(
     env_name: str,
     target_registry_id: int | None = None,
 ) -> dict | None:
-    """Bind a user's own secret to a project/env name."""
+    """Bind an org-visible or legacy personal secret to a project/env name."""
     return await async_bind_project_secret(
         secret_id,
         user_id=user_id,
@@ -634,7 +777,7 @@ async def bind_project_secret_by_key(
     env_name: str,
     target_registry_id: int | None = None,
 ) -> dict | None:
-    """Bind one of the current user's own secrets to a project/env name."""
+    """Bind an org-visible or legacy personal secret to a project/env name."""
     return await async_bind_project_secret_by_key(
         key_name,
         user_id=user_id,
@@ -654,7 +797,7 @@ async def async_bind_project_secret_by_key(
     env_name: str,
     target_registry_id: int | None = None,
 ) -> dict | None:
-    """Async bind one of the current user's own secrets to a project/env name."""
+    """Async bind an org-visible or legacy personal secret to a project/env name."""
     if not user_id:
         raise ValueError("user_id is required to bind a vault secret")
     clean_key_name = (key_name or "").strip()
@@ -663,20 +806,16 @@ async def async_bind_project_secret_by_key(
 
     async with UnitOfWork() as uow:
         try:
-            secret = (
-                await uow.session.scalars(
-                    select(Secret)
-                    .where(
-                        Secret.user_id == user_id,
-                        Secret.key_name == clean_key_name,
-                    )
-                    .limit(1)
-                )
-            ).first()
+            secret = await _async_secret_by_key_for_write(
+                uow,
+                user_id=user_id,
+                key_name=clean_key_name,
+                org_id=org_id,
+            )
         except SQLAlchemyError:
             await uow.session.rollback()
             return None
-        if secret is None:
+        if secret is None or not _secret_bindable_by_actor(secret, user_id=user_id, org_id=org_id):
             return None
 
         clean_project_slug = _normalize_project_slug(project_slug)
@@ -684,17 +823,18 @@ async def async_bind_project_secret_by_key(
             raise ValueError("project_slug is required")
         clean_env_name = _normalize_env_name(env_name)
         now = datetime.now(timezone.utc)
-        existing = (
-            await uow.session.scalars(
-                select(VaultProjectBinding)
-                .where(
-                    VaultProjectBinding.user_id == user_id,
-                    VaultProjectBinding.project_slug == clean_project_slug,
-                    VaultProjectBinding.env_name == clean_env_name,
-                )
-                .limit(1)
+        existing_stmt = select(VaultProjectBinding).where(
+            VaultProjectBinding.project_slug == clean_project_slug,
+            VaultProjectBinding.env_name == clean_env_name,
+        )
+        if org_id:
+            existing_stmt = existing_stmt.where(VaultProjectBinding.org_id == org_id)
+        else:
+            existing_stmt = existing_stmt.where(
+                VaultProjectBinding.org_id.is_(None),
+                VaultProjectBinding.user_id == user_id,
             )
-        ).first()
+        existing = (await uow.session.scalars(existing_stmt.limit(1))).first()
         if existing:
             existing.secret_id = secret.id
             existing.org_id = org_id
@@ -749,7 +889,8 @@ async def resolve_project_bound_env_tokens(
 ) -> dict[str, str]:
     """Return env-name/token pairs for project-bound secrets.
 
-    Only the user's own tokens are eligible. Manual secrets are intentionally
+    Org-owned tokens are eligible for every member in the org. Legacy personal
+    tokens remain scoped to the owning user. Manual secrets are intentionally
     excluded; ask-level secrets become available only through a matching project
     binding, while available secrets still need a binding to define an env name.
     """
@@ -789,7 +930,15 @@ async def async_resolve_project_bound_env_tokens(
                 continue
             secret.last_accessed_at = datetime.now(timezone.utc)
             secret.access_count = (secret.access_count or 0) + 1
-            await _async_log_access(user_id, secret.id, secret.key_name, "read", "agent", uow=uow)
+            await _async_log_access(
+                user_id,
+                secret.id,
+                secret.key_name,
+                "read",
+                "agent",
+                org_id=_secret_org_id(secret) or org_id,
+                uow=uow,
+            )
             env[binding.env_name] = _decrypt(bytes(secret.encrypted_value))
         return env
 
@@ -1308,23 +1457,32 @@ def _pending_grant_is_actionable(grant: VaultAgentGrant, secret: Secret | None) 
     return normalize_agent_access_level(getattr(secret, "agent_access_level", None)) == VAULT_AGENT_ACCESS_ASK
 
 
-async def _visible_secret_stmt(uow: UnitOfWork, user_id: str, *, org_id: str | None = None):
-    if await _async_table_exists(uow, "vault_shares"):
+async def _visible_secret_stmt(
+    uow: UnitOfWork,
+    user_id: str,
+    *,
+    org_id: str | None = None,
+    include_shared: bool = True,
+):
+    visibility = []
+    if org_id:
+        visibility.append(Secret.org_id == org_id)
+        visibility.append(and_(Secret.org_id.is_(None), Secret.user_id == user_id))
+    else:
+        visibility.append(Secret.user_id == user_id)
+
+    if include_shared and await _async_table_exists(uow, "vault_shares"):
         shared_secret_ids = select(VaultShare.secret_id).where(
             VaultShare.shared_with_user_id == user_id,
             VaultShare.revoked_at.is_(None),
         )
-        stmt = select(Secret).where(
-            or_(
-                Secret.user_id == user_id,
-                Secret.id.in_(shared_secret_ids),
-            )
-        )
-    else:
-        stmt = select(Secret).where(Secret.user_id == user_id)
-    if org_id:
-        stmt = stmt.join(User, User.id == Secret.user_id).where(User.org_id == org_id)
-    return stmt
+        if org_id:
+            shared_secret_ids = shared_secret_ids.join(
+                User,
+                User.id == VaultShare.shared_by_user_id,
+            ).where(User.org_id == org_id)
+        visibility.append(Secret.id.in_(shared_secret_ids))
+    return select(Secret).where(or_(*visibility))
 
 
 async def _visible_secret_by_key(
@@ -1333,11 +1491,28 @@ async def _visible_secret_by_key(
     user_id: str,
     key_name: str,
     org_id: str | None = None,
+    include_shared: bool = True,
 ) -> Secret | None:
+    repo = getattr(uow, "vault", None)
+    if repo is not None:
+        try:
+            secret = (
+                await repo.get_by_key(user_id, key_name, org_id=org_id)
+                if org_id
+                else await repo.get_by_key(user_id, key_name)
+            )
+        except (AttributeError, TypeError):
+            secret = None
+        if secret:
+            return secret
+
     stmt = (
-        (await _visible_secret_stmt(uow, user_id, org_id=org_id))
+        (await _visible_secret_stmt(uow, user_id, org_id=org_id, include_shared=include_shared))
         .where(Secret.key_name == key_name)
-        .order_by(case((Secret.user_id == user_id, 0), else_=1), Secret.id.desc())
+        .order_by(
+            case((Secret.org_id == org_id, 0), (Secret.user_id == user_id, 1), else_=2),
+            Secret.id.desc(),
+        )
         .limit(1)
     )
     return (await uow.session.scalars(stmt)).first()
@@ -1553,15 +1728,30 @@ async def async_authorize_agent_secret_read(
         return {"allowed": False, "status": "pending", "grant": _grant_to_dict(pending)}
 
 
-async def async_delete_secret(key_name: str, user_id: str) -> bool:
+async def async_delete_secret(key_name: str, user_id: str, *, org_id: str | None = None) -> bool:
     """Delete a secret through the native async DB path."""
     if not user_id:
         raise ValueError("user_id is required to delete a vault secret")
     async with UnitOfWork() as uow:
-        secret = await uow.vault.get_by_key(user_id, key_name)
+        secret = await _async_secret_by_key_for_write(
+            uow,
+            user_id=user_id,
+            key_name=key_name,
+            org_id=org_id,
+        )
         if not secret:
             return False
-        await _async_log_access(user_id, secret.id, key_name, "delete", "user", uow=uow)
+        if not _secret_bindable_by_actor(secret, user_id=user_id, org_id=org_id):
+            return False
+        await _async_log_access(
+            user_id,
+            secret.id,
+            key_name,
+            "delete",
+            "user",
+            org_id=_secret_org_id(secret) or org_id,
+            uow=uow,
+        )
         await uow.session.delete(secret)
         return True
 
@@ -1795,12 +1985,17 @@ async def async_bind_project_secret(
     env_name: str,
     target_registry_id: int | None = None,
 ) -> dict | None:
-    """Bind a user's own secret to a project/env name using native async DB access."""
+    """Bind an org-visible or legacy personal secret to a project/env name using native async DB access."""
     if not user_id:
         raise ValueError("user_id is required to bind a vault secret")
     async with UnitOfWork() as uow:
-        secret = await uow.session.get(Secret, secret_id)
-        if not secret or str(secret.user_id) != str(user_id):
+        secret = await _async_secret_by_id_for_actor(
+            uow,
+            secret_id=secret_id,
+            user_id=user_id,
+            org_id=org_id,
+        )
+        if not secret:
             return None
         binding = await _async_upsert_project_binding(
             uow,
@@ -1819,9 +2014,12 @@ async def async_delete_project_binding(binding_id: int, *, user_id: str, org_id:
     """Deactivate a project binding through the native async DB path."""
     async with UnitOfWork() as uow:
         binding = await uow.session.get(VaultProjectBinding, binding_id)
-        if not binding or str(binding.user_id) != str(user_id):
+        if not binding:
             return False
-        if not _binding_org_matches(binding, org_id):
+        if org_id:
+            if str(binding.org_id) != str(org_id):
+                return False
+        elif str(binding.user_id) != str(user_id) or binding.org_id is not None:
             return False
         binding.active = False
         binding.updated_at = datetime.now(timezone.utc)

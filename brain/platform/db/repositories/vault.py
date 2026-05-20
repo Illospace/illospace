@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from brain.platform.db.models.vault import Secret, VaultAccessLog, VaultMissingRequest, VaultShare
 from brain.platform.db.repositories.base import BaseRepository
@@ -30,10 +30,29 @@ class VaultRepository(BaseRepository[Secret]):
         )
         return (await self._session.scalars(stmt)).all()
 
-    async def a_get_by_key(self, user_id: str, key_name: str) -> Secret | None:
+    async def a_get_by_key(
+        self,
+        user_id: str,
+        key_name: str,
+        *,
+        org_id: str | None = None,
+    ) -> Secret | None:
+        if org_id:
+            org_stmt = (
+                select(Secret)
+                .where(Secret.org_id == org_id, Secret.key_name == key_name)
+                .order_by(Secret.id.desc())
+                .limit(1)
+            )
+            org_result = await self._session.scalars(org_stmt)
+            if secret := org_result.first():
+                return secret
+
         stmt = select(Secret).where(
             Secret.user_id == user_id, Secret.key_name == key_name
         )
+        if org_id:
+            stmt = stmt.where(Secret.org_id.is_(None))
         result = await self._session.scalars(stmt)
         return result.first()
 
@@ -107,8 +126,13 @@ class VaultAccessLogRepository(BaseRepository[VaultAccessLog]):
 
         stmt = (
             select(VaultAccessLog)
-            .join(User, User.id == VaultAccessLog.user_id)
-            .where(User.org_id == org_id)
+            .outerjoin(User, User.id == VaultAccessLog.user_id)
+            .where(
+                or_(
+                    VaultAccessLog.org_id == org_id,
+                    and_(VaultAccessLog.org_id.is_(None), User.org_id == org_id),
+                )
+            )
             .order_by(VaultAccessLog.accessed_at.desc())
             .limit(limit)
         )

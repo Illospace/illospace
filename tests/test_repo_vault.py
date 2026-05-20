@@ -97,6 +97,16 @@ class TestVaultRepository:
         assert found is not None
         assert found.key_name == "MY_KEY"
 
+    async def test_get_by_key_prefers_org_scope(self, repo, session):
+        legacy = await _make_secret(session, key_name="SHARED_KEY", user_id=USER2_ID)
+        org_secret = await _make_secret(session, key_name="SHARED_KEY", org_id=ORG_ID)
+
+        found = await repo.a_get_by_key(USER2_ID, "SHARED_KEY", org_id=ORG_ID)
+
+        assert found is not None
+        assert found.id == org_secret.id
+        assert found.id != legacy.id
+
     async def test_get_by_key_not_found(self, repo):
         assert await repo.a_get_by_key(USER_ID, "MISSING") is None
 

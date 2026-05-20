@@ -176,7 +176,7 @@ async def update_secret(
     from brain.platform.db.repositories.vault import VaultRepository
 
     repo = VaultRepository(db)
-    secret = await repo.a_get_by_key(user_id, key_name)
+    secret = await repo.a_get_by_key(user_id, key_name, org_id=_org_id(user))
     if not secret:
         raise HTTPException(status_code=404, detail="Secret not found")
     updates = body.model_dump(exclude_unset=True)
@@ -381,7 +381,7 @@ async def create_secret(
     except RuntimeError as exc:
         _raise_if_vault_not_configured(exc)
         raise
-    secret = await async_get_secret_record(body.key_name, user_id)
+    secret = await async_get_secret_record(body.key_name, user_id, org_id=_org_id(user))
     if not secret:
         raise HTTPException(status_code=500, detail="Failed to create secret")
     if not isinstance(getattr(secret, "agent_access_level", None), str):
@@ -398,7 +398,7 @@ async def delete_secret(
     await _async_require_unlocked(request, user)
     from brain.systems.vault import async_delete_secret as _delete
 
-    deleted = await _delete(key_name, user_id=_require_user_id(user))
+    deleted = await _delete(key_name, user_id=_require_user_id(user), org_id=_org_id(user))
     if not deleted:
         raise HTTPException(status_code=404, detail="Secret not found")
     return {"deleted": True}

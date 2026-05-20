@@ -14,13 +14,14 @@ class SecretRead(BaseModel):
     access_count: int
     agent_access_level: str = "ask"
     user_id: str | UUID
+    org_id: str | UUID | None = None
     is_shared: bool = False
     shared_by_name: str | None = None
     model_config = {"from_attributes": True}
 
-    @field_serializer("user_id")
+    @field_serializer("user_id", "org_id")
     @classmethod
-    def serialize_uuid(cls, v: object) -> str:
+    def serialize_uuid(cls, v: object) -> str | None:
         return str(v) if v is not None else None
 
 class SecretCreate(BaseModel):

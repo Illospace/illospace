@@ -72,6 +72,7 @@ class TestVaultUserScoping:
         mock_secret.last_accessed_at = None
         mock_secret.access_count = 0
         mock_secret.user_id = USER_A["id"]
+        mock_secret.org_id = USER_A["org_id"]
         mock_secret.is_shared = False
         mock_secret.shared_by_name = None
         with patch("brain.systems.vault.async_set_secret") as mock_set, \
@@ -116,7 +117,7 @@ class TestVaultUserScoping:
         with patch("brain.systems.vault.async_delete_secret", return_value=True) as mock_del:
             resp = client.delete("/api/vault/MY_KEY")
         assert resp.status_code == 200
-        mock_del.assert_called_once_with("MY_KEY", user_id=USER_A["id"])
+        mock_del.assert_called_once_with("MY_KEY", user_id=USER_A["id"], org_id=USER_A["org_id"])
 
     @pytest.mark.asyncio
     async def test_update_secret_metadata_uses_async_session(self):

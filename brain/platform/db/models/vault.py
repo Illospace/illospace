@@ -68,9 +68,13 @@ class Secret(Base):
     user_id: Mapped[str] = mapped_column(
         UUID(as_uuid=False), ForeignKey("users.id"), nullable=False
     )
+    org_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
 
     __table_args__ = (
         UniqueConstraint("user_id", "key_name", name="secrets_user_key_unique"),
+        UniqueConstraint("org_id", "key_name", name="secrets_org_key_unique"),
     )
 
 
@@ -136,7 +140,7 @@ class VaultAgentGrant(Base):
 
 
 class VaultProjectBinding(Base):
-    """User-owned token availability for one project/env name."""
+    """Project/env token availability for an org-owned or legacy personal secret."""
 
     __tablename__ = "vault_project_bindings"
 
@@ -170,6 +174,12 @@ class VaultProjectBinding(Base):
             "env_name",
             name="uq_vault_project_bindings_user_project_env",
         ),
+        UniqueConstraint(
+            "org_id",
+            "project_slug",
+            "env_name",
+            name="uq_vault_project_bindings_org_project_env",
+        ),
     )
 
 
@@ -181,6 +191,9 @@ class VaultAccessLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(
         UUID(as_uuid=False), ForeignKey("users.id"), nullable=False
+    )
+    org_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=True, index=True
     )
     secret_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("secrets.id", ondelete="SET NULL"), nullable=True
