@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import pytest_asyncio
@@ -1349,9 +1349,9 @@ async def test_post_thread_discussion_reply_tool_writes_illo_comment(monkeypatch
         async def __aexit__(self, exc_type, exc_val, exc_tb):
             return None
 
-    broadcast = AsyncMock()
+    published = Mock()
     monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
-    monkeypatch.setattr("brain.app.api.routers.ws.ws_manager.broadcast_product_event", broadcast)
+    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", published)
 
     with bind_agent_context(
         {
@@ -1382,10 +1382,9 @@ async def test_post_thread_discussion_reply_tool_writes_illo_comment(monkeypatch
     assert created[0].thread_id == "some-id"
     assert created[0].org_id == "test-org"
     assert created[0].author_user_id is None
-    broadcast.assert_awaited_once_with(
+    published.assert_called_once_with(
         "thread_discussion_comment",
-        {"idea_id": "some-id", "comment": payload["comment"]},
-        org_id="test-org",
+        {"idea_id": "some-id", "org_id": "test-org", "comment": payload["comment"]},
     )
 
 

@@ -180,9 +180,9 @@ async def _handle_post_thread_discussion_reply(
     reply_to_comment_id: int | None = None,
 ) -> str:
     """Post an Illo-authored reply to a Thread's Discussion surface."""
-    from brain.app.api.routers.ws import ws_manager
     from brain.platform.db.models.idea import Idea, ThreadDiscussionComment
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.systems.cortex.events import publish_safe
 
     text = str(body or "").strip()
     if not text:
@@ -237,10 +237,9 @@ async def _handle_post_thread_discussion_reply(
         await uow.session.flush()
         payload = _discussion_comment_payload(comment)
 
-    await ws_manager.broadcast_product_event(
+    publish_safe(
         "thread_discussion_comment",
-        {"idea_id": target_thread_id, "comment": payload},
-        org_id=org_id,
+        {"idea_id": target_thread_id, "org_id": org_id, "comment": payload},
     )
     return json.dumps({"ok": True, "comment": payload}, default=str)
 
