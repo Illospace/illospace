@@ -73,6 +73,8 @@ class _RouterCycleSession:
     def __init__(self, cycle):
         self._cycle = cycle
         self.flushed = False
+        self.refreshed = False
+        self.committed = False
 
     async def scalars(self, statement):
         return _RouterCycleResult(self._cycle)
@@ -83,8 +85,12 @@ class _RouterCycleSession:
     async def flush(self):
         self.flushed = True
 
+    async def refresh(self, obj):
+        assert obj is self._cycle
+        self.refreshed = True
+
     async def commit(self):
-        pass
+        self.committed = True
 
 
 class _ExecuteCycleSession:
@@ -336,6 +342,46 @@ async def test_cycle_update_recomputes_schedule_with_new_timezone_before_saving(
     assert cycle.schedule_expr == "0 9 * * 1"
     assert cycle.timezone == "America/Toronto"
     assert db.flushed is True
+    assert db.refreshed is True
+
+
+@pytest.mark.asyncio
+async def test_cycle_update_refreshes_server_updated_timestamp_before_serializing():
+    cycle = _cycle_for_serialization(
+        schedule_expr="0 9 * * *",
+        timezone_name="America/Toronto",
+    )
+
+    class _RaisesOnAccess:
+        def __getattribute__(self, name):
+            if name in {"__class__", "__repr__", "__str__"}:
+                return object.__getattribute__(self, name)
+            raise AssertionError("updated_at was serialized before async refresh")
+
+        def __bool__(self):
+            raise AssertionError("updated_at was serialized before async refresh")
+
+    class _RefreshRequiredSession(_RouterCycleSession):
+        async def flush(self):
+            await super().flush()
+            cycle.updated_at = _RaisesOnAccess()
+
+        async def refresh(self, obj):
+            await super().refresh(obj)
+            obj.updated_at = datetime(2026, 4, 27, 13, 0, tzinfo=timezone.utc)
+
+    db = _RefreshRequiredSession(cycle)
+
+    response = await cycles_router.update_cycle(
+        cycle.id,
+        cycles_router.CycleUpdate(name="Updated cycle"),
+        db=db,
+        user={"id": cycle.user_id, "org_id": None},
+    )
+
+    assert db.flushed is True
+    assert db.refreshed is True
+    assert response["updated_at"] == datetime(2026, 4, 27, 13, 0, tzinfo=timezone.utc)
 
 
 @pytest.mark.asyncio

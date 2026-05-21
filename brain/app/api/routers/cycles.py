@@ -161,6 +161,7 @@ async def create_cycle(
     )
     db.add(cycle)
     await db.flush()
+    await db.refresh(cycle)
     payload = serialize_cycle(cycle)
     event = {
         "org_id": cycle.org_id,
@@ -241,6 +242,7 @@ async def update_cycle(
     except ValueError as exc:
         raise _bad_request(exc) from exc
     await db.flush()
+    await db.refresh(cycle)
     payload = serialize_cycle(cycle)
     event = {
         "org_id": cycle.org_id,
