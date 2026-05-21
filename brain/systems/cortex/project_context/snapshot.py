@@ -256,7 +256,20 @@ def build_project_context_snapshot(
             "source": "metadata.project_context" if "project_context" in metadata else "metadata.project",
             "resources": resources,
         }
-        for key in ("id", "name", "description", "permissions", "mode"):
+        for key in (
+            "id",
+            "project_id",
+            "profile_id",
+            "selected_profile_id",
+            "project_key",
+            "slug",
+            "profile_slug",
+            "selected_profile_slug",
+            "name",
+            "description",
+            "permissions",
+            "mode",
+        ):
             value = project.get(key)
             if value is not None:
                 snapshot[key] = value

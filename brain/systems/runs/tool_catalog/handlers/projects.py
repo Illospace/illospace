@@ -138,6 +138,21 @@ def _validated_project_context(project_context: dict[str, Any]) -> dict[str, Any
         raise ValueError(str(exc)) from exc
 
 
+def _profile_project_context(profile, project_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    from brain.systems.cortex.project_context.identity import stamp_project_profile_identity
+
+    context = dict(project_context if isinstance(project_context, dict) else profile.project_context or {})
+    return _validated_project_context(
+        stamp_project_profile_identity(
+            context,
+            profile_id=profile.id,
+            slug=profile.slug,
+            name=profile.name,
+            description=profile.description,
+        )
+    )
+
+
 def _context_from_inputs(
     *,
     project_context: dict[str, Any] | None = None,
@@ -173,7 +188,7 @@ def _project_resources(profile) -> list[dict[str, Any]]:
 def _store_resources(profile, resources: list[dict[str, Any]]) -> None:
     context = dict(profile.project_context or {})
     context["resources"] = resources
-    profile.project_context = _validated_project_context(context)
+    profile.project_context = _profile_project_context(profile, context)
 
 
 def _unique_resource_id(resource: dict[str, Any], existing_ids: set[str], index: int) -> str:
@@ -335,6 +350,7 @@ async def _handle_manage_project(
                 )
                 uow.session.add(profile)
                 await uow.session.flush()
+                profile.project_context = _profile_project_context(profile, context)
                 await sync_project_access_list(
                     uow.session,
                     profile,
@@ -385,6 +401,7 @@ async def _handle_manage_project(
                     profile.default_environment_binding_id = default_environment_binding_id
                 if metadata is not None:
                     profile.metadata_ = metadata
+                profile.project_context = _profile_project_context(profile)
                 uow.session.add(profile)
                 await uow.commit()
                 return json.dumps({"project": _profile_read(profile)}, default=str)
@@ -475,7 +492,7 @@ async def _handle_manage_project(
                 context = project_context
                 if selected_profile_id:
                     profile = await _get_profile(uow.session, org_id, user_id, selected_profile_id)
-                    context = dict(profile.project_context or {})
+                    context = _profile_project_context(profile)
                 if not context:
                     return json.dumps({"error": "attach_to_thread requires: project_id or project_context"})
                 try:

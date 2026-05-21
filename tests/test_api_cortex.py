@@ -310,6 +310,9 @@ async def test_project_profile_resource_endpoints_mutate_context(tmp_path):
     )
 
     assert [resource["path"] for resource in profile.project_context["resources"]] == [str(first), str(second)]
+    assert profile.project_context["project_key"] == "project-1"
+    assert profile.project_context["profile_id"] == "project-1"
+    assert profile.project_context["profile_slug"] == "yc"
     added_id = profile.project_context["resources"][1]["id"]
 
     await _project_context.reorder_project_resources(
@@ -320,6 +323,7 @@ async def test_project_profile_resource_endpoints_mutate_context(tmp_path):
     )
 
     assert [resource["id"] for resource in profile.project_context["resources"]] == [added_id, "r1"]
+    assert profile.project_context["project_key"] == "project-1"
 
 
 async def test_project_profile_resource_reorder_rejects_duplicates(tmp_path):
@@ -1812,6 +1816,8 @@ def test_project_profile_read_includes_visibility_and_access():
 
     assert payload.visibility == "private"
     assert payload.access[0].name == "Alex"
+    assert payload.project_context["project_key"] == "project-1"
+    assert payload.project_context["profile_slug"] == "yc"
 
 
 def test_project_profile_create_defaults_private():
@@ -1917,6 +1923,10 @@ async def test_create_project_profile_allows_empty_project_context(client, mock_
     assert response.status_code == 201
     payload = response.json()
     assert payload["slug"] == "empty-project"
+    assert payload["project_context"]["project_key"] == "empty-profile-1"
+    assert payload["project_context"]["profile_id"] == "empty-profile-1"
+    assert payload["project_context"]["selected_profile_id"] == "empty-profile-1"
+    assert payload["project_context"]["profile_slug"] == "empty-project"
     assert payload["project_context"]["resources"] == []
     assert payload["project_context"]["status"] == "validated"
     assert payload["project_context"]["project_workspace_manifest"]["mounts"] == []
@@ -2207,3 +2217,51 @@ async def test_attach_idea_project_context_persists_snapshot_scope_and_env_bindi
     assert payload["status"] == "validated"
     assert "brain/app/api" in payload["permission_scope"]["allowed_paths"]
     assert idea.agent_details["project_context"]["resources"][0]["path"] == "brain"
+
+
+async def test_attach_project_profile_stamps_profile_identity_in_snapshot():
+    from brain.app.api.routers.cortex import _project_context
+    from brain.systems.cortex.project_context.schemas import IdeaProjectAttachmentCreate
+
+    idea = _make_idea(id="idea-1", org_id="org-1")
+    profile = SimpleNamespace(
+        id="profile-1",
+        org_id="org-1",
+        user_id="user-1",
+        slug="strategy-room",
+        name="Strategy Room",
+        description=None,
+        project_context={"name": "Older Name", "resources": []},
+        default_environment_binding_id=None,
+        active=True,
+        metadata_={},
+        created_at=None,
+    )
+    session = MagicMock()
+
+    def add(obj):
+        obj.id = 41
+        obj.created_at = datetime.now(timezone.utc)
+
+    session.add.side_effect = add
+    db = _AsyncSession(session)
+    user = {"id": "user-1", "org_id": "org-1", "role": "owner"}
+
+    with (
+        patch.object(_project_context, "_require_idea_for_user", AsyncMock(return_value=idea)),
+        patch.object(_project_context, "_get_project_profile", AsyncMock(return_value=profile)),
+    ):
+        payload = await _project_context.attach_idea_project_context(
+            "idea-1",
+            IdeaProjectAttachmentCreate(project_profile_id="profile-1"),
+            db=db,
+            user=user,
+        )
+
+    snapshot = payload.snapshot
+    assert payload.project_profile_id == "profile-1"
+    assert snapshot["project_key"] == "profile-1"
+    assert snapshot["profile_id"] == "profile-1"
+    assert snapshot["selected_profile_id"] == "profile-1"
+    assert snapshot["profile_slug"] == "strategy-room"
+    assert idea.agent_details["project_context"]["project_key"] == "profile-1"

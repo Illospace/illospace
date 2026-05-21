@@ -40,6 +40,12 @@ def test_project_context_materializable_resources_include_empty_project_roots():
     }) is True
 
 
+def test_project_root_key_prefers_canonical_project_key_over_legacy_id():
+    from brain.systems.cortex.project_context.project_root import project_key_from_context
+
+    assert project_key_from_context({"id": "legacy-context", "project_key": "profile-1"}) == "profile-1"
+
+
 def test_runner_materializes_thread_attachment_files_as_project_resources(monkeypatch):
     from brain.systems.runs.cortex import runner
 
@@ -1046,6 +1052,72 @@ async def test_materialize_uploaded_folder_imports_files_into_project_native_roo
     assert (source_root / "folder" / "data" / "metrics.csv").read_text(encoding="utf-8") == "metric,value\n"
     assert (draft_dir / "folder" / "brief.md").read_text(encoding="utf-8") == "brief"
     assert (draft_dir / "folder" / "data" / "metrics.csv").read_text(encoding="utf-8") == "metric,value\n"
+
+
+async def test_materialize_saved_project_root_identity_survives_resource_changes(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    seed = tmp_path / "seed.md"
+    seed.write_text("seed", encoding="utf-8")
+    runs: dict[int, SimpleNamespace] = {}
+
+    def run_for(run_id: int, resources: list[dict[str, str]]):
+        run = SimpleNamespace(
+            id=run_id,
+            user_id="user-1",
+            org_id="org-1",
+            metadata_={},
+            target_ref={
+                "kind": "cortex_idea",
+                "project_context_snapshot": {
+                    "project_key": "profile-stable",
+                    "profile_id": "profile-stable",
+                    "profile_slug": "strategy-room",
+                    "status": "validated",
+                    "resources": resources,
+                },
+            },
+            workspace_ref={},
+        )
+        runs[run_id] = run
+        return run
+
+    first_run = run_for(71, [])
+    second_run = run_for(72, [{"id": "seed", "kind": "file", "name": "seed.md", "path": str(seed)}])
+
+    class FakeSession:
+        async def get(self, _model, run_id):
+            return runs.get(run_id)
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+
+    first = await materialize_project_context_workspaces(
+        71,
+        workspace_root=str(tmp_path / "ideas" / "thread-one"),
+        user_id="user-1",
+    )
+    second = await materialize_project_context_workspaces(
+        72,
+        workspace_root=str(tmp_path / "ideas" / "thread-two"),
+        user_id="user-1",
+    )
+
+    first_source = Path(first_run.target_ref["project_context_snapshot"]["resources"][0]["materialization"]["source_path"])
+    second_source = Path(second_run.target_ref["project_context_snapshot"]["resources"][0]["materialization"]["source_path"])
+    assert first.ok
+    assert second.ok
+    assert first_source == second_source == tmp_path / "project-roots" / "profile-stable"
+    assert (second_source / "seed.md").read_text(encoding="utf-8") == "seed"
 
 
 async def test_materialize_thread_draft_marks_conflict_when_root_and_draft_changed(tmp_path, monkeypatch):

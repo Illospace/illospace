@@ -15,6 +15,7 @@ import json
 import shutil
 
 from brain.systems.cortex.project_context.drafts import PROJECT_HISTORY_DIR
+from brain.systems.cortex.project_context.identity import PROJECT_IDENTITY_FIELDS
 from brain.systems.cortex.project_context.workspace_manifest import (
     PROJECT_CONTEXT_DIR,
     PROJECT_CONTEXT_LOCAL_DIR,
@@ -26,15 +27,7 @@ PROJECT_ROOT_RESOURCE_ID = "project-root"
 PROJECT_ROOT_RESOURCE_KIND = "project_root"
 PROJECT_ROOT_MOUNT_PATH = "/"
 PROJECT_ROOT_IMPORTS_FILE = "imports.json"
-PROJECT_KEY_FIELDS = (
-    "id",
-    "project_id",
-    "profile_id",
-    "selected_profile_id",
-    "slug",
-    "selected_profile_slug",
-    "project_key",
-)
+PROJECT_KEY_FIELDS = PROJECT_IDENTITY_FIELDS
 
 
 @dataclass(frozen=True)
@@ -252,4 +245,3 @@ def directory_import_candidates(
         if safe_relative:
             candidates.append(ProjectRootImportCandidate(path, safe_relative, resource_id=resource_id))
     return candidates
-

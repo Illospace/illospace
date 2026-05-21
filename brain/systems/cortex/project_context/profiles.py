@@ -4,8 +4,20 @@ from __future__ import annotations
 from typing import Any
 
 from brain.systems.cortex.project_context.access import project_profile_visibility
+from brain.systems.cortex.project_context.identity import stamp_project_profile_identity
 from brain.systems.cortex.project_context.schemas import IdeaProjectAttachmentRead, ProjectProfileRead
 from brain.platform.db.models.idea import IdeaProjectAttachment, ProjectProfile
+
+
+def _profile_context_for_read(profile: ProjectProfile) -> dict[str, Any]:
+    context = profile.project_context if isinstance(profile.project_context, dict) else {}
+    return stamp_project_profile_identity(
+        context,
+        profile_id=profile.id,
+        slug=profile.slug,
+        name=profile.name,
+        description=profile.description,
+    )
 
 
 def profile_to_read(profile: ProjectProfile, access: list[dict[str, Any]] | None = None) -> ProjectProfileRead:
@@ -16,7 +28,7 @@ def profile_to_read(profile: ProjectProfile, access: list[dict[str, Any]] | None
         "slug": profile.slug,
         "name": profile.name,
         "description": profile.description,
-        "project_context": profile.project_context,
+        "project_context": _profile_context_for_read(profile),
         "visibility": project_profile_visibility(profile),
         "access": access or [],
         "default_environment_binding_id": profile.default_environment_binding_id,
