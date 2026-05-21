@@ -68,6 +68,17 @@ def _json_block(title: str, value: Any) -> str:
     return f"\n\n## {title}\n```json\n{json.dumps(value, indent=2, default=str)}\n```"
 
 
+def _initial_acknowledgement(message: str) -> str:
+    normalized = " ".join(str(message or "").lower().split())
+    if any(term in normalized for term in ("fix", "broken", "bug", "issue", "error")):
+        return "Got it - I'll inspect the issue, make the smallest safe fix, and verify it."
+    if any(term in normalized for term in ("project", "folder", "copy", "repo", "repository")):
+        return "Got it - I'll check the project context, make the requested change carefully, and verify it."
+    if any(term in normalized for term in ("look", "inspect", "check", "understand", "tell me what")):
+        return "Got it - I'll inspect the context first, then tell you what I find."
+    return "Got it - I'll inspect the request and take the safest next step."
+
+
 def _thread_attachment_context(runtime: RunRuntime) -> dict[str, Any] | None:
     metadata_context = runtime.request.metadata.get("thread_attachment_context")
     if isinstance(metadata_context, dict):
@@ -90,6 +101,7 @@ class FastRecipe(BaseRunRecipe):
             workspace_ref=runtime.request.workspace_ref,
             metadata=runtime.request.metadata,
         )
+        await runtime.activity(_initial_acknowledgement(context.message or runtime.request.message))
         await runtime.activity("Reading context")
         workspace_root = _workspace_root(runtime.request.workspace_ref)
         model_policy = dict(runtime.request.model_policy or {})

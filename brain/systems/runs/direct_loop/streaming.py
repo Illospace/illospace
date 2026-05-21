@@ -4,19 +4,51 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 import time
 from typing import Callable
 
 from brain.platform.async_io import run_blocking
 
 
-def _public_reflection_excerpt(text: str, *, limit: int = 140) -> str:
+def _public_reflection_excerpt(text: str, *, limit: int = 320) -> str:
     """Compact a provider-supplied reasoning summary for live activity."""
     cleaned = " ".join((text or "").split())
+    if not _reflection_is_publishable(cleaned):
+        return ""
     if len(cleaned) <= limit:
         return cleaned
+    boundary = _last_sentence_boundary(cleaned, limit=limit)
+    if boundary is not None:
+        return cleaned[:boundary].strip()
     shortened = cleaned[:limit].rsplit(" ", 1)[0].rstrip(".,;:")
     return f"{shortened}…"
+
+
+def _reflection_is_publishable(text: str) -> bool:
+    if not text:
+        return False
+    bold_match = re.match(r"^\*\*([^*]+)\*\*\s*([\s\S]*)$", text)
+    if bold_match:
+        tail = (bold_match.group(2) or "").strip()
+        if not tail or len(tail) < 24 or tail in {"I", "I'm", "I’m", "The"}:
+            return False
+        return True
+    words = text.split()
+    if len(words) >= 3 and text.rstrip().endswith((".", "?", "!", "…")):
+        return True
+    return len(text) >= 80
+
+
+def _last_sentence_boundary(text: str, *, limit: int) -> int | None:
+    window = text[:limit]
+    for mark in (". ", "? ", "! "):
+        index = window.rfind(mark)
+        if index >= 80:
+            return index + 1
+    if window.rstrip().endswith((".", "?", "!")):
+        return len(window.rstrip())
+    return None
 
 
 def _approx_token_count(chars: int) -> int:
@@ -50,6 +82,7 @@ def streaming_call(
         thinking_chars = 0
         text_chars = 0
         reflection_text = ""
+        published_reflection = False
         phase = "waiting"
         for event in stream:
             if cancel_event.is_set():
@@ -84,11 +117,12 @@ def streaming_call(
                 phase = "writing"
             now = time.time()
             if on_stream_activity and now - last_progress >= 3:
-                last_progress = now
                 label = ""
                 if phase == "reflection":
-                    excerpt = _public_reflection_excerpt(reflection_text)
-                    label = excerpt
+                    if not published_reflection:
+                        label = _public_reflection_excerpt(reflection_text)
+                        if label:
+                            published_reflection = True
                 elif phase == "thinking":
                     elapsed = int(now - call_start)
                     thinking_tokens = _approx_token_count(thinking_chars)
@@ -104,6 +138,7 @@ def streaming_call(
                 else:
                     label = f"Streaming… ({int(now - call_start)}s)"
                 if label and label != last_activity_label:
+                    last_progress = now
                     last_activity_label = label
                     on_stream_activity(label)
         return stream.get_final_message()
