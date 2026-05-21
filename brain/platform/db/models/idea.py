@@ -35,6 +35,8 @@ __all__ = [
     "IdeaThread",
     "UserMention",
     "VisualBlock",
+    "ThreadContextSubmission",
+    "ThreadDiscussionComment",
     "ProjectProfile",
     "ProjectProfileAccess",
     "IdeaProjectAttachment",
@@ -189,6 +191,68 @@ class IdeaThread(Base, CreatedAtMixin):
     user_id: Mapped[Optional[str]] = mapped_column(
         UUID(as_uuid=False), ForeignKey("users.id"), nullable=True
     )
+
+
+class ThreadContextSubmission(Base, CreatedAtMixin):
+    """Immutable context submitted by a personal agent and attached to a Thread."""
+
+    __tablename__ = "thread_context_submissions"
+    __table_args__ = (
+        Index("ix_thread_context_submissions_thread_created", "thread_id", "created_at", "id"),
+        Index("ix_thread_context_submissions_inbound_event", "inbound_event_id"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+        default=lambda: str(uuid.uuid4()),
+    )
+    thread_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("ideas.id", ondelete="CASCADE"), nullable=False
+    )
+    org_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
+    )
+    source_connection_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("external_agent_connections.id", ondelete="SET NULL"), nullable=True
+    )
+    submitted_by_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    inbound_event_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("inbound_events.id", ondelete="SET NULL"), nullable=True
+    )
+    intent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), default=dict)
+    constraints: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), default=dict)
+    correlation: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), default=dict)
+    parts: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
+    routing_result: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), default=dict)
+
+
+class ThreadDiscussionComment(Base, CreatedAtMixin):
+    """Attached team discussion comment for a Thread."""
+
+    __tablename__ = "thread_discussion_comments"
+    __table_args__ = (
+        Index("ix_thread_discussion_comments_thread_created", "thread_id", "created_at", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    thread_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("ideas.id", ondelete="CASCADE"), nullable=False
+    )
+    org_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
+    )
+    author_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    author_kind: Mapped[str] = mapped_column(String(20), nullable=False, server_default="user", default="user")
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    attachments: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'::jsonb"), default=list)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, server_default=text("'{}'::jsonb"), default=dict)
 
 
 class UserMention(Base, CreatedAtMixin):

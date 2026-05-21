@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.domain import DomainRecord
 from brain.platform.db.models.external_agent import ExternalAgentConnectionRow
-from brain.platform.db.models.idea import Idea, IdeaThread
+from brain.platform.db.models.idea import Idea, IdeaThread, ThreadContextSubmission
 from brain.platform.db.models.inbound import (
     InboundDecisionReceiptRow,
     InboundDomainProjectionKeyRow,
@@ -35,6 +35,10 @@ STATUS_FAILED = "failed"
 ACTION_STORE_ONLY = "store_only"
 ACTION_DOMAIN_PROJECTION_UPSERT = "domain_projection.upsert"
 ACTION_ILO_REQUIRED = "ilo_required"
+ACTION_THREAD_CREATED = "thread.created"
+ACTION_THREAD_ATTACHED = "thread.attached"
+ACTION_CONTEXT_ACCEPTED = "accepted"
+CONTEXT_ENVELOPE_KIND = "context"
 
 DOMAIN_PROJECTION_ACTIONS = frozenset(
     {ACTION_DOMAIN_PROJECTION_UPSERT, "domain_projection", "create_domain_record"}
@@ -188,6 +192,14 @@ async def submit_inbound_envelope(
     policy: InboundSourcePolicyRow | None = None
     projection: InboundDomainProjectionRow | None = None
     try:
+        if normalized["kind"] == CONTEXT_ENVELOPE_KIND:
+            return await _process_context_envelope(
+                session,
+                context=context,
+                event=event,
+                normalized=normalized,
+            )
+
         policy = await match_source_policy(
             session,
             org_id=context.org_id,
@@ -429,9 +441,44 @@ def _normalize_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
         "desired_outcome": _clean_optional(data.get("desired_outcome")),
         "idempotency_key": _clean_optional(data.get("idempotency_key")),
     }
+    if kind == CONTEXT_ENVELOPE_KIND:
+        normalized.update(_normalize_context_fields(data, normalized["payload"]))
     if normalized["idempotency_key"] and len(str(normalized["idempotency_key"])) > 160:
         raise InboundValidationError("idempotency_key must be 160 characters or fewer")
     return normalized
+
+
+def _normalize_context_fields(data: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
+    intent = _clean_optional(data.get("intent")) or _clean_optional(payload.get("intent"))
+    source = data.get("source", payload.get("source", {}))
+    constraints = data.get("constraints", payload.get("constraints", {}))
+    correlation = data.get("correlation", payload.get("correlation", {}))
+    parts = data.get("parts", payload.get("parts", []))
+    if source is None:
+        source = {}
+    if constraints is None:
+        constraints = {}
+    if correlation is None:
+        correlation = {}
+    if parts is None:
+        parts = []
+    if not isinstance(source, dict):
+        raise InboundValidationError("source must be an object")
+    if not isinstance(constraints, dict):
+        raise InboundValidationError("constraints must be an object")
+    if not isinstance(correlation, dict):
+        raise InboundValidationError("correlation must be an object")
+    if not isinstance(parts, list):
+        raise InboundValidationError("parts must be an array")
+    if not intent and not parts and not _clean_optional(data.get("summary")):
+        raise InboundValidationError("context envelope requires intent, summary, or parts")
+    return {
+        "intent": intent,
+        "source": dict(source),
+        "constraints": dict(constraints),
+        "correlation": dict(correlation),
+        "parts": list(parts),
+    }
 
 
 async def _find_idempotent_event(
@@ -963,6 +1010,221 @@ def _triage_tool_use(triage: Mapping[str, Any]) -> dict[str, Any]:
         "status": triage.get("status"),
         **({"run_id": triage.get("run_id")} if triage.get("run_id") is not None else {}),
     }
+
+
+async def _process_context_envelope(
+    session: AsyncSession,
+    *,
+    context: _ConnectionContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Attach submitted personal-agent context to a Thread without LLM routing."""
+
+    if not context.owner_user_id:
+        return await _complete_event(
+            session,
+            event,
+            policy=None,
+            status=STATUS_PROCESSED,
+            action_type=ACTION_CONTEXT_ACCEPTED,
+            action_result={
+                "operation": "stored",
+                "reason": "missing_authority_user",
+                "event_id": str(event.id),
+            },
+            confidence=1.0,
+            target={"kind": "inbound_event", "event_id": str(event.id)},
+            tool_use={"type": ACTION_CONTEXT_ACCEPTED},
+            reasoning_summary="Context was accepted as an inbound event because no authority user was available.",
+        )
+
+    correlation = dict(normalized.get("correlation") or {})
+    thread = await _correlated_thread(session, context=context, correlation=correlation)
+    operation = "attached"
+    action_type = ACTION_THREAD_ATTACHED
+    if thread is None:
+        thread = await _create_context_thread(session, context=context, event=event, normalized=normalized)
+        operation = "created"
+        action_type = ACTION_THREAD_CREATED
+
+    source = dict(normalized.get("source") or {})
+    constraints = dict(normalized.get("constraints") or {})
+    parts = list(normalized.get("parts") or [])
+    intent = _clean_optional(normalized.get("intent")) or _clean_optional(normalized.get("summary"))
+
+    submission = ThreadContextSubmission(
+        thread_id=str(thread.id),
+        org_id=context.org_id,
+        source_connection_id=context.connection_id,
+        submitted_by_user_id=context.owner_user_id,
+        inbound_event_id=str(event.id),
+        intent=intent,
+        source=source,
+        constraints=constraints,
+        correlation=correlation,
+        parts=_json_safe(parts),
+        routing_result={},
+    )
+    session.add(submission)
+    await session.flush()
+
+    thread_message = IdeaThread(
+        idea_id=str(thread.id),
+        role="user",
+        content=_context_timeline_preview(
+            context=context,
+            normalized=normalized,
+            submission_id=str(submission.id),
+        ),
+        attachments=[],
+        metadata_={
+            "source": "inbound.context",
+            "event_id": str(event.id),
+            "context_submission_id": str(submission.id),
+            "origin": normalized.get("origin"),
+            "operation": operation,
+            "connection_id": context.connection_id,
+            "source_connection_display_name": context.display_name,
+            "source_kind": context.source_kind,
+            "part_count": len(parts),
+        },
+        message_type="context_submission",
+        user_id=context.owner_user_id,
+    )
+    session.add(thread_message)
+    await session.flush()
+
+    action_result = {
+        "operation": operation,
+        "thread_id": str(thread.id),
+        "url": _thread_url(thread),
+        "context_submission_id": str(submission.id),
+        "thread_message_id": thread_message.id,
+        "event_id": str(event.id),
+        "message": (
+            "Context accepted and attached to an existing Thread."
+            if operation == "attached"
+            else "Context accepted and a Thread was created."
+        ),
+    }
+    submission.routing_result = dict(action_result)
+    return await _complete_event(
+        session,
+        event,
+        policy=None,
+        status=STATUS_PROCESSED,
+        action_type=action_type,
+        action_result=action_result,
+        confidence=1.0,
+        target={"kind": "cortex_idea", "idea_id": str(thread.id)},
+        tool_use={"type": "illo_submit_context", "operation": operation},
+        reasoning_summary=(
+            "Context ingress was routed deterministically by explicit correlation."
+            if operation == "attached"
+            else "Context ingress created a Thread immediately so the personal agent can return a link."
+        ),
+        reusable_pattern_candidate={
+            "kind": CONTEXT_ENVELOPE_KIND,
+            "origin": normalized.get("origin"),
+            "source_kind": context.source_kind,
+        },
+    )
+
+
+async def _correlated_thread(
+    session: AsyncSession,
+    *,
+    context: _ConnectionContext,
+    correlation: Mapping[str, Any],
+) -> Idea | None:
+    thread_id = _clean_optional(correlation.get("thread_id") or correlation.get("idea_id"))
+    if not thread_id:
+        return None
+    thread = await session.get(Idea, thread_id)
+    if thread is None or str(thread.org_id) != str(context.org_id):
+        raise InboundValidationError("correlation.thread_id does not match an accessible Thread")
+    return thread
+
+
+async def _create_context_thread(
+    session: AsyncSession,
+    *,
+    context: _ConnectionContext,
+    event: InboundEventRow,
+    normalized: Mapping[str, Any],
+) -> Idea:
+    intent = _clean_optional(normalized.get("intent")) or _clean_optional(normalized.get("summary"))
+    source_name = context.display_name or context.source_kind or "personal agent"
+    title = _truncate(intent or f"Context from {source_name}", 180)
+    idea = Idea(
+        title=title,
+        description=_truncate(f"{source_name} submitted context to Illo.", 500),
+        status="emerged",
+        origin="inbound_context",
+        origin_ref=f"inbound_event:{event.id}",
+        user_id=str(context.owner_user_id),
+        org_id=context.org_id,
+        agent_details={
+            "context_ingress": {
+                "event_id": str(event.id),
+                "origin": normalized.get("origin"),
+                "connection_id": context.connection_id,
+                "source_kind": context.source_kind,
+            }
+        },
+    )
+    session.add(idea)
+    await session.flush()
+    return idea
+
+
+def _context_timeline_preview(
+    *,
+    context: _ConnectionContext,
+    normalized: Mapping[str, Any],
+    submission_id: str,
+) -> str:
+    source_name = context.display_name or context.source_kind or "personal agent"
+    parts = list(normalized.get("parts") or [])
+    lines = [
+        f"Context submitted from {source_name}.",
+        "",
+        f"Submission: {submission_id}",
+    ]
+    if normalized.get("intent"):
+        lines.append(f"Intent: {normalized.get('intent')}")
+    if normalized.get("summary") and normalized.get("summary") != normalized.get("intent"):
+        lines.append(f"Summary: {normalized.get('summary')}")
+    if normalized.get("origin"):
+        lines.append(f"Origin: {normalized.get('origin')}")
+    if parts:
+        lines.extend(["", f"Context parts: {len(parts)}"])
+        for index, part in enumerate(parts[:8], start=1):
+            lines.append(f"{index}. {_context_part_preview(part)}")
+        if len(parts) > 8:
+            lines.append(f"... plus {len(parts) - 8} more part(s).")
+    if normalized.get("source"):
+        lines.extend(["", f"Source: {_json_preview(normalized.get('source'), limit=600)}"])
+    return _truncate("\n".join(lines), MAX_TRIAGE_MESSAGE_CHARS)
+
+
+def _context_part_preview(part: Any) -> str:
+    if not isinstance(part, dict):
+        return _truncate(part, 180)
+    part_type = _clean_optional(part.get("type") or part.get("kind")) or "part"
+    title = _clean_optional(part.get("title") or part.get("name") or part.get("label"))
+    text = _clean_optional(part.get("text") or part.get("content") or part.get("url") or part.get("uri"))
+    bits = [part_type]
+    if title:
+        bits.append(title)
+    if text:
+        bits.append(_truncate(text, 140))
+    return " - ".join(bits)
+
+
+def _thread_url(thread: Idea) -> str:
+    return f"/cortex?idea={thread.id}"
 
 
 async def _complete_event(

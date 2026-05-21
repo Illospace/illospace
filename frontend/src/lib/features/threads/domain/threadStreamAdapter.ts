@@ -378,7 +378,7 @@ export function buildThreadTranscriptItems({
         role: isAgent ? 'illo' : 'user',
         author: isAgent ? 'Illo' : item.user_name || 'You',
         timestamp: timeAgo(item.timestamp, nowMs),
-        tag: item.metadata?.fast_steer ? 'Steering' : item.metadata?.queued_after_run ? 'Queued' : undefined,
+        tag: messageTag(item),
         tone: isAgent ? 'spectral' : accentTone(userAccent),
         accentColor: userAccent ?? undefined,
         coreColor: userAccent ? mixHex(userAccent, userShellColor, themeMode === 'light' ? 0.16 : 0.68) : undefined,
@@ -512,4 +512,11 @@ export function buildThreadTranscriptItems({
   }
 
   return items;
+}
+
+function messageTag(item: StreamItem): string | undefined {
+  if (item.metadata?.context_submission_id || item.message_type === 'context_submission') return 'Context';
+  if (item.metadata?.fast_steer) return 'Steering';
+  if (item.metadata?.queued_after_run) return 'Queued';
+  return undefined;
 }

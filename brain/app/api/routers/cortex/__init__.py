@@ -9,6 +9,7 @@ from brain.app.api.routers.cortex._router import router  # noqa: F401
 import brain.app.api.routers.cortex._ideas  # noqa: F401
 import brain.app.api.routers.cortex._run  # noqa: F401
 import brain.app.api.routers.cortex._idea_ops  # noqa: F401
+import brain.app.api.routers.cortex._discussion  # noqa: F401
 import brain.app.api.routers.cortex._analytics  # noqa: F401
 import brain.app.api.routers.cortex._misc  # noqa: F401
 import brain.app.api.routers.cortex._bootstrap  # noqa: F401

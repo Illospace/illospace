@@ -1140,6 +1140,28 @@ CHAT_TOOLS = [
             },
             "required": ["body"],
         },
+    },
+    {
+        "name": "read_thread_discussion",
+        "description": (
+            "Read the Discussion comments attached to the current Thread. "
+            "Use this only when team comments may contain relevant context, or when the user asks "
+            "about the Discussion. Discussion is not automatically included in every run prompt."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "thread_id": {
+                    "type": "string",
+                    "description": "Optional Thread id. Defaults to the current Thread for this run.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum comments to return, from newest back then ordered chronologically.",
+                    "default": 50,
+                },
+            },
+        },
     }
 ]
 

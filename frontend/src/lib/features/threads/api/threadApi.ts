@@ -21,6 +21,9 @@ export type ThreadActivityTimelineItem = Awaited<ReturnType<typeof api.activityT
 export type IdeaAudit = Awaited<ReturnType<typeof api.ideaAudit>>;
 export type IdeaAuditAnalysisResult = Awaited<ReturnType<typeof api.ideaAuditAnalysisResult>>;
 export type GeneratedThreadTitle = Awaited<ReturnType<typeof api.generateTitle>>;
+export type ThreadDiscussionComment = Awaited<ReturnType<typeof api.listThreadDiscussion>>[number];
+export type ThreadDiscussionCreateInput = Parameters<typeof api.postThreadDiscussionComment>[1];
+export type ThreadDiscussionCreateResult = Awaited<ReturnType<typeof api.postThreadDiscussionComment>>;
 
 type ThreadApiMethods = {
   unifiedStream: (ideaId: string, includeDebug?: boolean) => Promise<StreamItem[]>;
@@ -39,6 +42,8 @@ type ThreadApiMethods = {
   skillFeedback: typeof api.skillFeedback;
   getIdea: (id: string) => Promise<Idea>;
   ideaConnections: (ideaId: string) => Promise<Connection[]>;
+  listThreadDiscussion: typeof api.listThreadDiscussion;
+  postThreadDiscussionComment: typeof api.postThreadDiscussionComment;
   activityTimeline: typeof api.activityTimeline;
   generateTitle: typeof api.generateTitle;
   uploadFile: (file: File) => Promise<UploadedThreadFile>;
@@ -69,6 +74,8 @@ export const threadApi = pickTypedApiMethods<ThreadApiMethods>([
   'skillFeedback',
   'getIdea',
   'ideaConnections',
+  'listThreadDiscussion',
+  'postThreadDiscussionComment',
   'activityTimeline',
   'generateTitle',
   'uploadFile',
@@ -99,6 +106,8 @@ export const {
   skillFeedback,
   getIdea,
   ideaConnections,
+  listThreadDiscussion,
+  postThreadDiscussionComment,
   activityTimeline,
   generateTitle,
   uploadFile,
