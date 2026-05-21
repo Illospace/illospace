@@ -1155,7 +1155,8 @@ PROJECT_TOOLS = [
             "files/repos/folders/docs, or attaching reusable project context to the current thread. "
             "Use draft_status to inspect the current run's materialized Project draft workspace and "
             "plan_publish to preview draft-to-source publish operations without mutating Project roots. "
-            "Use publish_draft to publish non-conflicting local Project draft changes back to root. "
+            "Use refresh_draft_from_root to explicitly apply latest root changes into untouched draft files. "
+            "Use publish_draft to publish local Project draft changes back to root; conflicts return guidance for the agent to reconcile root and draft before retrying. "
             "Use root_versions, preview_root_version, and restore_root_version to inspect, preview, or roll back local Project root history. "
             "For awareness questions about what project context exists or what Illo can see, prefer "
             "read_project_contexts first. Thread attachments do not require a project. Use action='help' or "
@@ -1182,6 +1183,7 @@ PROJECT_TOOLS = [
                         "attach_to_thread",
                         "draft_status",
                         "plan_publish",
+                        "refresh_draft_from_root",
                         "publish_draft",
                         "root_versions",
                         "preview_root_version",
@@ -1190,7 +1192,8 @@ PROJECT_TOOLS = [
                     "description": (
                         "The project operation to run. delete archives the project profile; "
                         "draft_status and plan_publish are read-only draft inspection actions; "
-                        "publish_draft mutates supported Project roots when no conflicts are present; "
+                        "refresh_draft_from_root mutates only the thread draft workspace by copying latest root files into untouched draft paths; "
+                        "publish_draft mutates supported Project roots after conflict checkpoints are resolved; "
                         "preview_root_version is read-only; restore_root_version mutates a local Project root back to a captured version."
                     ),
                 },

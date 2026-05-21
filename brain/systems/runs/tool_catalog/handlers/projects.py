@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from brain.systems.cortex.project_context.draft_state import project_draft_status_payload
+from brain.systems.cortex.project_context.draft_state import (
+    project_draft_status_payload,
+    project_refresh_draft_from_root_payload,
+)
 from brain.systems.cortex.project_context.publish import (
     project_publish_draft_payload,
     project_publish_plan_payload,
@@ -28,10 +31,15 @@ PROJECT_DRAFT_OPERATIONS: dict[str, dict[str, object]] = {
         "optional": [],
         "effect": "produce a grouped publish plan for Project draft changes without writing files",
     },
+    "refresh_draft_from_root": {
+        "required": ["current Project-backed AgentRun/thread"],
+        "optional": ["resource_id", "resource_ids"],
+        "effect": "explicitly refresh the thread draft from the latest Project root without mutating the root",
+    },
     "publish_draft": {
         "required": ["current Project-backed AgentRun/thread"],
         "optional": ["resource_ids", "publish_paths", "path"],
-        "effect": "publish non-conflicting local Project draft changes back to their Project root",
+        "effect": "publish local Project draft changes back to root, blocking with conflict-resolution guidance when root and draft changed the same paths",
     },
     "root_versions": {
         "required": ["current Project-backed AgentRun/thread"],
@@ -230,6 +238,11 @@ async def _handle_manage_project(
         return json.dumps(project_draft_status_payload(), default=str)
     if action == "plan_publish":
         return json.dumps(project_publish_plan_payload(), default=str)
+    if action == "refresh_draft_from_root":
+        return json.dumps(
+            project_refresh_draft_from_root_payload(resource_id=resource_id, resource_ids=resource_ids),
+            default=str,
+        )
     if action == "publish_draft":
         return json.dumps(
             project_publish_draft_payload(

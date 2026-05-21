@@ -165,6 +165,8 @@ async def test_manage_project_plan_publish_groups_changes_without_writing_source
         ("update", "brief.md"),
         ("create", "new.md"),
     }
+    assert group["diff"]["path_count"] == 2
+    assert group["diff"]["root_to_draft"]
 
 
 async def test_manage_project_draft_status_uses_manifest_mount_paths(tmp_path):
@@ -238,7 +240,7 @@ async def test_manage_project_plan_publish_blocks_conflicts_from_draft_manifest(
     assert plan["groups"][0]["blocked_reasons"] == ["conflicted_paths_require_resolution"]
 
 
-async def test_manage_project_draft_status_refreshes_unmodified_files_from_latest_root(tmp_path):
+async def test_manage_project_draft_status_is_read_only_for_unmodified_files_changed_in_root(tmp_path):
     from brain.systems.cortex.project_context.drafts import sync_draft_from_root
 
     source_dir = tmp_path / "source"
@@ -252,9 +254,31 @@ async def test_manage_project_draft_status_refreshes_unmodified_files_from_lates
         status = json.loads(await projects._handle_manage_project(action="draft_status"))
 
     assert status["ok"] is True
+    assert (draft_dir / "brief.md").read_text(encoding="utf-8") == "root v1"
+    assert status["resources"][0]["status"] == "out_of_date"
+    assert status["resources"][0]["out_of_date_paths"] == ["brief.md"]
+    assert status["resources"][0]["changes"]["conflicted_paths"] == []
+
+
+async def test_manage_project_refresh_draft_from_root_updates_unmodified_files(tmp_path):
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "source"
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    source_dir.mkdir()
+    (source_dir / "brief.md").write_text("root v1", encoding="utf-8")
+    sync_draft_from_root(source_dir, draft_dir)
+    (source_dir / "brief.md").write_text("root v2", encoding="utf-8")
+
+    with bind_agent_context({"run": _project_run(source_dir, draft_dir), "idea_id": "idea-1"}):
+        refreshed = json.loads(await projects._handle_manage_project(action="refresh_draft_from_root"))
+        status = json.loads(await projects._handle_manage_project(action="draft_status"))
+
+    assert refreshed["ok"] is True
+    assert refreshed["summary"] == {"refreshed_count": 1, "skipped_count": 0, "conflicted_count": 0}
+    assert refreshed["refreshed_resources"][0]["updated_from_root"] == ["brief.md"]
     assert (draft_dir / "brief.md").read_text(encoding="utf-8") == "root v2"
     assert status["resources"][0]["status"] == "clean"
-    assert status["resources"][0]["changes"]["conflicted_paths"] == []
 
 
 async def test_manage_project_publish_draft_applies_local_changes_and_refreshes_plan(tmp_path):
@@ -424,9 +448,34 @@ async def test_manage_project_publish_draft_refuses_conflicts(tmp_path):
         payload = json.loads(await projects._handle_manage_project(action="publish_draft"))
 
     assert payload["ok"] is False
-    assert payload["code"] == "project_draft_publish_blocked"
+    assert payload["code"] == "project_draft_conflicts_require_resolution"
     assert payload["summary"]["blocked_count"] == 1
+    assert payload["conflict_resolution"]["required"] is True
+    assert "preserves the user's intent" in payload["conflict_resolution"]["instructions"]
+    assert payload["conflict_resolution"]["retry_action"]["arguments"] == {"action": "publish_draft"}
     assert (source_dir / "brief.md").read_text(encoding="utf-8") == "root update"
+
+
+async def test_manage_project_publish_draft_retries_after_conflict_checkpoint_when_root_is_stable(tmp_path):
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "source"
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    source_dir.mkdir()
+    (source_dir / "brief.md").write_text("base", encoding="utf-8")
+    sync_draft_from_root(source_dir, draft_dir)
+    (source_dir / "brief.md").write_text("root update", encoding="utf-8")
+    (draft_dir / "brief.md").write_text("draft update", encoding="utf-8")
+
+    with bind_agent_context({"run": _project_run(source_dir, draft_dir), "idea_id": "idea-1"}):
+        first = json.loads(await projects._handle_manage_project(action="publish_draft"))
+        second = json.loads(await projects._handle_manage_project(action="publish_draft"))
+
+    assert first["ok"] is False
+    assert first["code"] == "project_draft_conflicts_require_resolution"
+    assert second["ok"] is True
+    assert second["summary"] == {"published_groups": 1, "operation_count": 1, "blocked_count": 0}
+    assert (source_dir / "brief.md").read_text(encoding="utf-8") == "draft update"
 
 
 async def test_manage_project_publish_draft_uses_repo_adapter_for_git_resources(tmp_path, monkeypatch):
@@ -615,6 +664,7 @@ async def test_manage_project_schema_exposes_draft_operations():
 
     assert "draft_status" in actions
     assert "plan_publish" in actions
+    assert "refresh_draft_from_root" in actions
     assert "publish_draft" in actions
     assert "preview_root_version" in actions
     assert "publish_paths" in tool["input_schema"]["properties"]

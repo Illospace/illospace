@@ -8,8 +8,12 @@ import shutil
 
 from brain.systems.cortex.project_context.draft_state import project_draft_status_payload
 from brain.systems.cortex.project_context.drafts import (
+    build_draft_diff,
     build_file_manifest,
+    clear_conflict_checkpoints,
     load_draft_metadata,
+    record_conflict_checkpoints,
+    refresh_base_snapshots_for_paths,
     save_draft_metadata,
     sync_draft_from_root,
 )
@@ -142,9 +146,16 @@ def _publish_blocked_reasons(group: Mapping[str, Any], operations: list[dict[str
     return blocked_reasons
 
 
-def project_publish_plan_payload(*, repo_status=None) -> dict[str, Any]:
+def project_publish_plan_payload(
+    *,
+    repo_status=None,
+    allow_conflict_checkpoint_publish: bool = False,
+) -> dict[str, Any]:
     repo_status = repo_status or repo_draft_status
-    status_payload = project_draft_status_payload(repo_status=repo_status)
+    status_payload = project_draft_status_payload(
+        repo_status=repo_status,
+        allow_conflict_checkpoint_publish=allow_conflict_checkpoint_publish,
+    )
     if not status_payload.get("ok"):
         status_payload["action"] = "plan_publish"
         return status_payload
@@ -160,6 +171,17 @@ def project_publish_plan_payload(*, repo_status=None) -> dict[str, Any]:
             "publish_target": publish_target,
         }
         blocked_reasons = _publish_blocked_reasons(group_for_blockers, operations)
+        diff_preview = None
+        if publish_target.get("kind") == "local_path" and resource.get("workspace_path") and publish_target.get("path"):
+            try:
+                diff_preview = build_draft_diff(
+                    Path(str(publish_target.get("path"))).expanduser(),
+                    Path(str(resource.get("workspace_path"))).expanduser(),
+                    paths=[str(operation.get("path")) for operation in operations if operation.get("path")],
+                    allow_conflict_checkpoint_publish=allow_conflict_checkpoint_publish,
+                )
+            except Exception as exc:
+                diff_preview = {"error": str(exc)}
         groups.append({
             "resource_id": resource.get("id"),
             "mount_path": resource.get("mount_path"),
@@ -177,6 +199,7 @@ def project_publish_plan_payload(*, repo_status=None) -> dict[str, Any]:
             "errors": resource.get("errors") or [],
             "change_counts": resource.get("change_counts"),
             "operations": operations,
+            "diff": diff_preview,
         })
 
     return {
@@ -361,6 +384,11 @@ def _refresh_published_draft_paths(source_path: str, workspace_path: str, operat
             base_manifest.pop(relative_path, None)
         else:
             base_manifest[relative_path] = dict(root_entry)
+    published_paths = [_clean_text(operation.get("path")) for operation in operations]
+    published_paths = [path for path in published_paths if path]
+    refresh_base_snapshots_for_paths(source, draft, published_paths)
+    clear_conflict_checkpoints(draft, published_paths)
+    metadata = load_draft_metadata(draft)
     save_draft_metadata(draft, metadata, base_manifest=dict(sorted(base_manifest.items())), source_root=str(source))
 
 
@@ -527,6 +555,67 @@ def _publish_repo_group(
     }
 
 
+def _conflict_resolution_guidance(blocked_groups: list[Mapping[str, Any]]) -> dict[str, Any]:
+    conflicts: list[dict[str, Any]] = []
+    for group in blocked_groups:
+        target = _as_mapping(group.get("publish_target"))
+        source_path = _clean_text(target.get("path")) if target.get("kind") == "local_path" else None
+        workspace_path = _clean_text(group.get("workspace_path"))
+        conflict_paths = [
+            _clean_text(operation.get("path"))
+            for operation in group.get("operations") or []
+            if isinstance(operation, Mapping) and operation.get("operation") == "resolve_conflict"
+        ]
+        conflict_paths = [path for path in conflict_paths if path]
+        if target.get("kind") == "local_path" and source_path and workspace_path and conflict_paths:
+            record_conflict_checkpoints(
+                Path(source_path).expanduser(),
+                Path(workspace_path).expanduser(),
+                conflict_paths,
+            )
+        diff_payload = _as_mapping(group.get("diff"))
+        for path in conflict_paths:
+            conflicts.append({
+                "resource_id": group.get("resource_id"),
+                "mount_path": group.get("mount_path"),
+                "path": path,
+                "root_path": _plan_path(source_path, path),
+                "draft_path": _plan_path(workspace_path, path),
+                "root_to_draft_diff": [
+                    item for item in (diff_payload.get("root_to_draft") or [])
+                    if isinstance(item, Mapping) and item.get("path") == path
+                ],
+                "base_to_draft_diff": [
+                    item for item in (diff_payload.get("base_to_draft") or [])
+                    if isinstance(item, Mapping) and item.get("path") == path
+                ],
+            })
+    return {
+        "required": True,
+        "instructions": (
+            "Publishing is blocked because the Project root changed on the same paths as this thread draft. "
+            "Resolve each conflicted draft file against the latest Project root before retrying. Compare root -> draft "
+            "to see what would be published, and compare base -> draft to recover the thread's original intent. "
+            "Edit the draft so it preserves the user's intent while respecting the current root philosophy, then retry "
+            "manage_project(action=\"publish_draft\"). If the current draft already expresses the correct resolution, "
+            "retry publish_draft deliberately; the conflict checkpoint will treat that retry as the resolution signal as "
+            "long as the root has not changed again."
+        ),
+        "retry_action": {
+            "tool": "manage_project",
+            "arguments": {"action": "publish_draft"},
+        },
+        "conflicts": conflicts,
+    }
+
+
+def _has_conflict_blockers(groups: list[Mapping[str, Any]]) -> bool:
+    return any(
+        "conflicted_paths_require_resolution" in (group.get("blocked_reasons") or [])
+        for group in groups
+    )
+
+
 def project_publish_draft_payload(
     *,
     resource_id: str | None = None,
@@ -546,7 +635,10 @@ def project_publish_draft_payload(
 ) -> dict[str, Any]:
     repo_status = repo_status or repo_draft_status
     repo_publish = repo_publish or publish_repo_draft
-    plan = project_publish_plan_payload(repo_status=repo_status)
+    plan = project_publish_plan_payload(
+        repo_status=repo_status,
+        allow_conflict_checkpoint_publish=True,
+    )
     if not plan.get("ok"):
         plan["action"] = "publish_draft"
         return plan
@@ -568,11 +660,17 @@ def project_publish_draft_payload(
         )
     blocked = [group for group in groups if group.get("status") == "blocked"]
     if blocked:
+        has_conflicts = _has_conflict_blockers(blocked)
+        conflict_resolution = _conflict_resolution_guidance(blocked) if has_conflicts else None
         return {
             "ok": False,
             "action": "publish_draft",
-            "code": "project_draft_publish_blocked",
-            "error": "Project draft has blocked resources; resolve conflicts before publishing.",
+            "code": "project_draft_conflicts_require_resolution" if has_conflicts else "project_draft_publish_blocked",
+            "error": (
+                "Project draft has root conflicts. Resolve the draft against the latest root, then retry publish_draft."
+                if has_conflicts
+                else "Project draft has blocked resources; resolve blockers before publishing."
+            ),
             "mutated_project_root": False,
             "summary": {
                 "published_groups": 0,
@@ -580,6 +678,7 @@ def project_publish_draft_payload(
                 "blocked_count": len(blocked),
             },
             "blocked_groups": blocked,
+            **({"conflict_resolution": conflict_resolution} if conflict_resolution else {}),
         }
     if has_filters and not sum(len(group.get("operations") or []) for group in groups):
         return {

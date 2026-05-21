@@ -350,6 +350,7 @@ class TestNightlySchedulerOwnership:
             "dream",
             "wake_up_index",
             "file_sync",
+            "project_draft_cleanup",
             "experiment_assessment",
             "self_improvement",
             "daily_blog",

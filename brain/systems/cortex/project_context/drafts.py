@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import difflib
 import hashlib
 import json
 import shutil
@@ -18,8 +20,13 @@ import shutil
 DRAFT_METADATA_DIR = ".illo-project-draft"
 PROJECT_HISTORY_DIR = ".illo-project-history"
 DRAFT_METADATA_FILE = "metadata.json"
+DRAFT_BASE_SNAPSHOT_DIR = "base"
+CONFLICT_CHECKPOINTS_KEY = "conflict_checkpoints"
 DRAFT_METADATA_SCHEMA_VERSION = 1
 IGNORED_DRAFT_DIRS = {DRAFT_METADATA_DIR, PROJECT_HISTORY_DIR}
+DIFF_FILE_LIMIT = 20
+DIFF_LINE_LIMIT = 240
+DIFF_TEXT_SIZE_LIMIT = 256 * 1024
 
 FileManifest = dict[str, dict[str, Any]]
 
@@ -49,6 +56,7 @@ class ProjectDraftPublishPlan:
     modified: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
     conflicted: list[str] = field(default_factory=list)
+    out_of_date: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -57,6 +65,14 @@ class ProjectDraftPublishPlan:
 
 def _metadata_path(draft_root: Path) -> Path:
     return Path(draft_root) / DRAFT_METADATA_DIR / DRAFT_METADATA_FILE
+
+
+def _base_snapshot_root(draft_root: Path) -> Path:
+    return Path(draft_root) / DRAFT_METADATA_DIR / DRAFT_BASE_SNAPSHOT_DIR
+
+
+def _base_snapshot_path(draft_root: Path, relative_path: str) -> Path:
+    return _base_snapshot_root(draft_root) / relative_path
 
 
 def _is_draft_metadata_relative(path: Path) -> bool:
@@ -134,16 +150,6 @@ def save_draft_metadata(
     return payload
 
 
-def _base_manifest_from_metadata(
-    draft_root: Path,
-    base_manifest: Mapping[str, Any] | None,
-) -> FileManifest:
-    if base_manifest is not None:
-        return _normalise_manifest(base_manifest)
-    metadata = load_draft_metadata(draft_root)
-    return _normalise_manifest(metadata.get("base_manifest"))
-
-
 def _path_entry(manifest: FileManifest, path: str) -> dict[str, Any] | None:
     return manifest.get(path)
 
@@ -159,12 +165,33 @@ def _copy_root_file(source_root: Path, draft_root: Path, relative_path: str) -> 
     shutil.copy2(source, destination)
 
 
+def _copy_base_snapshot(source_root: Path, draft_root: Path, relative_path: str) -> None:
+    source = source_root if source_root.is_file() else source_root / relative_path
+    destination = _base_snapshot_path(draft_root, relative_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_dir() and not destination.is_symlink():
+        shutil.rmtree(destination)
+    elif destination.exists() or destination.is_symlink():
+        destination.unlink()
+    if source.exists() and source.is_file() and not source.is_symlink():
+        shutil.copy2(source, destination)
+
+
 def _remove_draft_path(draft_root: Path, relative_path: str) -> None:
     path = draft_root / relative_path
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path)
     elif path.exists() or path.is_symlink():
         path.unlink()
+
+
+def _remove_base_snapshot(draft_root: Path, relative_path: str) -> None:
+    path = _base_snapshot_path(draft_root, relative_path)
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+    _prune_empty_parents(_base_snapshot_root(draft_root), relative_path)
 
 
 def _prune_empty_parents(draft_root: Path, relative_path: str) -> None:
@@ -221,6 +248,71 @@ def _updated_base_manifest(
         if entry is not None:
             updated[path] = dict(entry)
     return dict(sorted(updated.items()))
+
+
+def _normalise_conflict_checkpoints(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, Mapping):
+        return {}
+    checkpoints: dict[str, dict[str, Any]] = {}
+    for path, checkpoint in value.items():
+        if isinstance(path, str) and isinstance(checkpoint, Mapping):
+            checkpoints[path] = dict(checkpoint)
+    return dict(sorted(checkpoints.items()))
+
+
+def _entry_from_checkpoint(checkpoint: Mapping[str, Any], key: str) -> dict[str, Any] | None:
+    entry = checkpoint.get(key)
+    return dict(entry) if isinstance(entry, Mapping) else None
+
+
+def _conflict_checkpoint_resolves(
+    checkpoint: Mapping[str, Any] | None,
+    *,
+    root_entry: dict[str, Any] | None,
+    draft_entry: dict[str, Any] | None,
+    allow_unmodified_checkpoint: bool,
+) -> bool:
+    if not checkpoint:
+        return False
+    checkpoint_root = _entry_from_checkpoint(checkpoint, "root_entry")
+    if not _entries_match(checkpoint_root, root_entry):
+        return False
+    if allow_unmodified_checkpoint:
+        return True
+    checkpoint_draft = _entry_from_checkpoint(checkpoint, "draft_entry")
+    return not _entries_match(checkpoint_draft, draft_entry)
+
+
+def _sync_base_snapshots(
+    source_root: Path,
+    draft_root: Path,
+    *,
+    paths: list[str],
+    root_manifest: FileManifest,
+    conflicts: set[str],
+) -> None:
+    for relative_path in paths:
+        if relative_path in conflicts:
+            continue
+        if root_manifest.get(relative_path) is None:
+            _remove_base_snapshot(draft_root, relative_path)
+        else:
+            _copy_base_snapshot(source_root, draft_root, relative_path)
+
+
+def _metadata_without_cleared_checkpoints(
+    metadata: Mapping[str, Any],
+    paths: set[str],
+) -> dict[str, Any]:
+    payload = dict(metadata)
+    checkpoints = _normalise_conflict_checkpoints(payload.get(CONFLICT_CHECKPOINTS_KEY))
+    for path in paths:
+        checkpoints.pop(path, None)
+    if checkpoints:
+        payload[CONFLICT_CHECKPOINTS_KEY] = checkpoints
+    else:
+        payload.pop(CONFLICT_CHECKPOINTS_KEY, None)
+    return payload
 
 
 def sync_draft_from_root(
@@ -282,6 +374,15 @@ def sync_draft_from_root(
         root_manifest=root_manifest,
         conflicts=conflict_set,
     )
+    all_paths = _sorted_paths(base, root_manifest, draft_after)
+    _sync_base_snapshots(
+        source_root,
+        draft_root,
+        paths=all_paths,
+        root_manifest=root_manifest,
+        conflicts=conflict_set,
+    )
+    metadata = _metadata_without_cleared_checkpoints(metadata, set(all_paths) - conflict_set)
     save_draft_metadata(
         draft_root,
         metadata,
@@ -308,22 +409,31 @@ def plan_draft_publish(
     source_root: Path,
     draft_root: Path,
     base_manifest: Mapping[str, Any] | None = None,
+    *,
+    allow_conflict_checkpoint_publish: bool = False,
 ) -> ProjectDraftPublishPlan:
     """Return draft changes that can be published back to the source root."""
 
     source_root = Path(source_root)
     draft_root = Path(draft_root)
     explicit_base = base_manifest is not None
-    base = _base_manifest_from_metadata(draft_root, base_manifest)
+    metadata = load_draft_metadata(draft_root)
+    base = (
+        _normalise_manifest(base_manifest)
+        if base_manifest is not None
+        else _normalise_manifest(metadata.get("base_manifest"))
+    )
     root_manifest = build_file_manifest(source_root)
     if not explicit_base and not base:
         base = root_manifest
     draft_manifest = build_file_manifest(draft_root)
+    checkpoints = _normalise_conflict_checkpoints(metadata.get(CONFLICT_CHECKPOINTS_KEY))
 
     created: list[str] = []
     modified: list[str] = []
     deleted: list[str] = []
     conflicted: list[str] = []
+    out_of_date: list[str] = []
 
     for relative_path in _sorted_paths(base, root_manifest, draft_manifest):
         base_entry = _path_entry(base, relative_path)
@@ -331,17 +441,31 @@ def plan_draft_publish(
         draft_entry = _path_entry(draft_manifest, relative_path)
 
         draft_changed = not _entries_match(draft_entry, base_entry)
+        root_changed = not _entries_match(root_entry, base_entry)
         if not draft_changed:
+            if root_changed:
+                out_of_date.append(relative_path)
             continue
-        if _is_conflict(base_entry=base_entry, root_entry=root_entry, draft_entry=draft_entry):
+        is_conflict = _is_conflict(base_entry=base_entry, root_entry=root_entry, draft_entry=draft_entry)
+        if is_conflict and _conflict_checkpoint_resolves(
+            checkpoints.get(relative_path),
+            root_entry=root_entry,
+            draft_entry=draft_entry,
+            allow_unmodified_checkpoint=allow_conflict_checkpoint_publish,
+        ):
+            is_conflict = False
+        if is_conflict:
             conflicted.append(relative_path)
+            out_of_date.append(relative_path)
             continue
         if _entries_match(draft_entry, root_entry):
             continue
-        if base_entry is None and draft_entry is not None:
+        if draft_entry is not None and root_entry is None and base_entry is None:
             created.append(relative_path)
         elif base_entry is not None and draft_entry is None:
             deleted.append(relative_path)
+        elif base_entry is None and draft_entry is None:
+            continue
         elif draft_entry is not None:
             modified.append(relative_path)
 
@@ -350,4 +474,214 @@ def plan_draft_publish(
         modified=modified,
         deleted=deleted,
         conflicted=conflicted,
+        out_of_date=out_of_date,
     )
+
+
+def record_conflict_checkpoints(
+    source_root: Path,
+    draft_root: Path,
+    paths: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Mark current root/draft entries as the point an agent must reconcile from."""
+
+    source_root = Path(source_root)
+    draft_root = Path(draft_root)
+    metadata = load_draft_metadata(draft_root)
+    checkpoints = _normalise_conflict_checkpoints(metadata.get(CONFLICT_CHECKPOINTS_KEY))
+    base_manifest = _normalise_manifest(metadata.get("base_manifest"))
+    root_manifest = build_file_manifest(source_root)
+    draft_manifest = build_file_manifest(draft_root)
+    created_at = datetime.now(timezone.utc).isoformat()
+    for relative_path in sorted({path for path in paths if path}):
+        checkpoints[relative_path] = {
+            "created_at": created_at,
+            "source_root": str(source_root),
+            "root_entry": root_manifest.get(relative_path),
+            "draft_entry": draft_manifest.get(relative_path),
+            "base_entry": base_manifest.get(relative_path),
+        }
+    save_draft_metadata(
+        draft_root,
+        metadata,
+        source_root=str(source_root),
+        **{CONFLICT_CHECKPOINTS_KEY: checkpoints},
+    )
+    return checkpoints
+
+
+def clear_conflict_checkpoints(draft_root: Path, paths: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    """Clear conflict checkpoints after a refresh, accepted root state, or publish."""
+
+    draft_root = Path(draft_root)
+    metadata = load_draft_metadata(draft_root)
+    checkpoints = _normalise_conflict_checkpoints(metadata.get(CONFLICT_CHECKPOINTS_KEY))
+    if paths is None:
+        checkpoints = {}
+    else:
+        for path in paths:
+            checkpoints.pop(path, None)
+    payload = dict(metadata)
+    if checkpoints:
+        payload[CONFLICT_CHECKPOINTS_KEY] = checkpoints
+    else:
+        payload.pop(CONFLICT_CHECKPOINTS_KEY, None)
+    save_draft_metadata(draft_root, payload)
+    return checkpoints
+
+
+def refresh_base_snapshots_for_paths(source_root: Path, draft_root: Path, paths: list[str]) -> None:
+    """Refresh hidden base snapshot files for paths whose base now equals root."""
+
+    source_root = Path(source_root)
+    draft_root = Path(draft_root)
+    root_manifest = build_file_manifest(source_root)
+    _sync_base_snapshots(
+        source_root,
+        draft_root,
+        paths=sorted({path for path in paths if path}),
+        root_manifest=root_manifest,
+        conflicts=set(),
+    )
+
+
+def _file_for_relative(root: Path, relative_path: str) -> Path:
+    root = Path(root)
+    if root.is_file():
+        return root
+    return root / relative_path
+
+
+def _read_diff_lines(path: Path | None) -> tuple[list[str], bool, str | None]:
+    if path is None or not path.exists() or not path.is_file() or path.is_symlink():
+        return [], False, None
+    try:
+        stat = path.stat()
+        if stat.st_size > DIFF_TEXT_SIZE_LIMIT:
+            return [], True, "file_too_large_for_inline_diff"
+        data = path.read_bytes()
+        if b"\x00" in data:
+            return [], True, "binary_file"
+        return data.decode("utf-8", errors="replace").splitlines(keepends=True), False, None
+    except Exception as exc:
+        return [], True, str(exc)
+
+
+def _diff_operation(left_entry: dict[str, Any] | None, right_entry: dict[str, Any] | None) -> str:
+    if left_entry is None and right_entry is not None:
+        return "create"
+    if left_entry is not None and right_entry is None:
+        return "delete"
+    if left_entry == right_entry:
+        return "unchanged"
+    return "update"
+
+
+def _inline_file_diff(
+    *,
+    path: str,
+    left_path: Path | None,
+    right_path: Path | None,
+    left_label: str,
+    right_label: str,
+    left_entry: dict[str, Any] | None,
+    right_entry: dict[str, Any] | None,
+    conflicted: bool,
+    max_lines: int,
+) -> dict[str, Any]:
+    left_lines, left_truncated, left_error = _read_diff_lines(left_path)
+    right_lines, right_truncated, right_error = _read_diff_lines(right_path)
+    patch_lines = list(difflib.unified_diff(
+        left_lines,
+        right_lines,
+        fromfile=f"{left_label}/{path}",
+        tofile=f"{right_label}/{path}",
+        lineterm="",
+    ))
+    patch_truncated = len(patch_lines) > max_lines
+    if patch_truncated:
+        patch_lines = patch_lines[:max_lines]
+    return {
+        "path": path,
+        "operation": _diff_operation(left_entry, right_entry),
+        "conflicted": conflicted,
+        "left_path": str(left_path) if left_path else None,
+        "right_path": str(right_path) if right_path else None,
+        "left_entry": left_entry,
+        "right_entry": right_entry,
+        "patch": "\n".join(patch_lines),
+        "truncated": bool(left_truncated or right_truncated or patch_truncated),
+        "errors": [error for error in (left_error, right_error) if error],
+    }
+
+
+def build_draft_diff(
+    source_root: Path,
+    draft_root: Path,
+    *,
+    paths: list[str] | None = None,
+    max_files: int = DIFF_FILE_LIMIT,
+    max_lines: int = DIFF_LINE_LIMIT,
+    allow_conflict_checkpoint_publish: bool = False,
+) -> dict[str, Any]:
+    """Build capped root-to-draft and base-to-draft diff previews for local resources."""
+
+    source_root = Path(source_root)
+    draft_root = Path(draft_root)
+    metadata = load_draft_metadata(draft_root)
+    base_manifest = _normalise_manifest(metadata.get("base_manifest"))
+    root_manifest = build_file_manifest(source_root)
+    draft_manifest = build_file_manifest(draft_root)
+    plan = plan_draft_publish(
+        source_root,
+        draft_root,
+        allow_conflict_checkpoint_publish=allow_conflict_checkpoint_publish,
+    )
+    selected = sorted({
+        path
+        for path in (paths or [*plan.created, *plan.modified, *plan.deleted, *plan.conflicted, *plan.out_of_date])
+        if path
+    })
+    truncated_files = len(selected) > max_files
+    selected = selected[:max_files]
+    conflicted = set(plan.conflicted)
+    root_to_draft: list[dict[str, Any]] = []
+    base_to_draft: list[dict[str, Any]] = []
+    for relative_path in selected:
+        root_entry = root_manifest.get(relative_path)
+        draft_entry = draft_manifest.get(relative_path)
+        base_entry = base_manifest.get(relative_path)
+        root_to_draft.append(_inline_file_diff(
+            path=relative_path,
+            left_path=_file_for_relative(source_root, relative_path) if root_entry is not None else None,
+            right_path=_file_for_relative(draft_root, relative_path) if draft_entry is not None else None,
+            left_label="root",
+            right_label="draft",
+            left_entry=root_entry,
+            right_entry=draft_entry,
+            conflicted=relative_path in conflicted,
+            max_lines=max_lines,
+        ))
+        base_path = _base_snapshot_path(draft_root, relative_path)
+        base_available = base_path.exists() and base_path.is_file()
+        base_entry_for_diff = base_entry if base_available else None
+        base_to_draft_entry = _inline_file_diff(
+            path=relative_path,
+            left_path=base_path if base_available else None,
+            right_path=_file_for_relative(draft_root, relative_path) if draft_entry is not None else None,
+            left_label="base",
+            right_label="draft",
+            left_entry=base_entry_for_diff,
+            right_entry=draft_entry,
+            conflicted=relative_path in conflicted,
+            max_lines=max_lines,
+        )
+        base_to_draft_entry["base_available"] = base_available
+        base_to_draft.append(base_to_draft_entry)
+
+    return {
+        "truncated": truncated_files,
+        "path_count": len(selected),
+        "root_to_draft": root_to_draft,
+        "base_to_draft": base_to_draft,
+    }

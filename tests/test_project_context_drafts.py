@@ -200,3 +200,78 @@ def test_plan_draft_publish_lists_draft_changes_and_conflicts(tmp_path):
     assert plan.modified == ["edit.md"]
     assert plan.deleted == ["delete.md"]
     assert plan.conflicted == ["conflict.md"]
+
+
+def test_plan_draft_publish_is_read_only_and_reports_out_of_date_paths(tmp_path):
+    from brain.systems.cortex.project_context.drafts import load_draft_metadata, plan_draft_publish, sync_draft_from_root
+
+    source = tmp_path / "source"
+    draft = tmp_path / "draft"
+    source.mkdir()
+    (source / "brief.md").write_text("root v1")
+    sync_draft_from_root(source, draft)
+    before_metadata = load_draft_metadata(draft)
+
+    (source / "brief.md").write_text("root v2")
+    plan = plan_draft_publish(source, draft)
+
+    assert (draft / "brief.md").read_text() == "root v1"
+    assert load_draft_metadata(draft) == before_metadata
+    assert plan.created == []
+    assert plan.modified == []
+    assert plan.deleted == []
+    assert plan.conflicted == []
+    assert plan.out_of_date == ["brief.md"]
+
+
+def test_conflict_checkpoint_allows_publish_retry_only_while_root_is_stable(tmp_path):
+    from brain.systems.cortex.project_context.drafts import (
+        plan_draft_publish,
+        record_conflict_checkpoints,
+        sync_draft_from_root,
+    )
+
+    source = tmp_path / "source"
+    draft = tmp_path / "draft"
+    source.mkdir()
+    (source / "brief.md").write_text("base")
+    sync_draft_from_root(source, draft)
+    (source / "brief.md").write_text("root update")
+    (draft / "brief.md").write_text("draft update")
+
+    initial = plan_draft_publish(source, draft, allow_conflict_checkpoint_publish=True)
+    assert initial.conflicted == ["brief.md"]
+
+    record_conflict_checkpoints(source, draft, ["brief.md"])
+    retry = plan_draft_publish(source, draft, allow_conflict_checkpoint_publish=True)
+    assert retry.conflicted == []
+    assert retry.modified == ["brief.md"]
+
+    (source / "brief.md").write_text("newer root update")
+    changed_again = plan_draft_publish(source, draft, allow_conflict_checkpoint_publish=True)
+    assert changed_again.conflicted == ["brief.md"]
+
+
+def test_build_draft_diff_includes_root_and_base_context(tmp_path):
+    from brain.systems.cortex.project_context.drafts import build_draft_diff, sync_draft_from_root
+
+    source = tmp_path / "source"
+    draft = tmp_path / "draft"
+    source.mkdir()
+    (source / "brief.md").write_text("base\n")
+    sync_draft_from_root(source, draft)
+    (source / "brief.md").write_text("root\n")
+    (draft / "brief.md").write_text("draft\n")
+
+    payload = build_draft_diff(source, draft, paths=["brief.md"])
+
+    root_diff = payload["root_to_draft"][0]
+    base_diff = payload["base_to_draft"][0]
+    assert root_diff["operation"] == "update"
+    assert "--- root/brief.md" in root_diff["patch"]
+    assert "+++ draft/brief.md" in root_diff["patch"]
+    assert "-root" in root_diff["patch"]
+    assert "+draft" in root_diff["patch"]
+    assert base_diff["base_available"] is True
+    assert "-base" in base_diff["patch"]
+    assert "+draft" in base_diff["patch"]

@@ -127,6 +127,8 @@ def _dedupe_change_set(changes: dict[str, list[str]]) -> dict[str, list[str]]:
 def _draft_publish_change_set(
     draft_path: str | None,
     source_path: str | None,
+    *,
+    allow_conflict_checkpoint_publish: bool = False,
 ) -> tuple[dict[str, list[str]], str, list[str], list[str], dict[str, Any]]:
     if not draft_path or not source_path:
         return _empty_change_set(), "draft_manifest", [], [], {}
@@ -134,14 +136,17 @@ def _draft_publish_change_set(
     source = Path(source_path).expanduser()
     if not draft.exists() or not source.exists():
         return _empty_change_set(), "draft_manifest", [], [], {}
-    sync_result = sync_draft_from_root(source, draft)
-    plan = plan_draft_publish(source, draft)
+    plan = plan_draft_publish(
+        source,
+        draft,
+        allow_conflict_checkpoint_publish=allow_conflict_checkpoint_publish,
+    )
     return _dedupe_change_set({
         "changed_paths": plan.modified,
         "new_paths": plan.created,
         "deleted_paths": plan.deleted,
         "conflicted_paths": plan.conflicted,
-    }), "draft_manifest", _limited_unique_paths(sync_result.out_of_date), [], {}
+    }), "draft_manifest", _limited_unique_paths(plan.out_of_date), [], {}
 
 
 def _repo_change_set(
@@ -286,6 +291,7 @@ def _resource_draft_entry(
     *,
     repo_status=None,
     repo_upstream_status=None,
+    allow_conflict_checkpoint_publish: bool = False,
 ) -> dict[str, Any]:
     materialization = _as_mapping(resource.get("materialization"))
     resource_path = _clean_text(materialization.get("path")) or _clean_text(resource.get("path"))
@@ -299,6 +305,7 @@ def _resource_draft_entry(
         changes, change_source, out_of_date_paths, status_errors, status_details = _draft_publish_change_set(
             workspace_path or resource_path,
             source_path,
+            allow_conflict_checkpoint_publish=allow_conflict_checkpoint_publish,
         )
     elif _is_repo_resource(resource, materialization):
         changes, change_source, out_of_date_paths, status_errors, status_details = _repo_change_set(
@@ -366,6 +373,7 @@ def _project_draft_resources(
     manifest: Mapping[str, Any] | None = None,
     repo_status=None,
     repo_upstream_status=None,
+    allow_conflict_checkpoint_publish: bool = False,
 ) -> list[dict[str, Any]]:
     resources = _manifest_resources(snapshot, manifest or {})
     return [
@@ -374,6 +382,7 @@ def _project_draft_resources(
             index,
             repo_status=repo_status,
             repo_upstream_status=repo_upstream_status,
+            allow_conflict_checkpoint_publish=allow_conflict_checkpoint_publish,
         )
         for index, resource in enumerate(resources)
         if isinstance(resource, Mapping)
@@ -406,7 +415,12 @@ def _aggregate_resource_changes(resources: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def project_draft_status_payload(*, repo_status=None, repo_upstream_status=None) -> dict[str, Any]:
+def project_draft_status_payload(
+    *,
+    repo_status=None,
+    repo_upstream_status=None,
+    allow_conflict_checkpoint_publish: bool = False,
+) -> dict[str, Any]:
     context = _current_project_draft_context()
     if not context["run_id"] and not context["idea_id"] and not context["snapshot"]:
         return {
@@ -433,6 +447,7 @@ def project_draft_status_payload(*, repo_status=None, repo_upstream_status=None)
         manifest=manifest,
         repo_status=repo_status,
         repo_upstream_status=repo_upstream_status,
+        allow_conflict_checkpoint_publish=allow_conflict_checkpoint_publish,
     )
     if not resources:
         return {
@@ -457,7 +472,121 @@ def project_draft_status_payload(*, repo_status=None, repo_upstream_status=None)
     }
 
 
+def _resource_matches_filter(resource: Mapping[str, Any], resource_id: str) -> bool:
+    materialization = _as_mapping(resource.get("materialization"))
+    candidates = {
+        str(resource.get("id") or ""),
+        str(resource.get("mount_path") or ""),
+        str(resource.get("path") or ""),
+        str(resource.get("workspace_path") or ""),
+        str(resource.get("source_path") or ""),
+        str(materialization.get("path") or ""),
+        str(materialization.get("workspace_path") or ""),
+        str(materialization.get("source_path") or ""),
+    }
+    return resource_id in candidates
+
+
+def project_refresh_draft_from_root_payload(
+    *,
+    resource_id: str | None = None,
+    resource_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    context = _current_project_draft_context()
+    if not context["run_id"] and not context["idea_id"] and not context["snapshot"]:
+        return {
+            "ok": False,
+            "code": "project_thread_not_bound",
+            "error": "refresh_draft_from_root requires a current AgentRun or Cortex thread with Project Context attached.",
+        }
+
+    snapshot = context["snapshot"]
+    if not snapshot:
+        return {
+            "ok": False,
+            "code": "project_draft_not_bound",
+            "error": "No Project draft workspace is bound to the current run/thread.",
+            "run_id": context["run_id"],
+            "idea_id": context["idea_id"],
+        }
+
+    manifest = _as_mapping(context["manifest"]) or ProjectWorkspaceManifest.from_project_context(snapshot).to_dict()
+    resources = _manifest_resources(snapshot, manifest)
+    selected_ids = {str(value) for value in (resource_ids or []) if str(value).strip()}
+    if resource_id:
+        selected_ids.add(str(resource_id))
+
+    refreshed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for index, resource in enumerate(resources):
+        if selected_ids and not any(_resource_matches_filter(resource, selected) for selected in selected_ids):
+            continue
+        materialization = _as_mapping(resource.get("materialization"))
+        resource_path = _clean_text(materialization.get("path")) or _clean_text(resource.get("path"))
+        workspace_path = _clean_text(materialization.get("workspace_path")) or _clean_text(resource.get("workspace_path"))
+        source_path = _clean_text(materialization.get("source_path")) or _clean_text(resource.get("source_path"))
+        label = _resource_label(resource, workspace_path or resource_path)
+        base_payload = {
+            "resource_id": str(resource.get("id") or f"resource-{index + 1}"),
+            "mount_path": _clean_text(resource.get("mount_path")) or label,
+            "label": label,
+            "workspace_path": workspace_path or resource_path,
+            "source_path": source_path,
+        }
+        if not source_path:
+            skipped.append({**base_payload, "status": "skipped", "reason": "resource_has_no_local_project_root"})
+            continue
+        if not (workspace_path or resource_path):
+            skipped.append({**base_payload, "status": "skipped", "reason": "resource_has_no_draft_workspace"})
+            continue
+        source = Path(source_path).expanduser()
+        draft = Path(workspace_path or resource_path).expanduser()
+        if not source.exists():
+            skipped.append({**base_payload, "status": "skipped", "reason": "project_root_missing"})
+            continue
+        try:
+            result = sync_draft_from_root(source, draft)
+        except Exception as exc:
+            skipped.append({**base_payload, "status": "error", "reason": "refresh_failed", "error": str(exc)})
+            continue
+        refreshed.append({
+            **base_payload,
+            "status": "refreshed" if result.ok else "conflicted",
+            "updated_from_root": result.copied,
+            "removed_from_root": result.removed,
+            "preserved_draft_paths": result.preserved,
+            "conflicted_paths": result.conflicts,
+            "out_of_date_paths": result.out_of_date,
+        })
+
+    if selected_ids and not refreshed and not skipped:
+        return {
+            "ok": False,
+            "action": "refresh_draft_from_root",
+            "code": "project_refresh_selection_empty",
+            "error": "No Project draft resources matched the requested refresh filters.",
+            "selected_resource_ids": sorted(selected_ids),
+        }
+
+    return {
+        "ok": True,
+        "action": "refresh_draft_from_root",
+        "run_id": context["run_id"],
+        "idea_id": context["idea_id"],
+        "mutated_project_root": False,
+        "mutated_draft_workspace": bool(refreshed),
+        "summary": {
+            "refreshed_count": len(refreshed),
+            "skipped_count": len(skipped),
+            "conflicted_count": sum(1 for item in refreshed if item.get("conflicted_paths")),
+        },
+        "refreshed_resources": refreshed,
+        "skipped_resources": skipped,
+    }
+
+
 __all__ = [
     "PROJECT_DRAFT_CHANGE_LIMIT",
+    "project_refresh_draft_from_root_payload",
     "project_draft_status_payload",
 ]

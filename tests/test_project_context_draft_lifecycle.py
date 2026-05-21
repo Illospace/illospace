@@ -185,3 +185,23 @@ async def test_expired_cleanup_reaps_retained_unpublished_project_drafts(tmp_pat
     assert run.metadata_["project_draft_cleanup"]["status"] == "deleted"
     assert not (tmp_path / "thread" / ".illo-project-context").exists()
     session.flush.assert_awaited_once()
+
+
+def test_project_draft_cleanup_is_in_nightly_scheduler_steps():
+    from brain.app.scheduler.programs import NIGHTLY_SLEEP_STEP_KEYS, get_step_specs
+
+    assert "project_draft_cleanup" in NIGHTLY_SLEEP_STEP_KEYS
+
+    job = SimpleNamespace(
+        job_key="nightly_sleep",
+        family="nightly_sleep",
+        program_key="nightly_sleep",
+        handler_ref="nightly",
+        default_payload={},
+        handler_kind="builtin",
+        timezone="UTC",
+    )
+    run = SimpleNamespace(scheduled_for=datetime(2026, 5, 21, tzinfo=timezone.utc))
+    steps = get_step_specs(job, run)
+
+    assert any(step.step_key == "project_draft_cleanup" for step in steps)
