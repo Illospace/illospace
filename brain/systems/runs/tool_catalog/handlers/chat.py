@@ -6,17 +6,33 @@ from typing import Any
 
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, logger
 
+THREAD_DISCUSSION_SURFACE = "thread_discussion"
+
+
+def _execution_metadata() -> dict[str, Any]:
+    metadata = getattr(_agent_context, "execution_metadata", None)
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _metadata_trigger(name: str) -> dict[str, Any]:
+    trigger = _execution_metadata().get(name)
+    return dict(trigger) if isinstance(trigger, dict) else {}
+
 
 def _current_chat_trigger() -> dict[str, Any]:
     trigger = getattr(_agent_context, "chat_trigger", None)
     if isinstance(trigger, dict):
         return dict(trigger)
-    execution_metadata = getattr(_agent_context, "execution_metadata", None)
-    if isinstance(execution_metadata, dict) and isinstance(
-        execution_metadata.get("chat_trigger"),
-        dict,
-    ):
-        return dict(execution_metadata["chat_trigger"])
+    return _metadata_trigger("chat_trigger")
+
+
+def _current_discussion_trigger() -> dict[str, Any]:
+    trigger = _metadata_trigger("discussion_trigger")
+    if trigger:
+        return trigger
+    target_ref = getattr(_agent_context, "target_ref", None)
+    if isinstance(target_ref, dict) and isinstance(target_ref.get("discussion_trigger"), dict):
+        return dict(target_ref["discussion_trigger"])
     return {}
 
 
@@ -39,13 +55,11 @@ def _current_thread_id() -> str | None:
     thread_id = getattr(run, "thread_id", None)
     if thread_id:
         return str(thread_id)
-    execution_metadata = getattr(_agent_context, "execution_metadata", None)
-    if isinstance(execution_metadata, dict):
-        target_ref = execution_metadata.get("target_ref")
-        if isinstance(target_ref, dict):
-            candidate = target_ref.get("idea_id") or target_ref.get("thread_id")
-            if candidate:
-                return str(candidate)
+    target_ref = _execution_metadata().get("target_ref")
+    if isinstance(target_ref, dict):
+        candidate = target_ref.get("idea_id") or target_ref.get("thread_id")
+        if candidate:
+            return str(candidate)
     return None
 
 
@@ -56,6 +70,39 @@ def _coerce_optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         raise ValueError("thread_root_message_id must be an integer")
+
+
+def _coerce_comment_id(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError("reply_to_comment_id must be an integer")
+
+
+def _first_nonempty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _discussion_comment_payload(comment: Any) -> dict[str, Any]:
+    return {
+        "id": comment.id,
+        "thread_id": str(comment.thread_id),
+        "org_id": str(comment.org_id),
+        "author_user_id": str(comment.author_user_id) if comment.author_user_id else None,
+        "author_kind": comment.author_kind,
+        "author_name": None,
+        "author_color": None,
+        "body": comment.body,
+        "attachments": comment.attachments or [],
+        "metadata": comment.metadata_ or {},
+        "created_at": comment.created_at.isoformat() if comment.created_at else None,
+    }
 
 
 async def _publish_chat_events(publish, summaries: dict[str, dict[str, Any]]) -> None:
@@ -127,6 +174,77 @@ async def _handle_post_chat_message(
     return json.dumps({"ok": True, "message": message_payload}, default=str)
 
 
+async def _handle_post_thread_discussion_reply(
+    body: str,
+    thread_id: str | None = None,
+    reply_to_comment_id: int | None = None,
+) -> str:
+    """Post an Illo-authored reply to a Thread's Discussion surface."""
+    from brain.app.api.routers.ws import ws_manager
+    from brain.platform.db.models.idea import Idea, ThreadDiscussionComment
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+
+    text = str(body or "").strip()
+    if not text:
+        return json.dumps({"error": "post_thread_discussion_reply requires body"})
+
+    trigger = _current_discussion_trigger()
+    response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
+    target_thread_id = _first_nonempty(
+        thread_id,
+        response_target.get("thread_id"),
+        trigger.get("thread_id"),
+        _current_thread_id(),
+    )
+    if not target_thread_id:
+        return json.dumps({"error": "post_thread_discussion_reply requires a Thread id or active Thread run"})
+
+    org_id = str(getattr(_agent_context, "org_id", "") or "").strip()
+    if not org_id:
+        return json.dumps({"error": "post_thread_discussion_reply requires an org-scoped run"})
+
+    target_reply_to_comment_id = (
+        _coerce_comment_id(reply_to_comment_id)
+        if reply_to_comment_id is not None
+        else _coerce_comment_id(response_target.get("reply_to_comment_id") or trigger.get("comment_id"))
+    )
+
+    async with UnitOfWork() as uow:
+        idea = await uow.session.get(Idea, target_thread_id)
+        if idea is None:
+            return json.dumps({"error": "Thread not found"})
+        idea_org_id = str(getattr(idea, "org_id", "") or "")
+        if idea_org_id and idea_org_id != org_id:
+            return json.dumps({"error": "Thread is outside this org"})
+
+        metadata = {
+            "source": "illo_agent",
+            "surface": THREAD_DISCUSSION_SURFACE,
+            "created_by_run_id": _current_run_id(),
+        }
+        if target_reply_to_comment_id is not None:
+            metadata["reply_to_comment_id"] = target_reply_to_comment_id
+        comment = ThreadDiscussionComment(
+            thread_id=target_thread_id,
+            org_id=org_id,
+            author_user_id=None,
+            author_kind="illo",
+            body=text,
+            attachments=[],
+            metadata_=metadata,
+        )
+        uow.session.add(comment)
+        await uow.session.flush()
+        payload = _discussion_comment_payload(comment)
+
+    await ws_manager.broadcast_product_event(
+        "thread_discussion_comment",
+        {"idea_id": target_thread_id, "comment": payload},
+        org_id=org_id,
+    )
+    return json.dumps({"ok": True, "comment": payload}, default=str)
+
+
 async def _handle_read_thread_discussion(
     thread_id: str | None = None,
     limit: int = 50,
@@ -184,4 +302,8 @@ async def _handle_read_thread_discussion(
     )
 
 
-__all__ = ["_handle_post_chat_message", "_handle_read_thread_discussion"]
+__all__ = [
+    "_handle_post_chat_message",
+    "_handle_post_thread_discussion_reply",
+    "_handle_read_thread_discussion",
+]

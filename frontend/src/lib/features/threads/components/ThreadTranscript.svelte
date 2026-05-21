@@ -741,6 +741,7 @@
             {@const runKey = getRunKey(item, index)}
             {@const liveWorkStream = isRunLiveWorkStream(item)}
             {#if liveWorkStream}
+              {@const showLiveCue = item.showLiveCue !== false}
               {@const liveCueWorkIndex = getRunLiveCueWorkIndex(item)}
               {@const liveCueLabel = getRunLiveCueLabel(item, liveCueWorkIndex)}
               <section class="run-live-work-stream" aria-label="Live run work">
@@ -781,14 +782,16 @@
                   </div>
                 {/if}
 
-                <div class="run-live-work-cue" aria-live="polite" aria-label={liveCueLabel}>
-                  <span class="thinking-status-label">{liveCueLabel}</span>
-                  <span class="thinking-status-dots" aria-hidden="true">
-                    <span>.</span>
-                    <span>.</span>
-                    <span>.</span>
-                  </span>
-                </div>
+                {#if showLiveCue}
+                  <div class="run-live-work-cue" aria-live="polite" aria-label={liveCueLabel}>
+                    <span class="thinking-status-label">{liveCueLabel}</span>
+                    <span class="thinking-status-dots" aria-hidden="true">
+                      <span>.</span>
+                      <span>.</span>
+                      <span>.</span>
+                    </span>
+                  </div>
+                {/if}
               </section>
             {:else}
               <details

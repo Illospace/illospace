@@ -382,7 +382,8 @@ TOOLS: dict[str, dict[str, Any]] = {
             "Submit ordered context from a personal agent to Illo, the user's team agent. "
             "Use this when the user wants Illo or the team to have the current AI thread, "
             "trace, artifacts, files, links, diffs, or other source material. The personal "
-            "agent supplies context and provenance; Illo coordinates the team workspace."
+            "agent supplies context and provenance; Illo coordinates the team workspace "
+            "and returns thread_url when routed to a Thread."
         ),
         "inputSchema": {
             "type": "object",

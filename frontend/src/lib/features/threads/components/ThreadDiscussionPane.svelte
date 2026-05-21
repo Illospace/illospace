@@ -1,9 +1,24 @@
 <script lang="ts">
+  import { tick } from 'svelte';
+
+  import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
+  import ChatStateView from '$lib/components/chat/ChatStateView.svelte';
+  import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
+  import {
+    CONVERSATION_SCROLL_BOTTOM_THRESHOLD,
+    conversationIsNearBottom,
+    scrollConversationToBottom,
+    shouldShowConversationScrollCue,
+  } from '$lib/components/chat/conversationScroll';
+  import { ConstellationNotice, ConstellationPresenceSeed } from '$lib/components/constellation';
   import {
     listThreadDiscussion,
     postThreadDiscussionComment,
     type ThreadDiscussionComment,
   } from '$lib/features/threads/api/threadApi';
+  import { auth } from '$lib/stores/auth.svelte';
+  import { buildPresenceSeedStyle, normalizeHexColor, presenceToneForColor } from '$lib/utils/constellationPresence';
+  import { parseServerDate } from '$lib/utils/datetime';
 
   let {
     ideaId = null,
@@ -17,6 +32,25 @@
   let posting = $state(false);
   let error = $state('');
   let loadedForIdeaId = $state<string | null>(null);
+  let streamEl: HTMLDivElement | undefined = $state();
+  let userScrolledUp = $state(false);
+  let showScrollCue = $state(false);
+  let lastScrollIdeaId = $state<string | null>(null);
+
+  type MessageTextSegment = {
+    text: string;
+    mention: boolean;
+  };
+
+  const MESSAGE_GROUP_WINDOW_MS = 15 * 60 * 1000;
+  const MENTION_RENDER_RE = /(^|[^A-Za-z0-9_])@([A-Za-z0-9._-]+)([.,:;!?]?)/g;
+  const tailSignature = $derived(`${comments.length}:${comments.at(-1)?.id ?? 'empty'}`);
+  const composerPlaceholder = $derived(
+    ideaId ? 'Comment on this Thread...' : 'Open a Thread to comment...',
+  );
+  const composerHint = $derived(
+    posting ? 'Posting comment...' : '@illo brings Illo into this Discussion.',
+  );
 
   $effect(() => {
     if (!ideaId) {
@@ -26,6 +60,19 @@
     }
     if (loadedForIdeaId === ideaId) return;
     void loadComments(ideaId);
+  });
+
+  $effect(() => {
+    if (ideaId === lastScrollIdeaId) return;
+    lastScrollIdeaId = ideaId;
+    userScrolledUp = false;
+    showScrollCue = false;
+  });
+
+  $effect(() => {
+    tailSignature;
+    if (!streamEl || loading) return;
+    tick().then(() => scrollDiscussionToBottom());
   });
 
   async function loadComments(targetIdeaId = ideaId) {
@@ -42,9 +89,8 @@
     }
   }
 
-  async function submitComment(event: SubmitEvent) {
-    event.preventDefault();
-    const text = body.trim();
+  async function submitComment(value = body) {
+    const text = value.trim();
     if (!ideaId || !text || posting) return;
     posting = true;
     error = '';
@@ -55,11 +101,16 @@
       });
       comments = [...comments, result.comment];
       body = '';
+      userScrolledUp = false;
     } catch (err: any) {
       error = err?.detail || 'Failed to post comment.';
     } finally {
       posting = false;
     }
+  }
+
+  function handleComposerValueChange(value: string) {
+    body = value;
   }
 
   function authorLabel(comment: ThreadDiscussionComment) {
@@ -71,180 +122,465 @@
   function timeLabel(value: string | null) {
     if (!value) return '';
     try {
-      return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const createdAt = parseServerDate(value);
+      if (!createdAt) return '';
+      const now = new Date();
+      const diffMs = Math.max(0, now.getTime() - createdAt.getTime());
+      const diffMinutes = Math.floor(diffMs / 60000);
+      const diffHours = Math.floor(diffMs / 3600000);
+
+      if (diffMs < 60000) return 'just now';
+      if (diffMinutes < 60) return `${diffMinutes} min ago`;
+      if (diffHours < 24) return `${diffHours} hr ago`;
+
+      return createdAt.toLocaleString([], {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
     } catch {
       return '';
     }
   }
+
+  function isIlloComment(comment: ThreadDiscussionComment) {
+    return comment.author_kind === 'illo' || comment.author_kind === 'agent';
+  }
+
+  function isOwnComment(comment: ThreadDiscussionComment) {
+    return (
+      comment.author_user_id != null &&
+      auth.user?.id != null &&
+      String(comment.author_user_id) === String(auth.user.id)
+    );
+  }
+
+  function participantTone(comment: ThreadDiscussionComment) {
+    if (isIlloComment(comment)) return 'spectral';
+    return presenceToneForColor(comment.author_color);
+  }
+
+  function participantStyle(comment: ThreadDiscussionComment) {
+    if (isIlloComment(comment)) return undefined;
+    return buildPresenceSeedStyle(normalizeHexColor(comment.author_color)) || undefined;
+  }
+
+  function messageStyle(comment: ThreadDiscussionComment) {
+    const accent = normalizeHexColor(comment.author_color);
+    if (!accent || isIlloComment(comment)) return undefined;
+
+    return [
+      `--discussion-message-author-color:color-mix(in srgb, ${accent} 76%, var(--constellation-color-text-primary))`,
+      `--discussion-message-hover-border:color-mix(in srgb, ${accent} 20%, transparent)`,
+      `--discussion-message-hover-background:color-mix(in srgb, ${accent} 8%, transparent)`,
+      `--seed-accent:${accent}`,
+    ].join('; ');
+  }
+
+  function shouldShowMessageHeader(rows: ThreadDiscussionComment[], index: number) {
+    if (index === 0) return true;
+
+    const current = rows[index];
+    const previous = rows[index - 1];
+    if (!current || !previous) return true;
+
+    if (!sameDiscussionAuthor(current, previous)) return true;
+
+    if (!current.created_at || !previous.created_at) return false;
+
+    const currentDate = parseServerDate(current.created_at);
+    const previousDate = parseServerDate(previous.created_at);
+    if (!currentDate || !previousDate) return true;
+
+    if (!sameCalendarDay(currentDate, previousDate)) return true;
+
+    return currentDate.getTime() - previousDate.getTime() > MESSAGE_GROUP_WINDOW_MS;
+  }
+
+  function sameDiscussionAuthor(current: ThreadDiscussionComment, previous: ThreadDiscussionComment) {
+    return (
+      current.author_user_id === previous.author_user_id &&
+      current.author_kind === previous.author_kind &&
+      current.author_name === previous.author_name
+    );
+  }
+
+  function sameCalendarDay(current: Date, previous: Date) {
+    return (
+      current.getFullYear() === previous.getFullYear() &&
+      current.getMonth() === previous.getMonth() &&
+      current.getDate() === previous.getDate()
+    );
+  }
+
+  function messageTextSegments(bodyText: string): MessageTextSegment[] {
+    const segments: MessageTextSegment[] = [];
+    MENTION_RENDER_RE.lastIndex = 0;
+    let cursor = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = MENTION_RENDER_RE.exec(bodyText)) !== null) {
+      const boundary = match[1] ?? '';
+      let token = match[2] ?? '';
+      let punctuation = match[3] ?? '';
+      const tokenTrailingPunctuation = token.match(/[.,:;!?]+$/)?.[0] ?? '';
+      if (tokenTrailingPunctuation) {
+        token = token.slice(0, -tokenTrailingPunctuation.length);
+        punctuation = `${tokenTrailingPunctuation}${punctuation}`;
+      }
+
+      const mentionStart = match.index + boundary.length;
+      if (mentionStart > cursor) {
+        segments.push({ text: bodyText.slice(cursor, mentionStart), mention: false });
+      }
+
+      const mentionText = `@${token}`;
+      segments.push({ text: mentionText, mention: true });
+      cursor = mentionStart + mentionText.length;
+
+      if (punctuation) {
+        segments.push({ text: punctuation, mention: false });
+        cursor += punctuation.length;
+      }
+    }
+
+    if (cursor < bodyText.length) {
+      segments.push({ text: bodyText.slice(cursor), mention: false });
+    }
+
+    return segments.length > 0 ? segments : [{ text: bodyText, mention: false }];
+  }
+
+  function syncScrollCue() {
+    showScrollCue = shouldShowConversationScrollCue(streamEl);
+  }
+
+  function handleStreamScroll() {
+    userScrolledUp = !conversationIsNearBottom(streamEl, CONVERSATION_SCROLL_BOTTOM_THRESHOLD);
+    syncScrollCue();
+  }
+
+  function scrollDiscussionToBottom(force = false) {
+    if (!streamEl) return;
+    if (!force && userScrolledUp) return;
+    scrollConversationToBottom(streamEl);
+    requestAnimationFrame(() => {
+      userScrolledUp = false;
+      syncScrollCue();
+    });
+  }
 </script>
 
 <div class="thread-discussion-pane">
-  <div class="discussion-list" aria-label="Thread Discussion">
-    {#if loading && comments.length === 0}
-      <div class="discussion-empty">Loading Discussion...</div>
+  <div
+    class="discussion-stream"
+    aria-label="Thread Discussion"
+    bind:this={streamEl}
+    onscroll={handleStreamScroll}
+  >
+    {#if !ideaId}
+      <ChatStateView
+        state="empty"
+        title="No Thread selected"
+        description="Open a Thread to read and write its Discussion."
+        eyebrow="Discussion"
+        compact
+        surface="plain"
+        className="discussion-state"
+      />
+    {:else if loading && comments.length === 0}
+      <ChatStateView
+        state="loading"
+        compact
+        surface="plain"
+        className="discussion-state"
+      />
     {:else if error && comments.length === 0}
-      <div class="discussion-empty discussion-error">{error}</div>
+      <ChatStateView
+        state="error"
+        title="Discussion could not load"
+        description={error}
+        tone="warning"
+        actionLabel="Try again"
+        onAction={() => void loadComments()}
+        compact
+        className="discussion-state"
+      />
     {:else if comments.length === 0}
-      <div class="discussion-empty">No Discussion yet.</div>
+      <ChatStateView
+        state="empty"
+        title="No comments yet"
+        description="Start a scoped note for teammates on this Thread."
+        eyebrow="Discussion"
+        compact
+        surface="plain"
+        className="discussion-state"
+      />
     {:else}
-      {#each comments as comment (comment.id)}
-        <article class="discussion-comment">
-          <div class="discussion-comment-meta">
-            <span class="discussion-author">{authorLabel(comment)}</span>
-            {#if timeLabel(comment.created_at)}
-              <time datetime={comment.created_at || undefined}>{timeLabel(comment.created_at)}</time>
+      <div class="discussion-message-list">
+        {#each comments as comment, index (comment.id)}
+          {@const showHeader = shouldShowMessageHeader(comments, index)}
+          {@const author = authorLabel(comment)}
+          {@const timestamp = timeLabel(comment.created_at)}
+          <article
+            class="discussion-message"
+            class:has-header={showHeader}
+            class:is-continuation={!showHeader}
+            class:is-own={isOwnComment(comment)}
+            class:is-illo={isIlloComment(comment)}
+            style={messageStyle(comment)}
+          >
+            {#if showHeader}
+              <header class="discussion-message-header">
+                <ConstellationPresenceSeed
+                  label={author}
+                  size="sm"
+                  role={isIlloComment(comment) ? 'illo' : 'user'}
+                  tone={participantTone(comment)}
+                  style={participantStyle(comment)}
+                  treatment="plain"
+                />
+
+                <div class="discussion-message-author-copy">
+                  <span>{author}</span>
+                  {#if timestamp}
+                    <time datetime={comment.created_at || undefined}>{timestamp}</time>
+                  {/if}
+                </div>
+              </header>
             {/if}
-          </div>
-          <div class="discussion-body">{comment.body}</div>
-        </article>
-      {/each}
+
+            <p class="discussion-message-body">
+              {#each messageTextSegments(comment.body) as segment, segmentIndex (segmentIndex)}
+                {#if segment.mention}
+                  <span class="discussion-mention">{segment.text}</span>
+                {:else}
+                  {segment.text}
+                {/if}
+              {/each}
+            </p>
+          </article>
+        {/each}
+      </div>
     {/if}
+
+    <ConversationScrollCue
+      visible={showScrollCue}
+      label="Jump to latest Discussion comment"
+      onclick={() => scrollDiscussionToBottom(true)}
+    />
   </div>
 
-  <form class="discussion-composer" onsubmit={submitComment}>
+  <div class="discussion-composer">
     {#if error && comments.length > 0}
-      <div class="discussion-inline-error">{error}</div>
+      <ConstellationNotice
+        title="Comment was not posted"
+        description={error}
+        tone="warning"
+        compact
+      />
     {/if}
-    <textarea
-      bind:value={body}
-      placeholder="Comment on this Thread..."
-      rows="3"
+
+    <ChatComposer
+      tone="spectral"
+      variant="thread"
+      placeholder={composerPlaceholder}
+      value={body}
+      hint={composerHint}
+      modeLabel="Discussion"
       disabled={posting || !ideaId}
-    ></textarea>
-    <button type="submit" disabled={posting || !body.trim() || !ideaId}>
-      {posting ? 'Posting...' : 'Post'}
-    </button>
-  </form>
+      loading={posting}
+      canSubmit={Boolean(ideaId) && body.trim().length > 0 && !posting}
+      primaryActionLabel="Post"
+      workingLabel="Posting"
+      onValueChange={handleComposerValueChange}
+      onSubmit={(value) => void submitComment(value)}
+    />
+  </div>
 </div>
 
 <style>
   .thread-discussion-pane {
-    min-height: 100%;
-    display: grid;
-    grid-template-rows: minmax(0, 1fr) auto;
-    color: var(--constellation-utility-panel-tab-active-text);
+    --discussion-message-hover-background: rgba(255, 255, 255, 0.025);
+    --discussion-message-hover-border: rgba(255, 255, 255, 0.03);
+    --discussion-message-body-text: var(--constellation-thread-message-illo-body);
+    --discussion-message-meta-text: var(--constellation-thread-message-illo-meta);
+    --discussion-message-author-color: var(--constellation-thread-message-author);
+    --discussion-mention-background: rgba(150, 188, 255, 0.16);
+    --discussion-mention-text: rgba(207, 224, 255, 0.98);
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    color: var(--discussion-message-body-text);
+    container-type: inline-size;
   }
 
-  .discussion-list {
+  :global(:root[data-color-scheme='light']) .thread-discussion-pane {
+    --discussion-message-hover-background: rgba(255, 255, 255, 0.42);
+    --discussion-message-hover-border: rgba(24, 35, 49, 0.04);
+    --discussion-mention-background: rgba(72, 111, 168, 0.14);
+    --discussion-mention-text: #315a91;
+  }
+
+  .discussion-stream {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding: 12px;
-    overflow-y: auto;
+    overflow: auto;
+    padding: 14px 14px 8px;
     scrollbar-color: var(--constellation-utility-panel-scrollbar) transparent;
   }
 
-  .discussion-list::-webkit-scrollbar {
+  .discussion-stream::-webkit-scrollbar {
     width: 4px;
   }
 
-  .discussion-list::-webkit-scrollbar-thumb {
+  .discussion-stream::-webkit-scrollbar-thumb {
     border-radius: 999px;
     background: var(--constellation-utility-panel-scrollbar);
   }
 
-  .discussion-empty {
-    padding: 22px 12px;
-    color: var(--constellation-utility-panel-tab-text);
-    font-size: 13px;
-    text-align: center;
+  .thread-discussion-pane :global(.discussion-state) {
+    margin: auto 0;
+    padding: 8px 2px;
   }
 
-  .discussion-error,
-  .discussion-inline-error {
-    color: #ff9a9a;
-  }
-
-  .discussion-comment {
-    display: grid;
-    gap: 5px;
-    padding: 10px 11px;
-    border: 1px solid var(--constellation-utility-panel-header-border);
-    border-radius: 8px;
-    background: var(--constellation-control-field-background);
-  }
-
-  .discussion-comment-meta {
+  .discussion-message-list {
     display: flex;
+    flex-direction: column;
+    gap: 0;
     min-width: 0;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    color: var(--constellation-utility-panel-tab-text);
-    font-size: 11px;
+    padding-bottom: 6px;
   }
 
-  .discussion-author {
+  .discussion-message {
+    position: relative;
+    display: grid;
+    align-self: stretch;
+    gap: 7px;
+    min-width: 0;
+    padding: 10px 12px;
+    border-radius: 14px;
+    background: transparent;
+    isolation: isolate;
+  }
+
+  .discussion-message::before {
+    content: '';
+    position: absolute;
+    inset: 1px 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: transparent;
+    box-shadow: inset 0 0 0 1px transparent;
+    transition:
+      background-color 140ms ease,
+      box-shadow 140ms ease;
+    pointer-events: none;
+  }
+
+  .discussion-message:hover::before,
+  .discussion-message:focus-within::before,
+  .discussion-message.is-own::before {
+    background: var(--discussion-message-hover-background);
+    box-shadow: inset 0 0 0 1px var(--discussion-message-hover-border);
+  }
+
+  .discussion-message.is-continuation {
+    gap: 0;
+    padding-top: 2px;
+  }
+
+  .discussion-message.is-continuation .discussion-message-body {
+    padding-left: 32px;
+  }
+
+  .discussion-message-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .discussion-message-author-copy {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .discussion-message-author-copy span {
     min-width: 0;
     overflow: hidden;
-    color: var(--constellation-utility-panel-tab-active-text);
-    font-weight: 690;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: var(--discussion-message-author-color);
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.15;
   }
 
-  .discussion-body {
-    color: var(--constellation-utility-panel-tab-active-text);
-    font-size: 13px;
-    line-height: 1.45;
+  .discussion-message-author-copy time {
+    color: var(--discussion-message-meta-text);
+    font-size: 11px;
+    line-height: 1.2;
+  }
+
+  .discussion-message-body {
+    margin: 0;
+    color: var(--discussion-message-body-text);
+    font-size: 14px;
+    line-height: 1.6;
     white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .discussion-mention {
+    display: inline;
+    padding: 0 0.24em;
+    border-radius: 5px;
+    background: var(--discussion-mention-background);
+    color: var(--discussion-mention-text);
+    font-weight: 680;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
   }
 
   .discussion-composer {
-    display: grid;
-    gap: 8px;
-    padding: 10px;
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+    padding: 10px 12px 12px;
     border-top: 1px solid var(--constellation-utility-panel-header-border);
   }
 
-  .discussion-composer textarea {
-    width: 100%;
-    min-width: 0;
-    resize: vertical;
-    max-height: 160px;
-    padding: 9px 10px;
-    border: 1px solid var(--constellation-control-field-border);
-    border-radius: 8px;
-    background: var(--constellation-control-field-background);
-    color: var(--constellation-utility-panel-tab-active-text);
-    font: inherit;
-    font-size: 13px;
-    line-height: 1.4;
+  .discussion-composer :global(.chat-composer-shell.is-thread .cortex-workspace-composer) {
+    min-height: 94px;
+    border-radius: 18px;
   }
 
-  .discussion-composer textarea:focus {
-    outline: 2px solid var(--constellation-control-focus-ring);
-    outline-offset: 2px;
-  }
+  @container (max-width: 360px) {
+    .discussion-message {
+      padding-inline: 10px;
+    }
 
-  .discussion-composer button {
-    justify-self: end;
-    min-height: 32px;
-    padding: 0 12px;
-    border: 1px solid var(--constellation-control-button-secondary-border);
-    border-radius: 8px;
-    background: var(--constellation-control-button-secondary-background);
-    color: var(--constellation-control-button-secondary-text);
-    font: inherit;
-    font-size: 12px;
-    font-weight: 720;
-    cursor: pointer;
-  }
+    .discussion-stream {
+      padding-inline: 10px;
+    }
 
-  .discussion-composer button:hover:not(:disabled),
-  .discussion-composer button:focus-visible {
-    border-color: var(--constellation-control-focus-ring);
-  }
-
-  .discussion-composer button:disabled,
-  .discussion-composer textarea:disabled {
-    cursor: default;
-    opacity: 0.55;
-  }
-
-  .discussion-inline-error {
-    font-size: 12px;
+    .discussion-composer {
+      padding-inline: 10px;
+    }
   }
 </style>

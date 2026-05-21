@@ -53,6 +53,15 @@ def _disabled_tool_names(runtime: RunRuntime) -> set[str]:
 
 def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:
     hidden = _FAST_HIDDEN_TOOL_NAMES | _disabled_tool_names(runtime)
+    target_ref = getattr(runtime.request, "target_ref", {}) or {}
+    surface = str(
+        runtime.request.metadata.get("originating_surface")
+        or target_ref.get("originating_surface")
+        or ""
+    )
+    if surface == "thread_discussion":
+        hidden = set(hidden)
+        hidden.discard("cortex_reply")
     return [
         tool
         for tool in build_agent_tools("coordinator")

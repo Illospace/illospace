@@ -16,6 +16,7 @@
     modeLabel = '',
     replyContextLabel = '',
     primaryActionLabel = 'Send',
+    workingLabel = '',
     stopLabel = 'Stop',
     attachLabel = 'Attach',
     disabled = false,
@@ -158,7 +159,7 @@
     canSubmit={resolvedCanSubmit}
     attachLabel={attachLabel}
     sendLabel={primaryActionLabel}
-    stopLabel={stopLabel}
+    stopLabel={loading && !onStop && workingLabel ? workingLabel : stopLabel}
     {attachments}
     {disabled}
     onStop={onStop}

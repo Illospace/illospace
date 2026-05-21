@@ -1,6 +1,6 @@
 # PRD: Universal Thread Context Ingress
 
-Status: thin vertical slice implemented in this branch; still a living PRD
+Status: first deployed slice validated; living PRD with follow-up corrections
 Date: 2026-05-21
 Owner: product/architecture discussion
 Related docs:
@@ -29,12 +29,15 @@ The motivating example is:
    conversation, tool trace, files, links, prompt history, or other artifacts.
 4. Illo receives the context as the team agent. Illo records it through the
    inbound coordination layer and decides how it belongs in the workspace.
-5. When a Thread is created or updated, Codex gets back a link so Reda can jump
-   into Illospace.
+5. When a Thread is created or updated, Codex gets back an absolute URL so Reda
+   can jump directly into Illospace from the personal-agent chat.
 6. The existing Thread stage renders the AI work. A right-panel Discussion lets
    teammates comment on the Thread without turning Illospace into another Slack.
-7. If the team needs Illo, they summon it with `@illo`. Illo's substantive work
-   continues in the main Thread, not inside the comment surface.
+   This Discussion should feel like the same team-chat product language, not a
+   second-rate textarea attached to the page.
+7. If the team needs Illo, they summon it with `@illo`. Illo acknowledges in the
+   surface where it was summoned, receives that surface as context, and then uses
+   the right tools to act wherever the request belongs.
 
 The product gap is not a missing special case called "decision request." The
 gap is a universal context ingress contract and a Universal Thread model broad
@@ -65,7 +68,8 @@ The two high-level MCP primitives are:
   behind `illo_get_ask`.
 - `illo_submit_context`: universal ingress for new context from a personal
   agent to Illo. It acknowledges receipt quickly, records the context through
-  inbound coordination, and returns any immediately available Thread URL.
+  inbound coordination, and returns any immediately available absolute Thread
+  URL.
 
 Universal Thread product vocabulary:
 
@@ -76,8 +80,13 @@ Universal Thread product vocabulary:
   Illo runs, AI messages, imported trace previews, tool/activity entries,
   artifacts, and generated outputs.
 - **Discussion**: a right-panel comment surface attached to the Thread. It is
-  scoped, human-first, and not a Slack replacement. Illo may comment there, but
-  AI work happens in the AI Timeline.
+  scoped, human-first, and not a Slack replacement. It should reuse the same
+  message, composer, mention, empty-state, spacing, and token primitives as the
+  general team room, while remaining Thread-scoped.
+- **Surface**: a container where conversation or work happens, such as the AI
+  Timeline, Discussion, a headless ask, or a future artifact-specific pane.
+  Illo runs should know the triggering surface and should have tools to read
+  from and respond into the relevant surface.
 - **Context**: imported external context parts such as raw Codex traces,
   prompt/conversation excerpts, files, links, screenshots, tool logs, diffs, or
   structured JSON.
@@ -92,7 +101,7 @@ personal agent submits context
 -> Illo may create or update a Thread
 -> existing Thread UI renders submitted context
 -> Discussion exists as an attached comment surface
--> @illo from Discussion can continue work in the main Thread
+-> @illo from Discussion acknowledges there and can act through surface tools
 ```
 
 MVP scope is governed by this proof loop. Anything not required to prove the
@@ -103,8 +112,9 @@ loop is out of scope unless explicitly pulled in.
 1. As a user working with Codex, I want to send my current agent conversation to
    Illo, so that my team can inspect the exact context instead of a lossy
    summary.
-2. As a user working with Codex, I want Codex to receive an Illo Thread link
-   after submission, so that I can jump into the team workspace.
+2. As a user working with Codex, I want Codex to receive an absolute Illo Thread
+   URL after submission, so that I can click it directly from the personal-agent
+   chat and jump into the team workspace.
 3. As a teammate, I want to open the Illo Thread and see the submitted context,
    so that I understand what the personal agent was doing.
 4. As a teammate, I want to inspect the raw imported context when needed, so
@@ -113,12 +123,16 @@ loop is out of scope unless explicitly pulled in.
    that a full trace does not overwhelm the Thread.
 6. As a teammate, I want to discuss an imported AI thread in a right-panel
    Discussion, so that comments stay attached to the relevant AI work.
-7. As a teammate, I want Discussion to feel like a comment section, so that
-   Illospace does not compete with Slack as a general chat tool.
+7. As a teammate, I want Discussion to use the same polished team-chat design
+   primitives as the general room, so that Thread comments feel native to
+   Illospace rather than bolted on.
 8. As a teammate, I want to summon Illo with `@illo` from Discussion, so that
-   Illo only participates when explicitly needed.
-9. As a teammate, I want Illo's substantive work to appear in the main Thread,
-   so that AI work remains in the AI Timeline rather than buried in comments.
+   Illo only participates when explicitly needed and replies in the place where
+   I summoned it.
+9. As a teammate, I want Illo to understand which surface I summoned it from, so
+   that it can acknowledge in Discussion, continue AI Timeline work, answer
+   headlessly, update artifacts, or take another suitable action without the
+   product hardcoding every possible workflow.
 10. As Illo, I want a tool to inspect Discussion when useful, so that I can read
     team comments intentionally without polluting every run prompt.
 11. As Illo, I want submitted context to arrive through the existing inbound
@@ -165,8 +179,9 @@ loop is out of scope unless explicitly pulled in.
 27. As a teammate, I want Thread Discussion notifications to be scoped and
     intentional, so that only relevant mentions, subscriptions, or activity
     produce noise.
-28. As Illo, I want `@illo this is what we decided, carry on` to create a
-    Thread-linked run, so that team decisions can steer the main AI work.
+28. As Illo, I want `@illo this is what we decided, carry on` to arrive with
+    Discussion as the triggering surface, so that I can acknowledge the team
+    there and then continue the underlying work in the appropriate surface.
 29. As a user, I want Codex to send full context when I ask, so that Illo and the
     team are not forced to rely on a summary written by the same agent that may
     be confused.
@@ -205,8 +220,13 @@ loop is out of scope unless explicitly pulled in.
   `thread.created`, `thread.attached`, `accepted`, `stored`, or
   `needs_clarification`.
 - Keep `illo_submit_context` async-safe. The tool should acknowledge quickly,
-  return any immediately available `thread_id` and `url`, and let longer Illo
-  reasoning continue through normal Thread/AgentRun state.
+  return any immediately available `thread_id`, internal route/path, and
+  user-facing absolute `thread_url`, and let longer Illo reasoning continue
+  through normal Thread/AgentRun state.
+- The MCP result must not depend on the personal agent reconstructing a URL from
+  a relative route. A relative path can remain useful for clients inside
+  Illospace, but Codex and other personal agents need a complete URL they can
+  show directly to the user.
 - Reuse the existing `ideas` table as the physical Thread table for MVP. "Idea"
   remains a legacy storage/API name until a later rename.
 - Introduce a Thread read/domain model that presents `ideas` as Threads to new
@@ -237,17 +257,28 @@ loop is out of scope unless explicitly pulled in.
 - Allow multiple context submissions to attach to the same Thread when
   correlation is explicit or Illo confidently routes them there.
 - Do not inject Discussion into every Illo run prompt. Discussion is available
-  through an explicit Illo tool when needed.
-- Include the triggering `@illo` Discussion comment as the trigger when a user
-  summons Illo from Discussion.
-- Add an Illo-visible tool for reading Thread Discussion. The tool should make
-  scope explicit, for example latest messages, messages since a timestamp, full
-  discussion, or messages mentioning Illo.
-- Keep Illo's substantive continuation in the main Thread/AI Timeline. Discussion
-  may receive small comments or acknowledgements, but the AI work belongs in the
-  Thread.
+  through explicit surface tools when needed.
+- Include the triggering `@illo` Discussion comment and its surface metadata
+  when a user summons Illo from Discussion.
+- Add Illo-visible surface tools for reading from and writing to Thread
+  Discussion. The read tool should make scope explicit, for example latest
+  messages, messages since a timestamp, full discussion, or messages mentioning
+  Illo. The write tool should let Illo acknowledge or answer in Discussion
+  without pretending every response belongs in the AI Timeline.
+- Add or adapt Illo-visible tools so a run can also continue AI Timeline work,
+  inspect submitted context, operate headlessly, or update other Thread surfaces
+  when that is the natural response to the user's request.
+- Do not encode deterministic action routing such as "Discussion mentions always
+  create AI Timeline work." The product contract is that Illo knows the
+  triggering surface and has enough tools to act in the surface that fits the
+  ask.
 - Keep the existing Thread stage as the MVP frontend surface. Add Discussion as
   a possible right-panel tab/surface.
+- Discussion should be visually and interactively built from the existing team
+  room/chat primitives: message rows, composer, mention rendering, attachment
+  affordances where applicable, loading/empty states, spacing, focus behavior,
+  and design tokens. A minimal bespoke textarea/list is not acceptable for the
+  product direction.
 - Render submitted context as generic preview blocks in the existing Thread
   timeline. Start with compact expandable previews; do not try to perfect raw
   trace visualization before usage teaches the right shape.
@@ -295,23 +326,65 @@ loop and left a few product/technical decisions explicit for future review:
 - Discussion is implemented as `thread_discussion_comments`, a dedicated
   Thread-attached comment table, not the existing general chat/room system. This
   keeps Discussion closer to a comment section and avoids polluting team chat
-  with per-Thread collaboration surfaces.
+  with per-Thread collaboration surfaces. This storage choice does not mean the
+  frontend should invent a weaker Discussion UI; it should still reuse the
+  general room's chat primitives and design tokens.
 - Discussion is available as a right-panel tab on the existing Thread stage.
   The backend broadcasts a `thread_discussion_comment` websocket event, but the
   first frontend pass reloads Discussion on panel open and after posting rather
   than subscribing live. Live subscription is a straightforward follow-up, not a
   requirement for proving the loop.
 - `@illo` in Discussion routes through the existing Cortex notify/run path and
-  links the run to the main Thread. Discussion comments do not automatically
-  enter every Illo prompt. The existing mention classifier invokes Illo for
-  unmentioned main Thread replies, so Discussion explicitly disables that
-  default and requires an actual Illo mention.
+  links the run to the main Thread. The deployed behavior exposed a semantic
+  bug: Illo answered in the AI Timeline with insufficient awareness that the
+  user summoned it from Discussion. The corrected contract is surface-aware:
+  Illo should acknowledge or answer in Discussion first, then use tools to carry
+  work into the AI Timeline, run headlessly, inspect context, or act elsewhere
+  when the ask calls for it.
 - Illo now has an explicit `read_thread_discussion` tool. This preserves the
   product boundary that Discussion can be inspected when useful without becoming
-  ambient prompt context for every run.
+  ambient prompt context for every run. A matching write/reply capability is
+  needed so Illo can naturally participate in Discussion when summoned there.
+- The first deployed MCP response returned an internal route such as
+  `/cortex?idea=...`. That is not enough for the original Codex use case. The
+  corrected contract is an absolute, user-clickable Thread URL in the MCP tool
+  result, plus optional IDs/routes for programmatic clients.
 - Slack previews, a full ideas-to-threads backend rename, a new Thread page, and
   detailed raw-trace visualization were left out under the positive proof-loop
   scope rule.
+
+## Implementation Notes From Surface Correction Pass
+
+The follow-up implementation pass addressed the first deployed slice's three
+largest product gaps:
+
+- `illo_submit_context` now treats `thread_url` as the canonical user-facing
+  absolute URL. `url` remains populated for existing callers and now also points
+  to the absolute URL. `thread_route` preserves the relative `/cortex?idea=...`
+  route for internal/programmatic clients.
+- Absolute Thread URLs are built from `ILLO_PUBLIC_URL` first, then
+  `ILLO_DASHBOARD_URL`, then a local-development fallback of
+  `http://localhost:8080`. Deployed environments should set `ILLO_PUBLIC_URL`
+  to the browser-reachable Illospace origin.
+- Discussion still uses dedicated Thread-attached storage
+  (`thread_discussion_comments`) instead of becoming the general team room. The
+  frontend correction is visual/interaction reuse: the panel now owns its full
+  right-dock surface and is built from the existing chat composer, state,
+  presence, mention, scroll, and token primitives.
+- `@illo` from Discussion now creates a surface-aware run. The trigger carries
+  `originating_surface=thread_discussion`, the triggering comment, and a
+  Discussion response target.
+- Illo now has an explicit `post_thread_discussion_reply` tool, paired with
+  `read_thread_discussion`, so it can acknowledge or answer in Discussion
+  without pretending every response belongs in the AI Timeline.
+- Discussion-origin runs no longer automatically mirror final answers into the
+  AI Timeline. Illo can still use AI Timeline tools such as `cortex_reply` when
+  continuing the underlying Thread work is the right action.
+- There is intentionally no deterministic fallback that auto-posts an
+  acknowledgement if the model ignores the Discussion reply tool. That preserves
+  the "Illo has the right surface tools and decides how to act" product
+  contract, but it leaves prompt/tool-choice quality as an important behavior to
+  observe in real usage.
 
 ## Testing Decisions And Coverage
 
@@ -323,15 +396,18 @@ implementation details. The important behaviors are:
   and hosted MCP.
 - Inbound events preserve source actor, authority user, ingress metadata,
   envelope kind, intent, source, constraints, correlation, and parts.
-- Routing can create a Thread and return a simple URL/id result.
+- Routing can create a Thread and return an absolute user-facing URL plus stable
+  IDs/routes for programmatic clients.
 - Routing can attach a second context submission to an existing Thread.
 - Routing can store a context submission without a Thread while preserving the
   inbound event/receipt.
 - Raw submitted context remains available after derived previews are generated.
 - Discussion comments do not automatically trigger Illo.
-- `@illo` in Discussion triggers an Illo run linked to the Thread.
+- `@illo` in Discussion triggers a surface-aware Illo run linked to the Thread.
 - Illo can explicitly inspect Discussion through a tool.
-- Illo continuation appears in the main Thread/AI Timeline.
+- Illo can explicitly reply in Discussion through a tool.
+- Illo can continue in the AI Timeline, run headlessly, or act in another
+  Thread surface when that is the natural response to the user's ask.
 - The existing Thread UI continues to open, stream, reply, and render normal
   Illo messages after context preview blocks are added.
 
@@ -343,11 +419,14 @@ Recommended test modules:
   quick acknowledgement shape.
 - Context submission persistence tests for immutable JSONB envelope storage.
 - Thread service/read-model tests for rendering context submission previews.
-- Discussion API/service tests for right-panel comment behavior and mention
-  triggering.
-- Agent tool tests for explicit Discussion inspection.
+- Discussion API/service tests for right-panel comment behavior, mention
+  triggering, and Discussion-targeted Illo acknowledgements/replies.
+- Agent tool tests for explicit Discussion inspection and Discussion replies.
+- Surface-routing tests proving that a Discussion-originated summon carries
+  surface metadata and does not force every Illo action into the AI Timeline.
 - Frontend component tests or Playwright smoke tests for opening an existing
-  Thread with a submitted context preview and Discussion panel available.
+  Thread with a submitted context preview and Discussion panel available, using
+  the same chat primitives/tokens as the general team room.
 
 Coverage added in this implementation pass:
 
@@ -362,8 +441,9 @@ Coverage added in this implementation pass:
 - Model metadata coverage for `thread_context_submissions` and
   `thread_discussion_comments`.
 - Discussion API coverage for normal comments not triggering Illo, explicit
-  `@illo` comments triggering the main Thread run path, and commit-before-
-  broadcast ordering.
+  `@illo` comments triggering the current main Thread run path, and
+  commit-before-broadcast ordering. Follow-up coverage must update this to the
+  surface-aware reply/action contract described above.
 - Frontend typecheck coverage for the Discussion tab/pane and context timeline
   tag changes.
 
@@ -389,7 +469,7 @@ personal agent submits context
 -> Illo may create or update a Thread
 -> existing Thread UI renders submitted context
 -> Discussion exists as an attached comment surface
--> @illo from Discussion can continue work in the main Thread
+-> @illo from Discussion acknowledges there and can act through surface tools
 ```
 
 Examples of work excluded by this principle include, but are not limited to:
@@ -402,7 +482,7 @@ Examples of work excluded by this principle include, but are not limited to:
 - automatic Illo participation in Discussion without an explicit summon;
 - perfect visualization for every possible raw trace shape;
 - complex personal-agent polling/handoff contracts beyond quick acknowledgement
-  and optional Thread URL;
+  and a user-facing absolute Thread URL;
 - many special-case MCP tools for individual submission scenarios.
 
 These examples are not a closed list. The positive proof loop is the scope

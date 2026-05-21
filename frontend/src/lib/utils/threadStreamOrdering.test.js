@@ -75,6 +75,22 @@ test('keeps queued follow-ups after the active run card until a final reply exis
   ]);
 });
 
+test('places pre-tool live agent text before its active run card', () => {
+  const ordered = orderQueuedThreadStreamItems([
+    { type: 'message', id: 'prompt-1', role: 'user', content: 'What is the team doing?' },
+    { type: 'run', id: 'run-1', run_id: 1, status: 'running' },
+    {
+      type: 'message',
+      id: 'live-run-1',
+      role: 'illo',
+      content: 'I will check recent workspace activity first.',
+      metadata: { run_id: 1, live_agent_text: true },
+    },
+  ]);
+
+  assert.deepEqual(ordered.map((item) => item.id), ['prompt-1', 'live-run-1', 'run-1']);
+});
+
 test('preserves unanchored queued messages in timestamp order', () => {
   const ordered = orderQueuedThreadStreamItems([
     { type: 'message', id: 'prompt-1', role: 'user', content: 'Build the app' },

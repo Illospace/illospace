@@ -17,6 +17,9 @@ from brain.app.mentions import classify_mention_intent
 from brain.platform.db.models.idea import ThreadDiscussionComment
 from brain.platform.db.models.org import User
 
+THREAD_DISCUSSION_SURFACE = "thread_discussion"
+THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
+
 
 class DiscussionCommentCreate(BaseModel):
     body: str = Field(min_length=1, max_length=20_000)
@@ -49,6 +52,54 @@ def _thread_org_id(idea: Any, user: dict[str, Any]) -> str:
     return str(getattr(idea, "org_id", None) or user.get("org_id") or "")
 
 
+def _discussion_trigger_context(
+    *,
+    idea: Any,
+    comment: ThreadDiscussionComment,
+    user: dict[str, Any],
+) -> dict[str, Any]:
+    thread_id = str(getattr(idea, "id", "") or comment.thread_id)
+    comment_id = comment.id
+    author_user_id = str(comment.author_user_id or user.get("id") or "") or None
+    return {
+        "surface": THREAD_DISCUSSION_SURFACE,
+        "thread_id": thread_id,
+        "comment_id": comment_id,
+        "body": comment.body,
+        "author_user_id": author_user_id,
+        "response_target": {
+            "surface": THREAD_DISCUSSION_SURFACE,
+            "thread_id": thread_id,
+            "reply_to_comment_id": comment_id,
+        },
+    }
+
+
+def _discussion_trigger_metadata(
+    *,
+    comment: ThreadDiscussionComment,
+    discussion_trigger: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        **dict(comment.metadata_ or {}),
+        "source": THREAD_DISCUSSION_SURFACE,
+        "originating_surface": THREAD_DISCUSSION_SURFACE,
+        "triggering_surface": THREAD_DISCUSSION_SURFACE,
+        "source_surface": THREAD_DISCUSSION_SURFACE,
+        "discussion_comment_id": comment.id,
+        "discussion_trigger": discussion_trigger,
+        "required_response_tool": THREAD_DISCUSSION_REPLY_TOOL,
+        "final_answer_target_surface": "originating_surface",
+        "thread_message": comment.body,
+        "request_source_context": {
+            "surface": THREAD_DISCUSSION_SURFACE,
+            "thread_id": discussion_trigger["thread_id"],
+            "comment_id": comment.id,
+            "response_tool": THREAD_DISCUSSION_REPLY_TOOL,
+        },
+    }
+
+
 async def _discussion_comment_payloads(
     db: AsyncSession,
     *,
@@ -78,12 +129,8 @@ async def _trigger_illo_from_discussion(
     from brain.app.triggers.adapters.internal import build_cortex_notify_trigger
     from brain.app.triggers.router import async_route_trigger
 
-    metadata = {
-        **dict(comment.metadata_ or {}),
-        "source": "thread_discussion",
-        "discussion_comment_id": comment.id,
-        "thread_message": comment.body,
-    }
+    discussion_trigger = _discussion_trigger_context(idea=idea, comment=comment, user=user)
+    metadata = _discussion_trigger_metadata(comment=comment, discussion_trigger=discussion_trigger)
     trigger = build_cortex_notify_trigger(
         event="thread_reply",
         idea_id=str(idea.id),

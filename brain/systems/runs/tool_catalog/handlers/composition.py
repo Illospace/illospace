@@ -32,6 +32,7 @@ from brain.systems.runs.tool_catalog.handlers.cortex_reply import (
 )
 from brain.systems.runs.tool_catalog.handlers.chat import (
     _handle_post_chat_message,
+    _handle_post_thread_discussion_reply,
     _handle_read_thread_discussion,
 )
 from brain.systems.runs.tool_catalog.handlers.cycles import _handle_manage_cycle
@@ -203,6 +204,10 @@ def _get_tool_handlers(
         "post_chat_message": lambda **kw: _patched_private(
             "_handle_post_chat_message",
             _handle_post_chat_message,
+        )(**kw),
+        "post_thread_discussion_reply": lambda **kw: _patched_private(
+            "_handle_post_thread_discussion_reply",
+            _handle_post_thread_discussion_reply,
         )(**kw),
         "read_thread_discussion": lambda **kw: _patched_private(
             "_handle_read_thread_discussion",

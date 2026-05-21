@@ -37,6 +37,7 @@ def test_tool_catalog_contains_behavior_guidance():
         "illo_get_team_members",
     } == set(tools)
     assert "team agent" in tools["illo_submit_context"]["description"]
+    assert "thread_url" in tools["illo_submit_context"]["description"]
     assert "before creating a new thread" in tools["illo_search_workspace"]["description"]
     assert "without creating a visible thread" in tools["illo_ask"]["description"]
     assert "Advanced compatibility tool" in tools["illo_create_thread"]["description"]
@@ -48,13 +49,31 @@ def test_client_routes_and_auth_header_are_stable(monkeypatch):
 
     def fake_json_request(method, url, **kwargs):
         calls.append({"method": method, "url": url, **kwargs})
+        if url == "https://illo.test/api/mcp":
+            return {
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "thread_id": "idea-1",
+                                    "thread_url": "https://illo.test/cortex?idea=idea-1",
+                                    "thread_route": "/cortex?idea=idea-1",
+                                    "url": "https://illo.test/cortex?idea=idea-1",
+                                }
+                            ),
+                        }
+                    ]
+                }
+            }
         return {"ok": True}
 
     monkeypatch.setattr(module, "_json_request", fake_json_request)
     client = module.IlloBridgeClient(module.IlloBridgeConfig("https://illo.test", "bridge-token", 12))
 
     client.search_workspace("roadmap", limit=5)
-    client.submit_context(
+    submit_result = client.submit_context(
         "Ask the team to review the implementation context",
         parts=[{"type": "text", "text": "Implemented context submission"}],
         repo="illospace-project",
@@ -98,6 +117,9 @@ def test_client_routes_and_auth_header_are_stable(monkeypatch):
     assert context_payload["params"]["arguments"]["files_touched"] == [
         "brain/app/api/routers/agent_mcp.py"
     ]
+    assert submit_result["thread_url"] == "https://illo.test/cortex?idea=idea-1"
+    assert submit_result["url"] == submit_result["thread_url"]
+    assert submit_result["thread_route"] == "/cortex?idea=idea-1"
     assert calls[4]["payload"]["teammate_user_ids"] == ["user-1"]
     assert calls[4]["payload"]["trigger_illo"] is True
     assert calls[6]["payload"]["context"] == {"topic": "roadmap"}

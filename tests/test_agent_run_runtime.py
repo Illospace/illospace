@@ -521,6 +521,53 @@ def test_fast_tool_surface_is_direct_coordinator_without_staged_reply_tools(monk
     assert roles == ["coordinator"]
 
 
+def test_fast_discussion_origin_surface_keeps_explicit_timeline_reply_tool(monkeypatch):
+    from brain.systems.runs.recipes.fast import _agent_tools_for_runtime
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.fast.build_agent_tools",
+        lambda role: [
+            {"name": "post_thread_discussion_reply"},
+            {"name": "cortex_reply"},
+            {"name": "cortex_visual_reply"},
+        ],
+    )
+
+    runtime = SimpleNamespace(
+        request=SimpleNamespace(
+            metadata={"originating_surface": "thread_discussion"},
+            target_ref={"originating_surface": "thread_discussion"},
+        )
+    )
+
+    assert [tool["name"] for tool in _agent_tools_for_runtime(runtime)] == [
+        "post_thread_discussion_reply",
+        "cortex_reply",
+    ]
+
+
+def test_discussion_origin_run_does_not_auto_mirror_final_answer_to_timeline():
+    from brain.systems.runs.cortex.runner import _run_should_mirror_final_answer_to_timeline
+
+    run = SimpleNamespace(
+        target_ref={"originating_surface": "thread_discussion"},
+        metadata_={"final_answer_target_surface": "originating_surface"},
+    )
+
+    assert _run_should_mirror_final_answer_to_timeline(run) is False
+
+
+def test_discussion_origin_run_can_explicitly_target_ai_timeline():
+    from brain.systems.runs.cortex.runner import _run_should_mirror_final_answer_to_timeline
+
+    run = SimpleNamespace(
+        target_ref={"originating_surface": "thread_discussion"},
+        metadata_={"final_answer_target_surface": "ai_timeline"},
+    )
+
+    assert _run_should_mirror_final_answer_to_timeline(run) is True
+
+
 async def test_runtime_drain_steering_can_use_isolated_durable_drain():
     from brain.systems.runs.steering import SteeringMessage
 

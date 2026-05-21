@@ -330,7 +330,8 @@ async def test_authenticated_source_traffic_marks_pending_connection_configured(
     assert token.last_used_at is not None
 
 
-async def test_webhook_and_mcp_context_share_inbound_event_path(session):
+async def test_webhook_and_mcp_context_share_inbound_event_path(session, monkeypatch):
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com/app")
     await _seed_connection(session)
 
     webhook_response = await _post_webhook(
@@ -374,7 +375,9 @@ async def test_webhook_and_mcp_context_share_inbound_event_path(session):
     assert mcp_payload["status"] == "processed"
     assert mcp_payload["matched_policy_id"] is None
     assert mcp_payload["thread_id"]
-    assert mcp_payload["url"] == f"/cortex?idea={mcp_payload['thread_id']}"
+    assert mcp_payload["thread_url"] == f"https://illo.example.com/cortex?idea={mcp_payload['thread_id']}"
+    assert mcp_payload["url"] == mcp_payload["thread_url"]
+    assert mcp_payload["thread_route"] == f"/cortex?idea={mcp_payload['thread_id']}"
     webhook_triage = await _assert_queued_triage(
         session,
         webhook_response.json()["ilo_outcome"],
@@ -431,7 +434,8 @@ async def test_malformed_mcp_json_fails_without_creating_event(session):
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 0
 
 
-async def test_mcp_context_ignores_signal_policy_and_creates_thread(session):
+async def test_mcp_context_ignores_signal_policy_and_creates_thread(session, monkeypatch):
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
     await _seed_connection(session)
     await inbound.create_source_policy(
         session,
@@ -471,7 +475,9 @@ async def test_mcp_context_ignores_signal_policy_and_creates_thread(session):
     assert response.status_code == 200
     assert body["status"] == "processed"
     assert body["thread_id"]
-    assert body["url"] == f"/cortex?idea={body['thread_id']}"
+    assert body["thread_url"] == f"https://illo.example.com/cortex?idea={body['thread_id']}"
+    assert body["url"] == body["thread_url"]
+    assert body["thread_route"] == f"/cortex?idea={body['thread_id']}"
     assert body["matched_policy_id"] is None
     assert body["error"] is None
     assert event.status == "processed"
@@ -819,7 +825,8 @@ async def test_idempotent_insert_integrity_error_returns_existing_replay(session
     assert await session.scalar(select(func.count()).select_from(InboundEventRow)) == 1
 
 
-async def test_context_envelope_creates_thread_submission_and_preview(session):
+async def test_context_envelope_creates_thread_submission_and_preview(session, monkeypatch):
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
     principal = await _seed_connection(session)
 
     result = await inbound.submit_inbound_envelope(
@@ -843,7 +850,9 @@ async def test_context_envelope_creates_thread_submission_and_preview(session):
     assert result["matched_policy_id"] is None
     assert result["ilo_outcome"]["operation"] == "created"
     thread_id = result["ilo_outcome"]["thread_id"]
-    assert result["ilo_outcome"]["url"] == f"/cortex?idea={thread_id}"
+    assert result["ilo_outcome"]["thread_url"] == f"https://illo.example.com/cortex?idea={thread_id}"
+    assert result["ilo_outcome"]["url"] == result["ilo_outcome"]["thread_url"]
+    assert result["ilo_outcome"]["thread_route"] == f"/cortex?idea={thread_id}"
 
     idea = await session.get(Idea, thread_id)
     assert idea is not None
@@ -856,6 +865,8 @@ async def test_context_envelope_creates_thread_submission_and_preview(session):
     assert submission.source["source_tool"] == "codex"
     assert submission.parts[0]["type"] == "conversation"
     assert submission.routing_result["thread_id"] == thread_id
+    assert submission.routing_result["thread_url"] == result["ilo_outcome"]["thread_url"]
+    assert submission.routing_result["thread_route"] == result["ilo_outcome"]["thread_route"]
 
     preview = (await session.scalars(select(IdeaThread).where(IdeaThread.idea_id == thread_id))).one()
     assert preview.message_type == "context_submission"
@@ -863,7 +874,8 @@ async def test_context_envelope_creates_thread_submission_and_preview(session):
     assert preview.metadata_["context_submission_id"] == str(submission.id)
 
 
-async def test_context_envelope_attaches_to_correlated_thread_and_replays_idempotently(session):
+async def test_context_envelope_attaches_to_correlated_thread_and_replays_idempotently(session, monkeypatch):
+    monkeypatch.setenv("ILLO_PUBLIC_URL", "https://illo.example.com")
     principal = await _seed_connection(session)
     thread = Idea(
         id="77777777-7777-4777-8777-777777777777",
@@ -888,6 +900,16 @@ async def test_context_envelope_attaches_to_correlated_thread_and_replays_idempo
             "idempotency_key": "codex:context:attach",
         },
     )
+    event = await session.get(InboundEventRow, first["event_id"])
+    assert event is not None
+    event.action_result = {
+        "operation": "attached",
+        "thread_id": str(thread.id),
+        "url": f"/cortex?idea={thread.id}",
+        "context_submission_id": first["ilo_outcome"]["context_submission_id"],
+        "message": first["ilo_outcome"]["message"],
+    }
+    await session.flush()
     replay = await inbound.submit_inbound_envelope(
         session,
         connection=principal,
@@ -903,7 +925,12 @@ async def test_context_envelope_attaches_to_correlated_thread_and_replays_idempo
 
     assert first["ilo_outcome"]["operation"] == "attached"
     assert first["ilo_outcome"]["thread_id"] == str(thread.id)
+    assert first["ilo_outcome"]["thread_url"] == f"https://illo.example.com/cortex?idea={thread.id}"
+    assert first["ilo_outcome"]["url"] == first["ilo_outcome"]["thread_url"]
+    assert first["ilo_outcome"]["thread_route"] == f"/cortex?idea={thread.id}"
     assert replay["idempotent_replay"] is True
+    assert replay["ilo_outcome"]["thread_url"] == first["ilo_outcome"]["thread_url"]
+    assert replay["ilo_outcome"]["thread_route"] == first["ilo_outcome"]["thread_route"]
     assert await session.scalar(select(func.count()).select_from(ThreadContextSubmission)) == 1
 
 

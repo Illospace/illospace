@@ -145,6 +145,7 @@ async def test_headless_ask_blocks_thread_mutation_tools():
     blocked_tools = event.payload["metadata"]["tool_policy"]["blocked_tools"]
     assert "manage_idea" in blocked_tools
     assert "post_chat_message" in blocked_tools
+    assert "post_thread_discussion_reply" in blocked_tools
     request_source = event.payload["metadata"]["request_source"]
     assert request_source["surface"] == "personal_agent_bridge"
     assert request_source["personal_agent"] == "Hermes"

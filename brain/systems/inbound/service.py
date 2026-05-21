@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -51,6 +53,7 @@ MAX_INBOUND_KIND_LENGTH = 40
 MAX_INBOUND_ORIGIN_LENGTH = 240
 MAX_TRIAGE_MESSAGE_CHARS = 8000
 MAX_TRIAGE_PAYLOAD_CHARS = 5000
+DEFAULT_PUBLIC_APP_URL = "http://localhost:8080"
 
 
 class InboundValidationError(ValueError):
@@ -1095,10 +1098,14 @@ async def _process_context_envelope(
     session.add(thread_message)
     await session.flush()
 
+    thread_url = _thread_url(thread)
+    thread_route = _thread_route(thread)
     action_result = {
         "operation": operation,
         "thread_id": str(thread.id),
-        "url": _thread_url(thread),
+        "thread_url": thread_url,
+        "thread_route": thread_route,
+        "url": thread_url,
         "context_submission_id": str(submission.id),
         "thread_message_id": thread_message.id,
         "event_id": str(event.id),
@@ -1223,8 +1230,51 @@ def _context_part_preview(part: Any) -> str:
     return " - ".join(bits)
 
 
+def _public_app_base_url() -> str:
+    raw = (
+        os.environ.get("ILLO_PUBLIC_URL")
+        or os.environ.get("ILLO_DASHBOARD_URL")
+        or DEFAULT_PUBLIC_APP_URL
+    ).strip()
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return DEFAULT_PUBLIC_APP_URL
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _thread_route_for_id(thread_id: Any) -> str:
+    return f"/cortex?idea={thread_id}"
+
+
+def _thread_url_for_route(route: str) -> str:
+    return f"{_public_app_base_url()}{route}"
+
+
+def _thread_route(thread: Idea) -> str:
+    return _thread_route_for_id(thread.id)
+
+
 def _thread_url(thread: Idea) -> str:
-    return f"/cortex?idea={thread.id}"
+    return _thread_url_for_route(_thread_route(thread))
+
+
+def _with_thread_links(outcome: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(outcome or {})
+    thread_id = _clean_optional(result.get("thread_id") or result.get("idea_id"))
+    if not thread_id:
+        return result
+    route = _clean_optional(result.get("thread_route"))
+    existing_url = _clean_optional(result.get("url"))
+    if route is None and existing_url and existing_url.startswith("/"):
+        route = existing_url
+    route = route or _thread_route_for_id(thread_id)
+    thread_url = _clean_optional(result.get("thread_url"))
+    if thread_url is None or thread_url.startswith("/"):
+        thread_url = _thread_url_for_route(route)
+    result["thread_route"] = route
+    result["thread_url"] = thread_url
+    result["url"] = thread_url
+    return result
 
 
 async def _complete_event(
@@ -1283,12 +1333,13 @@ def _finalize_event(
 
 
 def _result_from_event(event: InboundEventRow, *, idempotent_replay: bool = False) -> dict[str, Any]:
+    outcome = _with_thread_links(event.action_result or {})
     return {
         "status": event.status,
         "event_id": str(event.id),
         "matched_policy_id": str(event.policy_id) if event.policy_id else None,
         "domain_projection_id": str(event.domain_projection_id) if event.domain_projection_id else None,
-        "ilo_outcome": dict(event.action_result or {}),
+        "ilo_outcome": outcome,
         "confidence": event.confidence,
         "idempotent_replay": idempotent_replay,
         "error": event.error,
