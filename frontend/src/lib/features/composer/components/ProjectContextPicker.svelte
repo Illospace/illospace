@@ -98,7 +98,6 @@
   const canSaveProject = $derived(
     creatingProject
       && newProjectName.trim().length > 0
-      && selectedResources.length > 0
       && activeProjectValidation.valid
       && !projectSaving,
   );

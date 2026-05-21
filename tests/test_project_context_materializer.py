@@ -571,7 +571,7 @@ async def test_materialize_refuses_to_overwrite_non_matching_thread_checkout(tmp
     assert run.target_status == "invalid"
 
 
-async def test_materialize_empty_project_context_is_not_ready(tmp_path, monkeypatch):
+async def test_materialize_empty_project_context_is_ready_noop(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -607,9 +607,15 @@ async def test_materialize_empty_project_context_is_not_ready(tmp_path, monkeypa
 
     result = await materialize_project_context_workspaces(48, workspace_root=str(tmp_path), user_id="user-1")
 
-    assert not result.ok
+    assert result.ok
+    assert result.empty_project is True
     assert result.workspaces == []
-    assert result.errors == ["Project Context has no resources to materialize."]
+    assert result.errors == []
+    assert run.target_ref["project_context_snapshot"]["resources"] == []
+    assert run.workspace_ref["project_workspace_manifest"]["mounts"] == []
+    assert run.workspace_ref["project_workspace_manifest"]["workspaces"] == []
+    assert run.workspace_ref["project_context_materialization"]["status"] == "materialized"
+    assert run.workspace_ref["project_context_materialization"]["empty_project"] is True
     assert "workspace_root" not in run.workspace_ref
 
 
@@ -901,7 +907,7 @@ def test_runner_fails_fast_when_project_context_has_no_workspace(monkeypatch):
         AsyncMock(return_value=SimpleNamespace(
             ok=False,
             workspaces=[],
-            errors=["Project Context has no resources to materialize."],
+            errors=["Could not materialize GitHub repository example-org/missing-repo: repository not found."],
         )),
     )
 

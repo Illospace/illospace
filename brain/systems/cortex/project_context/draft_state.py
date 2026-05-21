@@ -449,7 +449,9 @@ def project_draft_status_payload(
         repo_upstream_status=repo_upstream_status,
         allow_conflict_checkpoint_publish=allow_conflict_checkpoint_publish,
     )
-    if not resources:
+    snapshot_resources = snapshot.get("resources") if isinstance(snapshot.get("resources"), list) else []
+    manifest_mounts = manifest.get("mounts") if isinstance(manifest.get("mounts"), list) else []
+    if not resources and (snapshot_resources or manifest_mounts):
         return {
             "ok": False,
             "code": "project_draft_not_materialized",

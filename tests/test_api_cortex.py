@@ -144,18 +144,12 @@ def test_project_context_extraction_from_thread_payload():
     assert _extract_project_context_from_message([], {"project_context": snapshot}) == snapshot
 
 
-def test_thread_project_context_validation_rejects_empty_context():
-    from fastapi import HTTPException
-
+def test_thread_project_context_validation_allows_empty_project():
     from brain.app.api.routers.cortex._idea_ops import _validate_thread_project_context
 
-    with pytest.raises(HTTPException) as excinfo:
-        _validate_thread_project_context({"name": "Legacy empty project", "resources": []})
+    context = {"name": "Empty project", "resources": []}
 
-    assert excinfo.value.status_code == 422
-    assert excinfo.value.detail["validation_errors"] == [
-        "project_context_snapshot.resources must contain at least one resource."
-    ]
+    assert _validate_thread_project_context(context) == context
 
 
 def test_project_context_extraction_promotes_readable_thread_upload(tmp_path, monkeypatch):
@@ -1818,7 +1812,7 @@ async def test_resolve_project_access_users_rejects_ambiguous_names():
 
 
 @pytest.mark.asyncio
-async def test_create_project_profile_rejects_empty_project_context(client, mock_session_factory):
+async def test_create_project_profile_allows_empty_project_context(client, mock_session_factory):
     from brain.app.api.routers.cortex import _project_context as pc_mod
 
     with (
@@ -1839,10 +1833,12 @@ async def test_create_project_profile_rejects_empty_project_context(client, mock
             json={"slug": "empty-project", "name": "Empty Project", "project_context": {"name": "Empty Project", "resources": []}},
         )
 
-    assert response.status_code == 422
-    assert response.json()["detail"]["validation_errors"] == [
-        "project_context_snapshot.resources must contain at least one resource."
-    ]
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["slug"] == "empty-project"
+    assert payload["project_context"]["resources"] == []
+    assert payload["project_context"]["status"] == "validated"
+    assert payload["project_context"]["project_workspace_manifest"]["mounts"] == []
 
 
 async def test_create_project_profile_validates_project_context(client, mock_session_factory):

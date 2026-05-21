@@ -68,8 +68,8 @@ test('normalizes connector resources before project save or run', () => {
     });
 });
 
-test('flags duplicate or empty resources before run', () => {
-    assert.equal(validateProjectContextResources([]).valid, false);
+test('allows empty projects and flags invalid resource entries before run', () => {
+    assert.equal(validateProjectContextResources([]).valid, true);
     assert.equal(validateProjectContextResources([{ path: 'frontend' }, { path: 'frontend' }]).valid, false);
     assert.equal(validateProjectContextResources([{ path: 'frontend' }, { repo: 'example-org/example-repo' }]).valid, true);
     assert.equal(validateProjectContextResources([{ uri: 'browser-file://spec.md', name: 'spec.md' }]).valid, false);
