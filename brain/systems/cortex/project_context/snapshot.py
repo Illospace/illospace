@@ -257,14 +257,9 @@ def build_project_context_snapshot(
             "resources": resources,
         }
         for key in (
-            "id",
-            "project_id",
-            "profile_id",
-            "selected_profile_id",
             "project_key",
             "slug",
-            "profile_slug",
-            "selected_profile_slug",
+            "project_id",
             "name",
             "description",
             "permissions",

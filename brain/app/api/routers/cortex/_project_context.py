@@ -20,7 +20,7 @@ from brain.systems.cortex.project_context.github import (
     async_search_repos,
     parse_github_repo_slug,
 )
-from brain.systems.cortex.project_context.identity import stamp_project_profile_identity
+from brain.systems.cortex.project_context.identity import stamped_project_context
 from brain.systems.cortex.project_context.profiles import attachment_to_read, profile_to_read
 from brain.systems.cortex.project_context.access import (
     can_manage_project_profile,
@@ -313,15 +313,7 @@ def _validated_snapshot_or_422(project_context: dict[str, Any]) -> dict[str, Any
 
 
 def _profile_project_context(profile: ProjectProfile, project_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    context = dict(project_context if isinstance(project_context, dict) else profile.project_context or {})
-    stamped = stamp_project_profile_identity(
-        context,
-        profile_id=profile.id,
-        slug=profile.slug,
-        name=profile.name,
-        description=profile.description,
-    )
-    return _validated_snapshot_or_422(stamped)
+    return _validated_snapshot_or_422(stamped_project_context(profile, project_context))
 
 
 def _resource_identity(resource: dict[str, Any]) -> str:

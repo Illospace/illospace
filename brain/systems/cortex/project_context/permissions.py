@@ -210,7 +210,7 @@ def attach_project_provenance(
     path = _clean_text(payload.get("path") or payload.get("relative_path") or payload.get("absolute_path"))
     provenance = dict(payload.get("provenance") or {}) if isinstance(payload.get("provenance"), Mapping) else {}
     project_ref = {
-        "project_context_id": snapshot.get("id"),
+        "project_context_id": snapshot.get("project_id") or snapshot.get("project_key"),
         "project_context_name": snapshot.get("name"),
         "project_context_status": snapshot.get("status"),
     }

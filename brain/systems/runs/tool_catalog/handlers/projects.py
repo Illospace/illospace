@@ -139,18 +139,9 @@ def _validated_project_context(project_context: dict[str, Any]) -> dict[str, Any
 
 
 def _profile_project_context(profile, project_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    from brain.systems.cortex.project_context.identity import stamp_project_profile_identity
+    from brain.systems.cortex.project_context.identity import stamped_project_context
 
-    context = dict(project_context if isinstance(project_context, dict) else profile.project_context or {})
-    return _validated_project_context(
-        stamp_project_profile_identity(
-            context,
-            profile_id=profile.id,
-            slug=profile.slug,
-            name=profile.name,
-            description=profile.description,
-        )
-    )
+    return _validated_project_context(stamped_project_context(profile, project_context))
 
 
 def _context_from_inputs(
@@ -217,7 +208,6 @@ async def _handle_manage_project(
     action: str,
     operation: str | None = None,
     project_id: str | None = None,
-    profile_id: str | None = None,
     slug: str | None = None,
     name: str | None = None,
     description: str | None = None,
@@ -313,7 +303,7 @@ async def _handle_manage_project(
         "role": "owner",
         "principal_type": "human",
     }
-    selected_profile_id = profile_id or project_id
+    selected_project_id = project_id
 
     try:
         async with UnitOfWork() as uow:
@@ -323,9 +313,9 @@ async def _handle_manage_project(
                 return json.dumps({"projects": [_profile_read(profile) for profile in profiles]}, default=str)
 
             if action == "get":
-                if not selected_profile_id:
+                if not selected_project_id:
                     return json.dumps({"error": "get requires: project_id"})
-                profile = await _get_profile(uow.session, org_id, user_id, selected_profile_id, include_inactive=include_inactive)
+                profile = await _get_profile(uow.session, org_id, user_id, selected_project_id, include_inactive=include_inactive)
                 return json.dumps({"project": _profile_read(profile)}, default=str)
 
             if action == "create":
@@ -362,9 +352,9 @@ async def _handle_manage_project(
                 return json.dumps({"project": _profile_read(profile)}, default=str)
 
             if action == "update":
-                if not selected_profile_id:
+                if not selected_project_id:
                     return json.dumps({"error": "update requires: project_id"})
-                profile = await _get_profile(uow.session, org_id, user_id, selected_profile_id, include_inactive=True)
+                profile = await _get_profile(uow.session, org_id, user_id, selected_project_id, include_inactive=True)
                 _require_manage_access(profile, actor)
                 if slug and slug != profile.slug:
                     existing = await uow.session.scalar(
@@ -407,9 +397,9 @@ async def _handle_manage_project(
                 return json.dumps({"project": _profile_read(profile)}, default=str)
 
             if action in {"archive", "delete"}:
-                if not selected_profile_id:
+                if not selected_project_id:
                     return json.dumps({"error": f"{action} requires: project_id"})
-                profile = await _get_profile(uow.session, org_id, user_id, selected_profile_id, include_inactive=True)
+                profile = await _get_profile(uow.session, org_id, user_id, selected_project_id, include_inactive=True)
                 _require_manage_access(profile, actor)
                 profile.active = False
                 uow.session.add(profile)
@@ -417,12 +407,12 @@ async def _handle_manage_project(
                 return json.dumps({"project": _profile_read(profile), "archived": True}, default=str)
 
             if action == "add_resource":
-                if not selected_profile_id:
+                if not selected_project_id:
                     return json.dumps({"error": "add_resource requires: project_id"})
                 incoming = resources or ([resource] if isinstance(resource, dict) else [])
                 if not incoming:
                     return json.dumps({"error": "add_resource requires: resource or resources"})
-                profile = await _get_profile(uow.session, org_id, user_id, selected_profile_id, include_inactive=True)
+                profile = await _get_profile(uow.session, org_id, user_id, selected_project_id, include_inactive=True)
                 _require_manage_access(profile, actor)
                 current = _project_resources(profile)
                 existing_ids = {str(item.get("id")) for item in current if item.get("id")}
@@ -436,9 +426,9 @@ async def _handle_manage_project(
                 return json.dumps({"project": _profile_read(profile)}, default=str)
 
             if action == "update_resource":
-                if not selected_profile_id or not resource_id or not isinstance(resource, dict):
+                if not selected_project_id or not resource_id or not isinstance(resource, dict):
                     return json.dumps({"error": "update_resource requires: project_id, resource_id, resource"})
-                profile = await _get_profile(uow.session, org_id, user_id, selected_profile_id, include_inactive=True)
+                profile = await _get_profile(uow.session, org_id, user_id, selected_project_id, include_inactive=True)
                 _require_manage_access(profile, actor)
                 current = _project_resources(profile)
                 for index, existing in enumerate(current):
@@ -455,9 +445,9 @@ async def _handle_manage_project(
                 return json.dumps({"project": _profile_read(profile)}, default=str)
 
             if action == "remove_resource":
-                if not selected_profile_id or not resource_id:
+                if not selected_project_id or not resource_id:
                     return json.dumps({"error": "remove_resource requires: project_id, resource_id"})
-                profile = await _get_profile(uow.session, org_id, user_id, selected_profile_id, include_inactive=True)
+                profile = await _get_profile(uow.session, org_id, user_id, selected_project_id, include_inactive=True)
                 _require_manage_access(profile, actor)
                 current = _project_resources(profile)
                 next_resources = [item for item in current if not _resource_matches(item, resource_id)]
@@ -469,9 +459,9 @@ async def _handle_manage_project(
                 return json.dumps({"project": _profile_read(profile)}, default=str)
 
             if action == "reorder_resources":
-                if not selected_profile_id or not resource_ids:
+                if not selected_project_id or not resource_ids:
                     return json.dumps({"error": "reorder_resources requires: project_id, resource_ids"})
-                profile = await _get_profile(uow.session, org_id, user_id, selected_profile_id, include_inactive=True)
+                profile = await _get_profile(uow.session, org_id, user_id, selected_project_id, include_inactive=True)
                 _require_manage_access(profile, actor)
                 current = _project_resources(profile)
                 by_id = {str(item.get("id")): item for item in current if item.get("id")}
@@ -490,8 +480,8 @@ async def _handle_manage_project(
                 await require_idea_for_project_actor(uow.session, target_idea_id, actor)
                 profile = None
                 context = project_context
-                if selected_profile_id:
-                    profile = await _get_profile(uow.session, org_id, user_id, selected_profile_id)
+                if selected_project_id:
+                    profile = await _get_profile(uow.session, org_id, user_id, selected_project_id)
                     context = _profile_project_context(profile)
                 if not context:
                     return json.dumps({"error": "attach_to_thread requires: project_id or project_context"})
@@ -501,7 +491,7 @@ async def _handle_manage_project(
                     return json.dumps({"error": "Invalid project context", "validation_errors": exc.errors})
                 attachment = IdeaProjectAttachment(
                     idea_id=target_idea_id,
-                    project_profile_id=profile.id if profile else selected_profile_id,
+                    project_profile_id=profile.id if profile else selected_project_id,
                     attached_by=user_id,
                     snapshot=snapshot,
                     permission_scope=snapshot.get("permission_scope") or {},

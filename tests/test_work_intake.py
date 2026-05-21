@@ -182,7 +182,7 @@ async def test_cortex_agent_run_request_uses_shared_work_intake_policy(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_cortex_work_intake_stamps_profile_identity_from_latest_attachment(monkeypatch):
+async def test_cortex_work_intake_stamps_project_identity_from_latest_attachment(monkeypatch):
     from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
 
     class _Session:
@@ -233,8 +233,8 @@ async def test_cortex_work_intake_stamps_profile_identity_from_latest_attachment
     )
 
     assert request.workspace_ref["project_key"] == "profile-1"
-    assert request.workspace_ref["profile_id"] == "profile-1"
-    assert request.workspace_ref["profile_slug"] == "strategy-room"
+    assert request.workspace_ref["project_id"] == "profile-1"
+    assert request.workspace_ref["slug"] == "strategy-room"
     assert request.target_ref["project_context_snapshot"]["project_key"] == "profile-1"
 
 

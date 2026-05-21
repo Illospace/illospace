@@ -40,10 +40,10 @@ def test_project_context_materializable_resources_include_empty_project_roots():
     }) is True
 
 
-def test_project_root_key_prefers_canonical_project_key_over_legacy_id():
+def test_project_root_key_uses_canonical_project_key():
     from brain.systems.cortex.project_context.project_root import project_key_from_context
 
-    assert project_key_from_context({"id": "legacy-context", "project_key": "profile-1"}) == "profile-1"
+    assert project_key_from_context({"project_key": "project-1"}) == "project-1"
 
 
 def test_runner_materializes_thread_attachment_files_as_project_resources(monkeypatch):
@@ -848,7 +848,7 @@ async def test_materialize_backend_readable_folder_becomes_thread_draft_workspac
         target_ref={
             "kind": "cortex_idea",
             "project_context_snapshot": {
-                "id": "profile-abc",
+                "project_id": "profile-abc",
                 "status": "validated",
                 "resources": [
                     {
@@ -1072,8 +1072,8 @@ async def test_materialize_saved_project_root_identity_survives_resource_changes
                 "kind": "cortex_idea",
                 "project_context_snapshot": {
                     "project_key": "profile-stable",
-                    "profile_id": "profile-stable",
-                    "profile_slug": "strategy-room",
+                    "project_id": "profile-stable",
+                    "slug": "strategy-room",
                     "status": "validated",
                     "resources": resources,
                 },

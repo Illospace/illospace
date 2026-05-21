@@ -414,7 +414,7 @@ class ProjectWorkspaceManifest:
         return cls(
             mounts=mounts,
             project_key=_project_key_from_context(snapshot),
-            project_id=_clean_text(snapshot.get("id") or snapshot.get("project_id") or snapshot.get("profile_id")),
+            project_id=_clean_text(snapshot.get("project_id")),
             workspace_root=workspace_root,
         )
 
@@ -600,7 +600,7 @@ def build_project_workspace_manifest_contract(project_context: Mapping[str, Any]
     return {
         "schema_version": 1,
         "project_key": _project_key_from_context(snapshot),
-        "project_id": _clean_text(snapshot.get("id") or snapshot.get("project_id") or snapshot.get("profile_id")),
+        "project_id": _clean_text(snapshot.get("project_id")),
         "mounts": mounts,
     }
 
