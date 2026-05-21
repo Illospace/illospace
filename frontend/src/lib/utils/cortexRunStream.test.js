@@ -7,6 +7,7 @@ import {
   applyRunCompletedToStream,
   mergeLiveStreamState,
   runUiEventKey,
+  shouldRenderLiveAgentTextItem,
 } from './cortexRunStream.ts';
 import { mergeRunProgressSnapshot } from './cortexRunPresentation.ts';
 
@@ -100,6 +101,28 @@ test('appends, extends, and resets live text deltas', () => {
   assert.equal(second[0].content, 'Hello');
   assert.equal(second[0].metadata.live_agent_text, true);
   assert.deepEqual(reset, []);
+});
+
+test('keeps live agent text visible until a settled run reply exists', () => {
+  const run = { type: 'run', id: '12', run_id: 12, status: 'running' };
+  const live = {
+    type: 'message',
+    id: 'live-run-12',
+    role: 'illo',
+    content: 'I will inspect the trace first.',
+    metadata: { run_id: 12, live_agent_text: true },
+  };
+  const settled = {
+    type: 'message',
+    id: 'm12',
+    role: 'illo',
+    content: 'Here is what I found.',
+    metadata: { run_id: 12 },
+  };
+
+  assert.equal(shouldRenderLiveAgentTextItem(live, [run, live]), true);
+  assert.equal(shouldRenderLiveAgentTextItem(live, [run, live, settled]), false);
+  assert.equal(shouldRenderLiveAgentTextItem(settled, [run, live, settled]), true);
 });
 
 test('creates and updates run activity with tool call state', () => {

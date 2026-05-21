@@ -15,7 +15,7 @@ import {
   isFastRun,
   shouldShowRunInTranscript,
 } from '$lib/utils/cortexRunPresentation';
-import { streamItemRunId } from '$lib/utils/cortexRunStream';
+import { shouldRenderLiveAgentTextItem, streamItemRunId } from '$lib/utils/cortexRunStream';
 import { parseServerDate, parseServerTimeMs, relativeTimeAgo } from '$lib/utils/datetime';
 import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
 import { buildRunEvidenceDebug } from '$lib/utils/runEvidenceDebug';
@@ -347,16 +347,10 @@ export function buildThreadTranscriptItems({
 }: BuildThreadTranscriptOptions): CortexThreadStageTranscriptItem[] {
   const items: CortexThreadStageTranscriptItem[] = [];
   const visibleItems = orderQueuedThreadStreamItems(visibleThreadStreamItems(stream));
-  const activeRunIds = new Set(
-    visibleItems
-      .filter((streamItem) => streamItem.type === 'run' && isActiveRun(streamItem))
-      .map((streamItem) => streamItemRunId(streamItem) ?? String(streamItem.id)),
-  );
 
   for (const item of visibleItems) {
     if (item.type === 'message') {
-      const messageRunId = streamItemRunId(item);
-      if (item.metadata?.live_agent_text && messageRunId && activeRunIds.has(messageRunId)) continue;
+      if (!shouldRenderLiveAgentTextItem(item, visibleItems)) continue;
 
       const isAgent = item.role === 'assistant' || item.role === 'illo';
       const userAccent = isAgent ? null : resolveUserAccent(item, idea, currentUser);
