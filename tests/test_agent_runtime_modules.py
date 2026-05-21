@@ -788,6 +788,16 @@ def test_streaming_runtime_surfaces_public_reflection_not_raw_reasoning(monkeypa
     assert deltas == ["Visible answer"]
 
 
+def test_public_reflection_excerpt_skips_title_only_fragments():
+    from brain.systems.runs.direct_loop.streaming import _public_reflection_excerpt
+
+    assert _public_reflection_excerpt("**Understanding project setup** I") == ""
+    assert _public_reflection_excerpt("**Understanding project setup** The") == ""
+    assert _public_reflection_excerpt(
+        "**Understanding project setup** I need to check the project context before changing resources."
+    ).startswith("**Understanding project setup**")
+
+
 def test_streaming_runtime_dedupes_stable_reflection_excerpt(monkeypatch):
     from brain.platform.integrations.transports.base import LLMResponse, StreamContext, StreamEvent, Usage
     from brain.systems.runs.direct_loop import streaming as runtime_streaming
@@ -828,6 +838,45 @@ def test_streaming_runtime_dedupes_stable_reflection_excerpt(monkeypatch):
     assert response is final
     assert len(activities) == 1
     assert activities[0].startswith("**Formulating a PR**")
+
+
+def test_streaming_runtime_waits_for_useful_reflection_fragment(monkeypatch):
+    from brain.platform.integrations.transports.base import LLMResponse, StreamContext, StreamEvent, Usage
+    from brain.systems.runs.direct_loop import streaming as runtime_streaming
+
+    final = LLMResponse(content=[], stop_reason="end_turn", usage=Usage())
+    events = iter([
+        StreamEvent(type="reflection", text="**Understanding project setup** I"),
+        StreamEvent(
+            type="reflection",
+            text=" need to check the project context before changing resources.",
+        ),
+    ])
+    provider = SimpleNamespace(stream=lambda _request: StreamContext(events, final_message=final))
+    cancel_event = SimpleNamespace(is_set=lambda: False)
+    activities = []
+    times = iter([0, 4, 8])
+
+    monkeypatch.setattr(runtime_streaming.time, "time", lambda: next(times))
+
+    response = runtime_streaming.streaming_call(
+        provider,
+        request=SimpleNamespace(),
+        cancel_event=cancel_event,
+        on_stream_activity=activities.append,
+        on_stream_delta=None,
+        session_id="session-1",
+        tokens=SimpleNamespace(),
+        start_time=0,
+        tool_calls_made=[],
+        call_start=0,
+        make_cancelled_result=lambda *args, **kwargs: None,
+    )
+
+    assert response is final
+    assert activities == [
+        "**Understanding project setup** I need to check the project context before changing resources."
+    ]
 
 
 

@@ -7,11 +7,11 @@ import {
   openSingletonThreadSidePanelTab,
 } from '../features/threads/controllers/threadSidePanelController.ts';
 
-test('default thread side panel opens Activity beside Handoff', () => {
+test('default thread side panel opens Discussion, Activity, Handoff, and Project', () => {
   const tabs = createDefaultThreadSidePanelTabs();
 
-  assert.deepEqual(tabs.map((tab) => tab.kind), ['activity', 'handoff-summary']);
-  assert.deepEqual(tabs.map((tab) => tab.label), ['Activity', 'Handoff']);
+  assert.deepEqual(tabs.map((tab) => tab.kind), ['discussion', 'activity', 'handoff-summary', 'project']);
+  assert.deepEqual(tabs.map((tab) => tab.label), ['Discussion', 'Activity', 'Handoff', 'Project']);
 });
 
 test('handoff summary is restored from the side panel add menu when closed', () => {

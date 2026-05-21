@@ -1,5 +1,6 @@
 export type ThreadStageRightDockTabKind =
   | 'browser'
+  | 'discussion'
   | 'activity'
   | 'handoff-summary'
   | 'project'
@@ -41,6 +42,7 @@ export type ThreadSidePanelTabState = {
 
 export function createDefaultThreadSidePanelTabs(): ThreadStageRightDockTab[] {
   return [
+    { id: 'discussion', label: 'Discussion', kind: 'discussion', closeable: true },
     { id: 'activity', label: 'Activity', kind: 'activity', closeable: true },
     { id: 'handoff-summary', label: 'Handoff', kind: 'handoff-summary', closeable: true },
     { id: 'project', label: 'Project', kind: 'project', closeable: true },
@@ -59,6 +61,7 @@ export function buildThreadSidePanelAddMenuItems(
   visibleApps: readonly ThreadSidePanelAppLike[],
 ): ThreadStageRightDockAddMenuItem[] {
   const browserCount = tabs.filter((tab) => tab.kind === 'browser').length;
+  const hasDiscussion = tabs.some((tab) => tab.kind === 'discussion');
   const hasActivity = tabs.some((tab) => tab.kind === 'activity');
   const hasHandoffSummary = tabs.some((tab) => tab.kind === 'handoff-summary');
   const hasProject = tabs.some((tab) => tab.kind === 'project');
@@ -85,6 +88,15 @@ export function buildThreadSidePanelAddMenuItems(
       kind: 'vault',
       label: 'Vault',
       description: 'Add or review thread keys',
+    });
+  }
+
+  if (!hasDiscussion) {
+    items.push({
+      id: 'discussion',
+      kind: 'discussion',
+      label: 'Discussion',
+      description: 'Open thread comments',
     });
   }
 
@@ -193,7 +205,7 @@ export function openBrowserThreadSidePanelTab(
 
 export function openSingletonThreadSidePanelTab(
   state: ThreadSidePanelTabState,
-  kind: 'activity' | 'handoff-summary' | 'project' | 'vault' | 'cycles' | 'preview' | 'code-review',
+  kind: 'discussion' | 'activity' | 'handoff-summary' | 'project' | 'vault' | 'cycles' | 'preview' | 'code-review',
 ): ThreadSidePanelTabState {
   const existing = state.tabs.find((tab) => tab.kind === kind);
   if (existing) return { ...state, activeTabId: existing.id };
@@ -210,7 +222,9 @@ export function openSingletonThreadSidePanelTab(
             ? 'Handoff'
             : kind === 'project'
               ? 'Project'
-              : 'Activity';
+              : kind === 'discussion'
+                ? 'Discussion'
+                : 'Activity';
   return {
     ...state,
     tabs: [

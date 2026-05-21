@@ -201,6 +201,31 @@ export interface ChatUnreadThread {
   latest_unread_at: string;
 }
 
+export interface ThreadDiscussionComment {
+  id: number;
+  thread_id: string;
+  org_id: string;
+  author_user_id: string | null;
+  author_kind: string;
+  author_name: string | null;
+  author_color: string | null;
+  body: string;
+  attachments: any[];
+  metadata: Record<string, any> | null;
+  created_at: string | null;
+}
+
+export interface ThreadDiscussionCreateInput {
+  body: string;
+  attachments?: any[];
+  metadata?: Record<string, any> | null;
+}
+
+export interface ThreadDiscussionCreateResult {
+  comment: ThreadDiscussionComment;
+  trigger: any | null;
+}
+
 export interface AppNotification {
   id: number;
   source: string;
@@ -873,6 +898,13 @@ export const api = {
   listThreads: (ideaId: string) => fetchJson<any[]>(`/api/cortex/ideas/${ideaId}/threads`),
   createThread: (ideaId: string, content: string) =>
     fetchJson<any>(`/api/cortex/ideas/${ideaId}/threads`, { method: 'POST', body: JSON.stringify({ content }) }),
+  listThreadDiscussion: (ideaId: string, limit = 100) =>
+    fetchJson<ThreadDiscussionComment[]>(withQuery(`/api/cortex/ideas/${ideaId}/discussion`, { limit })),
+  postThreadDiscussionComment: (ideaId: string, data: ThreadDiscussionCreateInput) =>
+    fetchJson<ThreadDiscussionCreateResult>(`/api/cortex/ideas/${ideaId}/discussion`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 
   // Cortex (continued)
   updateIdea: (id: string, data: any) =>

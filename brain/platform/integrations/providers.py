@@ -336,6 +336,14 @@ def _without_openai_reasoning_summary(kwargs: dict[str, Any]) -> dict[str, Any]:
     return retry_kwargs
 
 
+def _is_complete_openai_reasoning_summary_event(event_type: str) -> bool:
+    return event_type in {
+        "response.reasoning_summary_text.done",
+        "response.reasoning_summary_part.done",
+        "response.output_item.done",
+    }
+
+
 class OpenAIProvider(LLMProvider):
     """OpenAI provider using the native Responses API."""
 
@@ -446,7 +454,11 @@ class OpenAIProvider(LLMProvider):
                             raise OpenAICodexRetryableError(message)
                         raise RuntimeError(message)
 
-                    reasoning_summary_delta = _extract_openai_reasoning_summary_from_event(event)
+                    reasoning_summary_delta = (
+                        _extract_openai_reasoning_summary_from_event(event)
+                        if _is_complete_openai_reasoning_summary_event(event_type)
+                        else ""
+                    )
                     if reasoning_summary_delta:
                         yield StreamEvent(type="reflection", text=reasoning_summary_delta)
                         continue

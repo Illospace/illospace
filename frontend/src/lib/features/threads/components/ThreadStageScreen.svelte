@@ -69,6 +69,7 @@
   import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
   import ThreadCodeReviewPane from '$lib/features/threads/components/ThreadCodeReviewPane.svelte';
   import ProjectDraftStatePanel from '$lib/features/threads/components/ProjectDraftStatePanel.svelte';
+  import ThreadDiscussionPane from '$lib/features/threads/components/ThreadDiscussionPane.svelte';
   import ThreadStageShell, { type ThreadPeripherySignal } from '$lib/features/threads/components/ThreadStageShell.svelte';
   import ThreadUtilityContent from '$lib/features/threads/components/ThreadUtilityContent.svelte';
   import WorkspaceComposerAdapter from '$lib/features/composer/components/WorkspaceComposerAdapter.svelte';
@@ -834,6 +835,10 @@
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'activity'));
   }
 
+  function openDiscussionTab() {
+    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'discussion'));
+  }
+
   function openHandoffSummaryTab() {
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'handoff-summary'));
   }
@@ -892,6 +897,10 @@
     }
     if (item.kind === 'activity') {
       addActivityTab();
+      return;
+    }
+    if (item.kind === 'discussion') {
+      openDiscussionTab();
       return;
     }
     if (item.kind === 'handoff-summary') {
@@ -1237,6 +1246,10 @@
     <ThreadAttachmentPreviewPane attachment={dockPreviewAttachment} />
   {/snippet}
 
+  {#snippet discussionPane()}
+    <ThreadDiscussionPane ideaId={idea?.id ?? null} />
+  {/snippet}
+
   {#snippet appsPane()}
     <ThreadAppsPane
       apps={workspaceApps.visibleApps}
@@ -1337,6 +1350,7 @@
               onAddMenuItem={handleSidePanelAddMenuItem}
               browserPane={browserPane}
               previewPane={previewPane}
+              discussionPane={discussionPane}
               utilityPane={utilityPane}
               projectPane={projectPane}
               appsPane={appsPane}

@@ -66,6 +66,24 @@ export function isLivePartialReply(item: Partial<CortexRunStreamItem> | null | u
   return Boolean(item?.metadata?.live_agent_text);
 }
 
+function isSettledAgentRunReply(item: Partial<CortexRunStreamItem>, runId: string): boolean {
+  if (item.type !== 'message' || isLivePartialReply(item)) return false;
+  const isAgentMessage = item.role === 'assistant' || item.role === 'illo';
+  return isAgentMessage && streamItemRunId(item) === runId && Boolean(String(item.content || '').trim());
+}
+
+export function shouldRenderLiveAgentTextItem(
+  item: Partial<CortexRunStreamItem> | null | undefined,
+  visibleItems: readonly Partial<CortexRunStreamItem>[] = [],
+): boolean {
+  if (!isLivePartialReply(item)) return true;
+  const runId = streamItemRunId(item);
+  if (!runId) return true;
+  return !visibleItems.some((candidate) => {
+    return candidate !== item && isSettledAgentRunReply(candidate, runId);
+  });
+}
+
 export function runUiEventKey(msg: any): string | null {
   const eventId = msg?.run_event_id ?? msg?.event_id ?? msg?.event_cursor;
   if (eventId === null || eventId === undefined || eventId === '' || Number(eventId) <= 0) return null;

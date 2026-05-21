@@ -77,7 +77,7 @@ Local repo config before package publish:
 
 ## Tools
 
-- `illo_submit_signal`: default path for automatic hooks and routine progress updates from Codex-style personal tools. Sends a signal envelope with summary, origin, payload, hints, desired outcome, and idempotency key so IloSpace can decide where it belongs.
+- `illo_submit_context`: default path for personal agents sending new context to Illo. Sends an intent, ordered context parts, provenance, constraints, correlation, and idempotency key so Illo can place the context in the team workspace.
 - `illo_search_workspace`: search existing Illo ideas/threads before creating duplicates.
 - `illo_get_thread`: inspect visible context for an existing Illo thread.
 - `illo_create_thread`: advanced compatibility tool for explicitly requested visible team threads.
@@ -89,28 +89,44 @@ Local repo config before package publish:
 Behavior guidance lives in tool descriptions so MCP clients can use this package
 without a separate skill or prompt file.
 
-## Codex-Style Progress Signal
+## Context Submission
 
-Automatic hooks should prefer `illo_submit_signal` instead of searching for a
-thread and posting directly. A typical payload:
+Personal agents should prefer `illo_submit_context` when they need to hand new
+conversation, trace, file, diff, link, or artifact context to Illo. A typical
+payload:
 
 ```json
 {
-  "summary": "Implemented the MCP submit-signal tool and added tests.",
-  "origin": "codex.progress",
+  "intent": "Share the Codex thread so the team can inspect the exact context and decide what to do next.",
+  "origin": "codex.context",
   "source_tool": "codex",
   "repo": "illospace-project",
-  "branch": "codex/mcp-submit-signal",
-  "task_title": "MCP personal-tool signal lane",
+  "branch": "codex/universal-thread-context",
+  "task_title": "Universal Thread context ingress",
   "files_touched": [
     "brain/app/api/routers/agent_mcp.py",
     "tests/test_external_agent_routes.py"
   ],
-  "desired_outcome": "team_update",
-  "idempotency_key": "codex:mcp-submit-signal:2026-05-18T18:30Z"
+  "parts": [
+    {
+      "type": "conversation",
+      "title": "Codex conversation",
+      "content": "Full or bounded conversation text goes here."
+    },
+    {
+      "type": "diff",
+      "title": "Current code diff",
+      "content": "Diff or artifact reference goes here."
+    }
+  ],
+  "correlation": {
+    "thread_id": "optional-existing-illo-thread-id"
+  },
+  "idempotency_key": "codex:universal-thread-context:2026-05-21T18:30Z"
 }
 ```
 
-The signal may include context hints, but it should not choose an Ilo thread,
-project, pin, or teammate target. IloSpace owns routing and Ilo handles
-ambiguity.
+The submission may include `correlation.thread_id` when the user explicitly
+means to attach context to an existing Thread. It should not choose projects,
+pins, teammates, or workflow-specific outcomes. Illo owns coordination in the
+team workspace.

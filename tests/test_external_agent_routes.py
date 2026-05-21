@@ -416,7 +416,7 @@ async def test_hosted_mcp_lists_tools_for_scoped_bridge_token():
 
     assert response.status_code == 200
     names = {tool["name"] for tool in response.json()["result"]["tools"]}
-    assert "illo_submit_signal" in names
+    assert "illo_submit_context" in names
     assert "illo_create_thread" in names
     assert "illo_ask" in names
     assert "illo_search_workspace" in names
@@ -493,7 +493,7 @@ async def test_hosted_mcp_filters_tools_by_bridge_token_scope():
     assert names == {"illo_search_workspace", "illo_get_thread", "illo_get_team_members"}
 
 
-async def test_hosted_mcp_submit_signal_builds_shared_envelope():
+async def test_hosted_mcp_submit_context_builds_shared_envelope():
     session = _AsyncSession()
     captured: dict[str, object] = {}
 
@@ -502,7 +502,18 @@ async def test_hosted_mcp_submit_signal_builds_shared_envelope():
         captured["connection"] = connection
         captured["envelope"] = envelope
         captured["ingress_context"] = ingress_context
-        return {"status": "processed", "event_id": "evt-1", "confidence": 0.9}
+        return {
+            "status": "processed",
+            "event_id": "evt-1",
+            "confidence": 0.9,
+            "ilo_outcome": {
+                "operation": "created",
+                "thread_id": "idea-1",
+                "url": "/cortex?idea=idea-1",
+                "message": "Context accepted and a Thread was created.",
+                "context_submission_id": "sub-1",
+            },
+        }
 
     with patch(
         "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
@@ -521,17 +532,16 @@ async def test_hosted_mcp_submit_signal_builds_shared_envelope():
                 "id": 11,
                 "method": "tools/call",
                 "params": {
-                    "name": "illo_submit_signal",
+                    "name": "illo_submit_context",
                     "arguments": {
-                        "summary": "Implemented the submit signal tool.",
-                        "origin": "codex.progress",
+                        "intent": "Ask the team to review the implementation context.",
+                        "origin": "codex.context",
                         "source_tool": "codex",
                         "repo": "illospace-project",
-                        "branch": "codex/mcp-submit-signal",
-                        "task_title": "MCP signal lane",
+                        "branch": "codex/mcp-submit-context",
+                        "task_title": "MCP context lane",
                         "files_touched": ["brain/app/api/routers/agent_mcp.py"],
-                        "payload": {"tests": "targeted"},
-                        "desired_outcome": "team_update",
+                        "parts": [{"type": "text", "text": "Implemented the submit context tool."}],
                         "idempotency_key": "codex:run-1",
                         "metadata": {"hook": "post-message"},
                     },
@@ -541,7 +551,11 @@ async def test_hosted_mcp_submit_signal_builds_shared_envelope():
 
     assert response.status_code == 200
     payload = json.loads(response.json()["result"]["content"][0]["text"])
-    assert payload == {"status": "processed", "event_id": "evt-1", "confidence": 0.9}
+    assert payload["status"] == "processed"
+    assert payload["event_id"] == "evt-1"
+    assert payload["thread_id"] == "idea-1"
+    assert payload["url"] == "/cortex?idea=idea-1"
+    assert payload["context_submission_id"] == "sub-1"
     submit.assert_awaited_once()
     assert captured["db"] is session
     assert captured["connection"] == {
@@ -552,31 +566,36 @@ async def test_hosted_mcp_submit_signal_builds_shared_envelope():
         "display_name": "Hermes",
         "agent_kind": "hermes",
         "source_type": "personal_tool",
-        "capabilities": ["submit_signals"],
+        "capabilities": ["submit_context"],
     }
     assert captured["envelope"] == {
-        "kind": "signal",
-        "origin": "codex.progress",
+        "kind": "context",
+        "origin": "codex.context",
         "payload": {
-            "tests": "targeted",
-            "checkpoint": {
-                "summary": "Implemented the submit signal tool.",
+            "intent": "Ask the team to review the implementation context.",
+            "parts": [{"type": "text", "text": "Implemented the submit context tool."}],
+            "source": {
                 "source_tool": "codex",
                 "repo": "illospace-project",
-                "branch": "codex/mcp-submit-signal",
-                "task_title": "MCP signal lane",
+                "branch": "codex/mcp-submit-context",
+                "task_title": "MCP context lane",
                 "files_touched": ["brain/app/api/routers/agent_mcp.py"],
             },
+            "constraints": {},
+            "correlation": {},
         },
-        "summary": "Implemented the submit signal tool.",
-        "hints": {
+        "summary": "Ask the team to review the implementation context.",
+        "intent": "Ask the team to review the implementation context.",
+        "parts": [{"type": "text", "text": "Implemented the submit context tool."}],
+        "source": {
             "source_tool": "codex",
             "repo": "illospace-project",
-            "branch": "codex/mcp-submit-signal",
-            "task_title": "MCP signal lane",
+            "branch": "codex/mcp-submit-context",
+            "task_title": "MCP context lane",
             "files_touched": ["brain/app/api/routers/agent_mcp.py"],
         },
-        "desired_outcome": "team_update",
+        "constraints": {},
+        "correlation": {},
         "idempotency_key": "codex:run-1",
     }
     ingress_context = captured["ingress_context"]
@@ -588,15 +607,15 @@ async def test_hosted_mcp_submit_signal_builds_shared_envelope():
         "org_id": "org-1",
     }
     assert ingress_context["metadata"]["hook"] == "post-message"
-    assert ingress_context["metadata"]["mcp_tool"] == "illo_submit_signal"
+    assert ingress_context["metadata"]["mcp_tool"] == "illo_submit_context"
 
 
-async def test_hosted_mcp_submit_signal_commits_before_later_batch_rollback():
+async def test_hosted_mcp_submit_context_commits_before_later_batch_rollback():
     order: list[str] = []
     session = _AsyncSession(order)
 
     async def fake_submit(_db, *, connection, envelope, ingress_context):
-        order.append("signal-write")
+        order.append("context-write")
         return {"status": "processed", "event_id": "evt-1", "connection_id": connection["id"]}
 
     with patch(
@@ -620,8 +639,8 @@ async def test_hosted_mcp_submit_signal_commits_before_later_batch_rollback():
                     "id": 21,
                     "method": "tools/call",
                     "params": {
-                        "name": "illo_submit_signal",
-                        "arguments": {"summary": "Signal should be durable before batch failure."},
+                        "name": "illo_submit_context",
+                        "arguments": {"intent": "Context should be durable before batch failure."},
                     },
                 },
                 {
@@ -638,13 +657,13 @@ async def test_hosted_mcp_submit_signal_commits_before_later_batch_rollback():
 
     assert response.status_code == 200
     first, second = response.json()
-    signal_result = json.loads(first["result"]["content"][0]["text"])
-    assert signal_result["event_id"] == "evt-1"
+    context_result = json.loads(first["result"]["content"][0]["text"])
+    assert context_result["event_id"] == "evt-1"
     assert second["result"]["isError"] is True
-    assert order == ["signal-write", "commit", "rollback"]
+    assert order == ["context-write", "commit", "rollback"]
 
 
-async def test_hosted_mcp_submit_signal_requires_signal_scope():
+async def test_hosted_mcp_submit_context_requires_signal_scope():
     principal = external_agents.AgentBridgePrincipal(
         connection_id="conn-1",
         org_id="org-1",
@@ -671,8 +690,8 @@ async def test_hosted_mcp_submit_signal_requires_signal_scope():
                 "id": 12,
                 "method": "tools/call",
                 "params": {
-                    "name": "illo_submit_signal",
-                    "arguments": {"summary": "Progress happened."},
+                    "name": "illo_submit_context",
+                    "arguments": {"intent": "Share context with Illo."},
                 },
             },
         )
@@ -684,7 +703,7 @@ async def test_hosted_mcp_submit_signal_requires_signal_scope():
     submit.assert_not_called()
 
 
-async def test_hosted_mcp_submit_signal_rejects_direct_workspace_targets():
+async def test_hosted_mcp_submit_context_rejects_direct_workspace_targets():
     with patch(
         "brain.app.api.routers.agent_mcp.external_agents.authenticate_bridge_token",
         return_value=_principal(),
@@ -701,9 +720,9 @@ async def test_hosted_mcp_submit_signal_rejects_direct_workspace_targets():
                 "id": 13,
                 "method": "tools/call",
                 "params": {
-                    "name": "illo_submit_signal",
+                    "name": "illo_submit_context",
                     "arguments": {
-                        "summary": "Please post this progress.",
+                        "intent": "Please post this context.",
                         "idea_id": "idea-1",
                     },
                 },

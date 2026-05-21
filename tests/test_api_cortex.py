@@ -1360,6 +1360,78 @@ async def test_create_thread_message_commits_before_broadcast(client, mock_sessi
 
 
 @pytest.mark.asyncio
+async def test_create_thread_discussion_comment_commits_before_broadcast_without_trigger(client, mock_session_factory):
+    idea = _make_idea(id="some-id", org_id="test-org")
+    order: list[str] = []
+
+    def _add(obj):
+        obj.id = 1
+        obj.created_at = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+
+    mock_session_factory.add.side_effect = _add
+    mock_session_factory.commit.side_effect = lambda: order.append("commit")
+
+    async def _broadcast(*_args, **_kwargs):
+        order.append("broadcast")
+
+    with (
+        patch("brain.app.api.routers.cortex._discussion._require_idea_for_user", AsyncMock(return_value=idea)),
+        patch("brain.app.api.routers.cortex._discussion.ws_manager.broadcast_product_event", side_effect=_broadcast),
+        patch("brain.app.triggers.router.async_route_trigger", AsyncMock()) as route_trigger,
+    ):
+        resp = await client.post(
+            "/api/cortex/ideas/some-id/discussion",
+            json={"body": "This direction looks right."},
+        )
+
+    assert resp.status_code == 201, resp.text
+    payload = resp.json()
+    assert payload["comment"]["body"] == "This direction looks right."
+    assert payload["trigger"] is None
+    route_trigger.assert_not_awaited()
+    assert "commit" in order
+    assert "broadcast" in order
+    assert order.index("commit") < order.index("broadcast")
+
+
+@pytest.mark.asyncio
+async def test_create_thread_discussion_illo_mention_routes_main_thread_trigger(client, mock_session_factory):
+    idea = _make_idea(id="some-id", title="Shared Thread", org_id="test-org")
+    trigger_response = {"status": "queued", "run_id": "run-1"}
+
+    def _add(obj):
+        obj.id = 7
+        obj.created_at = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+
+    mock_session_factory.add.side_effect = _add
+
+    async def _route_trigger(trigger, *, session):
+        return SimpleNamespace(to_response=lambda: trigger_response)
+
+    with (
+        patch("brain.app.api.routers.cortex._discussion._require_idea_for_user", AsyncMock(return_value=idea)),
+        patch("brain.app.api.routers.cortex._discussion.ws_manager.broadcast_product_event", AsyncMock()),
+        patch("brain.app.triggers.adapters.internal.build_cortex_notify_trigger", return_value=SimpleNamespace(event_type="cortex.thread_reply")) as build_trigger,
+        patch("brain.app.triggers.router.async_route_trigger", side_effect=_route_trigger) as route_trigger,
+    ):
+        resp = await client.post(
+            "/api/cortex/ideas/some-id/discussion",
+            json={"body": "@illo this is what we decided, carry on"},
+        )
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["trigger"] == trigger_response
+    build_trigger.assert_called_once()
+    _, kwargs = build_trigger.call_args
+    assert kwargs["event"] == "thread_reply"
+    assert kwargs["idea_id"] == "some-id"
+    assert kwargs["thread_message"] == "@illo this is what we decided, carry on"
+    assert kwargs["metadata"]["source"] == "thread_discussion"
+    assert kwargs["metadata"]["discussion_comment_id"] == 7
+    route_trigger.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_update_idea_status_commits_before_broadcast(client, mock_session_factory):
     idea = _make_idea(id="status-idea", status="emerged", org_id="test-org")
     order: list[str] = []
