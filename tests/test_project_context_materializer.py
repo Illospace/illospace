@@ -13,11 +13,12 @@ def test_thread_attachment_file_is_not_materialized_as_github_workspace():
     }) is None
 
 
-def test_runner_skips_materialization_for_thread_attachment_files(monkeypatch):
+def test_runner_materializes_thread_attachment_files_as_project_resources(monkeypatch):
     from brain.systems.runs.cortex import runner
 
     run = SimpleNamespace(
         id=51,
+        root_run_id=None,
         user_id="user-1",
         org_id="org-1",
         thread_id="idea-4",
@@ -52,11 +53,13 @@ def test_runner_skips_materialization_for_thread_attachment_files(monkeypatch):
         async def __aexit__(self, *_args):
             return False
 
-    async def fail_materialize(*_args, **_kwargs):
-        raise AssertionError("file-only attachments should not be materialized as workspaces")
-
     monkeypatch.setattr(runner, "UnitOfWork", lambda: FakeUow())
-    monkeypatch.setattr(runner, "materialize_project_context_workspaces", fail_materialize)
+    monkeypatch.setattr(runner, "_async_record_project_activity", AsyncMock())
+    monkeypatch.setattr(
+        runner,
+        "materialize_project_context_workspaces",
+        AsyncMock(return_value=SimpleNamespace(ok=True, workspaces=[{"name": "agent.md", "path": "/tmp/thread"}], errors=[])),
+    )
 
     context_ready, status_payload = runner._materialize_project_context(51)
 
@@ -642,6 +645,197 @@ async def test_materialize_missing_project_context_snapshot_reports_error(tmp_pa
 
     assert not result.ok
     assert result.errors == ["Project Context snapshot is missing."]
+
+
+async def test_materialize_backend_readable_folder_becomes_thread_draft_workspace(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    project_dir = tmp_path / "project-root"
+    project_dir.mkdir()
+    (project_dir / "brief.md").write_text("runtime context")
+
+    run = SimpleNamespace(
+        id=51,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={},
+        target_ref={
+            "kind": "cortex_idea",
+            "project_context_snapshot": {
+                "id": "profile-abc",
+                "status": "validated",
+                "resources": [
+                    {
+                        "id": "resource-folder",
+                        "kind": "folder",
+                        "mount_path": "/reports",
+                        "path": str(project_dir),
+                    }
+                ],
+            },
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(
+        materializer,
+        "_clone_github_repo",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local folders should not be cloned as GitHub repositories")
+        ),
+    )
+
+    result = await materialize_project_context_workspaces(51, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
+
+    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "profile-abc" / "resource-folder"
+    assert result.ok
+    assert result.workspaces == [{"name": "/reports", "path": str(draft_dir)}]
+    assert (draft_dir / "brief.md").read_text() == "runtime context"
+    resource = run.target_ref["project_context_snapshot"]["resources"][0]
+    assert resource["path"] == str(draft_dir)
+    assert resource["materialization"]["source_path"] == str(project_dir)
+    assert resource["materialization"]["workspace_path"] == str(draft_dir)
+    assert resource["materialization"]["draft"] is True
+    assert resource["materialization"]["project_key"] == "profile-abc"
+    assert run.workspace_ref["workspace_root"] == str(draft_dir)
+    assert run.workspace_ref["project_workspace_manifest"]["workspaces"][0]["name"] == "/reports"
+
+
+async def test_materialize_backend_readable_file_uses_parent_workspace(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    attachment_dir = tmp_path / "attachments"
+    attachment_dir.mkdir()
+    spec_file = attachment_dir / "spec.md"
+    spec_file.write_text("# Spec")
+
+    run = SimpleNamespace(
+        id=53,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={},
+        target_ref={
+            "kind": "cortex_idea",
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "id": "attachment-1",
+                        "kind": "file",
+                        "name": "spec.md",
+                        "path": str(spec_file),
+                        "source": "thread_attachment",
+                    }
+                ],
+            },
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+
+    result = await materialize_project_context_workspaces(53, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
+
+    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "attachment-1"
+    draft_file = draft_dir / "spec.md"
+    assert result.ok
+    assert result.workspaces == [{"name": "spec.md", "path": str(draft_dir)}]
+    assert draft_file.read_text() == "# Spec"
+    resource = run.target_ref["project_context_snapshot"]["resources"][0]
+    assert resource["path"] == str(draft_file)
+    assert resource["materialization"]["source_path"] == str(spec_file)
+    assert resource["materialization"]["workspace_path"] == str(draft_dir)
+    assert run.workspace_ref["workspace_root"] == str(draft_dir)
+
+
+async def test_materialize_thread_draft_marks_conflict_when_root_and_draft_changed(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    project_dir = tmp_path / "project-root"
+    project_dir.mkdir()
+    (project_dir / "brief.md").write_text("root v1")
+
+    run = SimpleNamespace(
+        id=56,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={},
+        target_ref={
+            "kind": "cortex_idea",
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "id": "resource-folder",
+                        "kind": "folder",
+                        "mount_path": "/reports",
+                        "path": str(project_dir),
+                    }
+                ],
+            },
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+
+    first = await materialize_project_context_workspaces(56, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
+    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "resource-folder"
+
+    assert first.ok
+    (draft_dir / "brief.md").write_text("draft edit")
+    (project_dir / "brief.md").write_text("root v2")
+
+    second = await materialize_project_context_workspaces(56, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
+
+    assert second.ok
+    assert (draft_dir / "brief.md").read_text() == "draft edit"
+    status = run.target_ref["project_context_snapshot"]["resources"][0]["materialization"]["draft_status"]
+    assert status["conflicts"] == ["brief.md"]
+    assert status["out_of_date"] == ["brief.md"]
 
 
 def test_project_context_root_is_scoped_by_thread(monkeypatch, tmp_path):

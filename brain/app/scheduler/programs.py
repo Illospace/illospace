@@ -18,6 +18,7 @@ NIGHTLY_SLEEP_STEP_KEYS: tuple[str, ...] = (
     "dream",
     "wake_up_index",
     "file_sync",
+    "project_draft_cleanup",
     "experiment_assessment",
     "self_improvement",
     "daily_blog",
@@ -62,6 +63,10 @@ NIGHTLY_SLEEP_STEP_BUDGET_HINTS: dict[str, dict[str, object]] = {
     "file_sync": {
         "work_type": "repo_summary_refresh",
         "estimated_tokens": 3_000,
+    },
+    "project_draft_cleanup": {
+        "work_type": "storage_cleanup",
+        "estimated_tokens": 500,
     },
     "experiment_assessment": {
         "work_type": "context_policy_eval",
@@ -248,6 +253,7 @@ def _nightly_steps(job: SchedulerJob, run: SchedulerRun) -> list[StepSpec]:
         StepSpec("nightly_dream", ["python3", "-m", "brain.jobs.pipelines.nightly_dream", "--date", target_date], "Dream synthesis"),
         StepSpec("wake_up_index", ["python3", "-m", "brain.jobs.pipelines.consolidate", "--phase", "index"], "Wake-up index"),
         StepSpec("brain_to_files_sync", ["python3", "-m", "brain.jobs.pipelines.sync_brain_to_files"], "Brain to files sync"),
+        StepSpec("project_draft_cleanup", ["python3", "-m", "brain.jobs.pipelines.project_draft_cleanup"], "Project draft cleanup"),
         StepSpec("experiment_assessment", ["python3", "-m", "brain.jobs.pipelines.nightly_assess", "--date", target_date], "Experiment assessment"),
         StepSpec("self_improvement", ["python3", "-m", "brain.jobs.pipelines.nightly_implement", "--date", target_date], "Self-improvement"),
         StepSpec("daily_blog", ["python3", str(Path("content") / "blog" / "generate_blog.py"), "--date", target_date], "Daily blog"),

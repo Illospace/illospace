@@ -39,11 +39,13 @@
     buildThreadSidePanelAddMenuItems,
     closeThreadSidePanelTab,
     createDefaultThreadSidePanelTabs,
+    isThreadSidePanelSingletonKind,
     openAppThreadSidePanelTab,
     openBrowserThreadSidePanelTab,
     openSingletonThreadSidePanelTab,
     type ThreadSidePanelTabState,
     type ThreadStageRightDockAddMenuItem,
+    type ThreadStageRightDockSingletonKind,
     type ThreadStageRightDockTab,
   } from '$lib/features/threads/controllers/threadSidePanelController';
   import { threadStreamController } from '$lib/features/threads/controllers/threadStreamController';
@@ -68,6 +70,7 @@
   import SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
   import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
   import ThreadCodeReviewPane from '$lib/features/threads/components/ThreadCodeReviewPane.svelte';
+  import ProjectDraftStatePanel from '$lib/features/threads/components/ProjectDraftStatePanel.svelte';
   import ThreadDiscussionPane from '$lib/features/threads/components/ThreadDiscussionPane.svelte';
   import ThreadStageShell, { type ThreadPeripherySignal } from '$lib/features/threads/components/ThreadStageShell.svelte';
   import ThreadUtilityContent from '$lib/features/threads/components/ThreadUtilityContent.svelte';
@@ -214,6 +217,11 @@
     ].join(';'),
   );
   const activeSidePanelTab = $derived(activeThreadSidePanelTab(sidePanelTabs, activeSidePanelTabId));
+  const projectDraftRunId = $derived.by(() => {
+    const run = runInfo ?? latestRun;
+    const id = run?.run_id ?? run?.id ?? null;
+    return id === '' ? null : id;
+  });
   const selectedThreadApp = $derived(
     activeSidePanelTab?.kind === 'app' && activeSidePanelTab.appId
       ? workspaceApps.appById(activeSidePanelTab.appId)
@@ -825,33 +833,13 @@
     applySidePanelState(openBrowserThreadSidePanelTab(sidePanelState()));
   }
 
-  function addActivityTab() {
-    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'activity'));
-  }
-
-  function openDiscussionTab() {
-    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'discussion'));
-  }
-
-  function openHandoffSummaryTab() {
-    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'handoff-summary'));
-  }
-
-  function openVaultTab() {
-    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'vault'));
-  }
-
-  function openCyclesTab() {
-    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'cycles'));
-  }
-
-  function openCodeReviewTab() {
-    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'code-review'));
+  function openSingletonTab(kind: ThreadStageRightDockSingletonKind) {
+    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), kind));
   }
 
   function openPreviewTab(attachment: CortexThreadStageImageAttachment | CortexThreadStageFileAttachment) {
     dockPreviewAttachment = attachment;
-    applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), 'preview'));
+    openSingletonTab('preview');
   }
 
   function openAppTab(appId: string | null | undefined) {
@@ -885,36 +873,16 @@
       addBrowserTab();
       return;
     }
-    if (item.kind === 'activity') {
-      addActivityTab();
-      return;
-    }
-    if (item.kind === 'discussion') {
-      openDiscussionTab();
-      return;
-    }
-    if (item.kind === 'handoff-summary') {
-      openHandoffSummaryTab();
-      return;
-    }
-    if (item.kind === 'vault') {
-      openVaultTab();
-      return;
-    }
-    if (item.kind === 'cycles') {
-      openCyclesTab();
-      return;
-    }
-    if (item.kind === 'code-review') {
-      openCodeReviewTab();
-      return;
-    }
     if (item.kind === 'preview') {
       if (dockPreviewAttachment) openPreviewTab(dockPreviewAttachment);
       return;
     }
     if (item.kind === 'app') {
       openAppTab(item.appId);
+      return;
+    }
+    if (isThreadSidePanelSingletonKind(item.kind)) {
+      openSingletonTab(item.kind);
     }
   }
 
@@ -947,7 +915,7 @@
     }
     if (promptId === lastAutoOpenedVaultPromptId) return;
     lastAutoOpenedVaultPromptId = promptId;
-    openVaultTab();
+    openSingletonTab('vault');
   });
 
   $effect(() => {
@@ -959,7 +927,7 @@
     }
     if (promptId === lastAutoOpenedVaultGrantPromptId) return;
     lastAutoOpenedVaultGrantPromptId = promptId;
-    openVaultTab();
+    openSingletonTab('vault');
   });
 
   $effect(() => {
@@ -967,7 +935,7 @@
     if (!signal || signal.ideaId !== idea?.id) return;
     if (signal.serial === lastAutoOpenedCycleSignal) return;
     lastAutoOpenedCycleSignal = signal.serial;
-    openCyclesTab();
+    openSingletonTab('cycles');
   });
 
   $effect(() => {
@@ -984,7 +952,7 @@
     const scopedSignature = `${currentIdeaId}:${signature}`;
     if (scopedSignature === lastAutoOpenedCodeReviewSignature) return;
     lastAutoOpenedCodeReviewSignature = scopedSignature;
-    openCodeReviewTab();
+    openSingletonTab('code-review');
   });
 
   let pendingInitialScrollIdeaId = $state<string | null>(null);
@@ -1220,6 +1188,14 @@
     </div>
   {/snippet}
 
+  {#snippet projectPane()}
+    <div class="thread-utility-surface">
+      <div class="thread-utility-surface-body">
+        <ProjectDraftStatePanel {idea} runId={projectDraftRunId} />
+      </div>
+    </div>
+  {/snippet}
+
   {#snippet previewPane()}
     <ThreadAttachmentPreviewPane attachment={dockPreviewAttachment} />
   {/snippet}
@@ -1330,6 +1306,7 @@
               previewPane={previewPane}
               discussionPane={discussionPane}
               utilityPane={utilityPane}
+              projectPane={projectPane}
               appsPane={appsPane}
               vaultPane={vaultPane}
               cyclesPane={cyclesPane}

@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import select, text
 
-from brain.platform.db.models.idea import Idea, IdeaProjectAttachment
+from brain.platform.db.models.idea import Idea, IdeaProjectAttachment, ProjectProfile
 from brain.systems.cortex.project_context.snapshot import (
     ProjectContextValidationError,
     validated_project_context_snapshot,
@@ -544,6 +544,16 @@ async def _a_latest_attached_project_context(session: Any, idea_id: str) -> dict
         attachment = result.first()
     except Exception:
         return {}
+    profile_id = getattr(attachment, "project_profile_id", None)
+    if profile_id and hasattr(session, "get"):
+        try:
+            profile = await session.get(ProjectProfile, profile_id)
+        except Exception:
+            profile = None
+        if profile is not None and getattr(profile, "active", True) is not False:
+            project_context = getattr(profile, "project_context", None)
+            if isinstance(project_context, dict):
+                return dict(project_context)
     snapshot = getattr(attachment, "snapshot", None)
     return dict(snapshot) if isinstance(snapshot, dict) else {}
 
@@ -614,16 +624,12 @@ async def _a_select_project_context(
     metadata: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
     validation_errors: list[dict[str, Any]] = []
-    for source, candidate in (
-        ("metadata", _project_context_from_metadata(metadata)),
-        ("idea", _project_context_from_idea(idea)),
-    ):
-        if not candidate:
-            continue
+    candidate = _project_context_from_metadata(metadata)
+    if candidate:
         snapshot, errors = _snapshot_for_project_context(candidate)
         if snapshot:
             return candidate, snapshot, validation_errors
-        validation_errors.append({"source": source, "errors": errors})
+        validation_errors.append({"source": "metadata", "errors": errors})
 
     candidate = await _a_latest_attached_project_context(session, idea_id)
     if candidate:
@@ -631,6 +637,13 @@ async def _a_select_project_context(
         if snapshot:
             return candidate, snapshot, validation_errors
         validation_errors.append({"source": "latest_attachment", "errors": errors})
+
+    candidate = _project_context_from_idea(idea)
+    if candidate:
+        snapshot, errors = _snapshot_for_project_context(candidate)
+        if snapshot:
+            return candidate, snapshot, validation_errors
+        validation_errors.append({"source": "idea", "errors": errors})
 
     return {}, None, validation_errors
 

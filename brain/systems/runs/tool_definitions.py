@@ -1175,6 +1175,11 @@ PROJECT_TOOLS = [
             "Create, list, update, archive, attach, and maintain Cortex Project Context profiles. "
             "This is the action tool for managing project/folder/context bundles, adding or removing "
             "files/repos/folders/docs, or attaching reusable project context to the current thread. "
+            "Use draft_status to inspect the current run's materialized Project draft workspace and "
+            "plan_publish to preview draft-to-source publish operations without mutating Project roots. "
+            "Use refresh_draft_from_root to explicitly apply latest root changes into untouched draft files. "
+            "Use publish_draft to publish local Project draft changes back to root; conflicts return guidance for the agent to reconcile root and draft before retrying. "
+            "Use root_versions, preview_root_version, and restore_root_version to inspect, preview, or roll back local Project root history. "
             "For awareness questions about what project context exists or what Illo can see, prefer "
             "read_project_contexts first. Thread attachments do not require a project. Use action='help' or "
             "action='schema' with operation to inspect arguments before mutating."
@@ -1198,8 +1203,21 @@ PROJECT_TOOLS = [
                         "remove_resource",
                         "reorder_resources",
                         "attach_to_thread",
+                        "draft_status",
+                        "plan_publish",
+                        "refresh_draft_from_root",
+                        "publish_draft",
+                        "root_versions",
+                        "preview_root_version",
+                        "restore_root_version",
                     ],
-                    "description": "The project operation to run. delete archives the project profile.",
+                    "description": (
+                        "The project operation to run. delete archives the project profile; "
+                        "draft_status and plan_publish are read-only draft inspection actions; "
+                        "refresh_draft_from_root mutates only the thread draft workspace by copying latest root files into untouched draft paths; "
+                        "publish_draft mutates supported Project roots after conflict checkpoints are resolved; "
+                        "preview_root_version is read-only; restore_root_version mutates a local Project root back to a captured version."
+                    ),
                 },
                 "operation": {
                     "type": "string",
@@ -1223,8 +1241,17 @@ PROJECT_TOOLS = [
                 "resource_id": {"type": "string", "description": "Resource id/path/uri/name for update/remove."},
                 "resource_ids": {
                     "type": "array",
-                    "description": "Complete ordered resource id list for reorder_resources.",
+                    "description": "Complete ordered resource id list for reorder_resources, or selected resource ids for publish_draft.",
                     "items": {"type": "string"},
+                },
+                "publish_paths": {
+                    "type": "array",
+                    "description": "Optional relative, mounted, draft, or target paths to publish for publish_draft.",
+                    "items": {"type": "string"},
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional single path filter for publish_draft.",
                 },
                 "metadata": {"type": "object", "description": "Optional metadata for profile or attachment provenance."},
                 "visibility": {
@@ -1244,6 +1271,39 @@ PROJECT_TOOLS = [
                     "description": "Thread/idea id for attach_to_thread when no current Cortex thread is bound.",
                 },
                 "include_inactive": {"type": "boolean", "default": False},
+                "version_id": {
+                    "type": "string",
+                    "description": "Captured Project root version id for preview_root_version or restore_root_version.",
+                },
+                "branch_name": {
+                    "type": "string",
+                    "description": "Optional branch name for repo-backed publish_draft operations.",
+                },
+                "commit_message": {
+                    "type": "string",
+                    "description": "Commit message for repo-backed publish_draft operations.",
+                },
+                "check_upstream": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "When true, repo-backed publish_draft checks origin/base_branch before committing and blocks overlapping upstream changes.",
+                },
+                "base_branch": {
+                    "type": "string",
+                    "description": "Base branch for repo-backed upstream freshness checks, defaulting to main.",
+                },
+                "push": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When true, push the repo publish branch after committing.",
+                },
+                "create_pr": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When true, attempt to create a pull request for the pushed repo publish branch.",
+                },
+                "pr_title": {"type": "string", "description": "Optional pull request title for repo publishing."},
+                "pr_body": {"type": "string", "description": "Optional pull request body for repo publishing."},
             },
             "required": ["action"],
         },

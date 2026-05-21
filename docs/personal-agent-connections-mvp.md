@@ -1,7 +1,7 @@
 # Personal Agent Connections MVP
 
-Status: planning draft  
-Date: 2026-05-14  
+Status: planning draft
+Date: 2026-05-14
 Scope: Illo team-agent connectivity with remote personal autonomous agents, specifically Hermes and OpenClaw.
 
 ## Goal

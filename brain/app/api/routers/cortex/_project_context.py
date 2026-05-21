@@ -1,6 +1,7 @@
 """Project Context profile and thought attachment endpoints."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import Depends, File, Form, HTTPException, Request, UploadFile
@@ -51,6 +52,9 @@ from brain.systems.cortex.project_context.uploads import (
     save_project_context_uploads,
 )
 from brain.systems.cortex.project_context import vault as project_context_vault
+from brain.systems.runs.execution_context import bind_agent_context
+from brain.systems.runs.tool_catalog.handlers import projects as project_tools
+from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import IdeaProjectAttachment, ProjectProfile, ProjectProfileAccess
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.org import User
@@ -338,8 +342,137 @@ def _project_resources(profile: ProjectProfile) -> list[dict[str, Any]]:
 def _replace_project_resources(profile: ProjectProfile, resources: list[dict[str, Any]]) -> None:
     context = dict(profile.project_context or {})
     context["resources"] = resources
-    _validated_snapshot_or_422(context)
-    profile.project_context = context
+    profile.project_context = _validated_snapshot_or_422(context)
+
+
+def _empty_project_change_summary() -> dict[str, Any]:
+    paths = {
+        "changed_paths": [],
+        "new_paths": [],
+        "deleted_paths": [],
+        "conflicted_paths": [],
+    }
+    return {
+        **paths,
+        "counts": {key: 0 for key in paths},
+        "total": 0,
+    }
+
+
+def _empty_project_draft_state_payload() -> dict[str, Any]:
+    code = "project_run_not_found"
+    error = "No AgentRun exists for this Cortex thread."
+    return {
+        "ok": False,
+        "code": code,
+        "error": error,
+        "idea_id": None,
+        "run_id": None,
+        "draft_status": {
+            "ok": False,
+            "action": "draft_status",
+            "code": code,
+            "error": error,
+            "idea_id": None,
+            "run_id": None,
+            "workspaces": [],
+            "materialization": {},
+            "resources": [],
+            "changes": _empty_project_change_summary(),
+        },
+        "plan_publish": {
+            "ok": False,
+            "action": "plan_publish",
+            "code": code,
+            "error": error,
+            "idea_id": None,
+            "run_id": None,
+            "mutates_project_root": False,
+            "plan_only": True,
+            "summary": {"resource_count": 0, "operation_count": 0, "blocked_count": 0},
+            "groups": [],
+        },
+        "root_versions": {
+            "ok": False,
+            "action": "root_versions",
+            "code": code,
+            "error": error,
+            "idea_id": None,
+            "run_id": None,
+            "summary": {"resource_count": 0, "version_count": 0},
+            "groups": [],
+        },
+    }
+
+
+async def _manage_project_payload(action: str) -> dict[str, Any]:
+    return json.loads(await project_tools._handle_manage_project(action=action))
+
+
+async def _project_draft_state_payload(
+    run: AgentRun | None,
+    *,
+    idea_id: str,
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if run is None:
+        return _empty_project_draft_state_payload()
+
+    run_id = str(getattr(run, "id", "") or "")
+    org_id = str(getattr(run, "org_id", "") or (user or {}).get("org_id") or "") or None
+    user_id = str(getattr(run, "user_id", "") or (user or {}).get("id") or "") or None
+    context = {
+        "run": run,
+        "run_id": run_id,
+        "idea_id": str(idea_id),
+        "org_id": org_id,
+        "user_id": user_id,
+        "execution_metadata": {
+            "run_id": run_id,
+            "idea_id": str(idea_id),
+            "org_id": org_id,
+            "user_id": user_id,
+        },
+    }
+    with bind_agent_context(context):
+        draft_status = await _manage_project_payload("draft_status")
+        plan_publish = await _manage_project_payload("plan_publish")
+        root_versions = await _manage_project_payload("root_versions")
+
+    return {
+        "ok": bool(
+            draft_status.get("ok")
+            and plan_publish.get("ok")
+            and root_versions.get("ok")
+        ),
+        "idea_id": draft_status.get("idea_id") or str(idea_id),
+        "run_id": draft_status.get("run_id") or run_id,
+        "draft_status": draft_status,
+        "plan_publish": plan_publish,
+        "root_versions": root_versions,
+    }
+
+
+async def _project_draft_state_run(
+    db: AsyncSession,
+    idea_id: str,
+    run_id: int | None,
+    user: dict[str, Any],
+) -> AgentRun | None:
+    await _require_idea_for_user(db, idea_id, user)
+    if run_id is not None:
+        run = await db.get(AgentRun, int(run_id))
+        if run is None or str(getattr(run, "thread_id", "") or "") != str(idea_id):
+            raise HTTPException(status_code=404, detail=f"Run #{run_id} not found for idea")
+        return run
+
+    stmt = (
+        select(AgentRun)
+        .where(AgentRun.thread_id == str(idea_id))
+        .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+        .limit(1)
+    )
+    return (await db.scalars(stmt)).first()
 
 
 @router.get("/project-context/profiles", response_model=list[ProjectProfileRead])
@@ -369,7 +502,7 @@ async def create_project_profile(
 ):
     org_id = _profile_org_id(user)
     visibility = _request_visibility(body.visibility)
-    _validated_snapshot_or_422(body.project_context)
+    project_context = _validated_snapshot_or_422(body.project_context)
     existing_stmt = _profile_scope_stmt(org_id).where(ProjectProfile.slug == body.slug)
     existing = await db.scalar(existing_stmt)
     if existing is not None:
@@ -380,7 +513,7 @@ async def create_project_profile(
         slug=body.slug,
         name=body.name,
         description=body.description,
-        project_context=body.project_context,
+        project_context=project_context,
         visibility=visibility,
         default_environment_binding_id=body.default_environment_binding_id,
         metadata_=body.metadata,
@@ -438,8 +571,7 @@ async def update_project_profile(
     if "description" in fields:
         profile.description = body.description
     if "project_context" in fields and body.project_context is not None:
-        _validated_snapshot_or_422(body.project_context)
-        profile.project_context = body.project_context
+        profile.project_context = _validated_snapshot_or_422(body.project_context)
     if "visibility" in fields and body.visibility is not None:
         profile.visibility = _request_visibility(body.visibility)
     if "default_environment_binding_id" in fields:
@@ -692,6 +824,17 @@ async def upload_project_context_local_files(
         return await save_project_context_uploads(files, relative_paths, upload_dir=UPLOAD_DIR)
     except ProjectContextUploadError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.get("/ideas/{idea_id}/project-context/draft-state")
+async def get_idea_project_context_draft_state(
+    idea_id: str,
+    run_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    run = await _project_draft_state_run(db, idea_id, run_id, user)
+    return await _project_draft_state_payload(run, idea_id=idea_id, user=user)
 
 
 @router.get("/ideas/{idea_id}/project-context", response_model=list[IdeaProjectAttachmentRead])

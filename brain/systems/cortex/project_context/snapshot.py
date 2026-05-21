@@ -21,6 +21,7 @@ from brain.systems.cortex.project_context.permissions import (
     normalize_project_path,
 )
 from brain.systems.cortex.project_context.resources import normalize_project_resource
+from brain.systems.cortex.project_context.workspace_manifest import attach_project_workspace_manifest_contract
 
 _GIT_RESOURCE_KINDS = {"repo", "repository", "folder", "workspace", "docs", "doc"}
 _RESOURCE_LOCATOR_KEYS = ("path", "uri", "name")
@@ -115,39 +116,6 @@ def _normalise_resource(raw: Mapping[str, Any], *, index: int) -> dict[str, Any]
         if git:
             resource["git"] = git
     return resource
-
-
-def _resources_from_target(target: Mapping[str, Any]) -> list[dict[str, Any]]:
-    resources: list[dict[str, Any]] = []
-    explicit_resources = target.get("resources")
-    if isinstance(explicit_resources, list):
-        for item in explicit_resources:
-            if isinstance(item, Mapping):
-                resources.append(_normalise_resource(item, index=len(resources)))
-
-    repo = target.get("repo") or target.get("repository") or target.get("repo_name")
-    workspace = target.get("workspace") or target.get("workspace_path")
-    if isinstance(workspace, Mapping):
-        workspace_path = workspace.get("path")
-        workspace_name = workspace.get("name")
-    else:
-        workspace_path = workspace
-        workspace_name = None
-
-    if repo or workspace_path or workspace_name:
-        resource: dict[str, Any] = {"kind": "repo" if repo else "workspace"}
-        if isinstance(repo, str):
-            resource["name"] = repo
-        if isinstance(workspace_name, str):
-            resource.setdefault("name", workspace_name)
-        if isinstance(workspace_path, str):
-            resource["path"] = workspace_path
-        if target.get("branch"):
-            resource["branch_hint"] = target.get("branch")
-        resources.insert(0, _normalise_resource(resource, index=0))
-        for index, resource in enumerate(resources):
-            resource["id"] = resource.get("id") or f"resource-{index + 1}"
-    return resources
 
 
 def _local_path_access_error(path: str) -> str | None:
@@ -249,6 +217,7 @@ def validate_project_context_snapshot(
 
 
 def _finalize_snapshot(snapshot: dict[str, Any], *, validate_local_paths: bool) -> dict[str, Any]:
+    snapshot = attach_project_workspace_manifest_contract(snapshot)
     status, errors = validate_project_context_snapshot(snapshot, validate_local_paths=validate_local_paths)
     snapshot["status"] = status
     if errors:
@@ -271,7 +240,6 @@ def build_project_context_snapshot(
     Supported metadata shapes:
     - {"project_context": {"resources": [...]}}
     - {"project": {"resources": [...]}}
-    - legacy/simple {"target": {"repo": ..., "workspace": {"path": ...}}}
     """
     if not isinstance(metadata, Mapping):
         return None
@@ -298,19 +266,6 @@ def build_project_context_snapshot(
             snapshot["run_id"] = run_id
         return _finalize_snapshot(snapshot, validate_local_paths=validate_local_paths)
 
-    target = metadata.get("target")
-    if isinstance(target, Mapping):
-        resources = _resources_from_target(target)
-        if resources:
-            snapshot = {
-                "schema_version": 1,
-                "captured_at": captured_at or datetime.now(timezone.utc).isoformat(),
-                "source": "metadata.target",
-                "resources": resources,
-            }
-            if run_id is not None:
-                snapshot["run_id"] = run_id
-            return _finalize_snapshot(snapshot, validate_local_paths=validate_local_paths)
     return None
 
 
@@ -338,24 +293,3 @@ def validated_project_context_snapshot(
         errors = [str(error) for error in (snapshot.get("validation_errors") or [])]
         raise ProjectContextValidationError(errors or ["Project Context is invalid."])
     return snapshot
-
-
-def attach_project_context_snapshot(
-    target_metadata: Mapping[str, Any] | None,
-    metadata: Mapping[str, Any] | None,
-    *,
-    run_id: int | None = None,
-    validate_local_paths: bool = False,
-) -> dict[str, Any]:
-    """Return target metadata with project_context_snapshot attached when available."""
-    payload = dict(target_metadata or {})
-    snapshot = build_project_context_snapshot(
-        metadata,
-        run_id=run_id,
-        validate_local_paths=validate_local_paths,
-    )
-    if snapshot is None and isinstance(metadata, Mapping) and isinstance(metadata.get("project_context_snapshot"), Mapping):
-        snapshot = _finalize_snapshot(dict(metadata["project_context_snapshot"]), validate_local_paths=validate_local_paths)
-    if snapshot:
-        payload["project_context_snapshot"] = snapshot
-    return payload
