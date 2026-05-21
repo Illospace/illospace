@@ -1,14 +1,26 @@
 <script lang="ts">
   import ConstellationIcon from '$lib/components/constellation/ConstellationIcon.svelte';
   import { getIdeaProjectDraftState } from '$lib/features/threads/api/threadApi';
+  import {
+    buildProjectDraftPanelView,
+    cleanLabel,
+    countResourceChange,
+    fileCountLabel,
+    latestGroupVersion,
+    PROJECT_DRAFT_CHANGE_METRICS,
+    publishGroupTitle,
+    publishOperationLabel,
+    publishOperationPath,
+    publishStatus,
+    publishTargetLabel,
+    resourceMeta,
+    resourceStatus,
+    resourceTitle,
+    restoreTitle,
+    versionTitle,
+  } from '$lib/features/threads/domain/projectDraftStatePresenter';
   import { relativeTimeAgo } from '$lib/utils/datetime';
   import type {
-    ProjectDraftChangeKey,
-    ProjectDraftChangeSet,
-    ProjectDraftPublishGroup,
-    ProjectDraftPublishOperation,
-    ProjectDraftResourceState,
-    ProjectDraftRootVersionGroup,
     ProjectDraftStateResponse,
     ProjectDraftStateRead,
     ProjectRootVersionState,
@@ -18,45 +30,7 @@
     id?: string | null;
   } | null;
 
-  type DraftChangeMetric = {
-    key: ProjectDraftChangeKey;
-    label: string;
-    tone: 'changed' | 'new' | 'deleted' | 'conflicted';
-  };
-
-  type NormalizedRootVersions = {
-    groups: ProjectDraftRootVersionGroup[];
-    versionCount: number;
-    resourceCount: number;
-    latestVersion: ProjectRootVersionState | null;
-  };
-
-  type DraftFileGroup = {
-    key: ProjectDraftChangeKey | 'out_of_date_paths';
-    label: string;
-    tone: DraftChangeMetric['tone'] | 'warning';
-    paths: string[];
-  };
-
-  type PublishPlanSummary = {
-    ok: boolean;
-    planOnly: boolean;
-    mutatesProjectRoot: boolean;
-    resourceCount: number;
-    operationCount: number;
-    blockedCount: number;
-    readyCount: number;
-    groups: ProjectDraftPublishGroup[];
-  };
-
-  type ReadinessTone = 'clean' | 'modified' | 'warning' | 'conflict';
-
-  const CHANGE_METRICS: DraftChangeMetric[] = [
-    { key: 'changed_paths', label: 'Changed', tone: 'changed' },
-    { key: 'new_paths', label: 'New', tone: 'new' },
-    { key: 'deleted_paths', label: 'Deleted', tone: 'deleted' },
-    { key: 'conflicted_paths', label: 'Conflicted', tone: 'conflicted' },
-  ];
+  const CHANGE_METRICS = PROJECT_DRAFT_CHANGE_METRICS;
 
   let {
     idea,
@@ -72,338 +46,20 @@
   let loadedKey = $state('');
   let requestSeq = 0;
 
-  const statePayload = $derived.by(() => {
-    const nested = (draftState as any)?.draft_status ?? (draftState as any)?.draft_state;
-    return (nested && typeof nested === 'object' ? nested : draftState) as ProjectDraftStateRead | null;
-  });
-  const resources = $derived.by(() => normalizeResources(statePayload));
-  const aggregateCounts = $derived.by(() => countAggregateChanges(statePayload, resources));
-  const totalChangeCount = $derived(
-    CHANGE_METRICS.reduce((sum, metric) => sum + aggregateCounts[metric.key], 0),
+  const draftView = $derived.by(() =>
+    buildProjectDraftPanelView({ draftState, loading, loadError, runId }),
   );
-  const outOfDatePaths = $derived.by(() => collectOutOfDatePaths(statePayload, resources));
-  const fileGroups = $derived.by(() => collectFileGroups(statePayload, resources, outOfDatePaths));
-  const publishPlan = $derived.by(() => summarizePublishPlan(draftState, resources));
-  const rootVersions = $derived.by(() => summarizeRootVersions(draftState, resources));
-  const effectiveRunId = $derived(statePayload?.run_id ?? draftState?.run_id ?? runId);
-  const runLabel = $derived(effectiveRunId ? `Run ${effectiveRunId}` : 'Latest run');
-  const readiness = $derived.by(() => summarizeReadiness());
+  const statePayload = $derived(draftView.statePayload);
+  const resources = $derived(draftView.resources);
+  const aggregateCounts = $derived(draftView.aggregateCounts);
+  const outOfDatePaths = $derived(draftView.outOfDatePaths);
+  const fileGroups = $derived(draftView.fileGroups);
+  const publishPlan = $derived(draftView.publishPlan);
+  const rootVersions = $derived(draftView.rootVersions);
+  const runLabel = $derived(draftView.runLabel);
+  const readiness = $derived(draftView.readiness);
   const signalTone = $derived(readiness.tone);
   const signalLabel = $derived(readiness.label);
-
-  function summarizeReadiness(): { tone: ReadinessTone; label: string; detail: string } {
-    if (loading) return { tone: 'warning', label: 'Loading', detail: 'Loading Project draft state.' };
-    if (loadError) return { tone: 'warning', label: 'Unavailable', detail: 'Draft state could not be loaded.' };
-    if (statePayload?.ok === false) return { tone: 'warning', label: 'Not bound', detail: 'No Project draft state is bound to this run.' };
-    if (!publishPlan.ok) return { tone: 'warning', label: 'Plan unavailable', detail: 'Publish preview could not be loaded.' };
-    if (aggregateCounts.conflicted_paths > 0 || publishPlan.blockedCount > 0) {
-      return { tone: 'conflict', label: 'Blocked', detail: 'Resolve conflicts before publish.' };
-    }
-    if (outOfDatePaths.length > 0) {
-      return { tone: 'warning', label: 'Needs refresh', detail: 'Root changed after this thread draft was made.' };
-    }
-    if (publishPlan.operationCount > 0) {
-      return { tone: 'modified', label: 'Ready', detail: 'Plan-only publish preview is ready.' };
-    }
-    if (totalChangeCount > 0) {
-      return { tone: 'modified', label: 'Draft changes', detail: 'Thread overlay has local changes.' };
-    }
-    return { tone: 'clean', label: 'Clean', detail: 'Thread overlay matches Project root.' };
-  }
-
-  function emptyChangeSet(): ProjectDraftChangeSet {
-    return {
-      changed_paths: [],
-      new_paths: [],
-      deleted_paths: [],
-      conflicted_paths: [],
-    };
-  }
-
-  function asArray(value: unknown): unknown[] {
-    return Array.isArray(value) ? value : [];
-  }
-
-  function pathList(value: unknown): string[] {
-    if (typeof value === 'string' && value.trim()) {
-      return [value.trim()];
-    }
-    return asArray(value)
-      .map((item) => {
-        if (typeof item === 'string') return item.trim();
-        if (!item || typeof item !== 'object') return '';
-        const record = item as Record<string, unknown>;
-        return String(record.path ?? record.relative_path ?? record.name ?? '').trim();
-      })
-      .filter(Boolean);
-  }
-
-  function normalizeResources(payload: ProjectDraftStateRead | null): ProjectDraftResourceState[] {
-    const raw = (payload as any)?.resources;
-    return Array.isArray(raw) ? raw : [];
-  }
-
-  function resourceChanges(resource: ProjectDraftResourceState): ProjectDraftChangeSet {
-    const changes = emptyChangeSet();
-    const rawChanges = (resource.changes ?? {}) as Record<string, unknown>;
-    for (const metric of CHANGE_METRICS) {
-      changes[metric.key] = pathList(rawChanges[metric.key]);
-    }
-    changes.out_of_date_paths = pathList(
-      rawChanges.out_of_date_paths
-        ?? rawChanges.out_of_date
-        ?? (resource as any).out_of_date_paths
-        ?? (resource as any).out_of_date,
-    );
-    return changes;
-  }
-
-  function countResourceChange(resource: ProjectDraftResourceState, key: ProjectDraftChangeKey): number {
-    const explicit = resource.change_counts?.[key];
-    if (typeof explicit === 'number' && Number.isFinite(explicit)) {
-      return explicit;
-    }
-    return resourceChanges(resource)[key].length;
-  }
-
-  function countAggregateChanges(
-    payload: ProjectDraftStateRead | null,
-    resourceList: ProjectDraftResourceState[],
-  ): Record<ProjectDraftChangeKey, number> {
-    const counts = {
-      changed_paths: 0,
-      new_paths: 0,
-      deleted_paths: 0,
-      conflicted_paths: 0,
-    };
-    const payloadCounts = payload?.changes?.counts;
-    for (const metric of CHANGE_METRICS) {
-      const value = payloadCounts?.[metric.key];
-      counts[metric.key] = typeof value === 'number' && Number.isFinite(value)
-        ? value
-        : resourceList.reduce((sum, resource) => sum + countResourceChange(resource, metric.key), 0);
-    }
-    return counts;
-  }
-
-  function collectOutOfDatePaths(
-    payload: ProjectDraftStateRead | null,
-    resourceList: ProjectDraftResourceState[],
-  ): string[] {
-    const payloadOutOfDate = (payload as any)?.out_of_date;
-    const paths = [
-      ...pathList((payload?.changes as any)?.out_of_date_paths),
-      ...pathList(payloadOutOfDate === true ? null : payloadOutOfDate),
-    ];
-
-    if (payloadOutOfDate === true) {
-      paths.push('Project draft');
-    }
-
-    for (const resource of resourceList) {
-      const resourcePaths = resourceChanges(resource).out_of_date_paths ?? [];
-      if (resourcePaths.length > 0) {
-        const prefix = resource.mount_path || resource.label || resource.id;
-        paths.push(...resourcePaths.map((path) => prefix ? `${prefix}/${path}` : path));
-        continue;
-      }
-      const status = resourceStatus(resource).toLowerCase();
-      if ((resource as any).out_of_date === true || status.includes('out of date') || status.includes('out-of-date')) {
-        paths.push(resourceTitle(resource));
-      }
-    }
-
-    return Array.from(new Set(paths)).sort();
-  }
-
-  function prefixedResourcePaths(
-    resource: ProjectDraftResourceState,
-    key: ProjectDraftChangeKey,
-  ): string[] {
-    const prefix = cleanLabel(resource.mount_path || resource.label || resource.id);
-    return resourceChanges(resource)[key].map((path) => prefix ? `${prefix}/${path}` : path);
-  }
-
-  function collectFileGroups(
-    payload: ProjectDraftStateRead | null,
-    resourceList: ProjectDraftResourceState[],
-    stalePaths: string[],
-  ): DraftFileGroup[] {
-    const groups: DraftFileGroup[] = CHANGE_METRICS.map((metric) => {
-      const payloadPaths = pathList((payload?.changes as any)?.[metric.key]);
-      const resourcePaths = resourceList.flatMap((resource) => prefixedResourcePaths(resource, metric.key));
-      const paths = resourcePaths.length > 0 ? resourcePaths : payloadPaths;
-      return {
-        key: metric.key,
-        label: metric.label,
-        tone: metric.tone,
-        paths: Array.from(new Set(paths)).sort(),
-      };
-    });
-    groups.push({
-      key: 'out_of_date_paths',
-      label: 'Out of date',
-      tone: 'warning',
-      paths: stalePaths,
-    });
-    return groups.filter((group) => group.paths.length > 0);
-  }
-
-  function publishPlanPayload(
-    payload: ProjectDraftStateResponse | ProjectDraftStateRead | null,
-  ): Record<string, any> | null {
-    const plan = (payload as any)?.plan_publish;
-    return plan && typeof plan === 'object' ? plan : null;
-  }
-
-  function publishPlanGroups(
-    payload: ProjectDraftStateResponse | ProjectDraftStateRead | null,
-    resourceList: ProjectDraftResourceState[],
-  ): ProjectDraftPublishGroup[] {
-    const planGroups = publishPlanPayload(payload)?.groups;
-    if (Array.isArray(planGroups)) return planGroups;
-    return resourceList.map((resource) => {
-      const operations = CHANGE_METRICS.flatMap((metric) =>
-        resourceChanges(resource)[metric.key].map((path) => ({
-          operation: metric.key === 'new_paths'
-            ? 'create'
-            : metric.key === 'deleted_paths'
-              ? 'delete'
-              : metric.key === 'conflicted_paths'
-                ? 'resolve_conflict'
-                : 'update',
-          path,
-        })),
-      );
-      return {
-        resource_id: resource.id,
-        mount_path: resource.mount_path,
-        label: resource.label,
-        workspace_path: resource.workspace_path,
-        publish_target: resource.source_path ? { kind: 'local_path', path: resource.source_path } : { kind: 'unknown' },
-        status: operations.some((operation) => operation.operation === 'resolve_conflict')
-          ? 'blocked'
-          : operations.length > 0
-            ? 'ready'
-            : 'clean',
-        blocked_reasons: operations.some((operation) => operation.operation === 'resolve_conflict')
-          ? ['conflicted_paths_require_resolution']
-          : [],
-        change_counts: resource.change_counts,
-        operations,
-      };
-    });
-  }
-
-  function summarizePublishPlan(
-    payload: ProjectDraftStateResponse | ProjectDraftStateRead | null,
-    resourceList: ProjectDraftResourceState[],
-  ): PublishPlanSummary {
-    const plan = publishPlanPayload(payload);
-    const groups = publishPlanGroups(payload, resourceList);
-    const summary = plan?.summary ?? {};
-    const explicitOperationCount = Number(summary.operation_count);
-    const explicitBlockedCount = Number(summary.blocked_count);
-    const explicitResourceCount = Number(summary.resource_count);
-    const operationCount = Number.isFinite(explicitOperationCount)
-      ? explicitOperationCount
-      : groups.reduce((sum, group) => sum + asArray(group.operations).length, 0);
-    const blockedCount = Number.isFinite(explicitBlockedCount)
-      ? explicitBlockedCount
-      : groups.filter((group) => cleanLabel(group.status).toLowerCase() === 'blocked').length;
-
-    return {
-      ok: plan?.ok !== false,
-      planOnly: plan?.plan_only !== false,
-      mutatesProjectRoot: plan?.mutates_project_root === true,
-      resourceCount: Number.isFinite(explicitResourceCount) ? explicitResourceCount : groups.length,
-      operationCount,
-      blockedCount,
-      readyCount: groups.filter((group) => cleanLabel(group.status).toLowerCase() === 'ready').length,
-      groups,
-    };
-  }
-
-  function rootVersionGroupsFromPayload(
-    payload: ProjectDraftStateResponse | ProjectDraftStateRead | null,
-  ): ProjectDraftRootVersionGroup[] {
-    const rootVersions = (payload as any)?.root_versions;
-    if (Array.isArray(rootVersions)) return rootVersions;
-    if (Array.isArray(rootVersions?.groups)) return rootVersions.groups;
-    if (Array.isArray((payload as any)?.root_version_groups)) return (payload as any).root_version_groups;
-    return [];
-  }
-
-  function rootVersionGroupsFromResources(resourcesWithVersions: ProjectDraftResourceState[]): ProjectDraftRootVersionGroup[] {
-    return resourcesWithVersions.flatMap((resource) => {
-      const raw = (resource as any).root_versions;
-      const versions = Array.isArray(raw?.versions)
-        ? raw.versions
-        : Array.isArray(raw)
-          ? raw
-          : [];
-      if (versions.length === 0) return [];
-      return [{
-        resource_id: resource.id,
-        mount_path: resource.mount_path,
-        label: resource.label,
-        source_path: resource.source_path,
-        workspace_path: resource.workspace_path,
-        versions,
-      }];
-    });
-  }
-
-  function summarizeRootVersions(
-    payload: ProjectDraftStateResponse | ProjectDraftStateRead | null,
-    resourceList: ProjectDraftResourceState[],
-  ): NormalizedRootVersions {
-    const groups = [
-      ...rootVersionGroupsFromPayload(payload),
-      ...rootVersionGroupsFromResources(resourceList),
-    ];
-    const versions = groups.flatMap((group) => Array.isArray(group.versions) ? group.versions : []);
-    const latestVersion = versions
-      .slice()
-      .sort((left, right) =>
-        new Date(right.created_at ?? 0).getTime() - new Date(left.created_at ?? 0).getTime(),
-      )[0] ?? null;
-    const summary = (payload as any)?.root_versions?.summary ?? (payload as any)?.root_versions_summary;
-    const summaryVersionCount = Number(summary?.version_count);
-    const summaryResourceCount = Number(summary?.resource_count);
-
-    return {
-      groups,
-      versionCount: Number.isFinite(summaryVersionCount) ? summaryVersionCount : versions.length,
-      resourceCount: Number.isFinite(summaryResourceCount) ? summaryResourceCount : groups.length,
-      latestVersion,
-    };
-  }
-
-  function cleanLabel(value: unknown, fallback = ''): string {
-    const text = String(value ?? '').replaceAll('_', ' ').trim();
-    return text || fallback;
-  }
-
-  function resourceTitle(resource: ProjectDraftResourceState): string {
-    return cleanLabel(resource.mount_path || resource.label || resource.id, 'Project resource');
-  }
-
-  function resourceMeta(resource: ProjectDraftResourceState): string {
-    return [
-      cleanLabel(resource.kind),
-      cleanLabel(resource.provider),
-      resource.repo ? String(resource.repo) : '',
-      cleanLabel(resource.change_source),
-    ].filter(Boolean).join(' / ');
-  }
-
-  function resourceStatus(resource: ProjectDraftResourceState): string {
-    const status = cleanLabel(resource.status);
-    if (status) return status;
-    const total = CHANGE_METRICS.reduce((sum, metric) => sum + countResourceChange(resource, metric.key), 0);
-    return total > 0 ? 'modified' : 'clean';
-  }
 
   function formatBytes(value: unknown): string {
     const size = Number(value);
@@ -420,52 +76,6 @@
       version.created_at ? relativeTimeAgo(version.created_at) : '',
       formatBytes(version.total_size),
     ].filter(Boolean).join(' / ');
-  }
-
-  function fileCountLabel(version: ProjectRootVersionState | null): string {
-    const count = Number(version?.file_count);
-    if (!Number.isFinite(count)) return '';
-    return `${count} file${count === 1 ? '' : 's'}`;
-  }
-
-  function versionTitle(version: ProjectRootVersionState): string {
-    return cleanLabel(version.label || version.version_id || version.id, 'Root version');
-  }
-
-  function restoreTitle(version: ProjectRootVersionState): string {
-    return `Restore ${versionTitle(version)} unavailable in this client`;
-  }
-
-  function latestGroupVersion(group: ProjectDraftRootVersionGroup): ProjectRootVersionState | null {
-    const versions = Array.isArray(group.versions) ? group.versions : [];
-    return versions
-      .slice()
-      .sort((left, right) =>
-        new Date(right.created_at ?? 0).getTime() - new Date(left.created_at ?? 0).getTime(),
-      )[0] ?? null;
-  }
-
-  function publishGroupTitle(group: ProjectDraftPublishGroup): string {
-    return cleanLabel(group.mount_path || group.label || group.resource_id, 'Project resource');
-  }
-
-  function publishTargetLabel(group: ProjectDraftPublishGroup): string {
-    const target = group.publish_target ?? {};
-    if (target.kind === 'local_path' && target.path) return target.path;
-    if (target.kind === 'git_repository' && target.repo) return target.repo;
-    return cleanLabel(target.kind, 'Target unavailable');
-  }
-
-  function publishStatus(group: ProjectDraftPublishGroup): string {
-    return cleanLabel(group.status, 'clean');
-  }
-
-  function publishOperationLabel(operation: ProjectDraftPublishOperation): string {
-    return cleanLabel(operation.operation, 'change');
-  }
-
-  function publishOperationPath(operation: ProjectDraftPublishOperation): string {
-    return cleanLabel(operation.path || operation.target_path || operation.draft_path, 'Project path');
   }
 
   async function loadDraftState(ideaId: string, currentRunId: string | number | null) {

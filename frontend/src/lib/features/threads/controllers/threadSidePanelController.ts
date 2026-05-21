@@ -10,6 +10,12 @@ export type ThreadStageRightDockTabKind =
   | 'preview'
   | 'code-review';
 
+export type ThreadStageRightDockDynamicKind = 'browser' | 'app';
+export type ThreadStageRightDockSingletonKind = Exclude<
+  ThreadStageRightDockTabKind,
+  ThreadStageRightDockDynamicKind
+>;
+
 export type ThreadStageRightDockTab = {
   id: string;
   label: string;
@@ -40,13 +46,132 @@ export type ThreadSidePanelTabState = {
   nextBrowserTabIndex: number;
 };
 
+export type ThreadStageRightDockTabDefinition = {
+  kind: ThreadStageRightDockSingletonKind;
+  id: ThreadStageRightDockSingletonKind;
+  label: string;
+  menuDescription: string;
+  icon: 'activity' | 'code' | 'cycles' | 'document' | 'folder' | 'reply-thread' | 'vault';
+  closeable: boolean;
+};
+
+const SINGLETON_TAB_DEFINITIONS = {
+  discussion: {
+    id: 'discussion',
+    kind: 'discussion',
+    label: 'Discussion',
+    menuDescription: 'Open thread comments',
+    icon: 'reply-thread',
+    closeable: true,
+  },
+  activity: {
+    id: 'activity',
+    kind: 'activity',
+    label: 'Activity',
+    menuDescription: 'Open run activity',
+    icon: 'activity',
+    closeable: true,
+  },
+  'handoff-summary': {
+    id: 'handoff-summary',
+    kind: 'handoff-summary',
+    label: 'Handoff',
+    menuDescription: 'Open durable agent summary',
+    icon: 'document',
+    closeable: true,
+  },
+  project: {
+    id: 'project',
+    kind: 'project',
+    label: 'Project',
+    menuDescription: 'Review draft state',
+    icon: 'folder',
+    closeable: true,
+  },
+  vault: {
+    id: 'vault',
+    kind: 'vault',
+    label: 'Vault',
+    menuDescription: 'Add or review thread keys',
+    icon: 'vault',
+    closeable: true,
+  },
+  cycles: {
+    id: 'cycles',
+    kind: 'cycles',
+    label: 'Cycles',
+    menuDescription: 'Review scheduled Illo work',
+    icon: 'cycles',
+    closeable: true,
+  },
+  preview: {
+    id: 'preview',
+    kind: 'preview',
+    label: 'Preview',
+    menuDescription: 'Review selected attachment',
+    icon: 'document',
+    closeable: true,
+  },
+  'code-review': {
+    id: 'code-review',
+    kind: 'code-review',
+    label: 'Review files',
+    menuDescription: 'See files Illo changed',
+    icon: 'code',
+    closeable: true,
+  },
+} satisfies Record<ThreadStageRightDockSingletonKind, ThreadStageRightDockTabDefinition>;
+
+export const THREAD_SIDE_PANEL_DEFAULT_TAB_KINDS = [
+  'discussion',
+  'activity',
+  'handoff-summary',
+  'project',
+] as const satisfies readonly ThreadStageRightDockSingletonKind[];
+
+const THREAD_SIDE_PANEL_ADD_MENU_KINDS = [
+  'vault',
+  'discussion',
+  'project',
+  'cycles',
+  'code-review',
+  'activity',
+  'handoff-summary',
+] as const satisfies readonly ThreadStageRightDockSingletonKind[];
+
+export const THREAD_SIDE_PANEL_SINGLETON_TAB_DEFINITIONS =
+  Object.values(SINGLETON_TAB_DEFINITIONS);
+
+export function isThreadSidePanelSingletonKind(
+  kind: ThreadStageRightDockTabKind,
+): kind is ThreadStageRightDockSingletonKind {
+  return kind in SINGLETON_TAB_DEFINITIONS;
+}
+
+export function threadSidePanelDefinitionForKind(
+  kind: ThreadStageRightDockSingletonKind,
+): ThreadStageRightDockTabDefinition {
+  return SINGLETON_TAB_DEFINITIONS[kind];
+}
+
+export function threadSidePanelIconForKind(kind: ThreadStageRightDockTabKind) {
+  if (kind === 'browser') return 'preview';
+  if (kind === 'app') return 'code';
+  return threadSidePanelDefinitionForKind(kind).icon;
+}
+
+function createSingletonTab(kind: ThreadStageRightDockSingletonKind): ThreadStageRightDockTab {
+  const definition = threadSidePanelDefinitionForKind(kind);
+  return {
+    id: definition.id,
+    label: definition.label,
+    kind: definition.kind,
+    closeable: definition.closeable,
+  };
+}
+
 export function createDefaultThreadSidePanelTabs(): ThreadStageRightDockTab[] {
-  return [
-    { id: 'discussion', label: 'Discussion', kind: 'discussion', closeable: true },
-    { id: 'activity', label: 'Activity', kind: 'activity', closeable: true },
-    { id: 'handoff-summary', label: 'Handoff', kind: 'handoff-summary', closeable: true },
-    { id: 'project', label: 'Project', kind: 'project', closeable: true },
-  ];
+  return THREAD_SIDE_PANEL_DEFAULT_TAB_KINDS.map(createSingletonTab);
 }
 
 export function activeThreadSidePanelTab(
@@ -61,13 +186,7 @@ export function buildThreadSidePanelAddMenuItems(
   visibleApps: readonly ThreadSidePanelAppLike[],
 ): ThreadStageRightDockAddMenuItem[] {
   const browserCount = tabs.filter((tab) => tab.kind === 'browser').length;
-  const hasDiscussion = tabs.some((tab) => tab.kind === 'discussion');
-  const hasActivity = tabs.some((tab) => tab.kind === 'activity');
-  const hasHandoffSummary = tabs.some((tab) => tab.kind === 'handoff-summary');
-  const hasProject = tabs.some((tab) => tab.kind === 'project');
-  const hasVault = tabs.some((tab) => tab.kind === 'vault');
-  const hasCycles = tabs.some((tab) => tab.kind === 'cycles');
-  const hasCodeReview = tabs.some((tab) => tab.kind === 'code-review');
+  const openKinds = new Set(tabs.map((tab) => tab.kind));
   const openAppIds = new Set(
     tabs
       .filter((tab) => tab.kind === 'app' && tab.appId)
@@ -82,66 +201,14 @@ export function buildThreadSidePanelAddMenuItems(
     },
   ];
 
-  if (!hasVault) {
+  for (const kind of THREAD_SIDE_PANEL_ADD_MENU_KINDS) {
+    if (openKinds.has(kind)) continue;
+    const definition = threadSidePanelDefinitionForKind(kind);
     items.push({
-      id: 'vault',
-      kind: 'vault',
-      label: 'Vault',
-      description: 'Add or review thread keys',
-    });
-  }
-
-  if (!hasDiscussion) {
-    items.push({
-      id: 'discussion',
-      kind: 'discussion',
-      label: 'Discussion',
-      description: 'Open thread comments',
-    });
-  }
-
-  if (!hasProject) {
-    items.push({
-      id: 'project',
-      kind: 'project',
-      label: 'Project',
-      description: 'Review draft state',
-    });
-  }
-
-  if (!hasCycles) {
-    items.push({
-      id: 'cycles',
-      kind: 'cycles',
-      label: 'Cycles',
-      description: 'Review scheduled Illo work',
-    });
-  }
-
-  if (!hasCodeReview) {
-    items.push({
-      id: 'code-review',
-      kind: 'code-review',
-      label: 'Review files',
-      description: 'See files Illo changed',
-    });
-  }
-
-  if (!hasActivity) {
-    items.push({
-      id: 'activity',
-      kind: 'activity',
-      label: 'Activity',
-      description: 'Open run activity',
-    });
-  }
-
-  if (!hasHandoffSummary) {
-    items.push({
-      id: 'handoff-summary',
-      kind: 'handoff-summary',
-      label: 'Handoff',
-      description: 'Open durable agent summary',
+      id: definition.id,
+      kind: definition.kind,
+      label: definition.label,
+      description: definition.menuDescription,
     });
   }
 
@@ -205,33 +272,19 @@ export function openBrowserThreadSidePanelTab(
 
 export function openSingletonThreadSidePanelTab(
   state: ThreadSidePanelTabState,
-  kind: 'discussion' | 'activity' | 'handoff-summary' | 'project' | 'vault' | 'cycles' | 'preview' | 'code-review',
+  kind: ThreadStageRightDockSingletonKind,
 ): ThreadSidePanelTabState {
   const existing = state.tabs.find((tab) => tab.kind === kind);
   if (existing) return { ...state, activeTabId: existing.id };
 
-  const label = kind === 'vault'
-    ? 'Vault'
-    : kind === 'cycles'
-      ? 'Cycles'
-      : kind === 'preview'
-        ? 'Preview'
-        : kind === 'code-review'
-          ? 'Review files'
-          : kind === 'handoff-summary'
-            ? 'Handoff'
-            : kind === 'project'
-              ? 'Project'
-              : kind === 'discussion'
-                ? 'Discussion'
-                : 'Activity';
+  const definition = threadSidePanelDefinitionForKind(kind);
   return {
     ...state,
     tabs: [
       ...state.tabs,
-      { id: kind, label, kind, closeable: true },
+      createSingletonTab(definition.kind),
     ],
-    activeTabId: kind,
+    activeTabId: definition.id,
   };
 }
 

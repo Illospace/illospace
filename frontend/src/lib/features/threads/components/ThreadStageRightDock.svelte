@@ -6,19 +6,27 @@
     ConstellationIconButton,
   } from '$lib/components/constellation';
   import ThreadStageRightDockTabButton from './ThreadStageRightDockTabButton.svelte';
-  import type {
-    ThreadStageRightDockAddMenuItem,
-    ThreadStageRightDockTab,
-    ThreadStageRightDockTabKind,
+  import {
+    createDefaultThreadSidePanelTabs,
+    threadSidePanelIconForKind,
+    type ThreadStageRightDockAddMenuItem,
+    type ThreadStageRightDockTab,
+    type ThreadStageRightDockTabKind,
   } from '$lib/features/threads/controllers/threadSidePanelController';
 
   type DockWidth = number | string;
-  const DEFAULT_TABS: ThreadStageRightDockTab[] = [
-    { id: 'discussion', label: 'Discussion', kind: 'discussion', closeable: true },
-    { id: 'activity', label: 'Activity', kind: 'activity', closeable: true },
-    { id: 'handoff-summary', label: 'Handoff', kind: 'handoff-summary', closeable: true },
-    { id: 'project', label: 'Project', kind: 'project', closeable: true },
-  ];
+  const PANE_LABEL_BY_KIND = {
+    browser: 'Browser',
+    preview: 'Preview',
+    discussion: 'Discussion',
+    activity: 'Activity',
+    'handoff-summary': 'Handoff summary',
+    project: 'Project draft state',
+    app: 'Generated apps',
+    vault: 'Vault',
+    cycles: 'Cycles',
+    'code-review': 'Review changed files',
+  } satisfies Record<ThreadStageRightDockTabKind, string>;
 
   function clamp(value: number, min: number, max: number) {
     return Math.min(max, Math.max(min, value));
@@ -34,7 +42,7 @@
 
   let {
     activeTabId = 'activity',
-    tabs = DEFAULT_TABS,
+    tabs = createDefaultThreadSidePanelTabs(),
     addMenuItems = [],
     width = 432,
     minWidth = 344,
@@ -82,18 +90,32 @@
     empty?: Snippet;
   } = $props();
 
-  const hasBrowserPane = $derived(!!browserPane);
-  const hasPreviewPane = $derived(!!previewPane);
-  const hasDiscussionPane = $derived(!!discussionPane);
-  const hasUtilityPane = $derived(!!utilityPane);
-  const hasProjectPane = $derived(!!projectPane);
-  const hasAppsPane = $derived(!!appsPane);
-  const hasVaultPane = $derived(!!vaultPane);
-  const hasCyclesPane = $derived(!!cyclesPane);
-  const hasCodeReviewPane = $derived(!!codeReviewPane);
-  const availableTabs = $derived(tabs.filter(tabHasPane));
+  const paneByKind = $derived<Record<ThreadStageRightDockTabKind, Snippet | undefined>>({
+    browser: browserPane,
+    preview: previewPane,
+    discussion: discussionPane,
+    activity: utilityPane,
+    'handoff-summary': utilityPane,
+    project: projectPane,
+    app: appsPane,
+    vault: vaultPane,
+    cycles: cyclesPane,
+    'code-review': codeReviewPane,
+  });
+  const availableTabs = $derived(tabs.filter((tab) => Boolean(paneByKind[tab.kind])));
   const resolvedActiveTab = $derived(
     availableTabs.find((tab) => tab.id === activeTabId) ?? availableTabs[0] ?? null,
+  );
+  const resolvedActivePane = $derived(
+    resolvedActiveTab ? paneByKind[resolvedActiveTab.kind] : undefined,
+  );
+  const resolvedActivePaneClass = $derived(
+    resolvedActiveTab
+      ? `right-dock-pane ${paneClassForKind(resolvedActiveTab.kind)}`
+      : 'right-dock-pane',
+  );
+  const resolvedActivePaneLabel = $derived(
+    resolvedActiveTab ? PANE_LABEL_BY_KIND[resolvedActiveTab.kind] : '',
   );
   const hasDockContent = $derived(Boolean(resolvedActiveTab));
   const hasAddMenu = $derived(addMenuItems.length > 0);
@@ -187,43 +209,8 @@
     onAddMenuItem?.(item);
   }
 
-  function iconForMenuKind(kind: ThreadStageRightDockTabKind) {
-    if (kind === 'browser') return 'preview';
-    if (kind === 'preview') return 'document';
-    if (kind === 'discussion') return 'reply-thread';
-    if (kind === 'activity') return 'activity';
-    if (kind === 'handoff-summary') return 'document';
-    if (kind === 'project') return 'folder';
-    if (kind === 'vault') return 'vault';
-    if (kind === 'cycles') return 'cycles';
-    if (kind === 'code-review') return 'code';
-    return 'code';
-  }
-
-  function tabHasPane(tab: ThreadStageRightDockTab) {
-    switch (tab.kind) {
-      case 'browser':
-        return hasBrowserPane;
-      case 'preview':
-        return hasPreviewPane;
-      case 'discussion':
-        return hasDiscussionPane;
-      case 'activity':
-      case 'handoff-summary':
-        return hasUtilityPane;
-      case 'project':
-        return hasProjectPane;
-      case 'app':
-        return hasAppsPane;
-      case 'vault':
-        return hasVaultPane;
-      case 'cycles':
-        return hasCyclesPane;
-      case 'code-review':
-        return hasCodeReviewPane;
-      default:
-        return true;
-    }
+  function paneClassForKind(kind: ThreadStageRightDockTabKind) {
+    return `right-dock-${kind === 'app' ? 'apps' : kind}`;
   }
 
   function handleDocumentClick(event: MouseEvent) {
@@ -306,7 +293,7 @@
                       onclick={() => handleAddMenuItemClick(item)}
                     >
                       <span class="right-dock-add-item-icon" aria-hidden="true">
-                        <ConstellationIcon name={iconForMenuKind(item.kind)} size={14} stroke={1.8} />
+                        <ConstellationIcon name={threadSidePanelIconForKind(item.kind)} size={14} stroke={1.8} />
                       </span>
                       <span class="right-dock-add-item-copy">
                         <strong>{item.label}</strong>
@@ -325,45 +312,9 @@
       </header>
 
       <div class="right-dock-content" data-active-tab={resolvedActiveTab?.kind ?? 'empty'}>
-        {#if resolvedActiveTab?.kind === 'browser' && hasBrowserPane}
-          <section class="right-dock-pane right-dock-browser" aria-label="Browser">
-            {@render browserPane?.()}
-          </section>
-        {:else if resolvedActiveTab?.kind === 'preview' && hasPreviewPane}
-          <section class="right-dock-pane right-dock-preview" aria-label="Preview">
-            {@render previewPane?.()}
-          </section>
-        {:else if resolvedActiveTab?.kind === 'discussion' && hasDiscussionPane}
-          <section class="right-dock-pane right-dock-discussion" aria-label="Discussion">
-            {@render discussionPane?.()}
-          </section>
-        {:else if resolvedActiveTab?.kind === 'activity' && hasUtilityPane}
-          <section class="right-dock-pane right-dock-activity" aria-label="Activity">
-            {@render utilityPane?.()}
-          </section>
-        {:else if resolvedActiveTab?.kind === 'handoff-summary' && hasUtilityPane}
-          <section class="right-dock-pane right-dock-handoff-summary" aria-label="Handoff summary">
-            {@render utilityPane?.()}
-          </section>
-        {:else if resolvedActiveTab?.kind === 'project' && hasProjectPane}
-          <section class="right-dock-pane right-dock-project" aria-label="Project draft state">
-            {@render projectPane?.()}
-          </section>
-        {:else if resolvedActiveTab?.kind === 'app' && hasAppsPane}
-          <section class="right-dock-pane right-dock-apps" aria-label="Generated apps">
-            {@render appsPane?.()}
-          </section>
-        {:else if resolvedActiveTab?.kind === 'vault' && hasVaultPane}
-          <section class="right-dock-pane right-dock-vault" aria-label="Vault">
-            {@render vaultPane?.()}
-          </section>
-        {:else if resolvedActiveTab?.kind === 'cycles' && hasCyclesPane}
-          <section class="right-dock-pane right-dock-cycles" aria-label="Cycles">
-            {@render cyclesPane?.()}
-          </section>
-        {:else if resolvedActiveTab?.kind === 'code-review' && hasCodeReviewPane}
-          <section class="right-dock-pane right-dock-code-review" aria-label="Review changed files">
-            {@render codeReviewPane?.()}
+        {#if resolvedActivePane}
+          <section class={resolvedActivePaneClass} aria-label={resolvedActivePaneLabel}>
+            {@render resolvedActivePane()}
           </section>
         {:else if hasEmptyState}
           <div class="right-dock-empty">
