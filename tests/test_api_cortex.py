@@ -1411,7 +1411,10 @@ async def test_create_thread_discussion_illo_mention_routes_surface_aware_trigge
     with (
         patch("brain.app.api.routers.cortex._discussion._require_idea_for_user", AsyncMock(return_value=idea)),
         patch("brain.app.api.routers.cortex._discussion.ws_manager.broadcast_product_event", AsyncMock()),
-        patch("brain.app.triggers.adapters.internal.build_cortex_notify_trigger", return_value=SimpleNamespace(event_type="cortex.thread_reply")) as build_trigger,
+        patch(
+            "brain.app.triggers.adapters.internal.build_thread_discussion_mention_trigger",
+            return_value=SimpleNamespace(event_type="cortex.thread_discussion_mention"),
+        ) as build_trigger,
         patch("brain.app.triggers.router.async_route_trigger", side_effect=_route_trigger) as route_trigger,
     ):
         resp = await client.post(
@@ -1423,9 +1426,9 @@ async def test_create_thread_discussion_illo_mention_routes_surface_aware_trigge
     assert resp.json()["trigger"] == trigger_response
     build_trigger.assert_called_once()
     _, kwargs = build_trigger.call_args
-    assert kwargs["event"] == "thread_reply"
     assert kwargs["idea_id"] == "some-id"
-    assert kwargs["thread_message"] == "@illo this is what we decided, carry on"
+    assert kwargs["comment"].body == "@illo this is what we decided, carry on"
+    assert kwargs["discussion_trigger"]["surface"] == "thread_discussion"
     assert kwargs["metadata"]["source"] == "thread_discussion"
     assert kwargs["metadata"]["originating_surface"] == "thread_discussion"
     assert kwargs["metadata"]["triggering_surface"] == "thread_discussion"

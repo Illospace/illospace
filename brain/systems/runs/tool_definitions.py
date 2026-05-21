@@ -1147,8 +1147,8 @@ CHAT_TOOLS = [
             "Post an Illo-authored reply into the current Thread Discussion. "
             "Use this when a run was summoned from Discussion, or when the natural "
             "answer belongs in Discussion rather than the AI Timeline. This does not "
-            "post to the AI Timeline; use cortex_reply or other Thread tools when the "
-            "underlying AI Timeline work should visibly continue there."
+            "post to the AI Timeline. Discussion and AI Timeline are separate "
+            "conversation surfaces linked by Thread context."
         ),
         "input_schema": {
             "type": "object",

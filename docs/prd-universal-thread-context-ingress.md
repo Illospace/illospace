@@ -363,7 +363,7 @@ largest product gaps:
   to the absolute URL. `thread_route` preserves the relative `/cortex?idea=...`
   route for internal/programmatic clients.
 - Absolute Thread URLs are built from `ILLO_PUBLIC_URL` first, then
-  `ILLO_DASHBOARD_URL`, then a local-development fallback of
+  `ILLO_DASHBOARD_URL`, then the local-development value
   `http://localhost:8080`. Deployed environments should set `ILLO_PUBLIC_URL`
   to the browser-reachable Illospace origin.
 - Discussion still uses dedicated Thread-attached storage
@@ -371,20 +371,20 @@ largest product gaps:
   frontend correction is visual/interaction reuse: the panel now owns its full
   right-dock surface and is built from the existing chat composer, state,
   presence, mention, scroll, and token primitives.
-- `@illo` from Discussion now creates a surface-aware run. The trigger carries
-  `originating_surface=thread_discussion`, the triggering comment, and a
-  Discussion response target.
+- `@illo` from Discussion now creates a dedicated Discussion trigger:
+  `cortex.thread_discussion_mention`, target kind `thread_discussion`. It is
+  not routed as `cortex.thread_reply`.
+- Discussion-origin work is admitted into a separate run conversation id:
+  `thread-discussion:{thread_id}`. The AI Timeline Thread id is carried as a
+  related surface for context only.
 - Illo now has an explicit `post_thread_discussion_reply` tool, paired with
   `read_thread_discussion`, so it can acknowledge or answer in Discussion
   without pretending every response belongs in the AI Timeline.
-- Discussion-origin runs no longer automatically mirror final answers into the
-  AI Timeline. Illo can still use AI Timeline tools such as `cortex_reply` when
-  continuing the underlying Thread work is the right action.
-- There is intentionally no deterministic fallback that auto-posts an
-  acknowledgement if the model ignores the Discussion reply tool. That preserves
-  the "Illo has the right surface tools and decides how to act" product
-  contract, but it leaves prompt/tool-choice quality as an important behavior to
-  observe in real usage.
+- Discussion-origin final answers settle back into `thread_discussion_comments`.
+  They do not mirror into `IdeaThread`, and Fast mode hides `cortex_reply` for
+  Discussion-origin runs. If future product work needs Illo to visibly continue
+  the AI Timeline from a Discussion request, that should be a separate explicit
+  action/tool, not a reused reply channel.
 
 ## Testing Decisions And Coverage
 
@@ -406,8 +406,8 @@ implementation details. The important behaviors are:
 - `@illo` in Discussion triggers a surface-aware Illo run linked to the Thread.
 - Illo can explicitly inspect Discussion through a tool.
 - Illo can explicitly reply in Discussion through a tool.
-- Illo can continue in the AI Timeline, run headlessly, or act in another
-  Thread surface when that is the natural response to the user's ask.
+- Illo can answer in Discussion, run headlessly, or use a separate explicit
+  action/tool when the user's ask should affect the AI Timeline.
 - The existing Thread UI continues to open, stream, reply, and render normal
   Illo messages after context preview blocks are added.
 
@@ -422,8 +422,10 @@ Recommended test modules:
 - Discussion API/service tests for right-panel comment behavior, mention
   triggering, and Discussion-targeted Illo acknowledgements/replies.
 - Agent tool tests for explicit Discussion inspection and Discussion replies.
-- Surface-routing tests proving that a Discussion-originated summon carries
-  surface metadata and does not force every Illo action into the AI Timeline.
+- Surface-routing tests proving that a Discussion-originated summon uses the
+  dedicated `cortex.thread_discussion_mention` event, enters a separate
+  Discussion run conversation, and never displays its final answer in the AI
+  Timeline.
 - Frontend component tests or Playwright smoke tests for opening an existing
   Thread with a submitted context preview and Discussion panel available, using
   the same chat primitives/tokens as the general team room.
@@ -441,9 +443,11 @@ Coverage added in this implementation pass:
 - Model metadata coverage for `thread_context_submissions` and
   `thread_discussion_comments`.
 - Discussion API coverage for normal comments not triggering Illo, explicit
-  `@illo` comments triggering the current main Thread run path, and
-  commit-before-broadcast ordering. Follow-up coverage must update this to the
-  surface-aware reply/action contract described above.
+  `@illo` comments triggering the dedicated Discussion event, and
+  commit-before-broadcast ordering.
+- Work-intake/runtime coverage for the separate `thread-discussion:{thread_id}`
+  run conversation, hidden AI Timeline reply tools on Discussion-origin runs,
+  and Discussion final-answer settlement into `thread_discussion_comments`.
 - Frontend typecheck coverage for the Discussion tab/pane and context timeline
   tag changes.
 

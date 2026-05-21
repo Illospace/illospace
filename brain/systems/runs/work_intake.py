@@ -22,6 +22,9 @@ from brain.systems.runs.store import AsyncAgentRunStore
 _VALID_MODEL_TIERS = {"low", "medium", "high"}
 _VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh"}
 _VALID_MODEL_PROVIDERS = {"anthropic", "openai"}
+THREAD_DISCUSSION_SURFACE = "thread_discussion"
+THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
+THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
 
 
 @dataclass(frozen=True)
@@ -233,6 +236,29 @@ def _chat_thread_id(chat_trigger: dict[str, Any], target: dict[str, Any]) -> str
     return f"chat:{conversation_id}:{message_id}"
 
 
+def _thread_discussion_parent_thread_id(
+    discussion_trigger: dict[str, Any],
+    target: dict[str, Any],
+) -> str:
+    response_target = discussion_trigger.get("response_target")
+    if not isinstance(response_target, dict):
+        response_target = {}
+    thread_id = str(
+        response_target.get("thread_id")
+        or discussion_trigger.get("thread_id")
+        or target.get("parent_thread_id")
+        or target.get("idea_id")
+        or ""
+    ).strip()
+    if not thread_id:
+        raise ValueError("Thread Discussion run triggers require a parent Thread id")
+    return thread_id
+
+
+def _thread_discussion_conversation_id(parent_thread_id: str) -> str:
+    return f"{THREAD_DISCUSSION_THREAD_PREFIX}{parent_thread_id}"
+
+
 def _run_event(trigger: dict[str, Any], policy: dict[str, Any]) -> str:
     event_type = str(trigger.get("event_type") or "")
     return str(policy.get("run_event") or event_type.split(".", 1)[-1])
@@ -372,6 +398,111 @@ def _agent_run_request_for_chat(trigger_payload: dict[str, Any] | Any) -> AgentR
     )
 
 
+async def _agent_run_request_for_thread_discussion(
+    session: Any,
+    trigger_payload: dict[str, Any] | Any,
+) -> AgentRunRequest:
+    trigger = _trigger_dict(trigger_payload)
+    target = _trigger_target(trigger)
+    payload = _trigger_payload(trigger)
+    policy = _trigger_policy(trigger)
+    trigger_org_id = str(trigger.get("org_id") or "") or None
+    actor_user_id = _payload_user_id(payload, trigger, org_id=trigger_org_id)
+    metadata = _merge_trigger_metadata(
+        trigger,
+        payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
+    )
+    discussion_trigger = dict(metadata.get("discussion_trigger") or payload.get("discussion") or {})
+    parent_thread_id = _thread_discussion_parent_thread_id(discussion_trigger, target)
+    idea = await _a_get_idea_for_intake(
+        session,
+        parent_thread_id,
+        fallback_user_id=actor_user_id,
+    )
+    if idea is None:
+        raise LookupError(f"Thread {parent_thread_id} not found")
+
+    surface_context = {
+        "originating_surface": THREAD_DISCUSSION_SURFACE,
+        "triggering_surface": THREAD_DISCUSSION_SURFACE,
+        "source_surface": THREAD_DISCUSSION_SURFACE,
+        "required_response_tool": THREAD_DISCUSSION_REPLY_TOOL,
+        "final_answer_target_surface": THREAD_DISCUSSION_SURFACE,
+    }
+    for key, value in surface_context.items():
+        metadata.setdefault(key, value)
+    metadata["discussion_trigger"] = discussion_trigger
+
+    message = str(payload.get("run_message") or payload.get("message") or payload.get("thread_message") or "")
+    metadata = annotate_metadata_with_slash_skill_commands(metadata, message)
+    profile = profile_from_metadata(metadata)
+    recipe = recipe_for_profile(profile, metadata)
+    priority = _priority(payload, policy)
+    run_event = _run_event(trigger, policy)
+    project_context, project_context_snapshot, project_context_validation_errors = await _a_select_project_context(
+        session,
+        idea=idea,
+        idea_id=parent_thread_id,
+        metadata=metadata,
+    )
+    target_ref = {
+        **target,
+        "kind": THREAD_DISCUSSION_SURFACE,
+        "event": str(run_event),
+        "surface": THREAD_DISCUSSION_SURFACE,
+        "idea_id": parent_thread_id,
+        "parent_thread_id": parent_thread_id,
+        "discussion_trigger": discussion_trigger,
+        **surface_context,
+        "related_surfaces": {
+            "ai_timeline": {
+                "kind": "ai_timeline",
+                "thread_id": parent_thread_id,
+            }
+        },
+    }
+    workspace_ref = dict(project_context) if project_context_snapshot else {}
+    if project_context_validation_errors:
+        metadata["project_context_validation_errors"] = project_context_validation_errors
+    if project_context_snapshot:
+        metadata["project_context"] = project_context
+        metadata.pop("project_context_snapshot", None)
+        target_ref["project_context_snapshot"] = project_context_snapshot
+        workspace_ref["project_context_snapshot"] = project_context_snapshot
+    else:
+        metadata.pop("project_context", None)
+        metadata.pop("project_context_snapshot", None)
+    if not isinstance(metadata.get("thread_context"), dict):
+        thread_context = await async_build_agent_visible_thread_context(
+            session,
+            parent_thread_id,
+            current_message=message,
+        )
+        if thread_context:
+            metadata["thread_context"] = thread_context
+
+    return AgentRunRequest(
+        org_id=str(getattr(idea, "org_id", None) or trigger_org_id or "") or None,
+        user_id=actor_user_id or getattr(idea, "user_id", None),
+        thread_id=_thread_discussion_conversation_id(parent_thread_id),
+        message=message,
+        profile=profile,
+        recipe=recipe,
+        target_ref=target_ref,
+        workspace_ref=workspace_ref,
+        model_policy=model_policy_from_metadata(metadata),
+        metadata={
+            **metadata,
+            "event": str(run_event),
+            "priority": priority,
+            "source": trigger.get("source"),
+            "producer": "trigger",
+            "idempotency_key": trigger.get("idempotency_key"),
+            "org_id": trigger_org_id,
+        },
+    )
+
+
 def _external_agent_headless_thread_id(target: dict[str, Any]) -> str:
     thread_id = str(target.get("thread_id") or "")
     if thread_id:
@@ -445,6 +576,38 @@ async def build_agent_run_request(
             },
         }
         request = _agent_run_request_for_chat(trigger_payload)
+        return AgentRunRequest(
+            **{
+                **request.__dict__,
+                "metadata": {
+                    **request.metadata,
+                    "source": event.source,
+                    "producer": producer,
+                    "idempotency_key": idempotency_key,
+                    "work_intake": metadata["work_intake"],
+                },
+            }
+        )
+
+    if target.get("kind") == THREAD_DISCUSSION_SURFACE:
+        trigger_payload = {
+            "source": event.source,
+            "event_type": event.event_type,
+            "actor": _as_mapping(event.actor),
+            "org_id": event.org_id,
+            "target": target,
+            "payload": {
+                **dict(event.payload or {}),
+                "message": message,
+                "metadata": metadata,
+            },
+            "idempotency_key": idempotency_key,
+            "policy": {
+                **_event_policy(event),
+                "priority": priority,
+            },
+        }
+        request = await _agent_run_request_for_thread_discussion(session, trigger_payload)
         return AgentRunRequest(
             **{
                 **request.__dict__,

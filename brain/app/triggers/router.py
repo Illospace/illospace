@@ -7,7 +7,11 @@ from typing import Any
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.app.triggers.contracts import IlloTrigger, TriggerRouteResult
 
-_CORTEX_TRIGGER_EVENTS = {"cortex.idea_created", "cortex.thread_reply"}
+_CORTEX_TRIGGER_EVENTS = {
+    "cortex.idea_created",
+    "cortex.thread_reply",
+    "cortex.thread_discussion_mention",
+}
 _CHAT_TRIGGER_EVENTS = {"chat.room_message_mention", "chat.room_thread_mention"}
 _RUN_TRIGGER_EVENTS = _CORTEX_TRIGGER_EVENTS | _CHAT_TRIGGER_EVENTS
 

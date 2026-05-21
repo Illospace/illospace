@@ -89,7 +89,7 @@ def _discussion_trigger_metadata(
         "discussion_comment_id": comment.id,
         "discussion_trigger": discussion_trigger,
         "required_response_tool": THREAD_DISCUSSION_REPLY_TOOL,
-        "final_answer_target_surface": "originating_surface",
+        "final_answer_target_surface": THREAD_DISCUSSION_SURFACE,
         "thread_message": comment.body,
         "request_source_context": {
             "surface": THREAD_DISCUSSION_SURFACE,
@@ -126,19 +126,18 @@ async def _trigger_illo_from_discussion(
     comment: ThreadDiscussionComment,
     user: dict[str, Any],
 ) -> dict[str, Any]:
-    from brain.app.triggers.adapters.internal import build_cortex_notify_trigger
+    from brain.app.triggers.adapters.internal import build_thread_discussion_mention_trigger
     from brain.app.triggers.router import async_route_trigger
 
     discussion_trigger = _discussion_trigger_context(idea=idea, comment=comment, user=user)
     metadata = _discussion_trigger_metadata(comment=comment, discussion_trigger=discussion_trigger)
-    trigger = build_cortex_notify_trigger(
-        event="thread_reply",
+    trigger = build_thread_discussion_mention_trigger(
         idea_id=str(idea.id),
         idea=idea,
+        comment=comment,
         user=user,
-        thread_message=comment.body,
+        discussion_trigger=discussion_trigger,
         metadata=metadata,
-        effective_metadata=metadata,
         priority=0,
     )
     return (await async_route_trigger(trigger, session=db)).to_response()

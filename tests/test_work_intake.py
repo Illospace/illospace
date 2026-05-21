@@ -223,10 +223,16 @@ async def test_discussion_origin_cortex_work_intake_records_surface_and_trigger_
         _Session(),
         WorkIntakeEvent(
             source="cortex",
-            event_type="cortex.thread_reply",
+            event_type="cortex.thread_discussion_mention",
             org_id="org-1",
             actor={"id": "user-1", "org_id": "org-1", "internal": False},
-            target={"kind": "cortex_idea", "idea_id": "idea-1"},
+            target={
+                "kind": "thread_discussion",
+                "idea_id": "idea-1",
+                "parent_thread_id": "idea-1",
+                "discussion_comment_id": 7,
+                "surface": "thread_discussion",
+            },
             payload={
                 "message": "[Idea: \"Launch\" | idea-1]\n\n@illo this is what we decided, carry on",
                 "metadata": {
@@ -234,20 +240,29 @@ async def test_discussion_origin_cortex_work_intake_records_surface_and_trigger_
                     "triggering_surface": "thread_discussion",
                     "discussion_trigger": discussion_trigger,
                     "required_response_tool": "post_thread_discussion_reply",
-                    "final_answer_target_surface": "originating_surface",
+                    "final_answer_target_surface": "thread_discussion",
                 },
             },
-            policy={"priority": 0, "producer": "trigger", "run_event": "thread_reply"},
+            policy={"priority": 0, "producer": "trigger", "run_event": "thread_discussion_mention"},
         ),
     )
 
-    assert request.thread_id == "idea-1"
+    assert request.thread_id == "thread-discussion:idea-1"
+    assert request.target_ref["kind"] == "thread_discussion"
+    assert request.target_ref["idea_id"] == "idea-1"
+    assert request.target_ref["parent_thread_id"] == "idea-1"
     assert request.target_ref["originating_surface"] == "thread_discussion"
     assert request.target_ref["triggering_surface"] == "thread_discussion"
     assert request.target_ref["discussion_trigger"] == discussion_trigger
+    assert request.target_ref["related_surfaces"] == {
+        "ai_timeline": {
+            "kind": "ai_timeline",
+            "thread_id": "idea-1",
+        }
+    }
     assert request.metadata["discussion_trigger"] == discussion_trigger
     assert request.metadata["required_response_tool"] == "post_thread_discussion_reply"
-    assert request.metadata["final_answer_target_surface"] == "originating_surface"
+    assert request.metadata["final_answer_target_surface"] == "thread_discussion"
 
 
 def test_legacy_routing_logic_is_removed_from_adapters():

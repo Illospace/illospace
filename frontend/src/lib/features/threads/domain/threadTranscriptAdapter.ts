@@ -76,6 +76,7 @@ export interface CortexThreadStageMessageItem {
   paragraphs?: readonly string[];
   sections?: readonly CortexThreadStageMessageSection[];
   attachments?: readonly CortexThreadStageAttachmentItem[];
+  inlineWithWork?: boolean;
 }
 
 export interface CortexThreadStageRunStep {

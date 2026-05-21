@@ -521,7 +521,7 @@ def test_fast_tool_surface_is_direct_coordinator_without_staged_reply_tools(monk
     assert roles == ["coordinator"]
 
 
-def test_fast_discussion_origin_surface_keeps_explicit_timeline_reply_tool(monkeypatch):
+def test_fast_discussion_origin_surface_keeps_timeline_reply_tools_hidden(monkeypatch):
     from brain.systems.runs.recipes.fast import _agent_tools_for_runtime
 
     monkeypatch.setattr(
@@ -542,7 +542,6 @@ def test_fast_discussion_origin_surface_keeps_explicit_timeline_reply_tool(monke
 
     assert [tool["name"] for tool in _agent_tools_for_runtime(runtime)] == [
         "post_thread_discussion_reply",
-        "cortex_reply",
     ]
 
 
@@ -557,7 +556,7 @@ def test_discussion_origin_run_does_not_auto_mirror_final_answer_to_timeline():
     assert _run_should_mirror_final_answer_to_timeline(run) is False
 
 
-def test_discussion_origin_run_can_explicitly_target_ai_timeline():
+def test_discussion_origin_run_never_mirrors_final_answer_to_ai_timeline():
     from brain.systems.runs.cortex.runner import _run_should_mirror_final_answer_to_timeline
 
     run = SimpleNamespace(
@@ -565,7 +564,7 @@ def test_discussion_origin_run_can_explicitly_target_ai_timeline():
         metadata_={"final_answer_target_surface": "ai_timeline"},
     )
 
-    assert _run_should_mirror_final_answer_to_timeline(run) is True
+    assert _run_should_mirror_final_answer_to_timeline(run) is False
 
 
 async def test_runtime_drain_steering_can_use_isolated_durable_drain():
@@ -2136,3 +2135,91 @@ async def test_runner_does_not_settle_non_idea_thread_id():
             return None
 
     assert await _settle_idea_for_terminal_root_run_async(FakeSession(), 44) is None
+
+
+async def test_runner_settles_discussion_origin_run_into_discussion_not_timeline(monkeypatch):
+    from brain.systems.runs.cortex.runner import _settle_terminal_root_run_async
+    from brain.platform.db.models.agent_run import AgentRunRow
+    from brain.platform.db.models.idea import IdeaThread, ThreadDiscussionComment
+
+    discussion_trigger = {
+        "thread_id": "idea-1",
+        "comment_id": 7,
+        "response_target": {
+            "surface": "thread_discussion",
+            "thread_id": "idea-1",
+            "reply_to_comment_id": 7,
+        },
+    }
+    run = SimpleNamespace(
+        id=46,
+        parent_run_id=None,
+        thread_id="thread-discussion:idea-1",
+        status="completed",
+        org_id="org-1",
+        target_ref={
+            "kind": "thread_discussion",
+            "idea_id": "idea-1",
+            "parent_thread_id": "idea-1",
+            "discussion_trigger": discussion_trigger,
+        },
+        metadata_={"originating_surface": "thread_discussion"},
+    )
+    final_artifact = SimpleNamespace(
+        id=101,
+        run_id=46,
+        artifact_type="final_answer",
+        text="Yes, I can see this Discussion comment.",
+    )
+    added = []
+    published = []
+    scalar_calls = 0
+
+    class FakeSession:
+        async def get(self, model, key):
+            if model is AgentRunRow and int(key) == 46:
+                return run
+            raise AssertionError("Discussion-origin settlement must not load the AI Timeline Thread")
+
+        def add(self, obj):
+            if isinstance(obj, ThreadDiscussionComment):
+                obj.id = 8
+            added.append(obj)
+
+        async def scalars(self, stmt):
+            nonlocal scalar_calls
+            scalar_calls += 1
+            if scalar_calls == 1:
+                return _ScalarRows([])
+            return _ScalarRows([final_artifact])
+
+        async def flush(self):
+            pass
+
+    monkeypatch.setattr(
+        "brain.systems.runs.cortex.runner.publish_safe",
+        lambda event, payload: published.append((event, payload)),
+    )
+
+    payload = await _settle_terminal_root_run_async(FakeSession(), 46)
+
+    assert payload == {
+        "surface": "thread_discussion",
+        "idea_id": "idea-1",
+        "run_id": 46,
+        "comment_id": 8,
+    }
+    assert not any(isinstance(obj, IdeaThread) for obj in added)
+    comment = next(obj for obj in added if isinstance(obj, ThreadDiscussionComment))
+    assert comment.thread_id == "idea-1"
+    assert comment.author_kind == "illo"
+    assert comment.body == "Yes, I can see this Discussion comment."
+    assert comment.metadata_ == {
+        "source": "agent_run_final_answer",
+        "surface": "thread_discussion",
+        "created_by_run_id": 46,
+        "artifact_id": 101,
+        "reply_to_comment_id": 7,
+    }
+    assert published[0][0] == "thread_discussion_comment"
+    assert published[0][1]["idea_id"] == "idea-1"

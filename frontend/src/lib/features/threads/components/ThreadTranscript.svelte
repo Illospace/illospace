@@ -333,6 +333,7 @@
       'thread-message',
       role === 'user' ? 'thread-message-user' : 'thread-message-illo',
       role === 'user' ? `thread-message-${tone}` : '',
+      item.inlineWithWork ? 'thread-message-inline-work' : '',
     ]
       .filter(Boolean)
       .join(' ');
@@ -1560,6 +1561,13 @@
     --thread-message-meta: var(--constellation-thread-message-illo-meta);
     justify-self: start;
     margin-right: auto;
+  }
+
+  .thread-message-inline-work.thread-message-illo {
+    --thread-inline-work-outdent: 16px;
+    width: min(calc(100% + var(--thread-inline-work-outdent)), 776px);
+    margin-inline-start: calc(var(--thread-inline-work-outdent) * -1);
+    gap: 8px;
   }
 
   .thread-message-user {
@@ -3088,6 +3096,10 @@
     .message-stack {
       gap: 14px;
       padding-bottom: 22px;
+    }
+
+    .thread-message-inline-work.thread-message-illo {
+      --thread-inline-work-outdent: 0px;
     }
 
     .thread-composer-dock {
