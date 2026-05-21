@@ -125,7 +125,7 @@ async def update_workspace_pin(
     body: WorkspacePinUpdate,
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
-    ):
+) -> WorkspacePinRead:
     org_id = require_org_context(user)
     pin = await _get_pin_for_org(db, org_id, pin_id)
     _require_pin_author(pin, user)
@@ -145,6 +145,7 @@ async def update_workspace_pin(
         pin.pin_metadata = dict(updates["metadata"])
 
     await db.flush()
+    await db.refresh(pin)
     payload = _serialize_pin(pin)
     await ws_manager.broadcast_to_org(org_id, "workspace_pin_updated", {"pin": payload.model_dump(mode="json")})
     return payload
@@ -155,7 +156,7 @@ async def delete_workspace_pin(
     pin_id: str,
     db: AsyncSession = Depends(get_db),
     user: dict[str, Any] = Depends(get_current_user),
-    ):
+):
     org_id = require_org_context(user)
     pin = await _get_pin_for_org(db, org_id, pin_id)
     _require_pin_author(pin, user)
