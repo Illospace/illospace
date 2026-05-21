@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -13,9 +14,10 @@ def test_thread_attachment_file_is_not_materialized_as_github_workspace():
     }) is None
 
 
-def test_project_context_materializable_resources_require_real_local_path_or_repo():
+def test_project_context_materializable_resources_include_empty_project_roots():
     from brain.systems.cortex.project_context.materializer import project_context_has_materializable_resources
 
+    assert project_context_has_materializable_resources({"resources": []}) is True
     assert project_context_has_materializable_resources({
         "resources": [
             {
@@ -25,7 +27,7 @@ def test_project_context_materializable_resources_require_real_local_path_or_rep
                 "uri": "browser-folder://pending",
             }
         ]
-    }) is False
+    }) is True
     assert project_context_has_materializable_resources({
         "resources": [
             {
@@ -92,7 +94,7 @@ def test_runner_materializes_thread_attachment_files_as_project_resources(monkey
     assert status_payload is None
 
 
-def test_runner_skips_placeholder_project_resources_without_failing(monkeypatch):
+def test_runner_materializes_placeholder_projects_as_empty_roots(monkeypatch):
     from brain.systems.runs.cortex import runner
 
     run = SimpleNamespace(
@@ -130,16 +132,23 @@ def test_runner_skips_placeholder_project_resources_without_failing(monkeypatch)
         async def __aexit__(self, *_args):
             return False
 
-    materialize = AsyncMock()
     monkeypatch.setattr(runner, "UnitOfWork", lambda: FakeUow())
     monkeypatch.setattr(runner, "_async_record_project_activity", AsyncMock())
-    monkeypatch.setattr(runner, "materialize_project_context_workspaces", materialize)
+    monkeypatch.setattr(
+        runner,
+        "materialize_project_context_workspaces",
+        AsyncMock(return_value=SimpleNamespace(
+            ok=True,
+            workspaces=[{"name": "/", "path": "/tmp/project-root"}],
+            errors=[],
+        )),
+    )
 
     context_ready, status_payload = runner._materialize_project_context(52)
 
     assert context_ready is True
     assert status_payload is None
-    materialize.assert_not_called()
+    runner.materialize_project_context_workspaces.assert_called_once()
 
 
 async def test_materialize_github_project_context_uses_vault_key_without_persisting_token(tmp_path, monkeypatch):
@@ -212,7 +221,9 @@ async def test_materialize_github_project_context_uses_vault_key_without_persist
     )
 
     assert result.ok
+    root_draft = tmp_path / ".illo-project-context" / "local" / "run-42" / "project-root"
     assert result.workspaces == [
+        {"name": "/", "path": str(root_draft)},
         {
             "name": "example-org/example-backend",
             "path": str(tmp_path / ".illo-project-context" / "github" / "example-org" / "example-backend"),
@@ -226,8 +237,9 @@ async def test_materialize_github_project_context_uses_vault_key_without_persist
             "branch": "main",
         }
     ]
-    resource = run.target_metadata["project_context_snapshot"]["resources"][0]
-    assert resource["path"] == result.workspaces[0]["path"]
+    resource = run.target_metadata["project_context_snapshot"]["resources"][1]
+    assert run.target_metadata["project_context_snapshot"]["resources"][0]["mount_path"] == "/"
+    assert resource["path"] == result.workspaces[1]["path"]
     assert resource["materialization"]["status"] == "ready"
     assert run.metadata_["workspaces"] == result.workspaces
     assert "test-private-token" not in str(run.metadata_)
@@ -293,9 +305,13 @@ async def test_materialize_github_folder_uri_mounts_repo_subpath(tmp_path, monke
 
     expected_repo = tmp_path / "thread-root" / ".illo-project-context" / "github" / "uwear-ai" / "agent-mission-control"
     expected_workspace = expected_repo / "workspaces" / "linkedin-outbound"
+    expected_root = tmp_path / "thread-root" / ".illo-project-context" / "local" / "resource-2" / "project-root"
     assert result.ok
-    assert result.workspaces == [{"name": "agent-mission-control/workspaces/linkedin-outbound", "path": str(expected_workspace)}]
-    resource = run.target_ref["project_context_snapshot"]["resources"][0]
+    assert result.workspaces == [
+        {"name": "/", "path": str(expected_root)},
+        {"name": "agent-mission-control/workspaces/linkedin-outbound", "path": str(expected_workspace)},
+    ]
+    resource = run.target_ref["project_context_snapshot"]["resources"][1]
     assert resource["repo"] == "uwear-ai/agent-mission-control"
     assert resource["path"] == str(expected_workspace)
     assert resource["materialization"]["repo_path"] == str(expected_repo)
@@ -572,8 +588,12 @@ async def test_materialize_reuses_existing_thread_checkout_without_reclone(tmp_p
     assert result.ok
     assert clone_calls == []
     assert sentinel.read_text() == "preserve me"
-    assert result.workspaces == [{"name": "example-org/example-repo", "path": str(checkout)}]
-    resource = run.target_ref["project_context_snapshot"]["resources"][0]
+    root_draft = tmp_path / ".illo-project-context" / "local" / "run-45" / "project-root"
+    assert result.workspaces == [
+        {"name": "/", "path": str(root_draft)},
+        {"name": "example-org/example-repo", "path": str(checkout)},
+    ]
+    resource = run.target_ref["project_context_snapshot"]["resources"][1]
     assert resource["path"] == str(checkout)
     assert resource["materialization"] == {
         "status": "ready",
@@ -646,8 +666,12 @@ async def test_materialize_ignores_stale_managed_run_path_and_uses_thread_root(t
 
     assert result.ok
     assert clone_calls == [expected_checkout]
-    assert result.workspaces == [{"name": "example-org/example-repo", "path": str(expected_checkout)}]
-    resource = run.target_ref["project_context_snapshot"]["resources"][0]
+    root_draft = thread_root / ".illo-project-context" / "local" / "run-46" / "project-root"
+    assert result.workspaces == [
+        {"name": "/", "path": str(root_draft)},
+        {"name": "example-org/example-repo", "path": str(expected_checkout)},
+    ]
+    resource = run.target_ref["project_context_snapshot"]["resources"][1]
     assert resource["path"] == str(expected_checkout)
 
 
@@ -715,7 +739,7 @@ async def test_materialize_refuses_to_overwrite_non_matching_thread_checkout(tmp
     assert run.target_status == "invalid"
 
 
-async def test_materialize_empty_project_context_is_ready_noop(tmp_path, monkeypatch):
+async def test_materialize_empty_project_context_creates_project_root(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -752,15 +776,20 @@ async def test_materialize_empty_project_context_is_ready_noop(tmp_path, monkeyp
     result = await materialize_project_context_workspaces(48, workspace_root=str(tmp_path), user_id="user-1")
 
     assert result.ok
+    draft_dir = tmp_path / ".illo-project-context" / "local" / "run-48" / "project-root"
+    source_root = tmp_path.parent / "project-roots" / "run-48"
     assert result.empty_project is True
-    assert result.workspaces == []
+    assert result.workspaces == [{"name": "/", "path": str(draft_dir)}]
     assert result.errors == []
-    assert run.target_ref["project_context_snapshot"]["resources"] == []
-    assert run.workspace_ref["project_workspace_manifest"]["mounts"] == []
-    assert run.workspace_ref["project_workspace_manifest"]["workspaces"] == []
+    resource = run.target_ref["project_context_snapshot"]["resources"][0]
+    assert resource["id"] == "project-root"
+    assert resource["mount_path"] == "/"
+    assert resource["materialization"]["source_path"] == str(source_root)
+    assert run.workspace_ref["project_workspace_manifest"]["mounts"][0]["mount_path"] == "/"
+    assert run.workspace_ref["project_workspace_manifest"]["workspaces"] == [{"name": "/", "path": str(draft_dir)}]
     assert run.workspace_ref["project_context_materialization"]["status"] == "materialized"
     assert run.workspace_ref["project_context_materialization"]["empty_project"] is True
-    assert "workspace_root" not in run.workspace_ref
+    assert run.workspace_ref["workspace_root"] == str(draft_dir)
 
 
 async def test_materialize_missing_project_context_snapshot_reports_error(tmp_path, monkeypatch):
@@ -852,21 +881,25 @@ async def test_materialize_backend_readable_folder_becomes_thread_draft_workspac
 
     result = await materialize_project_context_workspaces(51, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
 
-    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "profile-abc" / "resource-folder"
+    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "profile-abc" / "project-root"
+    source_root = tmp_path / "project-roots" / "profile-abc"
     assert result.ok
-    assert result.workspaces == [{"name": "/reports", "path": str(draft_dir)}]
+    assert result.workspaces == [{"name": "/", "path": str(draft_dir)}]
     assert (draft_dir / "brief.md").read_text() == "runtime context"
     resource = run.target_ref["project_context_snapshot"]["resources"][0]
+    assert resource["id"] == "project-root"
+    assert resource["mount_path"] == "/"
     assert resource["path"] == str(draft_dir)
-    assert resource["materialization"]["source_path"] == str(project_dir)
+    assert resource["materialization"]["source_path"] == str(source_root)
+    assert (source_root / "brief.md").read_text() == "runtime context"
     assert resource["materialization"]["workspace_path"] == str(draft_dir)
     assert resource["materialization"]["draft"] is True
     assert resource["materialization"]["project_key"] == "profile-abc"
     assert run.workspace_ref["workspace_root"] == str(draft_dir)
-    assert run.workspace_ref["project_workspace_manifest"]["workspaces"][0]["name"] == "/reports"
+    assert run.workspace_ref["project_workspace_manifest"]["workspaces"][0]["name"] == "/"
 
 
-async def test_materialize_backend_readable_file_uses_parent_workspace(tmp_path, monkeypatch):
+async def test_materialize_single_uploaded_file_uses_project_native_folder_root(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context import materializer
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -915,16 +948,104 @@ async def test_materialize_backend_readable_file_uses_parent_workspace(tmp_path,
 
     result = await materialize_project_context_workspaces(53, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
 
-    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "attachment-1"
-    draft_file = draft_dir / "spec.md"
+    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "attachment-1" / "project-root"
     assert result.ok
-    assert result.workspaces == [{"name": "spec.md", "path": str(draft_dir)}]
-    assert draft_file.read_text() == "# Spec"
+    assert result.workspaces == [{"name": "/", "path": str(draft_dir)}]
+    assert (draft_dir / "spec.md").read_text() == "# Spec"
     resource = run.target_ref["project_context_snapshot"]["resources"][0]
-    assert resource["path"] == str(draft_file)
-    assert resource["materialization"]["source_path"] == str(spec_file)
+    source_root = Path(resource["materialization"]["source_path"])
+    assert source_root != spec_file
+    assert source_root.is_dir()
+    assert (source_root / "spec.md").read_text() == "# Spec"
+    assert resource["id"] == "project-root"
+    assert resource["mount_path"] == "/"
+    assert resource["path"] == str(draft_dir)
+    assert resource["materialization"]["path"] == str(draft_dir)
+    assert resource["materialization"]["kind"] == "project_root"
     assert resource["materialization"]["workspace_path"] == str(draft_dir)
+    assert resource["materialization"]["draft"] is True
     assert run.workspace_ref["workspace_root"] == str(draft_dir)
+    mount = run.workspace_ref["project_workspace_manifest"]["mounts"][0]
+    assert mount["kind"] == "project_root"
+    assert mount["source_path"] == str(source_root)
+    assert mount["resource_path"] == str(draft_dir)
+
+
+async def test_materialize_uploaded_folder_imports_files_into_project_native_root(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    upload_dir = tmp_path / "uploads"
+    (upload_dir / "folder").mkdir(parents=True)
+    first_file = upload_dir / "folder" / "brief.md"
+    second_file = upload_dir / "folder" / "data" / "metrics.csv"
+    second_file.parent.mkdir()
+    first_file.write_text("brief", encoding="utf-8")
+    second_file.write_text("metric,value\n", encoding="utf-8")
+
+    run = SimpleNamespace(
+        id=57,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={},
+        target_ref={
+            "kind": "cortex_idea",
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "id": "folder-upload",
+                        "kind": "folder",
+                        "name": "folder",
+                        "uri": "project-context-upload://folder",
+                        "uploaded_files": [
+                            {
+                                "filename": "brief.md",
+                                "relative_path": "folder/brief.md",
+                                "storage_path": str(first_file),
+                            },
+                            {
+                                "filename": "metrics.csv",
+                                "relative_path": "folder/data/metrics.csv",
+                                "storage_path": str(second_file),
+                            },
+                        ],
+                    }
+                ],
+            },
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+
+    result = await materialize_project_context_workspaces(
+        57,
+        workspace_root=str(tmp_path / "thread-root"),
+        user_id="user-1",
+    )
+
+    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "folder-upload" / "project-root"
+    source_root = Path(run.target_ref["project_context_snapshot"]["resources"][0]["materialization"]["source_path"])
+    assert result.ok
+    assert result.workspaces == [{"name": "/", "path": str(draft_dir)}]
+    assert (source_root / "folder" / "brief.md").read_text(encoding="utf-8") == "brief"
+    assert (source_root / "folder" / "data" / "metrics.csv").read_text(encoding="utf-8") == "metric,value\n"
+    assert (draft_dir / "folder" / "brief.md").read_text(encoding="utf-8") == "brief"
+    assert (draft_dir / "folder" / "data" / "metrics.csv").read_text(encoding="utf-8") == "metric,value\n"
 
 
 async def test_materialize_thread_draft_marks_conflict_when_root_and_draft_changed(tmp_path, monkeypatch):
@@ -973,11 +1094,12 @@ async def test_materialize_thread_draft_marks_conflict_when_root_and_draft_chang
     monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
 
     first = await materialize_project_context_workspaces(56, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
-    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "resource-folder"
+    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "resource-folder" / "project-root"
+    source_root = Path(run.target_ref["project_context_snapshot"]["resources"][0]["materialization"]["source_path"])
 
     assert first.ok
     (draft_dir / "brief.md").write_text("draft edit")
-    (project_dir / "brief.md").write_text("root v2")
+    (source_root / "brief.md").write_text("root v2")
 
     second = await materialize_project_context_workspaces(56, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
 

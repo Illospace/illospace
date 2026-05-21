@@ -91,7 +91,9 @@ def _plan_path(base_path: str | None, relative_path: str) -> str | None:
         return None
     base = Path(base_path).expanduser()
     if base.exists() and base.is_file():
-        return str(base) if normalised.as_posix() == base.name else None
+        if normalised.as_posix() == base.name:
+            return str(base)
+        return str(base.parent / normalised.as_posix())
     return str(base / normalised.as_posix())
 
 
@@ -152,11 +154,7 @@ def _publish_blocked_reasons(group: Mapping[str, Any], operations: list[dict[str
         and not operation.get("target_path")
         for operation in operations
     ):
-        target_path = _clean_text(publish_target.get("path"))
-        if target_path and Path(target_path).expanduser().is_file():
-            blocked_reasons.append("file_project_root_cannot_publish_additional_paths")
-        else:
-            blocked_reasons.append("publish_operation_path_unavailable")
+        blocked_reasons.append("publish_operation_path_unavailable")
     return blocked_reasons
 
 
@@ -347,6 +345,11 @@ def _delete_publish_path(target_path: str | None) -> None:
         target.unlink()
 
 
+def _local_publish_root(source_path: str) -> Path:
+    source = Path(source_path).expanduser()
+    return source.parent if source.exists() and source.is_file() else source
+
+
 def _version_metadata(
     group: Mapping[str, Any],
     *,
@@ -429,8 +432,9 @@ def _publish_local_group(
 
     applied: list[dict[str, Any]] = []
     operations = [dict(operation) for operation in group.get("operations") or [] if isinstance(operation, Mapping)]
+    source_root = _local_publish_root(source_path)
     before_version = capture_project_root_version(
-        Path(source_path).expanduser(),
+        source_root,
         label="before-draft-publish",
         metadata=_version_metadata(
             group,
@@ -457,11 +461,11 @@ def _publish_local_group(
     except Exception as exc:
         rollback_errors: list[str] = []
         try:
-            restore_project_root_version(Path(source_path).expanduser(), before_version.version_id)
+            restore_project_root_version(source_root, before_version.version_id)
             if sync_after_publish:
-                sync_draft_from_root(Path(source_path).expanduser(), Path(workspace_path).expanduser())
+                sync_draft_from_root(source_root, Path(workspace_path).expanduser())
             else:
-                _refresh_published_draft_paths(source_path, workspace_path, applied)
+                _refresh_published_draft_paths(str(source_root), workspace_path, applied)
         except Exception as rollback_exc:
             rollback_errors.append(str(rollback_exc))
         blocked_reasons = ["publish_failed_rolled_back"] if not rollback_errors else ["publish_failed_rollback_failed"]
@@ -480,7 +484,7 @@ def _publish_local_group(
         }
 
     after_version = capture_project_root_version(
-        Path(source_path).expanduser(),
+        source_root,
         label="after-draft-publish",
         metadata=_version_metadata(
             group,
@@ -493,9 +497,9 @@ def _publish_local_group(
         ),
     )
     if sync_after_publish:
-        sync_draft_from_root(Path(source_path).expanduser(), Path(workspace_path).expanduser())
+        sync_draft_from_root(source_root, Path(workspace_path).expanduser())
     else:
-        _refresh_published_draft_paths(source_path, workspace_path, applied)
+        _refresh_published_draft_paths(str(source_root), workspace_path, applied)
     return {
         "resource_id": group.get("resource_id"),
         "mount_path": group.get("mount_path"),

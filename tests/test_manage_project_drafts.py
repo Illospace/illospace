@@ -339,7 +339,7 @@ async def test_manage_project_publish_draft_applies_local_changes_and_refreshes_
     assert plan_after["summary"] == {"resource_count": 1, "operation_count": 0, "blocked_count": 0}
 
 
-async def test_manage_project_blocks_new_sibling_publish_for_file_roots(tmp_path):
+async def test_manage_project_publish_draft_allows_new_sibling_for_single_uploaded_file_project(tmp_path):
     from brain.systems.cortex.project_context.drafts import sync_draft_from_root
 
     source_dir = tmp_path / "uploads"
@@ -360,15 +360,15 @@ async def test_manage_project_blocks_new_sibling_publish_for_file_roots(tmp_path
         )
 
     operation = plan["groups"][0]["operations"][0]
-    assert plan["summary"] == {"resource_count": 1, "operation_count": 1, "blocked_count": 1}
-    assert plan["groups"][0]["status"] == "blocked"
-    assert plan["groups"][0]["blocked_reasons"] == ["file_project_root_cannot_publish_additional_paths"]
+    assert plan["summary"] == {"resource_count": 1, "operation_count": 1, "blocked_count": 0}
+    assert plan["groups"][0]["status"] == "ready"
+    assert plan["groups"][0]["blocked_reasons"] == []
     assert operation["draft_path"] == str(draft_dir / "customer_analysis_past_4_weeks.md")
-    assert operation["target_path"] is None
-    assert published["ok"] is False
-    assert published["code"] == "project_draft_publish_blocked"
+    assert operation["target_path"] == str(source_dir / "customer_analysis_past_4_weeks.md")
+    assert published["ok"] is True
+    assert published["summary"] == {"published_groups": 1, "operation_count": 1, "blocked_count": 0}
     assert source_file.read_text(encoding="utf-8") == "base csv"
-    assert not (source_dir / "customer_analysis_past_4_weeks.md").exists()
+    assert (source_dir / "customer_analysis_past_4_weeks.md").read_text(encoding="utf-8") == "analysis"
 
 
 async def test_manage_project_allows_original_file_root_update(tmp_path):
@@ -390,6 +390,34 @@ async def test_manage_project_allows_original_file_root_update(tmp_path):
     assert plan["groups"][0]["operations"][0]["target_path"] == str(source_file)
     assert published["ok"] is True
     assert source_file.read_text(encoding="utf-8") == "draft csv"
+
+
+async def test_manage_project_empty_local_project_root_publishes_new_file(tmp_path):
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "empty-project-root"
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "empty-project"
+    source_dir.mkdir()
+    sync_draft_from_root(source_dir, draft_dir)
+    (draft_dir / "README.md").write_text("# New project\n", encoding="utf-8")
+
+    with bind_agent_context({"run": _project_run(source_dir, draft_dir), "idea_id": "idea-1"}):
+        plan = json.loads(await projects._handle_manage_project(action="plan_publish"))
+        published = json.loads(await projects._handle_manage_project(action="publish_draft"))
+
+    assert plan["summary"] == {"resource_count": 1, "operation_count": 1, "blocked_count": 0}
+    assert plan["groups"][0]["status"] == "ready"
+    assert plan["groups"][0]["operations"] == [
+        {
+            "operation": "create",
+            "path": "README.md",
+            "draft_path": str(draft_dir / "README.md"),
+            "target_path": str(source_dir / "README.md"),
+        }
+    ]
+    assert published["ok"] is True
+    assert published["summary"] == {"published_groups": 1, "operation_count": 1, "blocked_count": 0}
+    assert (source_dir / "README.md").read_text(encoding="utf-8") == "# New project\n"
 
 
 async def test_manage_project_publish_draft_rolls_back_local_root_on_failure(tmp_path, monkeypatch):
