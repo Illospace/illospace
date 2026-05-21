@@ -218,7 +218,7 @@ async def test_exchange_openai_oauth_stores_chatgpt_session_payload():
         status="connected",
         setup_required=False,
         method="chatgpt",
-        source="user_default",
+        source="codex_subscription",
         label="Codex / ChatGPT",
     ))
 
@@ -282,7 +282,7 @@ async def test_exchange_openai_oauth_uses_session_redirect_uri_for_server_callba
             status="connected",
             setup_required=False,
             method="chatgpt",
-            source="user_default",
+            source="codex_subscription",
             label="Codex / ChatGPT",
         )),
     ):

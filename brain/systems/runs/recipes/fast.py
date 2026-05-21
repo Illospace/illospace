@@ -13,7 +13,7 @@ from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_
 from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.base import BaseRunRecipe
-from brain.systems.runs.recipes.shared import workspace_root_from_ref
+from brain.systems.runs.recipes.shared import project_runtime_workspace_from_ref
 from brain.systems.personality import soul_prompt_section
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,8 @@ Runtime rules:
 - Treat the provided Target, Workspace, Context, attachments, memory, and live steering as the current run state.
 - Use later live steering to adjust the current run without discarding useful progress.
 - Prefer the smallest complete action that satisfies the request now; leave larger follow-up work explicit.
+- Before your first tool call on work that needs inspection, edits, or more than a moment, write one brief task-specific assistant sentence that says what you are about to do.
+- Make that opening natural to the request; do not use canned acknowledgements.
 - Keep progress updates brief and meaningful when work takes more than a moment.
 - Do not simulate a Deep coordinator graph inside Fast. If the request needs parallel workers, long verification, or durable delegation, make that boundary explicit and prepare a clean handoff.
 - Before finalizing, reconcile the answer with the evidence visible in this run and name any concrete blocker or uncertainty.
@@ -51,15 +53,20 @@ def _disabled_tool_names(runtime: RunRuntime) -> set[str]:
 
 def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:
     hidden = _FAST_HIDDEN_TOOL_NAMES | _disabled_tool_names(runtime)
+    target_ref = getattr(runtime.request, "target_ref", {}) or {}
+    surface = str(
+        runtime.request.metadata.get("originating_surface")
+        or target_ref.get("originating_surface")
+        or ""
+    )
+    if surface == "thread_discussion":
+        hidden = set(hidden)
+        hidden.discard("cortex_reply")
     return [
         tool
         for tool in build_agent_tools("coordinator")
         if str(tool.get("name") or "") not in hidden
     ]
-
-
-def _workspace_root(workspace_ref: dict[str, Any]) -> str | None:
-    return workspace_root_from_ref(workspace_ref)
 
 
 def _json_block(title: str, value: Any) -> str:
@@ -91,7 +98,8 @@ class FastRecipe(BaseRunRecipe):
             metadata=runtime.request.metadata,
         )
         await runtime.activity("Reading context")
-        workspace_root = _workspace_root(runtime.request.workspace_ref)
+        project_workspace = project_runtime_workspace_from_ref(runtime.request.workspace_ref)
+        workspace_root = project_workspace.workspace_root
         model_policy = dict(runtime.request.model_policy or {})
         model = model_policy.get("model") or get_model_for_tier(
             model_policy.get("tier") or "high",
@@ -111,7 +119,10 @@ class FastRecipe(BaseRunRecipe):
             return await runtime.drain_steering()
 
         disabled_tools = _disabled_tool_names(runtime)
-        raw_tool_handlers = build_tool_handlers(workspace_root=workspace_root)
+        raw_tool_handlers = build_tool_handlers(
+            workspace_root=workspace_root,
+            allowed_workspaces=project_workspace.allowed_workspaces,
+        )
         if disabled_tools:
             raw_tool_handlers = {
                 name: handler for name, handler in raw_tool_handlers.items() if name not in disabled_tools
@@ -156,6 +167,7 @@ class FastRecipe(BaseRunRecipe):
                 "org_id": runtime.request.org_id,
                 "profile": "fast",
                 "recipe": self.name,
+                "execution_provenance": runtime.request.metadata,
                 "target_ref": runtime.request.target_ref,
                 "workspace_ref": runtime.request.workspace_ref,
                 "thread_attachment_context": _thread_attachment_context(runtime),

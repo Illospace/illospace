@@ -81,6 +81,7 @@ def _actor_payload(actor: PrincipalIdentity | None) -> dict[str, Any] | None:
         "principal_type": actor.principal_type,
         "role": actor.role,
         "name": actor.name,
+        "email": actor.email,
         "org_id": actor.org_id,
         "internal": actor.internal,
         "permissions": sorted(actor.permissions),

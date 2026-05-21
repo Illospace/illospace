@@ -7,6 +7,7 @@ import {
   applyRunCompletedToStream,
   mergeLiveStreamState,
   runUiEventKey,
+  shouldRenderLiveAgentTextItem,
 } from './cortexRunStream.ts';
 import { mergeRunProgressSnapshot } from './cortexRunPresentation.ts';
 
@@ -100,6 +101,60 @@ test('appends, extends, and resets live text deltas', () => {
   assert.equal(second[0].content, 'Hello');
   assert.equal(second[0].metadata.live_agent_text, true);
   assert.deepEqual(reset, []);
+});
+
+test('keeps live agent text visible until a settled run reply exists', () => {
+  const run = { type: 'run', id: '12', run_id: 12, status: 'running' };
+  const live = {
+    type: 'message',
+    id: 'live-run-12',
+    role: 'illo',
+    content: 'I will inspect the trace first.',
+    metadata: { run_id: 12, live_agent_text: true },
+  };
+  const settled = {
+    type: 'message',
+    id: 'm12',
+    role: 'illo',
+    content: 'Here is what I found.',
+    metadata: { run_id: 12 },
+  };
+
+  assert.equal(shouldRenderLiveAgentTextItem(live, [run, live]), true);
+  assert.equal(shouldRenderLiveAgentTextItem(live, [run, live, settled]), false);
+  assert.equal(shouldRenderLiveAgentTextItem(settled, [run, live, settled]), true);
+});
+
+test('starts a new live text segment after tool work begins', () => {
+  const preamble = applyAgentTextDeltaToStream([], {
+    idea_id: 'idea-1',
+    run_id: 12,
+    delta: 'I will inspect first.',
+    profile: 'fast',
+    event_created_at: '2026-05-05T10:00:01Z',
+  }, 'idea-1');
+  const withTool = applyAgentActivityToStream(preamble, {
+    type: 'tool_started',
+    idea_id: 'idea-1',
+    run_id: 12,
+    activity: 'Using read_file',
+    tool_name: 'read_file',
+    event_created_at: '2026-05-05T10:00:02Z',
+  }, 'idea-1', 'fast');
+  const next = applyAgentTextDeltaToStream(withTool, {
+    idea_id: 'idea-1',
+    run_id: 12,
+    delta: 'I found the file.',
+    event_created_at: '2026-05-05T10:00:03Z',
+  }, 'idea-1');
+  const liveMessages = next.filter((item) => item.metadata?.live_agent_text);
+
+  assert.deepEqual(liveMessages.map((item) => item.content), [
+    'I will inspect first.',
+    'I found the file.',
+  ]);
+  assert.equal(liveMessages[0].metadata.live_agent_text_after_tool, false);
+  assert.equal(liveMessages[1].metadata.live_agent_text_after_tool, true);
 });
 
 test('creates and updates run activity with tool call state', () => {

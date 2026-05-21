@@ -30,7 +30,7 @@ from sqlalchemy import select
 sys.path.insert(0, ".")
 
 from brain.platform.integrations.anthropic_adapter import build_auth_adapter, get_oauth_betas
-from brain.platform.db.models.org import UserApiKey
+from brain.platform.db.models.org import OrgApiKey
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.vault import _decrypt
 
@@ -54,17 +54,16 @@ async def _load_token() -> str:
     async with UnitOfWork() as uow:
         row = (
             await uow.session.scalars(
-                select(UserApiKey.encrypted_key)
+                select(OrgApiKey.encrypted_key)
                 .where(
-                    UserApiKey.provider == "anthropic",
-                    UserApiKey.is_active == True,  # noqa: E712
+                    OrgApiKey.provider == "anthropic",
                 )
-                .order_by(UserApiKey.created_at.desc())
+                .order_by(OrgApiKey.created_at.desc())
                 .limit(1)
             )
         ).first()
     if row is None:
-        raise RuntimeError("No active anthropic token found in user_api_keys")
+        raise RuntimeError("No Anthropic org token found in org_api_keys")
     return _decrypt(bytes(row))
 
 

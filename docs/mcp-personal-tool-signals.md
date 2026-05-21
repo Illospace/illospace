@@ -1,7 +1,12 @@
 # MCP Personal Tool Signals
 
-Status: implementation note for Reda's MCP lane
+Status: historical implementation note; superseded for new work by
+`docs/prd-universal-thread-context-ingress.md`
 Parent PRD: `docs/prd-inbound-coordination-layer.md`
+
+Current canonical ingress tool for personal agents is `illo_submit_context`.
+This document describes the earlier `illo_submit_signal` lane that proved the
+inbound coordination foundation and still explains legacy scope/history.
 
 ## Purpose
 

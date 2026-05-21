@@ -4,7 +4,75 @@ from __future__ import annotations
 
 from typing import Any
 
+from brain.systems.cortex.project_context.draft_state import (
+    project_draft_status_payload,
+    project_refresh_draft_from_root_payload,
+)
+from brain.systems.cortex.project_context.publish import (
+    project_publish_draft_payload,
+    project_publish_plan_payload,
+)
+from brain.systems.cortex.project_context.root_history import (
+    project_preview_root_version_payload,
+    project_restore_root_version_payload,
+    project_root_versions_payload,
+)
 from brain.systems.runs.tool_catalog.handlers.common import *
+
+
+PROJECT_DRAFT_OPERATIONS: dict[str, dict[str, object]] = {
+    "draft_status": {
+        "required": ["current Project-backed AgentRun/thread"],
+        "optional": [],
+        "effect": "read Project draft workspace status without mutating Project roots",
+    },
+    "plan_publish": {
+        "required": ["current Project-backed AgentRun/thread"],
+        "optional": [],
+        "effect": "produce a grouped publish plan for Project draft changes without writing files",
+    },
+    "refresh_draft_from_root": {
+        "required": ["current Project-backed AgentRun/thread"],
+        "optional": ["resource_id", "resource_ids"],
+        "effect": "explicitly refresh the thread draft from the latest Project root without mutating the root",
+    },
+    "publish_draft": {
+        "required": ["current Project-backed AgentRun/thread"],
+        "optional": ["resource_ids", "publish_paths", "path"],
+        "effect": "publish local Project draft changes back to root, blocking with conflict-resolution guidance when root and draft changed the same paths",
+    },
+    "root_versions": {
+        "required": ["current Project-backed AgentRun/thread"],
+        "optional": ["resource_id"],
+        "effect": "list local Project root versions captured for attached draft resources",
+    },
+    "preview_root_version": {
+        "required": ["current Project-backed AgentRun/thread", "version_id"],
+        "optional": ["resource_id"],
+        "effect": "preview how restoring a captured local Project root version would change the root",
+    },
+    "restore_root_version": {
+        "required": ["current Project-backed AgentRun/thread", "version_id"],
+        "optional": ["resource_id"],
+        "effect": "restore a local Project root to a captured version and refresh its thread draft",
+    },
+}
+
+
+def _project_manage_tool_guide(operation: str | None = None) -> str:
+    requested = str(operation or "").strip().lower()
+    if requested in PROJECT_DRAFT_OPERATIONS:
+        return json.dumps(
+            {"tool": "manage_project", "operation": requested, **PROJECT_DRAFT_OPERATIONS[requested]},
+            default=str,
+        )
+    payload = json.loads(_manage_tool_guide("manage_project", operation))
+    if requested:
+        return json.dumps(payload, default=str)
+    operations = dict(payload.get("operations") or {})
+    operations.update(PROJECT_DRAFT_OPERATIONS)
+    payload["operations"] = operations
+    return json.dumps(payload, default=str)
 
 
 def _project_tool_context() -> tuple[str | None, str | None, str | None]:
@@ -65,10 +133,9 @@ def _validated_project_context(project_context: dict[str, Any]) -> dict[str, Any
     )
 
     try:
-        validated_project_context_snapshot(project_context)
+        return validated_project_context_snapshot(project_context)
     except ProjectContextValidationError as exc:
         raise ValueError(str(exc)) from exc
-    return project_context
 
 
 def _context_from_inputs(
@@ -150,16 +217,70 @@ async def _handle_manage_project(
     default_environment_binding_id: int | None = None,
     environment_binding_id: int | None = None,
     idea_id: str | None = None,
+    publish_paths: list[str] | None = None,
+    path: str | None = None,
+    version_id: str | None = None,
+    branch_name: str | None = None,
+    commit_message: str | None = None,
+    push: bool = False,
+    create_pr: bool = False,
+    pr_title: str | None = None,
+    pr_body: str | None = None,
+    check_upstream: bool = True,
+    base_branch: str | None = None,
     include_inactive: bool = False,
 ) -> str:
     action = str(action or "").strip().lower()
     if action in {"help", "schema"}:
-        return _manage_tool_guide("manage_project", operation)
+        return _project_manage_tool_guide(operation)
+
+    if action == "draft_status":
+        return json.dumps(project_draft_status_payload(), default=str)
+    if action == "plan_publish":
+        return json.dumps(project_publish_plan_payload(), default=str)
+    if action == "refresh_draft_from_root":
+        return json.dumps(
+            project_refresh_draft_from_root_payload(resource_id=resource_id, resource_ids=resource_ids),
+            default=str,
+        )
+    if action == "publish_draft":
+        return json.dumps(
+            project_publish_draft_payload(
+                resource_id=resource_id,
+                resource_ids=resource_ids,
+                publish_paths=publish_paths,
+                path=path,
+                branch_name=branch_name,
+                commit_message=commit_message,
+                push=push,
+                create_pr=create_pr,
+                pr_title=pr_title,
+                pr_body=pr_body,
+                check_upstream=check_upstream,
+                base_branch=base_branch,
+            ),
+            default=str,
+        )
+    if action == "root_versions":
+        return json.dumps(project_root_versions_payload(resource_id=resource_id), default=str)
+    if action == "preview_root_version":
+        return json.dumps(
+            project_preview_root_version_payload(version_id=version_id, resource_id=resource_id),
+            default=str,
+        )
+    if action == "restore_root_version":
+        return json.dumps(
+            project_restore_root_version_payload(version_id=version_id, resource_id=resource_id),
+            default=str,
+        )
 
     from sqlalchemy import select
 
-    from brain.app.api.routers.cortex._project_context import _require_idea_for_user, _sync_project_access_list
-    from brain.systems.cortex.project_context.access import normalize_project_visibility
+    from brain.systems.cortex.project_context.access import (
+        normalize_project_visibility,
+        require_idea_for_project_actor,
+        sync_project_access_list,
+    )
     from brain.systems.cortex.project_context.resources import normalize_project_resource
     from brain.systems.cortex.project_context.snapshot import (
         ProjectContextValidationError,
@@ -214,7 +335,7 @@ async def _handle_manage_project(
                 )
                 uow.session.add(profile)
                 await uow.session.flush()
-                await _sync_project_access_list(
+                await sync_project_access_list(
                     uow.session,
                     profile,
                     org_id=org_id,
@@ -253,7 +374,7 @@ async def _handle_manage_project(
                 if visibility is not None:
                     profile.visibility = normalize_project_visibility(visibility)
                 if shared_usernames is not None:
-                    await _sync_project_access_list(
+                    await sync_project_access_list(
                         uow.session,
                         profile,
                         org_id=org_id,
@@ -349,7 +470,7 @@ async def _handle_manage_project(
                 target_idea_id = idea_id or context_idea_id
                 if not target_idea_id:
                     return json.dumps({"error": "attach_to_thread requires: idea_id when no Cortex thread is bound"})
-                await _require_idea_for_user(uow.session, target_idea_id, actor)
+                await require_idea_for_project_actor(uow.session, target_idea_id, actor)
                 profile = None
                 context = project_context
                 if selected_profile_id:

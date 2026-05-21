@@ -1,8 +1,8 @@
 # PRD: Inbound Coordination Layer for IloSpace
 
 Status: living PRD; foundation shipped in PR #113, Illo-admin configuration tool and Phase 2 triage handoff implemented in `codex/illo-inbound-admin-tools`; triage reconciliation and token compatibility backfill implemented in `codex/inbound-token-reconcile`; stored-event replay harness and source cards implemented in `codex/inbound-replay-harness`; E2E follow-up fixes shipped; ship-to-all-users readiness hardening is in progress in `codex/inbound-readiness-hardening`
-Date: 2026-05-18  
-Owner: product/architecture discussion  
+Date: 2026-05-18
+Owner: product/architecture discussion
 
 ## Implementation Status After PR #113 And Admin Tool Slice
 

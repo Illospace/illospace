@@ -44,12 +44,6 @@
     last_requested: string;
   }
 
-  interface OrgUser {
-    id: string;
-    name: string;
-    email: string;
-  }
-
   interface AgentGrant {
     id: number;
     key_name: string;
@@ -254,21 +248,6 @@
   let editSaving = $state(false);
   let showEditPassword = $state(false);
 
-  // Share state
-  let showShareModal = $state(false);
-  let shareSecretId = $state(0);
-  let shareSecretName = $state('');
-  let orgUsers = $state<OrgUser[]>([]);
-  let shareUserId = $state('');
-  let shareSaving = $state(false);
-  const shareUserOptions = $derived(
-    orgUsers.map((user) => ({
-      value: user.id,
-      label: user.name,
-      description: user.email,
-    })),
-  );
-
   // Project binding state
   let showBindModal = $state(false);
   let bindSecretId = $state(0);
@@ -303,7 +282,9 @@
     ['vault-page', embedded ? 'is-embedded' : ''].filter(Boolean).join(' '),
   );
   const vaultSessionStorageKey = $derived(
-    auth.user?.id ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.id)}` : '',
+    auth.user?.org_id && auth.user?.id
+      ? `${VAULT_SESSION_STORAGE_PREFIX}:${String(auth.user.org_id)}:${String(auth.user.id)}`
+      : '',
   );
   const vaultLockoutMessage = $derived(
     vaultLockedUntil ? `Too many attempts. Try again ${relativeTime(vaultLockedUntil)}.` : '',
@@ -709,6 +690,15 @@
 
   function handleVaultError(err: any, fallback: string) {
     if (err?.status === 423) {
+      if (err?.detail === 'Vault PIN setup required') {
+        hasPin = false;
+        vaultLocked = false;
+        vaultToken = null;
+        clearPersistedVaultSession();
+        showPinSetup = true;
+        ui.toast('Set your Vault PIN before changing protected secrets.', 'error');
+        return;
+      }
       markVaultLocked(true);
       return;
     }
@@ -1128,50 +1118,6 @@
       handleVaultError(err, 'Update failed');
     } finally {
       editSaving = false;
-    }
-  }
-
-  async function openShare(secret: Secret) {
-    shareSecretId = secret.id;
-    shareSecretName = secret.key_name;
-    shareUserId = '';
-    showShareModal = true;
-    if (isVaultPreview) {
-      orgUsers = [
-        { id: 'preview-user-1', name: 'Alex', email: 'alex@example.test' },
-        { id: 'preview-user-2', name: 'Deploy Agent', email: 'deploy-agent@example.test' },
-      ];
-      return;
-    }
-    try {
-      orgUsers = await api.vaultOrgUsers(vaultToken);
-    } catch (err: any) {
-      if (err?.status === 423) {
-        markVaultLocked(true);
-      }
-      orgUsers = [];
-    }
-  }
-
-  async function submitShare() {
-    if (!shareUserId) {
-      ui.toast('Select a user to share with', 'error');
-      return;
-    }
-    if (isVaultPreview) {
-      showShareModal = false;
-      ui.toast(`Preview share prepared for "${shareSecretName}"`, 'success');
-      return;
-    }
-    shareSaving = true;
-    try {
-      await api.vaultShare(shareSecretId, { shared_with_user_id: shareUserId }, vaultToken);
-      ui.toast(`Shared "${shareSecretName}" successfully`, 'success');
-      showShareModal = false;
-    } catch (err: any) {
-      handleVaultError(err, 'Share failed');
-    } finally {
-      shareSaving = false;
     }
   }
 
@@ -1954,9 +1900,6 @@
                               <ConstellationButton variant="quiet" size="sm" onclick={() => openBind(row.secret)}>
                                 Bind project
                               </ConstellationButton>
-                              <ConstellationButton variant="quiet" size="sm" onclick={() => openShare(row.secret)}>
-                                Share
-                              </ConstellationButton>
                               <ConstellationButton
                                 variant="destructive"
                                 size="sm"
@@ -2264,46 +2207,6 @@
         <div class="modal-actions">
           <ConstellationButton variant="secondary" onclick={() => (showEditModal = false)}>Cancel</ConstellationButton>
           <ConstellationButton type="submit" loading={editSaving} loadingLabel="Saving">Update</ConstellationButton>
-        </div>
-      </form>
-    </div>
-  </div>
-{/if}
-
-<!-- Share Modal -->
-{#if showShareModal}
-  <!-- svelte-ignore a11y_interactive_supports_focus -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="modal-overlay" onclick={() => (showShareModal = false)} role="dialog" aria-modal="true" tabindex="-1">
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="modal" onclick={(e) => e.stopPropagation()}>
-      <div class="modal-header">
-        <span class="modal-title">Share: {shareSecretName}</span>
-        <ConstellationIconButton label="Close" title="Close" size="sm" onclick={() => (showShareModal = false)}>
-          <ConstellationIcon name="x" />
-        </ConstellationIconButton>
-      </div>
-
-      <form onsubmit={(e) => { e.preventDefault(); submitShare(); }}>
-        <div class="form-field" style="margin-bottom: var(--sp-3)">
-          <label class="form-label" for="share-user">Share with</label>
-          {#if orgUsers.length === 0}
-            <p class="share-empty">No other team members available</p>
-          {:else}
-            <ConstellationSelect
-              id="share-user"
-              options={shareUserOptions}
-              bind:value={shareUserId}
-              placeholder="Select a teammate..."
-            />
-          {/if}
-        </div>
-        <div class="modal-actions">
-          <ConstellationButton variant="secondary" onclick={() => (showShareModal = false)}>Cancel</ConstellationButton>
-          <ConstellationButton type="submit" loading={shareSaving} disabled={!shareUserId} loadingLabel="Sharing">
-            Share
-          </ConstellationButton>
         </div>
       </form>
     </div>
@@ -3002,12 +2905,6 @@
     to {
       background-position: -200% 0;
     }
-  }
-
-  .share-empty {
-    color: var(--text-3);
-    font-size: var(--text-sm);
-    font-style: italic;
   }
 
   @media (max-width: 760px) {

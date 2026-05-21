@@ -1,11 +1,11 @@
-"""Team repositories — domain queries for users, orgs, and API keys."""
+"""Team repositories — domain queries for users, orgs, and org API keys."""
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Sequence
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
-from brain.platform.db.models.org import ApiKeyShare, Org, OrgApiKey, User, UserApiKey
+from brain.platform.db.models.org import Org, OrgApiKey, User
 from brain.platform.db.repositories.base import BaseRepository
 
 
@@ -61,82 +61,6 @@ class TeamRepository(BaseRepository[User]):
     async def has_any(self) -> bool:
         stmt = select(User.id).limit(1)
         return (await self._session.scalars(stmt)).first() is not None
-
-
-class UserApiKeyRepository(BaseRepository[UserApiKey]):
-    """Personal API-key access patterns shared by FastAPI and legacy shims."""
-
-    model = UserApiKey
-
-    async def list_by_user(self, user_id: str) -> Sequence[UserApiKey]:
-        stmt = (
-            select(UserApiKey)
-            .where(UserApiKey.user_id == user_id)
-            .order_by(UserApiKey.created_at.desc())
-        )
-        return (await self._session.scalars(stmt)).all()
-
-    async def list_shared_with_user(self, user_id: str) -> Sequence[dict[str, Any]]:
-        stmt = (
-            select(
-                UserApiKey.id,
-                UserApiKey.provider,
-                UserApiKey.label,
-                UserApiKey.is_active,
-                UserApiKey.last_used_at,
-                UserApiKey.total_tokens_used,
-                UserApiKey.estimated_cost_usd,
-                User.name.label("shared_by_name"),
-                ApiKeyShare.shared_at,
-            )
-            .join(ApiKeyShare, ApiKeyShare.api_key_id == UserApiKey.id)
-            .join(User, User.id == ApiKeyShare.shared_by_user_id)
-            .where(
-                ApiKeyShare.shared_with_user_id == user_id,
-                ApiKeyShare.revoked_at.is_(None),
-            )
-        )
-        return [dict(row._mapping) for row in (await self._session.execute(stmt)).all()]
-
-    async def is_accessible_active(self, user_id: str, api_key_id: int) -> bool:
-        stmt = (
-            select(UserApiKey.id)
-            .where(
-                UserApiKey.id == api_key_id,
-                UserApiKey.is_active == True,  # noqa: E712
-                or_(
-                    UserApiKey.user_id == user_id,
-                    UserApiKey.id.in_(
-                        select(ApiKeyShare.api_key_id).where(
-                            ApiKeyShare.shared_with_user_id == user_id,
-                            ApiKeyShare.revoked_at.is_(None),
-                        )
-                    ),
-                ),
-            )
-            .limit(1)
-        )
-        return (await self._session.scalars(stmt)).first() is not None
-
-    async def set_default_for_user(self, user_id: str, api_key_id: int | None) -> bool:
-        user = await self._session.get(User, user_id)
-        if not user:
-            return False
-        user.default_api_key_id = api_key_id
-        await self._session.flush()
-        return True
-
-    async def deactivate_owned(self, user_id: str, api_key_id: int) -> bool:
-        stmt = select(UserApiKey).where(
-            UserApiKey.id == api_key_id,
-            UserApiKey.user_id == user_id,
-        )
-        key = (await self._session.scalars(stmt)).first()
-        if not key:
-            return False
-        key.is_active = False
-        await self._session.flush()
-        return True
 
 
 class OrgApiKeyRepository(BaseRepository[OrgApiKey]):

@@ -14,7 +14,7 @@ def _status_payload(**overrides):
         "authenticated": True,
         "method": "api_key",
         "auth_mode": "api_key",
-        "has_personal_db_key": True,
+        "has_codex_subscription": False,
         "has_org_db_key": True,
         "has_db_keys": True,
         "runtime_key_available": True,
@@ -40,7 +40,7 @@ async def test_auth_status_reports_runtime_db_key_state():
         data = await auth_status(provider="anthropic", user=user, db=object())
 
     assert data["authenticated"] is True
-    assert data["has_personal_db_key"] is True
+    assert data["has_codex_subscription"] is False
     assert data["has_org_db_key"] is True
     assert data["runtime_uses_db_key"] is True
     assert data["runtime_key_source"] == "org_main"
@@ -68,7 +68,7 @@ async def test_auth_status_requires_db_key_even_if_env_key_exists():
             runtime_key_scope="none",
             status="not_configured",
             setup_required=True,
-            has_personal_db_key=False,
+            has_codex_subscription=False,
             has_org_db_key=False,
             has_db_keys=False,
         )),
@@ -96,7 +96,7 @@ async def test_auth_status_reports_openai_codex_cache_runtime():
             status="in_use",
             method="chatgpt",
             auth_mode="chatgpt",
-            has_personal_db_key=False,
+            has_codex_subscription=False,
             has_org_db_key=False,
             has_db_keys=False,
             runtime_key_source="codex_cache",

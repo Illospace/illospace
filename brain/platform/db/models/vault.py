@@ -1,6 +1,6 @@
-"""Vault models: secrets, config, sessions, agent grants, project bindings, access log, shares, missing requests.
+"""Vault models: org-owned secrets, config, sessions, agent grants, project bindings, access log, missing requests.
 
-Matches: secrets, vault_config, vault_sessions, vault_agent_grants, vault_project_bindings, vault_access_log, vault_shares,
+Matches: secrets, vault_config, vault_sessions, vault_agent_grants, vault_project_bindings, vault_access_log,
          vault_missing_requests tables.
 """
 from __future__ import annotations
@@ -31,7 +31,6 @@ __all__ = [
     "VaultAgentGrant",
     "VaultProjectBinding",
     "VaultAccessLog",
-    "VaultShare",
     "VaultMissingRequest",
 ]
 
@@ -65,12 +64,18 @@ class Secret(Base):
     agent_access_level: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="ask", default="ask"
     )
-    user_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("users.id"), nullable=False
+    org_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_by_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
 
     __table_args__ = (
-        UniqueConstraint("user_id", "key_name", name="secrets_user_key_unique"),
+        UniqueConstraint("org_id", "key_name", name="secrets_org_key_unique"),
     )
 
 
@@ -79,7 +84,7 @@ class VaultConfig(Base):
 
     __tablename__ = "vault_config"
 
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("NOW()")
@@ -87,13 +92,16 @@ class VaultConfig(Base):
 
 
 class VaultSession(Base):
-    """Short-lived unlock session for a user's vault."""
+    """Short-lived unlock session for an org vault."""
 
     __tablename__ = "vault_sessions"
 
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    org_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    actor_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("NOW()")
@@ -110,11 +118,11 @@ class VaultAgentGrant(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     key_name: Mapped[str] = mapped_column(String(128), nullable=False)
-    user_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    org_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    org_id: Mapped[Optional[str]] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=True
+    requested_by_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     run_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=True
@@ -136,7 +144,7 @@ class VaultAgentGrant(Base):
 
 
 class VaultProjectBinding(Base):
-    """User-owned token availability for one project/env name."""
+    """Project/env token availability for an org-owned secret."""
 
     __tablename__ = "vault_project_bindings"
 
@@ -144,11 +152,11 @@ class VaultProjectBinding(Base):
     secret_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("secrets.id", ondelete="CASCADE"), nullable=False
     )
-    user_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    org_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    org_id: Mapped[Optional[str]] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=True
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     target_registry_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("target_registry.id", ondelete="SET NULL"), nullable=True
@@ -165,10 +173,10 @@ class VaultProjectBinding(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "user_id",
+            "org_id",
             "project_slug",
             "env_name",
-            name="uq_vault_project_bindings_user_project_env",
+            name="uq_vault_project_bindings_org_project_env",
         ),
     )
 
@@ -179,8 +187,11 @@ class VaultAccessLog(Base):
     __tablename__ = "vault_access_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("users.id"), nullable=False
+    org_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    actor_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     secret_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("secrets.id", ondelete="SET NULL"), nullable=True
@@ -195,32 +206,6 @@ class VaultAccessLog(Base):
     )
 
 
-class VaultShare(Base):
-    """A secret shared with another user."""
-
-    __tablename__ = "vault_shares"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    secret_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("secrets.id", ondelete="CASCADE"), nullable=False
-    )
-    shared_with_user_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("users.id"), nullable=False
-    )
-    shared_by_user_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("users.id"), nullable=False
-    )
-    shared_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True),
-        server_default=text("NOW()"), nullable=True
-    )
-    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint("secret_id", "shared_with_user_id", name="uq_vault_shares_secret_user"),
-    )
-
-
 class VaultMissingRequest(Base):
     """A request for a secret that doesn't exist yet."""
 
@@ -228,11 +213,11 @@ class VaultMissingRequest(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     key_name: Mapped[str] = mapped_column(String(128), nullable=False)
-    user_id: Mapped[Optional[str]] = mapped_column(
+    actor_user_id: Mapped[Optional[str]] = mapped_column(
         UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
-    org_id: Mapped[Optional[str]] = mapped_column(
-        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=True
+    org_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False, index=True
     )
     request_count: Mapped[int] = mapped_column(
         Integer, server_default=text("1"), default=1

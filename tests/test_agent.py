@@ -32,7 +32,7 @@ def _mock_llm_client(mock_anthropic_client, provider="anthropic"):
     llm = MagicMock()
     llm.client = mock_anthropic_client
     llm.provider = provider
-    llm.source = "user_default"
+    llm.source = "org_main"
     llm.is_oauth = False
     llm.extra_headers = {}
     llm.token_prefix = "sk-ant-api03-test" if provider == "anthropic" else "sk-openai-test"
@@ -1343,6 +1343,20 @@ class TestExecToolHandlers:
 
         result = handlers["read_file"]("app.ts", workspace="frontend")
         assert "FRONTEND" in result["content"]
+
+    def test_workspace_selector_accepts_project_mount_path(self, tmp_path):
+        from brain.systems.runs.tool_handlers import _get_tool_handlers
+
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        (reports / "q4.md").write_text("# Q4\n")
+
+        handlers = _get_tool_handlers(
+            allowed_workspaces=[{"name": "/reports", "path": str(reports)}],
+        )
+
+        result = handlers["read_file"]("q4.md", workspace="/reports")
+        assert "Q4" in result["content"]
 
     def test_workspace_selector_works_without_primary_workspace_root(self, tmp_path):
         from brain.systems.runs.tool_handlers import _get_tool_handlers

@@ -93,7 +93,7 @@ class LLMClient:
     """Resolved LLM client ready for API calls."""
     client: Any
     provider: str                     # "anthropic" or "openai"
-    source: str                       # "user_default", "org_main", "env", "none"
+    source: str                       # "codex_subscription", "org_main", "env", "none"
     auth_mode: str | None             # "api_key", "chatgpt", etc.
     is_oauth: bool                    # True for provider OAuth-style credentials.
     extra_headers: dict[str, str]     # Per-request headers.
@@ -150,8 +150,9 @@ async def _async_resolve_key_from_db(
     user_id: str | None = None,
     org_id: str | None = None,
     provider: str = "anthropic",
+    auth_mode: str | None = None,
 ) -> tuple[str | None, str]:
-    """Resolve API key from DB using an async session."""
+    """Resolve provider credentials from DB using an async session."""
     try:
         from brain.systems.vault import async_resolve_api_key
 
@@ -159,6 +160,7 @@ async def _async_resolve_key_from_db(
             user_id=user_id,
             org_id=org_id,
             provider=provider,
+            auth_mode=auth_mode,
             session=session,
         )
     except Exception as exc:
@@ -360,7 +362,7 @@ async def _async_persist_refreshed_openai_codex_db_credential(
     source: str,
     cred: OpenAICodexCredential,
 ) -> None:
-    if source not in {"user_default", "org_main"}:
+    if source not in {"codex_subscription", "org_main"}:
         return
 
     from brain.systems.vault import async_update_resolved_api_key
@@ -482,6 +484,7 @@ async def _async_resolve_openai_auth(
         user_id=user_id,
         org_id=org_id,
         provider="openai",
+        auth_mode=auth_mode,
     )
     refreshed_cred: OpenAICodexCredential | None = None
 
@@ -582,9 +585,9 @@ def resolve_llm_client(
         resolved_auth = _resolve_openai_local_auth(auth_mode=auth_mode)
         if not resolved_auth:
             shared_hint = (
-                "user-scoped OpenAI/Codex credentials require async_resolve_llm_client."
+                "user Codex subscription credentials require async_resolve_llm_client."
                 if os.environ.get("ILLO_ENV", "development") == "production"
-                else "user-scoped OpenAI/Codex credentials require async_resolve_llm_client; set OPENAI_API_KEY in dev or enable the machine-local Codex fallback."
+                else "user Codex subscription credentials require async_resolve_llm_client; set OPENAI_API_KEY in dev or enable the machine-local Codex fallback."
             )
             raise RuntimeError(
                 f"No OpenAI auth found. {shared_hint}"
@@ -664,9 +667,9 @@ async def async_resolve_llm_client(
             )
             if not resolved_auth:
                 shared_hint = (
-                    "Add a user-scoped OpenAI/Codex credential in Illo."
+                    "Connect a Codex subscription or add an org OpenAI key in Illo."
                     if os.environ.get("ILLO_ENV", "development") == "production"
-                    else "Add a user-scoped OpenAI/Codex credential in Illo, or set OPENAI_API_KEY in dev. Machine-local Codex login is only a local fallback."
+                    else "Connect a Codex subscription, add an org OpenAI key, or set OPENAI_API_KEY in dev. Machine-local Codex login is only a local fallback."
                 )
                 raise RuntimeError(f"No OpenAI auth found. {shared_hint}")
             if resolved_auth.auth_mode == "chatgpt":
@@ -678,6 +681,7 @@ async def async_resolve_llm_client(
             user_id=user_id,
             org_id=org_id,
             provider=normalized_provider,
+            auth_mode=auth_mode,
         )
         if not key:
             key, source = _resolve_key_from_env(provider=normalized_provider)

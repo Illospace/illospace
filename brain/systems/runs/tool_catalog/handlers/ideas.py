@@ -308,6 +308,24 @@ async def _apply_owner_handoff(idea, *, next_owner_id: str, actor: dict[str, Any
     idea.user_id = str(next_owner_id)
 
 
+async def _cleanup_archived_project_drafts(idea, *, session) -> dict[str, Any] | None:
+    if str(getattr(idea, "status", "") or "") != "archived":
+        return None
+    try:
+        from brain.systems.cortex.project_context.draft_lifecycle import (
+            apply_project_draft_cleanup_for_thread,
+        )
+
+        return await apply_project_draft_cleanup_for_thread(
+            session,
+            str(idea.id),
+            archived_at=getattr(idea, "archived_at", None),
+        )
+    except Exception as exc:
+        logger.warning("project_draft_archive_cleanup_failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
 async def _validated_create_owner_id(
     *,
     session,
@@ -534,6 +552,7 @@ async def _handle_manage_idea(
                 if normalized_action == "archive":
                     change = await _status_change(idea, "archived", trigger="agent_archive", session=uow.session)
                     await uow.session.flush()
+                    project_draft_cleanup = await _cleanup_archived_project_drafts(idea, session=uow.session)
                     serialized = await _serialize_idea(idea, uow.session)
                     event = ("idea_archived", {"idea_id": str(idea.id), "idea": serialized})
                     result = {
@@ -541,6 +560,7 @@ async def _handle_manage_idea(
                         "archived": True,
                         "idea": serialized,
                         "status_change": {"old_status": change[0], "new_status": change[1]} if change else None,
+                        "project_draft_cleanup": project_draft_cleanup,
                     }
 
                 elif normalized_action == "restore":
@@ -560,6 +580,7 @@ async def _handle_manage_idea(
                         return json.dumps({"error": "set_status requires: status"})
                     change = await _status_change(idea, status, trigger="agent_set_status", session=uow.session)
                     await uow.session.flush()
+                    project_draft_cleanup = await _cleanup_archived_project_drafts(idea, session=uow.session)
                     serialized = await _serialize_idea(idea, uow.session)
                     if status == "archived":
                         event = ("idea_archived", {"idea_id": str(idea.id), "idea": serialized})
@@ -572,6 +593,7 @@ async def _handle_manage_idea(
                         "ok": True,
                         "idea": serialized,
                         "status_change": {"old_status": change[0], "new_status": change[1]} if change else None,
+                        "project_draft_cleanup": project_draft_cleanup,
                     }
 
                 elif normalized_action == "mark_read":
@@ -610,12 +632,18 @@ async def _handle_manage_idea(
                     if not updates:
                         return json.dumps({"error": "update requires at least one field to change"})
                     await uow.session.flush()
+                    project_draft_cleanup = await _cleanup_archived_project_drafts(idea, session=uow.session)
                     serialized = await _serialize_idea(idea, uow.session)
                     if updates.get("status") == "archived":
                         event = ("idea_archived", {"idea_id": str(idea.id), "idea": serialized})
                     else:
                         event = ("idea_updated", {"idea_id": str(idea.id), "fields": updates})
-                    result = {"ok": True, "idea": serialized, "fields": updates}
+                    result = {
+                        "ok": True,
+                        "idea": serialized,
+                        "fields": updates,
+                        "project_draft_cleanup": project_draft_cleanup,
+                    }
 
                 else:
                     return json.dumps({"error": f"Unknown action: {action}"})

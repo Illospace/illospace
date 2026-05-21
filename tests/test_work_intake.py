@@ -181,6 +181,75 @@ async def test_cortex_agent_run_request_uses_shared_work_intake_policy(monkeypat
     assert request.metadata["priority"] == 3
 
 
+@pytest.mark.asyncio
+async def test_discussion_origin_cortex_work_intake_records_surface_and_trigger_comment(monkeypatch):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    class _Session:
+        async def get(self, _model, _idea_id):
+            return SimpleNamespace(
+                id="idea-1",
+                title="Launch",
+                org_id="org-1",
+                user_id="owner-1",
+                agent_details=None,
+            )
+
+        async def scalars(self, *_args, **_kwargs):
+            return SimpleNamespace(first=lambda: None)
+
+    async def fake_thread_context(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "brain.systems.runs.work_intake.async_build_agent_visible_thread_context",
+        fake_thread_context,
+    )
+
+    discussion_trigger = {
+        "surface": "thread_discussion",
+        "thread_id": "idea-1",
+        "comment_id": 7,
+        "body": "@illo this is what we decided, carry on",
+        "author_user_id": "user-1",
+        "response_target": {
+            "surface": "thread_discussion",
+            "thread_id": "idea-1",
+            "reply_to_comment_id": 7,
+        },
+    }
+
+    request = await build_agent_run_request(
+        _Session(),
+        WorkIntakeEvent(
+            source="cortex",
+            event_type="cortex.thread_reply",
+            org_id="org-1",
+            actor={"id": "user-1", "org_id": "org-1", "internal": False},
+            target={"kind": "cortex_idea", "idea_id": "idea-1"},
+            payload={
+                "message": "[Idea: \"Launch\" | idea-1]\n\n@illo this is what we decided, carry on",
+                "metadata": {
+                    "originating_surface": "thread_discussion",
+                    "triggering_surface": "thread_discussion",
+                    "discussion_trigger": discussion_trigger,
+                    "required_response_tool": "post_thread_discussion_reply",
+                    "final_answer_target_surface": "originating_surface",
+                },
+            },
+            policy={"priority": 0, "producer": "trigger", "run_event": "thread_reply"},
+        ),
+    )
+
+    assert request.thread_id == "idea-1"
+    assert request.target_ref["originating_surface"] == "thread_discussion"
+    assert request.target_ref["triggering_surface"] == "thread_discussion"
+    assert request.target_ref["discussion_trigger"] == discussion_trigger
+    assert request.metadata["discussion_trigger"] == discussion_trigger
+    assert request.metadata["required_response_tool"] == "post_thread_discussion_reply"
+    assert request.metadata["final_answer_target_surface"] == "originating_surface"
+
+
 def test_legacy_routing_logic_is_removed_from_adapters():
     files = {
         "brain/app/triggers/router.py": {

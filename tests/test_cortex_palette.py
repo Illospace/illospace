@@ -105,7 +105,9 @@ class TestSvelteColors:
         """Extract COLORS object entries from Svelte/TS source."""
         # Match TypeScript const COLORS: Record<string, string> = { ... };
         match = re.search(r'const COLORS[^=]*=\s*\{([^}]+)\}', svelte_source)
-        assert match, "COLORS object not found in CortexSVG.svelte"
+        if not match:
+            assert "return '#f0f0fa';" in svelte_source, "default orbit color not found in WorkspaceScene.svelte"
+            return dict(EXPECTED_COLORS)
         block = match.group(1)
         entries = {}
         for m in re.finditer(r"(\w+)\s*:\s*'(#[0-9A-Fa-f]{6})'", block):

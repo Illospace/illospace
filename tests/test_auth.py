@@ -46,7 +46,6 @@ def _make_user(
         "org_name":            "Example",
         "org_slug":            "illo",
         "attribution_enabled": True,
-        "default_provider":    None,
         "password_hash":       bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode(),
     }
 

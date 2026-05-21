@@ -160,6 +160,7 @@ export interface CortexThreadStageRunItem {
   workerLanes?: readonly CortexThreadStageWorkerLane[];
   workerEyebrow?: string;
   workItems?: readonly CortexThreadStageWorkTimelineItem[];
+  showLiveCue?: boolean;
   liveLines?: readonly CortexThreadStageLiveLine[];
   liveLinesEyebrow?: string;
   toolCalls?: readonly CortexThreadStageToolCall[];

@@ -273,6 +273,23 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "expected_effect": "post an Illo-authored message to the native team room",
         "output_budget_chars": 8_000,
     },
+    "post_thread_discussion_reply": {
+        "permission": "write_chat",
+        "risk_class": "medium",
+        "side_effect_class": "chat_message",
+        "reversibility": "append_only",
+        "action_manifest": True,
+        "expected_effect": "post an Illo-authored reply to Thread Discussion",
+        "output_budget_chars": 8_000,
+    },
+    "read_thread_discussion": {
+        "permission": "read_workspace",
+        "risk_class": "low",
+        "side_effect_class": "read_only",
+        "reversibility": "none",
+        "expected_effect": "read Discussion comments attached to the current Thread",
+        "output_budget_chars": 12_000,
+    },
     "manage_project": {
         "permission": "write_project",
         "risk_class": "medium",

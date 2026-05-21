@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import pytest_asyncio
@@ -369,6 +369,130 @@ async def test_project_profile_resource_reorder_rejects_duplicates(tmp_path):
         )
 
     assert exc_info.value.status_code == 422
+
+
+def _project_draft_run_for_test(source_dir, draft_dir, *, run_id=123, idea_id="idea-1"):
+    resource = {
+        "id": "reports",
+        "kind": "folder",
+        "mount_path": "/reports",
+        "path": str(draft_dir),
+        "materialization": {
+            "status": "ready",
+            "provider": "local",
+            "kind": "folder",
+            "path": str(draft_dir),
+            "source_path": str(source_dir),
+            "workspace_path": str(draft_dir),
+            "draft": True,
+        },
+    }
+    return SimpleNamespace(
+        id=run_id,
+        thread_id=idea_id,
+        org_id="test-org",
+        user_id="user-1",
+        target_ref={"project_context_snapshot": {"resources": [resource]}},
+        workspace_ref={
+            "workspaces": [{"name": "/reports", "path": str(draft_dir)}],
+            "project_context_snapshot": {"resources": [resource]},
+            "project_context_materialization": {
+                "status": "materialized",
+                "workspaces": [{"name": "/reports", "path": str(draft_dir)}],
+                "errors": [],
+            },
+        },
+        metadata_={},
+    )
+
+
+async def test_project_context_draft_state_payload_uses_manage_project_helpers(tmp_path):
+    from brain.app.api.routers.cortex import _project_context
+
+    source_dir = tmp_path / "source"
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    source_dir.mkdir()
+    draft_dir.mkdir(parents=True)
+    (source_dir / "brief.md").write_text("original", encoding="utf-8")
+    (draft_dir / "brief.md").write_text("changed", encoding="utf-8")
+    (draft_dir / "new.md").write_text("new file", encoding="utf-8")
+
+    payload = await _project_context._project_draft_state_payload(
+        _project_draft_run_for_test(source_dir, draft_dir),
+        idea_id="idea-1",
+        user={"id": "user-1", "org_id": "test-org"},
+    )
+
+    assert payload["ok"] is True
+    assert payload["run_id"] == "123"
+    assert payload["idea_id"] == "idea-1"
+    assert payload["draft_status"]["resources"][0]["changes"]["changed_paths"] == ["brief.md"]
+    assert payload["draft_status"]["resources"][0]["changes"]["new_paths"] == ["new.md"]
+    assert payload["plan_publish"]["summary"] == {"resource_count": 1, "operation_count": 2, "blocked_count": 0}
+    assert payload["root_versions"]["summary"] == {"resource_count": 1, "version_count": 0}
+
+
+async def test_project_context_draft_state_payload_handles_missing_run():
+    from brain.app.api.routers.cortex import _project_context
+
+    payload = await _project_context._project_draft_state_payload(
+        None,
+        idea_id="idea-1",
+        user={"id": "user-1", "org_id": "test-org"},
+    )
+
+    assert payload["ok"] is False
+    assert payload["run_id"] is None
+    assert payload["idea_id"] is None
+    assert payload["draft_status"]["resources"] == []
+    assert payload["draft_status"]["changes"]["total"] == 0
+    assert payload["plan_publish"]["groups"] == []
+    assert payload["root_versions"]["groups"] == []
+
+
+async def test_project_context_draft_state_run_rejects_run_from_other_thread():
+    from fastapi import HTTPException
+
+    from brain.app.api.routers.cortex import _project_context
+
+    session = MagicMock()
+    session.get = AsyncMock(return_value=SimpleNamespace(id=77, thread_id="other-idea"))
+
+    with (
+        patch.object(_project_context, "_require_idea_for_user", AsyncMock(return_value=_make_idea(id="idea-1"))),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await _project_context._project_draft_state_run(
+            session,
+            "idea-1",
+            77,
+            {"id": "user-1", "org_id": "test-org"},
+        )
+
+    assert exc_info.value.status_code == 404
+    assert "Run #77" in exc_info.value.detail
+
+
+async def test_project_context_draft_state_run_selects_latest_thread_run_when_omitted():
+    from brain.app.api.routers.cortex import _project_context
+
+    selected_run = SimpleNamespace(id=88, thread_id="idea-1")
+    session = MagicMock()
+    session.scalars = AsyncMock(return_value=SimpleNamespace(first=lambda: selected_run))
+
+    with patch.object(_project_context, "_require_idea_for_user", AsyncMock(return_value=_make_idea(id="idea-1"))):
+        result = await _project_context._project_draft_state_run(
+            session,
+            "idea-1",
+            None,
+            {"id": "user-1", "org_id": "test-org"},
+        )
+
+    stmt = session.scalars.call_args.args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert result is selected_run
+    assert "agent_runs.thread_id = 'idea-1'" in compiled
+    assert "ORDER BY agent_runs.created_at DESC, agent_runs.id DESC" in compiled
 
 
 def test_manage_project_tool_is_available_to_agents():
@@ -1236,6 +1360,159 @@ async def test_create_thread_message_commits_before_broadcast(client, mock_sessi
 
 
 @pytest.mark.asyncio
+async def test_create_thread_discussion_comment_commits_before_broadcast_without_trigger(client, mock_session_factory):
+    idea = _make_idea(id="some-id", org_id="test-org")
+    order: list[str] = []
+
+    def _add(obj):
+        obj.id = 1
+        obj.created_at = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+
+    mock_session_factory.add.side_effect = _add
+    mock_session_factory.commit.side_effect = lambda: order.append("commit")
+
+    async def _broadcast(*_args, **_kwargs):
+        order.append("broadcast")
+
+    with (
+        patch("brain.app.api.routers.cortex._discussion._require_idea_for_user", AsyncMock(return_value=idea)),
+        patch("brain.app.api.routers.cortex._discussion.ws_manager.broadcast_product_event", side_effect=_broadcast),
+        patch("brain.app.triggers.router.async_route_trigger", AsyncMock()) as route_trigger,
+    ):
+        resp = await client.post(
+            "/api/cortex/ideas/some-id/discussion",
+            json={"body": "This direction looks right."},
+        )
+
+    assert resp.status_code == 201, resp.text
+    payload = resp.json()
+    assert payload["comment"]["body"] == "This direction looks right."
+    assert payload["trigger"] is None
+    route_trigger.assert_not_awaited()
+    assert "commit" in order
+    assert "broadcast" in order
+    assert order.index("commit") < order.index("broadcast")
+
+
+@pytest.mark.asyncio
+async def test_create_thread_discussion_illo_mention_routes_surface_aware_trigger(client, mock_session_factory):
+    idea = _make_idea(id="some-id", title="Shared Thread", org_id="test-org")
+    trigger_response = {"status": "queued", "run_id": "run-1"}
+
+    def _add(obj):
+        obj.id = 7
+        obj.created_at = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+
+    mock_session_factory.add.side_effect = _add
+
+    async def _route_trigger(trigger, *, session):
+        return SimpleNamespace(to_response=lambda: trigger_response)
+
+    with (
+        patch("brain.app.api.routers.cortex._discussion._require_idea_for_user", AsyncMock(return_value=idea)),
+        patch("brain.app.api.routers.cortex._discussion.ws_manager.broadcast_product_event", AsyncMock()),
+        patch("brain.app.triggers.adapters.internal.build_cortex_notify_trigger", return_value=SimpleNamespace(event_type="cortex.thread_reply")) as build_trigger,
+        patch("brain.app.triggers.router.async_route_trigger", side_effect=_route_trigger) as route_trigger,
+    ):
+        resp = await client.post(
+            "/api/cortex/ideas/some-id/discussion",
+            json={"body": "@illo this is what we decided, carry on"},
+        )
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["trigger"] == trigger_response
+    build_trigger.assert_called_once()
+    _, kwargs = build_trigger.call_args
+    assert kwargs["event"] == "thread_reply"
+    assert kwargs["idea_id"] == "some-id"
+    assert kwargs["thread_message"] == "@illo this is what we decided, carry on"
+    assert kwargs["metadata"]["source"] == "thread_discussion"
+    assert kwargs["metadata"]["originating_surface"] == "thread_discussion"
+    assert kwargs["metadata"]["triggering_surface"] == "thread_discussion"
+    assert kwargs["metadata"]["required_response_tool"] == "post_thread_discussion_reply"
+    assert kwargs["metadata"]["discussion_comment_id"] == 7
+    assert kwargs["metadata"]["discussion_trigger"] == {
+        "surface": "thread_discussion",
+        "thread_id": "some-id",
+        "comment_id": 7,
+        "body": "@illo this is what we decided, carry on",
+        "author_user_id": ANY,
+        "response_target": {
+            "surface": "thread_discussion",
+            "thread_id": "some-id",
+            "reply_to_comment_id": 7,
+        },
+    }
+    route_trigger.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_post_thread_discussion_reply_tool_writes_illo_comment(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.chat import _handle_post_thread_discussion_reply
+
+    created = []
+
+    class _Session:
+        async def get(self, _model, thread_id):
+            return SimpleNamespace(id=thread_id, org_id="test-org")
+
+        def add(self, obj):
+            obj.id = 9
+            obj.created_at = datetime(2026, 5, 21, 12, 5, tzinfo=timezone.utc)
+            created.append(obj)
+
+        async def flush(self):
+            return None
+
+    class _UnitOfWork:
+        async def __aenter__(self):
+            self.session = _Session()
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    published = Mock()
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
+    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", published)
+
+    with bind_agent_context(
+        {
+            "org_id": "test-org",
+            "run_id": 42,
+            "target_ref": {
+                "discussion_trigger": {
+                    "surface": "thread_discussion",
+                    "thread_id": "some-id",
+                    "comment_id": 7,
+                    "response_target": {
+                        "surface": "thread_discussion",
+                        "thread_id": "some-id",
+                        "reply_to_comment_id": 7,
+                    },
+                }
+            },
+        }
+    ):
+        raw = await _handle_post_thread_discussion_reply("Got it, I will carry that forward.")
+
+    payload = json.loads(raw)
+    assert payload["ok"] is True
+    assert payload["comment"]["body"] == "Got it, I will carry that forward."
+    assert payload["comment"]["author_kind"] == "illo"
+    assert payload["comment"]["metadata"]["created_by_run_id"] == 42
+    assert payload["comment"]["metadata"]["reply_to_comment_id"] == 7
+    assert created[0].thread_id == "some-id"
+    assert created[0].org_id == "test-org"
+    assert created[0].author_user_id is None
+    published.assert_called_once_with(
+        "thread_discussion_comment",
+        {"idea_id": "some-id", "org_id": "test-org", "comment": payload["comment"]},
+    )
+
+
+@pytest.mark.asyncio
 async def test_update_idea_status_commits_before_broadcast(client, mock_session_factory):
     idea = _make_idea(id="status-idea", status="emerged", org_id="test-org")
     order: list[str] = []
@@ -1507,26 +1784,6 @@ def test_project_context_validation_rejects_missing_local_path_when_enforced(tmp
     assert any("does not exist" in error for error in snapshot["validation_errors"])
 
 
-def test_project_context_snapshot_attachment_revalidates_existing_status():
-    from brain.systems.cortex.project_context.snapshot import attach_project_context_snapshot
-
-    payload = attach_project_context_snapshot(
-        {},
-        {
-            "project_context_snapshot": {
-                "status": "validated",
-                "resources": [],
-            },
-        },
-    )
-
-    snapshot = payload["project_context_snapshot"]
-    assert snapshot["status"] == "invalid"
-    assert snapshot["validation_errors"] == [
-        "project_context_snapshot.resources must contain at least one resource."
-    ]
-
-
 def test_project_profile_visibility_policy_matches_drive_model():
     from brain.systems.cortex.project_context.access import is_project_profile_visible
 
@@ -1703,6 +1960,7 @@ async def test_create_project_profile_validates_project_context(client, mock_ses
 
     assert resp.status_code == 201
     assert resp.json()["slug"] == "brain"
+    assert resp.json()["project_context"]["project_workspace_manifest"]["mounts"][0]["mount_path"] == "/brain"
     assert mock_session_factory.add.called
 
 
@@ -1754,7 +2012,8 @@ async def test_project_context_github_connect_uses_server_side_vault_token(clien
 @pytest.mark.asyncio
 async def test_project_context_github_connect_logs_vault_read_as_api_actor(client):
     with (
-        patch("brain.systems.cortex.project_context.vault.async_has_pin", AsyncMock(return_value=False)),
+        patch("brain.systems.cortex.project_context.vault.async_has_pin", AsyncMock(return_value=True)),
+        patch("brain.systems.cortex.project_context.vault.async_validate_vault_token", AsyncMock(return_value=True)),
         patch("brain.systems.cortex.project_context.vault.async_get_secret", AsyncMock(return_value="ghp_secret")) as get_secret,
         patch("brain.app.api.routers.cortex._project_context.async_connect_with_token", AsyncMock(return_value={
             "login": "alex",
@@ -1769,7 +2028,7 @@ async def test_project_context_github_connect_logs_vault_read_as_api_actor(clien
     assert resp.status_code == 200
     get_secret.assert_awaited_once_with(
         "GITHUB_TOKEN",
-        user_id="user-1",
+        actor_user_id="user-1",
         org_id="test-org",
         accessed_by="api",
     )
@@ -1836,12 +2095,11 @@ async def test_project_context_github_bind_token_verifies_repo_and_binds_owned_v
         "GITHUB_TOKEN",
         user=ANY,
         unlock_token=None,
-        allow_shared=False,
     )
     get_repo.assert_awaited_once_with("example-org/example-repo", token="ghp_secret")
     bind.assert_awaited_once_with(
         "GITHUB_TOKEN",
-        user_id="user-1",
+        actor_user_id="user-1",
         org_id="test-org",
         project_slug="example-org/example-repo",
         env_name="GH_TOKEN",

@@ -25,7 +25,7 @@ from brain.systems.inbound.service import submit_inbound_envelope as _submit_inb
 
 router = APIRouter(tags=["agent-mcp"], dependencies=[Depends(rate_limit)])
 
-SIGNAL_TOOL_NAME = "illo_submit_signal"
+CONTEXT_TOOL_NAME = "illo_submit_context"
 
 
 ToolHandler = Callable[
@@ -46,44 +46,50 @@ def _tool_schema(description: str, properties: dict[str, Any], required: list[st
 
 
 MCP_TOOLS: dict[str, dict[str, Any]] = {
-    SIGNAL_TOOL_NAME: {
+    CONTEXT_TOOL_NAME: {
         **_tool_schema(
             (
-                "Submit a progress or status signal from a personal tool into IloSpace. "
-                "This is the default tool for automatic hooks and routine work updates: "
-                "send what happened, plus hints like repo, branch, task, and files touched. "
-                "Do not choose a thread, project, or teammate target here; IloSpace and Illo "
-                "decide whether to store, route, summarize, ask, or ignore the signal. "
-                "Use direct thread tools only when the user explicitly asks for a visible "
-                "thread/message in a known destination."
+                "Submit ordered context from a personal agent to Illo, the user's team agent. "
+                "Use this when the user wants Illo or the team to have the current AI thread, "
+                "trace, artifacts, files, links, diffs, or other source material. The personal "
+                "agent supplies context and provenance; Illo coordinates the team workspace. "
+                "Do not encode a workflow such as decision request here. Use correlation when "
+                "attaching to a known Thread; otherwise IlloSpace may create one and return thread_url."
             ),
             {
-                "summary": {
+                "intent": {
                     "type": "string",
-                    "description": "Concise human-readable progress summary from the personal tool.",
+                    "description": "Natural-language reason this context is being submitted.",
                 },
                 "origin": {
                     "type": "string",
-                    "description": "Stable source event name, for example codex.progress.",
-                    "default": "codex.progress",
+                    "description": "Stable source event name, for example codex.context.",
+                    "default": "codex.context",
                 },
-                "payload": {
+                "parts": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Ordered source context parts: text, json, link, file, trace, conversation, diff, screenshot, or artifact.",
+                    "default": [],
+                },
+                "source": {
                     "type": "object",
-                    "description": "Optional structured event payload from the personal tool.",
+                    "description": "Optional provenance about the personal agent, repo, branch, model, session, or external source.",
                     "default": {},
                 },
-                "hints": {
+                "constraints": {
                     "type": "object",
-                    "description": "Optional routing/context hints. These are not direct workspace targets.",
+                    "description": "Optional boundaries such as privacy, urgency, visibility, or notification preferences.",
                     "default": {},
                 },
-                "desired_outcome": {
-                    "type": "string",
-                    "description": "Optional intent for IloSpace, such as team_update, store_only, or ask_illo.",
+                "correlation": {
+                    "type": "object",
+                    "description": "Optional correlation such as thread_id, external_session_id, or previous submission reference.",
+                    "default": {},
                 },
                 "idempotency_key": {
                     "type": "string",
-                    "description": "Optional stable key so repeated hook submissions do not duplicate work.",
+                    "description": "Optional stable key so repeated submissions do not duplicate work.",
                 },
                 "source_tool": {
                     "type": "string",
@@ -103,7 +109,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 "run_id": {"type": "string", "description": "Optional personal-tool run id."},
                 "metadata": {"type": "object", "description": "Optional machine-readable metadata.", "default": {}},
             },
-            ["summary"],
+            ["intent"],
         ),
         "scope": external_agents.SCOPE_SIGNAL_SUBMIT,
         "mutates_inbound": True,
@@ -154,7 +160,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 "personal-agent work. Use only when the user explicitly asks to share work "
                 "with teammates, publish findings into Illo, or start a team-visible "
                 "discussion. For automatic hooks and routine progress, prefer "
-                f"{SIGNAL_TOOL_NAME} so IloSpace can route the signal. Set trigger_illo "
+                f"{CONTEXT_TOOL_NAME} so IloSpace can route the context. Set trigger_illo "
                 "only when the user wants Illo to actively respond or the message explicitly "
                 "mentions Illo."
             ),
@@ -191,7 +197,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 "Advanced compatibility tool for posting a visible update into an existing "
                 "Illo thread. Use only when the user explicitly names or provides the thread "
                 "destination. For automatic hooks and routine progress, prefer "
-                f"{SIGNAL_TOOL_NAME} so IloSpace can route the signal."
+                f"{CONTEXT_TOOL_NAME} so IloSpace can route the context."
             ),
             {
                 "idea_id": {"type": "string", "description": "Existing Illo idea/thread id."},
@@ -286,7 +292,7 @@ def _tool_metadata(arguments: dict[str, Any], *, tool_name: str, trigger_illo: b
     return metadata
 
 
-_FORBIDDEN_SIGNAL_TARGET_FIELDS = frozenset(
+_FORBIDDEN_CONTEXT_TARGET_FIELDS = frozenset(
     {
         "idea_id",
         "thread_id",
@@ -305,63 +311,69 @@ def _clean_optional_string(value: Any) -> str | None:
     return text or None
 
 
-def _signal_hints(arguments: dict[str, Any]) -> dict[str, Any]:
-    hints = _clean_dict(arguments.get("hints"))
+def _context_source(arguments: dict[str, Any]) -> dict[str, Any]:
+    source = _clean_dict(arguments.get("source"))
     for key in ("source_tool", "repo", "branch", "task_title", "session_id", "run_id"):
         value = _clean_optional_string(arguments.get(key))
         if value:
-            hints.setdefault(key, value)
+            source.setdefault(key, value)
     files_touched = _clean_string_list(arguments.get("files_touched"))
     if files_touched:
-        hints.setdefault("files_touched", files_touched)
-    return hints
+        source.setdefault("files_touched", files_touched)
+    return source
 
 
-def _signal_payload(arguments: dict[str, Any], *, summary: str, origin: str, hints: dict[str, Any]) -> dict[str, Any]:
-    payload = _clean_dict(arguments.get("payload"))
-    source_tool = str(hints.get("source_tool") or arguments.get("source_tool") or "").strip().lower()
-    if "checkpoint" not in payload and (origin == "codex.progress" or source_tool == "codex"):
-        payload["checkpoint"] = {
-            key: value
-            for key, value in {
-                "summary": summary,
-                "source_tool": hints.get("source_tool") or "codex",
-                "repo": hints.get("repo"),
-                "branch": hints.get("branch"),
-                "task_title": hints.get("task_title"),
-                "files_touched": hints.get("files_touched"),
-                "session_id": hints.get("session_id"),
-                "run_id": hints.get("run_id"),
-            }.items()
-            if value not in (None, "", [])
-        }
-    return payload
+def _clean_context_parts(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{CONTEXT_TOOL_NAME} parts must be an array")
+    parts: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            parts.append(dict(item))
+        elif str(item or "").strip():
+            parts.append({"type": "text", "text": str(item)})
+    return parts
 
 
-def _build_signal_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
-    forbidden = sorted(_FORBIDDEN_SIGNAL_TARGET_FIELDS.intersection(arguments))
+def _build_context_envelope(arguments: dict[str, Any]) -> dict[str, Any]:
+    forbidden = sorted(_FORBIDDEN_CONTEXT_TARGET_FIELDS.intersection(arguments))
     if forbidden:
         raise ValueError(
-            f"{SIGNAL_TOOL_NAME} accepts context hints, not direct workspace targets. "
-            f"Remove top-level field(s): {', '.join(forbidden)}"
+            f"{CONTEXT_TOOL_NAME} accepts context and optional correlation, not direct workspace targets. "
+            f"Move Thread ids under correlation and remove top-level field(s): {', '.join(forbidden)}"
         )
-    summary = _clean_optional_string(arguments.get("summary"))
-    if not summary:
-        raise ValueError(f"{SIGNAL_TOOL_NAME} requires a non-empty summary")
-    origin = _clean_optional_string(arguments.get("origin")) or "codex.progress"
-    hints = _signal_hints(arguments)
+    intent = _clean_optional_string(arguments.get("intent") or arguments.get("summary"))
+    if not intent:
+        raise ValueError(f"{CONTEXT_TOOL_NAME} requires a non-empty intent")
+    origin = _clean_optional_string(arguments.get("origin")) or "codex.context"
+    source = _context_source(arguments)
+    constraints = _clean_dict(arguments.get("constraints"))
+    correlation = _clean_dict(arguments.get("correlation"))
+    parts = _clean_context_parts(arguments.get("parts"))
+    payload = {
+        "intent": intent,
+        "parts": parts,
+        "source": source,
+        "constraints": constraints,
+        "correlation": correlation,
+    }
     return {
-        "kind": "signal",
+        "kind": "context",
         "origin": origin,
-        "payload": _signal_payload(arguments, summary=summary, origin=origin, hints=hints),
-        "summary": summary,
-        "hints": hints,
-        "desired_outcome": _clean_optional_string(arguments.get("desired_outcome")),
+        "payload": payload,
+        "summary": _clean_optional_string(arguments.get("summary")) or intent,
+        "intent": intent,
+        "parts": parts,
+        "source": source,
+        "constraints": constraints,
+        "correlation": correlation,
         "idempotency_key": _clean_optional_string(arguments.get("idempotency_key")),
     }
 
 
-def _signal_connection(principal: external_agents.AgentBridgePrincipal) -> dict[str, Any]:
+def _context_connection(principal: external_agents.AgentBridgePrincipal) -> dict[str, Any]:
     return {
         "id": principal.connection_id,
         "org_id": principal.org_id,
@@ -370,11 +382,11 @@ def _signal_connection(principal: external_agents.AgentBridgePrincipal) -> dict[
         "display_name": principal.connection_display_name,
         "agent_kind": principal.agent_kind,
         "source_type": "personal_tool",
-        "capabilities": ["submit_signals"],
+        "capabilities": ["submit_context"],
     }
 
 
-def _signal_source_actor(principal: external_agents.AgentBridgePrincipal) -> dict[str, Any]:
+def _context_source_actor(principal: external_agents.AgentBridgePrincipal) -> dict[str, Any]:
     return {
         "kind": "external_source_connection",
         "connection_id": principal.connection_id,
@@ -383,14 +395,14 @@ def _signal_source_actor(principal: external_agents.AgentBridgePrincipal) -> dic
     }
 
 
-def _signal_ingress_context(
+def _context_ingress_context(
     principal: external_agents.AgentBridgePrincipal,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "surface": "mcp_personal_tool",
-        "tool_name": SIGNAL_TOOL_NAME,
-        "source_actor": _signal_source_actor(principal),
+        "tool_name": CONTEXT_TOOL_NAME,
+        "source_actor": _context_source_actor(principal),
         "authority_principal": {
             "kind": "user",
             "user_id": principal.owner_user_id,
@@ -400,7 +412,7 @@ def _signal_ingress_context(
             "token_id": principal.token_id,
             "scopes": sorted(principal.scopes),
         },
-        "metadata": _tool_metadata(arguments, tool_name=SIGNAL_TOOL_NAME),
+        "metadata": _tool_metadata(arguments, tool_name=CONTEXT_TOOL_NAME),
     }
 
 
@@ -446,18 +458,33 @@ def _list_tools(principal: external_agents.AgentBridgePrincipal) -> list[dict[st
     return tools
 
 
-async def _tool_submit_signal(
+def _context_tool_response(result: dict[str, Any]) -> dict[str, Any]:
+    outcome = dict(result.get("ilo_outcome") or {})
+    return {
+        **result,
+        "thread_id": outcome.get("thread_id"),
+        "thread_url": outcome.get("thread_url") or outcome.get("url"),
+        "thread_route": outcome.get("thread_route"),
+        "url": outcome.get("url") or outcome.get("thread_url"),
+        "message": outcome.get("message"),
+        "operation": outcome.get("operation"),
+        "context_submission_id": outcome.get("context_submission_id"),
+    }
+
+
+async def _tool_submit_context(
     db: AsyncSession,
     principal: external_agents.AgentBridgePrincipal,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    envelope = _build_signal_envelope(arguments)
-    return await submit_inbound_envelope(
+    envelope = _build_context_envelope(arguments)
+    result = await submit_inbound_envelope(
         db,
-        connection=_signal_connection(principal),
+        connection=_context_connection(principal),
         envelope=envelope,
-        ingress_context=_signal_ingress_context(principal, arguments),
+        ingress_context=_context_ingress_context(principal, arguments),
     )
+    return _context_tool_response(result)
 
 
 async def _tool_search_workspace(
@@ -593,7 +620,7 @@ async def _add_thread_trigger_result_if_needed(
 
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
-    SIGNAL_TOOL_NAME: _tool_submit_signal,
+    CONTEXT_TOOL_NAME: _tool_submit_context,
     "illo_search_workspace": _tool_search_workspace,
     "illo_get_thread": _tool_get_thread,
     "illo_get_team_members": _tool_get_team_members,

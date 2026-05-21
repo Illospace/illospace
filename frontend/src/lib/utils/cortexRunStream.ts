@@ -66,6 +66,109 @@ export function isLivePartialReply(item: Partial<CortexRunStreamItem> | null | u
   return Boolean(item?.metadata?.live_agent_text);
 }
 
+function timestampMs(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function livePartialItemsForRun(
+  stream: readonly CortexRunStreamItem[],
+  runId: unknown,
+): CortexRunStreamItem[] {
+  const key = runIdKey(runId);
+  if (!key) return [];
+  return stream.filter((item) => isLivePartialReply(item) && streamItemRunId(item) === key);
+}
+
+function lastLivePartialForRun(
+  stream: readonly CortexRunStreamItem[],
+  runId: unknown,
+): CortexRunStreamItem | null {
+  return livePartialItemsForRun(stream, runId).at(-1) ?? null;
+}
+
+function nextLivePartialId(runId: unknown, stream: readonly CortexRunStreamItem[]): string | null {
+  const baseId = livePartialId(runId);
+  if (!baseId) return null;
+  const count = livePartialItemsForRun(stream, runId).length;
+  return count === 0 ? baseId : `${baseId}-${count + 1}`;
+}
+
+function runToolTimes(run: CortexRunStreamItem): number[] {
+  const times = [
+    ...(run.tool_calls || []).map((call) => timestampMs(call.at)),
+    ...(run.activity_trace || [])
+      .filter((entry) => Boolean(entry.tool_name))
+      .map((entry) => timestampMs(entry.at)),
+    ...(run.work_log || [])
+      .filter((entry) => String(entry.kind || '').includes('tool'))
+      .map((entry) => timestampMs(entry.time)),
+  ];
+  return times.filter((value): value is number => value !== null);
+}
+
+function hasRunToolWork(
+  stream: readonly CortexRunStreamItem[],
+  runId: unknown,
+  matches: (time: number) => boolean,
+): boolean {
+  const key = runIdKey(runId);
+  if (!key) return false;
+  return stream.some((item) => {
+    if (item.type !== 'run' || streamItemRunId(item) !== key) return false;
+    return runToolTimes(item).some(matches);
+  });
+}
+
+function hasRunToolWorkSince(
+  stream: readonly CortexRunStreamItem[],
+  runId: unknown,
+  sinceMs: number,
+): boolean {
+  return hasRunToolWork(stream, runId, (time) => time > sinceMs);
+}
+
+function hasRunToolWorkBefore(
+  stream: readonly CortexRunStreamItem[],
+  runId: unknown,
+  beforeMs: number,
+): boolean {
+  return hasRunToolWork(stream, runId, (time) => time <= beforeMs);
+}
+
+function livePartialLastDeltaMs(item: CortexRunStreamItem): number | null {
+  return timestampMs(item.metadata?.live_agent_text_last_delta_at) ?? timestampMs(item.timestamp);
+}
+
+function shouldStartNewLivePartial(
+  stream: readonly CortexRunStreamItem[],
+  runId: unknown,
+  currentPartial: CortexRunStreamItem | null,
+): boolean {
+  if (!currentPartial) return true;
+  const lastDeltaMs = livePartialLastDeltaMs(currentPartial);
+  return lastDeltaMs !== null && hasRunToolWorkSince(stream, runId, lastDeltaMs);
+}
+
+function isSettledAgentRunReply(item: Partial<CortexRunStreamItem>, runId: string): boolean {
+  if (item.type !== 'message' || isLivePartialReply(item)) return false;
+  const isAgentMessage = item.role === 'assistant' || item.role === 'illo';
+  return isAgentMessage && streamItemRunId(item) === runId && Boolean(String(item.content || '').trim());
+}
+
+export function shouldRenderLiveAgentTextItem(
+  item: Partial<CortexRunStreamItem> | null | undefined,
+  visibleItems: readonly Partial<CortexRunStreamItem>[] = [],
+): boolean {
+  if (!isLivePartialReply(item)) return true;
+  const runId = streamItemRunId(item);
+  if (!runId) return true;
+  return !visibleItems.some((candidate) => {
+    return candidate !== item && isSettledAgentRunReply(candidate, runId);
+  });
+}
+
 export function runUiEventKey(msg: any): string | null {
   const eventId = msg?.run_event_id ?? msg?.event_id ?? msg?.event_cursor;
   if (eventId === null || eventId === undefined || eventId === '' || Number(eventId) <= 0) return null;
@@ -184,31 +287,46 @@ export function applyAgentTextDeltaToStream(
 ): CortexRunStreamItem[] {
   if (!msg || msg.idea_id !== selectedIdeaId) return stream;
   const runId = msg.run_id;
-  const partialId = livePartialId(runId);
-  if (!partialId) return stream;
+  const partialBaseId = livePartialId(runId);
+  if (!partialBaseId) return stream;
 
   if (msg.reset) {
-    return stream.filter((item) => item.id !== partialId);
+    return stream.filter((item) => {
+      return item.id !== partialBaseId && !String(item.id).startsWith(`${partialBaseId}-`);
+    });
   }
 
   const delta = typeof msg.delta === 'string' ? msg.delta : '';
   if (!delta) return stream;
 
-  const existing = stream.find((item) => item.id === partialId);
-  if (existing) {
+  const deltaAt = eventAt(msg, nowIso);
+  const existing = lastLivePartialForRun(stream, runId);
+  if (!shouldStartNewLivePartial(stream, runId, existing)) {
     return stream.map((item) =>
-      item.id === partialId
-        ? { ...item, content: `${item.content || ''}${delta}` }
+      item.id === existing?.id
+        ? {
+            ...item,
+            content: `${item.content || ''}${delta}`,
+            metadata: {
+              ...(item.metadata || {}),
+              live_agent_text_last_delta_at: deltaAt,
+            },
+          }
         : item,
     );
   }
+
+  const partialId = nextLivePartialId(runId, stream);
+  if (!partialId) return stream;
+  const deltaAtMs = timestampMs(deltaAt);
+  const afterTool = deltaAtMs !== null && hasRunToolWorkBefore(stream, runId, deltaAtMs);
 
   return [
     ...stream,
     {
       type: 'message',
       id: partialId,
-      timestamp: nowIso,
+      timestamp: deltaAt,
       role: 'illo',
       content: delta,
       metadata: {
@@ -216,6 +334,9 @@ export function applyAgentTextDeltaToStream(
         idea_id: msg.idea_id,
         execution_profile: msg.profile || 'fast',
         live_agent_text: true,
+        live_agent_text_after_tool: afterTool,
+        live_agent_text_first_delta_at: deltaAt,
+        live_agent_text_last_delta_at: deltaAt,
       },
     },
   ];

@@ -30,7 +30,11 @@ from brain.systems.runs.tool_catalog.handlers.cortex_reply import (
     _handle_cortex_reply,
     _handle_cortex_visual_reply,
 )
-from brain.systems.runs.tool_catalog.handlers.chat import _handle_post_chat_message
+from brain.systems.runs.tool_catalog.handlers.chat import (
+    _handle_post_chat_message,
+    _handle_post_thread_discussion_reply,
+    _handle_read_thread_discussion,
+)
 from brain.systems.runs.tool_catalog.handlers.cycles import _handle_manage_cycle
 from brain.systems.runs.tool_catalog.handlers.domains import _handle_manage_domain
 from brain.systems.runs.tool_catalog.handlers.inbound import _handle_manage_inbound
@@ -200,6 +204,14 @@ def _get_tool_handlers(
         "post_chat_message": lambda **kw: _patched_private(
             "_handle_post_chat_message",
             _handle_post_chat_message,
+        )(**kw),
+        "post_thread_discussion_reply": lambda **kw: _patched_private(
+            "_handle_post_thread_discussion_reply",
+            _handle_post_thread_discussion_reply,
+        )(**kw),
+        "read_thread_discussion": lambda **kw: _patched_private(
+            "_handle_read_thread_discussion",
+            _handle_read_thread_discussion,
         )(**kw),
         "manage_cycle": lambda **kw: _patched_private("_handle_manage_cycle", _handle_manage_cycle)(**kw),
         "manage_domain": lambda **kw: _patched_private("_handle_manage_domain", _handle_manage_domain)(**kw),

@@ -9,7 +9,6 @@ export type VaultSecret = ProjectContextVaultSecret & Record<string, any>;
 export type CreateSecretInput = Parameters<typeof api.createSecret>[0];
 export type UpdateSecretInput = Parameters<typeof api.updateSecret>[1];
 export type VaultSetupPinInput = Parameters<typeof api.vaultSetupPin>[0];
-export type VaultShareInput = Parameters<typeof api.vaultShare>[1];
 export type VaultApproveGrantInput = Parameters<typeof api.vaultApproveGrant>[1];
 export type VaultProjectSecretBindingInput = Parameters<typeof api.vaultBindProjectSecret>[1];
 export type VaultUnlockResponse = Awaited<ReturnType<typeof api.vaultUnlock>>;
@@ -30,9 +29,6 @@ type VaultApiMethods = {
   vaultSetupPin: typeof api.vaultSetupPin;
   vaultUnlock: (pin: string) => Promise<VaultUnlockResponse>;
   vaultLock: typeof api.vaultLock;
-  vaultOrgUsers: typeof api.vaultOrgUsers;
-  vaultShare: typeof api.vaultShare;
-  vaultRevokeShare: typeof api.vaultRevokeShare;
   vaultLog: (vaultToken?: VaultToken) => Promise<VaultLogEntry[]>;
   missingSecrets: (vaultToken?: VaultToken) => Promise<MissingSecret[]>;
   vaultAgentGrants: (vaultToken?: VaultToken, status?: string) => Promise<VaultAgentGrant[]>;
@@ -53,9 +49,6 @@ export const vaultApi = pickTypedApiMethods<VaultApiMethods>([
   'vaultSetupPin',
   'vaultUnlock',
   'vaultLock',
-  'vaultOrgUsers',
-  'vaultShare',
-  'vaultRevokeShare',
   'vaultLog',
   'missingSecrets',
   'vaultAgentGrants',
@@ -76,9 +69,6 @@ export const {
   vaultSetupPin,
   vaultUnlock,
   vaultLock,
-  vaultOrgUsers,
-  vaultShare,
-  vaultRevokeShare,
   vaultLog,
   missingSecrets,
   vaultAgentGrants,

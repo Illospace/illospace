@@ -49,6 +49,8 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_cortex_reply",
     "_handle_cortex_visual_reply",
     "_handle_post_chat_message",
+    "_handle_post_thread_discussion_reply",
+    "_handle_read_thread_discussion",
     "_handle_read_thread_messages",
     "_handle_manage_cycle",
     "_handle_manage_domain",

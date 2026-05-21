@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import select, text
 
-from brain.platform.db.models.idea import Idea, IdeaProjectAttachment
+from brain.platform.db.models.idea import Idea, IdeaProjectAttachment, ProjectProfile
 from brain.systems.cortex.project_context.snapshot import (
     ProjectContextValidationError,
     validated_project_context_snapshot,
@@ -529,6 +529,24 @@ def _metadata_int(metadata: dict[str, Any], *keys: str) -> int | None:
     return None
 
 
+def _surface_context_for_target(metadata: dict[str, Any]) -> dict[str, Any]:
+    surface_context: dict[str, Any] = {}
+    for key in (
+        "originating_surface",
+        "triggering_surface",
+        "source_surface",
+        "required_response_tool",
+        "final_answer_target_surface",
+    ):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            surface_context[key] = value.strip()
+    discussion_trigger = metadata.get("discussion_trigger")
+    if isinstance(discussion_trigger, dict):
+        surface_context["discussion_trigger"] = dict(discussion_trigger)
+    return surface_context
+
+
 async def _a_latest_attached_project_context(session: Any, idea_id: str) -> dict[str, Any]:
     if not hasattr(session, "scalars"):
         return {}
@@ -544,6 +562,16 @@ async def _a_latest_attached_project_context(session: Any, idea_id: str) -> dict
         attachment = result.first()
     except Exception:
         return {}
+    profile_id = getattr(attachment, "project_profile_id", None)
+    if profile_id and hasattr(session, "get"):
+        try:
+            profile = await session.get(ProjectProfile, profile_id)
+        except Exception:
+            profile = None
+        if profile is not None and getattr(profile, "active", True) is not False:
+            project_context = getattr(profile, "project_context", None)
+            if isinstance(project_context, dict):
+                return dict(project_context)
     snapshot = getattr(attachment, "snapshot", None)
     return dict(snapshot) if isinstance(snapshot, dict) else {}
 
@@ -614,16 +642,12 @@ async def _a_select_project_context(
     metadata: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
     validation_errors: list[dict[str, Any]] = []
-    for source, candidate in (
-        ("metadata", _project_context_from_metadata(metadata)),
-        ("idea", _project_context_from_idea(idea)),
-    ):
-        if not candidate:
-            continue
+    candidate = _project_context_from_metadata(metadata)
+    if candidate:
         snapshot, errors = _snapshot_for_project_context(candidate)
         if snapshot:
             return candidate, snapshot, validation_errors
-        validation_errors.append({"source": source, "errors": errors})
+        validation_errors.append({"source": "metadata", "errors": errors})
 
     candidate = await _a_latest_attached_project_context(session, idea_id)
     if candidate:
@@ -631,6 +655,13 @@ async def _a_select_project_context(
         if snapshot:
             return candidate, snapshot, validation_errors
         validation_errors.append({"source": "latest_attachment", "errors": errors})
+
+    candidate = _project_context_from_idea(idea)
+    if candidate:
+        snapshot, errors = _snapshot_for_project_context(candidate)
+        if snapshot:
+            return candidate, snapshot, validation_errors
+        validation_errors.append({"source": "idea", "errors": errors})
 
     return {}, None, validation_errors
 
@@ -666,6 +697,7 @@ async def _agent_run_request_for_cortex(
         "event": event,
         "title": getattr(idea, "title", None),
     }
+    target_ref.update(_surface_context_for_target(metadata))
     workspace_ref = dict(project_context) if project_context_snapshot else {}
     if project_context_validation_errors:
         metadata["project_context_validation_errors"] = project_context_validation_errors

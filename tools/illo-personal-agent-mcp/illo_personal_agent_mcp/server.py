@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger("illo_personal_agent_mcp")
 DEFAULT_TIMEOUT_SECONDS = 60.0
-SIGNAL_TOOL_NAME = "illo_submit_signal"
+CONTEXT_TOOL_NAME = "illo_submit_context"
 
 
 class IlloBridgeError(RuntimeError):
@@ -153,14 +153,15 @@ class IlloBridgeClient:
     def get_team_members(self) -> dict[str, Any]:
         return self._request("GET", "/api/agent-bridge/workspace/team-members")
 
-    def submit_signal(
+    def submit_context(
         self,
-        summary: str,
+        intent: str,
         *,
-        origin: str = "codex.progress",
-        payload: dict[str, Any] | None = None,
-        hints: dict[str, Any] | None = None,
-        desired_outcome: str | None = None,
+        origin: str = "codex.context",
+        parts: list[dict[str, Any]] | None = None,
+        source: dict[str, Any] | None = None,
+        constraints: dict[str, Any] | None = None,
+        correlation: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
         source_tool: str = "codex",
         repo: str | None = None,
@@ -173,11 +174,12 @@ class IlloBridgeClient:
     ) -> dict[str, Any]:
         arguments = _drop_empty(
             {
-                "summary": str(summary),
-                "origin": str(origin or "codex.progress"),
-                "payload": dict(payload or {}),
-                "hints": dict(hints or {}),
-                "desired_outcome": desired_outcome,
+                "intent": str(intent),
+                "origin": str(origin or "codex.context"),
+                "parts": list(parts or []),
+                "source": dict(source or {}),
+                "constraints": dict(constraints or {}),
+                "correlation": dict(correlation or {}),
                 "idempotency_key": idempotency_key,
                 "source_tool": source_tool,
                 "repo": repo,
@@ -194,9 +196,9 @@ class IlloBridgeClient:
             "/api/mcp",
             payload={
                 "jsonrpc": "2.0",
-                "id": SIGNAL_TOOL_NAME,
+                "id": CONTEXT_TOOL_NAME,
                 "method": "tools/call",
-                "params": {"name": SIGNAL_TOOL_NAME, "arguments": arguments},
+                "params": {"name": CONTEXT_TOOL_NAME, "arguments": arguments},
             },
         )
         return _decode_mcp_tool_result(response)
@@ -286,12 +288,13 @@ def tool_illo_get_team_members() -> dict[str, Any]:
     return _client().get_team_members()
 
 
-def tool_illo_submit_signal(
-    summary: str,
-    origin: str = "codex.progress",
-    payload: dict[str, Any] | None = None,
-    hints: dict[str, Any] | None = None,
-    desired_outcome: str | None = None,
+def tool_illo_submit_context(
+    intent: str,
+    origin: str = "codex.context",
+    parts: list[dict[str, Any]] | None = None,
+    source: dict[str, Any] | None = None,
+    constraints: dict[str, Any] | None = None,
+    correlation: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     source_tool: str = "codex",
     repo: str | None = None,
@@ -302,12 +305,13 @@ def tool_illo_submit_signal(
     run_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return _client().submit_signal(
-        summary=summary,
+    return _client().submit_context(
+        intent=intent,
         origin=origin,
-        payload=payload,
-        hints=hints,
-        desired_outcome=desired_outcome,
+        parts=parts,
+        source=source,
+        constraints=constraints,
+        correlation=correlation,
         idempotency_key=idempotency_key,
         source_tool=source_tool,
         repo=repo,
@@ -372,27 +376,44 @@ ToolFunction = Callable[..., dict[str, Any]]
 
 
 TOOLS: dict[str, dict[str, Any]] = {
-    SIGNAL_TOOL_NAME: {
-        "function": tool_illo_submit_signal,
+    CONTEXT_TOOL_NAME: {
+        "function": tool_illo_submit_context,
         "description": (
-            "Submit a progress or status signal from a personal tool into IloSpace. "
-            "This is the default tool for automatic hooks and routine work updates: "
-            "send what happened, plus hints like repo, branch, task, and files touched. "
-            "Do not choose a thread, project, or teammate target here; IloSpace and Ilo "
-            "decide whether to store, route, summarize, ask, or ignore the signal."
+            "Submit ordered context from a personal agent to Illo, the user's team agent. "
+            "Use this when the user wants Illo or the team to have the current AI thread, "
+            "trace, artifacts, files, links, diffs, or other source material. The personal "
+            "agent supplies context and provenance; Illo coordinates the team workspace "
+            "and returns thread_url when routed to a Thread."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "summary": {"type": "string", "description": "Concise progress summary."},
-                "origin": {"type": "string", "description": "Stable event name.", "default": "codex.progress"},
-                "payload": {"type": "object", "description": "Optional structured payload.", "default": {}},
-                "hints": {
+                "intent": {
+                    "type": "string",
+                    "description": "Natural-language reason this context is being submitted.",
+                },
+                "origin": {"type": "string", "description": "Stable event name.", "default": "codex.context"},
+                "parts": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Ordered source context parts.",
+                    "default": [],
+                },
+                "source": {
                     "type": "object",
-                    "description": "Optional routing/context hints, not direct workspace targets.",
+                    "description": "Optional provenance about the personal agent, repo, branch, model, or session.",
                     "default": {},
                 },
-                "desired_outcome": {"type": "string", "description": "Optional intent for IloSpace."},
+                "constraints": {
+                    "type": "object",
+                    "description": "Optional privacy, urgency, visibility, or notification boundaries.",
+                    "default": {},
+                },
+                "correlation": {
+                    "type": "object",
+                    "description": "Optional thread_id, external_session_id, or prior submission reference.",
+                    "default": {},
+                },
                 "idempotency_key": {"type": "string", "description": "Optional dedupe key."},
                 "source_tool": {"type": "string", "description": "Personal tool name.", "default": "codex"},
                 "repo": {"type": "string", "description": "Repository or workspace hint."},
@@ -408,7 +429,7 @@ TOOLS: dict[str, dict[str, Any]] = {
                 "run_id": {"type": "string", "description": "Optional tool run id."},
                 "metadata": {"type": "object", "description": "Optional metadata.", "default": {}},
             },
-            "required": ["summary"],
+            "required": ["intent"],
         },
     },
     "illo_search_workspace": {
@@ -449,7 +470,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "personal-agent work. Use only when the user explicitly asks to share work "
             "with teammates, publish findings into Illo, or start a team-visible "
             "discussion. For automatic hooks and routine progress, prefer "
-            f"{SIGNAL_TOOL_NAME} so IloSpace can route the signal. Set trigger_illo "
+            f"{CONTEXT_TOOL_NAME} so IloSpace can route the context. Set trigger_illo "
             "only when the user wants Ilo to actively respond or the message explicitly "
             "mentions Ilo."
         ),
@@ -486,7 +507,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "Advanced compatibility tool for posting a visible update into an existing "
             "Illo thread. Use only when the user explicitly names or provides the thread "
             "destination. For automatic hooks and routine progress, prefer "
-            f"{SIGNAL_TOOL_NAME} so IloSpace can route the signal."
+            f"{CONTEXT_TOOL_NAME} so IloSpace can route the context."
         ),
         "inputSchema": {
             "type": "object",

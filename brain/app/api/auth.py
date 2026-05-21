@@ -46,7 +46,6 @@ async def _get_localhost_user() -> dict[str, Any] | None:
                 **identity,
                 "color": ctx.get("color", "#6366f1"),
                 "attribution_enabled": ctx.get("attribution_enabled", True),
-                "default_provider": ctx.get("default_provider"),
                 "internal": True,
                 "audit": {
                     **identity["audit"],
@@ -110,7 +109,6 @@ async def get_current_user(request: Request) -> dict[str, Any]:
         **identity,
         "color": ctx.get("color", "#6366f1"),
         "attribution_enabled": ctx.get("attribution_enabled", True),
-        "default_provider": ctx.get("default_provider"),
     }
 
 

@@ -17,10 +17,14 @@ export type UploadedThreadFile = Awaited<ReturnType<typeof api.uploadFile>>;
 export type UploadPreview = Awaited<ReturnType<typeof api.previewUpload>>;
 export type ThreadProjectContextAttachment = Awaited<ReturnType<typeof api.listIdeaProjectContext>>[number];
 export type AttachThreadProjectContextInput = Parameters<typeof api.attachIdeaProjectContext>[1];
+export type ThreadProjectDraftState = Awaited<ReturnType<typeof api.getIdeaProjectDraftState>>;
 export type ThreadActivityTimelineItem = Awaited<ReturnType<typeof api.activityTimeline>>[number];
 export type IdeaAudit = Awaited<ReturnType<typeof api.ideaAudit>>;
 export type IdeaAuditAnalysisResult = Awaited<ReturnType<typeof api.ideaAuditAnalysisResult>>;
 export type GeneratedThreadTitle = Awaited<ReturnType<typeof api.generateTitle>>;
+export type ThreadDiscussionComment = Awaited<ReturnType<typeof api.listThreadDiscussion>>[number];
+export type ThreadDiscussionCreateInput = Parameters<typeof api.postThreadDiscussionComment>[1];
+export type ThreadDiscussionCreateResult = Awaited<ReturnType<typeof api.postThreadDiscussionComment>>;
 
 type ThreadApiMethods = {
   unifiedStream: (ideaId: string, includeDebug?: boolean) => Promise<StreamItem[]>;
@@ -39,12 +43,15 @@ type ThreadApiMethods = {
   skillFeedback: typeof api.skillFeedback;
   getIdea: (id: string) => Promise<Idea>;
   ideaConnections: (ideaId: string) => Promise<Connection[]>;
+  listThreadDiscussion: typeof api.listThreadDiscussion;
+  postThreadDiscussionComment: typeof api.postThreadDiscussionComment;
   activityTimeline: typeof api.activityTimeline;
   generateTitle: typeof api.generateTitle;
   uploadFile: (file: File) => Promise<UploadedThreadFile>;
   previewUpload: typeof api.previewUpload;
   listIdeaProjectContext: typeof api.listIdeaProjectContext;
   attachIdeaProjectContext: typeof api.attachIdeaProjectContext;
+  getIdeaProjectDraftState: typeof api.getIdeaProjectDraftState;
   ideaAudit: typeof api.ideaAudit;
   ideaAuditAnalyze: typeof api.ideaAuditAnalyze;
   ideaAuditAnalysisResult: typeof api.ideaAuditAnalysisResult;
@@ -69,12 +76,15 @@ export const threadApi = pickTypedApiMethods<ThreadApiMethods>([
   'skillFeedback',
   'getIdea',
   'ideaConnections',
+  'listThreadDiscussion',
+  'postThreadDiscussionComment',
   'activityTimeline',
   'generateTitle',
   'uploadFile',
   'previewUpload',
   'listIdeaProjectContext',
   'attachIdeaProjectContext',
+  'getIdeaProjectDraftState',
   'ideaAudit',
   'ideaAuditAnalyze',
   'ideaAuditAnalysisResult',
@@ -99,12 +109,15 @@ export const {
   skillFeedback,
   getIdea,
   ideaConnections,
+  listThreadDiscussion,
+  postThreadDiscussionComment,
   activityTimeline,
   generateTitle,
   uploadFile,
   previewUpload,
   listIdeaProjectContext,
   attachIdeaProjectContext,
+  getIdeaProjectDraftState,
   ideaAudit,
   ideaAuditAnalyze,
   ideaAuditAnalysisResult,

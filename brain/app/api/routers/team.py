@@ -269,12 +269,6 @@ async def async_update_profile(
         ):
             raise HTTPException(status_code=409, detail="color is already taken in this workspace")
         updates["color"] = color
-    provider = updates.get("default_provider")
-    if provider is not None:
-        provider = provider.strip().lower() or None
-        if provider not in (None, "anthropic", "openai"):
-            raise HTTPException(status_code=400, detail="default_provider must be anthropic or openai")
-        updates["default_provider"] = provider
     for key, value in updates.items():
         setattr(u, key, value)
     await db.flush()

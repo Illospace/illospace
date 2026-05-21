@@ -77,13 +77,23 @@ def patch_uow(session, monkeypatch):
     monkeypatch.setattr("brain.systems.vault.UnitOfWork", lambda: _TestUoW(session))
 
 
-async def _secret(session, key_name: str, value: str, *, user_id=USER_ID, access_level="ask") -> Secret:
+async def _secret(
+    session,
+    key_name: str,
+    value: str,
+    *,
+    actor_user_id=USER_ID,
+    org_id: str | None = None,
+    access_level="ask",
+) -> Secret:
     from brain.systems.vault import _encrypt
 
     secret = Secret(
         key_name=key_name,
         encrypted_value=_encrypt(value),
-        user_id=user_id,
+        org_id=org_id or ORG_ID,
+        created_by_user_id=actor_user_id,
+        updated_by_user_id=actor_user_id,
         agent_access_level=access_level,
     )
     session.add(secret)
@@ -97,12 +107,13 @@ async def _binding(
     *,
     project_slug="example-repo",
     env_name="GITHUB_TOKEN",
-    user_id=USER_ID,
+    actor_user_id=USER_ID,
+    org_id=ORG_ID,
 ):
     binding = VaultProjectBinding(
         secret_id=secret.id,
-        user_id=user_id,
-        org_id=ORG_ID,
+        org_id=org_id,
+        created_by_user_id=actor_user_id,
         project_slug=project_slug,
         env_name=env_name,
         active=True,
@@ -122,7 +133,7 @@ async def test_available_secret_bypasses_run_grant(patch_uow, session):
     await _secret(session, "OPENAI_API_KEY", "sk-test", access_level="available")
     result = await authorize_agent_secret_read(
         "OPENAI_API_KEY",
-        user_id=USER_ID,
+        actor_user_id=USER_ID,
         org_id=ORG_ID,
         run_id=None,
         reason=None,
@@ -139,7 +150,7 @@ async def test_manual_secret_cannot_be_auto_read(patch_uow, session):
     await _secret(session, "STRIPE_WEBHOOK_SECRET", "whsec-test", access_level="manual")
     result = await authorize_agent_secret_read(
         "STRIPE_WEBHOOK_SECRET",
-        user_id=USER_ID,
+        actor_user_id=USER_ID,
         org_id=ORG_ID,
         run_id=42,
         reason="Need webhook secret for this task",
@@ -159,7 +170,7 @@ async def test_ask_secret_bound_to_project_is_allowed_without_prompt(patch_uow, 
 
     result = await authorize_agent_secret_read(
         "GITHUB_TOKEN",
-        user_id=USER_ID,
+        actor_user_id=USER_ID,
         org_id=ORG_ID,
         run_id=None,
         reason=None,
@@ -180,7 +191,7 @@ async def test_ask_secret_without_matching_project_creates_pending_grant(patch_u
 
     result = await authorize_agent_secret_read(
         "GITHUB_TOKEN",
-        user_id=USER_ID,
+        actor_user_id=USER_ID,
         org_id=ORG_ID,
         run_id=42,
         reason="Need GitHub access for this project task",
@@ -192,20 +203,18 @@ async def test_ask_secret_without_matching_project_creates_pending_grant(patch_u
     assert result["grant"]["key_name"] == "GITHUB_TOKEN"
 
 
-async def test_resolve_project_bound_env_tokens_returns_only_matching_user_tokens(patch_uow, session):
+async def test_resolve_project_bound_env_tokens_returns_org_bound_tokens_for_members(patch_uow, session):
     from brain.systems.vault import resolve_project_bound_env_tokens
 
-    github = await _secret(session, "GITHUB_TOKEN", "ghp-test", access_level="ask")
+    github = await _secret(session, "GITHUB_TOKEN", "ghp-test", org_id=ORG_ID, access_level="ask")
     await _binding(session, github, project_slug="example-repo", env_name="GITHUB_TOKEN")
-    manual = await _secret(session, "MANUAL_TOKEN", "manual-test", access_level="manual")
+    manual = await _secret(session, "MANUAL_TOKEN", "manual-test", org_id=ORG_ID, access_level="manual")
     await _binding(session, manual, project_slug="example-repo", env_name="MANUAL_TOKEN")
-    other_project = await _secret(session, "OTHER_TOKEN", "other-test", access_level="ask")
+    other_project = await _secret(session, "OTHER_TOKEN", "other-test", org_id=ORG_ID, access_level="ask")
     await _binding(session, other_project, project_slug="other-project", env_name="OTHER_TOKEN")
-    other_user = await _secret(session, "USER2_TOKEN", "user2-test", user_id=OTHER_USER_ID, access_level="ask")
-    await _binding(session, other_user, project_slug="example-repo", env_name="USER2_TOKEN", user_id=OTHER_USER_ID)
 
     env = await resolve_project_bound_env_tokens(
-        user_id=USER_ID,
+        actor_user_id=OTHER_USER_ID,
         org_id=ORG_ID,
         project_slug="example-repo",
     )
@@ -215,31 +224,81 @@ async def test_resolve_project_bound_env_tokens_returns_only_matching_user_token
     assert github.access_count == 1
 
 
-async def test_bind_project_secret_by_key_binds_only_current_users_owned_secret(patch_uow, session):
+async def test_project_bindings_require_org_scope(patch_uow, session):
+    from brain.systems.vault import resolve_project_bound_env_tokens
+
+    secret = await _secret(session, "ORG_TOKEN", "org-test", access_level="ask")
+    await _binding(session, secret, project_slug="example-repo", env_name="ORG_TOKEN")
+
+    with pytest.raises(ValueError, match="org_id is required"):
+        await resolve_project_bound_env_tokens(
+            actor_user_id=OTHER_USER_ID,
+            org_id=None,
+            project_slug="example-repo",
+        )
+
+
+async def test_bind_project_secret_by_key_binds_org_secret_for_any_member(patch_uow, session):
     from brain.systems.vault import bind_project_secret_by_key
 
-    await _secret(session, "OTHER_GITHUB_TOKEN", "ghp-other", user_id=OTHER_USER_ID, access_level="ask")
-    owned = await _secret(session, "GITHUB_TOKEN", "ghp-test", access_level="ask")
+    org_owned = await _secret(session, "GITHUB_TOKEN", "ghp-test", org_id=ORG_ID, access_level="ask")
 
     missing = await bind_project_secret_by_key(
         "OTHER_GITHUB_TOKEN",
-        user_id=USER_ID,
+        actor_user_id=USER_ID,
         org_id=ORG_ID,
         project_slug="Example-Org/Example-Repo",
         env_name="GH_TOKEN",
     )
     binding = await bind_project_secret_by_key(
         "GITHUB_TOKEN",
-        user_id=USER_ID,
+        actor_user_id=OTHER_USER_ID,
         org_id=ORG_ID,
         project_slug="Example-Org/Example-Repo",
         env_name="GH_TOKEN",
     )
 
     assert missing is None
-    assert binding["secret_id"] == owned.id
+    assert binding["secret_id"] == org_owned.id
+    assert binding["created_by_user_id"] == OTHER_USER_ID
+    assert binding["org_id"] == ORG_ID
     assert binding["project_slug"] == "example-org/example-repo"
     assert binding["env_name"] == "GH_TOKEN"
+
+
+async def test_get_secret_reads_org_secret_for_member(patch_uow, session):
+    from brain.systems.vault import get_secret
+
+    await _secret(session, "ORG_GITHUB_TOKEN", "ghp-org", actor_user_id=USER_ID, org_id=ORG_ID)
+
+    value = await get_secret("ORG_GITHUB_TOKEN", actor_user_id=OTHER_USER_ID, org_id=ORG_ID)
+
+    assert value == "ghp-org"
+
+
+async def test_list_secrets_includes_org_secret_for_member(patch_uow, session):
+    from brain.systems.vault import list_secrets
+
+    org_secret = await _secret(session, "ORG_GITHUB_TOKEN", "ghp-org", actor_user_id=USER_ID, org_id=ORG_ID)
+
+    rows = await list_secrets(OTHER_USER_ID, org_id=ORG_ID)
+
+    assert [
+        {
+            "id": row["id"],
+            "key_name": row["key_name"],
+            "org_id": row["org_id"],
+            "created_by_user_id": row["created_by_user_id"],
+        }
+        for row in rows
+    ] == [
+        {
+            "id": org_secret.id,
+            "key_name": "ORG_GITHUB_TOKEN",
+            "org_id": ORG_ID,
+            "created_by_user_id": USER_ID,
+        }
+    ]
 
 
 async def test_project_bound_env_tokens_match_project_slug_aliases(patch_uow, session):
@@ -249,7 +308,7 @@ async def test_project_bound_env_tokens_match_project_slug_aliases(patch_uow, se
     await _binding(session, github, project_slug="example-org/example-repo", env_name="GH_TOKEN")
 
     env = await resolve_project_bound_env_tokens(
-        user_id=USER_ID,
+        actor_user_id=USER_ID,
         org_id=ORG_ID,
         project_slug="example-repo",
         project_slugs=["example-repo", "example-org/example-repo"],
@@ -328,7 +387,7 @@ async def test_project_bound_env_uses_materialized_project_context_without_run_b
     }):
         project_context = project_execution_env._current_project_token_context()
         env = await async_resolve_project_bound_env_tokens(
-            user_id=USER_ID,
+            actor_user_id=USER_ID,
             org_id=ORG_ID,
             project_slug=project_context.get("project_slug"),
             project_slugs=project_context.get("project_slugs"),
@@ -402,6 +461,38 @@ def test_exec_command_injects_project_bound_env_names_without_returning_values(m
     assert run_env["GIT_CONFIG_COUNT"] == "1"
     assert run_env["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
     assert run_env["GIT_CONFIG_VALUE_0"] == f"AUTHORIZATION: basic {encoded}"
+
+
+def test_exec_command_attributes_project_bound_git_to_requesting_user(monkeypatch, tmp_path):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.files import _handle_exec_command
+
+    monkeypatch.setattr(
+        "brain.systems.runs.project_execution_env.current_project_bound_env",
+        lambda: {"GITHUB_TOKEN": "ghp-secret-value"},
+    )
+    proc = SimpleNamespace(returncode=0, stdout="", stderr="")
+    actor = {
+        "id": USER_ID,
+        "org_id": ORG_ID,
+        "name": "Alex Example",
+        "email": "alex@example.com",
+    }
+
+    with bind_agent_context({
+        "user_id": USER_ID,
+        "org_id": ORG_ID,
+        "execution_metadata": {"illo_trigger": {"actor": actor}},
+    }):
+        with patch("subprocess.run", return_value=proc) as run:
+            result = _handle_exec_command("git commit -m test", working_dir=str(tmp_path))
+
+    run_env = run.call_args.kwargs["env"]
+    assert result["git_auth_configured"] == ["github.com"]
+    assert run_env["GIT_AUTHOR_NAME"] == "Alex Example"
+    assert run_env["GIT_AUTHOR_EMAIL"] == "alex@example.com"
+    assert run_env["GIT_COMMITTER_NAME"] == "Alex Example"
+    assert run_env["GIT_COMMITTER_EMAIL"] == "alex@example.com"
 
 
 def test_exec_command_redacts_project_bound_git_auth_from_output(monkeypatch, tmp_path):

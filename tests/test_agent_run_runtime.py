@@ -441,6 +441,7 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert captured["spec"].idea_id is None
     assert captured["spec"].workspace_root == "/tmp/work"
     assert "interactive single-agent path" in captured["spec"].system_prompt
+    assert "write one brief task-specific assistant sentence" in captured["spec"].system_prompt
     assert "Move quickly, but keep senior engineering hygiene." not in captured["spec"].system_prompt
     assert "A `/skill` mention is an explicit skill command." not in captured["spec"].system_prompt
     assert _stream_has(runtime.stream.messages, "run.text_delta", {"delta": "README contents", "run_id": 42})
@@ -520,6 +521,53 @@ def test_fast_tool_surface_is_direct_coordinator_without_staged_reply_tools(monk
     assert roles == ["coordinator"]
 
 
+def test_fast_discussion_origin_surface_keeps_explicit_timeline_reply_tool(monkeypatch):
+    from brain.systems.runs.recipes.fast import _agent_tools_for_runtime
+
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.fast.build_agent_tools",
+        lambda role: [
+            {"name": "post_thread_discussion_reply"},
+            {"name": "cortex_reply"},
+            {"name": "cortex_visual_reply"},
+        ],
+    )
+
+    runtime = SimpleNamespace(
+        request=SimpleNamespace(
+            metadata={"originating_surface": "thread_discussion"},
+            target_ref={"originating_surface": "thread_discussion"},
+        )
+    )
+
+    assert [tool["name"] for tool in _agent_tools_for_runtime(runtime)] == [
+        "post_thread_discussion_reply",
+        "cortex_reply",
+    ]
+
+
+def test_discussion_origin_run_does_not_auto_mirror_final_answer_to_timeline():
+    from brain.systems.runs.cortex.runner import _run_should_mirror_final_answer_to_timeline
+
+    run = SimpleNamespace(
+        target_ref={"originating_surface": "thread_discussion"},
+        metadata_={"final_answer_target_surface": "originating_surface"},
+    )
+
+    assert _run_should_mirror_final_answer_to_timeline(run) is False
+
+
+def test_discussion_origin_run_can_explicitly_target_ai_timeline():
+    from brain.systems.runs.cortex.runner import _run_should_mirror_final_answer_to_timeline
+
+    run = SimpleNamespace(
+        target_ref={"originating_surface": "thread_discussion"},
+        metadata_={"final_answer_target_surface": "ai_timeline"},
+    )
+
+    assert _run_should_mirror_final_answer_to_timeline(run) is True
+
+
 async def test_runtime_drain_steering_can_use_isolated_durable_drain():
     from brain.systems.runs.steering import SteeringMessage
 
@@ -545,7 +593,7 @@ async def test_runtime_drain_steering_can_use_isolated_durable_drain():
 
 
 def test_workspace_root_from_ref_uses_thread_project_context_snapshot():
-    from brain.systems.runs.recipes.shared import workspace_root_from_ref
+    from brain.systems.runs.recipes.shared import project_runtime_workspace_from_ref, workspace_root_from_ref
 
     assert workspace_root_from_ref({"workspace_root": "/tmp/direct"}) == "/tmp/direct"
     assert workspace_root_from_ref(
@@ -576,6 +624,83 @@ def test_workspace_root_from_ref_uses_thread_project_context_snapshot():
             }
         }
     ) == "/tmp/ideas/idea-1/project/repo"
+    runtime_workspace = project_runtime_workspace_from_ref(
+        {
+            "workspaces": [
+                {"name": "/repos/frontend", "path": "/tmp/projects/p1/repos/frontend"},
+                {"name": "/reports", "path": "/tmp/projects/p1/reports"},
+            ],
+            "project_context_snapshot": {
+                "resources": [
+                    {
+                        "kind": "repo",
+                        "mount_path": "/repos/frontend",
+                        "path": "/tmp/projects/p1/repos/frontend",
+                    },
+                    {
+                        "kind": "folder",
+                        "mount_path": "/reports",
+                        "path": "/tmp/projects/p1/reports",
+                    },
+                ],
+            },
+        }
+    )
+    assert runtime_workspace.workspace_root == "/tmp/projects/p1/repos/frontend"
+    assert runtime_workspace.allowed_workspaces == [
+        {"name": "/repos/frontend", "path": "/tmp/projects/p1/repos/frontend"},
+        {"name": "/reports", "path": "/tmp/projects/p1/reports"},
+    ]
+    runtime_workspace = project_runtime_workspace_from_ref(
+        {
+            "workspaces": [{"name": "/specs", "path": "/tmp/projects/p1/specs"}],
+            "project_context_permission_scope": {
+                "allowed_paths": ["/tmp/projects/p1/specs/spec.md"],
+            },
+        }
+    )
+    assert runtime_workspace.allowed_workspaces == [
+        {"name": "/specs", "path": "/tmp/projects/p1/specs"},
+    ]
+    runtime_workspace = project_runtime_workspace_from_ref(
+        {
+            "workspaces": [{"name": "spec.md", "path": "/tmp/projects/p1/draft/attachment-1"}],
+            "project_context_snapshot": {
+                "resources": [
+                    {
+                        "kind": "file",
+                        "name": "spec.md",
+                        "path": "/tmp/projects/p1/draft/attachment-1/spec.md",
+                        "materialization": {
+                            "workspace_path": "/tmp/projects/p1/draft/attachment-1",
+                        },
+                    }
+                ],
+            },
+        }
+    )
+    assert runtime_workspace.allowed_workspaces == [
+        {"name": "spec.md", "path": "/tmp/projects/p1/draft/attachment-1"},
+    ]
+    runtime_workspace = project_runtime_workspace_from_ref(
+        {
+            "workspaces": [
+                {"name": "/reports", "path": "/tmp/projects/p1/reports-a"},
+                {"name": "/reports", "path": "/tmp/projects/p1/reports-b"},
+            ],
+            "project_workspace_manifest": {
+                "workspace_root": "/tmp/projects/p1/reports-a",
+                "workspaces": [
+                    {"name": "/reports", "path": "/tmp/projects/p1/reports-a"},
+                    {"name": "/reports-2", "path": "/tmp/projects/p1/reports-b"},
+                ],
+            },
+        }
+    )
+    assert runtime_workspace.allowed_workspaces == [
+        {"name": "/reports", "path": "/tmp/projects/p1/reports-a"},
+        {"name": "/reports-2", "path": "/tmp/projects/p1/reports-b"},
+    ]
 
 
 async def test_fast_recipe_infers_workspace_root_from_project_context_snapshot(monkeypatch):
@@ -638,6 +763,46 @@ async def test_fast_recipe_applies_runtime_tool_policy(monkeypatch):
     assert result.status.value == "completed"
     assert [tool["name"] for tool in captured["spec"].tools] == ["web_search"]
     assert sorted(captured["spec"].tool_handlers) == ["web_search"]
+
+
+async def test_fast_recipe_passes_project_workspace_registry_to_tools(monkeypatch):
+    from brain.systems.runs.recipes.fast import FastRecipe
+
+    captured = {}
+
+    def fake_build_tool_handlers(**kwargs):
+        captured["tool_kwargs"] = kwargs
+        return {}
+
+    async def fake_invoke(spec):
+        captured["spec"] = spec
+        return SimpleNamespace(output="ok", success=True, error=None)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", fake_build_tool_handlers)
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime(
+        "fast",
+        workspace_ref={
+            "workspaces": [
+                {"name": "/repos/frontend", "path": "/tmp/projects/p1/repos/frontend"},
+                {"name": "/reports", "path": "/tmp/projects/p1/reports"},
+            ],
+        },
+    )
+
+    result = await FastRecipe().execute(runtime)
+
+    assert result.status.value == "completed"
+    assert captured["spec"].workspace_root == "/tmp/projects/p1/repos/frontend"
+    assert captured["tool_kwargs"] == {
+        "workspace_root": "/tmp/projects/p1/repos/frontend",
+        "allowed_workspaces": [
+            {"name": "/repos/frontend", "path": "/tmp/projects/p1/repos/frontend"},
+            {"name": "/reports", "path": "/tmp/projects/p1/reports"},
+        ],
+    }
 
 
 async def test_runner_delegates_cycle_settlement_for_terminal_run(monkeypatch):
@@ -1458,6 +1623,46 @@ async def test_worker_recipe_infers_workspace_root_from_project_context_permissi
     assert captured["spec"].workspace_root == "/tmp/ideas/idea-1/project/repo"
 
 
+async def test_worker_recipe_passes_project_workspace_registry_to_tools(monkeypatch):
+    from brain.systems.runs.recipes.workers import WorkerRecipe
+
+    captured = {}
+
+    def fake_build_tool_handlers(**kwargs):
+        captured["tool_kwargs"] = kwargs
+        return {}
+
+    async def fake_invoke(spec):
+        captured["spec"] = spec
+        return SimpleNamespace(output="ok", success=True, error=None)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.build_agent_tools", lambda role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.build_tool_handlers", fake_build_tool_handlers)
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime(
+        "worker",
+        workspace_ref={
+            "workspaces": [
+                {"name": "/repos/frontend", "path": "/tmp/projects/p1/repos/frontend"},
+                {"name": "/reports", "path": "/tmp/projects/p1/reports"},
+            ],
+        },
+    )
+
+    result = await WorkerRecipe().execute(runtime)
+
+    assert result.status.value == "completed"
+    assert captured["spec"].workspace_root == "/tmp/projects/p1/repos/frontend"
+    assert captured["tool_kwargs"] == {
+        "workspace_root": "/tmp/projects/p1/repos/frontend",
+        "allowed_workspaces": [
+            {"name": "/repos/frontend", "path": "/tmp/projects/p1/repos/frontend"},
+            {"name": "/reports", "path": "/tmp/projects/p1/reports"},
+        ],
+    }
+
+
 def test_run_stream_payload_is_the_single_cortex_projection():
     from brain.systems.runs.cortex.read_models import run_stream_payload
 
@@ -1498,12 +1703,15 @@ def test_run_stream_payload_is_the_single_cortex_projection():
     assert payload["model_policy"] == {"tier": "high", "thinking": "high"}
 
 
-def _async_work_intake_session(idea, *, attachment=None):
+def _async_work_intake_session(idea, *, attachment=None, profiles=None):
     class _Session:
         def __init__(self):
             self.idea = idea
+            self.profiles = profiles or {}
 
-        async def get(self, model, idea_id):
+        async def get(self, model, identity):
+            if getattr(model, "__name__", "") == "ProjectProfile":
+                return self.profiles.get(str(identity))
             return self.idea
 
         async def scalars(self, stmt):
@@ -1714,6 +1922,49 @@ async def test_work_intake_falls_back_to_latest_project_attachment():
 
     assert request.metadata["project_context"]["name"] == "Attached Project"
     assert request.target_ref["project_context_snapshot"]["resources"][0]["path"] == "attached/project"
+
+
+async def test_work_intake_resolves_attached_profile_to_latest_project_root():
+    idea = SimpleNamespace(
+        id="idea-1",
+        org_id="org-1",
+        user_id="u1",
+        title="Thread",
+        agent_details={
+            "project_context": {
+                "name": "Stale attached snapshot",
+                "resources": [{"type": "folder", "path": "old/root"}],
+            },
+        },
+    )
+    attachment = SimpleNamespace(
+        project_profile_id="project-1",
+        snapshot={
+            "name": "Attached Project",
+            "resources": [{"type": "folder", "path": "attached/old"}],
+        },
+    )
+    profile = SimpleNamespace(
+        active=True,
+        project_context={
+            "name": "Attached Project",
+            "resources": [{"type": "folder", "path": "attached/latest"}],
+        },
+    )
+
+    session = _async_work_intake_session(idea, attachment=attachment, profiles={"project-1": profile})
+
+    request = await _build_cortex_intake_run_request(
+        session,
+        idea_id="idea-1",
+        event="thread_reply",
+        message="Continue in the project",
+        user_id="u1",
+        metadata={},
+    )
+
+    assert request.metadata["project_context"]["resources"][0]["path"] == "attached/latest"
+    assert request.target_ref["project_context_snapshot"]["resources"][0]["path"] == "attached/latest"
 
 
 async def test_work_intake_applies_intelligence_and_effort_overrides():

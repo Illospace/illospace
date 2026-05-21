@@ -84,6 +84,10 @@
   const selectModeOptions = $derived(intentOptions ?? []);
   const showSecondaryIntentPicker = $derived(Boolean(secondaryIntentOptions?.length));
   const showSettingsPicker = $derived(Boolean(settingsGroups?.length));
+  const showAttachControl = $derived(Boolean(onAttach));
+  const actionDisabled = $derived(
+    disabled || (isWorking ? !onStop && !shouldSubmitWhileWorking : !resolvedCanSubmit),
+  );
   const selectedIntentValue = $derived(intentValue ?? selectedMode);
   const selectedSecondaryIntentValue = $derived(secondaryIntentValue ?? secondaryIntentOptions?.[0]?.value ?? '');
   const effectiveIntentValue = $derived(
@@ -449,15 +453,17 @@
           {@render leadingControls()}
         {:else}
           <div class="composer-default-leading">
-            <ConstellationComposerOrb
-              label={attachLabel}
-              title={attachLabel}
-              disabled={disabled}
-              variant={controlVariant}
-              onclick={handleAttach}
-            >
-              <ConstellationIcon name="attach" size={18} stroke={2} />
-            </ConstellationComposerOrb>
+            {#if showAttachControl}
+              <ConstellationComposerOrb
+                label={attachLabel}
+                title={attachLabel}
+                disabled={disabled}
+                variant={controlVariant}
+                onclick={handleAttach}
+              >
+                <ConstellationIcon name="attach" size={18} stroke={2} />
+              </ConstellationComposerOrb>
+            {/if}
 
             <div class="composer-chip-group" aria-label="Composer settings">
               {#if extraLeadingControls}
@@ -591,7 +597,7 @@
           <ConstellationComposerActionOrb
             actionState={effectiveActionState}
             label={actionLabel}
-            disabled={disabled || (!isWorking && !resolvedCanSubmit)}
+            disabled={actionDisabled}
             onclick={handleSubmitAction}
           />
         {/if}
