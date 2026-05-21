@@ -19,10 +19,13 @@ import { shouldRenderLiveAgentTextItem, streamItemRunId } from '$lib/utils/corte
 import { parseServerDate, parseServerTimeMs, relativeTimeAgo } from '$lib/utils/datetime';
 import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
 import { buildRunEvidenceDebug } from '$lib/utils/runEvidenceDebug';
+import { buildChronologicalRunSegments } from '$lib/utils/threadRunChronology';
 import { orderQueuedThreadStreamItems } from '$lib/utils/threadStreamOrdering';
 import type { Idea, StreamItem } from '$lib/types/cortex';
 import type {
   CortexThreadStageAttachmentItem,
+  CortexThreadStageMessageItem,
+  CortexThreadStageRunItem,
   CortexThreadStageRunStatus,
   CortexThreadStageRunStepStatus,
   CortexThreadStageTranscriptItem,
@@ -334,6 +337,194 @@ export function getRunActivity(source: StreamItem | null | undefined): string | 
   return null;
 }
 
+interface TranscriptMappingContext {
+  idea?: Idea | null;
+  themeMode: ThreadThemeMode;
+  currentUser?: ThreadCurrentUser | null;
+  nowMs: number;
+  onApproveRun?: (runId: number) => void;
+  onDenyRun?: (runId: number) => void;
+}
+
+function mapThreadMessageItem(
+  item: StreamItem,
+  {
+    idea,
+    themeMode,
+    currentUser,
+    nowMs,
+  }: TranscriptMappingContext,
+): CortexThreadStageMessageItem {
+  const isAgent = item.role === 'assistant' || item.role === 'illo';
+  const userAccent = isAgent ? null : resolveUserAccent(item, idea, currentUser);
+  const rawAttachments = Array.isArray(item.attachments) ? item.attachments : [];
+  const attachments = [...rawAttachments, ...messageLinkAttachments(item.content, rawAttachments)]
+    .map((attachment) => mapThreadAttachment(attachment))
+    .filter(Boolean) as CortexThreadStageAttachmentItem[];
+
+  const userShellColor = themeMode === 'light'
+    ? THREAD_USER_LIGHT_SHELL_COLOR
+    : THREAD_USER_DARK_SHELL_COLOR;
+  const userOwnerText = themeMode === 'light'
+    ? THREAD_USER_LIGHT_OWNER_TEXT
+    : THREAD_USER_DARK_OWNER_TEXT;
+
+  return {
+    kind: 'message',
+    id: item.id,
+    role: isAgent ? 'illo' : 'user',
+    author: isAgent ? 'Illo' : item.user_name || 'You',
+    timestamp: timeAgo(item.timestamp, nowMs),
+    tag: messageTag(item),
+    tone: isAgent ? 'spectral' : accentTone(userAccent),
+    accentColor: userAccent ?? undefined,
+    coreColor: userAccent ? mixHex(userAccent, userShellColor, themeMode === 'light' ? 0.16 : 0.68) : undefined,
+    ownerColor: userAccent ? mixHex(userAccent, userOwnerText, themeMode === 'light' ? 0.22 : 0.78) : undefined,
+    html: item.content ? renderReadableMarkdown(item.content) : undefined,
+    attachments: attachments.length ? attachments : undefined,
+  };
+}
+
+function runLiveLines(item: StreamItem, fallback: string | null): CortexThreadStageRunItem['liveLines'] {
+  if (item.work_log?.length) return item.work_log;
+  if (item.live_lines?.length) return item.live_lines;
+  return fallback ? [fallback] : [];
+}
+
+function mapThreadRunItem(
+  item: StreamItem,
+  {
+    nowMs,
+    onApproveRun,
+    onDenyRun,
+  }: TranscriptMappingContext,
+): CortexThreadStageRunItem {
+  const runActivity = getRunActivity(item);
+  const runStatus = normalizeRunStatus(item.status);
+  const activeRun = isActiveRun(item);
+  const runId = Number(item.id);
+  const canApproveRun = Boolean(item.requires_approval && Number.isFinite(runId));
+  const workItems = runWorkTimelineItems(item).map((workItem) => ({
+    ...workItem,
+    time: workItem.at ? formatRunClock(workItem.at) : undefined,
+  }));
+  return {
+    kind: 'run',
+    id: item.id,
+    status: runStatus,
+    skill: item.skill_name || item.title || (isFastRun(item) ? 'Fast' : 'run'),
+    event: item.title || (isFastRun(item) ? 'Fast work log' : 'Latest run'),
+    summaryTitle: runWorkSummaryTitle(item),
+    summarySubtitle: runWorkSummarySubtitle(item),
+    defaultExpanded: activeRun || Boolean(item.requires_approval),
+    timestamp: formatRunClock(item.started_at || item.timestamp) || timeAgo(item.timestamp, nowMs),
+    model: item.model_used || undefined,
+    thinking: item.thinking_used || undefined,
+    tokens: formatCompactTokens(item.tokens_total),
+    cost: formatCost(item.estimated_cost),
+    telemetry: buildRunTelemetry(item),
+    duration: item.duration_sec ? formatDuration(item.duration_sec) : undefined,
+    error: item.error || undefined,
+    requiresApproval: Boolean(item.requires_approval),
+    runSteps: (item.run_steps || []).map((step: any, index: number) => ({
+      id: String(
+        step.id ||
+          `${step.node_id || step.step_id || step.skill_name || step.label || 'step'}-${step.wave ?? 0}-${index}`,
+      ),
+      label: step.node_id || step.step_id || step.label || step.skill_name || 'Step',
+      skill: step.skill_name || undefined,
+      duration: step.duration_sec ? formatDuration(step.duration_sec) : undefined,
+      tokens: formatCompactTokens(step.tokens_total),
+      task: step.task || undefined,
+      wave: step.wave,
+      status: normalizeStepStatus(step.status),
+    })),
+    workItems,
+    liveLines: runLiveLines(item, runActivity),
+    liveLinesEyebrow: activeRun ? 'Live work' : 'Work log',
+    toolCalls: (item.tool_calls || []).map((toolCall: any) => ({
+      tool: toolCall.tool,
+      args: toolCall.args || undefined,
+      at: toolCall.at || undefined,
+      status: toolCall.status || undefined,
+      display: toolCall.display || undefined,
+    })),
+    toolCallsDefaultOpen: activeRun,
+    evidenceDebug: buildRunEvidenceDebug(item) ?? undefined,
+    onApprove:
+      canApproveRun && onApproveRun
+        ? () => onApproveRun(runId)
+        : undefined,
+    onDeny:
+      canApproveRun && onDenyRun
+        ? () => onDenyRun(runId)
+        : undefined,
+  };
+}
+
+function groupedRenderableLiveAgentTextItems(visibleItems: readonly StreamItem[]): Map<string, StreamItem[]> {
+  const visibleRunIds = new Set<string>();
+  for (const item of visibleItems) {
+    if (item.type !== 'run' || !shouldShowRunInTranscript(item) || !canSplitRunLiveText(item)) continue;
+    const runId = streamItemRunId(item) ?? String(item.id);
+    if (runId) visibleRunIds.add(runId);
+  }
+
+  const liveTextByRun = new Map<string, StreamItem[]>();
+  for (const item of visibleItems) {
+    if (item.type !== 'message' || !item.metadata?.live_agent_text) continue;
+    if (!shouldRenderLiveAgentTextItem(item, visibleItems)) continue;
+    const runId = streamItemRunId(item);
+    if (!runId || !visibleRunIds.has(runId)) continue;
+    const runItems = liveTextByRun.get(runId);
+    if (runItems) runItems.push(item);
+    else liveTextByRun.set(runId, [item]);
+  }
+  return liveTextByRun;
+}
+
+function liveAgentTextItemIds(liveTextByRun: Map<string, StreamItem[]>): Set<string> {
+  const ids = new Set<string>();
+  for (const items of liveTextByRun.values()) {
+    for (const item of items) {
+      ids.add(String(item.id));
+    }
+  }
+  return ids;
+}
+
+function canSplitRunLiveText(item: StreamItem): boolean {
+  return isActiveRun(item) && !item.requires_approval && item.status !== 'pending_approval';
+}
+
+function appendChronologicalRunSegments(
+  transcriptItems: CortexThreadStageTranscriptItem[],
+  runItem: CortexThreadStageRunItem,
+  liveTextItems: readonly StreamItem[],
+  context: TranscriptMappingContext,
+) {
+  const segments = buildChronologicalRunSegments(runItem.workItems ?? [], liveTextItems, {
+    includeTrailingCue: true,
+  });
+  let workSegmentIndex = 0;
+  for (const segment of segments) {
+    if (segment.kind === 'live_text') {
+      transcriptItems.push(mapThreadMessageItem(segment.item, context));
+      continue;
+    }
+    if (segment.items.length === 0 && !segment.showLiveCue) continue;
+    workSegmentIndex += 1;
+    transcriptItems.push({
+      ...runItem,
+      id: `${runItem.id}:work:${workSegmentIndex}`,
+      workItems: segment.items,
+      liveLines: [],
+      showLiveCue: segment.showLiveCue,
+      toolCalls: [],
+    });
+  }
+}
+
 export function buildThreadTranscriptItems({
   idea,
   stream,
@@ -347,39 +538,22 @@ export function buildThreadTranscriptItems({
 }: BuildThreadTranscriptOptions): CortexThreadStageTranscriptItem[] {
   const items: CortexThreadStageTranscriptItem[] = [];
   const visibleItems = orderQueuedThreadStreamItems(visibleThreadStreamItems(stream));
+  const liveTextByRun = groupedRenderableLiveAgentTextItems(visibleItems);
+  const consumedLiveTextIds = liveAgentTextItemIds(liveTextByRun);
+  const mappingContext: TranscriptMappingContext = {
+    idea,
+    themeMode,
+    currentUser,
+    nowMs,
+    onApproveRun,
+    onDenyRun,
+  };
 
   for (const item of visibleItems) {
     if (item.type === 'message') {
+      if (consumedLiveTextIds.has(String(item.id))) continue;
       if (!shouldRenderLiveAgentTextItem(item, visibleItems)) continue;
-
-      const isAgent = item.role === 'assistant' || item.role === 'illo';
-      const userAccent = isAgent ? null : resolveUserAccent(item, idea, currentUser);
-      const rawAttachments = Array.isArray(item.attachments) ? item.attachments : [];
-      const attachments = [...rawAttachments, ...messageLinkAttachments(item.content, rawAttachments)]
-        .map((attachment) => mapThreadAttachment(attachment))
-        .filter(Boolean) as CortexThreadStageAttachmentItem[];
-
-      const userShellColor = themeMode === 'light'
-        ? THREAD_USER_LIGHT_SHELL_COLOR
-        : THREAD_USER_DARK_SHELL_COLOR;
-      const userOwnerText = themeMode === 'light'
-        ? THREAD_USER_LIGHT_OWNER_TEXT
-        : THREAD_USER_DARK_OWNER_TEXT;
-
-      items.push({
-        kind: 'message',
-        id: item.id,
-        role: isAgent ? 'illo' : 'user',
-        author: isAgent ? 'Illo' : item.user_name || 'You',
-        timestamp: timeAgo(item.timestamp, nowMs),
-        tag: messageTag(item),
-        tone: isAgent ? 'spectral' : accentTone(userAccent),
-        accentColor: userAccent ?? undefined,
-        coreColor: userAccent ? mixHex(userAccent, userShellColor, themeMode === 'light' ? 0.16 : 0.68) : undefined,
-        ownerColor: userAccent ? mixHex(userAccent, userOwnerText, themeMode === 'light' ? 0.22 : 0.78) : undefined,
-        html: item.content ? renderReadableMarkdown(item.content) : undefined,
-        attachments: attachments.length ? attachments : undefined,
-      });
+      items.push(mapThreadMessageItem(item, mappingContext));
       continue;
     }
 
@@ -398,72 +572,14 @@ export function buildThreadTranscriptItems({
 
     if (item.type === 'run') {
       if (!shouldShowRunInTranscript(item)) continue;
-      const runActivity = getRunActivity(item);
-      const runStatus = normalizeRunStatus(item.status);
-      const activeRun = isActiveRun(item);
-      const workItems = runWorkTimelineItems(item).map((workItem) => ({
-        ...workItem,
-        time: workItem.at ? formatRunClock(workItem.at) : undefined,
-      }));
-      const runId = Number(item.id);
-      items.push({
-        kind: 'run',
-        id: item.id,
-        status: runStatus,
-        skill: item.skill_name || item.title || (isFastRun(item) ? 'Fast' : 'run'),
-        event: item.title || (isFastRun(item) ? 'Fast work log' : 'Latest run'),
-        summaryTitle: runWorkSummaryTitle(item),
-        summarySubtitle: runWorkSummarySubtitle(item),
-        defaultExpanded: activeRun || Boolean(item.requires_approval),
-        timestamp: formatRunClock(item.started_at || item.timestamp) || timeAgo(item.timestamp, nowMs),
-        model: item.model_used || undefined,
-        thinking: item.thinking_used || undefined,
-        tokens: formatCompactTokens(item.tokens_total),
-        cost: formatCost(item.estimated_cost),
-        telemetry: buildRunTelemetry(item),
-        duration: item.duration_sec ? formatDuration(item.duration_sec) : undefined,
-        error: item.error || undefined,
-        requiresApproval: Boolean(item.requires_approval),
-        runSteps: (item.run_steps || []).map((step: any, index: number) => ({
-          id: String(
-            step.id ||
-              `${step.node_id || step.step_id || step.skill_name || step.label || 'step'}-${step.wave ?? 0}-${index}`,
-          ),
-          label: step.node_id || step.step_id || step.label || step.skill_name || 'Step',
-          skill: step.skill_name || undefined,
-          duration: step.duration_sec ? formatDuration(step.duration_sec) : undefined,
-          tokens: formatCompactTokens(step.tokens_total),
-          task: step.task || undefined,
-          wave: step.wave,
-          status: normalizeStepStatus(step.status),
-        })),
-        workItems,
-        liveLines: item.work_log?.length
-          ? item.work_log
-          : item.live_lines?.length
-            ? item.live_lines
-            : runActivity
-              ? [runActivity]
-              : [],
-        liveLinesEyebrow: activeRun ? 'Live work' : 'Work log',
-        toolCalls: (item.tool_calls || []).map((toolCall: any) => ({
-          tool: toolCall.tool,
-          args: toolCall.args || undefined,
-          at: toolCall.at || undefined,
-          status: toolCall.status || undefined,
-          display: toolCall.display || undefined,
-        })),
-        toolCallsDefaultOpen: activeRun,
-        evidenceDebug: buildRunEvidenceDebug(item) ?? undefined,
-        onApprove:
-          item.requires_approval && Number.isFinite(runId) && onApproveRun
-            ? () => onApproveRun(runId)
-            : undefined,
-        onDeny:
-          item.requires_approval && Number.isFinite(runId) && onDenyRun
-            ? () => onDenyRun(runId)
-            : undefined,
-      });
+      const runItem = mapThreadRunItem(item, mappingContext);
+      const runId = streamItemRunId(item) ?? String(item.id);
+      const liveTextItems = liveTextByRun.get(runId) ?? [];
+      if (liveTextItems.length > 0 && canSplitRunLiveText(item)) {
+        appendChronologicalRunSegments(items, runItem, liveTextItems, mappingContext);
+        continue;
+      }
+      items.push(runItem);
     }
   }
 

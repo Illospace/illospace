@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import pytest_asyncio
@@ -1395,7 +1395,7 @@ async def test_create_thread_discussion_comment_commits_before_broadcast_without
 
 
 @pytest.mark.asyncio
-async def test_create_thread_discussion_illo_mention_routes_main_thread_trigger(client, mock_session_factory):
+async def test_create_thread_discussion_illo_mention_routes_surface_aware_trigger(client, mock_session_factory):
     idea = _make_idea(id="some-id", title="Shared Thread", org_id="test-org")
     trigger_response = {"status": "queued", "run_id": "run-1"}
 
@@ -1427,8 +1427,89 @@ async def test_create_thread_discussion_illo_mention_routes_main_thread_trigger(
     assert kwargs["idea_id"] == "some-id"
     assert kwargs["thread_message"] == "@illo this is what we decided, carry on"
     assert kwargs["metadata"]["source"] == "thread_discussion"
+    assert kwargs["metadata"]["originating_surface"] == "thread_discussion"
+    assert kwargs["metadata"]["triggering_surface"] == "thread_discussion"
+    assert kwargs["metadata"]["required_response_tool"] == "post_thread_discussion_reply"
     assert kwargs["metadata"]["discussion_comment_id"] == 7
+    assert kwargs["metadata"]["discussion_trigger"] == {
+        "surface": "thread_discussion",
+        "thread_id": "some-id",
+        "comment_id": 7,
+        "body": "@illo this is what we decided, carry on",
+        "author_user_id": ANY,
+        "response_target": {
+            "surface": "thread_discussion",
+            "thread_id": "some-id",
+            "reply_to_comment_id": 7,
+        },
+    }
     route_trigger.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_post_thread_discussion_reply_tool_writes_illo_comment(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.chat import _handle_post_thread_discussion_reply
+
+    created = []
+
+    class _Session:
+        async def get(self, _model, thread_id):
+            return SimpleNamespace(id=thread_id, org_id="test-org")
+
+        def add(self, obj):
+            obj.id = 9
+            obj.created_at = datetime(2026, 5, 21, 12, 5, tzinfo=timezone.utc)
+            created.append(obj)
+
+        async def flush(self):
+            return None
+
+    class _UnitOfWork:
+        async def __aenter__(self):
+            self.session = _Session()
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    published = Mock()
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
+    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", published)
+
+    with bind_agent_context(
+        {
+            "org_id": "test-org",
+            "run_id": 42,
+            "target_ref": {
+                "discussion_trigger": {
+                    "surface": "thread_discussion",
+                    "thread_id": "some-id",
+                    "comment_id": 7,
+                    "response_target": {
+                        "surface": "thread_discussion",
+                        "thread_id": "some-id",
+                        "reply_to_comment_id": 7,
+                    },
+                }
+            },
+        }
+    ):
+        raw = await _handle_post_thread_discussion_reply("Got it, I will carry that forward.")
+
+    payload = json.loads(raw)
+    assert payload["ok"] is True
+    assert payload["comment"]["body"] == "Got it, I will carry that forward."
+    assert payload["comment"]["author_kind"] == "illo"
+    assert payload["comment"]["metadata"]["created_by_run_id"] == 42
+    assert payload["comment"]["metadata"]["reply_to_comment_id"] == 7
+    assert created[0].thread_id == "some-id"
+    assert created[0].org_id == "test-org"
+    assert created[0].author_user_id is None
+    published.assert_called_once_with(
+        "thread_discussion_comment",
+        {"idea_id": "some-id", "org_id": "test-org", "comment": payload["comment"]},
+    )
 
 
 @pytest.mark.asyncio

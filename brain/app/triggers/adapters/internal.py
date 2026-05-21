@@ -18,6 +18,35 @@ def _idea_payload(idea: Any) -> dict[str, Any]:
     }
 
 
+def _discussion_reply_run_message(
+    *,
+    idea_data: dict[str, Any],
+    idea_id: str,
+    thread_message: str,
+    metadata: dict[str, Any] | None,
+) -> str:
+    metadata = dict(metadata or {})
+    discussion_trigger = metadata.get("discussion_trigger")
+    if not isinstance(discussion_trigger, dict):
+        discussion_trigger = {}
+    comment_id = discussion_trigger.get("comment_id") or metadata.get("discussion_comment_id")
+    return "\n".join(
+        [
+            f"[Thread: \"{idea_data['title']}\" | {idea_id}]",
+            "",
+            "A teammate summoned @illo from Thread Discussion.",
+            "Originating surface: thread_discussion.",
+            "Acknowledge or answer in Discussion with post_thread_discussion_reply when a visible response fits.",
+            "Use read_thread_discussion if more Discussion context is needed.",
+            "Use AI Timeline tools such as cortex_reply only when continuing the underlying Thread work belongs there.",
+            "You may also act headlessly when no visible surface update is appropriate.",
+            "",
+            f"Triggering Discussion comment id: {comment_id}",
+            f"Triggering Discussion comment: {thread_message[:2000]}",
+        ]
+    )
+
+
 def build_cortex_notify_trigger(
     *,
     event: str,
@@ -54,8 +83,19 @@ def build_cortex_notify_trigger(
             )
         run_metadata = metadata
     else:
-        run_message = f"[Idea: \"{idea_data['title']}\" | {idea_id}]\n\n{thread_message[:2000]}"
         run_metadata = effective_metadata if effective_metadata is not None else metadata
+        if (
+            isinstance(run_metadata, dict)
+            and str(run_metadata.get("originating_surface") or "") == "thread_discussion"
+        ):
+            run_message = _discussion_reply_run_message(
+                idea_data=idea_data,
+                idea_id=idea_id,
+                thread_message=thread_message,
+                metadata=run_metadata,
+            )
+        else:
+            run_message = f"[Idea: \"{idea_data['title']}\" | {idea_id}]\n\n{thread_message[:2000]}"
 
     payload = {
         "idea_id": idea_id,

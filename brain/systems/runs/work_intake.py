@@ -529,6 +529,24 @@ def _metadata_int(metadata: dict[str, Any], *keys: str) -> int | None:
     return None
 
 
+def _surface_context_for_target(metadata: dict[str, Any]) -> dict[str, Any]:
+    surface_context: dict[str, Any] = {}
+    for key in (
+        "originating_surface",
+        "triggering_surface",
+        "source_surface",
+        "required_response_tool",
+        "final_answer_target_surface",
+    ):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            surface_context[key] = value.strip()
+    discussion_trigger = metadata.get("discussion_trigger")
+    if isinstance(discussion_trigger, dict):
+        surface_context["discussion_trigger"] = dict(discussion_trigger)
+    return surface_context
+
+
 async def _a_latest_attached_project_context(session: Any, idea_id: str) -> dict[str, Any]:
     if not hasattr(session, "scalars"):
         return {}
@@ -679,6 +697,7 @@ async def _agent_run_request_for_cortex(
         "event": event,
         "title": getattr(idea, "title", None),
     }
+    target_ref.update(_surface_context_for_target(metadata))
     workspace_ref = dict(project_context) if project_context_snapshot else {}
     if project_context_validation_errors:
         metadata["project_context_validation_errors"] = project_context_validation_errors

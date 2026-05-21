@@ -211,6 +211,60 @@ _TERMINAL_RUN_IDEA_STATUS = {
     "canceled": "failed",
 }
 _PROTECTED_IDEA_STATUSES = {"archived", "resolved"}
+_AI_TIMELINE_SURFACES = {"ai_timeline", "thread_timeline", "cortex_thread", "main_thread"}
+_NON_TIMELINE_FINAL_ANSWER_TARGETS = {
+    "discussion",
+    "headless",
+    "none",
+    "originating_surface",
+    "thread_discussion",
+}
+
+
+def _run_surface_value(run: AgentRunRow, key: str) -> str:
+    for container in (
+        getattr(run, "target_ref", None),
+        getattr(run, "metadata_", None),
+    ):
+        if not isinstance(container, dict):
+            continue
+        value = container.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _run_should_mirror_final_answer_to_timeline(run: AgentRunRow) -> bool:
+    target_surface = _run_surface_value(run, "final_answer_target_surface")
+    if target_surface in _AI_TIMELINE_SURFACES:
+        return True
+    if target_surface in _NON_TIMELINE_FINAL_ANSWER_TARGETS:
+        return False
+    originating_surface = _run_surface_value(run, "originating_surface")
+    return originating_surface != "thread_discussion"
+
+
+async def _run_completed_tool(session, *, run_id: int, tool_name: str) -> bool:
+    if not hasattr(session, "scalars"):
+        return False
+    try:
+        result = await session.scalars(
+            select(AgentRunEventRow)
+            .where(
+                AgentRunEventRow.run_id == int(run_id),
+                AgentRunEventRow.event_type == "run.tool_completed",
+            )
+            .order_by(AgentRunEventRow.sequence_no.desc(), AgentRunEventRow.id.desc())
+            .limit(50)
+        )
+        events = list(result.all())
+    except Exception:
+        return False
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if str(payload.get("tool_name") or payload.get("tool") or "") == tool_name:
+            return True
+    return False
 
 
 def _message_belongs_to_run(message: IdeaThread, run_id: int) -> bool:
@@ -253,6 +307,11 @@ async def _latest_unmirrored_final_answer(session, *, run: AgentRunRow, idea: Id
 async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict[str, Any] | None:
     run = await session.get(AgentRunRow, int(run_id))
     if run is None or run.parent_run_id is not None:
+        return None
+    if (
+        not _run_should_mirror_final_answer_to_timeline(run)
+        and not await _run_completed_tool(session, run_id=int(run_id), tool_name="cortex_reply")
+    ):
         return None
     target_status = _TERMINAL_RUN_IDEA_STATUS.get(str(run.status or ""))
     if not target_status or not run.thread_id:

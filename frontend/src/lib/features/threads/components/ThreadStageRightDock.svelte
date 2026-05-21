@@ -591,7 +591,6 @@
   }
 
   .right-dock-content[data-active-tab='activity'],
-  .right-dock-content[data-active-tab='discussion'],
   .right-dock-content[data-active-tab='handoff-summary'],
   .right-dock-content[data-active-tab='project'],
   .right-dock-content[data-active-tab='vault'],
@@ -603,6 +602,11 @@
 
   .right-dock-content[data-active-tab='app'] {
     overflow: hidden;
+  }
+
+  .right-dock-content[data-active-tab='discussion'] {
+    overflow: hidden;
+    padding: 0;
   }
 
   .right-dock-pane,
@@ -656,7 +660,6 @@
   }
 
   .right-dock-content[data-active-tab='activity']::-webkit-scrollbar,
-  .right-dock-content[data-active-tab='discussion']::-webkit-scrollbar,
   .right-dock-content[data-active-tab='handoff-summary']::-webkit-scrollbar,
   .right-dock-content[data-active-tab='project']::-webkit-scrollbar,
   .right-dock-content[data-active-tab='vault']::-webkit-scrollbar,
@@ -665,7 +668,6 @@
   }
 
   .right-dock-content[data-active-tab='activity']::-webkit-scrollbar-thumb,
-  .right-dock-content[data-active-tab='discussion']::-webkit-scrollbar-thumb,
   .right-dock-content[data-active-tab='handoff-summary']::-webkit-scrollbar-thumb,
   .right-dock-content[data-active-tab='project']::-webkit-scrollbar-thumb,
   .right-dock-content[data-active-tab='vault']::-webkit-scrollbar-thumb,

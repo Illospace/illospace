@@ -1142,6 +1142,34 @@ CHAT_TOOLS = [
         },
     },
     {
+        "name": "post_thread_discussion_reply",
+        "description": (
+            "Post an Illo-authored reply into the current Thread Discussion. "
+            "Use this when a run was summoned from Discussion, or when the natural "
+            "answer belongs in Discussion rather than the AI Timeline. This does not "
+            "post to the AI Timeline; use cortex_reply or other Thread tools when the "
+            "underlying AI Timeline work should visibly continue there."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "string",
+                    "description": "Concise markdown message to post in Thread Discussion as Illo.",
+                },
+                "thread_id": {
+                    "type": "string",
+                    "description": "Optional Thread id. Defaults to the triggering/current Thread.",
+                },
+                "reply_to_comment_id": {
+                    "type": "integer",
+                    "description": "Optional Discussion comment id being acknowledged. Defaults to the triggering comment.",
+                },
+            },
+            "required": ["body"],
+        },
+    },
+    {
         "name": "read_thread_discussion",
         "description": (
             "Read the Discussion comments attached to the current Thread. "

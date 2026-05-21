@@ -54,7 +54,7 @@ MCP_TOOLS: dict[str, dict[str, Any]] = {
                 "trace, artifacts, files, links, diffs, or other source material. The personal "
                 "agent supplies context and provenance; Illo coordinates the team workspace. "
                 "Do not encode a workflow such as decision request here. Use correlation when "
-                "attaching to a known Thread; otherwise IlloSpace may create one and return a link."
+                "attaching to a known Thread; otherwise IlloSpace may create one and return thread_url."
             ),
             {
                 "intent": {
@@ -463,7 +463,9 @@ def _context_tool_response(result: dict[str, Any]) -> dict[str, Any]:
     return {
         **result,
         "thread_id": outcome.get("thread_id"),
-        "url": outcome.get("url"),
+        "thread_url": outcome.get("thread_url") or outcome.get("url"),
+        "thread_route": outcome.get("thread_route"),
+        "url": outcome.get("url") or outcome.get("thread_url"),
         "message": outcome.get("message"),
         "operation": outcome.get("operation"),
         "context_submission_id": outcome.get("context_submission_id"),

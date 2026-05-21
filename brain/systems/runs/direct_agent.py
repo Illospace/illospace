@@ -1729,6 +1729,13 @@ async def run_agent_async(
 
         # Post-loop: harvest, auto-encode, save, return
         output = _extract_text(state.messages)
+        staged_reply_contents = [
+            str(content or "").strip()
+            for content in list(getattr(_agent_context, "reply_contents", []) or [])
+            if str(content or "").strip()
+        ]
+        if staged_reply_contents:
+            output = staged_reply_contents[-1]
         raw_persist_source = raw_archive_messages if raw_archive_messages is not None else state.messages
         persistable_messages = _messages_without_inline_attachment_binary(
             _sanitize_tool_pairs(copy.deepcopy(raw_persist_source), session_id)

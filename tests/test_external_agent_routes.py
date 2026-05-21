@@ -509,7 +509,9 @@ async def test_hosted_mcp_submit_context_builds_shared_envelope():
             "ilo_outcome": {
                 "operation": "created",
                 "thread_id": "idea-1",
-                "url": "/cortex?idea=idea-1",
+                "thread_url": "https://illo.example.com/cortex?idea=idea-1",
+                "thread_route": "/cortex?idea=idea-1",
+                "url": "https://illo.example.com/cortex?idea=idea-1",
                 "message": "Context accepted and a Thread was created.",
                 "context_submission_id": "sub-1",
             },
@@ -554,7 +556,9 @@ async def test_hosted_mcp_submit_context_builds_shared_envelope():
     assert payload["status"] == "processed"
     assert payload["event_id"] == "evt-1"
     assert payload["thread_id"] == "idea-1"
-    assert payload["url"] == "/cortex?idea=idea-1"
+    assert payload["thread_url"] == "https://illo.example.com/cortex?idea=idea-1"
+    assert payload["thread_route"] == "/cortex?idea=idea-1"
+    assert payload["url"] == payload["thread_url"]
     assert payload["context_submission_id"] == "sub-1"
     submit.assert_awaited_once()
     assert captured["db"] is session
