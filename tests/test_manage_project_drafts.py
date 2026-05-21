@@ -453,6 +453,14 @@ async def test_manage_project_publish_draft_refuses_conflicts(tmp_path):
     assert payload["conflict_resolution"]["required"] is True
     assert "preserves the user's intent" in payload["conflict_resolution"]["instructions"]
     assert payload["conflict_resolution"]["retry_action"]["arguments"] == {"action": "publish_draft"}
+    conflict = payload["conflict_resolution"]["conflicts"][0]
+    assert conflict["path"] == "brief.md"
+    assert conflict["root_path"] == str(source_dir / "brief.md")
+    assert conflict["draft_path"] == str(draft_dir / "brief.md")
+    assert "-root update" in conflict["root_to_draft_diff"][0]["patch"]
+    assert "+draft update" in conflict["root_to_draft_diff"][0]["patch"]
+    assert "-base" in conflict["base_to_draft_diff"][0]["patch"]
+    assert "+draft update" in conflict["base_to_draft_diff"][0]["patch"]
     assert (source_dir / "brief.md").read_text(encoding="utf-8") == "root update"
 
 

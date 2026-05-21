@@ -9,6 +9,7 @@ Start here when you want to understand, run, or extend Illo Brain.
 - [Server Setup](server-setup.md) - canonical single-server team deployment runbook.
 - [Deployment](deployment.md) - deployment overview and advanced native notes.
 - [Cycles](cycles.md) - scheduler-owned recurring jobs.
+- [Project Workspaces](project-workspaces.md) - Project root, thread draft, base, conflict, and publish semantics.
 - [Security Model](security-model.md) - secrets, tool execution, browser sessions, and data boundaries.
 - [Personal Agent Connections MVP](personal-agent-connections-mvp.md) - implementation plan for connecting Illo with Hermes and OpenClaw.
 - [Dependency Licensing](dependency-licensing.md) - Apache 2.0 project policy and third-party review notes.

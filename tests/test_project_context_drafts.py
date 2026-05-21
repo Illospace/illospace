@@ -253,7 +253,8 @@ def test_conflict_checkpoint_allows_publish_retry_only_while_root_is_stable(tmp_
 
 
 def test_build_draft_diff_includes_root_and_base_context(tmp_path):
-    from brain.systems.cortex.project_context.drafts import build_draft_diff, sync_draft_from_root
+    from brain.systems.cortex.project_context.draft_diff import build_draft_diff
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
 
     source = tmp_path / "source"
     draft = tmp_path / "draft"

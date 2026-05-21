@@ -7,8 +7,8 @@ from typing import Any
 import shutil
 
 from brain.systems.cortex.project_context.draft_state import project_draft_status_payload
+from brain.systems.cortex.project_context.draft_diff import build_draft_diff
 from brain.systems.cortex.project_context.drafts import (
-    build_draft_diff,
     build_file_manifest,
     clear_conflict_checkpoints,
     load_draft_metadata,
