@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 import json
 from pathlib import PurePath
+import re
 from typing import Any
 import zipfile
 
@@ -117,6 +118,18 @@ TRACE_MAX_CYCLE_RUNS = 200
 TRACE_MAX_STRING_CHARS = 4000
 TRACE_MAX_COLLECTION_ITEMS = 80
 TRACE_MAX_DEPTH = 6
+TRACE_REDACTED_VALUE = "[redacted]"
+TRACE_REDACTED_SECRET = "[secret redacted]"
+TRACE_SECRET_KEY_RE = re.compile(
+    r"(^|[_.-])(api[_.-]?key|authorization|credential|credentials|password|private[_.-]?key|secret|token)([_.-]|$)",
+    re.IGNORECASE,
+)
+TRACE_SECRET_VALUE_PATTERNS = [
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"gh[opusr]_[A-Za-z0-9_]{20,}"),
+    re.compile(r"sk-[A-Za-z0-9][A-Za-z0-9_-]{20,}"),
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{20,}"),
+]
 
 
 async def build_agent_trace_snapshot_async(
@@ -214,6 +227,7 @@ def _agent_trace_snapshot_payload(
         "cycles": cycle_state,
         "diagnostics": diagnostics,
     }
+    bundle = _redact_trace_secrets(bundle)
     bundle["storage_estimate"] = {
         "json_bytes": len(json.dumps(_jsonable(bundle), sort_keys=True, default=str).encode("utf-8")),
         "truncated": _contains_truncation(bundle),
@@ -323,6 +337,7 @@ def _thread_trace_snapshot_payload(
         "cycles": cycle_state,
         "diagnostics": diagnostics,
     }
+    bundle = _redact_trace_secrets(bundle)
     bundle["storage_estimate"] = {
         "json_bytes": len(json.dumps(_jsonable(bundle), sort_keys=True, default=str).encode("utf-8")),
         "truncated": _contains_truncation(bundle),
@@ -335,7 +350,7 @@ def build_agent_trace_export_zip(
 ) -> bytes:
     """Package a trace snapshot as a small shareable zip."""
 
-    trace = _jsonable(snapshot)
+    trace = _redact_trace_secrets(_jsonable(snapshot))
     run = trace.get("run") if isinstance(trace.get("run"), dict) else {}
     thread = trace.get("thread") if isinstance(trace.get("thread"), dict) else {}
     is_thread_export = trace.get("export_scope") == "thread"
@@ -1131,6 +1146,28 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
     return str(value)
+
+
+def _redact_trace_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if TRACE_SECRET_KEY_RE.search(key_text):
+                redacted[key_text] = TRACE_REDACTED_VALUE
+            else:
+                redacted[key_text] = _redact_trace_secrets(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_trace_secrets(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_trace_secrets(item) for item in value]
+    if isinstance(value, str):
+        text = value
+        for pattern in TRACE_SECRET_VALUE_PATTERNS:
+            text = pattern.sub(TRACE_REDACTED_SECRET, text)
+        return text
+    return value
 
 
 def _safe_filename_part(value: Any) -> str:

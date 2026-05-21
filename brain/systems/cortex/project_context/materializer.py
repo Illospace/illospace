@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import inspect
 import os
 import shutil
@@ -67,6 +67,7 @@ def _looks_like_github_remote(value: str) -> bool:
         lowered.startswith("git@github.com:")
         or lowered.startswith("https://github.com/")
         or lowered.startswith("http://github.com/")
+        or lowered.startswith("github://")
         or lowered.startswith("github.com/")
     )
 
@@ -100,6 +101,50 @@ def _github_slug_from_resource(resource: dict[str, Any]) -> str | None:
     return None
 
 
+def _normalise_repo_subpath(value: Any) -> str | None:
+    text = _clean_text(value)
+    if not text:
+        return None
+    path = PurePosixPath(text.replace("\\", "/"))
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return path.as_posix() or None
+
+
+def _github_uri_subpath(value: Any) -> str | None:
+    text = _clean_text(value)
+    if not text or not text.lower().startswith("github://"):
+        return None
+    body = text.split("://", 1)[1].split("?", 1)[0].split("#", 1)[0].strip("/")
+    parts = [part for part in body.split("/") if part]
+    if len(parts) <= 2:
+        return None
+    return _normalise_repo_subpath("/".join(parts[2:]))
+
+
+def _github_subpath_from_resource(resource: dict[str, Any]) -> str | None:
+    for key in ("subpath", "path_in_repo", "relative_path"):
+        subpath = _normalise_repo_subpath(resource.get(key))
+        if subpath:
+            return subpath
+    for key in ("uri", "url"):
+        subpath = _github_uri_subpath(resource.get(key))
+        if subpath:
+            return subpath
+    return None
+
+
+def _resource_has_backend_path_hint(resource: dict[str, Any]) -> bool:
+    for key in ("path", "local_path", "storage_path"):
+        value = _clean_text(resource.get(key))
+        if value and Path(value).expanduser().is_absolute() and Path(value).expanduser().exists():
+            return True
+    return any(
+        Path(path).expanduser().is_absolute() and Path(path).expanduser().exists()
+        for path in [*_path_texts_from_uploaded_files(resource), *_path_texts_from_resource_scope(resource)]
+    )
+
+
 def project_context_has_materializable_resources(context: dict[str, Any] | None) -> bool:
     resources = context.get("resources") if isinstance(context, dict) else None
     if not isinstance(resources, list):
@@ -107,8 +152,11 @@ def project_context_has_materializable_resources(context: dict[str, Any] | None)
     return any(
         isinstance(resource, dict)
         and (
-            _resource_kind(resource) in _LOCAL_FIRST_RESOURCE_KINDS
-            or _github_slug_from_resource(resource)
+            bool(_github_slug_from_resource(resource))
+            or (
+                _resource_kind(resource) in _LOCAL_FIRST_RESOURCE_KINDS
+                and _resource_has_backend_path_hint(resource)
+            )
         )
         for resource in resources
     )
@@ -374,6 +422,51 @@ def _workspace_entry_from_resource(resource: dict[str, Any], path: Path | str) -
     return {"name": _resource_workspace_name(resource, workspace_path), "path": str(workspace_path)}
 
 
+def _repo_workspace_path(resource: dict[str, Any], repo_path: Path) -> tuple[Path | None, str | None]:
+    subpath = _github_subpath_from_resource(resource)
+    if not subpath:
+        return repo_path, None
+    workspace_path = (repo_path / subpath).expanduser()
+    if not _path_is_relative_to(workspace_path, repo_path):
+        return None, f"GitHub Project subpath escapes repository root: {subpath}"
+    if not workspace_path.exists():
+        return None, f"GitHub Project subpath does not exist in {resource.get('repo') or repo_path.name}: {subpath}"
+    return workspace_path, subpath
+
+
+def _mark_github_materialized(
+    resource: dict[str, Any],
+    *,
+    slug: str,
+    repo_path: Path,
+    workspace_path: Path,
+    branch: str | None,
+    commit: str | None,
+    credential: str,
+    subpath: str | None = None,
+    reused: bool = False,
+) -> dict[str, str]:
+    resource["path"] = str(workspace_path)
+    resource["repo"] = slug
+    materialization = {
+        "status": "ready",
+        "provider": "github",
+        "repo": slug,
+        "branch": branch,
+        "commit": commit,
+        "credential": credential,
+    }
+    if subpath:
+        materialization["path"] = str(workspace_path)
+        materialization["workspace_path"] = str(workspace_path)
+        materialization["repo_path"] = str(repo_path)
+        materialization["subpath"] = subpath
+    if reused:
+        materialization["reused"] = True
+    resource["materialization"] = materialization
+    return _workspace_entry_from_resource(resource, workspace_path)
+
+
 def _draft_equivalent_path(value: Any, source_path: Path, draft_path: Path) -> str | None:
     text = _clean_text(value)
     if not text:
@@ -627,18 +720,28 @@ async def _materialize_resource(
     existing_checkout = _existing_git_checkout(destination, slug, branch)
     if existing_checkout:
         clone = existing_checkout
-        resource["path"] = clone["path"]
-        resource["repo"] = slug
-        resource["materialization"] = {
-            "status": "ready",
-            "provider": "github",
-            "repo": slug,
-            "branch": clone.get("branch") or branch,
-            "commit": clone.get("commit") or None,
-            "credential": "existing",
-            "reused": True,
-        }
-        return _workspace_entry_from_resource(resource, clone["path"]), None
+        repo_path = Path(clone["path"])
+        workspace_path, subpath = _repo_workspace_path(resource, repo_path)
+        if workspace_path is None:
+            message = subpath or f"Could not resolve GitHub Project workspace for {slug}."
+            resource["materialization"] = {
+                "status": "failed",
+                "provider": "github",
+                "repo": slug,
+                "error": message,
+            }
+            return None, message
+        return _mark_github_materialized(
+            resource,
+            slug=slug,
+            repo_path=repo_path,
+            workspace_path=workspace_path,
+            branch=clone.get("branch") or branch,
+            commit=clone.get("commit") or None,
+            credential="existing",
+            subpath=subpath,
+            reused=True,
+        ), None
     if destination.exists() and any(destination.iterdir()):
         message = (
             f"Project context destination {destination} already exists but is not a matching GitHub "
@@ -660,23 +763,27 @@ async def _materialize_resource(
             prefix = f"Vault key {key_name}: " if key_name else "public clone: "
             errors.append(prefix + _sanitize_git_error(str(exc)))
             continue
-        resource["path"] = clone["path"]
-        resource["repo"] = slug
-        resource["materialization"] = {
-            "status": "ready",
-            "provider": "github",
-            "repo": slug,
-            "branch": clone.get("branch") or branch,
-            "commit": clone.get("commit") or None,
-            "credential": "vault" if key_name else "public",
-        }
+        repo_path = Path(clone["path"])
+        workspace_path, subpath = _repo_workspace_path(resource, repo_path)
+        if workspace_path is None:
+            errors.append(subpath or f"Could not resolve GitHub Project workspace for {slug}.")
+            continue
         if key_name and "credential_ref" not in resource:
             resource["credential_ref"] = {
                 "type": "vault_secret",
                 "provider": "github",
                 "key_name": key_name,
             }
-        return _workspace_entry_from_resource(resource, clone["path"]), None
+        return _mark_github_materialized(
+            resource,
+            slug=slug,
+            repo_path=repo_path,
+            workspace_path=workspace_path,
+            branch=clone.get("branch") or branch,
+            commit=clone.get("commit") or None,
+            credential="vault" if key_name else "public",
+            subpath=subpath,
+        ), None
 
     resource["materialization"] = {
         "status": "failed",

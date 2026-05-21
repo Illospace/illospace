@@ -1326,6 +1326,27 @@ class TestExecToolHandlers:
         result = _handle_search_files("def hello", str(tmp_path))
         assert result["count"] >= 1
 
+    def test_project_draft_metadata_is_hidden_from_file_tools(self, tmp_path):
+        from brain.systems.runs.direct_agent import _handle_list_files, _handle_read_file, _handle_search_files
+
+        (tmp_path / "unified_payments.csv").write_text("visible,target\n", encoding="utf-8")
+        metadata = tmp_path / ".illo-project-draft"
+        metadata.mkdir()
+        (metadata / "metadata.json").write_text('{"internal": "target"}', encoding="utf-8")
+        base = metadata / "base"
+        base.mkdir()
+        (base / "unified_payments.csv").write_text("internal,target\n", encoding="utf-8")
+
+        listed = _handle_list_files("**/*", str(tmp_path))
+        searched = _handle_search_files("target", str(tmp_path))
+        direct_read = _handle_read_file(str(metadata / "metadata.json"))
+
+        assert listed["files"] == ["unified_payments.csv"]
+        assert listed["total"] == 1
+        assert ".illo-project-draft" not in searched["matches"]
+        assert "unified_payments.csv" in searched["matches"]
+        assert "error" in direct_read
+
     def test_workspace_selector_reads_from_additional_repo(self, tmp_path):
         from brain.systems.runs.tool_handlers import _get_tool_handlers
 

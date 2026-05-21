@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 import shutil
 
@@ -86,10 +86,13 @@ def _current_publish_actor() -> tuple[str | None, str | None]:
 def _plan_path(base_path: str | None, relative_path: str) -> str | None:
     if not base_path:
         return None
+    normalised = PurePosixPath(str(relative_path or "").replace("\\", "/"))
+    if normalised.is_absolute() or any(part in {"", ".", ".."} for part in normalised.parts):
+        return None
     base = Path(base_path).expanduser()
     if base.exists() and base.is_file():
-        return str(base)
-    return str(base / relative_path)
+        return str(base) if normalised.as_posix() == base.name else None
+    return str(base / normalised.as_posix())
 
 
 def _publish_target(resource: Mapping[str, Any]) -> dict[str, Any]:
@@ -114,7 +117,7 @@ def _publish_operations(resource: Mapping[str, Any]) -> list[dict[str, Any]]:
             operations.append({
                 "operation": operation,
                 "path": path,
-                "draft_path": _plan_path(resource.get("resource_path") or resource.get("workspace_path"), path),
+                "draft_path": _plan_path(resource.get("workspace_path") or resource.get("resource_path"), path),
                 "target_path": _plan_path(resource.get("source_path"), path),
             })
     return operations
@@ -143,6 +146,17 @@ def _publish_blocked_reasons(group: Mapping[str, Any], operations: list[dict[str
         blocked_reasons.append("conflicted_paths_require_resolution")
     if operations and _as_mapping(group.get("publish_target")).get("kind") == "unknown":
         blocked_reasons.append("publish_target_unavailable")
+    publish_target = _as_mapping(group.get("publish_target"))
+    if publish_target.get("kind") == "local_path" and any(
+        operation.get("operation") in {"create", "update", "delete"}
+        and not operation.get("target_path")
+        for operation in operations
+    ):
+        target_path = _clean_text(publish_target.get("path"))
+        if target_path and Path(target_path).expanduser().is_file():
+            blocked_reasons.append("file_project_root_cannot_publish_additional_paths")
+        else:
+            blocked_reasons.append("publish_operation_path_unavailable")
     return blocked_reasons
 
 

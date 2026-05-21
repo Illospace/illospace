@@ -13,6 +13,31 @@ def test_thread_attachment_file_is_not_materialized_as_github_workspace():
     }) is None
 
 
+def test_project_context_materializable_resources_require_real_local_path_or_repo():
+    from brain.systems.cortex.project_context.materializer import project_context_has_materializable_resources
+
+    assert project_context_has_materializable_resources({
+        "resources": [
+            {
+                "id": "placeholder-folder",
+                "kind": "folder",
+                "name": "agent-mission-control/workspaces/linkedin-outbound",
+                "uri": "browser-folder://pending",
+            }
+        ]
+    }) is False
+    assert project_context_has_materializable_resources({
+        "resources": [
+            {
+                "id": "github-folder",
+                "kind": "folder",
+                "name": "agent-mission-control/workspaces/linkedin-outbound",
+                "uri": "github://uwear-ai/agent-mission-control/workspaces/linkedin-outbound",
+            }
+        ]
+    }) is True
+
+
 def test_runner_materializes_thread_attachment_files_as_project_resources(monkeypatch):
     from brain.systems.runs.cortex import runner
 
@@ -65,6 +90,56 @@ def test_runner_materializes_thread_attachment_files_as_project_resources(monkey
 
     assert context_ready is True
     assert status_payload is None
+
+
+def test_runner_skips_placeholder_project_resources_without_failing(monkeypatch):
+    from brain.systems.runs.cortex import runner
+
+    run = SimpleNamespace(
+        id=52,
+        root_run_id=None,
+        user_id="user-1",
+        org_id="org-1",
+        thread_id="idea-5",
+        target_ref={
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "id": "placeholder-folder",
+                        "kind": "folder",
+                        "name": "not-yet-uploaded",
+                        "uri": "browser-folder://not-yet-uploaded",
+                    }
+                ],
+            }
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    materialize = AsyncMock()
+    monkeypatch.setattr(runner, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(runner, "_async_record_project_activity", AsyncMock())
+    monkeypatch.setattr(runner, "materialize_project_context_workspaces", materialize)
+
+    context_ready, status_payload = runner._materialize_project_context(52)
+
+    assert context_ready is True
+    assert status_payload is None
+    materialize.assert_not_called()
 
 
 async def test_materialize_github_project_context_uses_vault_key_without_persisting_token(tmp_path, monkeypatch):
@@ -157,6 +232,75 @@ async def test_materialize_github_project_context_uses_vault_key_without_persist
     assert run.metadata_["workspaces"] == result.workspaces
     assert "test-private-token" not in str(run.metadata_)
     assert "test-private-token" not in str(run.target_metadata)
+
+
+async def test_materialize_github_folder_uri_mounts_repo_subpath(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    run = SimpleNamespace(
+        id=54,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={},
+        target_ref={
+            "project_context_snapshot": {
+                "status": "validated",
+                "resources": [
+                    {
+                        "id": "resource-2",
+                        "kind": "folder",
+                        "name": "agent-mission-control/workspaces/linkedin-outbound",
+                        "label": "agent-mission-control/workspaces/linkedin-outbound",
+                        "uri": "github://uwear-ai/agent-mission-control/workspaces/linkedin-outbound",
+                    }
+                ],
+            },
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    def fake_clone(slug, destination, *, token, branch):
+        assert slug == "uwear-ai/agent-mission-control"
+        workspace = destination / "workspaces" / "linkedin-outbound"
+        workspace.mkdir(parents=True)
+        (workspace / "README.md").write_text("LinkedIn workflow", encoding="utf-8")
+        return {"path": str(destination), "branch": branch or "main", "commit": "abc123"}
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+    monkeypatch.setattr(materializer, "_token_candidates", AsyncMock(return_value=[(None, None)]))
+    monkeypatch.setattr(materializer, "_clone_github_repo", fake_clone)
+
+    result = await materialize_project_context_workspaces(
+        54,
+        workspace_root=str(tmp_path / "thread-root"),
+        user_id="user-1",
+        org_id="org-1",
+    )
+
+    expected_repo = tmp_path / "thread-root" / ".illo-project-context" / "github" / "uwear-ai" / "agent-mission-control"
+    expected_workspace = expected_repo / "workspaces" / "linkedin-outbound"
+    assert result.ok
+    assert result.workspaces == [{"name": "agent-mission-control/workspaces/linkedin-outbound", "path": str(expected_workspace)}]
+    resource = run.target_ref["project_context_snapshot"]["resources"][0]
+    assert resource["repo"] == "uwear-ai/agent-mission-control"
+    assert resource["path"] == str(expected_workspace)
+    assert resource["materialization"]["repo_path"] == str(expected_repo)
+    assert resource["materialization"]["subpath"] == "workspaces/linkedin-outbound"
+    assert resource["materialization"]["workspace_path"] == str(expected_workspace)
 
 
 async def test_materialize_github_project_context_finds_general_github_token(tmp_path, monkeypatch):
