@@ -93,6 +93,8 @@ EXPECTED_TABLES = {
     "summary_lineage",
     "tags",
     "target_registry",
+    "thread_context_submissions",
+    "thread_discussion_comments",
     "user_codex_connections",
     "user_mentions",
     "users",

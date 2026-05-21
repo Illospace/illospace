@@ -441,6 +441,7 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert captured["spec"].idea_id is None
     assert captured["spec"].workspace_root == "/tmp/work"
     assert "interactive single-agent path" in captured["spec"].system_prompt
+    assert "write one brief task-specific assistant sentence" in captured["spec"].system_prompt
     assert "Move quickly, but keep senior engineering hygiene." not in captured["spec"].system_prompt
     assert "A `/skill` mention is an explicit skill command." not in captured["spec"].system_prompt
     assert _stream_has(runtime.stream.messages, "run.text_delta", {"delta": "README contents", "run_id": 42})

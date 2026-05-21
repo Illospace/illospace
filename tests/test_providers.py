@@ -380,6 +380,49 @@ class TestOpenAIProvider:
         assert result.stop_reason == "end_turn"
         assert result.content[0].text == "Hi"
 
+    def test_stream_emits_only_complete_reasoning_summary_reflections(self):
+        client = MagicMock()
+        mock_resp = MagicMock()
+        output_message = MagicMock()
+        output_message.type = "message"
+        output_message.role = "assistant"
+        output_text = MagicMock()
+        output_text.type = "output_text"
+        output_text.text = "Answer"
+        output_message.content = [output_text]
+        mock_resp.output = [output_message]
+        mock_resp.usage.input_tokens = 10
+        mock_resp.usage.output_tokens = 5
+        mock_resp.usage.input_tokens_details.cached_tokens = 0
+        mock_resp.incomplete_details = None
+        client.responses.create.return_value = iter([
+            {"type": "response.reasoning_summary_text.delta", "delta": "**Understanding setup** I"},
+            {
+                "type": "response.reasoning_summary_text.done",
+                "text": "**Understanding setup** I checked the project context before changing anything.",
+            },
+            {"type": "response.output_text.delta", "delta": "Answer"},
+            {"type": "response.completed", "response": mock_resp},
+        ])
+
+        p = OpenAIProvider(client)
+        with p.stream(LLMRequest(
+            model="openai/gpt-5.4",
+            messages=[{"role": "user", "content": "hi"}],
+            reasoning_effort="high",
+        )) as stream:
+            events = list(stream)
+            result = stream.get_final_message()
+
+        assert [(event.type, event.text) for event in events] == [
+            (
+                "reflection",
+                "**Understanding setup** I checked the project context before changing anything.",
+            ),
+            ("text", "Answer"),
+        ]
+        assert result.content[0].text == "Answer"
+
     def test_stream_strips_provider_prefix(self):
         client = MagicMock()
         mock_resp = MagicMock()

@@ -15,7 +15,7 @@ import {
   isFastRun,
   shouldShowRunInTranscript,
 } from '$lib/utils/cortexRunPresentation';
-import { streamItemRunId } from '$lib/utils/cortexRunStream';
+import { shouldRenderLiveAgentTextItem, streamItemRunId } from '$lib/utils/cortexRunStream';
 import { parseServerDate, parseServerTimeMs, relativeTimeAgo } from '$lib/utils/datetime';
 import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
 import { buildRunEvidenceDebug } from '$lib/utils/runEvidenceDebug';
@@ -347,16 +347,10 @@ export function buildThreadTranscriptItems({
 }: BuildThreadTranscriptOptions): CortexThreadStageTranscriptItem[] {
   const items: CortexThreadStageTranscriptItem[] = [];
   const visibleItems = orderQueuedThreadStreamItems(visibleThreadStreamItems(stream));
-  const activeRunIds = new Set(
-    visibleItems
-      .filter((streamItem) => streamItem.type === 'run' && isActiveRun(streamItem))
-      .map((streamItem) => streamItemRunId(streamItem) ?? String(streamItem.id)),
-  );
 
   for (const item of visibleItems) {
     if (item.type === 'message') {
-      const messageRunId = streamItemRunId(item);
-      if (item.metadata?.live_agent_text && messageRunId && activeRunIds.has(messageRunId)) continue;
+      if (!shouldRenderLiveAgentTextItem(item, visibleItems)) continue;
 
       const isAgent = item.role === 'assistant' || item.role === 'illo';
       const userAccent = isAgent ? null : resolveUserAccent(item, idea, currentUser);
@@ -378,7 +372,7 @@ export function buildThreadTranscriptItems({
         role: isAgent ? 'illo' : 'user',
         author: isAgent ? 'Illo' : item.user_name || 'You',
         timestamp: timeAgo(item.timestamp, nowMs),
-        tag: item.metadata?.fast_steer ? 'Steering' : item.metadata?.queued_after_run ? 'Queued' : undefined,
+        tag: messageTag(item),
         tone: isAgent ? 'spectral' : accentTone(userAccent),
         accentColor: userAccent ?? undefined,
         coreColor: userAccent ? mixHex(userAccent, userShellColor, themeMode === 'light' ? 0.16 : 0.68) : undefined,
@@ -512,4 +506,11 @@ export function buildThreadTranscriptItems({
   }
 
   return items;
+}
+
+function messageTag(item: StreamItem): string | undefined {
+  if (item.metadata?.context_submission_id || item.message_type === 'context_submission') return 'Context';
+  if (item.metadata?.fast_steer) return 'Steering';
+  if (item.metadata?.queued_after_run) return 'Queued';
+  return undefined;
 }
