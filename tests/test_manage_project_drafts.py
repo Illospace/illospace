@@ -664,6 +664,39 @@ async def test_manage_project_draft_status_reports_clear_unbound_error():
     assert "current AgentRun or Cortex thread" in payload["error"]
 
 
+async def test_manage_project_draft_status_allows_empty_project():
+    context = {
+        "run": SimpleNamespace(id=123, metadata_={}),
+        "idea_id": "idea-1",
+        "workspace_ref": {
+            "project_context_snapshot": {
+                "name": "Empty project",
+                "status": "validated",
+                "resources": [],
+            },
+            "project_workspace_manifest": {
+                "schema_version": 1,
+                "mounts": [],
+                "workspaces": [],
+            },
+        },
+        "target_ref": {},
+        "execution_metadata": {},
+    }
+    with bind_agent_context(context):
+        status = json.loads(await projects._handle_manage_project(action="draft_status"))
+        plan = json.loads(await projects._handle_manage_project(action="plan_publish"))
+        versions = json.loads(await projects._handle_manage_project(action="root_versions"))
+
+    assert status["ok"] is True
+    assert status["resources"] == []
+    assert status["changes"]["total"] == 0
+    assert plan["ok"] is True
+    assert plan["summary"] == {"resource_count": 0, "operation_count": 0, "blocked_count": 0}
+    assert versions["ok"] is True
+    assert versions["summary"] == {"resource_count": 0, "version_count": 0}
+
+
 async def test_manage_project_schema_exposes_draft_operations():
     from brain.systems.runs.tool_definitions import PROJECT_TOOLS
 

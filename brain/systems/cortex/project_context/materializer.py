@@ -40,10 +40,11 @@ class ProjectContextMaterializationResult:
     workspaces: list[dict[str, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     resources_checked: int = 0
+    empty_project: bool = False
 
     @property
     def ok(self) -> bool:
-        return bool(self.workspaces) and not self.errors
+        return (bool(self.workspaces) or self.empty_project) and not self.errors
 
     def fail(self, message: str) -> "ProjectContextMaterializationResult":
         self.errors.append(message)
@@ -745,8 +746,7 @@ async def materialize_project_context_workspaces(
             return result.fail("Project Context snapshot is missing.")
         snapshot = dict(snapshot)
         resources = [dict(item) for item in snapshot.get("resources") or [] if isinstance(item, dict)]
-        if not resources:
-            return result.fail("Project Context has no resources to materialize.")
+        result.empty_project = not resources
         snapshot["resources"] = resources
         user_id = user_id or (str(run.user_id) if getattr(run, "user_id", None) else None)
         org_id = org_id or _clean_text(getattr(run, "org_id", None)) or _clean_text(metadata.get("org_id"))
@@ -767,7 +767,7 @@ async def materialize_project_context_workspaces(
         if error:
             result.errors.append(error)
 
-    if not result.resources_checked:
+    if resources and not result.resources_checked:
         return result.fail("Project Context resources do not include a supported repository or local workspace.")
 
     workspace_manifest = normalize_project_workspace_manifest(
@@ -778,6 +778,13 @@ async def materialize_project_context_workspaces(
     workspace_manifest_payload = workspace_manifest.to_dict()
     result.workspaces = workspaces
     status = "materialized" if not result.errors else "failed"
+    project_context_materialization = {
+        "status": status,
+        "workspaces": workspaces,
+        "workspace_manifest": workspace_manifest_payload,
+        "errors": result.errors[:10],
+        "empty_project": result.empty_project,
+    }
     snapshot["permission_scope"] = derive_project_permission_scope(snapshot)
     if result.errors:
         existing_errors = snapshot.get("validation_errors") if isinstance(snapshot.get("validation_errors"), list) else []
@@ -798,26 +805,20 @@ async def materialize_project_context_workspaces(
         current_workspace_payload["project_context_snapshot"] = snapshot
         current_workspace_payload["project_context_permission_scope"] = permission_scope
         current_workspace_payload["project_workspace_manifest"] = workspace_manifest_payload
-        current_workspace_payload["workspaces"] = _merge_workspaces(current_workspace_payload.get("workspaces"), workspaces)
+        current_workspace_payload["workspaces"] = (
+            [] if result.empty_project else _merge_workspaces(current_workspace_payload.get("workspaces"), workspaces)
+        )
         if workspaces:
             default_workspace = workspaces[0]["path"]
             current_workspace_payload["workspace_root"] = default_workspace
             current_workspace_payload["resolved_workspace_root"] = default_workspace
-        current_workspace_payload["project_context_materialization"] = {
-            "status": status,
-            "workspaces": workspaces,
-            "workspace_manifest": workspace_manifest_payload,
-            "errors": result.errors[:10],
-        }
+        current_workspace_payload["project_context_materialization"] = project_context_materialization
 
-        current_metadata["workspaces"] = _merge_workspaces(current_metadata.get("workspaces"), workspaces)
+        current_metadata["workspaces"] = (
+            [] if result.empty_project else _merge_workspaces(current_metadata.get("workspaces"), workspaces)
+        )
         current_metadata["project_workspace_manifest"] = workspace_manifest_payload
-        current_metadata["project_context_materialization"] = {
-            "status": status,
-            "workspaces": workspaces,
-            "workspace_manifest": workspace_manifest_payload,
-            "errors": result.errors[:10],
-        }
+        current_metadata["project_context_materialization"] = project_context_materialization
         run.metadata_ = current_metadata
         _set_run_target_payload(run, current_target_payload)
         _set_run_workspace_payload(run, current_workspace_payload)

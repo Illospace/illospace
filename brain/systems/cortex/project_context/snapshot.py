@@ -152,8 +152,6 @@ def validate_project_context_snapshot(
     resources = snapshot.get("resources")
     if not isinstance(resources, list):
         return "invalid", ["project_context_snapshot.resources must be a list."]
-    if not resources:
-        return "invalid", ["project_context_snapshot.resources must contain at least one resource."]
 
     errors: list[str] = []
     seen_ids: set[str] = set()

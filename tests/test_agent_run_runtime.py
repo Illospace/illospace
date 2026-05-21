@@ -1837,7 +1837,7 @@ async def test_work_intake_inherits_project_context_from_idea():
     assert request.workspace_ref["project_context_snapshot"]["resources"][0]["path"] == "projects/yc-application"
 
 
-async def test_work_intake_skips_invalid_metadata_project_context_for_valid_idea_context():
+async def test_work_intake_prefers_empty_metadata_project_context_over_idea_context():
     idea = SimpleNamespace(
         id="idea-1",
         org_id="org-1",
@@ -1861,17 +1861,12 @@ async def test_work_intake_skips_invalid_metadata_project_context_for_valid_idea
         metadata={"project_context": {"name": "Stale empty project", "resources": []}},
     )
 
-    assert request.metadata["project_context"]["name"] == "Illospace"
-    assert request.target_ref["project_context_snapshot"]["resources"][0]["name"] == "Illospace/illospace"
-    assert request.metadata["project_context_validation_errors"] == [
-        {
-            "source": "metadata",
-            "errors": ["project_context_snapshot.resources must contain at least one resource."],
-        }
-    ]
+    assert request.metadata["project_context"]["name"] == "Stale empty project"
+    assert request.target_ref["project_context_snapshot"]["resources"] == []
+    assert "project_context_validation_errors" not in request.metadata
 
 
-async def test_work_intake_drops_invalid_legacy_project_context_when_no_valid_fallback():
+async def test_work_intake_keeps_empty_legacy_project_context_when_no_resource_fallback():
     idea = SimpleNamespace(
         id="idea-1",
         org_id="org-1",
@@ -1890,15 +1885,10 @@ async def test_work_intake_drops_invalid_legacy_project_context_when_no_valid_fa
         metadata={},
     )
 
-    assert "project_context" not in request.metadata
-    assert "project_context_snapshot" not in request.target_ref
-    assert request.workspace_ref == {}
-    assert request.metadata["project_context_validation_errors"] == [
-        {
-            "source": "idea",
-            "errors": ["project_context_snapshot.resources must contain at least one resource."],
-        }
-    ]
+    assert request.metadata["project_context"]["name"] == "Legacy empty project"
+    assert request.target_ref["project_context_snapshot"]["resources"] == []
+    assert request.workspace_ref["project_context_snapshot"]["resources"] == []
+    assert "project_context_validation_errors" not in request.metadata
 
 
 async def test_work_intake_falls_back_to_latest_project_attachment():
