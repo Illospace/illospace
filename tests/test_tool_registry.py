@@ -101,6 +101,23 @@ def test_thread_discussion_reply_tool_is_registered_and_exposed():
     assert registration.reversibility == "append_only"
 
 
+def test_ai_timeline_message_tool_is_registered_and_exposed():
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+    from brain.systems.runs.tool_catalog.registry import get_tool_registration
+
+    name = "post_ai_timeline_message"
+    assert name in _names(COORDINATOR_TOOLS)
+    assert name in _names(WORKER_TOOLS)
+    assert name in _get_tool_handlers()
+
+    registration = get_tool_registration(name)
+    assert registration is not None
+    assert registration.permission == "write_chat"
+    assert registration.side_effect_class == "chat_message"
+    assert registration.reversibility == "append_only"
+
+
 def test_context_route_surface_is_registry_driven():
     from brain.systems.runs.tool_catalog.registry import context_route_payload, context_route_tool_names
 

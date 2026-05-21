@@ -1516,6 +1516,92 @@ async def test_post_thread_discussion_reply_tool_writes_illo_comment(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_post_ai_timeline_message_tool_writes_linked_thread_message(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.chat import _handle_post_ai_timeline_message
+
+    idea = SimpleNamespace(id="some-id", org_id="test-org", status="active", user_id=None, title="Test Thread")
+    created = []
+
+    class _Session:
+        async def get(self, _model, thread_id):
+            return idea if thread_id == "some-id" else None
+
+        def add(self, obj):
+            if hasattr(obj, "content"):
+                obj.id = 19
+                obj.created_at = datetime(2026, 5, 21, 12, 6, tzinfo=timezone.utc)
+            created.append(obj)
+
+        async def flush(self):
+            return None
+
+    class _UnitOfWork:
+        async def __aenter__(self):
+            self.session = _Session()
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    published = Mock()
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
+    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", published)
+
+    with bind_agent_context(
+        {
+            "org_id": "test-org",
+            "run_id": 43,
+            "thread_id": "thread-discussion:some-id",
+            "target_ref": {
+                "kind": "thread_discussion",
+                "idea_id": "some-id",
+                "thread_id": "thread-discussion:some-id",
+                "discussion_trigger": {
+                    "surface": "thread_discussion",
+                    "thread_id": "some-id",
+                    "comment_id": 13,
+                    "response_target": {
+                        "surface": "thread_discussion",
+                        "thread_id": "some-id",
+                        "reply_to_comment_id": 13,
+                    },
+                },
+                "related_surfaces": {
+                    "ai_timeline": {
+                        "thread_id": "some-id",
+                    },
+                },
+            },
+        }
+    ):
+        raw = await _handle_post_ai_timeline_message("Adding this to the AI Timeline.")
+
+    payload = json.loads(raw)
+    assert payload["ok"] is True
+    assert payload["message"]["idea_id"] == "some-id"
+    assert payload["message"]["role"] == "illo"
+    assert payload["message"]["content"] == "Adding this to the AI Timeline."
+    assert payload["message"]["metadata"] == {
+        "source": "illo_agent",
+        "surface": "ai_timeline",
+        "originating_surface": "thread_discussion",
+        "created_by_run_id": 43,
+        "discussion_comment_id": 13,
+    }
+    assert created[0].idea_id == "some-id"
+    assert idea.status == "unread_reply"
+    assert published.call_args_list[0].args == (
+        "thread_message",
+        {"idea_id": "some-id", "message": payload["message"]},
+    )
+    assert published.call_args_list[1].args == (
+        "status_change",
+        {"idea_id": "some-id", "new_status": "unread_reply"},
+    )
+
+
+@pytest.mark.asyncio
 async def test_update_idea_status_commits_before_broadcast(client, mock_session_factory):
     idea = _make_idea(id="status-idea", status="emerged", org_id="test-org")
     order: list[str] = []
