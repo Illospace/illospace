@@ -793,12 +793,14 @@ def _workspace_diagnostics(runs: list[AgentRunRow]) -> list[dict[str, Any]]:
 
 
 def _workspace_root_candidates(workspace_ref: dict[str, Any]) -> list[dict[str, Any]]:
+    from brain.systems.cortex.project_context.runtime_context import project_runtime_materialization
+
     candidates = []
     for key in ("resolved_workspace_root", "workspace_root", "worktree_path", "path", "local_path"):
         value = workspace_ref.get(key)
         if isinstance(value, str) and value.strip():
             candidates.append({"source": key, "path": value.strip(), "looks_like_file": _looks_like_file_path(value)})
-    materialization = workspace_ref.get("project_context_materialization")
+    materialization = project_runtime_materialization(workspace_ref) or workspace_ref.get("project_context_materialization")
     if isinstance(materialization, dict):
         for item in _safe_list(materialization.get("workspaces")):
             if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"].strip():

@@ -1833,6 +1833,14 @@ def test_project_profile_create_defaults_private():
     assert payload.shared_usernames == []
 
 
+def test_project_profile_create_defaults_to_empty_project_context():
+    from brain.systems.cortex.project_context.schemas import ProjectProfileCreate
+
+    payload = ProjectProfileCreate(slug="empty", name="Empty")
+
+    assert payload.project_context == {"resources": []}
+
+
 async def test_resolve_project_access_users_accepts_names_only():
     from brain.app.api.routers.cortex._project_context import _resolve_project_access_users
 

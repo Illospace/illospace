@@ -153,6 +153,50 @@ async def test_thread_cleanup_updates_all_project_runs(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_thread_cleanup_retains_shared_project_context_when_any_run_is_dirty(tmp_path):
+    from brain.systems.cortex.project_context.draft_lifecycle import apply_project_draft_cleanup_for_thread
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    clean_source = tmp_path / "clean-root"
+    dirty_source = tmp_path / "dirty-root"
+    clean_source.mkdir()
+    dirty_source.mkdir()
+    (clean_source / "brief.md").write_text("Published clean\n")
+    (dirty_source / "brief.md").write_text("Published dirty\n")
+    project_context_dir = tmp_path / "thread" / ".illo-project-context"
+    clean_draft = project_context_dir / "local" / "clean-reports"
+    dirty_draft = project_context_dir / "local" / "dirty-reports"
+    sync_draft_from_root(clean_source, clean_draft)
+    sync_draft_from_root(dirty_source, dirty_draft)
+    (dirty_draft / "brief.md").write_text("Unpublished dirty draft\n")
+    clean_run = _run_with_local_project_draft(clean_source, clean_draft)
+    dirty_run = _run_with_local_project_draft(dirty_source, dirty_draft)
+    clean_run.id = 8
+    dirty_run.id = 9
+
+    result = MagicMock()
+    result.all.return_value = [clean_run, dirty_run]
+    session = MagicMock()
+    session.scalars = AsyncMock(return_value=result)
+    session.flush = AsyncMock()
+
+    payload = await apply_project_draft_cleanup_for_thread(
+        session,
+        "idea-1",
+        archived_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+    )
+
+    assert payload["run_count"] == 2
+    assert payload["deleted_count"] == 0
+    assert payload["retained_count"] == 1
+    assert project_context_dir.exists()
+    assert (dirty_draft / "brief.md").read_text(encoding="utf-8") == "Unpublished dirty draft\n"
+    assert clean_run.metadata_["project_draft_cleanup"]["status"] == "retained_unpublished"
+    assert dirty_run.metadata_["project_draft_cleanup"]["status"] == "retained_unpublished"
+    session.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_expired_cleanup_reaps_retained_unpublished_project_drafts(tmp_path):
     from brain.systems.cortex.project_context.draft_lifecycle import (
         cleanup_expired_project_draft_workspaces,

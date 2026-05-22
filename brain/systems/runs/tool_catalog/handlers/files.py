@@ -6,8 +6,13 @@ from collections.abc import Mapping
 import pathlib
 import re as _re
 import shlex as _shlex
+import shutil
+import tempfile
 
-from brain.systems.cortex.project_context.drafts import IGNORED_DRAFT_DIRS
+from brain.systems.cortex.project_context.drafts import IGNORED_DRAFT_DIRS, build_file_manifest
+from brain.systems.cortex.project_context.runtime_context import (
+    project_runtime_context_from_payloads,
+)
 from brain.systems.cortex.project_context.workspace_manifest import (
     ProjectWorkspaceManifest,
     normalize_project_workspace_manifest,
@@ -108,7 +113,8 @@ def _manifest_from_project_workspace_payload(
         if resources:
             return normalize_project_workspace_manifest(
                 {
-                    "id": payload.get("project_id") or payload.get("project_key"),
+                    "project_id": payload.get("project_id"),
+                    "project_key": payload.get("project_key"),
                     "resources": resources,
                     "workspace_root": payload.get("workspace_root"),
                     "resolved_workspace_root": payload.get("resolved_workspace_root"),
@@ -125,9 +131,17 @@ def _manifest_from_project_workspace_payload(
 def _project_workspace_manifest_payloads(payloads: list[Mapping[str, object]]) -> list[Mapping[str, object]]:
     manifests: list[Mapping[str, object]] = []
     for payload in payloads:
+        runtime = project_runtime_context_from_payloads(payload)
+        runtime_manifest = _context_mapping(runtime.get("project_workspace_manifest"))
+        if runtime_manifest:
+            manifests.append(runtime_manifest)
         workspace_manifest = payload.get("project_workspace_manifest")
         if isinstance(workspace_manifest, Mapping):
             manifests.append(workspace_manifest)
+        runtime_materialization = _context_mapping(runtime.get("project_context_materialization"))
+        materialized_manifest = runtime_materialization.get("workspace_manifest")
+        if isinstance(materialized_manifest, Mapping):
+            manifests.append(materialized_manifest)
         materialization = payload.get("project_context_materialization")
         if isinstance(materialization, Mapping):
             materialized_manifest = materialization.get("workspace_manifest")
@@ -153,6 +167,13 @@ def _first_project_workspace_manifest(
 
 def _current_project_workspace_manifest() -> ProjectWorkspaceManifest | None:
     workspace_payloads = _agent_context_payloads()
+    runtime = project_runtime_context_from_payloads(*workspace_payloads)
+    runtime_manifest = _context_mapping(runtime.get("project_workspace_manifest"))
+    if runtime_manifest:
+        manifest = _manifest_from_project_workspace_payload(runtime_manifest, include_workspace_entries=False)
+        if manifest and manifest.mounts:
+            return manifest
+
     manifest = _first_project_workspace_manifest(workspace_payloads, include_workspace_entries=False)
     if manifest:
         return manifest
@@ -162,6 +183,11 @@ def _current_project_workspace_manifest() -> ProjectWorkspaceManifest | None:
         if isinstance(payload.get("workspaces"), list):
             workspaces = payload.get("workspaces")
             break
+    snapshot = _context_mapping(runtime.get("project_context_snapshot"))
+    if snapshot:
+        manifest = normalize_project_workspace_manifest(snapshot, workspaces=workspaces)
+        if manifest.mounts:
+            return manifest
     for payload in workspace_payloads:
         snapshot = payload.get("project_context_snapshot")
         if isinstance(snapshot, Mapping):
@@ -214,6 +240,107 @@ def _project_source_mounts() -> list[object]:
     if manifest is None:
         return []
     return [mount for mount in manifest.mounts if mount.source_path]
+
+
+def _project_source_roots() -> list[pathlib.Path]:
+    roots: list[pathlib.Path] = []
+    seen: set[str] = set()
+    for mount in _project_source_mounts():
+        source_path = getattr(mount, "source_path", None)
+        if not isinstance(source_path, str) or not source_path.strip():
+            continue
+        source = pathlib.Path(source_path).expanduser()
+        root = source if source.is_dir() or not source.exists() else source.parent
+        key = os.path.realpath(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(root)
+    return roots
+
+
+class _ProjectRootMutationGuard:
+    def __init__(self, roots: list[pathlib.Path]) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="illo-project-root-guard-")
+        self._snapshots: list[dict[str, object]] = []
+        tmp_root = pathlib.Path(self._tmp.name)
+        for index, root in enumerate(roots):
+            root = pathlib.Path(root).expanduser()
+            snapshot_path = tmp_root / str(index)
+            exists = root.exists()
+            if exists:
+                if root.is_dir() and not root.is_symlink():
+                    shutil.copytree(root, snapshot_path)
+                else:
+                    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(root, snapshot_path)
+            self._snapshots.append({
+                "root": root,
+                "snapshot_path": snapshot_path,
+                "exists": exists,
+                "manifest": build_file_manifest(root),
+            })
+
+    @classmethod
+    def capture(cls) -> "_ProjectRootMutationGuard | None":
+        roots = _project_source_roots()
+        return cls(roots) if roots else None
+
+    def restore_if_changed(self) -> list[str]:
+        changed: list[str] = []
+        for snapshot in self._snapshots:
+            root = snapshot["root"]
+            if not isinstance(root, pathlib.Path):
+                continue
+            before_manifest = snapshot.get("manifest")
+            if build_file_manifest(root) == before_manifest:
+                continue
+            changed.append(str(root))
+            snapshot_path = snapshot["snapshot_path"]
+            existed = bool(snapshot["exists"])
+            if root.is_dir() and not root.is_symlink():
+                shutil.rmtree(root)
+            elif root.exists() or root.is_symlink():
+                root.unlink()
+            if existed and isinstance(snapshot_path, pathlib.Path):
+                if snapshot_path.is_dir():
+                    shutil.copytree(snapshot_path, root)
+                elif snapshot_path.exists():
+                    root.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(snapshot_path, root)
+        return changed
+
+    def cleanup(self) -> None:
+        self._tmp.cleanup()
+
+
+def _root_mutation_blocked_result(result: dict, changed_roots: list[str]) -> dict:
+    message = (
+        "Blocked command because it mutated Project root. Project roots are read-only during agent execution; "
+        "write through the Project draft mount and publish with manage_project(action=\"publish_draft\"). "
+        f"Restored roots: {', '.join(changed_roots)}"
+    )
+    return {
+        **result,
+        "exit_code": -1,
+        "stderr": message,
+        "error": message,
+        "blocked": True,
+        "project_root_restored": True,
+        "restored_project_roots": changed_roots,
+    }
+
+
+def _finalize_project_root_guard(result: dict, guard: _ProjectRootMutationGuard | None) -> dict:
+    if guard is None:
+        return result
+    try:
+        changed_roots = guard.restore_if_changed()
+    finally:
+        guard.cleanup()
+    if changed_roots:
+        return _root_mutation_blocked_result(result, changed_roots)
+    return result
 
 
 _PROJECT_SOURCE_WRITE_PATTERNS = [
@@ -329,6 +456,7 @@ def _handle_exec_command(
     _SHELL_CHARS = {'|', '>', '<', '&&', '||', ';', '`', '$(' }
     needs_shell = any(ch in command for ch in _SHELL_CHARS)
     project_execution = _prepare_project_execution_env()
+    root_guard = _ProjectRootMutationGuard.capture()
 
     try:
         if needs_shell:
@@ -372,15 +500,15 @@ def _handle_exec_command(
             "_record_execution_artifacts",
             _record_execution_artifacts,
         )(command, result)
-        return result
+        return _finalize_project_root_guard(result, root_guard)
     except subprocess.TimeoutExpired:
         result = {"exit_code": -1, "stdout": "", "stderr": f"Command timed out after {timeout}s", "error": "timeout"}
         _annotate_project_execution_result(result, project_execution)
-        return result
+        return _finalize_project_root_guard(result, root_guard)
     except Exception as e:
         error = _redact_sensitive_output(str(e), project_execution.sensitive_values)
         result = {"exit_code": -1, "stdout": "", "stderr": error, "error": error}
-        return result
+        return _finalize_project_root_guard(result, root_guard)
 
 
 def _handle_run_script(script: str, description: str | None = None, timeout: int = 60, _workspace: str | None = None) -> dict:
@@ -393,6 +521,7 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
         _workspace = None
     cwd = _workspace or _patched_workspace_root()
     project_execution = _prepare_project_execution_env()
+    root_guard = _ProjectRootMutationGuard.capture()
 
     try:
         _block_project_source_command_write(script, operation="script", cwd=cwd)
@@ -434,7 +563,7 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
                 "_record_execution_artifacts",
                 _record_execution_artifacts,
             )(f"python {os.path.basename(script_path)}", result)
-            return result
+            return _finalize_project_root_guard(result, root_guard)
         finally:
             try:
                 os.remove(script_path)
@@ -448,7 +577,7 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
             {"script": script, "description": description, "timeout": timeout, "workspace": _workspace},
             result,
         )
-        return result
+        return _finalize_project_root_guard(result, root_guard)
     except Exception as e:
         error = _redact_sensitive_output(str(e), project_execution.sensitive_values)
         result = {"exit_code": -1, "stdout": "", "stderr": error, "error": error}
@@ -458,7 +587,7 @@ def _handle_run_script(script: str, description: str | None = None, timeout: int
             {"script": script, "description": description, "timeout": timeout, "workspace": _workspace},
             result,
         )
-        return result
+        return _finalize_project_root_guard(result, root_guard)
 
 
 def _handle_read_file(path: str, start_line: int | None = None, end_line: int | None = None, _workspace: str | None = None) -> dict:

@@ -10,6 +10,9 @@ from brain.systems.cortex.project_context.drafts import (
     sync_draft_from_root,
 )
 from brain.systems.cortex.project_context.repo_publish import repo_draft_status, repo_draft_upstream_status
+from brain.systems.cortex.project_context.runtime_context import (
+    project_runtime_context_from_payloads,
+)
 from brain.systems.cortex.project_context.workspace_manifest import ProjectWorkspaceManifest
 from brain.systems.runs.execution_context import current_agent_context
 
@@ -67,21 +70,15 @@ def _current_project_draft_context() -> dict[str, Any]:
         metadata.get("workspace_ref"),
         execution_metadata.get("workspace_ref"),
     )
+    runtime = project_runtime_context_from_payloads(workspace_ref, target_ref, metadata, execution_metadata)
     snapshot = _first_mapping(
-        workspace_ref.get("project_context_snapshot"),
-        target_ref.get("project_context_snapshot"),
-        metadata.get("project_context_snapshot"),
-        execution_metadata.get("project_context_snapshot"),
+        runtime.get("project_context_snapshot"),
     )
     manifest = _first_mapping(
-        workspace_ref.get("project_workspace_manifest"),
-        metadata.get("project_workspace_manifest"),
-        execution_metadata.get("project_workspace_manifest"),
+        runtime.get("project_workspace_manifest"),
     )
     materialization = _first_mapping(
-        workspace_ref.get("project_context_materialization"),
-        metadata.get("project_context_materialization"),
-        execution_metadata.get("project_context_materialization"),
+        runtime.get("project_context_materialization"),
     )
     idea_id = (
         _clean_text(getattr(context, "idea_id", None))
@@ -152,6 +149,7 @@ def _draft_publish_change_set(
 def _repo_change_set(
     path: str | None,
     *,
+    mount_subpath: str | None = None,
     repo_status=None,
     repo_upstream_status=None,
     base_branch: str | None = None,
@@ -160,7 +158,9 @@ def _repo_change_set(
         return _empty_change_set(), "repo_status", [], [], {}
     repo_status = repo_status or repo_draft_status
     repo_upstream_status = repo_upstream_status or repo_draft_upstream_status
-    status = repo_status(Path(path).expanduser())
+    repo_path = Path(path).expanduser()
+    scope_kwargs = {"mount_subpath": mount_subpath} if mount_subpath else {}
+    status = repo_status(repo_path, **scope_kwargs)
     errors = [str(error) for error in (getattr(status, "errors", None) or []) if str(error)]
     changed_paths = [path for path in status.changed_paths if path not in set(status.unmerged_paths)]
     upstream_changed_paths: list[str] = []
@@ -170,10 +170,11 @@ def _repo_change_set(
     if not errors:
         try:
             upstream = repo_upstream_status(
-                Path(path).expanduser(),
+                repo_path,
                 changed_paths=status.changed_paths,
                 base_branch=base_branch,
-                fetch=False,
+                fetch=True,
+                **scope_kwargs,
             )
             upstream_status = str(getattr(upstream, "status", None) or "not_checked")
             upstream_changed_paths = [
@@ -300,6 +301,8 @@ def _resource_draft_entry(
         path = Path(resource_path).expanduser()
         workspace_path = str(path.parent if path.exists() and path.is_file() else path)
     source_path = _clean_text(materialization.get("source_path")) or _clean_text(resource.get("source_path"))
+    repo_path = _clean_text(materialization.get("repo_path"))
+    repo_subpath = _clean_text(materialization.get("subpath"))
 
     if source_path:
         changes, change_source, out_of_date_paths, status_errors, status_details = _draft_publish_change_set(
@@ -309,7 +312,8 @@ def _resource_draft_entry(
         )
     elif _is_repo_resource(resource, materialization):
         changes, change_source, out_of_date_paths, status_errors, status_details = _repo_change_set(
-            workspace_path or resource_path,
+            repo_path or workspace_path or resource_path,
+            mount_subpath=repo_subpath,
             repo_status=repo_status,
             repo_upstream_status=repo_upstream_status,
             base_branch=_clean_text(resource.get("default_branch") or materialization.get("branch")),
@@ -350,6 +354,8 @@ def _resource_draft_entry(
         "kind": _clean_text(resource.get("kind") or resource.get("type") or resource.get("resource_type")) or "resource",
         "provider": _clean_text(materialization.get("provider")) or _clean_text(resource.get("provider")),
         "repo": _clean_text(materialization.get("repo")) or _clean_text(resource.get("repo")),
+        "repo_path": repo_path,
+        "repo_subpath": repo_subpath,
         "workspace_path": workspace_path,
         "resource_path": resource_path,
         "source_path": source_path,

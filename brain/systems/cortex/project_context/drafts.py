@@ -1,7 +1,7 @@
 """Pure Project draft helpers.
 
 Drafts are writable overlays over a canonical Project root. The helpers in this
-module keep the root read-only and model synchronization as a file-level
+module keep the root read-only and model synchronization as a path-level
 three-way comparison between the base manifest, the latest root, and the draft.
 """
 from __future__ import annotations
@@ -80,7 +80,7 @@ def _is_draft_metadata_relative(path: Path) -> bool:
     return bool(path.parts) and path.parts[0] in IGNORED_DRAFT_DIRS
 
 
-def _manifest_entry(path: Path) -> dict[str, Any]:
+def _file_manifest_entry(path: Path) -> dict[str, Any]:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -90,6 +90,10 @@ def _manifest_entry(path: Path) -> dict[str, Any]:
         "sha256": digest.hexdigest(),
         "size": path.stat().st_size,
     }
+
+
+def _directory_manifest_entry() -> dict[str, Any]:
+    return {"kind": "directory"}
 
 
 def _normalise_manifest(manifest: Mapping[str, Any] | None) -> FileManifest:
@@ -104,7 +108,7 @@ def _normalise_manifest(manifest: Mapping[str, Any] | None) -> FileManifest:
 
 
 def build_file_manifest(root: Path) -> FileManifest:
-    """Build a deterministic manifest for regular files under ``root``."""
+    """Build a deterministic manifest for files and folders under ``root``."""
 
     root = Path(root)
     if not root.exists():
@@ -119,9 +123,12 @@ def build_file_manifest(root: Path) -> FileManifest:
         relative = path.relative_to(root.parent if root.is_file() else root)
         if _is_draft_metadata_relative(relative):
             continue
-        if not path.is_file() or path.is_symlink():
+        if path.is_symlink():
             continue
-        manifest[relative.as_posix()] = _manifest_entry(path)
+        if path.is_dir():
+            manifest[relative.as_posix()] = _directory_manifest_entry()
+        elif path.is_file():
+            manifest[relative.as_posix()] = _file_manifest_entry(path)
     return dict(sorted(manifest.items()))
 
 
@@ -159,6 +166,11 @@ def _copy_root_file(source_root: Path, draft_root: Path, relative_path: str) -> 
     source = source_root if source_root.is_file() else source_root / relative_path
     destination = draft_root / relative_path
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir() and not source.is_symlink():
+        if destination.exists() and not destination.is_dir():
+            destination.unlink()
+        destination.mkdir(parents=True, exist_ok=True)
+        return
     if destination.is_dir() and not destination.is_symlink():
         shutil.rmtree(destination)
     elif destination.exists() or destination.is_symlink():
@@ -170,6 +182,11 @@ def _copy_base_snapshot(source_root: Path, draft_root: Path, relative_path: str)
     source = source_root if source_root.is_file() else source_root / relative_path
     destination = _base_snapshot_path(draft_root, relative_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.exists() and source.is_dir() and not source.is_symlink():
+        if destination.exists() and not destination.is_dir():
+            destination.unlink()
+        destination.mkdir(parents=True, exist_ok=True)
+        return
     if destination.is_dir() and not destination.is_symlink():
         shutil.rmtree(destination)
     elif destination.exists() or destination.is_symlink():
@@ -321,7 +338,6 @@ def sync_draft_from_root(
             if root_entry is None:
                 if draft_entry is not None:
                     _remove_draft_path(draft_root, relative_path)
-                    _prune_empty_parents(draft_root, relative_path)
                     removed.append(relative_path)
             elif not _entries_match(draft_entry, root_entry):
                 _copy_root_file(source_root, draft_root, relative_path)

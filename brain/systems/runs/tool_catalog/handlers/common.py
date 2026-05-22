@@ -643,14 +643,21 @@ def _build_workspace_registry(
 ) -> list[dict[str, str]]:
     """Return a deduplicated list of accessible workspace roots."""
     registry: list[dict[str, str]] = []
-    seen_paths: set[str] = set()
+    by_path: dict[str, dict[str, str]] = {}
 
     for raw in ([workspace_root] if workspace_root else []) + list(allowed_workspaces or []):
         item = _normalize_workspace_entry(raw)
-        if not item or item["path"] in seen_paths:
+        if not item:
+            continue
+        existing = by_path.get(item["path"])
+        if existing is not None:
+            aliases = existing.setdefault("aliases", "")
+            names = {existing["name"], *[part for part in aliases.split("\n") if part]}
+            if item["name"] not in names:
+                existing["aliases"] = "\n".join([*sorted(names - {existing["name"]}), item["name"]])
             continue
         registry.append(item)
-        seen_paths.add(item["path"])
+        by_path[item["path"]] = item
 
     return registry
 
@@ -674,14 +681,23 @@ def _select_workspace(
     if path_matches:
         return path_matches[0]["path"]
 
-    name_matches = [item for item in registry if item["name"] == requested or os.path.basename(item["path"]) == requested]
+    name_matches = [
+        item for item in registry
+        if item["name"] == requested
+        or os.path.basename(item["path"]) == requested
+        or requested in {part for part in item.get("aliases", "").split("\n") if part}
+    ]
     if len(name_matches) == 1:
         return name_matches[0]["path"]
     if len(name_matches) > 1:
         options = ", ".join(sorted({item["path"] for item in name_matches}))
         raise ValueError(f"Workspace selector '{workspace}' is ambiguous. Matches: {options}")
 
-    options = ", ".join(sorted(item["name"] for item in registry)) or "(none)"
+    option_names = set()
+    for item in registry:
+        option_names.add(item["name"])
+        option_names.update(part for part in item.get("aliases", "").split("\n") if part)
+    options = ", ".join(sorted(option_names)) or "(none)"
     raise ValueError(f"Workspace '{workspace}' is not accessible in this run. Available: {options}")
 
 

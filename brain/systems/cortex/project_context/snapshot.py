@@ -20,6 +20,7 @@ from brain.systems.cortex.project_context.permissions import (
     derive_project_permission_scope,
     normalize_project_path,
 )
+from brain.systems.cortex.project_context.identity import durable_project_id_from_context
 from brain.systems.cortex.project_context.resources import normalize_project_resource
 from brain.systems.cortex.project_context.workspace_manifest import attach_project_workspace_manifest_contract
 
@@ -256,17 +257,25 @@ def build_project_context_snapshot(
             "source": "metadata.project_context" if "project_context" in metadata else "metadata.project",
             "resources": resources,
         }
+        durable_project_id = durable_project_id_from_context(project)
+        if durable_project_id:
+            snapshot["project_id"] = durable_project_id
+            snapshot["project_key"] = durable_project_id
         for key in (
             "project_key",
             "slug",
             "project_id",
+            "project_profile_id",
+            "selected_profile_id",
             "name",
             "description",
             "permissions",
             "mode",
         ):
             value = project.get(key)
-            if value is not None:
+            if value is not None and key not in {"project_key", "project_id"}:
+                snapshot[key] = value
+            elif value is not None and not durable_project_id:
                 snapshot[key] = value
         if run_id is not None:
             snapshot["run_id"] = run_id

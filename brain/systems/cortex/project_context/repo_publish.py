@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 import subprocess
 
@@ -22,6 +22,17 @@ class GitCommandResult:
 
 
 CommandRunner = Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class _RepoPathspecScope:
+    requested_path: Path
+    git_cwd: Path
+    pathspec_root: str = ""
+
+    @property
+    def pathspec_args(self) -> list[str]:
+        return ["--", self.pathspec_root] if self.pathspec_root else []
 
 
 @dataclass(frozen=True)
@@ -179,6 +190,65 @@ def _normalise_repo_path(path: str) -> str:
     return cleaned.rstrip("/")
 
 
+def _normalise_relative_pathspec(value: Any) -> str | None:
+    text = _normalise_repo_path(str(value or ""))
+    if not text or text == ".":
+        return ""
+    path = PurePosixPath(text)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return path.as_posix()
+
+
+def _resolve_pathspec_scope(
+    repo_path: Path,
+    *,
+    mount_subpath: str | None,
+    pathspec_root: str | None,
+    run_cmd: CommandRunner,
+) -> tuple[_RepoPathspecScope | None, str | None]:
+    root_value = mount_subpath if mount_subpath is not None else pathspec_root
+    root = _normalise_relative_pathspec(root_value)
+    if root is None:
+        return None, f"invalid mount_subpath/pathspec root: {root_value}"
+    if not root:
+        return _RepoPathspecScope(requested_path=repo_path, git_cwd=repo_path), None
+
+    rev_parse = _run_command(run_cmd, ["git", "rev-parse", "--show-toplevel"], cwd=repo_path)
+    if rev_parse.returncode != 0:
+        return None, _command_error("git rev-parse --show-toplevel", rev_parse)
+    repo_root = rev_parse.stdout.strip()
+    if not repo_root:
+        return None, "git rev-parse --show-toplevel failed: no repository root"
+    return _RepoPathspecScope(
+        requested_path=repo_path,
+        git_cwd=Path(repo_root).expanduser(),
+        pathspec_root=root,
+    ), None
+
+
+def _path_join(root: str, path: str) -> str:
+    path = _normalise_repo_path(path)
+    if not root:
+        return path
+    if not path:
+        return root
+    return f"{root}/{path}"
+
+
+def _path_relative_to_scope(path: str, scope: _RepoPathspecScope) -> str:
+    clean_path = _normalise_repo_path(path)
+    root = scope.pathspec_root
+    if not root:
+        return clean_path
+    if clean_path == root:
+        return ""
+    prefix = f"{root}/"
+    if clean_path.startswith(prefix):
+        return clean_path.removeprefix(prefix)
+    return ""
+
+
 def _parse_path_lines(output: str) -> list[str]:
     return _unique(
         [path for line in output.splitlines() if (path := _normalise_repo_path(line))]
@@ -214,10 +284,14 @@ def _normalise_selected_paths(selected_paths: Sequence[str] | None) -> list[str]
     return _unique(
         [
             path
-            for path in (_normalise_repo_path(str(item)) for item in items)
-            if path
+            for path in (_normalise_relative_pathspec(item) for item in items)
+            if path is not None and path
         ]
     )
+
+
+def _scope_paths(paths: list[str], scope: _RepoPathspecScope) -> list[str]:
+    return _unique([_path_join(scope.pathspec_root, path) for path in paths])
 
 
 def _changed_paths_for_selection(
@@ -288,12 +362,27 @@ def _parse_status_paths(raw_status: str) -> tuple[list[str], list[str]]:
 def repo_draft_status(
     repo_path: Path,
     *,
+    mount_subpath: str | None = None,
+    pathspec_root: str | None = None,
     run_cmd: CommandRunner = default_run_cmd,
 ) -> RepoDraftStatus:
     """Return porcelain git status for a local Project repo draft workspace."""
 
     repo_path = Path(repo_path)
-    status = _run_command(run_cmd, ["git", "status", "--porcelain"], cwd=repo_path)
+    scope, scope_error = _resolve_pathspec_scope(
+        repo_path,
+        mount_subpath=mount_subpath,
+        pathspec_root=pathspec_root,
+        run_cmd=run_cmd,
+    )
+    if scope_error or scope is None:
+        return RepoDraftStatus(repo_path=repo_path, errors=[scope_error or "invalid git pathspec scope"])
+
+    status = _run_command(
+        run_cmd,
+        ["git", "status", "--porcelain", *scope.pathspec_args],
+        cwd=scope.git_cwd,
+    )
     if status.returncode != 0:
         return RepoDraftStatus(
             repo_path=repo_path,
@@ -302,6 +391,12 @@ def repo_draft_status(
         )
 
     changed_paths, unmerged_paths = _parse_status_paths(status.stdout)
+    changed_paths = _unique(
+        [path for path in (_path_relative_to_scope(path, scope) for path in changed_paths) if path]
+    )
+    unmerged_paths = _unique(
+        [path for path in (_path_relative_to_scope(path, scope) for path in unmerged_paths) if path]
+    )
     return RepoDraftStatus(
         repo_path=repo_path,
         changed_paths=changed_paths,
@@ -316,15 +411,29 @@ def repo_draft_upstream_status(
     changed_paths: Sequence[str] | None = None,
     base_branch: str | None = DEFAULT_BASE_BRANCH,
     fetch: bool = True,
+    mount_subpath: str | None = None,
+    pathspec_root: str | None = None,
     run_cmd: CommandRunner = default_run_cmd,
 ) -> RepoDraftUpstreamStatus:
     """Return upstream changes that may conflict with draft paths."""
 
     repo_path = Path(repo_path)
+    scope, scope_error = _resolve_pathspec_scope(
+        repo_path,
+        mount_subpath=mount_subpath,
+        pathspec_root=pathspec_root,
+        run_cmd=run_cmd,
+    )
+    if scope_error or scope is None:
+        return RepoDraftUpstreamStatus(
+            repo_path=repo_path,
+            status="error",
+            errors=[scope_error or "invalid git pathspec scope"],
+        )
     branch = _clean_base_branch(base_branch)
     upstream_ref = f"refs/remotes/origin/{branch}"
     draft_paths = _unique(
-        [path for path in (_normalise_repo_path(item) for item in changed_paths or []) if path]
+        [path for path in (_normalise_relative_pathspec(item) for item in changed_paths or []) if path]
     )
     fetch_status = "not_requested"
 
@@ -332,7 +441,7 @@ def repo_draft_upstream_status(
         fetch_result = _run_command(
             run_cmd,
             ["git", "fetch", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
-            cwd=repo_path,
+            cwd=scope.git_cwd,
         )
         if fetch_result.returncode != 0:
             return RepoDraftUpstreamStatus(
@@ -344,7 +453,7 @@ def repo_draft_upstream_status(
             )
         fetch_status = "succeeded"
 
-    rev_parse = _run_command(run_cmd, ["git", "rev-parse", "HEAD"], cwd=repo_path)
+    rev_parse = _run_command(run_cmd, ["git", "rev-parse", "HEAD"], cwd=scope.git_cwd)
     if rev_parse.returncode != 0:
         return RepoDraftUpstreamStatus(
             repo_path=repo_path,
@@ -366,8 +475,15 @@ def repo_draft_upstream_status(
 
     diff = _run_command(
         run_cmd,
-        ["git", "diff", "--name-only", f"{base_commit}..{upstream_ref}", "--"],
-        cwd=repo_path,
+        [
+            "git",
+            "diff",
+            "--name-only",
+            f"{base_commit}..{upstream_ref}",
+            "--",
+            *([scope.pathspec_root] if scope.pathspec_root else []),
+        ],
+        cwd=scope.git_cwd,
     )
     if diff.returncode != 0:
         return RepoDraftUpstreamStatus(
@@ -379,7 +495,11 @@ def repo_draft_upstream_status(
             errors=[_command_error("git diff", diff)],
         )
 
-    upstream_changed_paths = _parse_path_lines(diff.stdout)
+    upstream_changed_paths = _unique([
+        path
+        for path in (_path_relative_to_scope(path, scope) for path in _parse_path_lines(diff.stdout))
+        if path
+    ])
     upstream_conflicted_paths = _overlapping_paths(draft_paths, upstream_changed_paths)
     upstream_status = (
         "conflicted"
@@ -411,6 +531,8 @@ def publish_repo_draft(
     check_upstream: bool = True,
     base_branch: str | None = DEFAULT_BASE_BRANCH,
     selected_paths: Sequence[str] | None = None,
+    mount_subpath: str | None = None,
+    pathspec_root: str | None = None,
     run_cmd: CommandRunner = default_run_cmd,
 ) -> RepoDraftPublishResult:
     """Publish local repo draft changes onto a non-main branch."""
@@ -432,7 +554,25 @@ def publish_repo_draft(
             errors=["commit_message is required"],
         )
 
-    status = repo_draft_status(repo_path, run_cmd=run_cmd)
+    scope, scope_error = _resolve_pathspec_scope(
+        repo_path,
+        mount_subpath=mount_subpath,
+        pathspec_root=pathspec_root,
+        run_cmd=run_cmd,
+    )
+    if scope_error or scope is None:
+        return RepoDraftPublishResult(
+            repo_path=repo_path,
+            branch=branch,
+            errors=[scope_error or "invalid git pathspec scope"],
+        )
+
+    status = repo_draft_status(
+        repo_path,
+        mount_subpath=mount_subpath,
+        pathspec_root=pathspec_root,
+        run_cmd=run_cmd,
+    )
     if status.errors:
         return RepoDraftPublishResult(
             repo_path=repo_path,
@@ -461,7 +601,8 @@ def publish_repo_draft(
         )
 
     publish_changed_paths = status.changed_paths
-    add_command = ["git", "add", "-A"]
+    add_command = ["git", "add", "-A", *scope.pathspec_args]
+    commit_pathspecs = scope.pathspec_args
     if selected_paths is not None:
         selected_repo_paths = _normalise_selected_paths(selected_paths)
         publish_changed_paths = _changed_paths_for_selection(
@@ -498,7 +639,9 @@ def publish_repo_draft(
                 ],
                 status=status,
             )
-        add_command = ["git", "add", "--", *add_paths]
+        add_pathspecs = _scope_paths(add_paths, scope)
+        add_command = ["git", "add", "--", *add_pathspecs]
+        commit_pathspecs = ["--", *add_pathspecs]
 
     upstream: RepoDraftUpstreamStatus | None = None
     if check_upstream:
@@ -507,6 +650,8 @@ def publish_repo_draft(
             changed_paths=publish_changed_paths,
             base_branch=base_branch,
             fetch=True,
+            mount_subpath=mount_subpath,
+            pathspec_root=pathspec_root,
             run_cmd=run_cmd,
         )
         if upstream.errors:
@@ -529,7 +674,9 @@ def publish_repo_draft(
                 **_publish_upstream_fields(upstream),
             )
 
-    checkout = _run_command(run_cmd, ["git", "checkout", "-B", branch], cwd=repo_path)
+    checkout_ref = f"origin/{upstream.base_branch or _clean_base_branch(base_branch)}" if check_upstream else None
+    checkout_command = ["git", "checkout", "-B", branch, checkout_ref] if checkout_ref else ["git", "checkout", "-B", branch]
+    checkout = _run_command(run_cmd, checkout_command, cwd=scope.git_cwd)
     if checkout.returncode != 0:
         return RepoDraftPublishResult(
             repo_path=repo_path,
@@ -540,7 +687,7 @@ def publish_repo_draft(
             **_publish_upstream_fields(upstream),
         )
 
-    add = _run_command(run_cmd, add_command, cwd=repo_path)
+    add = _run_command(run_cmd, add_command, cwd=scope.git_cwd)
     if add.returncode != 0:
         return RepoDraftPublishResult(
             repo_path=repo_path,
@@ -551,7 +698,11 @@ def publish_repo_draft(
             **_publish_upstream_fields(upstream),
         )
 
-    commit = _run_command(run_cmd, ["git", "commit", "-m", message], cwd=repo_path)
+    commit = _run_command(
+        run_cmd,
+        ["git", "commit", "-m", message, *commit_pathspecs],
+        cwd=scope.git_cwd,
+    )
     if commit.returncode != 0:
         return RepoDraftPublishResult(
             repo_path=repo_path,
@@ -563,7 +714,7 @@ def publish_repo_draft(
             **_publish_upstream_fields(upstream),
         )
 
-    rev_parse = _run_command(run_cmd, ["git", "rev-parse", "HEAD"], cwd=repo_path)
+    rev_parse = _run_command(run_cmd, ["git", "rev-parse", "HEAD"], cwd=scope.git_cwd)
     if rev_parse.returncode != 0:
         return RepoDraftPublishResult(
             repo_path=repo_path,
@@ -584,7 +735,11 @@ def publish_repo_draft(
     pr_error: str | None = None
 
     if push or create_pr:
-        push_result = _run_command(run_cmd, ["git", "push", "-u", "origin", branch], cwd=repo_path)
+        push_result = _run_command(
+            run_cmd,
+            ["git", "push", "-u", "origin", branch],
+            cwd=scope.git_cwd,
+        )
         if push_result.returncode == 0:
             push_status = "succeeded"
         else:
@@ -603,7 +758,7 @@ def publish_repo_draft(
             pr_result = _run_command(
                 run_cmd,
                 ["gh", "pr", "create", "--head", branch, "--title", title, "--body", body],
-                cwd=repo_path,
+                cwd=scope.git_cwd,
             )
             if pr_result.returncode == 0:
                 pr_status = "succeeded"

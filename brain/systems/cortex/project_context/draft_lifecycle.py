@@ -14,6 +14,7 @@ from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.models.idea import Idea
 from brain.systems.cortex.project_context.drafts import plan_draft_publish
 from brain.systems.cortex.project_context.repo_publish import repo_draft_status
+from brain.systems.cortex.project_context.runtime_context import project_runtime_context_from_payloads
 from brain.systems.cortex.project_context.workspace_manifest import PROJECT_CONTEXT_DIR
 
 
@@ -150,9 +151,18 @@ def _mounts_from_manifest_payload(payload: Mapping[str, Any]) -> list[dict[str, 
 def _project_manifest_payloads(run: Any) -> list[Mapping[str, Any]]:
     manifests: list[Mapping[str, Any]] = []
     for payload in _payloads_from_run(run):
+        runtime = project_runtime_context_from_payloads(payload)
+        runtime_manifest = runtime.get("project_workspace_manifest")
+        if runtime_manifest:
+            manifests.append(runtime_manifest)
         manifest = payload.get("project_workspace_manifest")
         if isinstance(manifest, Mapping):
             manifests.append(manifest)
+        runtime_materialization = runtime.get("project_context_materialization")
+        if isinstance(runtime_materialization, Mapping):
+            nested = runtime_materialization.get("workspace_manifest")
+            if isinstance(nested, Mapping):
+                manifests.append(nested)
         materialization = payload.get("project_context_materialization")
         if isinstance(materialization, Mapping):
             nested = materialization.get("workspace_manifest")
@@ -325,6 +335,153 @@ def _project_context_dir_dirty_state(run: Any, project_context_dir: Path) -> tup
     return dirty, details, errors
 
 
+def _project_context_dir_dirty_state_for_runs(
+    runs: Sequence[Any],
+    project_context_dir: Path,
+) -> tuple[bool, list[dict[str, Any]], list[str]]:
+    dirty = False
+    details: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for run in runs:
+        run_dirty, run_details, run_errors = _project_context_dir_dirty_state(run, project_context_dir)
+        dirty = dirty or run_dirty
+        errors.extend(run_errors)
+        details.append({
+            "run_id": str(getattr(run, "id", "")) if getattr(run, "id", None) is not None else None,
+            "thread_id": str(getattr(run, "thread_id", "")) if getattr(run, "thread_id", None) is not None else None,
+            "has_unpublished_changes": run_dirty,
+            "resources": run_details,
+        })
+    return dirty, details, errors
+
+
+def _cleanup_status_for_counts(*, deleted_count: int, retained_count: int, skipped_count: int) -> str:
+    if retained_count:
+        return "retained_unpublished"
+    if skipped_count:
+        return "partial"
+    if deleted_count:
+        return "deleted"
+    return "no_project_draft"
+
+
+def _cleanup_result_from_paths(
+    *,
+    archived_at: datetime,
+    cleanup_after: str,
+    paths: list[ProjectDraftCleanupPath],
+    skipped_count: int = 0,
+) -> ProjectDraftCleanupResult:
+    deleted_count = sum(1 for path in paths if path.status == "deleted")
+    retained_count = sum(1 for path in paths if path.status == "retained_until_cleanup_after")
+    skipped_count += sum(1 for path in paths if path.status == "delete_failed")
+    return ProjectDraftCleanupResult(
+        status=_cleanup_status_for_counts(
+            deleted_count=deleted_count,
+            retained_count=retained_count,
+            skipped_count=skipped_count,
+        ),
+        archived_at=_iso_timestamp(archived_at),
+        cleanup_after=cleanup_after if retained_count else None,
+        deleted_count=deleted_count,
+        retained_count=retained_count,
+        skipped_count=skipped_count,
+        paths=paths,
+    )
+
+
+def cleanup_project_drafts_for_runs(
+    runs: Sequence[Any],
+    *,
+    archived_at: datetime | None = None,
+    now: datetime | None = None,
+    force_expired: bool = False,
+) -> list[ProjectDraftCleanupResult]:
+    """Apply cleanup once per shared Project context directory, then stamp each run."""
+
+    now = _ensure_aware(now or _utc_now())
+    archived_at = _ensure_aware(archived_at or now)
+    cleanup_after_dt = archived_at + PROJECT_DRAFT_UNPUBLISHED_RETENTION
+    cleanup_after = _iso_timestamp(cleanup_after_dt)
+    run_dirs = [(run, _run_project_context_dirs(run)) for run in runs]
+    directory_keys: list[str] = []
+    directories_by_key: dict[str, Path] = {}
+    for _, project_context_dirs in run_dirs:
+        for project_context_dir in project_context_dirs:
+            key = str(project_context_dir)
+            if key in directories_by_key:
+                continue
+            directories_by_key[key] = project_context_dir
+            directory_keys.append(key)
+
+    decisions: dict[str, ProjectDraftCleanupPath] = {}
+    for key in directory_keys:
+        project_context_dir = directories_by_key[key]
+        referencing_runs = [
+            run
+            for run, project_context_dirs in run_dirs
+            if any(str(candidate) == key for candidate in project_context_dirs)
+        ]
+        has_changes, details, errors = _project_context_dir_dirty_state_for_runs(
+            referencing_runs,
+            project_context_dir,
+        )
+        if has_changes and not force_expired:
+            decisions[key] = ProjectDraftCleanupPath(
+                project_context_dir=str(project_context_dir),
+                status="retained_until_cleanup_after",
+                has_unpublished_changes=True,
+                reason="unpublished_project_draft_changes",
+                cleanup_after=cleanup_after,
+                errors=errors,
+                details={"runs": details},
+            )
+            continue
+
+        delete_errors = _delete_project_context_dir(project_context_dir)
+        if delete_errors:
+            decisions[key] = ProjectDraftCleanupPath(
+                project_context_dir=str(project_context_dir),
+                status="delete_failed",
+                has_unpublished_changes=has_changes,
+                reason="project_draft_delete_failed",
+                cleanup_after=cleanup_after if has_changes else None,
+                errors=[*errors, *delete_errors],
+                details={"runs": details},
+            )
+        else:
+            decisions[key] = ProjectDraftCleanupPath(
+                project_context_dir=str(project_context_dir),
+                status="deleted",
+                has_unpublished_changes=has_changes,
+                reason="expired_unpublished_project_draft" if has_changes else "clean_project_draft_archived",
+                details={"runs": details},
+            )
+
+    results: list[ProjectDraftCleanupResult] = []
+    for run, project_context_dirs in run_dirs:
+        if not project_context_dirs:
+            result = ProjectDraftCleanupResult(
+                status="no_project_draft",
+                archived_at=_iso_timestamp(archived_at),
+                skipped_count=1,
+            )
+        else:
+            paths = [
+                decisions[str(project_context_dir)]
+                for project_context_dir in project_context_dirs
+                if str(project_context_dir) in decisions
+            ]
+            result = _cleanup_result_from_paths(
+                archived_at=archived_at,
+                cleanup_after=cleanup_after,
+                paths=paths,
+            )
+        _set_run_cleanup_metadata(run, result)
+        results.append(result)
+    return results
+
+
 def cleanup_project_draft_for_run(
     run: Any,
     *,
@@ -390,16 +547,12 @@ def cleanup_project_draft_for_run(
                 details={"resources": details},
             ))
 
-    if retained_count:
-        status = "retained_unpublished"
-    elif skipped_count:
-        status = "partial"
-    elif deleted_count:
-        status = "deleted"
-    else:
-        status = "no_project_draft"
     result = ProjectDraftCleanupResult(
-        status=status,
+        status=_cleanup_status_for_counts(
+            deleted_count=deleted_count,
+            retained_count=retained_count,
+            skipped_count=skipped_count,
+        ),
         archived_at=_iso_timestamp(archived_at),
         cleanup_after=cleanup_after if retained_count else None,
         deleted_count=deleted_count,
@@ -421,11 +574,24 @@ def _set_run_cleanup_metadata(run: Any, result: ProjectDraftCleanupResult) -> No
 
 
 def _summary_from_results(results: Sequence[ProjectDraftCleanupResult]) -> dict[str, Any]:
+    unique_paths: dict[str, ProjectDraftCleanupPath] = {}
+    for result in results:
+        for path in result.paths:
+            unique_paths.setdefault(path.project_context_dir, path)
+    if unique_paths:
+        deleted_count = sum(1 for path in unique_paths.values() if path.status == "deleted")
+        retained_count = sum(1 for path in unique_paths.values() if path.status == "retained_until_cleanup_after")
+        skipped_count = sum(1 for path in unique_paths.values() if path.status == "delete_failed")
+        skipped_count += sum(result.skipped_count for result in results if not result.paths)
+    else:
+        deleted_count = sum(result.deleted_count for result in results)
+        retained_count = sum(result.retained_count for result in results)
+        skipped_count = sum(result.skipped_count for result in results)
     return {
         "run_count": len(results),
-        "deleted_count": sum(result.deleted_count for result in results),
-        "retained_count": sum(result.retained_count for result in results),
-        "skipped_count": sum(result.skipped_count for result in results),
+        "deleted_count": deleted_count,
+        "retained_count": retained_count,
+        "skipped_count": skipped_count,
         "has_unpublished_changes": any(result.has_unpublished_changes for result in results),
         "runs": [result.to_dict() for result in results],
     }
@@ -442,10 +608,7 @@ async def apply_project_draft_cleanup_for_thread(
 
     stmt = select(AgentRunRow).where(AgentRunRow.thread_id == str(thread_id))
     runs = (await session.scalars(stmt)).all()
-    results = [
-        cleanup_project_draft_for_run(run, archived_at=archived_at, now=now)
-        for run in runs
-    ]
+    results = cleanup_project_drafts_for_runs(runs, archived_at=archived_at, now=now)
     await session.flush()
     return _summary_from_results(results)
 
@@ -467,7 +630,8 @@ async def cleanup_expired_project_draft_workspaces(
         .limit(max(1, min(int(limit or 500), 2000)))
     )
     runs = (await session.scalars(stmt)).all()
-    results: list[ProjectDraftCleanupResult] = []
+    eligible_runs: list[Any] = []
+    archived_times: list[datetime] = []
     for run in runs:
         cleanup = _as_mapping(_as_mapping(getattr(run, "metadata_", None)).get(PROJECT_DRAFT_CLEANUP_METADATA_KEY))
         if cleanup.get("status") == "deleted":
@@ -475,13 +639,15 @@ async def cleanup_expired_project_draft_workspaces(
         cleanup_after = _parse_timestamp(cleanup.get("cleanup_after"))
         if cleanup_after is None or cleanup_after > now:
             continue
-        archived_at = _parse_timestamp(cleanup.get("archived_at")) or now
-        results.append(cleanup_project_draft_for_run(
-            run,
-            archived_at=archived_at,
-            now=now,
-            force_expired=True,
-        ))
+        eligible_runs.append(run)
+        archived_times.append(_parse_timestamp(cleanup.get("archived_at")) or now)
+    archived_at = min(archived_times) if archived_times else now
+    results = cleanup_project_drafts_for_runs(
+        eligible_runs,
+        archived_at=archived_at,
+        now=now,
+        force_expired=True,
+    )
     if results:
         await session.flush()
     return _summary_from_results(results)
@@ -493,4 +659,5 @@ __all__ = [
     "apply_project_draft_cleanup_for_thread",
     "cleanup_expired_project_draft_workspaces",
     "cleanup_project_draft_for_run",
+    "cleanup_project_drafts_for_runs",
 ]

@@ -9,6 +9,7 @@ import os
 import re
 from types import SimpleNamespace
 
+from brain.systems.cortex.project_context.runtime_context import project_runtime_context_from_payloads
 from brain.systems.runs.execution_context import _agent_context
 
 logger = logging.getLogger("agent")
@@ -36,15 +37,21 @@ def _run_payload_context(run: object) -> dict | None:
         or {}
     )
     workspace_payload = dict(getattr(run, "workspace_ref", None) or {})
-    snapshot = target_payload.get("project_context_snapshot") or workspace_payload.get("project_context_snapshot")
+    runtime = project_runtime_context_from_payloads(workspace_payload, target_payload)
+    snapshot = (
+        runtime.get("project_context_snapshot")
+        or target_payload.get("project_context_snapshot")
+        or workspace_payload.get("project_context_snapshot")
+    )
     if isinstance(snapshot, dict):
         target_payload["project_context_snapshot"] = snapshot
 
     workspace_root = (
-        workspace_payload.get("resolved_workspace_root")
+        (runtime.get("project_workspace_manifest") or {}).get("workspace_root")
+        or workspace_payload.get("resolved_workspace_root")
         or workspace_payload.get("workspace_root")
     )
-    workspaces = workspace_payload.get("workspaces")
+    workspaces = (runtime.get("project_workspace_manifest") or {}).get("workspaces") or workspace_payload.get("workspaces")
     if (not isinstance(workspace_root, str) or not workspace_root.strip()) and isinstance(workspaces, list):
         workspace_root = next(
             (

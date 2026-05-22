@@ -93,11 +93,14 @@ def _single_allowed_path(scope: dict[str, Any]) -> str | None:
 def project_runtime_workspace_from_ref(workspace_ref: dict[str, Any]) -> ProjectRuntimeWorkspace:
     """Return the agent-facing workspace set represented by a runtime workspace reference."""
 
+    from brain.systems.cortex.project_context.runtime_context import project_runtime_context_from_payloads
+
     workspace_ref = workspace_ref if isinstance(workspace_ref, dict) else {}
+    runtime = project_runtime_context_from_payloads(workspace_ref)
     allowed_workspaces: list[dict[str, str]] = []
     seen_paths: set[str] = set()
 
-    workspace_manifest = workspace_ref.get("project_workspace_manifest")
+    workspace_manifest = runtime.get("project_workspace_manifest") or workspace_ref.get("project_workspace_manifest")
     if isinstance(workspace_manifest, dict):
         for item in workspace_manifest.get("workspaces") or []:
             if isinstance(item, dict):

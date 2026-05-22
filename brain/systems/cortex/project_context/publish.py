@@ -21,6 +21,12 @@ from brain.systems.cortex.project_context.repo_publish import (
     publish_repo_draft,
     repo_draft_status,
 )
+from brain.systems.cortex.project_context.root_transaction import project_root_locks
+from brain.systems.cortex.project_context.publish_transaction import (
+    capture_local_transaction_versions,
+    local_publish_roots,
+    rollback_local_transaction,
+)
 from brain.systems.cortex.project_context.versioning import (
     build_project_root_version_metadata,
     capture_project_root_version,
@@ -101,7 +107,12 @@ def _publish_target(resource: Mapping[str, Any]) -> dict[str, Any]:
     if resource.get("source_path"):
         return {"kind": "local_path", "path": resource.get("source_path")}
     if resource.get("repo"):
-        return {"kind": "git_repository", "repo": resource.get("repo")}
+        target = {"kind": "git_repository", "repo": resource.get("repo")}
+        if resource.get("repo_path"):
+            target["repo_path"] = resource.get("repo_path")
+        if resource.get("repo_subpath"):
+            target["subpath"] = resource.get("repo_subpath")
+        return target
     return {"kind": "unknown"}
 
 
@@ -325,12 +336,9 @@ def _copy_publish_path(draft_path: str | None, target_path: str | None) -> None:
     target = Path(target_path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
     if draft.is_dir():
-        if target.exists():
-            if target.is_dir():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
-        shutil.copytree(draft, target)
+        if target.exists() and not target.is_dir():
+            target.unlink()
+        target.mkdir(parents=True, exist_ok=True)
     else:
         shutil.copy2(draft, target)
 
@@ -541,7 +549,8 @@ def _publish_repo_group(
 ) -> dict[str, Any]:
     target = _as_mapping(group.get("publish_target"))
     workspace_path = _clean_text(group.get("workspace_path"))
-    if target.get("kind") != "git_repository" or not workspace_path:
+    repo_path = _clean_text(target.get("repo_path")) or workspace_path
+    if target.get("kind") != "git_repository" or not repo_path:
         return {
             "resource_id": group.get("resource_id"),
             "mount_path": group.get("mount_path"),
@@ -550,18 +559,19 @@ def _publish_repo_group(
             "operations": [],
         }
     repo_publish = repo_publish or publish_repo_draft
-    result = repo_publish(
-        Path(workspace_path).expanduser(),
-        branch_name=branch_name,
-        commit_message=commit_message or "Publish Project draft",
-        push=push,
-        create_pr=create_pr,
-        pr_title=pr_title,
-        pr_body=pr_body,
-        check_upstream=check_upstream,
-        base_branch=base_branch,
-        selected_paths=selected_paths,
-    )
+    publish_kwargs = {
+        "branch_name": branch_name,
+        "commit_message": commit_message or "Publish Project draft",
+        "push": push,
+        "create_pr": create_pr,
+        "pr_title": pr_title,
+        "pr_body": pr_body,
+        "check_upstream": check_upstream,
+        "base_branch": base_branch,
+        "selected_paths": selected_paths,
+        "mount_subpath": _clean_text(target.get("subpath")),
+    }
+    result = repo_publish(Path(repo_path).expanduser(), **publish_kwargs)
     payload = _publish_repo_result_payload(result)
     return {
         "resource_id": group.get("resource_id"),
@@ -615,13 +625,17 @@ def _conflict_resolution_guidance(blocked_groups: list[Mapping[str, Any]]) -> di
             "Resolve each conflicted draft file against the latest Project root before retrying. Compare root -> draft "
             "to see what would be published, and compare base -> draft to recover the thread's original intent. "
             "Edit the draft so it preserves the user's intent while respecting the current root philosophy, then retry "
-            "manage_project(action=\"publish_draft\"). If the current draft already expresses the correct resolution, "
-            "retry publish_draft deliberately; the conflict checkpoint will treat that retry as the resolution signal as "
-            "long as the root has not changed again."
+            "manage_project(action=\"publish_draft\"). If the current draft already expresses the correct resolution "
+            "without edits, retry deliberately with manage_project(action=\"publish_draft\", "
+            "acknowledge_conflict_resolution=True). Identical retries without that acknowledgement remain blocked."
         ),
         "retry_action": {
             "tool": "manage_project",
             "arguments": {"action": "publish_draft"},
+        },
+        "acknowledged_retry_action": {
+            "tool": "manage_project",
+            "arguments": {"action": "publish_draft", "acknowledge_conflict_resolution": True},
         },
         "conflicts": conflicts,
     }
@@ -634,89 +648,77 @@ def _has_conflict_blockers(groups: list[Mapping[str, Any]]) -> bool:
     )
 
 
-def project_publish_draft_payload(
+def _blocked_publish_payload(blocked: list[Mapping[str, Any]]) -> dict[str, Any]:
+    has_conflicts = _has_conflict_blockers(blocked)
+    conflict_resolution = _conflict_resolution_guidance(blocked) if has_conflicts else None
+    return {
+        "ok": False,
+        "action": "publish_draft",
+        "code": "project_draft_conflicts_require_resolution" if has_conflicts else "project_draft_publish_blocked",
+        "error": (
+            "Project draft has root conflicts. Resolve the draft against the latest root, then retry publish_draft."
+            if has_conflicts
+            else "Project draft has blocked resources; resolve blockers before publishing."
+        ),
+        "mutated_project_root": False,
+        "summary": {
+            "published_groups": 0,
+            "operation_count": 0,
+            "blocked_count": len(blocked),
+        },
+        "blocked_groups": blocked,
+        **({"conflict_resolution": conflict_resolution} if conflict_resolution else {}),
+    }
+
+
+def _selection_empty_payload(
     *,
-    resource_id: str | None = None,
-    resource_ids: list[str] | None = None,
-    publish_paths: list[str] | None = None,
-    path: str | None = None,
-    branch_name: str | None = None,
-    commit_message: str | None = None,
-    push: bool = False,
-    create_pr: bool = False,
-    pr_title: str | None = None,
-    pr_body: str | None = None,
-    check_upstream: bool = True,
-    base_branch: str | None = None,
-    repo_status=None,
-    repo_publish=None,
+    selected_resource_ids: list[str],
+    selected_publish_paths: list[str],
 ) -> dict[str, Any]:
-    repo_status = repo_status or repo_draft_status
-    repo_publish = repo_publish or publish_repo_draft
-    plan = project_publish_plan_payload(
-        repo_status=repo_status,
-        allow_conflict_checkpoint_publish=True,
-    )
-    if not plan.get("ok"):
-        plan["action"] = "publish_draft"
-        return plan
+    return {
+        "ok": False,
+        "action": "publish_draft",
+        "code": "project_draft_publish_selection_empty",
+        "error": "No Project draft changes matched the requested publish filters.",
+        "mutated_project_root": False,
+        "summary": {
+            "published_groups": 0,
+            "operation_count": 0,
+            "blocked_count": 0,
+        },
+        "selected_resource_ids": selected_resource_ids,
+        "selected_publish_paths": selected_publish_paths,
+    }
 
-    groups = [group for group in plan.get("groups") or [] if isinstance(group, Mapping)]
-    selected_resource_ids = _strings_from_value(resource_ids)
-    if resource_id:
-        selected_resource_ids.append(resource_id)
-    selected_publish_paths = _paths_from_value(publish_paths)
-    if path:
-        selected_publish_paths.append(path)
-    has_filters = bool(selected_resource_ids or selected_publish_paths)
-    has_path_filters = bool(selected_publish_paths)
-    if has_filters:
-        groups = _filter_publish_groups(
-            groups,
-            resource_ids=selected_resource_ids,
-            publish_paths=selected_publish_paths,
-        )
-    blocked = [group for group in groups if group.get("status") == "blocked"]
-    if blocked:
-        has_conflicts = _has_conflict_blockers(blocked)
-        conflict_resolution = _conflict_resolution_guidance(blocked) if has_conflicts else None
-        return {
-            "ok": False,
-            "action": "publish_draft",
-            "code": "project_draft_conflicts_require_resolution" if has_conflicts else "project_draft_publish_blocked",
-            "error": (
-                "Project draft has root conflicts. Resolve the draft against the latest root, then retry publish_draft."
-                if has_conflicts
-                else "Project draft has blocked resources; resolve blockers before publishing."
-            ),
-            "mutated_project_root": False,
-            "summary": {
-                "published_groups": 0,
-                "operation_count": 0,
-                "blocked_count": len(blocked),
-            },
-            "blocked_groups": blocked,
-            **({"conflict_resolution": conflict_resolution} if conflict_resolution else {}),
-        }
-    if has_filters and not sum(len(group.get("operations") or []) for group in groups):
-        return {
-            "ok": False,
-            "action": "publish_draft",
-            "code": "project_draft_publish_selection_empty",
-            "error": "No Project draft changes matched the requested publish filters.",
-            "mutated_project_root": False,
-            "summary": {
-                "published_groups": 0,
-                "operation_count": 0,
-                "blocked_count": 0,
-            },
-            "selected_resource_ids": selected_resource_ids,
-            "selected_publish_paths": selected_publish_paths,
-        }
 
+def _execute_publish_groups(
+    groups: list[Mapping[str, Any]],
+    *,
+    plan: Mapping[str, Any],
+    branch_name: str | None,
+    commit_message: str | None,
+    push: bool,
+    create_pr: bool,
+    pr_title: str | None,
+    pr_body: str | None,
+    check_upstream: bool,
+    base_branch: str | None,
+    has_path_filters: bool,
+    repo_publish,
+    actor_id: str | None,
+    org_id: str | None,
+) -> dict[str, Any]:
     published_groups: list[dict[str, Any]] = []
     blocked_groups: list[dict[str, Any]] = []
-    actor_id, org_id = _current_publish_actor()
+    local_before_versions = capture_local_transaction_versions(
+        groups,
+        run_id=plan.get("run_id"),
+        idea_id=plan.get("idea_id"),
+        actor_id=actor_id,
+        org_id=org_id,
+    )
+
     for group in groups:
         if not group.get("operations"):
             continue
@@ -755,12 +757,17 @@ def project_publish_draft_payload(
             published_groups.append(result)
 
     if blocked_groups:
+        rollback_errors = rollback_local_transaction(
+            groups,
+            local_before_versions,
+        ) if local_before_versions else []
         return {
             "ok": False,
             "action": "publish_draft",
             "code": "project_draft_publish_blocked",
-            "error": "Some Project draft resources do not have a supported publish adapter.",
-            "mutated_project_root": bool(published_groups),
+            "error": "Some Project draft resources could not be published; local Project root changes were rolled back.",
+            "mutated_project_root": bool(rollback_errors),
+            "rolled_back_project_root": bool(local_before_versions) and not rollback_errors,
             "summary": {
                 "published_groups": len(published_groups),
                 "operation_count": sum(len(group["operations"]) for group in published_groups),
@@ -768,6 +775,7 @@ def project_publish_draft_payload(
             },
             "published_groups": published_groups,
             "blocked_groups": blocked_groups,
+            "rollback_errors": rollback_errors,
         }
 
     return {
@@ -781,6 +789,107 @@ def project_publish_draft_payload(
         },
         "published_groups": published_groups,
     }
+
+
+def _publishable_groups_from_plan(
+    plan: Mapping[str, Any],
+    *,
+    selected_resource_ids: list[str],
+    selected_publish_paths: list[str],
+) -> list[dict[str, Any]]:
+    groups = [group for group in plan.get("groups") or [] if isinstance(group, Mapping)]
+    if selected_resource_ids or selected_publish_paths:
+        return _filter_publish_groups(
+            groups,
+            resource_ids=selected_resource_ids,
+            publish_paths=selected_publish_paths,
+        )
+    return [dict(group) for group in groups]
+
+
+def project_publish_draft_payload(
+    *,
+    resource_id: str | None = None,
+    resource_ids: list[str] | None = None,
+    publish_paths: list[str] | None = None,
+    path: str | None = None,
+    branch_name: str | None = None,
+    commit_message: str | None = None,
+    push: bool = False,
+    create_pr: bool = False,
+    pr_title: str | None = None,
+    pr_body: str | None = None,
+    check_upstream: bool = True,
+    base_branch: str | None = None,
+    acknowledge_conflict_resolution: bool = False,
+    repo_status=None,
+    repo_publish=None,
+) -> dict[str, Any]:
+    repo_status = repo_status or repo_draft_status
+    repo_publish = repo_publish or publish_repo_draft
+    plan = project_publish_plan_payload(
+        repo_status=repo_status,
+        allow_conflict_checkpoint_publish=bool(acknowledge_conflict_resolution),
+    )
+    if not plan.get("ok"):
+        plan["action"] = "publish_draft"
+        return plan
+
+    selected_resource_ids = _strings_from_value(resource_ids)
+    if resource_id:
+        selected_resource_ids.append(resource_id)
+    selected_publish_paths = _paths_from_value(publish_paths)
+    if path:
+        selected_publish_paths.append(path)
+    has_filters = bool(selected_resource_ids or selected_publish_paths)
+    has_path_filters = bool(selected_publish_paths)
+    groups = _publishable_groups_from_plan(
+        plan,
+        selected_resource_ids=selected_resource_ids,
+        selected_publish_paths=selected_publish_paths,
+    )
+    local_roots = local_publish_roots(groups)
+    lock_context = project_root_locks(local_roots) if local_roots else project_root_locks([])
+    with lock_context:
+        if local_roots:
+            plan = project_publish_plan_payload(
+                repo_status=repo_status,
+                allow_conflict_checkpoint_publish=bool(acknowledge_conflict_resolution),
+            )
+            if not plan.get("ok"):
+                plan["action"] = "publish_draft"
+                return plan
+            groups = _publishable_groups_from_plan(
+                plan,
+                selected_resource_ids=selected_resource_ids,
+                selected_publish_paths=selected_publish_paths,
+            )
+        blocked = [group for group in groups if group.get("status") == "blocked"]
+        if blocked:
+            return _blocked_publish_payload(blocked)
+        if has_filters and not sum(len(group.get("operations") or []) for group in groups):
+            return _selection_empty_payload(
+                selected_resource_ids=selected_resource_ids,
+                selected_publish_paths=selected_publish_paths,
+            )
+
+        actor_id, org_id = _current_publish_actor()
+        return _execute_publish_groups(
+            groups,
+            plan=plan,
+            branch_name=branch_name,
+            commit_message=commit_message,
+            push=push,
+            create_pr=create_pr,
+            pr_title=pr_title,
+            pr_body=pr_body,
+            check_upstream=check_upstream,
+            base_branch=base_branch,
+            has_path_filters=has_path_filters,
+            repo_publish=repo_publish,
+            actor_id=actor_id,
+            org_id=org_id,
+        )
 
 
 __all__ = [

@@ -1243,7 +1243,8 @@ PROJECT_TOOLS = [
                         "The project operation to run. delete archives the project profile; "
                         "draft_status and plan_publish are read-only draft inspection actions; "
                         "refresh_draft_from_root mutates only the thread draft workspace by copying latest root files into untouched draft paths; "
-                        "publish_draft mutates supported Project roots after conflict checkpoints are resolved; "
+                        "publish_draft mutates supported Project roots after conflict checkpoints are resolved "
+                        "by editing draft content or explicitly acknowledging an unchanged resolution; "
                         "preview_root_version is read-only; restore_root_version mutates a local Project root back to a captured version."
                     ),
                 },
@@ -1251,8 +1252,7 @@ PROJECT_TOOLS = [
                     "type": "string",
                     "description": "Optional operation name to inspect when action is help or schema.",
                 },
-                "project_id": {"type": "string", "description": "Project profile id for existing-project actions."},
-                "profile_id": {"type": "string", "description": "Alias for project_id."},
+                "project_id": {"type": "string", "description": "Project id for existing-project actions."},
                 "slug": {"type": "string", "description": "Stable project slug for create/update."},
                 "name": {"type": "string", "description": "Human-readable project name."},
                 "description": {"type": "string", "description": "Optional project description."},
@@ -1280,6 +1280,15 @@ PROJECT_TOOLS = [
                 "path": {
                     "type": "string",
                     "description": "Optional single path filter for publish_draft.",
+                },
+                "acknowledge_conflict_resolution": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "For publish_draft only: set true after conflict guidance when the unchanged draft is "
+                        "intentionally the resolved content. Without this acknowledgement, an identical retry remains "
+                        "blocked until the draft content changes."
+                    ),
                 },
                 "metadata": {"type": "object", "description": "Optional metadata for profile or attachment provenance."},
                 "visibility": {

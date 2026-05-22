@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import subprocess
 
 
 class FakeRunner:
@@ -46,6 +47,30 @@ def test_repo_draft_status_parses_changed_paths_and_unmerged_paths(tmp_path):
     assert runner.commands == [["git", "status", "--porcelain"]]
 
 
+def test_repo_draft_status_scopes_mount_subpath_from_repo_root(tmp_path):
+    from brain.systems.cortex.project_context.repo_publish import repo_draft_status
+
+    mounted = tmp_path / "docs"
+    mounted.mkdir()
+    runner = FakeRunner(
+        [
+            (0, f"{tmp_path}\n", ""),
+            (0, " M docs/README.md\nUU docs/conflict.md\n M outside.md\n", ""),
+        ]
+    )
+
+    status = repo_draft_status(mounted, mount_subpath="docs", run_cmd=runner)
+
+    assert status.changed_paths == ["README.md", "conflict.md"]
+    assert status.unmerged_paths == ["conflict.md"]
+    assert runner.commands == [
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "status", "--porcelain", "--", "docs"],
+    ]
+    assert runner.calls[0][1] == mounted
+    assert runner.calls[1][1] == tmp_path
+
+
 def test_repo_draft_upstream_status_fetches_base_branch_and_detects_overlap(tmp_path):
     from brain.systems.cortex.project_context.repo_publish import repo_draft_upstream_status
 
@@ -76,6 +101,40 @@ def test_repo_draft_upstream_status_fetches_base_branch_and_detects_overlap(tmp_
         ["git", "rev-parse", "HEAD"],
         ["git", "diff", "--name-only", "base123..refs/remotes/origin/main", "--"],
     ]
+
+
+def test_repo_draft_upstream_status_scopes_mount_subpath_diff(tmp_path):
+    from brain.systems.cortex.project_context.repo_publish import repo_draft_upstream_status
+
+    mounted = tmp_path / "docs"
+    mounted.mkdir()
+    runner = FakeRunner(
+        [
+            (0, f"{tmp_path}\n", ""),
+            (0, "", ""),
+            (0, "base123\n", ""),
+            (0, "docs/README.md\ndocs/notes.md\noutside.md\n", ""),
+        ]
+    )
+
+    status = repo_draft_upstream_status(
+        mounted,
+        changed_paths=["README.md", "app.py"],
+        base_branch="main",
+        mount_subpath="docs",
+        run_cmd=runner,
+    )
+
+    assert status.status == "conflicted"
+    assert status.upstream_changed_paths == ["README.md", "notes.md"]
+    assert status.upstream_conflicted_paths == ["README.md"]
+    assert runner.commands == [
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"],
+        ["git", "rev-parse", "HEAD"],
+        ["git", "diff", "--name-only", "base123..refs/remotes/origin/main", "--", "docs"],
+    ]
+    assert [cwd for _command, cwd in runner.calls] == [mounted, tmp_path, tmp_path, tmp_path]
 
 
 def test_publish_repo_draft_creates_branch_stages_commits_and_reads_commit_sha(tmp_path):
@@ -144,8 +203,58 @@ def test_publish_repo_draft_stages_only_selected_paths(tmp_path):
         ["git", "status", "--porcelain"],
         ["git", "checkout", "-B", "illo/publish-project-draft"],
         ["git", "add", "--", "a.py"],
-        ["git", "commit", "-m", "Publish draft"],
+        ["git", "commit", "-m", "Publish draft", "--", "a.py"],
         ["git", "rev-parse", "HEAD"],
+    ]
+
+
+def test_publish_repo_draft_interprets_selected_paths_inside_mount_subpath(tmp_path):
+    from brain.systems.cortex.project_context.repo_publish import publish_repo_draft
+
+    mounted = tmp_path / "docs"
+    mounted.mkdir()
+    runner = FakeRunner(
+        [
+            (0, f"{tmp_path}\n", ""),
+            (0, f"{tmp_path}\n", ""),
+            (0, " M docs/a.py\n M docs/b.py\n M outside.py\n", ""),
+            (0, "", ""),
+            (0, "", ""),
+            (0, "[illo/publish abc123] Publish draft\n", ""),
+            (0, "abc123def\n", ""),
+        ]
+    )
+
+    result = publish_repo_draft(
+        mounted,
+        branch_name="illo/publish-project-draft",
+        commit_message="Publish draft",
+        selected_paths=["a.py"],
+        check_upstream=False,
+        mount_subpath="docs",
+        run_cmd=runner,
+    )
+
+    assert result.ok is True
+    assert result.changed_paths == ["a.py"]
+    assert result.commit_sha == "abc123def"
+    assert runner.commands == [
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "status", "--porcelain", "--", "docs"],
+        ["git", "checkout", "-B", "illo/publish-project-draft"],
+        ["git", "add", "--", "docs/a.py"],
+        ["git", "commit", "-m", "Publish draft", "--", "docs/a.py"],
+        ["git", "rev-parse", "HEAD"],
+    ]
+    assert [cwd for _command, cwd in runner.calls] == [
+        mounted,
+        mounted,
+        tmp_path,
+        tmp_path,
+        tmp_path,
+        tmp_path,
+        tmp_path,
     ]
 
 
@@ -205,7 +314,7 @@ def test_publish_repo_draft_checks_upstream_and_publishes_non_overlapping_change
         ["git", "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"],
         ["git", "rev-parse", "HEAD"],
         ["git", "diff", "--name-only", "base123..refs/remotes/origin/main", "--"],
-        ["git", "checkout", "-B", "illo/publish-project-draft"],
+        ["git", "checkout", "-B", "illo/publish-project-draft", "origin/main"],
         ["git", "add", "-A"],
         ["git", "commit", "-m", "Publish draft"],
         ["git", "rev-parse", "HEAD"],
@@ -364,3 +473,49 @@ def test_publish_repo_draft_refuses_protected_publish_branch(tmp_path):
     assert result.ok is False
     assert result.errors == ["refusing to publish directly to protected branch: main"]
     assert runner.commands == []
+
+
+def test_publish_repo_draft_with_mount_subpath_does_not_commit_sibling_changes(tmp_path):
+    from brain.systems.cortex.project_context.repo_publish import publish_repo_draft
+
+    repo = tmp_path / "repo"
+    docs = repo / "docs"
+    other = repo / "other"
+    docs.mkdir(parents=True)
+    other.mkdir()
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    git("init", "-b", "main")
+    git("config", "user.email", "tests@example.com")
+    git("config", "user.name", "Project Tests")
+    (docs / "guide.md").write_text("base docs\n", encoding="utf-8")
+    (other / "notes.md").write_text("base other\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "initial")
+
+    (docs / "guide.md").write_text("draft docs\n", encoding="utf-8")
+    (other / "notes.md").write_text("unrelated other\n", encoding="utf-8")
+    git("add", "other/notes.md")
+
+    result = publish_repo_draft(
+        repo,
+        branch_name="illo/project-docs",
+        commit_message="Publish docs",
+        check_upstream=False,
+        mount_subpath="docs",
+    )
+
+    assert result.ok is True
+    assert result.changed_paths == ["guide.md"]
+    assert result.commit_sha
+    committed_paths = git("show", "--name-only", "--format=", result.commit_sha).stdout.splitlines()
+    assert committed_paths == ["docs/guide.md"]
+    assert git("status", "--porcelain").stdout == "M  other/notes.md\n"

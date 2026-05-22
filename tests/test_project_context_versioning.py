@@ -26,6 +26,7 @@ def test_capture_project_root_version_records_manifest_and_copies_files(tmp_path
     assert version.metadata == {"run_id": 42}
     assert version.manifest == {
         "README.md": {"kind": "file", "sha256": _sha256("hello"), "size": 5},
+        "docs": {"kind": "directory"},
         "docs/guide.md": {"kind": "file", "sha256": _sha256("there"), "size": 5},
     }
     assert version.store_path.is_relative_to(project / ".illo-project-history" / "versions")
@@ -41,9 +42,30 @@ def test_capture_project_root_version_records_manifest_and_copies_files(tmp_path
     assert summary["summary"]["version_count"] == 1
     assert summary["summary"]["latest_version_id"] == version.version_id
     assert summary["versions"][0]["file_count"] == 2
+    assert summary["versions"][0]["directory_count"] == 1
     assert summary["versions"][0]["total_size"] == 10
-    assert summary["versions"][0]["paths"] == ["README.md", "docs/guide.md"]
+    assert summary["versions"][0]["paths"] == ["README.md", "docs", "docs/guide.md"]
     assert "manifest" not in summary["versions"][0]
+
+
+def test_restore_project_root_version_preserves_empty_directories(tmp_path):
+    from brain.systems.cortex.project_context.versioning import (
+        capture_project_root_version,
+        restore_project_root_version,
+    )
+
+    project = tmp_path / "project"
+    (project / "empty" / "nested").mkdir(parents=True)
+    version = capture_project_root_version(project, label="with-empty-dirs")
+
+    (project / "empty" / "nested" / "later.md").write_text("later", encoding="utf-8")
+    (project / "other").mkdir()
+
+    restore_project_root_version(project, version.version_id)
+
+    assert (project / "empty" / "nested").is_dir()
+    assert not (project / "empty" / "nested" / "later.md").exists()
+    assert not (project / "other").exists()
 
 
 def test_capture_project_root_version_excludes_hidden_history_from_later_manifests(tmp_path):

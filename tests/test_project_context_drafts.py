@@ -24,7 +24,20 @@ def test_build_file_manifest_records_regular_file_content_and_ignores_draft_meta
 
     assert manifest == {
         "README.md": {"kind": "file", "sha256": _sha256("hello"), "size": 5},
+        "docs": {"kind": "directory"},
         "docs/guide.md": {"kind": "file", "sha256": _sha256("there"), "size": 5},
+    }
+
+
+def test_build_file_manifest_records_empty_directories(tmp_path):
+    from brain.systems.cortex.project_context.drafts import build_file_manifest
+
+    project = tmp_path / "project"
+    (project / "empty" / "nested").mkdir(parents=True)
+
+    assert build_file_manifest(project) == {
+        "empty": {"kind": "directory"},
+        "empty/nested": {"kind": "directory"},
     }
 
 

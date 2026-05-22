@@ -30,7 +30,11 @@ def conflict_checkpoint_resolves(
     draft_entry: dict[str, Any] | None,
     allow_unmodified_checkpoint: bool,
 ) -> bool:
-    """Return whether a checkpoint turns an old conflict into a publishable draft change."""
+    """Return whether a checkpoint turns an old conflict into a publishable draft change.
+
+    Unmodified checkpoint retries are only publishable when the caller explicitly acknowledges
+    that the unchanged draft is the intended conflict resolution.
+    """
 
     if not checkpoint:
         return False

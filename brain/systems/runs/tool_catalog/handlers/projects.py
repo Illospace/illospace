@@ -38,7 +38,7 @@ PROJECT_DRAFT_OPERATIONS: dict[str, dict[str, object]] = {
     },
     "publish_draft": {
         "required": ["current Project-backed AgentRun/thread"],
-        "optional": ["resource_ids", "publish_paths", "path"],
+        "optional": ["resource_ids", "publish_paths", "path", "acknowledge_conflict_resolution"],
         "effect": "publish local Project draft changes back to root, blocking with conflict-resolution guidance when root and draft changed the same paths",
     },
     "root_versions": {
@@ -233,6 +233,7 @@ async def _handle_manage_project(
     pr_body: str | None = None,
     check_upstream: bool = True,
     base_branch: str | None = None,
+    acknowledge_conflict_resolution: bool = False,
     include_inactive: bool = False,
 ) -> str:
     action = str(action or "").strip().lower()
@@ -263,6 +264,7 @@ async def _handle_manage_project(
                 pr_body=pr_body,
                 check_upstream=check_upstream,
                 base_branch=base_branch,
+                acknowledge_conflict_resolution=acknowledge_conflict_resolution,
             ),
             default=str,
         )

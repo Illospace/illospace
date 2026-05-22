@@ -46,7 +46,11 @@ class ProjectRootVersion:
 
     @property
     def file_count(self) -> int:
-        return len(self.manifest)
+        return sum(1 for entry in self.manifest.values() if entry.get("kind") == "file")
+
+    @property
+    def directory_count(self) -> int:
+        return sum(1 for entry in self.manifest.values() if entry.get("kind") == "directory")
 
     @property
     def total_size(self) -> int:
@@ -63,6 +67,7 @@ class ProjectRootVersion:
             "created_at": self.created_at,
             "metadata": self.metadata,
             "file_count": self.file_count,
+            "directory_count": self.directory_count,
             "total_size": self.total_size,
             "paths": self.paths,
         }
@@ -79,6 +84,7 @@ class ProjectRootVersion:
             "manifest": self.manifest,
             "metadata": self.metadata,
             "file_count": self.file_count,
+            "directory_count": self.directory_count,
             "total_size": self.total_size,
             "paths": self.paths,
             "store_path": str(self.store_path),
@@ -173,7 +179,10 @@ def capture_project_root_version(
     files_dir.mkdir()
 
     try:
-        for relative_path in manifest:
+        for relative_path, entry in manifest.items():
+            if entry.get("kind") == "directory":
+                _ensure_directory(files_dir / _safe_relative_path(relative_path))
+                continue
             source = _source_path_for_manifest(root, root_kind, relative_path)
             destination = files_dir / _safe_relative_path(relative_path)
             _ensure_directory(destination.parent)
@@ -281,14 +290,18 @@ def compare_project_root_to_version(root: Path, version_id: str) -> ProjectRootV
 
 
 def build_project_root_manifest(root: Path) -> FileManifest:
-    """Build a deterministic manifest of regular Project files, excluding Illo history."""
+    """Build a deterministic manifest of Project files and folders, excluding Illo history."""
 
     root = Path(root).expanduser()
     if not root.exists():
         return {}
     manifest: FileManifest = {}
     for relative_path, file_path in _iter_manifest_files(root):
-        manifest[relative_path] = _manifest_entry(file_path)
+        manifest[relative_path] = (
+            _directory_manifest_entry()
+            if file_path.is_dir() and not file_path.is_symlink()
+            else _file_manifest_entry(file_path)
+        )
     return dict(sorted(manifest.items()))
 
 
@@ -439,10 +452,18 @@ def _iter_manifest_files(root: Path) -> list[tuple[str, Path]]:
     if not root.is_dir():
         return []
 
-    files: list[tuple[str, Path]] = []
+    paths: list[tuple[str, Path]] = []
     for current, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(name for name in dirnames if name not in _IGNORED_MANIFEST_DIRS)
         current_path = Path(current)
+        for dirname in dirnames:
+            path = current_path / dirname
+            if path.is_symlink():
+                continue
+            relative = path.relative_to(root)
+            if _is_ignored_manifest_relative(relative):
+                continue
+            paths.append((relative.as_posix(), path))
         for filename in sorted(filenames):
             path = current_path / filename
             if not path.is_file() or path.is_symlink():
@@ -450,11 +471,11 @@ def _iter_manifest_files(root: Path) -> list[tuple[str, Path]]:
             relative = path.relative_to(root)
             if _is_ignored_manifest_relative(relative):
                 continue
-            files.append((relative.as_posix(), path))
-    return files
+            paths.append((relative.as_posix(), path))
+    return sorted(paths)
 
 
-def _manifest_entry(path: Path) -> dict[str, Any]:
+def _file_manifest_entry(path: Path) -> dict[str, Any]:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -464,6 +485,10 @@ def _manifest_entry(path: Path) -> dict[str, Any]:
         "sha256": digest.hexdigest(),
         "size": path.stat().st_size,
     }
+
+
+def _directory_manifest_entry() -> dict[str, Any]:
+    return {"kind": "directory"}
 
 
 def _manifest_entries_match(current: Mapping[str, Any], version: Mapping[str, Any]) -> bool:
@@ -640,13 +665,18 @@ def _restore_folder_root(root: Path, version: ProjectRootVersion) -> None:
     target_paths = set(version.manifest)
     for relative_path, current_path in _iter_manifest_files(root):
         if relative_path not in target_paths:
-            current_path.unlink()
+            if current_path.is_dir() and not current_path.is_symlink():
+                shutil.rmtree(current_path)
+            else:
+                current_path.unlink()
 
-    for relative_path in target_paths:
-        source = _archive_path(version, relative_path)
+    for relative_path, entry in sorted(version.manifest.items()):
         target = root / _safe_relative_path(relative_path)
+        if entry.get("kind") == "directory":
+            _ensure_directory(target)
+            continue
+        source = _archive_path(version, relative_path)
         _copy_restore_file(source, target)
-    _prune_empty_dirs(root)
 
 
 def _restore_file_root(root: Path, version: ProjectRootVersion) -> None:

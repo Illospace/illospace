@@ -14,7 +14,7 @@ class ProjectProfileCreate(BaseModel):
     slug: str = Field(..., min_length=1, max_length=120)
     name: str = Field(..., min_length=1)
     description: str | None = None
-    project_context: dict[str, Any]
+    project_context: dict[str, Any] = Field(default_factory=lambda: {"resources": []})
     visibility: str = Field(default=PROJECT_VISIBILITY_PRIVATE)
     shared_usernames: list[str] = Field(default_factory=list, description="User names to grant access to a private project.")
     default_environment_binding_id: int | None = None

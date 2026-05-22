@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import os
 
 from brain.systems.runs.execution_context import bind_agent_context
 from brain.systems.runs.tool_catalog.handlers import files
@@ -73,6 +74,19 @@ def test_read_file_resolves_project_mount_path_to_draft_workspace(tmp_path):
     assert result["path"] == str(draft_dir / "brief.md")
     assert "draft copy" in result["content"]
     assert "source copy" not in result["content"]
+
+
+def test_workspace_selector_keeps_project_mount_alias_for_default_workspace(tmp_path):
+    from brain.systems.runs.tool_catalog.handlers.common import _select_workspace
+
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "project-1" / "project-root"
+    draft_dir.mkdir(parents=True)
+
+    assert _select_workspace(
+        "/",
+        str(draft_dir),
+        [{"name": "/", "path": str(draft_dir)}],
+    ) == str(draft_dir)
 
 
 def test_write_file_resolves_project_mount_path_to_draft_workspace(tmp_path):
@@ -173,6 +187,28 @@ def test_exec_command_blocks_relative_project_source_write_from_source_cwd(tmp_p
 
     assert result["blocked"] is True
     assert "Blocked command that may write to Project source path" in result["stderr"]
+    assert source_file.read_text(encoding="utf-8") == "source copy"
+
+
+def test_exec_command_restores_project_root_write_through_relative_traversal(tmp_path):
+    source_dir = tmp_path / "source" / "reports"
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    source_dir.mkdir(parents=True)
+    draft_dir.mkdir(parents=True)
+    source_file = source_dir / "brief.md"
+    source_file.write_text("source copy", encoding="utf-8")
+    relative_source = os.path.relpath(source_file, draft_dir)
+
+    with bind_agent_context(_project_context(source_dir, draft_dir)):
+        result = files._handle_exec_command(
+            f"printf hacked > {relative_source}",
+            working_dir=str(draft_dir),
+            _workspace=str(tmp_path),
+        )
+
+    assert result["blocked"] is True
+    assert result["project_root_restored"] is True
+    assert "mutated Project root" in result["stderr"]
     assert source_file.read_text(encoding="utf-8") == "source copy"
 
 
