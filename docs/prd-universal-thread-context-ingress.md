@@ -330,10 +330,11 @@ loop and left a few product/technical decisions explicit for future review:
   frontend should invent a weaker Discussion UI; it should still reuse the
   general room's chat primitives and design tokens.
 - Discussion is available as a right-panel tab on the existing Thread stage.
-  The backend broadcasts a `thread_discussion_comment` websocket event, but the
-  first frontend pass reloads Discussion on panel open and after posting rather
-  than subscribing live. Live subscription is a straightforward follow-up, not a
-  requirement for proving the loop.
+  The backend persists Discussion replies in `thread_discussion_comments` and
+  emits `thread_discussion_comment` when it is in the API process. Production
+  testing showed that Illo replies created by the worker can be correctly
+  persisted without appearing in the open panel, so the pane must also subscribe
+  to Discussion events and reconcile after Discussion-origin run/tool events.
 - `@illo` in Discussion routes through the existing Cortex notify/run path and
   links the run to the main Thread. The deployed behavior exposed a semantic
   bug: Illo answered in the AI Timeline with insufficient awareness that the
@@ -382,9 +383,24 @@ largest product gaps:
   without pretending every response belongs in the AI Timeline.
 - Discussion-origin final answers settle back into `thread_discussion_comments`.
   They do not mirror into `IdeaThread`, and Fast mode hides `cortex_reply` for
-  Discussion-origin runs. If future product work needs Illo to visibly continue
-  the AI Timeline from a Discussion request, that should be a separate explicit
-  action/tool, not a reused reply channel.
+  Discussion-origin runs. When Illo visibly continues the AI Timeline from a
+  Discussion request, it must use a separate explicit action/tool, not a reused
+  reply channel.
+- Production test run `283` proved that separate explicit action/tool is needed:
+  when asked from Discussion to "send something or do something in the AI
+  timeline", Illo correctly replied in Discussion but had no direct AI Timeline
+  write surface and fell back to awkward status-only `manage_idea` calls. The
+  correction is `post_ai_timeline_message`, a distinct Illo-authored Timeline
+  write tool. `cortex_reply` remains hidden for Discussion-origin final answers;
+  Discussion replies, Timeline messages, and Thread management are three
+  intentionally separate tools.
+- A deployed debug run confirmed the backend surface contract was correct:
+  the `@illo` Discussion request created run `282`, Illo used
+  `post_thread_discussion_reply`, and comment `12` was stored in
+  `thread_discussion_comments`. The missing visible reply was a frontend live
+  rendering gap, so the pane now listens for `thread_discussion_comment`,
+  refreshes after `thread-discussion:{thread_id}` run/tool events, and performs
+  a short post-trigger reconciliation window.
 
 ## Testing Decisions And Coverage
 
@@ -406,6 +422,9 @@ implementation details. The important behaviors are:
 - `@illo` in Discussion triggers a surface-aware Illo run linked to the Thread.
 - Illo can explicitly inspect Discussion through a tool.
 - Illo can explicitly reply in Discussion through a tool.
+- Illo can explicitly post an Illo-authored message to the linked AI Timeline
+  through a separate tool when a Discussion request asks it to affect that
+  surface.
 - Illo can answer in Discussion, run headlessly, or use a separate explicit
   action/tool when the user's ask should affect the AI Timeline.
 - The existing Thread UI continues to open, stream, reply, and render normal

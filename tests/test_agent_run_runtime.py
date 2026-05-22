@@ -528,6 +528,7 @@ def test_fast_discussion_origin_surface_keeps_timeline_reply_tools_hidden(monkey
         "brain.systems.runs.recipes.fast.build_agent_tools",
         lambda role: [
             {"name": "post_thread_discussion_reply"},
+            {"name": "post_ai_timeline_message"},
             {"name": "cortex_reply"},
             {"name": "cortex_visual_reply"},
         ],
@@ -542,6 +543,7 @@ def test_fast_discussion_origin_surface_keeps_timeline_reply_tools_hidden(monkey
 
     assert [tool["name"] for tool in _agent_tools_for_runtime(runtime)] == [
         "post_thread_discussion_reply",
+        "post_ai_timeline_message",
     ]
 
 

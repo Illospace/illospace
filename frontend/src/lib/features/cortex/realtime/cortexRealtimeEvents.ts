@@ -18,6 +18,7 @@ export const CORTEX_RUN_REALTIME_EVENT_TYPES = [
 export const CORTEX_REALTIME_EVENT_TYPES = [
   'status_change',
   'thread_message',
+  'thread_discussion_comment',
   'visual_reply',
   'browser_session_state',
   'browser_session_frame',
@@ -55,6 +56,23 @@ export type CortexRealtimePayloadByType = {
       created_at?: string;
       content?: string | null;
       metadata?: Record<string, unknown> | null;
+    };
+  };
+  thread_discussion_comment: {
+    idea_id?: string;
+    org_id?: string;
+    comment?: {
+      id?: string | number;
+      thread_id?: string;
+      org_id?: string;
+      author_user_id?: string | null;
+      author_kind?: string;
+      author_name?: string | null;
+      author_color?: string | null;
+      body?: string;
+      attachments?: unknown[];
+      metadata?: Record<string, unknown> | null;
+      created_at?: string | null;
     };
   };
   visual_reply: {
