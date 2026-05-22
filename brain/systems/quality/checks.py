@@ -25,6 +25,7 @@ from brain.platform.db.repositories.memory_visibility import (
 )
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.memory.embeddings import embed_document, vec_to_pg
+from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +88,6 @@ async def check_duplicate(
 
     Returns (is_duplicate, details) where details includes the similar memory if found.
     """
-    if embedding is None:
-        embedding = embed_document(content)
-
-    emb_str = vec_to_pg(embedding)
     visibility_context = MemoryVisibilityContext(
         user_id=user_id,
         org_id=org_id,
@@ -99,6 +96,11 @@ async def check_duplicate(
     vis_clause, vis_params = memory_visibility_sql(visibility_context, alias="")
 
     async with UnitOfWork() as uow:
+        if embedding is None:
+            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+            embedding = embed_document(content, runtime_config=runtime_config)
+
+        emb_str = vec_to_pg(embedding)
         row = (await uow.session.execute(text("""
             SELECT id, content,
                    1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity

@@ -109,9 +109,12 @@ async def store_divergence_results(
     content = "\n".join(summary_lines)
 
     from brain.systems.memory.embeddings import embed_document, vec_to_pg
-    embedding = embed_document(content)
+    from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
 
     async with UnitOfWork() as uow:
+        runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+        embedding = embed_document(content, runtime_config=runtime_config)
+
         await uow.session.execute(text("""
             INSERT INTO memories (content, memory_type, semantic_embedding,
                 salience, tags, source, org_id, user_id, scope)

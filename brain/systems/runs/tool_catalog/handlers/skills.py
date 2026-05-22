@@ -185,13 +185,10 @@ async def _handle_create_skill(
 
     try:
         from brain.systems.memory.embeddings import embed_document, vec_to_pg
+        from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
 
         source_kind = "private_local" if user_requested else "agent_draft"
         trust_level = "private_local" if user_requested else "agent_draft"
-
-        # Embed before DB work (most expensive part, no need to hold conn)
-        emb_text = f"{name}: {description}"
-        embedding = embed_document(emb_text)
 
         # Atomic upsert — INSERT ... ON CONFLICT avoids race conditions
         from sqlalchemy import text as sa_text
@@ -202,6 +199,10 @@ async def _handle_create_skill(
 
         asset_specs = assets or []
         async with UnitOfWork() as uow:
+            emb_text = f"{name}: {description}"
+            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+            embedding = embed_document(emb_text, runtime_config=runtime_config)
+
             row = (await uow.session.execute(sa_text("""
                 INSERT INTO skills
                     (name, description, procedure, level, model_tier, thinking_tier,

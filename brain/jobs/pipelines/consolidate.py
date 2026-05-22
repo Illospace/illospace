@@ -163,7 +163,10 @@ async def import_daily_log(uow, filepath: str, log_date: date) -> int:
 
         dense = compress_text(title, body)
         memory_type, salience = classify_memory(title, body)
-        semantic_emb = embed_document(dense)
+        from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+
+        runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+        semantic_emb = embed_document(dense, runtime_config=runtime_config)
         tags = extract_tags(title + " " + body)
         tags.append(log_date.isoformat())
 
@@ -218,7 +221,10 @@ async def import_domain_file(uow, filepath: str) -> int:
             memory_type = 'fact'
             salience = max(salience, 5.0)
 
-        semantic_emb = embed_document(dense)
+        from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+
+        runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+        semantic_emb = embed_document(dense, runtime_config=runtime_config)
 
         tags = extract_tags(title + " " + body)
         tags.append(filename.replace('.md', ''))
