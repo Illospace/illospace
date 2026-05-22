@@ -15,7 +15,7 @@ import json
 import shutil
 
 from brain.systems.cortex.project_context.drafts import PROJECT_HISTORY_DIR
-from brain.systems.cortex.project_context.identity import PROJECT_IDENTITY_FIELDS
+from brain.systems.cortex.project_context.identity import PROJECT_IDENTITY_FIELDS, project_identity_field_value
 from brain.systems.cortex.project_context.workspace_manifest import (
     PROJECT_CONTEXT_DIR,
     PROJECT_CONTEXT_LOCAL_DIR,
@@ -60,7 +60,6 @@ def _project_fingerprint(project_context: Mapping[str, Any], resources: Sequence
         "description": project_context.get("description"),
         "resources": [
             {
-                "id": resource.get("id"),
                 "kind": resource.get("kind") or resource.get("type") or resource.get("resource_type"),
                 "name": resource.get("name") or resource.get("label"),
                 "path": resource.get("path") or resource.get("local_path") or resource.get("storage_path"),
@@ -83,11 +82,7 @@ def project_key_from_context(
     context = project_context if isinstance(project_context, Mapping) else {}
     resource_list = [resource for resource in (resources or []) if isinstance(resource, Mapping)]
     for key in PROJECT_KEY_FIELDS:
-        value = _clean_text(context.get(key))
-        if value:
-            return _safe_segment(value, fallback="project")
-    for resource in resource_list:
-        value = _clean_text(resource.get("id"))
+        value = project_identity_field_value(context, key)
         if value:
             return _safe_segment(value, fallback="project")
     value = _clean_text(context.get("name") or context.get("title"))
@@ -96,6 +91,17 @@ def project_key_from_context(
     if fallback:
         return _safe_segment(fallback, fallback="project")
     return f"project-{_project_fingerprint(context, resource_list)}"
+
+
+def is_synthetic_project_root_resource(resource: Mapping[str, Any]) -> bool:
+    """Return true only for the materializer-created Project root resource."""
+
+    kind = (_clean_text(resource.get("kind") or resource.get("type") or resource.get("resource_type")) or "").lower()
+    return (
+        kind == PROJECT_ROOT_RESOURCE_KIND
+        and _clean_text(resource.get("id")) == PROJECT_ROOT_RESOURCE_ID
+        and _clean_text(resource.get("mount_path")) == PROJECT_ROOT_MOUNT_PATH
+    )
 
 
 def project_roots_parent(thread_workspace_root: Path) -> Path:
@@ -177,8 +183,13 @@ def _unique_relative_path(project_root: Path, relative_path: str) -> str:
     return candidate.as_posix()
 
 
-def _copy_import_file(source_path: Path, target_path: Path) -> None:
+def _copy_import_path(source_path: Path, target_path: Path) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    if source_path.is_dir() and not source_path.is_symlink():
+        if target_path.exists() and not target_path.is_dir():
+            target_path.unlink()
+        target_path.mkdir(parents=True, exist_ok=True)
+        return
     shutil.copy2(source_path, target_path)
 
 
@@ -195,7 +206,9 @@ def import_candidates_into_project_root(
 
     for candidate in candidates:
         source_path = Path(candidate.source_path).expanduser()
-        if not source_path.exists() or not source_path.is_file() or source_path.is_symlink():
+        if not source_path.exists() or source_path.is_symlink():
+            continue
+        if not source_path.is_file() and not source_path.is_dir():
             continue
         existing = imports.get(candidate.key)
         if isinstance(existing, Mapping):
@@ -210,13 +223,18 @@ def import_candidates_into_project_root(
         if target_path.exists() or target_path.is_symlink():
             relative_path = _unique_relative_path(project_root, relative_path)
             target_path = project_root / relative_path
-        _copy_import_file(source_path, target_path)
+        _copy_import_path(source_path, target_path)
         imports[candidate.key] = {
             "source_path": str(source_path),
             "relative_path": relative_path,
             "resource_id": candidate.resource_id,
+            "kind": "directory" if source_path.is_dir() else "file",
         }
-        imported.append({"source_path": str(source_path), "relative_path": relative_path})
+        imported.append({
+            "source_path": str(source_path),
+            "relative_path": relative_path,
+            "kind": "directory" if source_path.is_dir() else "file",
+        })
 
     metadata["imports"] = imports
     save_project_root_imports(project_root, metadata)
@@ -234,7 +252,7 @@ def directory_import_candidates(
         return []
     candidates: list[ProjectRootImportCandidate] = []
     for path in sorted(source_root.rglob("*")):
-        if not path.is_file() or path.is_symlink():
+        if path.is_symlink() or (not path.is_file() and not path.is_dir()):
             continue
         relative = path.relative_to(source_root).as_posix()
         if any(part in {PROJECT_HISTORY_DIR, PROJECT_CONTEXT_DIR} for part in Path(relative).parts):

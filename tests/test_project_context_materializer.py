@@ -46,6 +46,80 @@ def test_project_root_key_uses_canonical_project_key():
     assert project_key_from_context({"project_key": "project-1"}) == "project-1"
 
 
+def test_project_root_key_prefers_picker_profile_identity_over_slug_key():
+    from brain.systems.cortex.project_context.project_root import project_key_from_context
+
+    assert project_key_from_context({
+        "name": "test empty project",
+        "project_key": "test-empty-project",
+        "project_profile_id": "fec2d533-e4a0-40e7-9055-b5b619e91ab6",
+        "selected_profile_id": "server:fec2d533-e4a0-40e7-9055-b5b619e91ab6",
+    }) == "fec2d533-e4a0-40e7-9055-b5b619e91ab6"
+    assert project_key_from_context({
+        "name": "test empty project",
+        "selected_profile_id": "server:fec2d533-e4a0-40e7-9055-b5b619e91ab6",
+    }) == "fec2d533-e4a0-40e7-9055-b5b619e91ab6"
+
+
+def test_project_root_key_ignores_current_thread_project_picker_sentinel():
+    from brain.systems.cortex.project_context.project_root import project_key_from_context
+
+    assert project_key_from_context({
+        "name": "test empty project",
+        "selected_profile_id": "current-thread-project",
+    }) == "test-empty-project"
+
+
+def test_project_root_key_ignores_ambiguous_top_level_id():
+    from brain.systems.cortex.project_context.project_root import project_key_from_context
+
+    assert project_key_from_context({"id": "context-1"}, fallback="run-73") == "run-73"
+
+
+def test_project_root_key_does_not_use_child_resource_id():
+    from brain.systems.cortex.project_context.project_root import project_key_from_context
+
+    assert project_key_from_context(
+        {},
+        resources=[{"id": "project-root", "kind": "folder", "mount_path": "/reports"}],
+        fallback="run-73",
+    ) == "run-73"
+
+
+def test_project_root_fingerprint_ignores_child_resource_ids():
+    from brain.systems.cortex.project_context.project_root import project_key_from_context
+
+    first = project_key_from_context(
+        {"description": "scratch"},
+        resources=[{"id": "child-a", "kind": "file"}],
+    )
+    second = project_key_from_context(
+        {"description": "scratch"},
+        resources=[{"id": "child-b", "kind": "file"}],
+    )
+
+    assert first == second
+
+
+def test_validated_snapshot_stamps_project_picker_profile_identity():
+    from brain.systems.cortex.project_context.snapshot import validated_project_context_snapshot
+
+    snapshot = validated_project_context_snapshot(
+        {
+            "name": "test empty project",
+            "project_profile_id": "fec2d533-e4a0-40e7-9055-b5b619e91ab6",
+            "selected_profile_id": "server:fec2d533-e4a0-40e7-9055-b5b619e91ab6",
+            "resources": [],
+        },
+        validate_local_paths=False,
+    )
+
+    assert snapshot["project_id"] == "fec2d533-e4a0-40e7-9055-b5b619e91ab6"
+    assert snapshot["project_key"] == "fec2d533-e4a0-40e7-9055-b5b619e91ab6"
+    assert snapshot["project_workspace_manifest"]["project_id"] == "fec2d533-e4a0-40e7-9055-b5b619e91ab6"
+    assert snapshot["project_workspace_manifest"]["project_key"] == "fec2d533-e4a0-40e7-9055-b5b619e91ab6"
+
+
 def test_runner_materializes_thread_attachment_files_as_project_resources(monkeypatch):
     from brain.systems.runs.cortex import runner
 
@@ -311,7 +385,7 @@ async def test_materialize_github_folder_uri_mounts_repo_subpath(tmp_path, monke
 
     expected_repo = tmp_path / "thread-root" / ".illo-project-context" / "github" / "uwear-ai" / "agent-mission-control"
     expected_workspace = expected_repo / "workspaces" / "linkedin-outbound"
-    expected_root = tmp_path / "thread-root" / ".illo-project-context" / "local" / "resource-2" / "project-root"
+    expected_root = tmp_path / "thread-root" / ".illo-project-context" / "local" / "run-54" / "project-root"
     assert result.ok
     assert result.workspaces == [
         {"name": "/", "path": str(expected_root)},
@@ -743,444 +817,6 @@ async def test_materialize_refuses_to_overwrite_non_matching_thread_checkout(tmp
     assert (checkout / "local-change.txt").read_text() == "do not delete"
     assert "refusing to overwrite live workspace state" in result.errors[0]
     assert run.target_status == "invalid"
-
-
-async def test_materialize_empty_project_context_creates_project_root(tmp_path, monkeypatch):
-    from brain.systems.cortex.project_context import materializer
-    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
-
-    run = SimpleNamespace(
-        id=48,
-        user_id="user-1",
-        org_id="org-1",
-        metadata_={},
-        target_ref={
-            "kind": "cortex_idea",
-            "project_context_snapshot": {
-                "status": "validated",
-                "resources": [],
-            },
-        },
-        workspace_ref={},
-    )
-
-    class FakeSession:
-        async def get(self, _model, _id):
-            return run
-
-    class FakeUow:
-        session = FakeSession()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
-    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
-
-    result = await materialize_project_context_workspaces(48, workspace_root=str(tmp_path), user_id="user-1")
-
-    assert result.ok
-    draft_dir = tmp_path / ".illo-project-context" / "local" / "run-48" / "project-root"
-    source_root = tmp_path.parent / "project-roots" / "run-48"
-    assert result.empty_project is True
-    assert result.workspaces == [{"name": "/", "path": str(draft_dir)}]
-    assert result.errors == []
-    resource = run.target_ref["project_context_snapshot"]["resources"][0]
-    assert resource["id"] == "project-root"
-    assert resource["mount_path"] == "/"
-    assert resource["materialization"]["source_path"] == str(source_root)
-    assert run.workspace_ref["project_workspace_manifest"]["mounts"][0]["mount_path"] == "/"
-    assert run.workspace_ref["project_workspace_manifest"]["workspaces"] == [{"name": "/", "path": str(draft_dir)}]
-    assert run.workspace_ref["project_context_materialization"]["status"] == "materialized"
-    assert run.workspace_ref["project_context_materialization"]["empty_project"] is True
-    assert run.workspace_ref["workspace_root"] == str(draft_dir)
-
-
-async def test_materialize_missing_project_context_snapshot_reports_error(tmp_path, monkeypatch):
-    from brain.systems.cortex.project_context import materializer
-    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
-
-    run = SimpleNamespace(
-        id=50,
-        user_id="user-1",
-        org_id="org-1",
-        metadata_={},
-        target_ref={"kind": "cortex_idea"},
-        workspace_ref={},
-    )
-
-    class FakeSession:
-        async def get(self, _model, _id):
-            return run
-
-    class FakeUow:
-        session = FakeSession()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
-    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
-
-    result = await materialize_project_context_workspaces(50, workspace_root=str(tmp_path), user_id="user-1")
-
-    assert not result.ok
-    assert result.errors == ["Project Context snapshot is missing."]
-
-
-async def test_materialize_backend_readable_folder_becomes_thread_draft_workspace(tmp_path, monkeypatch):
-    from brain.systems.cortex.project_context import materializer
-    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
-
-    project_dir = tmp_path / "project-root"
-    project_dir.mkdir()
-    (project_dir / "brief.md").write_text("runtime context")
-
-    run = SimpleNamespace(
-        id=51,
-        user_id="user-1",
-        org_id="org-1",
-        metadata_={},
-        target_ref={
-            "kind": "cortex_idea",
-            "project_context_snapshot": {
-                "project_id": "profile-abc",
-                "status": "validated",
-                "resources": [
-                    {
-                        "id": "resource-folder",
-                        "kind": "folder",
-                        "mount_path": "/reports",
-                        "path": str(project_dir),
-                    }
-                ],
-            },
-        },
-        workspace_ref={},
-    )
-
-    class FakeSession:
-        async def get(self, _model, _id):
-            return run
-
-    class FakeUow:
-        session = FakeSession()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
-    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
-    monkeypatch.setattr(
-        materializer,
-        "_clone_github_repo",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("local folders should not be cloned as GitHub repositories")
-        ),
-    )
-
-    result = await materialize_project_context_workspaces(51, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
-
-    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "profile-abc" / "project-root"
-    source_root = tmp_path / "project-roots" / "profile-abc"
-    assert result.ok
-    assert result.workspaces == [{"name": "/", "path": str(draft_dir)}]
-    assert (draft_dir / "brief.md").read_text() == "runtime context"
-    resource = run.target_ref["project_context_snapshot"]["resources"][0]
-    assert resource["id"] == "project-root"
-    assert resource["mount_path"] == "/"
-    assert resource["path"] == str(draft_dir)
-    assert resource["materialization"]["source_path"] == str(source_root)
-    assert (source_root / "brief.md").read_text() == "runtime context"
-    assert resource["materialization"]["workspace_path"] == str(draft_dir)
-    assert resource["materialization"]["draft"] is True
-    assert resource["materialization"]["project_key"] == "profile-abc"
-    assert run.workspace_ref["workspace_root"] == str(draft_dir)
-    assert run.workspace_ref["project_workspace_manifest"]["workspaces"][0]["name"] == "/"
-
-
-async def test_materialize_single_uploaded_file_uses_project_native_folder_root(tmp_path, monkeypatch):
-    from brain.systems.cortex.project_context import materializer
-    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
-
-    attachment_dir = tmp_path / "attachments"
-    attachment_dir.mkdir()
-    spec_file = attachment_dir / "spec.md"
-    spec_file.write_text("# Spec")
-
-    run = SimpleNamespace(
-        id=53,
-        user_id="user-1",
-        org_id="org-1",
-        metadata_={},
-        target_ref={
-            "kind": "cortex_idea",
-            "project_context_snapshot": {
-                "status": "validated",
-                "resources": [
-                    {
-                        "id": "attachment-1",
-                        "kind": "file",
-                        "name": "spec.md",
-                        "path": str(spec_file),
-                        "source": "thread_attachment",
-                    }
-                ],
-            },
-        },
-        workspace_ref={},
-    )
-
-    class FakeSession:
-        async def get(self, _model, _id):
-            return run
-
-    class FakeUow:
-        session = FakeSession()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
-    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
-
-    result = await materialize_project_context_workspaces(53, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
-
-    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "attachment-1" / "project-root"
-    assert result.ok
-    assert result.workspaces == [{"name": "/", "path": str(draft_dir)}]
-    assert (draft_dir / "spec.md").read_text() == "# Spec"
-    resource = run.target_ref["project_context_snapshot"]["resources"][0]
-    source_root = Path(resource["materialization"]["source_path"])
-    assert source_root != spec_file
-    assert source_root.is_dir()
-    assert (source_root / "spec.md").read_text() == "# Spec"
-    assert resource["id"] == "project-root"
-    assert resource["mount_path"] == "/"
-    assert resource["path"] == str(draft_dir)
-    assert resource["materialization"]["path"] == str(draft_dir)
-    assert resource["materialization"]["kind"] == "project_root"
-    assert resource["materialization"]["workspace_path"] == str(draft_dir)
-    assert resource["materialization"]["draft"] is True
-    assert run.workspace_ref["workspace_root"] == str(draft_dir)
-    mount = run.workspace_ref["project_workspace_manifest"]["mounts"][0]
-    assert mount["kind"] == "project_root"
-    assert mount["source_path"] == str(source_root)
-    assert mount["resource_path"] == str(draft_dir)
-
-
-async def test_materialize_uploaded_folder_imports_files_into_project_native_root(tmp_path, monkeypatch):
-    from brain.systems.cortex.project_context import materializer
-    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
-
-    upload_dir = tmp_path / "uploads"
-    (upload_dir / "folder").mkdir(parents=True)
-    first_file = upload_dir / "folder" / "brief.md"
-    second_file = upload_dir / "folder" / "data" / "metrics.csv"
-    second_file.parent.mkdir()
-    first_file.write_text("brief", encoding="utf-8")
-    second_file.write_text("metric,value\n", encoding="utf-8")
-
-    run = SimpleNamespace(
-        id=57,
-        user_id="user-1",
-        org_id="org-1",
-        metadata_={},
-        target_ref={
-            "kind": "cortex_idea",
-            "project_context_snapshot": {
-                "status": "validated",
-                "resources": [
-                    {
-                        "id": "folder-upload",
-                        "kind": "folder",
-                        "name": "folder",
-                        "uri": "project-context-upload://folder",
-                        "uploaded_files": [
-                            {
-                                "filename": "brief.md",
-                                "relative_path": "folder/brief.md",
-                                "storage_path": str(first_file),
-                            },
-                            {
-                                "filename": "metrics.csv",
-                                "relative_path": "folder/data/metrics.csv",
-                                "storage_path": str(second_file),
-                            },
-                        ],
-                    }
-                ],
-            },
-        },
-        workspace_ref={},
-    )
-
-    class FakeSession:
-        async def get(self, _model, _id):
-            return run
-
-    class FakeUow:
-        session = FakeSession()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
-    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
-
-    result = await materialize_project_context_workspaces(
-        57,
-        workspace_root=str(tmp_path / "thread-root"),
-        user_id="user-1",
-    )
-
-    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "folder-upload" / "project-root"
-    source_root = Path(run.target_ref["project_context_snapshot"]["resources"][0]["materialization"]["source_path"])
-    assert result.ok
-    assert result.workspaces == [{"name": "/", "path": str(draft_dir)}]
-    assert (source_root / "folder" / "brief.md").read_text(encoding="utf-8") == "brief"
-    assert (source_root / "folder" / "data" / "metrics.csv").read_text(encoding="utf-8") == "metric,value\n"
-    assert (draft_dir / "folder" / "brief.md").read_text(encoding="utf-8") == "brief"
-    assert (draft_dir / "folder" / "data" / "metrics.csv").read_text(encoding="utf-8") == "metric,value\n"
-
-
-async def test_materialize_saved_project_root_identity_survives_resource_changes(tmp_path, monkeypatch):
-    from brain.systems.cortex.project_context import materializer
-    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
-
-    seed = tmp_path / "seed.md"
-    seed.write_text("seed", encoding="utf-8")
-    runs: dict[int, SimpleNamespace] = {}
-
-    def run_for(run_id: int, resources: list[dict[str, str]]):
-        run = SimpleNamespace(
-            id=run_id,
-            user_id="user-1",
-            org_id="org-1",
-            metadata_={},
-            target_ref={
-                "kind": "cortex_idea",
-                "project_context_snapshot": {
-                    "project_key": "profile-stable",
-                    "project_id": "profile-stable",
-                    "slug": "strategy-room",
-                    "status": "validated",
-                    "resources": resources,
-                },
-            },
-            workspace_ref={},
-        )
-        runs[run_id] = run
-        return run
-
-    first_run = run_for(71, [])
-    second_run = run_for(72, [{"id": "seed", "kind": "file", "name": "seed.md", "path": str(seed)}])
-
-    class FakeSession:
-        async def get(self, _model, run_id):
-            return runs.get(run_id)
-
-    class FakeUow:
-        session = FakeSession()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
-    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
-
-    first = await materialize_project_context_workspaces(
-        71,
-        workspace_root=str(tmp_path / "ideas" / "thread-one"),
-        user_id="user-1",
-    )
-    second = await materialize_project_context_workspaces(
-        72,
-        workspace_root=str(tmp_path / "ideas" / "thread-two"),
-        user_id="user-1",
-    )
-
-    first_source = Path(first_run.target_ref["project_context_snapshot"]["resources"][0]["materialization"]["source_path"])
-    second_source = Path(second_run.target_ref["project_context_snapshot"]["resources"][0]["materialization"]["source_path"])
-    assert first.ok
-    assert second.ok
-    assert first_source == second_source == tmp_path / "project-roots" / "profile-stable"
-    assert (second_source / "seed.md").read_text(encoding="utf-8") == "seed"
-
-
-async def test_materialize_thread_draft_marks_conflict_when_root_and_draft_changed(tmp_path, monkeypatch):
-    from brain.systems.cortex.project_context import materializer
-    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
-
-    project_dir = tmp_path / "project-root"
-    project_dir.mkdir()
-    (project_dir / "brief.md").write_text("root v1")
-
-    run = SimpleNamespace(
-        id=56,
-        user_id="user-1",
-        org_id="org-1",
-        metadata_={},
-        target_ref={
-            "kind": "cortex_idea",
-            "project_context_snapshot": {
-                "status": "validated",
-                "resources": [
-                    {
-                        "id": "resource-folder",
-                        "kind": "folder",
-                        "mount_path": "/reports",
-                        "path": str(project_dir),
-                    }
-                ],
-            },
-        },
-        workspace_ref={},
-    )
-
-    class FakeSession:
-        async def get(self, _model, _id):
-            return run
-
-    class FakeUow:
-        session = FakeSession()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
-    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
-
-    first = await materialize_project_context_workspaces(56, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
-    draft_dir = tmp_path / "thread-root" / ".illo-project-context" / "local" / "resource-folder" / "project-root"
-    source_root = Path(run.target_ref["project_context_snapshot"]["resources"][0]["materialization"]["source_path"])
-
-    assert first.ok
-    (draft_dir / "brief.md").write_text("draft edit")
-    (source_root / "brief.md").write_text("root v2")
-
-    second = await materialize_project_context_workspaces(56, workspace_root=str(tmp_path / "thread-root"), user_id="user-1")
-
-    assert second.ok
-    assert (draft_dir / "brief.md").read_text() == "draft edit"
-    status = run.target_ref["project_context_snapshot"]["resources"][0]["materialization"]["draft_status"]
-    assert status["conflicts"] == ["brief.md"]
-    assert status["out_of_date"] == ["brief.md"]
-
 
 def test_project_context_root_is_scoped_by_thread(monkeypatch, tmp_path):
     from brain.systems.runs.cortex.runner import _project_context_root

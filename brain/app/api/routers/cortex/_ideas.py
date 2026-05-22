@@ -46,6 +46,7 @@ from brain.systems.cortex.thought_lifecycle import (
     post_thread_message,
     transition_thought_status,
 )
+from brain.systems.cortex.project_context.resolution import merge_project_context_metadata
 from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
 
 
@@ -161,29 +162,13 @@ def _mention_skip_response() -> dict[str, Any]:
 
 
 async def _latest_user_thread_metadata(db: AsyncSession, idea_id: str) -> dict[str, Any]:
-    result = await db.execute(
-        select(IdeaThread.metadata_)
-        .where(IdeaThread.idea_id == idea_id, IdeaThread.role == "user")
-        .order_by(IdeaThread.created_at.desc(), IdeaThread.id.desc())
-        .limit(1)
-    )
-    latest = result.scalar_one_or_none()
-    return dict(latest or {}) if isinstance(latest, dict) else {}
+    from brain.systems.cortex.project_context.resolution import latest_user_thread_metadata
+
+    return await latest_user_thread_metadata(db, idea_id)
 
 
 async def _effective_notify_metadata(db: AsyncSession, idea_id: str, metadata: Any) -> dict[str, Any]:
-    """Merge the freshly persisted thread metadata into run metadata.
-
-    The composer stores attachment-derived Project Context on the thread first;
-    /notify may then send only execution-profile metadata. Keep the thread's
-    resource snapshot unless the caller explicitly sends a replacement.
-    """
-    effective = await _latest_user_thread_metadata(db, idea_id)
-    if isinstance(metadata, dict):
-        for key, value in metadata.items():
-            if value is not None:
-                effective[key] = value
-    return effective
+    return merge_project_context_metadata(await _latest_user_thread_metadata(db, idea_id), metadata)
 
 
 async def _author_hints_for_ideas(
