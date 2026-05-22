@@ -23,8 +23,6 @@ import subprocess
 import sys
 import time
 
-import numpy as np
-
 from brain.kernel import config as brain_config
 from brain.systems.runs.project_execution_env import (
     annotate_project_execution_result,
@@ -32,6 +30,7 @@ from brain.systems.runs.project_execution_env import (
     redact_sensitive_output,
 )
 from brain.platform.async_io import run_blocking, run_subprocess_sync
+from brain.systems.tools.semantic_search import semantic_code_search
 
 logger = logging.getLogger("agent.tools")
 
@@ -240,125 +239,44 @@ async def handle_semantic_search(query: str, scope: str = "both", limit: int = 5
     """Search using embedding similarity."""
     results = []
 
-    # Memory search
     if scope in ("memories", "both"):
         try:
             from brain.app.mcp.server import async_tool_brain_recall
+
             memories = await async_tool_brain_recall(query=query, limit=limit)
             if isinstance(memories, dict) and "memories" in memories:
-                for m in memories["memories"]:
+                for memory in memories["memories"]:
                     results.append({
                         "source": "memory",
-                        "type": m.get("type", "unknown"),
-                        "content": m.get("content", "")[:300],
-                        "similarity": m.get("similarity", 0),
+                        "type": memory.get("type", "unknown"),
+                        "content": memory.get("content", "")[:300],
+                        "similarity": memory.get("similarity", 0),
                     })
-        except Exception as e:
-            logger.debug(f"Memory search failed: {e}")
+        except Exception as exc:
+            logger.debug("Memory search failed: %s", exc)
 
-    # Code search via embeddings
     if scope in ("code", "both"):
         try:
             from brain.platform.db.repositories.unit_of_work import UnitOfWork
-            from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+            from brain.systems.memory.embedding_service import EmbeddingService, embedding_degradation_reason
 
             async with UnitOfWork() as uow:
-                runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            code_results = _semantic_code_search(
+                embedding_service = await EmbeddingService.from_session(uow.session)
+            results.extend(semantic_code_search(
                 query,
                 limit=limit,
                 workspace_root=workspace_root,
-                runtime_config=runtime_config,
-            )
-            results.extend(code_results)
-        except Exception as e:
-            logger.debug(f"Code semantic search failed: {e}")
+                embedding_service=embedding_service,
+            ))
+        except Exception as exc:
+            logger.debug("Code semantic search failed: %s", embedding_degradation_reason(exc))
 
-    # Sort by similarity
-    results.sort(key=lambda r: r.get("similarity", 0), reverse=True)
-
+    results.sort(key=lambda result: result.get("similarity", 0), reverse=True)
     return {
         "results": results[:limit],
         "count": len(results),
         "query": query,
     }
-
-
-def _semantic_code_search(
-    query: str,
-    limit: int = 5,
-    workspace_root: str | None = None,
-    runtime_config=None,
-) -> list[dict]:
-    """Search code files using embeddings.
-
-    Strategy: embed the query, then compare against file-level summaries.
-    Falls back to grep if embeddings unavailable.
-    """
-    try:
-        from brain.systems.memory.embeddings import embed_query
-
-        query_vec = embed_query(query, runtime_config=runtime_config)
-
-        # Get candidate files (Python files, limited to avoid embedding everything)
-        workspace = pathlib.Path(workspace_root or WORKSPACE_ROOT)
-        py_files = sorted(workspace.glob("**/*.py"), key=lambda p: p.stat().st_mtime, reverse=True)
-        # Skip venv, __pycache__, .git
-        py_files = [
-            f for f in py_files
-            if not any(skip in str(f) for skip in ("venv/", "__pycache__", ".git/", "node_modules/"))
-        ][:50]  # Cap at 50 most recent
-
-        # Build lightweight summaries for embedding
-        candidates = []
-        for f in py_files:
-            try:
-                first_lines = f.read_text(errors="replace")[:500]
-                rel_path = str(f.relative_to(workspace))
-                candidates.append((rel_path, first_lines))
-            except Exception:
-                continue
-
-        if not candidates:
-            return []
-
-        # Embed summaries
-        from brain.systems.memory.embeddings import embed_batch
-        texts = [f"{path}: {preview}" for path, preview in candidates]
-        vecs = embed_batch(texts, mode="document", runtime_config=runtime_config)
-
-        # Compute similarities
-        similarities = np.dot(vecs, query_vec) / (
-            np.linalg.norm(vecs, axis=1) * np.linalg.norm(query_vec) + 1e-8
-        )
-
-        # Return top matches
-        top_indices = np.argsort(similarities)[::-1][:limit]
-        results = []
-        for idx in top_indices:
-            if similarities[idx] > 0.3:  # minimum threshold
-                path, preview = candidates[idx]
-                results.append({
-                    "source": "code",
-                    "path": path,
-                    "preview": preview[:200],
-                    "similarity": round(float(similarities[idx]), 3),
-                })
-
-        return results
-
-    except Exception as e:
-        logger.debug(f"Semantic code search fell back to grep: {e}")
-        # Fallback: simple grep
-        try:
-            proc = run_subprocess_sync(
-                ["grep", "-rn", "--include=*.py", "-l", query.split()[0], workspace_root or WORKSPACE_ROOT],
-                capture_output=True, text=True, timeout=10,
-            )
-            files = proc.stdout.strip().split("\n")[:limit]
-            return [{"source": "code", "path": f, "similarity": 0.5} for f in files if f]
-        except Exception:
-            return []
 
 
 def _workspace_search_root(path: str | None = None, workspace_root: str | None = None) -> str:

@@ -19,6 +19,17 @@ VALID_PROCEDURE = (
 )
 
 
+@pytest.fixture(autouse=True)
+def mock_embedding_service():
+    service = MagicMock()
+    service.document.return_value = [0.1] * 384
+    with patch(
+        "brain.systems.memory.embedding_service.EmbeddingService.from_session",
+        new=AsyncMock(return_value=service),
+    ):
+        yield service
+
+
 @pytest.mark.asyncio
 class TestCreateSkillGateEnforcement:
     """Test that create_skill enforces the live gate."""

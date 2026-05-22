@@ -402,7 +402,6 @@ async def test_brain_skills_degrades_when_embedding_unavailable():
 
 async def test_brain_skills_uses_db_backed_runtime_config_for_embeddings():
     from brain.app.mcp.server import async_tool_brain_skills
-    from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
 
     row = {
         "id": 1,
@@ -434,22 +433,15 @@ async def test_brain_skills_uses_db_backed_runtime_config_for_embeddings():
             _ExecuteResult(all_value=[]),
         ],
     )
-    runtime = EmbeddingRuntimeConfig(
-        backend="api",
-        provider="openai",
-        api_model="text-embedding-3-small",
-        cpu_model="all-MiniLM-L6-v2",
-        dimensions=768,
-        api_key="secret",
-    )
+    embedding_service = SimpleNamespace(query=MagicMock(return_value=[0.1]))
 
     with patch("brain.app.mcp.server.UnitOfWork", return_value=uow), \
-         patch("brain.systems.runtime_settings.memory.async_get_embedding_runtime_config", return_value=runtime), \
-         patch("brain.systems.memory.embeddings.embed_query", return_value=[0.1]) as embed_query, \
+         patch("brain.systems.memory.embedding_service.EmbeddingService.from_session", return_value=embedding_service) as load_service, \
          patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]"):
         result = await async_tool_brain_skills("fix a bug")
 
-    embed_query.assert_called_once_with("fix a bug", runtime_config=runtime)
+    load_service.assert_awaited_once_with(uow.session)
+    embedding_service.query.assert_called_once_with("fix a bug")
     assert "degraded_reason" not in result
     assert result["recommended_skills"][0]["name"] == "develop"
 

@@ -31,10 +31,7 @@ from brain.platform.async_io import (
     read_text as read_text_async,
     write_text as write_text_async,
 )
-from brain.systems.memory.embeddings import (
-    embed_document, embed_batch, embed_query,
-    vec_to_pg,
-)
+from brain.systems.memory.embeddings import vec_to_pg
 
 WORKSPACE = str(config.WORKSPACE_ROOT)
 MEMORY_DIR = str(config.JOURNAL_DIR)  # illo-brain/journal/ — standalone, no external deps
@@ -163,10 +160,10 @@ async def import_daily_log(uow, filepath: str, log_date: date) -> int:
 
         dense = compress_text(title, body)
         memory_type, salience = classify_memory(title, body)
-        from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+        from brain.systems.memory.embedding_service import EmbeddingService
 
-        runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-        semantic_emb = embed_document(dense, runtime_config=runtime_config)
+        embedding_service = await EmbeddingService.from_session(uow.session)
+        semantic_emb = embedding_service.document(dense)
         tags = extract_tags(title + " " + body)
         tags.append(log_date.isoformat())
 
@@ -221,10 +218,10 @@ async def import_domain_file(uow, filepath: str) -> int:
             memory_type = 'fact'
             salience = max(salience, 5.0)
 
-        from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+        from brain.systems.memory.embedding_service import EmbeddingService
 
-        runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-        semantic_emb = embed_document(dense, runtime_config=runtime_config)
+        embedding_service = await EmbeddingService.from_session(uow.session)
+        semantic_emb = embedding_service.document(dense)
 
         tags = extract_tags(title + " " + body)
         tags.append(filename.replace('.md', ''))

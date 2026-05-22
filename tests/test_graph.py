@@ -12,6 +12,25 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 1))))
 
 
+@pytest.fixture(autouse=True)
+def mock_embedding_service_runtime():
+    from brain.systems.memory.embedding_service import EmbeddingService
+    from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
+
+    service = EmbeddingService(EmbeddingRuntimeConfig(
+        backend="cpu",
+        provider="gemini",
+        api_model="gemini-embedding-2",
+        cpu_model="all-MiniLM-L6-v2",
+        dimensions=2000,
+    ))
+    with patch(
+        "brain.systems.memory.embedding_service.EmbeddingService.from_session",
+        new=AsyncMock(return_value=service),
+    ):
+        yield service
+
+
 def _mock_session_execute(results_sequence):
     """Helper: build a mock session whose .execute() returns results in sequence.
 

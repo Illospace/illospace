@@ -39,8 +39,7 @@ async def async_get_context(
     """Query the brain for context relevant to this message."""
     from sqlalchemy import text
     from brain.platform.db.repositories.unit_of_work import UnitOfWork
-    from brain.systems.memory.embeddings import embed_query
-    from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+    from brain.systems.memory.embedding_service import EmbeddingService
 
     user_id = user_id or os.environ.get("BRAIN_USER_ID")
     org_id = org_id or os.environ.get("BRAIN_ORG_ID")
@@ -54,8 +53,8 @@ async def async_get_context(
     # 1. Semantic search for relevant memories
     try:
         async with UnitOfWork() as uow:
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            query_emb = embed_query(message, runtime_config=runtime_config)
+            embedding_service = await EmbeddingService.from_session(uow.session)
+            query_emb = embedding_service.query(message)
             emb_str = "[" + ",".join(str(x) for x in query_emb) + "]"
 
             # Get top relevant memories (lessons and patterns weighted higher)

@@ -11,15 +11,18 @@ from typing import Any
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.platform.async_io import http_get
 from brain.platform.db.models.run import AgentRun
 from brain.platform.provider_health import provider_health_snapshot
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
+from brain.systems.runtime_settings.embedding_diagnostics import (
+    embedding_backend_label,
+    embedding_provider_label,
+)
+from brain.systems.runtime_settings.memory import async_get_embedding_info
 
 APP_VERSION = "6.0.0"
 DEFAULT_DB_TIMEOUT_MS = 1500
 DEFAULT_DEEP_TIMEOUT_MS = 2500
-DEFAULT_GPU_HEALTH_TIMEOUT_SECONDS = 1.0
 DEFAULT_STUCK_RUN_SECONDS = 15 * 60
 DEFAULT_RECENT_FAILURE_WINDOW_MINUTES = 60
 DEFAULT_RECENT_FAILURE_LIMIT = 10
@@ -75,13 +78,6 @@ def _elapsed_ms(start: float) -> int:
 def _timeout_ms(env_name: str, default: int) -> int:
     try:
         return max(100, int(os.getenv(env_name, str(default))))
-    except Exception:
-        return default
-
-
-def _timeout_seconds(env_name: str, default: float) -> float:
-    try:
-        return max(0.05, float(os.getenv(env_name, str(default))))
     except Exception:
         return default
 
@@ -350,95 +346,53 @@ async def readiness_health_snapshot(
     }
 
 
-def _embedding_health_check() -> HealthCheck:
+async def _embedding_health_check(session: AsyncSession | None) -> HealthCheck:
     start = time.monotonic()
     try:
-        import brain.kernel.config as cfg
+        if session is None:
+            raise RuntimeError("embedding health checks require an explicit database session")
 
-        backend = cfg.EMBEDDING_BACKEND
-        details: dict[str, Any] = {
-            "backend": backend,
-            "dimensions": cfg.EMBEDDING_DIM,
+        info = await async_get_embedding_info(session)
+        runtime_status = str(info.get("status") or "unknown")
+        details = {
+            key: value
+            for key, value in info.items()
+            if key not in {"detail", "remediation"}
         }
-        if backend == "api":
-            details.update({
-                "provider": cfg.EMBEDDING_API_PROVIDER,
-                "model": cfg.EMBEDDING_API_MODEL,
-                "api_key_configured": bool(cfg.EMBEDDING_API_KEY),
-            })
-            if not cfg.EMBEDDING_API_KEY:
-                return HealthCheck(
-                    name="embedding",
-                    status="failed",
-                    summary="API embedding backend is missing credentials",
-                    latency_ms=_elapsed_ms(start),
-                    details=details,
-                    remediation="Add embedding credentials in System/Access, or switch EMBEDDING_BACKEND.",
-                )
+        remediation = info.get("remediation")
+        if runtime_status == "ready":
             return HealthCheck(
                 name="embedding",
                 status="ok",
-                summary="API embedding backend is configured",
+                summary=f"{embedding_backend_label(info)} embedding backend is ready",
                 latency_ms=_elapsed_ms(start),
                 details=details,
             )
-        if backend == "cpu":
-            details["model"] = cfg.EMBEDDING_CPU_MODEL
+
+        if runtime_status == "initializing":
             return HealthCheck(
                 name="embedding",
-                status="ok",
-                summary="CPU embedding backend is configured",
+                status="degraded",
+                summary="GPU embedding backend is initializing",
                 latency_ms=_elapsed_ms(start),
                 details=details,
+                remediation=str(remediation) if remediation else None,
             )
-        if backend == "gpu":
-            timeout_s = _timeout_seconds(
-                "HEALTH_DEEP_GPU_TIMEOUT_SECONDS",
-                DEFAULT_GPU_HEALTH_TIMEOUT_SECONDS,
-            )
-            url = f"{cfg.GPU_SERVER_URL.rstrip('/')}/health"
-            response = http_get(url, timeout=timeout_s)
-            payload = response.json()
-            details.update({
-                "gpu_server_url": cfg.GPU_SERVER_URL,
-                "http_status": response.status_code,
-                "server": payload,
-            })
-            server_status = payload.get("status")
-            if response.status_code == 200 and server_status in {"ok", "healthy"}:
-                return HealthCheck(
-                    name="embedding",
-                    status="ok",
-                    summary="GPU embedding backend is healthy",
-                    latency_ms=_elapsed_ms(start),
-                    details=details,
-                )
-            if response.status_code == 200 and server_status == "degraded":
-                return HealthCheck(
-                    name="embedding",
-                    status="degraded",
-                    summary="GPU embedding backend reports degraded",
-                    latency_ms=_elapsed_ms(start),
-                    details=details,
-                    remediation="Inspect GPU server worker status and logs.",
-                )
-            return HealthCheck(
-                name="embedding",
-                status="failed",
-                summary="GPU embedding backend is not healthy",
-                latency_ms=_elapsed_ms(start),
-                details=details,
-                remediation="Restart or inspect the GPU model server before runing semantic work.",
-            )
+
+        summary = str(info.get("detail") or f"embedding backend is {runtime_status}")
+        if runtime_status == "missing_key":
+            summary = f"{embedding_provider_label(info)} embedding credentials missing"
         return HealthCheck(
             name="embedding",
             status="failed",
-            summary=f"unknown embedding backend: {backend}",
+            summary=summary,
             latency_ms=_elapsed_ms(start),
             details=details,
-            remediation="Set EMBEDDING_BACKEND to api, cpu, or gpu.",
+            remediation=str(remediation) if remediation else None,
         )
     except Exception as exc:
+        if session is not None:
+            await _rollback_health_session(session)
         return HealthCheck(
             name="embedding",
             status="failed",
@@ -447,7 +401,6 @@ def _embedding_health_check() -> HealthCheck:
             details={"error": str(exc)},
             remediation="Verify embedding backend configuration and service availability.",
         )
-
 
 def _provider_health_check() -> HealthCheck:
     start = time.monotonic()
@@ -643,7 +596,7 @@ async def deep_health_snapshot(
     session: AsyncSession | None = None,
 ) -> dict[str, Any]:
     checks = {
-        "embedding": _embedding_health_check(),
+        "embedding": await _embedding_health_check(session),
         "providers": _provider_health_check(),
         "scheduler": await _scheduler_health_check(session),
         "run": await _run_health_check(session),

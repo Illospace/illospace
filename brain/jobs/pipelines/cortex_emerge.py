@@ -28,7 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.kernel import config
 from brain.platform.async_io import run_subprocess
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.memory.embeddings import embed_document, embed_batch, vec_to_pg
+from brain.systems.memory.embedding_service import EmbeddingService
+from brain.systems.memory.embeddings import vec_to_pg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [cortex_emerge] %(message)s")
 log = logging.getLogger(__name__)
@@ -142,7 +143,7 @@ async def _async_create_emerged_idea(
 # Source: Conversation Patterns (recurring topics in memories)
 # ---------------------------------------------------------------------------
 
-async def _async_scan_conversation_patterns(session: AsyncSession, runtime_config) -> list[dict]:
+async def _async_scan_conversation_patterns(session: AsyncSession, embedding_service: EmbeddingService) -> list[dict]:
     """Find recurring topics in recent memories through async DB access."""
     candidates = []
     try:
@@ -166,7 +167,7 @@ async def _async_scan_conversation_patterns(session: AsyncSession, runtime_confi
         if len(texts) > 50:
             texts = texts[:50]
 
-        embs = embed_batch(texts, mode='document', runtime_config=runtime_config)
+        embs = embedding_service.batch(texts, mode='document')
 
         clusters = []
         used = set()
@@ -359,15 +360,13 @@ async def async_run_emergence(session: AsyncSession) -> dict:
     """Async emergence entry point for API-triggered runs."""
     log.info("=== Cortex Emergence Pipeline Starting ===")
 
-    from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
-
-    runtime_config = await async_get_embedding_runtime_config(session, include_secret=True)
+    embedding_service = await EmbeddingService.from_session(session)
     thresholds = await _async_load_thresholds(session)
     existing = await _async_get_existing_ideas_with_embeddings(session)
     log.info("Loaded %s existing ideas for dedup", len(existing))
 
     all_candidates = []
-    all_candidates.extend([(c, 'conversation') for c in await _async_scan_conversation_patterns(session, runtime_config)])
+    all_candidates.extend([(c, 'conversation') for c in await _async_scan_conversation_patterns(session, embedding_service)])
     all_candidates.extend([(c, 'error') for c in await _async_scan_error_patterns(session)])
     all_candidates.extend([(c, 'github') for c in await _async_scan_github_issues()])
     all_candidates.extend([(c, 'nightly_insight') for c in await _async_scan_nightly_insights(session)])
@@ -388,7 +387,7 @@ async def async_run_emergence(session: AsyncSession) -> dict:
             continue
 
         text_content = f"{candidate['title']} {candidate.get('description', '')}"
-        emb = embed_document(text_content, runtime_config=runtime_config)
+        emb = embedding_service.document(text_content)
 
         is_dup, dup_id = _is_duplicate(emb, existing)
         if is_dup:

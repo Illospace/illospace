@@ -24,8 +24,8 @@ from brain.platform.db.repositories.memory_visibility import (
     memory_visibility_sql,
 )
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.systems.memory.embeddings import embed_document, vec_to_pg
-from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+from brain.systems.memory.embedding_service import EmbeddingService
+from brain.systems.memory.embeddings import vec_to_pg
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +97,8 @@ async def check_duplicate(
 
     async with UnitOfWork() as uow:
         if embedding is None:
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            embedding = embed_document(content, runtime_config=runtime_config)
+            embedding_service = await EmbeddingService.from_session(uow.session)
+            embedding = embedding_service.document(content)
 
         emb_str = vec_to_pg(embedding)
         row = (await uow.session.execute(text("""

@@ -406,6 +406,103 @@ def test_runtime_memory_does_not_use_env_api_keys(monkeypatch):
     assert memory_settings._installation_embedding_api_key("gemini") is None
 
 
+def test_runtime_memory_reports_missing_gemini_key_with_system_access_detail(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    import brain.kernel.config as cfg
+    import brain.systems.runtime_settings.memory as memory_settings
+
+    stored_config = {
+        memory_settings.RUNTIME_MEMORY_SETTINGS_KEY: json.dumps({
+            "backend": "api",
+            "provider": "gemini",
+            "api_model": "gemini-embedding-2",
+            "cpu_model": "all-MiniLM-L6-v2",
+            "dimensions": 768,
+            "reranker": "weighted",
+        }),
+    }
+
+    monkeypatch.setattr(cfg, "EMBEDDING_BACKEND", "api", raising=False)
+    monkeypatch.setattr(cfg, "EMBEDDING_API_PROVIDER", "gemini", raising=False)
+    monkeypatch.setattr(memory_settings, "_read_runtime_config_value", lambda key: stored_config.get(key))
+    monkeypatch.setattr(memory_settings, "_indexed_vector_count", lambda: 0)
+
+    data = memory_settings.get_runtime_memory(SimpleNamespace(id="user-1", org_id="org-1"))
+
+    assert data.embedding_status == "missing_key"
+    assert data.embedding_detail == "Gemini embedding credentials are not configured. Add them in System/Access."
+    assert data.embedding_remediation == "Add embedding credentials in System/Access, or choose Local CPU."
+
+
+def test_embedding_info_gpu_uses_bounded_health_probe(monkeypatch):
+    import brain.kernel.config as cfg
+    import brain.systems.runtime_settings.memory as memory_settings
+
+    captured = {}
+
+    class Response:
+        def json(self):
+            return {
+                "status": "ok",
+                "workers": {
+                    "embedding": {"status": "ready"},
+                },
+            }
+
+    def fake_http_get(url, *, timeout):
+        captured["url"] = url
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(cfg, "EMBEDDING_BACKEND", "gpu", raising=False)
+    monkeypatch.setattr(cfg, "GPU_SERVER_URL", "http://gpu.example", raising=False)
+    monkeypatch.setattr(memory_settings, "_read_runtime_config_value", lambda key: None)
+    monkeypatch.setattr(memory_settings, "http_get", fake_http_get)
+
+    info = memory_settings.get_embedding_info()
+
+    assert info["status"] == "ready"
+    assert info["loaded"] is True
+    assert info["gpu_worker_status"] == "ready"
+    assert captured == {
+        "url": "http://gpu.example/health",
+        "timeout": memory_settings.GPU_EMBEDDING_INFO_TIMEOUT_SECONDS,
+    }
+
+
+@pytest.mark.asyncio
+async def test_async_check_runtime_memory_rejects_missing_credentials_before_provider_call(monkeypatch):
+    from types import SimpleNamespace
+
+    import brain.systems.runtime_settings.memory as memory_settings
+    from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
+
+    runtime_config = EmbeddingRuntimeConfig(
+        backend="api",
+        provider="gemini",
+        api_model="gemini-embedding-2",
+        cpu_model="all-MiniLM-L6-v2",
+        dimensions=768,
+        api_key="",
+    )
+    monkeypatch.setattr(
+        "brain.systems.memory.embedding_service.async_get_embedding_runtime_config",
+        AsyncMock(return_value=runtime_config),
+    )
+
+    with patch("brain.systems.memory.embeddings.embed_query") as embed_query:
+        result = await memory_settings.async_check_runtime_memory(
+            MagicMock(),
+            SimpleNamespace(id="user-1", org_id="org-1"),
+        )
+
+    assert result.status == "error"
+    assert result.detail == "Gemini embedding credentials are not configured. Add them in System/Access."
+    embed_query.assert_not_called()
+
+
 def test_update_runtime_memory_blocks_embedder_change_when_installation_vectors_exist(monkeypatch):
     from types import SimpleNamespace
 

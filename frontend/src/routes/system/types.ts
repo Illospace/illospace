@@ -32,6 +32,7 @@ export interface RuntimeSettings {
     embedding_dimensions?: number | null;
     embedding_status: string;
     embedding_detail?: string | null;
+    embedding_remediation?: string | null;
     indexed_vectors: number;
     api_key_statuses?: Record<string, boolean>;
     reranker: string;

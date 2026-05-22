@@ -160,7 +160,9 @@ class TestGetContextMocked:
 
     def test_error_captured(self):
         """DB errors should be captured in result, not raised."""
-        with patch("brain.systems.memory.embeddings.embed_query", side_effect=Exception("DB down")):
+        service = MagicMock()
+        service.query.side_effect = Exception("DB down")
+        with patch("brain.systems.memory.embedding_service.EmbeddingService.from_session", new=AsyncMock(return_value=service)):
             result = get_context("test")
         assert "error" in result
         assert "DB down" in result["error"]

@@ -2,7 +2,7 @@
 
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -65,12 +65,29 @@ def mock_embeddings():
         patch("brain.systems.memory.embeddings.embed_document", return_value=fake_vec),
         patch("brain.systems.memory.embeddings.embed_query", return_value=fake_vec),
         patch("brain.systems.memory.embeddings.embed_batch", return_value=[fake_vec]),
+        patch(
+            "brain.systems.memory.embedding_service.EmbeddingService.from_session",
+            new=AsyncMock(return_value=_test_embedding_service()),
+        ),
     ]
     for p in patches:
         p.start()
     yield fake_vec
     for p in patches:
         p.stop()
+
+
+def _test_embedding_service():
+    from brain.systems.memory.embedding_service import EmbeddingService
+    from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
+
+    return EmbeddingService(EmbeddingRuntimeConfig(
+        backend="cpu",
+        provider="gemini",
+        api_model="gemini-embedding-2",
+        cpu_model="all-MiniLM-L6-v2",
+        dimensions=2000,
+    ))
 
 
 @pytest.fixture

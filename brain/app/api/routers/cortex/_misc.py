@@ -884,10 +884,9 @@ async def audit_apply(
         if not content or len(content) < 20:
             raise HTTPException(status_code=400, detail="Lesson content must be >= 20 chars")
         from brain.platform.db.repositories.memory_write_context import MemoryWriteContext
-        from brain.systems.memory.embeddings import embed_document
+        from brain.systems.memory.embedding_service import EmbeddingService
         from brain.systems.memory.scope import classify_scope
         from brain.systems.quality.gate import check_quality
-        from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
 
         salience = float(payload.get("salience", 7.0))
         qr = await check_quality(content, salience=salience, memory_type=payload.get("memory_type", "lesson"))
@@ -905,8 +904,8 @@ async def audit_apply(
             evidence={"audit_action_payload": payload},
         )
         async with UnitOfWork() as uow:
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            semantic_embedding = embed_document(content, runtime_config=runtime_config)
+            embedding_service = await EmbeddingService.from_session(uow.session)
+            semantic_embedding = embedding_service.document(content)
             result = await uow.memories.insert_memory(
                 content=content,
                 memory_type=payload.get("memory_type", "lesson"),

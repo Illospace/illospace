@@ -156,17 +156,16 @@ async def test_deep_health_reports_degradation_without_secrets(monkeypatch):
         model="gpt-5.4-mini",
         exc="provider failed with sk-test-secret-token",
     )
-    monkeypatch.setattr(
-        health,
-        "_embedding_health_check",
-        lambda: health.HealthCheck(
+    async def embedding_check(_session=None):
+        return health.HealthCheck(
             name="embedding",
             status="ok",
             summary="embedding configured",
             latency_ms=1,
             details={"api_key_configured": True},
-        ),
-    )
+        )
+
+    monkeypatch.setattr(health, "_embedding_health_check", embedding_check)
     async def scheduler_check(_session=None):
         return health.HealthCheck(
             name="scheduler",
@@ -197,3 +196,60 @@ async def test_deep_health_reports_degradation_without_secrets(monkeypatch):
     assert "super-secret-token" not in payload
     assert "[redacted]" in payload
     reset_provider_health()
+
+
+@pytest.mark.asyncio
+async def test_deep_health_uses_db_backed_embedding_runtime(monkeypatch):
+    monkeypatch.setattr(
+        health,
+        "async_get_embedding_info",
+        AsyncMock(return_value={
+            "backend": "api",
+            "provider": "gemini",
+            "model": "gemini-embedding-2",
+            "dimensions": 768,
+            "status": "missing_key",
+            "api_key_set": False,
+            "loaded": False,
+            "ready": False,
+            "detail": "Gemini embedding credentials are not configured. Add them in System/Access.",
+            "remediation": "Add embedding credentials in System/Access, or choose Local CPU.",
+        }),
+    )
+    monkeypatch.setattr(
+        health,
+        "_provider_health_check",
+        lambda: health.HealthCheck(
+            name="providers",
+            status="ok",
+            summary="provider health is clear",
+            latency_ms=1,
+        ),
+    )
+
+    async def scheduler_check(_session=None):
+        return health.HealthCheck(
+            name="scheduler",
+            status="ok",
+            summary="scheduler healthy",
+            latency_ms=1,
+        )
+
+    async def run_check(_session=None):
+        return health.HealthCheck(
+            name="run",
+            status="ok",
+            summary="run health is clear",
+            latency_ms=1,
+        )
+
+    monkeypatch.setattr(health, "_scheduler_health_check", scheduler_check)
+    monkeypatch.setattr(health, "_run_health_check", run_check)
+
+    snapshot = await health.deep_health_snapshot(session=MagicMock())
+
+    assert snapshot["status"] == "unhealthy"
+    assert snapshot["checks"]["embedding"]["status"] == "failed"
+    assert snapshot["checks"]["embedding"]["summary"] == "Gemini embedding credentials missing"
+    assert snapshot["checks"]["embedding"]["remediation"] == "Add embedding credentials in System/Access, or choose Local CPU."
+    assert snapshot["checks"]["embedding"]["details"]["api_key_set"] is False
