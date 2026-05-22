@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -58,12 +57,6 @@ def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:
         for tool in build_agent_tools("coordinator")
         if str(tool.get("name") or "") not in hidden
     ]
-
-
-def _json_block(title: str, value: Any) -> str:
-    if not value:
-        return ""
-    return f"\n\n## {title}\n```json\n{json.dumps(value, indent=2, default=str)}\n```"
 
 
 def _thread_attachment_context(runtime: RunRuntime) -> dict[str, Any] | None:
@@ -125,13 +118,12 @@ class FastRecipe(BaseRunRecipe):
             root_run_id=runtime.run.root_run_id,
         )
 
+        prompt_context = context.prompt_context()
         system_prompt = (
             soul_prompt_section()
             + "\n\n"
             + FAST_AGENT_INSTRUCTIONS
-            + _json_block("Target", runtime.request.target_ref)
-            + _json_block("Workspace", runtime.request.workspace_ref)
-            + (f"\n\n## Context\n{context.prompt_context()}" if context.prompt_context() else "")
+            + (f"\n\n## Context\n{prompt_context}" if prompt_context else "")
         )
         spec = build_direct_agent_invocation(
             message=context.message,
@@ -152,7 +144,7 @@ class FastRecipe(BaseRunRecipe):
             on_stream_delta=_delta,
             live_guidance_loader=_guidance,
             cancel_event=runtime.cancel_event,
-            brain_context_preloaded=bool(context.prompt_context()),
+            brain_context_preloaded=bool(prompt_context),
             skip_harvest=True,
             metadata={
                 "org_id": runtime.request.org_id,

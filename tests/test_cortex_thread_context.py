@@ -165,6 +165,49 @@ def test_run_context_prompt_includes_thread_context():
     assert "Illo: earlier answer" in prompt_context
 
 
+def test_run_context_prompt_compacts_large_project_context_references():
+    from brain.systems.runs.context import RunContextLoader
+
+    huge_value = "x" * 2_000_000
+    project_ref = {
+        "kind": "cortex_idea",
+        "title": "Port the SEO workflow",
+        "project_context_snapshot": {
+            "name": "Agent Mission Control Reference",
+            "resources": [
+                {
+                    "kind": "folder",
+                    "path": "/workspaces/agent-mission-control-reference",
+                    "materialization": {
+                        "status": "ready",
+                        "project_root_file_count": 779,
+                        "imports": {
+                            "imported": [huge_value],
+                            "root_versions": {"before": huge_value},
+                            "project_root_file_count": 779,
+                        },
+                    },
+                }
+            ],
+        },
+    }
+
+    context = RunContextLoader().load(
+        thread_id="idea-1",
+        message="Can you see it?",
+        target_ref=project_ref,
+        workspace_ref=project_ref,
+    )
+
+    prompt_context = context.prompt_context()
+
+    assert len(prompt_context) < 30_000
+    assert huge_value[:1000] not in prompt_context
+    assert "large value omitted from prompt context" in prompt_context
+    assert '"project_root_file_count": 779' in prompt_context
+    assert "/workspaces/agent-mission-control-reference" in prompt_context
+
+
 async def _add_run_final_answer(
     session,
     *,

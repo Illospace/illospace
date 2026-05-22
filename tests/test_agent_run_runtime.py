@@ -450,6 +450,55 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert any(_artifact_type(artifact) == "file_observation" for artifact in runtime.store.artifacts)
 
 
+async def test_fast_recipe_keeps_large_project_context_out_of_system_prompt(monkeypatch):
+    from brain.systems.runs.recipes.fast import FastRecipe
+
+    captured = {}
+
+    async def fake_invoke(spec):
+        captured["spec"] = spec
+        return SimpleNamespace(output="ok", success=True, error=None)
+
+    huge_value = "x" * 2_000_000
+    large_ref = {
+        "kind": "cortex_idea",
+        "title": "Port the SEO workflow",
+        "project_context_snapshot": {
+            "name": "Agent Mission Control Reference",
+            "resources": [
+                {
+                    "kind": "folder",
+                    "path": "/workspaces/agent-mission-control-reference",
+                    "materialization": {
+                        "status": "ready",
+                        "project_root_file_count": 779,
+                        "imports": {
+                            "imported": [huge_value],
+                            "root_versions": {"before": huge_value},
+                        },
+                    },
+                }
+            ],
+        },
+        "workspace_root": "/workspaces/agent-mission-control-reference",
+    }
+
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime("fast", workspace_ref=large_ref)
+    runtime.request = replace(runtime.request, target_ref=large_ref)
+
+    result = await FastRecipe().execute(runtime)
+
+    assert result.status.value == "completed"
+    assert len(captured["spec"].system_prompt) < 40_000
+    assert huge_value[:1000] not in captured["spec"].system_prompt
+    assert "large value omitted from prompt context" in captured["spec"].system_prompt
+    assert captured["spec"].system_prompt.count("## Context") == 1
+
+
 async def test_direct_agent_invocation_uses_async_kernel(monkeypatch):
     from brain.systems.runs.invocation import build_direct_agent_invocation
     from brain.systems.runs.invocation import invoke_direct_agent_async

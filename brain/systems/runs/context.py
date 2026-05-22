@@ -8,6 +8,42 @@ from typing import Any
 
 from brain.systems.runs.skill_commands import parse_slash_skill_names
 
+PROMPT_REFERENCE_CHAR_LIMIT = 12_000
+PROMPT_SCALAR_CHAR_LIMIT = 1_200
+PROMPT_LIST_ITEM_LIMIT = 24
+PROMPT_DICT_ITEM_LIMIT = 48
+
+_HEAVY_PROMPT_KEYS = {
+    "content",
+    "file_contents",
+    "files",
+    "imported",
+    "imports",
+    "result",
+    "result_preview",
+    "root_versions",
+    "stderr",
+    "stdout",
+    "text",
+    "uploaded_files",
+}
+
+_COUNT_KEYS = (
+    "file_count",
+    "path_count",
+    "resource_count",
+    "root_file_count",
+    "root_path_count",
+    "draft_file_count",
+    "draft_path_count",
+    "project_root_file_count",
+    "project_root_path_count",
+    "project_draft_file_count",
+    "project_draft_path_count",
+    "seed_resource_count",
+    "changed_file_count",
+)
+
 
 def _skill_names_from_metadata(metadata: dict[str, Any], message: str) -> list[str]:
     raw_names = metadata.get("slash_skill_names")
@@ -34,6 +70,74 @@ def _request_source_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _compact_heavy_value(value: Any) -> dict[str, Any]:
+    summary: dict[str, Any] = {"omitted": "large value omitted from prompt context"}
+    if isinstance(value, dict):
+        summary["key_count"] = len(value)
+        for key in _COUNT_KEYS:
+            if key in value:
+                summary[key] = value.get(key)
+        if value:
+            summary["keys"] = [str(key) for key in list(value.keys())[:PROMPT_LIST_ITEM_LIMIT]]
+    elif isinstance(value, list):
+        summary["item_count"] = len(value)
+    else:
+        text = str(value or "")
+        summary["char_count"] = len(text)
+        if text:
+            summary["preview"] = _truncate_scalar(text, 160)
+    return summary
+
+
+def _truncate_scalar(value: Any, limit: int = PROMPT_SCALAR_CHAR_LIMIT) -> Any:
+    if not isinstance(value, str):
+        return value
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 38)].rstrip() + f"... [truncated {len(value) - limit} chars]"
+
+
+def _compact_prompt_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 6:
+        if isinstance(value, dict):
+            return {"omitted": "nested object omitted from prompt context", "key_count": len(value)}
+        if isinstance(value, list):
+            return {"omitted": "nested list omitted from prompt context", "item_count": len(value)}
+        return _truncate_scalar(value, 240)
+
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for index, (raw_key, raw_item) in enumerate(value.items()):
+            if index >= PROMPT_DICT_ITEM_LIMIT:
+                compact["omitted_keys_count"] = len(value) - PROMPT_DICT_ITEM_LIMIT
+                break
+            key = str(raw_key)
+            if key in _HEAVY_PROMPT_KEYS:
+                compact[key] = _compact_heavy_value(raw_item)
+                continue
+            compact[key] = _compact_prompt_value(raw_item, depth=depth + 1)
+        return compact
+
+    if isinstance(value, list):
+        compact_items = [
+            _compact_prompt_value(item, depth=depth + 1)
+            for item in value[:PROMPT_LIST_ITEM_LIMIT]
+        ]
+        if len(value) > PROMPT_LIST_ITEM_LIMIT:
+            compact_items.append({"omitted_items_count": len(value) - PROMPT_LIST_ITEM_LIMIT})
+        return compact_items
+
+    return _truncate_scalar(value)
+
+
+def compact_prompt_reference(value: dict[str, Any], *, char_limit: int = PROMPT_REFERENCE_CHAR_LIMIT) -> str:
+    compact = _compact_prompt_value(value)
+    rendered = json.dumps(compact, sort_keys=True, indent=2, default=str)
+    if len(rendered) <= char_limit:
+        return rendered
+    return rendered[: max(0, char_limit - 47)].rstrip() + f"\n... [prompt reference truncated to {char_limit} chars]"
+
+
 @dataclass(frozen=True)
 class RunContext:
     thread_id: str
@@ -53,11 +157,11 @@ class RunContext:
             if formatted:
                 parts.append("Thread so far, before the current user message:\n" + formatted)
         if self.target_ref:
-            parts.append(f"Target: {self.target_ref}")
+            parts.append("Target:\n" + compact_prompt_reference(self.target_ref))
         if self.workspace_ref:
-            parts.append(f"Workspace: {self.workspace_ref}")
+            parts.append("Workspace:\n" + compact_prompt_reference(self.workspace_ref))
         if self.handoff:
-            parts.append(f"Handoff: {self.handoff}")
+            parts.append("Handoff:\n" + compact_prompt_reference(self.handoff))
         if self.request_source:
             parts.append(
                 "Request Source:\n"
