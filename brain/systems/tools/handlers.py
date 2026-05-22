@@ -259,7 +259,17 @@ async def handle_semantic_search(query: str, scope: str = "both", limit: int = 5
     # Code search via embeddings
     if scope in ("code", "both"):
         try:
-            code_results = _semantic_code_search(query, limit=limit, workspace_root=workspace_root)
+            from brain.platform.db.repositories.unit_of_work import UnitOfWork
+            from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+
+            async with UnitOfWork() as uow:
+                runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+            code_results = _semantic_code_search(
+                query,
+                limit=limit,
+                workspace_root=workspace_root,
+                runtime_config=runtime_config,
+            )
             results.extend(code_results)
         except Exception as e:
             logger.debug(f"Code semantic search failed: {e}")
@@ -274,7 +284,12 @@ async def handle_semantic_search(query: str, scope: str = "both", limit: int = 5
     }
 
 
-def _semantic_code_search(query: str, limit: int = 5, workspace_root: str | None = None) -> list[dict]:
+def _semantic_code_search(
+    query: str,
+    limit: int = 5,
+    workspace_root: str | None = None,
+    runtime_config=None,
+) -> list[dict]:
     """Search code files using embeddings.
 
     Strategy: embed the query, then compare against file-level summaries.
@@ -283,7 +298,7 @@ def _semantic_code_search(query: str, limit: int = 5, workspace_root: str | None
     try:
         from brain.systems.memory.embeddings import embed_query
 
-        query_vec = embed_query(query)
+        query_vec = embed_query(query, runtime_config=runtime_config)
 
         # Get candidate files (Python files, limited to avoid embedding everything)
         workspace = pathlib.Path(workspace_root or WORKSPACE_ROOT)
@@ -310,7 +325,7 @@ def _semantic_code_search(query: str, limit: int = 5, workspace_root: str | None
         # Embed summaries
         from brain.systems.memory.embeddings import embed_batch
         texts = [f"{path}: {preview}" for path, preview in candidates]
-        vecs = embed_batch(texts, mode="document")
+        vecs = embed_batch(texts, mode="document", runtime_config=runtime_config)
 
         # Compute similarities
         similarities = np.dot(vecs, query_vec) / (
