@@ -92,17 +92,18 @@ class EmbeddingService:
                 f"Unknown embedding backend {self.runtime_config.backend!r}. Use gpu, cpu, or api."
             )
         if backend == "api" and not self.runtime_config.api_key:
-            raise EmbeddingCredentialsUnavailable(_credential_message(self.provider))
+            raise EmbeddingCredentialsUnavailable(embedding_credentials_message(self.provider))
 
     def _typed_provider_error(self, exc: RuntimeError) -> EmbeddingServiceError:
         detail = str(exc)
         lower = detail.lower()
         if "credentials are not configured" in lower or "embedding_api_key" in lower:
-            return EmbeddingCredentialsUnavailable(_credential_message(self.provider))
+            return EmbeddingCredentialsUnavailable(embedding_credentials_message(self.provider))
         return EmbeddingProviderUnavailable(detail)
 
 
-def _credential_message(provider: str) -> str:
+def embedding_credentials_message(provider: str) -> str:
+    """Return the operator-facing missing-credentials message for a provider."""
     if provider in {"gemini", "google"}:
         return "Gemini embedding credentials are not configured. Add them in System/Access."
     if provider == "openai":

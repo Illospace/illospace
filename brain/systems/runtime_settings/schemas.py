@@ -44,6 +44,7 @@ class RuntimeMemoryRead(BaseModel):
     embedding_dimensions: int | None = None
     embedding_status: str
     embedding_detail: str | None = None
+    embedding_remediation: str | None = None
     indexed_vectors: int = 0
     api_key_statuses: dict[str, bool] = Field(default_factory=dict)
     reranker: RerankerKey = "weighted"

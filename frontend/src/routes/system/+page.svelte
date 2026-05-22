@@ -676,22 +676,22 @@
       const data = await api.revealSecret(keyName, token);
       const value = String(data?.value || '');
       if (!value) throw new Error('Vault secret is empty.');
+      let memory;
       if (provider === 'gemini') {
-        await api.connectRuntimeGeminiKey({ api_key: value });
+        memory = await api.connectRuntimeGeminiKey({ api_key: value });
       } else {
-        await api.connectRuntimeOpenAIEmbeddingKey({ api_key: value });
+        memory = await api.connectRuntimeOpenAIEmbeddingKey({ api_key: value });
       }
       selectedMemoryVaultKey = keyName;
       if (settings) {
         settings = {
           ...settings,
-          memory: {
-            ...settings.memory,
-            api_key_statuses: {
-              ...(settings.memory.api_key_statuses ?? {}),
-              [provider]: true,
-            },
-          },
+          memory,
+        };
+        memoryDraft = {
+          embedder: memory.embedder,
+          embedding_model: memory.embedding_model || defaultEmbeddingModel(memory.embedder, { ...settings, memory }),
+          reranker: memory.reranker || 'weighted',
         };
       }
       memoryCheck = null;
@@ -737,12 +737,13 @@
         detail: `${label} selected. Save changes to apply.`,
       };
     }
-    if (!settings.memory.embedding_detail) return null;
+    if (!settings.memory.embedding_detail && !settings.memory.embedding_remediation) return null;
     const needsApiKey = usesApiEmbedder(settings.memory.embedder) && settings.memory.embedding_status === 'missing_key';
+    const detail = settings.memory.embedding_detail || settings.memory.embedding_remediation || undefined;
     return {
       tone: 'warning',
       title: needsApiKey ? 'Memory is not set up.' : 'Memory status',
-      detail: needsApiKey ? undefined : settings.memory.embedding_detail,
+      detail,
     };
   }
 
