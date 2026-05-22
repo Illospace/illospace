@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select, text
 
 from brain.platform.db.models.idea import Idea, IdeaProjectAttachment, ProjectProfile
+from brain.systems.cortex.project_context.merge import merge_project_context_payloads
 from brain.systems.cortex.project_context.snapshot import (
     ProjectContextValidationError,
     validated_project_context_snapshot,
@@ -806,18 +807,25 @@ async def _a_select_project_context(
     metadata: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
     validation_errors: list[dict[str, Any]] = []
-    candidate = _project_context_from_metadata(metadata)
-    if candidate:
-        snapshot, errors = _snapshot_for_project_context(candidate)
-        if snapshot:
+    metadata_candidate = _project_context_from_metadata(metadata)
+    attachment_candidate = await _a_latest_attached_project_context(session, idea_id)
+    if metadata_candidate and attachment_candidate:
+        candidate = merge_project_context_payloads(attachment_candidate, metadata_candidate)
+        snapshot, errors = _snapshot_for_project_context(candidate or {})
+        if snapshot and candidate:
             return candidate, snapshot, validation_errors
+        validation_errors.append({"source": "metadata+latest_attachment", "errors": errors})
+
+    if metadata_candidate:
+        snapshot, errors = _snapshot_for_project_context(metadata_candidate)
+        if snapshot:
+            return metadata_candidate, snapshot, validation_errors
         validation_errors.append({"source": "metadata", "errors": errors})
 
-    candidate = await _a_latest_attached_project_context(session, idea_id)
-    if candidate:
-        snapshot, errors = _snapshot_for_project_context(candidate)
+    if attachment_candidate:
+        snapshot, errors = _snapshot_for_project_context(attachment_candidate)
         if snapshot:
-            return candidate, snapshot, validation_errors
+            return attachment_candidate, snapshot, validation_errors
         validation_errors.append({"source": "latest_attachment", "errors": errors})
 
     candidate = _project_context_from_idea(idea)

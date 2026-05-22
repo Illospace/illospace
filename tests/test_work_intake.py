@@ -239,6 +239,81 @@ async def test_cortex_work_intake_stamps_project_identity_from_latest_attachment
 
 
 @pytest.mark.asyncio
+async def test_cortex_work_intake_merges_attachment_resources_with_latest_project_identity(monkeypatch):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    class _Session:
+        async def get(self, model, key):
+            name = getattr(model, "__name__", "")
+            if name == "Idea":
+                return SimpleNamespace(
+                    id="idea-1",
+                    title="Launch",
+                    org_id="org-1",
+                    user_id="owner-1",
+                    agent_details=None,
+                )
+            if name == "ProjectProfile":
+                assert key == "profile-1"
+                return SimpleNamespace(
+                    id="profile-1",
+                    slug="test-empty-project",
+                    name="test empty project",
+                    description=None,
+                    active=True,
+                    project_context={"resources": []},
+                )
+            return None
+
+        async def scalars(self, *_args, **_kwargs):
+            attachment = SimpleNamespace(project_profile_id="profile-1", snapshot={"resources": []})
+            return SimpleNamespace(first=lambda: attachment)
+
+    async def fake_thread_context(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "brain.systems.runs.work_intake.async_build_agent_visible_thread_context",
+        fake_thread_context,
+    )
+
+    uploaded_resource = {
+        "id": "attachment-1",
+        "kind": "file",
+        "name": "unified_payments.csv",
+        "path": "/app/brain/uploads/unified_payments.csv",
+        "uri": "/static/uploads/unified_payments.csv",
+        "source": "thread_attachment",
+    }
+    request = await build_agent_run_request(
+        _Session(),
+        WorkIntakeEvent(
+            source="cortex",
+            event_type="cortex.thread_reply",
+            org_id="org-1",
+            actor={"id": "user-1", "org_id": "org-1", "internal": False},
+            target={"kind": "cortex_idea", "idea_id": "idea-1"},
+            payload={
+                "message": "@illo continue",
+                "metadata": {
+                    "project_context": {
+                        "name": "test empty project",
+                        "selected_profile_id": "current-thread-project",
+                        "resources": [uploaded_resource],
+                    }
+                },
+            },
+        ),
+    )
+
+    snapshot = request.target_ref["project_context_snapshot"]
+    assert snapshot["project_key"] == "profile-1"
+    assert snapshot["project_id"] == "profile-1"
+    assert snapshot["resources"][0]["path"] == "/app/brain/uploads/unified_payments.csv"
+    assert request.workspace_ref["slug"] == "test-empty-project"
+
+
+@pytest.mark.asyncio
 async def test_discussion_origin_cortex_work_intake_records_surface_and_trigger_comment(monkeypatch):
     from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
 

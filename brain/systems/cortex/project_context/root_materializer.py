@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 import os
+import shutil
 
 from brain.systems.cortex.project_context.drafts import build_file_manifest, load_draft_metadata, sync_draft_from_root
 from brain.systems.cortex.project_context.project_root import (
@@ -58,6 +59,58 @@ def should_use_existing_resource_path(existing_path: str | None, workspace_root:
 
 def runtime_workspace_path(path: Path) -> Path:
     return path if path.is_dir() else path.parent
+
+
+def _project_root_alias_paths(
+    project_context: Mapping[str, Any],
+    resources: Sequence[Mapping[str, Any]],
+    *,
+    workspace_root: Path,
+    canonical_key: str,
+) -> list[Path]:
+    canonical_root = project_root_path(workspace_root, canonical_key)
+    values: list[Any] = [
+        project_context.get("slug"),
+        project_context.get("name"),
+        project_context.get("title"),
+        project_context.get("project_key"),
+    ]
+    for resource in resources:
+        if not isinstance(resource, Mapping):
+            continue
+        values.extend([resource.get("project_key"), resource.get("slug")])
+
+    aliases: list[Path] = []
+    for value in values:
+        text = clean_text(value)
+        if not text or text == canonical_key:
+            continue
+        alias = project_root_path(workspace_root, text)
+        if alias != canonical_root and alias not in aliases:
+            aliases.append(alias)
+    return aliases
+
+
+def _adopt_existing_project_root_alias(source_root: Path, alias_roots: Sequence[Path]) -> str | None:
+    if build_file_manifest(source_root):
+        return None
+    for alias_root in alias_roots:
+        if not alias_root.exists() or not alias_root.is_dir() or alias_root == source_root:
+            continue
+        if not build_file_manifest(alias_root):
+            continue
+        source_root.mkdir(parents=True, exist_ok=True)
+        for item in alias_root.iterdir():
+            target = source_root / item.name
+            if target.exists():
+                continue
+            if item.is_dir() and not item.is_symlink():
+                shutil.copytree(item, target, symlinks=False)
+            elif item.is_file() and not item.is_symlink():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
+        return str(alias_root)
+    return None
 
 
 def _path_texts_from_uploaded_files(resource: Mapping[str, Any]) -> list[str]:
@@ -205,6 +258,15 @@ def materialize_project_native_root(
     )
     source_root = project_root_path(workspace_root, project_key)
     source_root.mkdir(parents=True, exist_ok=True)
+    adopted_from_root = _adopt_existing_project_root_alias(
+        source_root,
+        _project_root_alias_paths(
+            project_context,
+            resources,
+            workspace_root=workspace_root,
+            canonical_key=project_key,
+        ),
+    )
 
     import_candidates: list[ProjectRootImportCandidate] = []
     for resource in resources:
@@ -254,6 +316,8 @@ def materialize_project_native_root(
     }
     if any(import_summary.values()):
         materialization["imports"] = import_summary
+    if adopted_from_root:
+        materialization["adopted_from_root"] = adopted_from_root
     if draft_status and any(draft_status.values()):
         materialization["draft_status"] = draft_status
 

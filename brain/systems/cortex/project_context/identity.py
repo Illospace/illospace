@@ -18,6 +18,14 @@ PROJECT_IDENTITY_FIELDS = (
     "slug",
 )
 
+PROJECT_IDENTITY_SENTINELS = {
+    "current",
+    "current-thread-project",
+    "current_thread_project",
+    "new",
+    "none",
+}
+
 
 def _clean_text(value: Any) -> str | None:
     if isinstance(value, str) and value.strip():
@@ -33,6 +41,8 @@ def _clean_identity_field(key: str, value: Any) -> str | None:
         namespace, raw_id = text.split(":", 1)
         if namespace in {"server", "profile", "project"} and raw_id.strip():
             return raw_id.strip()
+    if key == "selected_profile_id" and text.lower() in PROJECT_IDENTITY_SENTINELS:
+        return None
     return text
 
 
@@ -126,6 +136,7 @@ def stamped_project_context(
 __all__ = [
     "PROJECT_DURABLE_IDENTITY_FIELDS",
     "PROJECT_IDENTITY_FIELDS",
+    "PROJECT_IDENTITY_SENTINELS",
     "durable_project_id_from_context",
     "project_context_identity",
     "project_identity_field_value",

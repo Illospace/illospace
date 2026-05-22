@@ -61,6 +61,15 @@ def test_project_root_key_prefers_picker_profile_identity_over_slug_key():
     }) == "fec2d533-e4a0-40e7-9055-b5b619e91ab6"
 
 
+def test_project_root_key_ignores_current_thread_project_picker_sentinel():
+    from brain.systems.cortex.project_context.project_root import project_key_from_context
+
+    assert project_key_from_context({
+        "name": "test empty project",
+        "selected_profile_id": "current-thread-project",
+    }) == "test-empty-project"
+
+
 def test_project_root_key_uses_top_level_context_id():
     from brain.systems.cortex.project_context.project_root import project_key_from_context
 
@@ -1460,6 +1469,68 @@ async def test_materialize_empty_saved_project_reports_non_empty_after_root_publ
     assert root_resource["materialization"]["root_empty"] is False
     assert root_resource["materialization"]["root_file_count"] == 1
     assert (draft_dir / "analysis" / "summary.md").read_text(encoding="utf-8") == "published"
+
+
+async def test_materialize_saved_project_adopts_existing_slug_root(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    profile_id = "profile-stable"
+    slug_root = tmp_path / "project-roots" / "test-empty-project"
+    slug_root.mkdir(parents=True)
+    (slug_root / "analysis").mkdir()
+    (slug_root / "unified_payments.csv").write_text("full csv", encoding="utf-8")
+    (slug_root / "analysis" / "summary.md").write_text("published", encoding="utf-8")
+
+    run = SimpleNamespace(
+        id=75,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={},
+        target_ref={
+            "kind": "cortex_idea",
+            "project_context_snapshot": {
+                "status": "validated",
+                "name": "test empty project",
+                "slug": "test-empty-project",
+                "project_id": profile_id,
+                "project_key": profile_id,
+                "resources": [],
+            },
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+
+    result = await materialize_project_context_workspaces(
+        75,
+        workspace_root=str(tmp_path / "ideas" / "thread-adopt"),
+        user_id="user-1",
+    )
+
+    canonical_root = tmp_path / "project-roots" / profile_id
+    draft_dir = tmp_path / "ideas" / "thread-adopt" / ".illo-project-context" / "local" / profile_id / "project-root"
+    root_resource = run.target_ref["project_context_snapshot"]["resources"][0]
+    assert result.ok
+    assert result.empty_project is False
+    assert (canonical_root / "unified_payments.csv").read_text(encoding="utf-8") == "full csv"
+    assert (canonical_root / "analysis" / "summary.md").read_text(encoding="utf-8") == "published"
+    assert (draft_dir / "unified_payments.csv").read_text(encoding="utf-8") == "full csv"
+    assert root_resource["materialization"]["adopted_from_root"] == str(slug_root)
 
 
 async def test_materialize_thread_draft_marks_conflict_when_root_and_draft_changed(tmp_path, monkeypatch):
