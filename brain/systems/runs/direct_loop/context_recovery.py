@@ -13,6 +13,7 @@ _CONTEXT_OVERFLOW_PATTERNS = (
     re.compile(r"input is too long", re.IGNORECASE),
     re.compile(r"request too large", re.IGNORECASE),
     re.compile(r"prompt is too long", re.IGNORECASE),
+    re.compile(r"instructions.*string too long", re.IGNORECASE),
     re.compile(r"token limit", re.IGNORECASE),
     re.compile(r"exceeds? the model", re.IGNORECASE),
 )
@@ -75,4 +76,3 @@ def context_overflow_payload(exc: Exception, *, provider_name: str | None = None
         "request_id": headers.get("x-request-id") or headers.get("request-id"),
         "message": text[:1_000],
     }
-
