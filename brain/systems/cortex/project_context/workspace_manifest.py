@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 import posixpath
 
-from brain.systems.cortex.project_context.identity import PROJECT_IDENTITY_FIELDS
+from brain.systems.cortex.project_context.identity import PROJECT_IDENTITY_FIELDS, project_identity_field_value
 from brain.systems.cortex.project_context.resources import ProjectResource
 
 
@@ -39,7 +39,7 @@ def _safe_segment(value: Any, *, fallback: str) -> str:
 def _project_key_from_context(project_context: Mapping[str, Any] | None) -> str | None:
     context = project_context if isinstance(project_context, Mapping) else {}
     for key in PROJECT_KEY_FIELDS:
-        value = _clean_text(context.get(key))
+        value = project_identity_field_value(context, key)
         if value:
             return _safe_segment(value, fallback="project")
     return None

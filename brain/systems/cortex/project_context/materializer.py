@@ -16,18 +16,19 @@ from brain.platform.db.models.run import AgentRun
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.project_context.github import parse_github_repo_slug
 from brain.systems.cortex.project_context.drafts import load_draft_metadata, sync_draft_from_root
+from brain.systems.cortex.project_context.identity import durable_project_id_from_context
 from brain.systems.cortex.project_context.permissions import derive_project_permission_scope
-from brain.systems.cortex.project_context.project_root import (
-    PROJECT_ROOT_MOUNT_PATH,
-    PROJECT_ROOT_RESOURCE_ID,
-    PROJECT_ROOT_RESOURCE_KIND,
-    ProjectRootImportCandidate,
-    directory_import_candidates,
-    import_candidates_into_project_root,
-    project_draft_root_path,
-    project_key_from_context,
-    project_root_path,
-    safe_project_relative_path,
+from brain.systems.cortex.project_context.project_root import is_synthetic_project_root_resource, project_key_from_context
+from brain.systems.cortex.project_context.resource_imports import (
+    backend_readable_resource_path,
+    path_is_relative_to,
+    runtime_workspace_path,
+    should_use_existing_resource_path,
+)
+from brain.systems.cortex.project_context.root_materializer import materialize_project_native_root
+from brain.systems.cortex.project_context.runtime_context import (
+    PROJECT_RUNTIME_CONTEXT_KEY,
+    build_project_runtime_context,
 )
 from brain.systems.cortex.project_context.snapshot import snapshot_from_project_context
 from brain.systems.cortex.project_context.workspace_manifest import (
@@ -261,31 +262,6 @@ def _git_output(cwd: Path, *args: str) -> str | None:
         return None
 
 
-def _path_is_relative_to(path: Path, parent: Path) -> bool:
-    try:
-        path.expanduser().resolve().relative_to(parent.expanduser().resolve())
-        return True
-    except Exception:
-        return False
-
-
-def _is_managed_project_context_path(path: Path) -> bool:
-    return ".illo-project-context" in path.expanduser().parts
-
-
-def _should_use_existing_resource_path(existing_path: str | None, workspace_root: Path) -> Path | None:
-    if not existing_path:
-        return None
-    path = Path(existing_path).expanduser()
-    if not path.exists():
-        return None
-    if _path_is_relative_to(path, workspace_root):
-        return path
-    if _is_managed_project_context_path(path):
-        return None
-    return path
-
-
 def _existing_git_checkout(destination: Path, slug: str, branch: str | None) -> dict[str, str] | None:
     """Return metadata for an existing checkout without mutating local state."""
 
@@ -421,7 +397,7 @@ def _repo_workspace_path(resource: dict[str, Any], repo_path: Path) -> tuple[Pat
     if not subpath:
         return repo_path, None
     workspace_path = (repo_path / subpath).expanduser()
-    if not _path_is_relative_to(workspace_path, repo_path):
+    if not path_is_relative_to(workspace_path, repo_path):
         return None, f"GitHub Project subpath escapes repository root: {subpath}"
     if not workspace_path.exists():
         return None, f"GitHub Project subpath does not exist in {resource.get('repo') or repo_path.name}: {subpath}"
@@ -513,10 +489,6 @@ def _rewrite_scope_paths_to_draft(resource: dict[str, Any], source_path: Path, d
                 nested[path_key] = rewrite_list(nested.get(path_key))
 
 
-def _runtime_workspace_path(path: Path) -> Path:
-    return path if path.is_dir() else path.parent
-
-
 def _sync_resource_to_draft(source_path: Path, draft_path: Path) -> dict[str, list[str]]:
     draft_workspace_path = draft_path.parent if source_path.is_file() else draft_path
     had_base_manifest = bool(load_draft_metadata(draft_workspace_path).get("base_manifest"))
@@ -531,203 +503,14 @@ def _sync_resource_to_draft(source_path: Path, draft_path: Path) -> dict[str, li
     }
 
 
-def _path_texts_from_uploaded_files(resource: dict[str, Any]) -> list[str]:
-    paths: list[str] = []
-    uploaded_files = resource.get("uploaded_files")
-    if not isinstance(uploaded_files, list):
-        return paths
-    for item in uploaded_files:
-        if not isinstance(item, dict):
-            continue
-        value = _clean_text(item.get("storage_path") or item.get("path") or item.get("local_path"))
-        if value:
-            paths.append(value)
-    return paths
-
-
-def _path_texts_from_resource_scope(resource: dict[str, Any]) -> list[str]:
-    paths: list[str] = []
-    for key in ("allowed_paths", "files", "folders"):
-        values = resource.get(key)
-        if not isinstance(values, list):
-            continue
-        for item in values:
-            value = _clean_text(item)
-            if value:
-                paths.append(value)
-    return paths
-
-
-def _resource_id(resource: dict[str, Any]) -> str | None:
-    return _clean_text(resource.get("id") or resource.get("name") or resource.get("label"))
-
-
 def _is_project_root_resource(resource: dict[str, Any]) -> bool:
-    return (
-        _resource_kind(resource) == PROJECT_ROOT_RESOURCE_KIND
-        or _clean_text(resource.get("id")) == PROJECT_ROOT_RESOURCE_ID
-        or _clean_text(resource.get("mount_path")) == PROJECT_ROOT_MOUNT_PATH
-    )
+    return is_synthetic_project_root_resource(resource)
 
 
 def _is_project_native_seed_resource(resource: dict[str, Any]) -> bool:
     if _is_project_root_resource(resource) or _github_slug_from_resource(resource):
         return False
     return _resource_kind(resource) in _LOCAL_FIRST_RESOURCE_KINDS
-
-
-def _uploaded_file_import_candidates(
-    resource: dict[str, Any],
-    *,
-    workspace_root: Path,
-) -> list[ProjectRootImportCandidate]:
-    uploaded_files = resource.get("uploaded_files")
-    if not isinstance(uploaded_files, list):
-        return []
-
-    candidates: list[ProjectRootImportCandidate] = []
-    resource_id = _resource_id(resource)
-    for item in uploaded_files:
-        if not isinstance(item, dict):
-            continue
-        source = _should_use_existing_resource_path(
-            _clean_text(item.get("storage_path") or item.get("path") or item.get("local_path")),
-            workspace_root,
-        )
-        if not source or not source.is_file():
-            continue
-        relative_path = safe_project_relative_path(
-            item.get("relative_path") or item.get("filename") or item.get("name") or source.name,
-            fallback=source.name,
-        )
-        if relative_path:
-            candidates.append(ProjectRootImportCandidate(source, relative_path, resource_id=resource_id))
-    return candidates
-
-
-def _direct_path_import_candidates(
-    resource: dict[str, Any],
-    *,
-    workspace_root: Path,
-) -> list[ProjectRootImportCandidate]:
-    source, checked = _backend_readable_resource_path(resource, workspace_root=workspace_root)
-    if not source or not checked:
-        return []
-    resource_id = _resource_id(resource)
-    if source.is_file():
-        relative_path = safe_project_relative_path(
-            resource.get("relative_path") or resource.get("name") or resource.get("label") or source.name,
-            fallback=source.name,
-        )
-        return [ProjectRootImportCandidate(source, relative_path, resource_id=resource_id)] if relative_path else []
-    return directory_import_candidates(source, resource_id=resource_id)
-
-
-def _project_native_import_candidates(
-    resource: dict[str, Any],
-    *,
-    workspace_root: Path,
-) -> list[ProjectRootImportCandidate]:
-    if not _is_project_native_seed_resource(resource):
-        return []
-    uploaded = _uploaded_file_import_candidates(resource, workspace_root=workspace_root)
-    if uploaded:
-        return uploaded
-    return _direct_path_import_candidates(resource, workspace_root=workspace_root)
-
-
-def _common_runtime_workspace_path(paths: list[Path]) -> Path | None:
-    if not paths:
-        return None
-    workspace_paths = [_runtime_workspace_path(path).resolve() for path in paths]
-    try:
-        common = Path(os.path.commonpath([str(path) for path in workspace_paths]))
-    except ValueError:
-        return None
-    return common if common.exists() else None
-
-
-def _backend_readable_resource_path(
-    resource: dict[str, Any],
-    *,
-    workspace_root: Path,
-) -> tuple[Path | None, bool]:
-    for key in ("path", "local_path", "storage_path"):
-        value = _clean_text(resource.get(key))
-        existing_path = _should_use_existing_resource_path(value, workspace_root)
-        if existing_path:
-            return existing_path, True
-
-    scoped_paths: list[Path] = []
-    path_texts = [*_path_texts_from_uploaded_files(resource), *_path_texts_from_resource_scope(resource)]
-    for value in path_texts:
-        existing_path = _should_use_existing_resource_path(value, workspace_root)
-        if existing_path:
-            scoped_paths.append(existing_path)
-
-    common_path = _common_runtime_workspace_path(scoped_paths)
-    if common_path:
-        return common_path, True
-    return None, bool(path_texts)
-
-
-def _materialize_project_native_root(
-    project_context: dict[str, Any],
-    resources: list[dict[str, Any]],
-    *,
-    workspace_root: Path,
-    run_id: int | None,
-) -> tuple[dict[str, Any], dict[str, str]]:
-    project_key = project_key_from_context(
-        project_context,
-        resources=resources,
-        fallback=f"run-{run_id}" if run_id else None,
-    )
-    source_root = project_root_path(workspace_root, project_key)
-    source_root.mkdir(parents=True, exist_ok=True)
-
-    import_candidates: list[ProjectRootImportCandidate] = []
-    for resource in resources:
-        import_candidates.extend(_project_native_import_candidates(resource, workspace_root=workspace_root))
-    import_summary = import_candidates_into_project_root(source_root, import_candidates)
-
-    draft_root = project_draft_root_path(workspace_root, project_key)
-    had_base_manifest = bool(load_draft_metadata(draft_root).get("base_manifest"))
-    sync_result = sync_draft_from_root(source_root, draft_root)
-    draft_status = {
-        "updated_from_root": sync_result.copied,
-        "removed_from_root": sync_result.removed,
-        "conflicts": sync_result.conflicts,
-        "out_of_date": sync_result.out_of_date,
-    } if had_base_manifest else {}
-
-    materialization: dict[str, Any] = {
-        "status": "ready",
-        "provider": "project_native",
-        "kind": PROJECT_ROOT_RESOURCE_KIND,
-        "path": str(draft_root),
-        "workspace_path": str(draft_root),
-        "source_path": str(source_root),
-        "draft": True,
-        "project_key": project_key,
-    }
-    if any(import_summary.values()):
-        materialization["imports"] = import_summary
-    if draft_status and any(draft_status.values()):
-        materialization["draft_status"] = draft_status
-
-    resource = {
-        "id": PROJECT_ROOT_RESOURCE_ID,
-        "kind": PROJECT_ROOT_RESOURCE_KIND,
-        "name": "Project root",
-        "label": "Project root",
-        "mount_path": PROJECT_ROOT_MOUNT_PATH,
-        "path": str(draft_root),
-        "workspace_path": str(draft_root),
-        "source_path": str(source_root),
-        "materialization": materialization,
-    }
-    return resource, _workspace_entry_from_resource(resource, draft_root)
 
 
 def _materialize_backend_readable_resource(
@@ -737,17 +520,17 @@ def _materialize_backend_readable_resource(
     project_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str] | None, str | None, bool]:
     materialization = resource.get("materialization") if isinstance(resource.get("materialization"), dict) else {}
-    previous_source = _should_use_existing_resource_path(_clean_text(materialization.get("source_path")), workspace_root)
-    previous_draft = _should_use_existing_resource_path(
+    previous_source = should_use_existing_resource_path(_clean_text(materialization.get("source_path")), workspace_root)
+    previous_draft = should_use_existing_resource_path(
         _clean_text(resource.get("path") or materialization.get("path")),
         workspace_root,
     )
-    if previous_source and previous_draft and _path_is_relative_to(previous_draft, workspace_root):
+    if previous_source and previous_draft and path_is_relative_to(previous_draft, workspace_root):
         existing_path = previous_draft
         source_path = previous_source
         checked = True
     else:
-        existing_path, checked = _backend_readable_resource_path(resource, workspace_root=workspace_root)
+        existing_path, checked = backend_readable_resource_path(resource, workspace_root=workspace_root)
         source_path = existing_path
     if not existing_path:
         return None, None, checked
@@ -757,7 +540,7 @@ def _materialize_backend_readable_resource(
     draft = False
     draft_status: dict[str, list[str]] | None = None
     draft_identity: ThreadDraftIdentity | None = None
-    if not _path_is_relative_to(existing_path, workspace_root):
+    if not path_is_relative_to(existing_path, workspace_root):
         draft_identity = ThreadDraftIdentity.from_project_resource(
             {**resource, "path": str(existing_path)},
             thread_workspace_root=workspace_root,
@@ -796,7 +579,7 @@ def _materialize_backend_readable_resource(
         draft = True
         _rewrite_scope_paths_to_draft(resource, source_path, existing_path)
 
-    workspace_path = _runtime_workspace_path(existing_path)
+    workspace_path = runtime_workspace_path(existing_path)
     kind = _resource_kind(resource)
     resource["path"] = str(existing_path)
     materialization = {
@@ -842,8 +625,8 @@ async def _materialize_resource(
             project_context=project_context,
         )
         return workspace, error
-    existing_path = _should_use_existing_resource_path(_clean_text(resource.get("path")), workspace_root)
-    if existing_path and _path_is_relative_to(existing_path, workspace_root):
+    existing_path = should_use_existing_resource_path(_clean_text(resource.get("path")), workspace_root)
+    if existing_path and path_is_relative_to(existing_path, workspace_root):
         return _workspace_entry_from_resource(resource, existing_path), None
 
     destination = _safe_repo_destination(workspace_root, slug)
@@ -958,6 +741,47 @@ def _snapshot_from_run(run: Any) -> dict[str, Any] | None:
     return None
 
 
+def _identity_sources_from_run(
+    *,
+    snapshot: dict[str, Any],
+    target_payload: dict[str, Any],
+    workspace_payload: dict[str, Any],
+    metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = [snapshot, target_payload, workspace_payload]
+    for payload in (target_payload, workspace_payload, metadata):
+        for key in ("project_context", "project_context_snapshot"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                sources.append(value)
+    return sources
+
+
+def _stamp_materialization_identity(
+    snapshot: dict[str, Any],
+    *,
+    target_payload: dict[str, Any],
+    workspace_payload: dict[str, Any],
+    metadata: dict[str, Any],
+    resources: list[dict[str, Any]],
+    fallback: str,
+) -> str:
+    for source in _identity_sources_from_run(
+        snapshot=snapshot,
+        target_payload=target_payload,
+        workspace_payload=workspace_payload,
+        metadata=metadata,
+    ):
+        durable_project_id = durable_project_id_from_context(source)
+        if durable_project_id:
+            snapshot["project_id"] = durable_project_id
+            snapshot["project_key"] = durable_project_id
+            return durable_project_id
+    project_key = project_key_from_context(snapshot, resources=resources, fallback=fallback)
+    snapshot["project_key"] = project_key
+    return project_key
+
+
 async def materialize_project_context_workspaces(
     run_id: int | None,
     *,
@@ -979,30 +803,41 @@ async def materialize_project_context_workspaces(
         if not run:
             return result.fail(f"Agent run {run_id} was not found.")
         metadata = dict(getattr(run, "metadata_", None) or {})
+        target_payload = _run_target_payload(run)
+        workspace_payload = _run_workspace_payload(run)
         snapshot = _snapshot_from_run(run)
         if not isinstance(snapshot, dict):
             return result.fail("Project Context snapshot is missing.")
         snapshot = dict(snapshot)
         resources = [dict(item) for item in snapshot.get("resources") or [] if isinstance(item, dict)]
-        result.empty_project = not resources
-        snapshot.setdefault(
-            "project_key",
-            project_key_from_context(snapshot, resources=resources, fallback=f"run-{run_id}"),
+        _stamp_materialization_identity(
+            snapshot,
+            target_payload=target_payload,
+            workspace_payload=workspace_payload,
+            metadata=metadata,
+            resources=resources,
+            fallback=f"run-{run_id}",
         )
         user_id = user_id or (str(run.user_id) if getattr(run, "user_id", None) else None)
         org_id = org_id or _clean_text(getattr(run, "org_id", None)) or _clean_text(metadata.get("org_id"))
 
     materialized_resources: list[dict[str, Any]] = []
     workspaces: list[dict[str, str]] = []
-    root_resource, root_workspace = _materialize_project_native_root(
+    root_resource, root_workspace = materialize_project_native_root(
         snapshot,
         resources,
         workspace_root=root,
         run_id=run_id,
+        actor_id=user_id,
+        org_id=org_id,
+        is_project_native_seed=_is_project_native_seed_resource,
+        workspace_entry_from_resource=_workspace_entry_from_resource,
     )
     materialized_resources.append(root_resource)
     workspaces.append(root_workspace)
     result.resources_checked += 1
+    root_materialization = root_resource.get("materialization") if isinstance(root_resource.get("materialization"), dict) else {}
+    result.empty_project = bool(root_materialization.get("root_empty", True))
 
     for resource in resources:
         if _is_project_root_resource(resource):
@@ -1032,6 +867,7 @@ async def materialize_project_context_workspaces(
         thread_workspace_root=root,
     )
     workspace_manifest_payload = workspace_manifest.to_dict()
+    snapshot["project_workspace_manifest"] = workspace_manifest_payload
     result.workspaces = workspaces
     status = "materialized" if not result.errors else "failed"
     project_context_materialization = {
@@ -1040,6 +876,11 @@ async def materialize_project_context_workspaces(
         "workspace_manifest": workspace_manifest_payload,
         "errors": result.errors[:10],
         "empty_project": result.empty_project,
+        "seed_resource_count": len(resources),
+        "project_root_path_count": int(root_materialization.get("root_path_count") or 0),
+        "project_root_file_count": int(root_materialization.get("root_file_count") or 0),
+        "project_draft_path_count": int(root_materialization.get("draft_path_count") or 0),
+        "project_draft_file_count": int(root_materialization.get("draft_file_count") or 0),
     }
     snapshot["permission_scope"] = derive_project_permission_scope(snapshot)
     if result.errors:
@@ -1055,9 +896,16 @@ async def materialize_project_context_workspaces(
         current_target_payload = _run_target_payload(run)
         current_workspace_payload = _run_workspace_payload(run)
         permission_scope = derive_project_permission_scope(snapshot)
+        project_runtime_context = build_project_runtime_context(
+            snapshot=snapshot,
+            permission_scope=permission_scope,
+            workspace_manifest=workspace_manifest_payload,
+            materialization=project_context_materialization,
+        )
 
         current_target_payload["project_context_snapshot"] = snapshot
         current_target_payload["project_context_permission_scope"] = permission_scope
+        current_workspace_payload[PROJECT_RUNTIME_CONTEXT_KEY] = project_runtime_context
         current_workspace_payload["project_context_snapshot"] = snapshot
         current_workspace_payload["project_context_permission_scope"] = permission_scope
         current_workspace_payload["project_workspace_manifest"] = workspace_manifest_payload

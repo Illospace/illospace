@@ -15,7 +15,7 @@ def _project_run(run_id: int, project_root: Path, *, project_id: str = "profile-
         target_ref={
             "kind": "cortex_idea",
             "project_context_snapshot": {
-                "id": project_id,
+                "project_id": project_id,
                 "status": "validated",
                 "resources": [
                     {
