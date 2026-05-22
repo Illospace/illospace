@@ -32,14 +32,8 @@ import json
 import logging
 import os
 import sys
-import uuid
-from datetime import datetime, timezone
-from typing import Any
-from urllib.parse import urlencode
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
-
-from sqlalchemy import text
 
 from brain.app.mcp.tools.common import (
     json_safe as _json_safe,
@@ -48,17 +42,29 @@ from brain.app.mcp.tools.common import (
     session_flush as _session_flush,
 )
 from brain.app.mcp.tools.encode import brain_encode_tool
+from brain.app.mcp.tools.guardrails import brain_guardrails_tool
 from brain.app.mcp.tools.recall import (
     add_attribution as _add_attribution,
     brain_recall_tool,
     finalize_recall_response as _finalize_recall_response_impl,
     log_retrieval as _async_log_retrieval_impl,
 )
+from brain.app.mcp.tools.runtime import runtime_settings_tool
 from brain.app.mcp.tools.skills import (
     SKILL_VIEW_SECTIONS,
     brain_skills_tool,
     skill_asset_tool,
     skill_view_tool,
+)
+from brain.app.mcp.tools.vault import (
+    VAULT_PROMPT_CATEGORIES as _VAULT_PROMPT_CATEGORIES,
+    brain_vault_tool,
+    clean_vault_prompt_text as _clean_vault_prompt_text,
+    normalize_vault_key_name as _normalize_vault_key_name,
+    safe_vault_secret_summary as _safe_vault_secret_summary,
+    vault_inventory_tool,
+    vault_prompt_url as _vault_prompt_url,
+    vault_secret_prompt_tool,
 )
 from brain.systems.memory.attention_controller import AttentionController, observe_retrieval
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
@@ -142,55 +148,12 @@ async def _finalize_recall_response(
 
 async def async_tool_brain_guardrails(skill: str | None = None) -> dict:
     """Get guardrails: recent failures, high-salience warnings, and skill-specific pitfalls."""
-    result = {"guardrails": [], "warnings": [], "pitfalls": []}
-
-    async with UnitOfWork() as uow:
-        # Recent failures (last 7 days)
-        rows_result = await _session_execute(uow.session, text("""
-            SELECT s.name, se.outcome_details, se.error_analysis, se.started_at
-            FROM skill_executions se
-            JOIN skills s ON s.id = se.skill_id
-            WHERE se.outcome = 'failure'
-              AND se.started_at > NOW() - INTERVAL '7 days'
-            ORDER BY se.started_at DESC
-            LIMIT 5
-        """))
-        rows = rows_result.mappings().all()
-        for row in rows:
-            result["guardrails"].append({
-                "skill": row["name"],
-                "failure": (row["error_analysis"] or row["outcome_details"] or "Unknown")[:200],
-                "when": str(row["started_at"]),
-            })
-
-        # High-salience warnings (lessons with salience >= 9)
-        if skill:
-            from brain.systems.memory.embedding_service import EmbeddingService
-
-            embedding_service = await EmbeddingService.from_session(uow.session)
-            skill_emb = embedding_service.query(skill)
-            result["warnings"].extend(
-                await _maybe_await(uow.memories.high_salience_warnings_for_skill(skill_embedding=skill_emb))
-            )
-
-        # Skill-specific pitfalls
-        if skill:
-            from brain.platform.db.models.skill import Skill as SkillModel
-            from sqlalchemy import select, or_
-            stmt = select(SkillModel.pitfalls).where(
-                SkillModel.name == skill,
-                or_(SkillModel.archived == False, SkillModel.archived.is_(None)),  # noqa: E712
-            )
-            row_result = await _session_execute(uow.session, stmt)
-            row = row_result.scalar()
-            if row:
-                pitfalls = row if isinstance(row, list) else json.loads(row)
-                result["pitfalls"] = [
-                    {"text": p["text"][:200], "severity": p.get("severity", "medium")}
-                    for p in pitfalls[-5:]  # latest 5
-                ]
-
-    return result
+    return await brain_guardrails_tool(
+        skill,
+        unit_of_work_cls=UnitOfWork,
+        maybe_await=_maybe_await,
+        session_execute=_session_execute,
+    )
 
 
 async def async_tool_brain_skills(task: str) -> dict:
@@ -286,125 +249,19 @@ async def tool_brain_vault(
     target_registry_id: int | None = None,
 ) -> dict:
     """Retrieve a secret from the vault."""
-    from brain.systems.cortex.events import publish_safe
-    from brain.systems.vault import authorize_agent_secret_read, get_secret
-    if not user_id:
-        return {"error": "Vault access requires an authenticated user context"}
-    target_user_id = str(user_id).strip()
-    if not target_user_id:
-        return {"error": "Vault access requires an authenticated user context"}
-    authorization = await authorize_agent_secret_read(
+    return await brain_vault_tool(
         key,
-        actor_user_id=target_user_id,
+        reason=reason,
+        user_id=user_id,
         org_id=org_id,
         run_id=run_id,
-        reason=reason,
+        idea_id=idea_id,
         requested_by=requested_by,
         project_slug=project_slug,
         project_slugs=project_slugs,
         target_registry_id=target_registry_id,
+        json_safe=_json_safe,
     )
-    if not authorization.get("allowed"):
-        grant = _json_safe(authorization.get("grant") or {})
-        grant_user_id = str(grant.get("requested_by_user_id") or target_user_id).strip() or target_user_id
-        if authorization.get("status") == "pending":
-            normalized_idea_id = (str(idea_id).strip() if idea_id else "") or None
-            prompt = None
-            if normalized_idea_id:
-                prompt = {
-                    "id": f"vault-grant-{grant.get('id') or run_id or 'thread'}",
-                    "idea_id": normalized_idea_id,
-                    "org_id": org_id,
-                    "target_user_id": grant_user_id,
-                    "run_id": grant.get("run_id") or run_id,
-                    "grant_id": grant.get("id"),
-                    "key_name": grant.get("key_name") or key,
-                    "requested_by": grant.get("requested_by") or requested_by,
-                    "reason": grant.get("reason") or reason,
-                    "requested_at": grant.get("requested_at"),
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-                publish_safe("vault_agent_grant_prompt", {
-                    "idea_id": normalized_idea_id,
-                    "org_id": org_id,
-                    "target_user_id": grant_user_id,
-                    "run_id": grant.get("run_id") or run_id,
-                    "grant": grant,
-                    "prompt": prompt,
-                })
-            response = {
-                "error": "Vault grant required before this agent can read the secret",
-                "grant_id": grant.get("id"),
-                "key_name": grant.get("key_name") or key,
-                "reason": grant.get("reason") or reason,
-                "requested_by": grant.get("requested_by") or requested_by,
-                "run_id": grant.get("run_id") or run_id,
-                "status": "pending",
-                "target_user_id": grant_user_id,
-            }
-            if prompt:
-                response["prompt"] = prompt
-            return response
-        return {"error": authorization.get("reason") or "Vault grant denied"}
-    value = await get_secret(
-        key,
-        actor_user_id=target_user_id,
-        org_id=org_id,
-        accessed_by="agent",
-    )
-    if value is None:
-        return {"error": f"Secret '{key}' not found in vault"}
-    return {"key": key, "value": value}
-
-
-_VAULT_PROMPT_CATEGORIES = {
-    "general",
-    "api",
-    "aws",
-    "auth",
-    "analytics",
-    "database",
-    "messaging",
-    "monitoring",
-    "payments",
-    "service",
-}
-
-
-def _clean_vault_prompt_text(value: str | None, *, max_chars: int = 240) -> str:
-    text = " ".join(str(value or "").split())
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 1].rstrip() + "..."
-
-
-def _normalize_vault_key_name(key_name: str) -> str:
-    cleaned = str(key_name or "").strip()
-    if not cleaned:
-        raise ValueError("key_name is required")
-    return cleaned.upper()
-
-
-def _safe_vault_secret_summary(secret: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "key_name": str(secret.get("key_name") or ""),
-        "description": str(secret.get("description") or ""),
-        "category": str(secret.get("category") or "general"),
-        "agent_access_level": str(secret.get("agent_access_level") or "ask"),
-    }
-
-
-def _vault_prompt_url(
-    *,
-    key_name: str,
-    description: str,
-    category: str,
-) -> str:
-    return "/vault?" + urlencode({
-        "add_secret": key_name,
-        "description": description,
-        "category": category,
-    })
 
 
 async def tool_vault_inventory(
@@ -414,41 +271,12 @@ async def tool_vault_inventory(
     org_id: str | None = None,
 ) -> dict:
     """List safe Vault metadata so the agent can choose an existing key."""
-    from brain.systems.vault import async_list_secrets
-
-    if not user_id:
-        return {"error": "Vault inventory requires an authenticated user context"}
-    normalized_user_id = str(user_id).strip()
-    if not normalized_user_id:
-        return {"error": "Vault inventory requires an authenticated user context"}
-    normalized_org_id = (str(org_id).strip() if org_id else "") or None
-    normalized_category = str(category or "").strip().lower() or None
-    normalized_access_level = str(access_level or "").strip().lower() or None
-
-    secrets = [
-        _safe_vault_secret_summary(secret)
-        for secret in await async_list_secrets(
-            actor_user_id=normalized_user_id,
-            org_id=normalized_org_id,
-            category=normalized_category,
-        )
-    ]
-    if normalized_access_level:
-        secrets = [
-            secret
-            for secret in secrets
-            if secret["agent_access_level"].strip().lower() == normalized_access_level
-        ]
-    secrets.sort(key=lambda secret: (secret["category"], secret["key_name"]))
-    return {
-        "secrets": secrets,
-        "count": len(secrets),
-        "metadata_only": True,
-        "guidance": (
-            "Use these names/descriptions/categories to decide which exact key to request with brain_vault. "
-            "If no suitable key exists, ask the user or call vault_secret_prompt."
-        ),
-    }
+    return await vault_inventory_tool(
+        category=category,
+        access_level=access_level,
+        user_id=user_id,
+        org_id=org_id,
+    )
 
 
 async def tool_vault_secret_prompt(
@@ -463,78 +291,17 @@ async def tool_vault_secret_prompt(
     requested_by: str = "agent",
 ) -> dict:
     """Open a guided Vault form for a user-supplied secret value."""
-    from brain.systems.cortex.events import publish_safe
-    from brain.systems.vault import record_missing_request
-
-    if not user_id:
-        return {"error": "Vault secret prompts require an authenticated user context"}
-
-    normalized_user_id = str(user_id).strip()
-    if not normalized_user_id:
-        return {"error": "Vault secret prompts require an authenticated user context"}
-    normalized_org_id = (str(org_id).strip() if org_id else "") or None
-    normalized_idea_id = (str(idea_id).strip() if idea_id else "") or None
-
-    try:
-        normalized_key = _normalize_vault_key_name(key_name)
-    except ValueError as exc:
-        return {"error": str(exc)}
-
-    normalized_category = str(category or "api").strip().lower() or "api"
-    if normalized_category not in _VAULT_PROMPT_CATEGORIES:
-        normalized_category = "general"
-    clean_description = _clean_vault_prompt_text(
-        description or f"Credential requested by Illo for {normalized_key}.",
+    return await vault_secret_prompt_tool(
+        key_name,
+        description=description,
+        category=category,
+        reason=reason,
+        user_id=user_id,
+        org_id=org_id,
+        run_id=run_id,
+        idea_id=idea_id,
+        requested_by=requested_by,
     )
-    clean_reason = _clean_vault_prompt_text(reason or clean_description, max_chars=360)
-    clean_requested_by = _clean_vault_prompt_text(requested_by or "agent", max_chars=80) or "agent"
-
-    prompt = {
-        "id": f"vault-secret-{run_id or 'thread'}-{uuid.uuid4().hex[:10]}",
-        "idea_id": normalized_idea_id,
-        "org_id": normalized_org_id,
-        "run_id": run_id,
-        "key_name": normalized_key,
-        "description": clean_description,
-        "category": normalized_category,
-        "reason": clean_reason,
-        "requested_by": clean_requested_by,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    await record_missing_request(normalized_key, actor_user_id=normalized_user_id, org_id=normalized_org_id)
-
-    if normalized_idea_id:
-        publish_safe("vault_secret_prompt", {
-            "idea_id": normalized_idea_id,
-            "org_id": normalized_org_id,
-            "run_id": run_id,
-            "prompt": prompt,
-            "key_name": normalized_key,
-            "description": clean_description,
-            "category": normalized_category,
-            "reason": clean_reason,
-            "requested_by": clean_requested_by,
-        })
-
-    response = {
-        "prompted": bool(normalized_idea_id),
-        "status": "opened" if normalized_idea_id else "recorded",
-        "key_name": normalized_key,
-        "description": clean_description,
-        "category": normalized_category,
-        "prompt": prompt,
-        "vault_url": _vault_prompt_url(
-            key_name=normalized_key,
-            description=clean_description,
-            category=normalized_category,
-        ),
-    }
-    if not normalized_idea_id:
-        response["warning"] = (
-            "No current Cortex thread was bound, so the missing key was recorded for Vault."
-        )
-    return response
 
 
 async def tool_runtime_settings(
@@ -543,15 +310,12 @@ async def tool_runtime_settings(
     org_id: str | None = None,
 ) -> dict:
     """Inspect active runtime/provider/auth settings for the current user."""
-    from brain.systems.services.runtime_introspection import async_get_runtime_settings_snapshot
-
-    async with UnitOfWork() as uow:
-        return await async_get_runtime_settings_snapshot(
-            uow.session,
-            user_id=user_id,
-            org_id=org_id,
-            provider=provider,
-        )
+    return await runtime_settings_tool(
+        provider=provider,
+        user_id=user_id,
+        org_id=org_id,
+        unit_of_work_cls=UnitOfWork,
+    )
 
 
 # ── MCP Protocol Layer ───────────────────────────────────────
