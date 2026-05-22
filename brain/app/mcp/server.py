@@ -28,199 +28,61 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import inspect
 import json
 import logging
 import os
 import sys
-import uuid
-from datetime import datetime, timezone
-from pathlib import PurePosixPath, PureWindowsPath
-from typing import Any
-from urllib.parse import urlencode
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), *([".."] * 3))))
 
-from sqlalchemy import text
-
+from brain.app.mcp.tools.common import (
+    json_safe as _json_safe,
+    maybe_await as _maybe_await,
+    session_execute as _session_execute,
+    session_flush as _session_flush,
+)
+from brain.app.mcp.tools.encode import brain_encode_tool
+from brain.app.mcp.tools.guardrails import brain_guardrails_tool
+from brain.app.mcp.tools.recall import (
+    add_attribution as _add_attribution,
+    brain_recall_tool,
+    finalize_recall_response as _finalize_recall_response_impl,
+    log_retrieval as _async_log_retrieval_impl,
+)
+from brain.app.mcp.tools.runtime import runtime_settings_tool
+from brain.app.mcp.tools.skills import (
+    SKILL_VIEW_SECTIONS,
+    brain_skills_tool,
+    skill_asset_tool,
+    skill_view_tool,
+)
+from brain.app.mcp.tools.vault import (
+    VAULT_PROMPT_CATEGORIES as _VAULT_PROMPT_CATEGORIES,
+    brain_vault_tool,
+    clean_vault_prompt_text as _clean_vault_prompt_text,
+    normalize_vault_key_name as _normalize_vault_key_name,
+    safe_vault_secret_summary as _safe_vault_secret_summary,
+    vault_inventory_tool,
+    vault_prompt_url as _vault_prompt_url,
+    vault_secret_prompt_tool,
+)
 from brain.systems.memory.attention_controller import AttentionController, observe_retrieval
-from brain.platform.db.repositories.memories import MemoryRepository
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.db.repositories.memory_write_context import MemoryWriteContext
 from brain.platform.db.repositories.memory_visibility import MemoryVisibilityContext
-from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_model_tier
 
 logger = logging.getLogger("mcp_brain")
 
-async def _maybe_await(value: Any) -> Any:
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
-async def _session_execute(session: Any, *args: Any, **kwargs: Any) -> Any:
-    return await _maybe_await(session.execute(*args, **kwargs))
-
-
-async def _session_flush(session: Any) -> None:
-    await _maybe_await(session.flush())
-
-
-def _jsonish(value: Any, default: Any) -> Any:
-    if value is None:
-        return default
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except json.JSONDecodeError:
-            return default
-    return value
-
-
-def _json_safe(value: Any) -> Any:
-    def convert(item: Any) -> str:
-        if hasattr(item, "isoformat"):
-            return item.isoformat()
-        return str(item)
-
-    return json.loads(json.dumps(value, default=convert))
-
-
-def _truncate_text(value: str, max_chars: int) -> tuple[str, bool]:
-    if max_chars <= 0:
-        max_chars = 12000
-    if len(value) <= max_chars:
-        return value, False
-    return value[:max_chars], True
-
-
-def _skill_digest_metadata(skill: Any) -> dict[str, Any]:
-    return {
-        "skill_version": getattr(skill, "version", None),
-        "bundle_version_id": getattr(skill, "bundle_version_id", None),
-        "bundle_digest": getattr(skill, "bundle_digest", None),
-        "overlay_revision": getattr(skill, "overlay_revision", None),
-        "effective_digest": getattr(skill, "effective_digest", None)
-        or getattr(skill, "bundle_digest", None),
-        "source_kind": getattr(skill, "source_kind", None) or "legacy_db",
-        "trust_level": getattr(skill, "trust_level", None) or "private_local",
-    }
-
-
-SKILL_VIEW_SECTIONS = (
-    "card",
-    "summary",
-    "procedure",
-    "pitfalls",
-    "triggers",
-    "guardrails",
-    "graduated_steps",
-    "metadata",
-)
-
-
-def _skill_card(skill: Any) -> dict[str, str]:
-    return {
-        "name": getattr(skill, "name", "") or "",
-        "description": getattr(skill, "description", "") or "",
-    }
-
-
-def _compact_skill_item(item: Any) -> str:
-    if isinstance(item, dict):
-        for key in ("text", "pattern", "action", "condition", "summary", "description"):
-            value = item.get(key)
-            if value:
-                return str(value)
-        return json.dumps(item, ensure_ascii=False, default=str)
-    return str(item)
-
-
-def _compact_skill_items(value: Any, *, limit: int = 3, max_chars: int = 180) -> list[str]:
-    items = _jsonish(value, [])
-    if not isinstance(items, list):
-        return []
-    compact: list[str] = []
-    for item in items[:limit]:
-        text_value, _ = _truncate_text(_compact_skill_item(item).strip(), max_chars)
-        if text_value:
-            compact.append(text_value)
-    return compact
-
-
-def _skill_summary(skill: Any, max_chars: int) -> tuple[str, bool]:
-    parts: list[str] = []
-    description = str(getattr(skill, "description", "") or "").strip()
-    if description:
-        parts.append(f"Description: {description}")
-
-    procedure = str(getattr(skill, "procedure", "") or "").strip()
-    if procedure:
-        preview, preview_truncated = _truncate_text(procedure, 900)
-        label = "Procedure preview"
-        if preview_truncated:
-            label += " (truncated)"
-        parts.append(f"{label}:\n{preview}")
-
-    for label, attr in (
-        ("Triggers", "triggers"),
-        ("Guardrails", "guardrails"),
-        ("Pitfalls", "pitfalls"),
-        ("Graduated steps", "graduated_steps"),
-    ):
-        items = _compact_skill_items(getattr(skill, attr, None))
-        if items:
-            parts.append(label + ":\n" + "\n".join(f"- {item}" for item in items))
-
-    if not parts:
-        parts.append(f"{getattr(skill, 'name', '') or 'Skill'}: no summary content is available.")
-
-    return _truncate_text("\n\n".join(parts), max_chars)
-
-
-def _validate_skill_asset_path(path: str) -> str:
-    cleaned = (path or "").strip()
-    if not cleaned:
-        raise ValueError("path is required")
-    if "\\" in cleaned:
-        raise ValueError("path must use POSIX separators")
-    if PurePosixPath(cleaned).is_absolute():
-        raise ValueError("path must be relative")
-    windows_path = PureWindowsPath(cleaned)
-    if windows_path.is_absolute() or windows_path.drive:
-        raise ValueError("path must be relative")
-    parts = cleaned.split("/")
-    if any(part in {"", ".", ".."} for part in parts):
-        raise ValueError("path cannot contain traversal segments")
-    return cleaned
-
-
-async def _add_attribution(session, memories: list[dict], current_user_id: str) -> list[dict]:
-    """Add attribution info to shared memories from other users.
-
-    If the source user has attribution_enabled=True, shows their name.
-    Otherwise, shows "A teammate" (anonymous).
-    """
-    try:
-        return await MemoryRepository(session).add_attribution(memories, current_user_id)
-    except Exception:
-        pass
-    return memories
-
 
 async def _async_log_retrieval(query: str, results: list) -> None:
-    """Insert a row into retrieval_log for metrics tracking. Non-blocking."""
-    try:
-        top_score = max((r.get("similarity", 0) for r in results), default=0)
-        async with UnitOfWork() as uow:
-            await _maybe_await(uow.retrieval_logs.create(
-                query_text=query[:500],
-                results_returned=len(results),
-                top_score=round(float(top_score), 4),
-            ))
-            await _session_flush(uow.session)
-    except Exception as e:
-        logger.debug(f"retrieval_log insert failed (non-critical): {e}")
+    return await _async_log_retrieval_impl(
+        query,
+        results,
+        unit_of_work_cls=UnitOfWork,
+        maybe_await=_maybe_await,
+        session_flush=_session_flush,
+        logger=logger,
+    )
 
 
 async def async_tool_brain_recall(
@@ -237,87 +99,21 @@ async def async_tool_brain_recall(
     Multiplayer: pass user_id + org_id for visibility-scoped recall.
     Without viewer context, recall intentionally returns no memories.
     """
-    from brain.systems.memory.embedding_service import EmbeddingService, embedding_degradation_reason
-
-    visibility_context = MemoryVisibilityContext(
-        user_id=user_id,
-        org_id=org_id,
-        allow_global=service_retrieval or (user_id == "system"),
-        principal_type="service" if service_retrieval or user_id == "system" else None,
-    )
-
-    query_emb = None
-    try:
-        async with UnitOfWork() as uow:
-            embedding_service = await EmbeddingService.from_session(uow.session)
-            query_emb = embedding_service.query(query)
-            results = await _maybe_await(uow.memories.graph_augmented_recall(
-                query_embedding=query_emb,
-                limit=limit,
-                context=visibility_context,
-            ))
-            memories = []
-            for r in results:
-                mem = {
-                    "id": r["id"],
-                    "content": r["content"][:300],
-                    "type": r["type"],
-                    "tier": r.get("tier", "episodic"),
-                    "salience": r.get("salience", 0),
-                    "similarity": r.get("similarity", 0),
-                    "visibility": r.get("visibility", "private"),
-                }
-                if r.get("graph_edges"):
-                    mem["graph_context"] = r["graph_edges"][:3]
-                memories.append(mem)
-            # Add cross-user attribution for shared memories
-            if user_id and memories:
-                memories = await _maybe_await(uow.memories.add_attribution(memories, user_id))
-        return await _finalize_recall_response(
-            query=query,
-            memories=memories,
-            limit=limit,
-            user_id=user_id,
-            org_id=org_id,
-            attention_debug=attention_debug,
-            expand_lazy_load=expand_lazy_load,
-            service_retrieval=service_retrieval,
-            )
-    except Exception as e:
-        logger.warning(f"Graph recall failed, falling back to vector: {e}")
-        if query_emb is None:
-            response = await _finalize_recall_response(
-                query=query,
-                memories=[],
-                limit=limit,
-                user_id=user_id,
-                org_id=org_id,
-                attention_debug=attention_debug,
-                expand_lazy_load=expand_lazy_load,
-                service_retrieval=service_retrieval,
-            )
-            response["warning"] = embedding_degradation_reason(e)
-            return response
-
-    # Fallback: pure vector search with same visibility filtering
-    async with UnitOfWork() as uow:
-        memories = await _maybe_await(uow.memories.recall_vector(
-            query_embedding=query_emb,
-            limit=limit,
-            context=visibility_context,
-        ))
-        if user_id and memories:
-            memories = await _maybe_await(uow.memories.add_attribution(memories, user_id))
-
-    return await _finalize_recall_response(
-        query=query,
-        memories=memories,
+    return await brain_recall_tool(
+        query,
         limit=limit,
         user_id=user_id,
         org_id=org_id,
         attention_debug=attention_debug,
         expand_lazy_load=expand_lazy_load,
         service_retrieval=service_retrieval,
+        unit_of_work_cls=UnitOfWork,
+        maybe_await=_maybe_await,
+        session_flush=_session_flush,
+        visibility_context_cls=MemoryVisibilityContext,
+        observe_retrieval_fn=observe_retrieval,
+        attention_controller_cls=AttentionController,
+        logger=logger,
     )
 
 
@@ -332,118 +128,32 @@ async def _finalize_recall_response(
     expand_lazy_load: bool | None,
     service_retrieval: bool = False,
 ) -> dict:
-
-    await _async_log_retrieval(query, memories)
-    service_retrieval = service_retrieval or user_id == "system"
-    if not user_id and not org_id and not service_retrieval and not memories:
-        return {
-            "memories": [],
-            "candidate_memories": [],
-            "suppressed_memories": [],
-            "lazy_load_memories": [],
-            "lazy_loaded_memories": [],
-            "count": 0,
-            "candidate_count": 0,
-            "attention_decision": {
-                "stage": "brain_recall",
-                "retrieval_decision_id": None,
-                "selected_count": 0,
-                "candidate_count": 0,
-                "service_retrieval": False,
-                "fallback_used": True,
-                "fallback_reason": "missing_user_context",
-            },
-        }
-    attention_decision = await observe_retrieval(
-        stage="brain_recall",
-        query_text=query,
-        candidates=memories,
+    return await _finalize_recall_response_impl(
+        query=query,
+        memories=memories,
+        limit=limit,
         user_id=user_id,
         org_id=org_id,
+        attention_debug=attention_debug,
+        expand_lazy_load=expand_lazy_load,
         service_retrieval=service_retrieval,
-        preload_budget_tokens=limit * 120,
-        lazy_budget_tokens=max(0, limit * 40),
+        unit_of_work_cls=UnitOfWork,
+        maybe_await=_maybe_await,
+        session_flush=_session_flush,
+        observe_retrieval_fn=observe_retrieval,
+        attention_controller_cls=AttentionController,
+        logger=logger,
     )
-    selection = AttentionController().materialize_selection(memories, attention_decision)
-    lazy_loaded_memories: list[dict] = []
-    retrieval_decision_id = attention_decision.get("retrieval_decision_id")
-    should_expand = (
-        expand_lazy_load if expand_lazy_load is not None
-        else os.getenv("ATTENTION_LAZY_LOAD_ENABLED", "0").strip().lower() not in {"0", "false", "no"}
-    )
-    if should_expand and selection.lazy_load_eligible and retrieval_decision_id is not None:
-        lazy_loaded_memories = await AttentionController().load_lazy_candidates(
-            retrieval_decision_id=int(retrieval_decision_id),
-            user_id=user_id,
-            org_id=org_id,
-            service_retrieval=service_retrieval,
-            limit=max(0, limit - len(selection.selected)),
-        )
-    visible_memories = list(selection.selected) + list(lazy_loaded_memories)
-    return {
-        "memories": visible_memories,
-        "candidate_memories": memories,
-        "suppressed_memories": selection.suppressed,
-        "lazy_load_memories": selection.lazy_load_eligible,
-        "lazy_loaded_memories": lazy_loaded_memories,
-        "count": len(visible_memories),
-        "candidate_count": len(memories),
-        "attention_decision": attention_decision,
-        **({"attention_explain": AttentionController().explain(attention_decision, memories)} if attention_debug else {}),
-    }
 
 
 async def async_tool_brain_guardrails(skill: str | None = None) -> dict:
     """Get guardrails: recent failures, high-salience warnings, and skill-specific pitfalls."""
-    result = {"guardrails": [], "warnings": [], "pitfalls": []}
-
-    async with UnitOfWork() as uow:
-        # Recent failures (last 7 days)
-        rows_result = await _session_execute(uow.session, text("""
-            SELECT s.name, se.outcome_details, se.error_analysis, se.started_at
-            FROM skill_executions se
-            JOIN skills s ON s.id = se.skill_id
-            WHERE se.outcome = 'failure'
-              AND se.started_at > NOW() - INTERVAL '7 days'
-            ORDER BY se.started_at DESC
-            LIMIT 5
-        """))
-        rows = rows_result.mappings().all()
-        for row in rows:
-            result["guardrails"].append({
-                "skill": row["name"],
-                "failure": (row["error_analysis"] or row["outcome_details"] or "Unknown")[:200],
-                "when": str(row["started_at"]),
-            })
-
-        # High-salience warnings (lessons with salience >= 9)
-        if skill:
-            from brain.systems.memory.embedding_service import EmbeddingService
-
-            embedding_service = await EmbeddingService.from_session(uow.session)
-            skill_emb = embedding_service.query(skill)
-            result["warnings"].extend(
-                await _maybe_await(uow.memories.high_salience_warnings_for_skill(skill_embedding=skill_emb))
-            )
-
-        # Skill-specific pitfalls
-        if skill:
-            from brain.platform.db.models.skill import Skill as SkillModel
-            from sqlalchemy import select, or_
-            stmt = select(SkillModel.pitfalls).where(
-                SkillModel.name == skill,
-                or_(SkillModel.archived == False, SkillModel.archived.is_(None)),  # noqa: E712
-            )
-            row_result = await _session_execute(uow.session, stmt)
-            row = row_result.scalar()
-            if row:
-                pitfalls = row if isinstance(row, list) else json.loads(row)
-                result["pitfalls"] = [
-                    {"text": p["text"][:200], "severity": p.get("severity", "medium")}
-                    for p in pitfalls[-5:]  # latest 5
-                ]
-
-    return result
+    return await brain_guardrails_tool(
+        skill,
+        unit_of_work_cls=UnitOfWork,
+        maybe_await=_maybe_await,
+        session_execute=_session_execute,
+    )
 
 
 async def async_tool_brain_skills(task: str) -> dict:
@@ -451,390 +161,13 @@ async def async_tool_brain_skills(task: str) -> dict:
 
     Returns the same structure as `skills.py plan` but without the subprocess overhead.
     """
-    from brain.systems.skills.builtin import ensure_builtin_skills_cached
-    from brain.systems.memory.embedding_service import EmbeddingService, embedding_degradation_reason
-    from brain.systems.memory.embeddings import vec_to_pg
-
-    await ensure_builtin_skills_cached()
-
-    def _coerce_triggers(value) -> list:
-        if not value:
-            return []
-        if isinstance(value, list):
-            return value
-        try:
-            parsed = json.loads(value)
-        except Exception:
-            return []
-        return parsed if isinstance(parsed, list) else []
-
-    def _trigger_match(value: str, triggers: list) -> tuple[float, str | None]:
-        lowered = (value or "").lower()
-        for trigger in triggers:
-            if isinstance(trigger, str):
-                direction = "for"
-                pattern = trigger
-            elif isinstance(trigger, dict):
-                direction = str(trigger.get("direction") or "for")
-                pattern = str(trigger.get("pattern") or "")
-            else:
-                continue
-            pattern = pattern.strip()
-            if not pattern or direction in {"not_for", "against", "negative"}:
-                continue
-            pattern_lower = pattern.lower()
-            if pattern_lower in lowered:
-                return 1.0, pattern
-            words = [part for part in pattern_lower.replace("-", " ").split() if len(part) > 2]
-            if len(words) >= 2 and all(word in lowered for word in words):
-                return 0.92, pattern
-        return 0.0, None
-
-    def _looks_like_workspace_app_task(value: str) -> bool:
-        lowered = (value or "").lower()
-        markers = (
-            "workspace app",
-            "generated app",
-            "build me an app",
-            "build an app",
-            "dashboard",
-            "tracker",
-            "todo list",
-            "to-do list",
-            "table",
-            "graph",
-            "chart",
-            "crm",
-            "review board",
-            "widget",
-        )
-        action_markers = ("create", "build", "make", "generate", "save", "persistent")
-        return any(marker in lowered for marker in markers) and any(
-            marker in lowered for marker in action_markers
-        )
-
-    def _looks_like_domain_task(value: str) -> bool:
-        lowered = (value or "").lower()
-        markers = (
-            "domain",
-            "domains",
-            "manage_domain",
-            "crm",
-            "customer relationship",
-            "outreach",
-            "pipeline",
-            "contacts",
-            "companies",
-            "records",
-            "database",
-            "structured data",
-            "tracker",
-            "track",
-            "checklist",
-            "todo",
-            "to-do",
-            "task list",
-            "table",
-            "list",
-            "activity log",
-            "operational log",
-            "data log",
-            "generated app",
-            "workspace app",
-        )
-        action_markers = (
-            "create",
-            "build",
-            "make",
-            "set up",
-            "setup",
-            "manage",
-            "maintain",
-            "add",
-            "record",
-            "query",
-            "using",
-            "use",
-            "see",
-        )
-        return any(marker in lowered for marker in markers) and any(
-            marker in lowered for marker in action_markers
-        )
-
-    async def _fetch_skill_card(uow, name: str):
-        result = await _session_execute(uow.session, text("""
-            SELECT id, name, description, version, maturity, confidence, use_count,
-                   success_count::float / GREATEST(use_count, 1) as success_rate,
-                   model_tier, thinking_tier, pitfalls, triggers,
-                   bundle_version_id, bundle_digest, overlay_revision,
-                   effective_digest, source_kind, trust_level,
-                   1.0 as skill_match,
-                   NULL as centroid_match,
-                   centroid_count
-            FROM skills
-            WHERE NOT archived
-              AND skill_type != 'meta'
-              AND name = :name
-            LIMIT 1
-        """), {"name": name})
-        return result.mappings().first()
-
-    _SMALL_SKILLSET_THRESHOLD = 30  # below this, send ALL skills — model picks better than embeddings
-
-    async with UnitOfWork() as uow:
-        task_emb = None
-        emb_str = None
-        embedding_error = None
-        try:
-            embedding_service = await EmbeddingService.from_session(uow.session)
-            task_emb = embedding_service.query(task)
-            emb_str = vec_to_pg(task_emb)
-        except Exception as exc:
-            embedding_error = embedding_degradation_reason(exc)[:300]
-            logger.warning("brain_skills running in degraded mode; embedding unavailable: %s", embedding_error)
-
-        # Count active skills to decide strategy
-        count_result = await _session_execute(uow.session, text(
-            "SELECT COUNT(*) as cnt FROM skills WHERE NOT archived"
-        ))
-        count_row = count_result.mappings().one()
-        skill_count = count_row["cnt"]
-
-        if emb_str is None:
-            limit_clause = "" if skill_count <= _SMALL_SKILLSET_THRESHOLD else "LIMIT 15"
-            matching_result = await _session_execute(uow.session, text(f"""
-                SELECT id, name, description, version, maturity, confidence, use_count,
-                       success_count::float / GREATEST(use_count, 1) as success_rate,
-                       model_tier, thinking_tier, pitfalls, triggers,
-                       bundle_version_id, bundle_digest, overlay_revision,
-                       effective_digest, source_kind, trust_level,
-                       0.0 as skill_match,
-                       NULL as centroid_match,
-                       centroid_count
-                FROM skills
-                WHERE NOT archived AND skill_type != 'meta'
-                ORDER BY use_count DESC, confidence DESC, name ASC
-                {limit_clause}
-            """))
-            matching_skills = matching_result.mappings().all()
-        elif skill_count <= _SMALL_SKILLSET_THRESHOLD:
-            matching_result = await _session_execute(uow.session, text("""
-                SELECT id, name, description, version, maturity, confidence, use_count,
-                       success_count::float / GREATEST(use_count, 1) as success_rate,
-                       model_tier, thinking_tier, pitfalls, triggers,
-                       bundle_version_id, bundle_digest, overlay_revision,
-                       effective_digest, source_kind, trust_level,
-                       1 - (embedding <=> CAST(:emb1 AS vector)) as skill_match,
-                       CASE WHEN task_centroid IS NOT NULL
-                            THEN 1 - (task_centroid <=> CAST(:emb2 AS vector)) ELSE NULL
-                       END as centroid_match,
-                       centroid_count
-                FROM skills
-                WHERE NOT archived AND skill_type != 'meta'
-                ORDER BY
-                    CASE WHEN centroid_count >= 3
-                         THEN (1 - (task_centroid <=> CAST(:emb3 AS vector))) * 0.7 + (1 - (embedding <=> CAST(:emb4 AS vector))) * 0.3
-                         ELSE 1 - (embedding <=> CAST(:emb5 AS vector))
-                    END DESC
-            """), {"emb1": emb_str, "emb2": emb_str, "emb3": emb_str, "emb4": emb_str, "emb5": emb_str})
-            matching_skills = matching_result.mappings().all()
-        else:
-            matching_result = await _session_execute(uow.session, text("""
-                SELECT id, name, description, version, maturity, confidence, use_count,
-                       success_count::float / GREATEST(use_count, 1) as success_rate,
-                       model_tier, thinking_tier, pitfalls, triggers,
-                       bundle_version_id, bundle_digest, overlay_revision,
-                       effective_digest, source_kind, trust_level,
-                       CASE WHEN embedding IS NOT NULL
-                            THEN 1 - (embedding <=> CAST(:emb1 AS vector))
-                            ELSE 0.35
-                       END as skill_match,
-                       CASE WHEN task_centroid IS NOT NULL
-                            THEN 1 - (task_centroid <=> CAST(:emb2 AS vector)) ELSE NULL
-                       END as centroid_match,
-                       centroid_count
-                FROM skills
-                WHERE NOT archived AND skill_type != 'meta' AND (embedding IS NOT NULL OR builtin IS TRUE)
-                ORDER BY
-                    CASE WHEN embedding IS NULL
-                         THEN 0.35
-                         WHEN centroid_count >= 3
-                         THEN (1 - (task_centroid <=> CAST(:emb3 AS vector))) * 0.7 + (1 - (embedding <=> CAST(:emb4 AS vector))) * 0.3
-                         ELSE 1 - (embedding <=> CAST(:emb5 AS vector))
-                    END DESC
-                LIMIT 15
-            """), {"emb1": emb_str, "emb2": emb_str, "emb3": emb_str, "emb4": emb_str, "emb5": emb_str})
-            matching_skills = matching_result.mappings().all()
-
-        # Relevant memories (lessons/patterns for guardrails)
-        if task_emb is None:
-            guardrail_memories = []
-        else:
-            guardrail_memories = await _maybe_await(uow.memories.guardrail_memories_for_task(
-                task_embedding=task_emb,
-                limit=5,
-            ))
-
-        if _looks_like_workspace_app_task(task):
-            workspace_app_skill = await _fetch_skill_card(uow, "build-workspace-app")
-            if workspace_app_skill is not None:
-                matching_skills = [
-                    workspace_app_skill,
-                    *[
-                        skill
-                        for skill in matching_skills
-                        if str(skill.get("name")) != "build-workspace-app"
-                    ],
-                ]
-        if _looks_like_domain_task(task):
-            domain_skill = await _fetch_skill_card(uow, "manage-domains")
-            if domain_skill is not None:
-                matching_skills = [
-                    domain_skill,
-                    *[
-                        skill
-                        for skill in matching_skills
-                        if str(skill.get("name")) != "manage-domains"
-                    ],
-                ]
-
-        asset_paths_by_version: dict[int, list[dict[str, Any]]] = {}
-        bundle_version_ids = {
-            int(skill["bundle_version_id"])
-            for skill in matching_skills
-            if skill.get("bundle_version_id")
-        }
-        for version_id in bundle_version_ids:
-            try:
-                assets = await _maybe_await(uow.skill_bundles.list_assets(version_id))
-            except Exception:
-                continue
-            asset_paths_by_version[version_id] = [
-                {
-                    "path": asset.path,
-                    "kind": asset.asset_kind,
-                    "mime_type": asset.mime_type,
-                }
-                for asset in assets
-            ]
-
-    # Rank skills by semantic match — find the right skill for the task.
-    # Quality/maturity can still inform degraded-mode ranking and strategy,
-    # but the public skill card stays small: name, description, and load handles.
-    # If a skill is bad, fix the skill — don't route around it.
-    ranked_recommendations: list[dict[str, Any]] = []
-    for s in matching_skills:
-        sim = float(s["skill_match"]) if s["skill_match"] else 0
-        if task_emb is not None and skill_count > _SMALL_SKILLSET_THRESHOLD and sim <= 0.3:
-            continue
-
-        success_rate = float(s["success_rate"]) if s["success_rate"] else 0
-        use_count = int(s["use_count"] or 0)
-        maturity = s["maturity"] or "emerging"
-
-        # Use centroid match when available (learned from actual task routing),
-        # fall back to description embedding match.
-        centroid_match = s.get("centroid_match")
-        centroid_count = int(s.get("centroid_count") or 0)
-        if centroid_match is not None and centroid_count >= 3:
-            semantic_score = float(centroid_match) * 0.7 + sim * 0.3
-        else:
-            semantic_score = sim
-
-        # Skill selection is purely semantic: find the skill that matches
-        # the task. There should be one right skill per task type. If that
-        # skill has low quality, the fix is to improve the skill — not to
-        # route around it by picking a generic one.
-        if task_emb is None and sim >= 1.0:
-            composite = 1.1
-        elif task_emb is None:
-            composite = (
-                float(s["confidence"] or 0) * 0.6
-                + success_rate * 0.3
-                + min(use_count, 20) / 100
-            )
-        else:
-            composite = semantic_score
-
-        skill_card = {
-            "name": s["name"],
-            "description": s["description"] or "",
-            "loaded_sections": ["catalog"],
-            "available_sections": list(SKILL_VIEW_SECTIONS),
-            "load_tools": {
-                "card": {
-                    "tool": "skill_view",
-                    "arguments": {"name": s["name"], "section": "card"},
-                },
-                "summary": {
-                    "tool": "skill_view",
-                    "arguments": {"name": s["name"], "section": "summary"},
-                },
-                "procedure": {
-                    "tool": "skill_view",
-                    "arguments": {"name": s["name"], "section": "procedure"},
-                },
-                "assets": {
-                    "tool": "skill_asset",
-                    "arguments": {"name": s["name"], "path": "examples/..."},
-                },
-            },
-        }
-        triggers = _coerce_triggers(s.get("triggers"))
-        trigger_score, matched_trigger = _trigger_match(task, triggers)
-        if trigger_score:
-            composite = max(composite, trigger_score)
-        bundle_version_id = s.get("bundle_version_id")
-        if bundle_version_id:
-            available_assets = asset_paths_by_version.get(int(bundle_version_id), [])
-            if available_assets:
-                skill_card["assets"] = available_assets[:20]
-                skill_card["load_tools"]["assets"]["available_paths"] = [
-                    asset["path"] for asset in available_assets[:20]
-                ]
-        ranked_recommendations.append({
-            "card": skill_card,
-            "sort_score": composite,
-            "maturity": maturity,
-            "success_rate": success_rate,
-            "matched_trigger": matched_trigger,
-        })
-
-    # Sort by composite score — best overall skill first, not just best keyword match
-    ranked_recommendations.sort(key=lambda item: item["sort_score"], reverse=True)
-    recommended = [item["card"] for item in ranked_recommendations]
-
-    guardrails = [m["content"][:200] for m in guardrail_memories]
-
-    # Determine strategy based on top skill (now composite-best, not just embedding-best)
-    strategy = "full_pipeline"
-    if ranked_recommendations:
-        top = ranked_recommendations[0]
-        if top["maturity"] == "expert" and top["success_rate"] > 0.85:
-            strategy = "direct"
-        elif top["maturity"] in ("emerging", "developing"):
-            strategy = "investigate_first"
-
-    # Skill gap: only when no skills match at all. Skill authoring is currently
-    # kept out of the live model tool surface, so this is informational only.
-    skill_gap = len(recommended) == 0
-
-    result = {
-        "task": task,
-        "strategy": strategy,
-        "recommended_skills": recommended,
-        "guardrails": guardrails,
-    }
-    if embedding_error:
-        result["degraded"] = True
-        result["degraded_reason"] = (
-            "Embedding backend unavailable; returned a non-semantic skill catalog fallback. "
-            f"Original error: {embedding_error}"
-        )
-    if skill_gap:
-        result["skill_gap"] = True
-        result["skill_gap_hint"] = "No installed skills matched; proceed without skill-specific guidance."
-    return result
+    return await brain_skills_tool(
+        task,
+        unit_of_work_cls=UnitOfWork,
+        maybe_await=_maybe_await,
+        session_execute=_session_execute,
+        logger=logger,
+    )
 
 
 async def async_tool_skill_view(
@@ -843,70 +176,13 @@ async def async_tool_skill_view(
     max_chars: int = 12000,
 ) -> dict:
     """Load a specific skill section on demand."""
-    section = (section or "procedure").strip().lower()
-    allowed = set(SKILL_VIEW_SECTIONS)
-    if section not in allowed:
-        return {
-            "error": f"Unknown skill section: {section}",
-            "allowed_sections": sorted(allowed),
-        }
-
-    async with UnitOfWork() as uow:
-        skill = await _maybe_await(uow.skills.get_by_name(name))
-        if skill is None:
-            return {"error": f"Skill '{name}' not found"}
-
-        if section == "card":
-            return {
-                **_skill_card(skill),
-                "section": section,
-                "loaded_sections": [section],
-            }
-
-        metadata = _skill_digest_metadata(skill)
-        payload: dict[str, Any] = {
-            "name": skill.name,
-            "section": section,
-            "loaded_sections": [section],
-            **metadata,
-        }
-
-        if section == "summary":
-            text_value, truncated = _skill_summary(skill, max_chars)
-            payload.update({
-                "description": skill.description or "",
-                "content_type": "text/markdown",
-                "content": text_value,
-                "truncated": truncated,
-            })
-        elif section == "procedure":
-            text_value, truncated = _truncate_text(skill.procedure or "", max_chars)
-            payload.update({
-                "content_type": "text/markdown",
-                "content": text_value,
-                "truncated": truncated,
-            })
-        elif section == "pitfalls":
-            payload["items"] = _jsonish(skill.pitfalls, [])
-        elif section == "triggers":
-            payload["items"] = _jsonish(skill.triggers, [])
-        elif section == "guardrails":
-            payload["items"] = _jsonish(skill.guardrails, [])
-        elif section == "graduated_steps":
-            payload["items"] = _jsonish(skill.graduated_steps, [])
-        else:
-            payload["metadata"] = {
-                "description": skill.description or "",
-                "maturity": skill.maturity or "emerging",
-                "confidence": float(skill.confidence or 0),
-                "use_count": int(skill.use_count or 0),
-                "success_count": int(skill.success_count or 0),
-                "failure_count": int(skill.failure_count or 0),
-                "model_tier": normalize_model_tier(skill.model_tier) or DEFAULT_MODEL_TIER,
-                "thinking_tier": skill.thinking_tier or "medium",
-                "skill_type": skill.skill_type or "skill",
-            }
-        return payload
+    return await skill_view_tool(
+        name,
+        section=section,
+        max_chars=max_chars,
+        unit_of_work_cls=UnitOfWork,
+        maybe_await=_maybe_await,
+    )
 
 
 async def async_tool_skill_asset(
@@ -915,52 +191,13 @@ async def async_tool_skill_asset(
     max_chars: int = 12000,
 ) -> dict:
     """Load a specific asset from the installed skill bundle version."""
-    try:
-        safe_path = _validate_skill_asset_path(path)
-    except ValueError as exc:
-        return {"error": str(exc)}
-
-    async with UnitOfWork() as uow:
-        skill = await _maybe_await(uow.skills.get_by_name(name))
-        if skill is None:
-            return {"error": f"Skill '{name}' not found"}
-        if not skill.bundle_version_id:
-            return {
-                "error": f"Skill '{name}' is not backed by a bundle version",
-                "name": skill.name,
-                **_skill_digest_metadata(skill),
-            }
-
-        assets = await _maybe_await(uow.skill_bundles.list_assets(skill.bundle_version_id))
-        asset = next((item for item in assets if item.path == safe_path), None)
-        if asset is None:
-            return {
-                "error": f"Skill asset not found: {safe_path}",
-                "name": skill.name,
-                "path": safe_path,
-                "available_assets": [item.path for item in assets[:50]],
-                **_skill_digest_metadata(skill),
-            }
-
-        content = asset.content_text
-        truncated = False
-        if content is not None:
-            content, truncated = _truncate_text(content, max_chars)
-
-        return {
-            "name": skill.name,
-            "path": asset.path,
-            "asset_kind": asset.asset_kind,
-            "mime_type": asset.mime_type,
-            "size_bytes": asset.size_bytes,
-            "content_digest": asset.content_digest,
-            "storage_kind": asset.storage_kind,
-            "storage_uri": asset.storage_uri,
-            "content": content,
-            "truncated": truncated,
-            "loaded_sections": [f"asset:{asset.path}"],
-            **_skill_digest_metadata(skill),
-        }
+    return await skill_asset_tool(
+        name,
+        path,
+        max_chars=max_chars,
+        unit_of_work_cls=UnitOfWork,
+        maybe_await=_maybe_await,
+    )
 
 
 async def async_tool_brain_encode(
@@ -979,56 +216,24 @@ async def async_tool_brain_encode(
     evidence: dict | None = None,
 ) -> dict:
     """Encode a new memory into the brain, scoped to the current user."""
-    from brain.systems.memory.embedding_service import EmbeddingService, embedding_degradation_reason
-
-    if len(content.strip()) < 20:
-        return {"error": "Content too short (min 20 chars)"}
-
-    if not user_id:
-        return {"error": "brain_encode requires user context (missing user_id)"}
-
-    if visibility not in ("private", "team", "org"):
-        visibility = "private"
-
-    try:
-        write_context = MemoryWriteContext(
-            user_id=user_id,
-            org_id=org_id,
-            visibility=visibility,
-            source=source,
-            conversation_id=conversation_id,
-            idea_id=idea_id,
-            run_id=run_id,
-            session_id=session_id,
-            confidence=confidence,
-            evidence=evidence or {},
-        )
-    except ValueError as exc:
-        return {"error": str(exc)}
-
-    semantic_emb = None
-    degraded_reason = None
-
-    async with UnitOfWork() as uow:
-        try:
-            embedding_service = await EmbeddingService.from_session(uow.session)
-            semantic_emb = embedding_service.document(content)
-        except Exception as exc:
-            degraded_reason = embedding_degradation_reason(exc)
-
-        result = await _maybe_await(uow.memories.insert_memory(
-            content=content,
-            memory_type=memory_type,
-            salience=salience,
-            semantic_embedding=semantic_emb,
-            context=write_context,
-            auto_edge=False,
-        ))
-
-    if degraded_reason:
-        result["warning"] = degraded_reason
-        result["embedding_deferred"] = True
-    return result
+    return await brain_encode_tool(
+        content,
+        memory_type=memory_type,
+        salience=salience,
+        source=source,
+        user_id=user_id,
+        org_id=org_id,
+        visibility=visibility,
+        conversation_id=conversation_id,
+        idea_id=idea_id,
+        run_id=run_id,
+        session_id=session_id,
+        confidence=confidence,
+        evidence=evidence,
+        unit_of_work_cls=UnitOfWork,
+        maybe_await=_maybe_await,
+        write_context_cls=MemoryWriteContext,
+    )
 
 
 async def tool_brain_vault(
@@ -1044,125 +249,19 @@ async def tool_brain_vault(
     target_registry_id: int | None = None,
 ) -> dict:
     """Retrieve a secret from the vault."""
-    from brain.systems.cortex.events import publish_safe
-    from brain.systems.vault import authorize_agent_secret_read, get_secret
-    if not user_id:
-        return {"error": "Vault access requires an authenticated user context"}
-    target_user_id = str(user_id).strip()
-    if not target_user_id:
-        return {"error": "Vault access requires an authenticated user context"}
-    authorization = await authorize_agent_secret_read(
+    return await brain_vault_tool(
         key,
-        actor_user_id=target_user_id,
+        reason=reason,
+        user_id=user_id,
         org_id=org_id,
         run_id=run_id,
-        reason=reason,
+        idea_id=idea_id,
         requested_by=requested_by,
         project_slug=project_slug,
         project_slugs=project_slugs,
         target_registry_id=target_registry_id,
+        json_safe=_json_safe,
     )
-    if not authorization.get("allowed"):
-        grant = _json_safe(authorization.get("grant") or {})
-        grant_user_id = str(grant.get("requested_by_user_id") or target_user_id).strip() or target_user_id
-        if authorization.get("status") == "pending":
-            normalized_idea_id = (str(idea_id).strip() if idea_id else "") or None
-            prompt = None
-            if normalized_idea_id:
-                prompt = {
-                    "id": f"vault-grant-{grant.get('id') or run_id or 'thread'}",
-                    "idea_id": normalized_idea_id,
-                    "org_id": org_id,
-                    "target_user_id": grant_user_id,
-                    "run_id": grant.get("run_id") or run_id,
-                    "grant_id": grant.get("id"),
-                    "key_name": grant.get("key_name") or key,
-                    "requested_by": grant.get("requested_by") or requested_by,
-                    "reason": grant.get("reason") or reason,
-                    "requested_at": grant.get("requested_at"),
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-                publish_safe("vault_agent_grant_prompt", {
-                    "idea_id": normalized_idea_id,
-                    "org_id": org_id,
-                    "target_user_id": grant_user_id,
-                    "run_id": grant.get("run_id") or run_id,
-                    "grant": grant,
-                    "prompt": prompt,
-                })
-            response = {
-                "error": "Vault grant required before this agent can read the secret",
-                "grant_id": grant.get("id"),
-                "key_name": grant.get("key_name") or key,
-                "reason": grant.get("reason") or reason,
-                "requested_by": grant.get("requested_by") or requested_by,
-                "run_id": grant.get("run_id") or run_id,
-                "status": "pending",
-                "target_user_id": grant_user_id,
-            }
-            if prompt:
-                response["prompt"] = prompt
-            return response
-        return {"error": authorization.get("reason") or "Vault grant denied"}
-    value = await get_secret(
-        key,
-        actor_user_id=target_user_id,
-        org_id=org_id,
-        accessed_by="agent",
-    )
-    if value is None:
-        return {"error": f"Secret '{key}' not found in vault"}
-    return {"key": key, "value": value}
-
-
-_VAULT_PROMPT_CATEGORIES = {
-    "general",
-    "api",
-    "aws",
-    "auth",
-    "analytics",
-    "database",
-    "messaging",
-    "monitoring",
-    "payments",
-    "service",
-}
-
-
-def _clean_vault_prompt_text(value: str | None, *, max_chars: int = 240) -> str:
-    text = " ".join(str(value or "").split())
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 1].rstrip() + "..."
-
-
-def _normalize_vault_key_name(key_name: str) -> str:
-    cleaned = str(key_name or "").strip()
-    if not cleaned:
-        raise ValueError("key_name is required")
-    return cleaned.upper()
-
-
-def _safe_vault_secret_summary(secret: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "key_name": str(secret.get("key_name") or ""),
-        "description": str(secret.get("description") or ""),
-        "category": str(secret.get("category") or "general"),
-        "agent_access_level": str(secret.get("agent_access_level") or "ask"),
-    }
-
-
-def _vault_prompt_url(
-    *,
-    key_name: str,
-    description: str,
-    category: str,
-) -> str:
-    return "/vault?" + urlencode({
-        "add_secret": key_name,
-        "description": description,
-        "category": category,
-    })
 
 
 async def tool_vault_inventory(
@@ -1172,41 +271,12 @@ async def tool_vault_inventory(
     org_id: str | None = None,
 ) -> dict:
     """List safe Vault metadata so the agent can choose an existing key."""
-    from brain.systems.vault import async_list_secrets
-
-    if not user_id:
-        return {"error": "Vault inventory requires an authenticated user context"}
-    normalized_user_id = str(user_id).strip()
-    if not normalized_user_id:
-        return {"error": "Vault inventory requires an authenticated user context"}
-    normalized_org_id = (str(org_id).strip() if org_id else "") or None
-    normalized_category = str(category or "").strip().lower() or None
-    normalized_access_level = str(access_level or "").strip().lower() or None
-
-    secrets = [
-        _safe_vault_secret_summary(secret)
-        for secret in await async_list_secrets(
-            actor_user_id=normalized_user_id,
-            org_id=normalized_org_id,
-            category=normalized_category,
-        )
-    ]
-    if normalized_access_level:
-        secrets = [
-            secret
-            for secret in secrets
-            if secret["agent_access_level"].strip().lower() == normalized_access_level
-        ]
-    secrets.sort(key=lambda secret: (secret["category"], secret["key_name"]))
-    return {
-        "secrets": secrets,
-        "count": len(secrets),
-        "metadata_only": True,
-        "guidance": (
-            "Use these names/descriptions/categories to decide which exact key to request with brain_vault. "
-            "If no suitable key exists, ask the user or call vault_secret_prompt."
-        ),
-    }
+    return await vault_inventory_tool(
+        category=category,
+        access_level=access_level,
+        user_id=user_id,
+        org_id=org_id,
+    )
 
 
 async def tool_vault_secret_prompt(
@@ -1221,78 +291,17 @@ async def tool_vault_secret_prompt(
     requested_by: str = "agent",
 ) -> dict:
     """Open a guided Vault form for a user-supplied secret value."""
-    from brain.systems.cortex.events import publish_safe
-    from brain.systems.vault import record_missing_request
-
-    if not user_id:
-        return {"error": "Vault secret prompts require an authenticated user context"}
-
-    normalized_user_id = str(user_id).strip()
-    if not normalized_user_id:
-        return {"error": "Vault secret prompts require an authenticated user context"}
-    normalized_org_id = (str(org_id).strip() if org_id else "") or None
-    normalized_idea_id = (str(idea_id).strip() if idea_id else "") or None
-
-    try:
-        normalized_key = _normalize_vault_key_name(key_name)
-    except ValueError as exc:
-        return {"error": str(exc)}
-
-    normalized_category = str(category or "api").strip().lower() or "api"
-    if normalized_category not in _VAULT_PROMPT_CATEGORIES:
-        normalized_category = "general"
-    clean_description = _clean_vault_prompt_text(
-        description or f"Credential requested by Illo for {normalized_key}.",
+    return await vault_secret_prompt_tool(
+        key_name,
+        description=description,
+        category=category,
+        reason=reason,
+        user_id=user_id,
+        org_id=org_id,
+        run_id=run_id,
+        idea_id=idea_id,
+        requested_by=requested_by,
     )
-    clean_reason = _clean_vault_prompt_text(reason or clean_description, max_chars=360)
-    clean_requested_by = _clean_vault_prompt_text(requested_by or "agent", max_chars=80) or "agent"
-
-    prompt = {
-        "id": f"vault-secret-{run_id or 'thread'}-{uuid.uuid4().hex[:10]}",
-        "idea_id": normalized_idea_id,
-        "org_id": normalized_org_id,
-        "run_id": run_id,
-        "key_name": normalized_key,
-        "description": clean_description,
-        "category": normalized_category,
-        "reason": clean_reason,
-        "requested_by": clean_requested_by,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    await record_missing_request(normalized_key, actor_user_id=normalized_user_id, org_id=normalized_org_id)
-
-    if normalized_idea_id:
-        publish_safe("vault_secret_prompt", {
-            "idea_id": normalized_idea_id,
-            "org_id": normalized_org_id,
-            "run_id": run_id,
-            "prompt": prompt,
-            "key_name": normalized_key,
-            "description": clean_description,
-            "category": normalized_category,
-            "reason": clean_reason,
-            "requested_by": clean_requested_by,
-        })
-
-    response = {
-        "prompted": bool(normalized_idea_id),
-        "status": "opened" if normalized_idea_id else "recorded",
-        "key_name": normalized_key,
-        "description": clean_description,
-        "category": normalized_category,
-        "prompt": prompt,
-        "vault_url": _vault_prompt_url(
-            key_name=normalized_key,
-            description=clean_description,
-            category=normalized_category,
-        ),
-    }
-    if not normalized_idea_id:
-        response["warning"] = (
-            "No current Cortex thread was bound, so the missing key was recorded for Vault."
-        )
-    return response
 
 
 async def tool_runtime_settings(
@@ -1301,15 +310,12 @@ async def tool_runtime_settings(
     org_id: str | None = None,
 ) -> dict:
     """Inspect active runtime/provider/auth settings for the current user."""
-    from brain.systems.services.runtime_introspection import async_get_runtime_settings_snapshot
-
-    async with UnitOfWork() as uow:
-        return await async_get_runtime_settings_snapshot(
-            uow.session,
-            user_id=user_id,
-            org_id=org_id,
-            provider=provider,
-        )
+    return await runtime_settings_tool(
+        provider=provider,
+        user_id=user_id,
+        org_id=org_id,
+        unit_of_work_cls=UnitOfWork,
+    )
 
 
 # ── MCP Protocol Layer ───────────────────────────────────────
