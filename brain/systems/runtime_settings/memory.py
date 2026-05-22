@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 from sqlalchemy import select, text
@@ -24,9 +24,19 @@ from .embedding_registry import (
     embedding_model_options,
     embedding_model_supported,
 )
+from .embedding_diagnostics import (
+    VALID_EMBEDDING_BACKENDS,
+    embedding_credentials_message,
+    embedding_status_detail,
+    embedding_status_remediation,
+    finalize_embedding_info,
+)
 from .schemas import RuntimeMemoryCheckRead, RuntimeMemoryRead, RuntimeMemoryUpdate, RuntimeOption
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from brain.systems.memory.embedding_service import EmbeddingService
 
 RUNTIME_MEMORY_SETTINGS_KEY = "runtime_memory"
 RUNTIME_MEMORY_SECRET_PREFIX = "runtime_memory_api_key_"
@@ -41,8 +51,8 @@ EMBEDDER_OPTIONS = embedder_options()
 RERANKER_OPTIONS = [
     RuntimeOption(key="weighted", label="Built-in ranking", description="Use the current memory ranking stack."),
 ]
-VALID_EMBEDDING_BACKENDS = {"api", "cpu", "gpu"}
 GPU_EMBEDDING_INFO_TIMEOUT_SECONDS = 1.0
+EMBEDDING_CHECK_QUERY = "illo brain memory setup check"
 
 
 @dataclass(frozen=True)
@@ -474,30 +484,6 @@ def _embedder_from_backend_provider(backend: str, provider: str | None) -> str:
     return "local_gpu"
 
 
-def _embedding_credentials_detail(provider: str) -> str:
-    try:
-        from brain.systems.memory.embedding_service import embedding_credentials_message
-
-        return embedding_credentials_message(provider)
-    except Exception:
-        if provider in {"gemini", "google"}:
-            return "Gemini embedding credentials are not configured. Add them in System/Access."
-        if provider == "openai":
-            return "OpenAI embedding credentials are not configured. Add them in System/Access."
-        return "Embedding credentials are not configured. Add them in System/Access."
-
-
-def _finalize_embedding_info(info: dict[str, Any]) -> dict[str, Any]:
-    detail = _embedding_detail(info)
-    remediation = _embedding_remediation(info)
-    if detail:
-        info["detail"] = detail
-    if remediation:
-        info["remediation"] = remediation
-    info["ready"] = str(info.get("status") or "") == "ready"
-    return info
-
-
 def _apply_gpu_embedding_info(info: dict[str, Any]) -> None:
     try:
         url = f"{cfg.GPU_SERVER_URL.rstrip('/')}/health"
@@ -520,8 +506,7 @@ def _apply_gpu_embedding_info(info: dict[str, Any]) -> None:
         info.update({"status": "unavailable", "loaded": False})
 
 
-def get_embedding_info(user: User | None = None) -> dict[str, Any]:
-    runtime = get_embedding_runtime_config()
+def _embedding_info_from_runtime(runtime: EmbeddingRuntimeConfig) -> dict[str, Any]:
     backend = runtime.backend.lower()
     provider = runtime.provider.lower()
     api_key_set = bool(runtime.api_key)
@@ -542,32 +527,15 @@ def get_embedding_info(user: User | None = None) -> dict[str, Any]:
     else:
         info["status"] = "ready"
         info["loaded"] = True
-    return _finalize_embedding_info(info)
+    return finalize_embedding_info(info)
+
+
+def get_embedding_info(user: User | None = None) -> dict[str, Any]:
+    return _embedding_info_from_runtime(get_embedding_runtime_config())
 
 
 async def async_get_embedding_info(session: AsyncSession, user: User | None = None) -> dict[str, Any]:
-    runtime = await async_get_embedding_runtime_config(session)
-    backend = runtime.backend.lower()
-    provider = runtime.provider.lower()
-    api_key_set = bool(runtime.api_key)
-    info: dict[str, Any] = {
-        "backend": backend,
-        "provider": provider,
-        "model": runtime.api_model if backend == "api" else runtime.cpu_model if backend == "cpu" else "local-gpu",
-        "dimensions": runtime.dimensions,
-        "api_key_set": api_key_set,
-    }
-    if backend not in VALID_EMBEDDING_BACKENDS:
-        info.update({"status": "invalid_config", "loaded": False})
-    elif backend == "gpu":
-        _apply_gpu_embedding_info(info)
-    elif backend == "api":
-        info["status"] = "ready" if info["api_key_set"] else "missing_key"
-        info["loaded"] = info["api_key_set"]
-    else:
-        info["status"] = "ready"
-        info["loaded"] = True
-    return _finalize_embedding_info(info)
+    return _embedding_info_from_runtime(await async_get_embedding_runtime_config(session))
 
 
 def _embedder_from_info(info: dict[str, Any]) -> str:
@@ -575,33 +543,6 @@ def _embedder_from_info(info: dict[str, Any]) -> str:
         str(info.get("backend") or "gpu"),
         str(info.get("provider") or ""),
     )
-
-
-def _embedding_detail(info: dict[str, Any]) -> str | None:
-    provider = str(info.get("provider") or "").lower()
-    status = info.get("status")
-    if status == "missing_key":
-        return _embedding_credentials_detail(provider)
-    if status == "invalid_config":
-        return f"Unknown embedding backend {info.get('backend')!r}. Use gpu, cpu, or api."
-    if status == "unavailable":
-        return "The local GPU embedding worker is not responding."
-    if status == "initializing":
-        return "The local GPU embedding worker is still initializing."
-    return None
-
-
-def _embedding_remediation(info: dict[str, Any]) -> str | None:
-    status = info.get("status")
-    if status == "missing_key":
-        return "Add embedding credentials in System/Access, or choose Local CPU."
-    if status == "invalid_config":
-        return "Set the memory embedder to Local GPU, Local CPU, Gemini, or OpenAI."
-    if status == "unavailable":
-        return "Start or inspect the GPU embedding worker, or switch memory to Local CPU/API."
-    if status == "initializing":
-        return "Wait for the GPU embedding worker to finish loading before running semantic work."
-    return None
 
 
 def _indexed_vector_count() -> int:
@@ -636,9 +577,13 @@ async def _async_indexed_vector_count(session: AsyncSession) -> int:
         return 0
 
 
-def get_runtime_memory(user: User) -> RuntimeMemoryRead:
-    info = get_embedding_info(user)
-    runtime = get_embedding_runtime_config(include_secret=False)
+def _runtime_memory_read(
+    *,
+    info: dict[str, Any],
+    runtime: EmbeddingRuntimeConfig,
+    indexed_vectors: int,
+    api_key_statuses: dict[str, bool],
+) -> RuntimeMemoryRead:
     reranker = runtime.reranker or "weighted"
     if reranker != "weighted":
         reranker = "weighted"
@@ -653,13 +598,10 @@ def get_runtime_memory(user: User) -> RuntimeMemoryRead:
         embedding_model=embedding_model,
         embedding_dimensions=info.get("dimensions"),
         embedding_status=str(info.get("status") or "unknown"),
-        embedding_detail=_embedding_detail(info),
-        embedding_remediation=_embedding_remediation(info),
-        indexed_vectors=_indexed_vector_count(),
-        api_key_statuses={
-            "openai": bool(_installation_embedding_api_key("openai")),
-            "gemini": bool(_installation_embedding_api_key("gemini")),
-        },
+        embedding_detail=embedding_status_detail(info),
+        embedding_remediation=embedding_status_remediation(info),
+        indexed_vectors=indexed_vectors,
+        api_key_statuses=api_key_statuses,
         reranker=reranker,
         embedder_options=EMBEDDER_OPTIONS,
         embedding_model_options=EMBEDDING_MODEL_OPTIONS,
@@ -667,34 +609,29 @@ def get_runtime_memory(user: User) -> RuntimeMemoryRead:
     )
 
 
+def get_runtime_memory(user: User) -> RuntimeMemoryRead:
+    info = get_embedding_info(user)
+    return _runtime_memory_read(
+        info=info,
+        runtime=get_embedding_runtime_config(include_secret=False),
+        indexed_vectors=_indexed_vector_count(),
+        api_key_statuses={
+            "openai": bool(_installation_embedding_api_key("openai")),
+            "gemini": bool(_installation_embedding_api_key("gemini")),
+        },
+    )
+
+
 async def async_get_runtime_memory(session: AsyncSession, user: User) -> RuntimeMemoryRead:
     info = await async_get_embedding_info(session, user)
-    runtime = await async_get_embedding_runtime_config(session, include_secret=False)
-    reranker = runtime.reranker or "weighted"
-    if reranker != "weighted":
-        reranker = "weighted"
-    embedder = _embedder_from_info(info)
-    embedding_model = info.get("model")
-    if not embedding_model_supported(embedder, str(embedding_model or "")):
-        embedding_model = default_embedding_model(embedder)
-
-    return RuntimeMemoryRead(
-        scope="installation",
-        embedder=embedder,
-        embedding_model=embedding_model,
-        embedding_dimensions=info.get("dimensions"),
-        embedding_status=str(info.get("status") or "unknown"),
-        embedding_detail=_embedding_detail(info),
-        embedding_remediation=_embedding_remediation(info),
+    return _runtime_memory_read(
+        info=info,
+        runtime=await async_get_embedding_runtime_config(session, include_secret=False),
         indexed_vectors=await _async_indexed_vector_count(session),
         api_key_statuses={
             "openai": bool(await _async_installation_embedding_api_key(session, "openai")),
             "gemini": bool(await _async_installation_embedding_api_key(session, "gemini")),
         },
-        reranker=reranker,
-        embedder_options=EMBEDDER_OPTIONS,
-        embedding_model_options=EMBEDDING_MODEL_OPTIONS,
-        reranker_options=RERANKER_OPTIONS,
     )
 
 
@@ -829,31 +766,9 @@ def check_runtime_memory(user: User) -> RuntimeMemoryCheckRead:
     try:
         from brain.systems.memory.embedding_service import EmbeddingService
 
-        embedding_service = EmbeddingService.from_legacy_sync_config()
-        vector = embedding_service.query("illo brain memory setup check")
-        shape = getattr(vector, "shape", None)
-        dimensions = int(shape[0] if shape else len(vector))
-        expected = embedding_service.runtime_config.dimensions
-        duration_ms = int(round((time.perf_counter() - started) * 1000))
-        if dimensions != expected:
-            return RuntimeMemoryCheckRead(
-                status="error",
-                detail=f"Embedding returned {dimensions} dimensions, expected {expected}.",
-                dimensions=dimensions,
-                duration_ms=duration_ms,
-            )
-        return RuntimeMemoryCheckRead(
-            status="ok",
-            detail=f"Embedding check returned {dimensions} dimensions.",
-            dimensions=dimensions,
-            duration_ms=duration_ms,
-        )
+        return _check_runtime_memory_with_service(EmbeddingService.from_legacy_sync_config(), started)
     except Exception as exc:
-        return RuntimeMemoryCheckRead(
-            status="error",
-            detail=_memory_check_error_detail(exc),
-            duration_ms=int(round((time.perf_counter() - started) * 1000)),
-        )
+        return _runtime_memory_check_error(exc, started)
 
 
 async def async_check_runtime_memory(
@@ -864,31 +779,45 @@ async def async_check_runtime_memory(
     try:
         from brain.systems.memory.embedding_service import EmbeddingService
 
-        embedding_service = await EmbeddingService.from_session(session)
-        vector = embedding_service.query("illo brain memory setup check")
-        shape = getattr(vector, "shape", None)
-        dimensions = int(shape[0] if shape else len(vector))
-        expected = embedding_service.runtime_config.dimensions
-        duration_ms = int(round((time.perf_counter() - started) * 1000))
-        if dimensions != expected:
-            return RuntimeMemoryCheckRead(
-                status="error",
-                detail=f"Embedding returned {dimensions} dimensions, expected {expected}.",
-                dimensions=dimensions,
-                duration_ms=duration_ms,
-            )
+        return _check_runtime_memory_with_service(await EmbeddingService.from_session(session), started)
+    except Exception as exc:
+        return _runtime_memory_check_error(exc, started)
+
+
+def _check_runtime_memory_with_service(
+    embedding_service: "EmbeddingService",
+    started: float,
+) -> RuntimeMemoryCheckRead:
+    vector = embedding_service.query(EMBEDDING_CHECK_QUERY)
+    shape = getattr(vector, "shape", None)
+    dimensions = int(shape[0] if shape else len(vector))
+    expected = embedding_service.runtime_config.dimensions
+    duration_ms = _elapsed_check_ms(started)
+    if dimensions != expected:
         return RuntimeMemoryCheckRead(
-            status="ok",
-            detail=f"Embedding check returned {dimensions} dimensions.",
+            status="error",
+            detail=f"Embedding returned {dimensions} dimensions, expected {expected}.",
             dimensions=dimensions,
             duration_ms=duration_ms,
         )
-    except Exception as exc:
-        return RuntimeMemoryCheckRead(
-            status="error",
-            detail=_memory_check_error_detail(exc),
-            duration_ms=int(round((time.perf_counter() - started) * 1000)),
-        )
+    return RuntimeMemoryCheckRead(
+        status="ok",
+        detail=f"Embedding check returned {dimensions} dimensions.",
+        dimensions=dimensions,
+        duration_ms=duration_ms,
+    )
+
+
+def _runtime_memory_check_error(exc: Exception, started: float) -> RuntimeMemoryCheckRead:
+    return RuntimeMemoryCheckRead(
+        status="error",
+        detail=_memory_check_error_detail(exc),
+        duration_ms=_elapsed_check_ms(started),
+    )
+
+
+def _elapsed_check_ms(started: float) -> int:
+    return int(round((time.perf_counter() - started) * 1000))
 
 
 def _memory_check_error_detail(exc: Exception) -> str:
@@ -900,7 +829,7 @@ def _memory_check_error_detail(exc: Exception) -> str:
     except Exception:
         provider = ""
     if provider in {"gemini", "google"}:
-        return _embedding_credentials_detail(provider)
+        return embedding_credentials_message(provider)
     if provider == "openai":
-        return _embedding_credentials_detail(provider)
+        return embedding_credentials_message(provider)
     return detail

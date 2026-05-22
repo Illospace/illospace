@@ -11,7 +11,6 @@ RAW_EMBEDDING_CALLS = {"embed_query", "embed_document", "embed_batch"}
 RAW_EMBEDDING_ALLOWLIST = {
     "brain/systems/memory/embeddings.py",
     "brain/systems/memory/embedding_service.py",
-    "brain/systems/runtime_settings/memory.py",
 }
 
 
@@ -67,11 +66,13 @@ def _parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
 
 
 def _is_raw_embedding_call(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in RAW_EMBEDDING_CALLS
-    )
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id in RAW_EMBEDDING_CALLS
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr in RAW_EMBEDDING_CALLS
+    return False
 
 
 def _enclosing_function_is_async(node: ast.AST, parent_map: dict[ast.AST, ast.AST]) -> bool:

@@ -14,6 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.platform.db.models.run import AgentRun
 from brain.platform.provider_health import provider_health_snapshot
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
+from brain.systems.runtime_settings.embedding_diagnostics import (
+    embedding_backend_label,
+    embedding_provider_label,
+)
 from brain.systems.runtime_settings.memory import async_get_embedding_info
 
 APP_VERSION = "6.0.0"
@@ -360,7 +364,7 @@ async def _embedding_health_check(session: AsyncSession | None) -> HealthCheck:
             return HealthCheck(
                 name="embedding",
                 status="ok",
-                summary=f"{_embedding_backend_label(info)} embedding backend is ready",
+                summary=f"{embedding_backend_label(info)} embedding backend is ready",
                 latency_ms=_elapsed_ms(start),
                 details=details,
             )
@@ -377,7 +381,7 @@ async def _embedding_health_check(session: AsyncSession | None) -> HealthCheck:
 
         summary = str(info.get("detail") or f"embedding backend is {runtime_status}")
         if runtime_status == "missing_key":
-            summary = f"{_embedding_provider_label(info)} embedding credentials missing"
+            summary = f"{embedding_provider_label(info)} embedding credentials missing"
         return HealthCheck(
             name="embedding",
             status="failed",
@@ -397,27 +401,6 @@ async def _embedding_health_check(session: AsyncSession | None) -> HealthCheck:
             details={"error": str(exc)},
             remediation="Verify embedding backend configuration and service availability.",
         )
-
-
-def _embedding_backend_label(info: dict[str, Any]) -> str:
-    backend = str(info.get("backend") or "").lower()
-    if backend == "api":
-        return _embedding_provider_label(info)
-    if backend == "cpu":
-        return "CPU"
-    if backend == "gpu":
-        return "GPU"
-    return backend or "unknown"
-
-
-def _embedding_provider_label(info: dict[str, Any]) -> str:
-    provider = str(info.get("provider") or "").lower()
-    if provider in {"gemini", "google"}:
-        return "Gemini"
-    if provider == "openai":
-        return "OpenAI"
-    return provider.upper() if provider else "API"
-
 
 def _provider_health_check() -> HealthCheck:
     start = time.monotonic()

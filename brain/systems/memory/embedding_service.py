@@ -13,6 +13,10 @@ from brain.systems.runtime_settings.memory import (
     async_get_embedding_runtime_config,
     get_embedding_runtime_config,
 )
+from brain.systems.runtime_settings.embedding_diagnostics import (
+    VALID_EMBEDDING_BACKENDS,
+    embedding_credentials_message,
+)
 
 EmbeddingMode = Literal["document", "query"]
 
@@ -87,7 +91,7 @@ class EmbeddingService:
 
     def _ensure_ready(self) -> None:
         backend = (self.runtime_config.backend or "").lower()
-        if backend not in {"gpu", "cpu", "api"}:
+        if backend not in VALID_EMBEDDING_BACKENDS:
             raise EmbeddingConfigUnavailable(
                 f"Unknown embedding backend {self.runtime_config.backend!r}. Use gpu, cpu, or api."
             )
@@ -100,16 +104,6 @@ class EmbeddingService:
         if "credentials are not configured" in lower or "embedding_api_key" in lower:
             return EmbeddingCredentialsUnavailable(embedding_credentials_message(self.provider))
         return EmbeddingProviderUnavailable(detail)
-
-
-def embedding_credentials_message(provider: str) -> str:
-    """Return the operator-facing missing-credentials message for a provider."""
-    if provider in {"gemini", "google"}:
-        return "Gemini embedding credentials are not configured. Add them in System/Access."
-    if provider == "openai":
-        return "OpenAI embedding credentials are not configured. Add them in System/Access."
-    return "Embedding credentials are not configured. Add them in System/Access."
-
 
 def embedding_degradation_reason(exc: Exception) -> str:
     """Return a stable degradation reason for embedding failures."""
