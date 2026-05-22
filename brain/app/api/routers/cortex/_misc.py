@@ -887,6 +887,7 @@ async def audit_apply(
         from brain.systems.memory.embedding_service import EmbeddingService
         from brain.systems.memory.scope import classify_scope
         from brain.systems.quality.gate import check_quality
+        from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
 
         salience = float(payload.get("salience", 7.0))
         qr = await check_quality(content, salience=salience, memory_type=payload.get("memory_type", "lesson"))

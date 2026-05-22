@@ -18,27 +18,29 @@ def _idea_payload(idea: Any) -> dict[str, Any]:
     }
 
 
-def _discussion_reply_run_message(
+THREAD_DISCUSSION_SURFACE = "thread_discussion"
+THREAD_DISCUSSION_REPLY_TOOL = "post_thread_discussion_reply"
+THREAD_DISCUSSION_EVENT = "thread_discussion_mention"
+THREAD_DISCUSSION_EVENT_TYPE = f"cortex.{THREAD_DISCUSSION_EVENT}"
+
+
+def _discussion_mention_run_message(
     *,
     idea_data: dict[str, Any],
     idea_id: str,
     thread_message: str,
-    metadata: dict[str, Any] | None,
+    discussion_trigger: dict[str, Any],
 ) -> str:
-    metadata = dict(metadata or {})
-    discussion_trigger = metadata.get("discussion_trigger")
-    if not isinstance(discussion_trigger, dict):
-        discussion_trigger = {}
-    comment_id = discussion_trigger.get("comment_id") or metadata.get("discussion_comment_id")
+    comment_id = discussion_trigger.get("comment_id")
     return "\n".join(
         [
             f"[Thread: \"{idea_data['title']}\" | {idea_id}]",
             "",
             "A teammate summoned @illo from Thread Discussion.",
-            "Originating surface: thread_discussion.",
+            "This is a separate Discussion conversation attached to the Thread, not an AI Timeline reply.",
             "Acknowledge or answer in Discussion with post_thread_discussion_reply when a visible response fits.",
             "Use read_thread_discussion if more Discussion context is needed.",
-            "Use AI Timeline tools such as cortex_reply only when continuing the underlying Thread work belongs there.",
+            "Treat the AI Timeline as related context only unless a separate tool explicitly asks you to act there.",
             "You may also act headlessly when no visible surface update is appropriate.",
             "",
             f"Triggering Discussion comment id: {comment_id}",
@@ -84,18 +86,7 @@ def build_cortex_notify_trigger(
         run_metadata = metadata
     else:
         run_metadata = effective_metadata if effective_metadata is not None else metadata
-        if (
-            isinstance(run_metadata, dict)
-            and str(run_metadata.get("originating_surface") or "") == "thread_discussion"
-        ):
-            run_message = _discussion_reply_run_message(
-                idea_data=idea_data,
-                idea_id=idea_id,
-                thread_message=thread_message,
-                metadata=run_metadata,
-            )
-        else:
-            run_message = f"[Idea: \"{idea_data['title']}\" | {idea_id}]\n\n{thread_message[:2000]}"
+        run_message = f"[Idea: \"{idea_data['title']}\" | {idea_id}]\n\n{thread_message[:2000]}"
 
     payload = {
         "idea_id": idea_id,
@@ -129,6 +120,90 @@ def build_cortex_notify_trigger(
             "run_event": event,
             "priority": int(priority),
             "auth_path": "cortex_session",
+        },
+    )
+
+
+def build_thread_discussion_mention_trigger(
+    *,
+    idea_id: str,
+    idea: Any,
+    comment: Any,
+    user: dict[str, Any],
+    discussion_trigger: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+    priority: int = 0,
+) -> IlloTrigger:
+    """Normalize a Thread Discussion @illo mention into its own conversation trigger.
+
+    Discussion is not a disguised Cortex thread reply. It is a separate comment
+    surface linked to the Thread, so this trigger gets its own event and target
+    kind. Keeping that split explicit prevents agents from answering Discussion
+    mentions in the AI Timeline by accident.
+    """
+    org_id = str(getattr(idea, "org_id", None) or user.get("org_id") or "")
+    actor = human_identity(user) if user and user.get("id") and user.get("id") != "system" else None
+    idea_data = _idea_payload(idea)
+    comment_id = int(getattr(comment, "id"))
+    body = str(getattr(comment, "body", "") or "")
+    discussion_trigger = dict(discussion_trigger or {})
+    metadata = dict(metadata or {})
+    metadata.setdefault("source", THREAD_DISCUSSION_SURFACE)
+    metadata.setdefault("originating_surface", THREAD_DISCUSSION_SURFACE)
+    metadata.setdefault("triggering_surface", THREAD_DISCUSSION_SURFACE)
+    metadata.setdefault("source_surface", THREAD_DISCUSSION_SURFACE)
+    metadata.setdefault("required_response_tool", THREAD_DISCUSSION_REPLY_TOOL)
+    metadata.setdefault("final_answer_target_surface", THREAD_DISCUSSION_SURFACE)
+    metadata.setdefault("discussion_comment_id", comment_id)
+    metadata.setdefault("discussion_trigger", discussion_trigger)
+
+    target = {
+        "kind": THREAD_DISCUSSION_SURFACE,
+        "idea_id": idea_id,
+        "parent_thread_id": idea_id,
+        "discussion_comment_id": comment_id,
+        "surface": THREAD_DISCUSSION_SURFACE,
+    }
+    payload = {
+        "idea_id": idea_id,
+        "parent_thread_id": idea_id,
+        "idea": idea_data,
+        "discussion": discussion_trigger,
+        "thread_message": body[:2000],
+        "run_message": _discussion_mention_run_message(
+            idea_data=idea_data,
+            idea_id=idea_id,
+            thread_message=body,
+            discussion_trigger=discussion_trigger,
+        ),
+        "metadata": metadata,
+        "priority": int(priority),
+        "user_id": user.get("id") if user else None,
+    }
+    idempotency_key = stable_idempotency_key(
+        source="cortex",
+        event_type=THREAD_DISCUSSION_EVENT_TYPE,
+        org_id=org_id,
+        target=target,
+        payload={
+            "discussion_comment_id": comment_id,
+            "thread_message": payload["thread_message"],
+            "priority": payload["priority"],
+        },
+    )
+    return IlloTrigger(
+        source="cortex",
+        event_type=THREAD_DISCUSSION_EVENT_TYPE,
+        actor=actor,
+        org_id=org_id,
+        target=target,
+        payload=payload,
+        idempotency_key=idempotency_key,
+        policy={
+            "route": "run",
+            "run_event": THREAD_DISCUSSION_EVENT,
+            "priority": int(priority),
+            "auth_path": "cortex_discussion_session",
         },
     )
 

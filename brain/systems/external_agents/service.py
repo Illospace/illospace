@@ -71,6 +71,7 @@ HEADLESS_ASK_BLOCKED_TOOLS = (
     "manage_idea",
     "manage_workspace_app",
     "post_chat_message",
+    "post_ai_timeline_message",
     "post_thread_discussion_reply",
 )
 

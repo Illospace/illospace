@@ -77,6 +77,41 @@ def test_internal_adapter_builds_cortex_thread_trigger():
     assert trigger.policy["route"] == "run"
 
 
+def test_internal_adapter_builds_thread_discussion_trigger_as_separate_surface():
+    from brain.app.triggers.adapters.internal import build_thread_discussion_mention_trigger
+
+    discussion_trigger = {
+        "surface": "thread_discussion",
+        "thread_id": "idea-1",
+        "comment_id": 77,
+        "response_target": {
+            "surface": "thread_discussion",
+            "thread_id": "idea-1",
+            "reply_to_comment_id": 77,
+        },
+    }
+    trigger = build_thread_discussion_mention_trigger(
+        idea_id="idea-1",
+        idea=_idea(),
+        comment=SimpleNamespace(id=77, body="@illo can you see this?"),
+        user=_user(),
+        discussion_trigger=discussion_trigger,
+    )
+
+    assert trigger.source == "cortex"
+    assert trigger.event_type == "cortex.thread_discussion_mention"
+    assert trigger.target == {
+        "kind": "thread_discussion",
+        "idea_id": "idea-1",
+        "parent_thread_id": "idea-1",
+        "discussion_comment_id": 77,
+        "surface": "thread_discussion",
+    }
+    assert trigger.payload["metadata"]["required_response_tool"] == "post_thread_discussion_reply"
+    assert "separate Discussion conversation" in trigger.payload["run_message"]
+    assert "not an AI Timeline reply" in trigger.payload["run_message"]
+
+
 def test_trigger_rejects_actor_cross_org():
     from brain.app.triggers.adapters.internal import build_cortex_notify_trigger
 

@@ -31,7 +31,7 @@ from brain.systems.cortex.project_context.materializer import (
 )
 from brain.systems.cortex.thought_lifecycle import TerminalRunSettlementCommand, settle_terminal_run
 from brain.platform.db.models.agent_run import AgentRunArtifactRow, AgentRunEventRow, AgentRunRow
-from brain.platform.db.models.idea import Idea, IdeaThread
+from brain.platform.db.models.idea import Idea, IdeaThread, ThreadDiscussionComment
 
 logger = logging.getLogger(__name__)
 UnitOfWork = None
@@ -212,22 +212,47 @@ _TERMINAL_RUN_IDEA_STATUS = {
 }
 _PROTECTED_IDEA_STATUSES = {"archived", "resolved"}
 _AI_TIMELINE_SURFACES = {"ai_timeline", "thread_timeline", "cortex_thread", "main_thread"}
+_THREAD_DISCUSSION_SURFACE = "thread_discussion"
+_THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
 _NON_TIMELINE_FINAL_ANSWER_TARGETS = {
     "discussion",
     "headless",
     "none",
     "originating_surface",
-    "thread_discussion",
+    _THREAD_DISCUSSION_SURFACE,
 }
 
 
+def _run_target_ref(run: AgentRunRow) -> dict[str, Any]:
+    value = getattr(run, "target_ref", None)
+    return value if isinstance(value, dict) else {}
+
+
+def _run_metadata(run: AgentRunRow) -> dict[str, Any]:
+    value = getattr(run, "metadata_", None)
+    return value if isinstance(value, dict) else {}
+
+
+def _run_context_maps(run: AgentRunRow):
+    for container in (_run_target_ref(run), _run_metadata(run)):
+        if container:
+            yield container
+
+
+def _run_is_thread_discussion_conversation(run: AgentRunRow) -> bool:
+    for container in _run_context_maps(run):
+        if container.get("kind") == _THREAD_DISCUSSION_SURFACE:
+            return True
+        if container.get("originating_surface") == _THREAD_DISCUSSION_SURFACE:
+            return True
+        if container.get("surface") == _THREAD_DISCUSSION_SURFACE:
+            return True
+    thread_id = str(getattr(run, "thread_id", "") or "")
+    return thread_id.startswith(_THREAD_DISCUSSION_THREAD_PREFIX)
+
+
 def _run_surface_value(run: AgentRunRow, key: str) -> str:
-    for container in (
-        getattr(run, "target_ref", None),
-        getattr(run, "metadata_", None),
-    ):
-        if not isinstance(container, dict):
-            continue
+    for container in _run_context_maps(run):
         value = container.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -235,36 +260,15 @@ def _run_surface_value(run: AgentRunRow, key: str) -> str:
 
 
 def _run_should_mirror_final_answer_to_timeline(run: AgentRunRow) -> bool:
+    if _run_is_thread_discussion_conversation(run):
+        return False
     target_surface = _run_surface_value(run, "final_answer_target_surface")
     if target_surface in _AI_TIMELINE_SURFACES:
         return True
     if target_surface in _NON_TIMELINE_FINAL_ANSWER_TARGETS:
         return False
     originating_surface = _run_surface_value(run, "originating_surface")
-    return originating_surface != "thread_discussion"
-
-
-async def _run_completed_tool(session, *, run_id: int, tool_name: str) -> bool:
-    if not hasattr(session, "scalars"):
-        return False
-    try:
-        result = await session.scalars(
-            select(AgentRunEventRow)
-            .where(
-                AgentRunEventRow.run_id == int(run_id),
-                AgentRunEventRow.event_type == "run.tool_completed",
-            )
-            .order_by(AgentRunEventRow.sequence_no.desc(), AgentRunEventRow.id.desc())
-            .limit(50)
-        )
-        events = list(result.all())
-    except Exception:
-        return False
-    for event in events:
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        if str(payload.get("tool_name") or payload.get("tool") or "") == tool_name:
-            return True
-    return False
+    return originating_surface != _THREAD_DISCUSSION_SURFACE
 
 
 def _message_belongs_to_run(message: IdeaThread, run_id: int) -> bool:
@@ -274,7 +278,7 @@ def _message_belongs_to_run(message: IdeaThread, run_id: int) -> bool:
     return str(metadata.get("run_id") or "") == str(run_id)
 
 
-async def _latest_unmirrored_final_answer(session, *, run: AgentRunRow, idea: Idea) -> tuple[str | None, int | None]:
+async def _latest_final_answer_artifact(session, *, run: AgentRunRow) -> tuple[str | None, int | None]:
     artifact = (
         await session.scalars(
             select(AgentRunArtifactRow)
@@ -289,6 +293,13 @@ async def _latest_unmirrored_final_answer(session, *, run: AgentRunRow, idea: Id
     text = str(getattr(artifact, "text", None) or "").strip()
     if not text:
         return None, None
+    return text, getattr(artifact, "id", None)
+
+
+async def _latest_unmirrored_final_answer(session, *, run: AgentRunRow, idea: Idea) -> tuple[str | None, int | None]:
+    text, artifact_id = await _latest_final_answer_artifact(session, run=run)
+    if not text:
+        return None, None
     recent_responses = (
         await session.scalars(
             select(IdeaThread)
@@ -301,17 +312,152 @@ async def _latest_unmirrored_final_answer(session, *, run: AgentRunRow, idea: Id
     ).all()
     if any(_message_belongs_to_run(message, int(run.id)) for message in recent_responses):
         return None, None
-    return text, getattr(artifact, "id", None)
+    return text, artifact_id
+
+
+def _run_discussion_trigger(run: AgentRunRow) -> dict[str, Any]:
+    for container in _run_context_maps(run):
+        trigger = container.get("discussion_trigger")
+        if isinstance(trigger, dict):
+            return dict(trigger)
+    return {}
+
+
+def _run_discussion_thread_id(run: AgentRunRow) -> str:
+    trigger = _run_discussion_trigger(run)
+    response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
+    target_ref = _run_target_ref(run)
+    for candidate in (
+        response_target.get("thread_id") if isinstance(response_target, dict) else None,
+        trigger.get("thread_id"),
+        target_ref.get("parent_thread_id"),
+        target_ref.get("idea_id"),
+    ):
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    thread_id = str(getattr(run, "thread_id", "") or "")
+    return (
+        thread_id[len(_THREAD_DISCUSSION_THREAD_PREFIX):]
+        if thread_id.startswith(_THREAD_DISCUSSION_THREAD_PREFIX)
+        else ""
+    )
+
+
+def _comment_belongs_to_run(comment: ThreadDiscussionComment, run_id: int) -> bool:
+    metadata = getattr(comment, "metadata_", None)
+    if not isinstance(metadata, dict):
+        return False
+    return str(metadata.get("created_by_run_id") or "") == str(run_id)
+
+
+async def _discussion_reply_already_recorded(session, *, run: AgentRunRow, thread_id: str) -> bool:
+    if not hasattr(session, "scalars"):
+        return False
+    try:
+        result = await session.scalars(
+            select(ThreadDiscussionComment)
+            .where(
+                ThreadDiscussionComment.thread_id == str(thread_id),
+                ThreadDiscussionComment.author_kind == "illo",
+            )
+            .order_by(ThreadDiscussionComment.created_at.desc(), ThreadDiscussionComment.id.desc())
+            .limit(100)
+        )
+        comments = list(result.all())
+    except Exception:
+        return False
+    return any(_comment_belongs_to_run(comment, int(run.id)) for comment in comments)
+
+
+def _thread_discussion_comment_payload(comment: ThreadDiscussionComment) -> dict[str, Any]:
+    return {
+        "id": comment.id,
+        "thread_id": str(comment.thread_id),
+        "org_id": str(comment.org_id),
+        "author_user_id": str(comment.author_user_id) if comment.author_user_id else None,
+        "author_kind": comment.author_kind,
+        "author_name": None,
+        "author_color": None,
+        "body": comment.body,
+        "attachments": comment.attachments or [],
+        "metadata": comment.metadata_ or {},
+        "created_at": comment.created_at.isoformat() if comment.created_at else None,
+    }
+
+
+async def _settle_thread_discussion_conversation_run_async(
+    session,
+    run: AgentRunRow,
+) -> dict[str, Any] | None:
+    """Settle a Discussion-origin run back into Discussion, never the AI Timeline."""
+    if not _run_is_thread_discussion_conversation(run):
+        return None
+    if run.parent_run_id is not None:
+        return None
+    thread_id = _run_discussion_thread_id(run)
+    org_id = str(getattr(run, "org_id", "") or "").strip()
+    if not thread_id or not org_id:
+        return None
+    if await _discussion_reply_already_recorded(session, run=run, thread_id=thread_id):
+        return None
+    final_answer, artifact_id = await _latest_final_answer_artifact(session, run=run)
+    if not final_answer:
+        return None
+
+    trigger = _run_discussion_trigger(run)
+    response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
+    reply_to_comment_id = response_target.get("reply_to_comment_id") or trigger.get("comment_id")
+    metadata: dict[str, Any] = {
+        "source": "agent_run_final_answer",
+        "surface": _THREAD_DISCUSSION_SURFACE,
+        "created_by_run_id": int(run.id),
+        "artifact_id": artifact_id,
+    }
+    if reply_to_comment_id not in (None, ""):
+        metadata["reply_to_comment_id"] = reply_to_comment_id
+
+    comment = ThreadDiscussionComment(
+        thread_id=thread_id,
+        org_id=org_id,
+        author_user_id=None,
+        author_kind="illo",
+        body=final_answer,
+        attachments=[],
+        metadata_=metadata,
+    )
+    session.add(comment)
+    if hasattr(session, "flush"):
+        await session.flush()
+    payload = _thread_discussion_comment_payload(comment)
+    publish_safe(
+        "thread_discussion_comment",
+        {"idea_id": thread_id, "org_id": org_id, "comment": payload},
+    )
+    return {
+        "surface": _THREAD_DISCUSSION_SURFACE,
+        "idea_id": thread_id,
+        "run_id": int(run.id),
+        "comment_id": getattr(comment, "id", None),
+    }
+
+
+async def _settle_terminal_root_run_async(session, run_id: int) -> dict[str, Any] | None:
+    run = await session.get(AgentRunRow, int(run_id))
+    if run is None or run.parent_run_id is not None:
+        return None
+    if _run_is_thread_discussion_conversation(run):
+        return await _settle_thread_discussion_conversation_run_async(session, run)
+    return await _settle_idea_for_terminal_root_run_async(session, run_id)
 
 
 async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict[str, Any] | None:
     run = await session.get(AgentRunRow, int(run_id))
     if run is None or run.parent_run_id is not None:
         return None
-    if (
-        not _run_should_mirror_final_answer_to_timeline(run)
-        and not await _run_completed_tool(session, run_id=int(run_id), tool_name="cortex_reply")
-    ):
+    if _run_is_thread_discussion_conversation(run):
+        return None
+    if not _run_should_mirror_final_answer_to_timeline(run):
         return None
     target_status = _TERMINAL_RUN_IDEA_STATUS.get(str(run.status or ""))
     if not target_status or not run.thread_id:
@@ -602,7 +748,7 @@ async def reap_stale_active_runs(
             event_row = await store.append_event(event)
             await store.set_status(int(row.id), RunStatus.FAILED, reason="runner_heartbeat_stale")
             await _project_live_event_async(uow.session, event.event_type, _event_stream_payload(event, event_row, row))
-            status_payload = await _settle_idea_for_terminal_root_run_async(uow.session, int(row.id))
+            status_payload = await _settle_terminal_root_run_async(uow.session, int(row.id))
             if status_payload:
                 status_payloads.append(status_payload)
             reaped += 1
@@ -700,7 +846,7 @@ async def _mark_run_failed_after_runner_error_async(
                 )
             await store.append_event(run_event(int(run_id), "run.failed", {"error": error}, root_run_id=row.root_run_id))
             await store.set_status(int(run_id), RunStatus.FAILED, reason=error[:500])
-        return await _settle_idea_for_terminal_root_run_async(uow.session, int(run_id))
+        return await _settle_terminal_root_run_async(uow.session, int(run_id))
 
 
 def _mark_run_failed_after_runner_error(
@@ -740,7 +886,7 @@ async def _run_queued_once_async(*, limit: int = 1) -> int:
                 async with _unit_of_work_factory()() as uow:
                     completed_run = await _engine_for_session(uow.session).run_existing(int(run_id))
                     completed_status = str(getattr(completed_run.status, "value", completed_run.status) or "")
-                    status_payload = await _settle_idea_for_terminal_root_run_async(uow.session, int(run_id))
+                    status_payload = await _settle_terminal_root_run_async(uow.session, int(run_id))
                 await _finalize_cycle_run_if_needed_async(int(run_id), status=completed_status)
             if status_payload:
                 publish_safe("status_change", status_payload)

@@ -7,6 +7,8 @@ from typing import Any
 from brain.systems.runs.tool_catalog.handlers.common import _agent_context, logger
 
 THREAD_DISCUSSION_SURFACE = "thread_discussion"
+AI_TIMELINE_SURFACE = "ai_timeline"
+THREAD_DISCUSSION_CONVERSATION_PREFIX = "thread-discussion:"
 
 
 def _execution_metadata() -> dict[str, Any]:
@@ -63,6 +65,14 @@ def _current_thread_id() -> str | None:
     return None
 
 
+def _current_target_ref() -> dict[str, Any]:
+    target_ref = getattr(_agent_context, "target_ref", None)
+    if isinstance(target_ref, dict):
+        return dict(target_ref)
+    target_ref = _execution_metadata().get("target_ref")
+    return dict(target_ref) if isinstance(target_ref, dict) else {}
+
+
 def _coerce_optional_int(value: Any) -> int | None:
     if value in (None, ""):
         return None
@@ -87,6 +97,32 @@ def _first_nonempty(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _thread_id_from_discussion_conversation(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.startswith(THREAD_DISCUSSION_CONVERSATION_PREFIX):
+        return text.removeprefix(THREAD_DISCUSSION_CONVERSATION_PREFIX).strip()
+    return text
+
+
+def _current_ai_timeline_thread_id(explicit_thread_id: str | None = None) -> str:
+    trigger = _current_discussion_trigger()
+    response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
+    target_ref = _current_target_ref()
+    related_surfaces = target_ref.get("related_surfaces") if isinstance(target_ref.get("related_surfaces"), dict) else {}
+    ai_timeline = related_surfaces.get(AI_TIMELINE_SURFACE) if isinstance(related_surfaces.get(AI_TIMELINE_SURFACE), dict) else {}
+    parent_thread_id = _first_nonempty(
+        explicit_thread_id,
+        response_target.get("thread_id"),
+        trigger.get("thread_id"),
+        target_ref.get("parent_thread_id"),
+        target_ref.get("idea_id"),
+        target_ref.get("thread_id"),
+        ai_timeline.get("thread_id"),
+        _current_thread_id(),
+    )
+    return _thread_id_from_discussion_conversation(parent_thread_id)
 
 
 def _discussion_comment_payload(comment: Any) -> dict[str, Any]:
@@ -244,6 +280,75 @@ async def _handle_post_thread_discussion_reply(
     return json.dumps({"ok": True, "comment": payload}, default=str)
 
 
+async def _handle_post_ai_timeline_message(
+    body: str,
+    thread_id: str | None = None,
+) -> str:
+    """Post an Illo-authored message to a Thread's AI Timeline surface."""
+    from brain.platform.db.models.idea import Idea
+    from brain.platform.db.repositories.unit_of_work import UnitOfWork
+    from brain.systems.cortex.events import publish_safe
+    from brain.systems.cortex.thought_lifecycle import ThreadMessageCommand, post_thread_message
+
+    text = str(body or "").strip()
+    if not text:
+        return json.dumps({"error": "post_ai_timeline_message requires body"})
+
+    target_thread_id = _current_ai_timeline_thread_id(thread_id)
+    if not target_thread_id:
+        return json.dumps({"error": "post_ai_timeline_message requires a Thread id or active Thread run"})
+
+    org_id = str(getattr(_agent_context, "org_id", "") or "").strip()
+    if not org_id:
+        return json.dumps({"error": "post_ai_timeline_message requires an org-scoped run"})
+
+    trigger = _current_discussion_trigger()
+    response_target = trigger.get("response_target") if isinstance(trigger.get("response_target"), dict) else {}
+    reply_to_comment_id = _coerce_comment_id(response_target.get("reply_to_comment_id") or trigger.get("comment_id"))
+
+    async with UnitOfWork() as uow:
+        idea = await uow.session.get(Idea, target_thread_id)
+        if idea is None:
+            return json.dumps({"error": "Thread not found"})
+        idea_org_id = str(getattr(idea, "org_id", "") or "")
+        if idea_org_id and idea_org_id != org_id:
+            return json.dumps({"error": "Thread is outside this org"})
+
+        metadata = {
+            "source": "illo_agent",
+            "surface": AI_TIMELINE_SURFACE,
+            "originating_surface": THREAD_DISCUSSION_SURFACE if trigger else AI_TIMELINE_SURFACE,
+            "created_by_run_id": _current_run_id(),
+        }
+        if reply_to_comment_id is not None:
+            metadata["discussion_comment_id"] = reply_to_comment_id
+        result = await post_thread_message(
+            uow.session,
+            idea=idea,
+            command=ThreadMessageCommand(
+                idea_id=target_thread_id,
+                role="illo",
+                content=text,
+                actor={"org_id": org_id},
+                metadata=metadata,
+            ),
+            lifecycle_trigger="agent_tool_ai_timeline_message",
+        )
+        message_payload = result.message_payload
+        status_change = result.status_change
+
+    publish_safe(
+        "thread_message",
+        {"idea_id": target_thread_id, "message": message_payload},
+    )
+    if status_change:
+        publish_safe(
+            "status_change",
+            {"idea_id": target_thread_id, "new_status": status_change["new_status"]},
+        )
+    return json.dumps({"ok": True, "message": message_payload}, default=str)
+
+
 async def _handle_read_thread_discussion(
     thread_id: str | None = None,
     limit: int = 50,
@@ -303,6 +408,7 @@ async def _handle_read_thread_discussion(
 
 __all__ = [
     "_handle_post_chat_message",
+    "_handle_post_ai_timeline_message",
     "_handle_post_thread_discussion_reply",
     "_handle_read_thread_discussion",
 ]

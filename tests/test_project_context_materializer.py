@@ -1311,8 +1311,14 @@ async def test_materialize_saved_project_root_identity_survives_resource_changes
     second_source = Path(second_run.target_ref["project_context_snapshot"]["resources"][0]["materialization"]["source_path"])
     assert first.ok
     assert second.ok
+    assert first.empty_project is True
+    assert second.empty_project is False
     assert first_source == second_source == tmp_path / "project-roots" / "profile-stable"
     assert (second_source / "seed.md").read_text(encoding="utf-8") == "seed"
+    assert first_run.workspace_ref["project_context_materialization"]["empty_project"] is True
+    assert second_run.workspace_ref["project_context_materialization"]["empty_project"] is False
+    assert second_run.workspace_ref["project_context_materialization"]["seed_resource_count"] == 1
+    assert second_run.workspace_ref["project_context_materialization"]["project_root_file_count"] == 1
 
 
 async def test_materialize_picker_project_context_uses_profile_id_root(tmp_path, monkeypatch):
@@ -1386,6 +1392,74 @@ async def test_materialize_picker_project_context_uses_profile_id_root(tmp_path,
     assert snapshot["project_workspace_manifest"]["project_id"] == profile_id
     assert snapshot["project_workspace_manifest"]["project_key"] == profile_id
     assert snapshot["project_workspace_manifest"]["mounts"][0]["mount_path"] == "/"
+
+
+async def test_materialize_empty_saved_project_reports_non_empty_after_root_publish(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context import materializer
+    from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
+
+    profile_id = "profile-stable"
+    source_root = tmp_path / "project-roots" / profile_id
+    source_root.mkdir(parents=True)
+    (source_root / "analysis").mkdir()
+    (source_root / "analysis" / "summary.md").write_text("published", encoding="utf-8")
+
+    run = SimpleNamespace(
+        id=74,
+        user_id="user-1",
+        org_id="org-1",
+        metadata_={
+            "project_context": {
+                "project_profile_id": profile_id,
+                "selected_profile_id": f"server:{profile_id}",
+                "name": "Empty profile with published root",
+                "resources": [],
+            },
+        },
+        target_ref={
+            "kind": "cortex_idea",
+            "project_context_snapshot": {
+                "status": "validated",
+                "name": "Empty profile with published root",
+                "project_profile_id": profile_id,
+                "resources": [],
+            },
+        },
+        workspace_ref={},
+    )
+
+    class FakeSession:
+        async def get(self, _model, _id):
+            return run
+
+    class FakeUow:
+        session = FakeSession()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(materializer, "UnitOfWork", lambda: FakeUow())
+
+    result = await materialize_project_context_workspaces(
+        74,
+        workspace_root=str(tmp_path / "ideas" / "thread-after-publish"),
+        user_id="user-1",
+    )
+
+    draft_dir = tmp_path / "ideas" / "thread-after-publish" / ".illo-project-context" / "local" / profile_id / "project-root"
+    materialization = run.workspace_ref["project_context_materialization"]
+    root_resource = run.target_ref["project_context_snapshot"]["resources"][0]
+    assert result.ok
+    assert result.empty_project is False
+    assert materialization["empty_project"] is False
+    assert materialization["seed_resource_count"] == 0
+    assert materialization["project_root_file_count"] == 1
+    assert root_resource["materialization"]["root_empty"] is False
+    assert root_resource["materialization"]["root_file_count"] == 1
+    assert (draft_dir / "analysis" / "summary.md").read_text(encoding="utf-8") == "published"
 
 
 async def test_materialize_thread_draft_marks_conflict_when_root_and_draft_changed(tmp_path, monkeypatch):

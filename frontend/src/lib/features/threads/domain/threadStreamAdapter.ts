@@ -354,6 +354,7 @@ function mapThreadMessageItem(
     currentUser,
     nowMs,
   }: TranscriptMappingContext,
+  { inlineWithWork = false }: { inlineWithWork?: boolean } = {},
 ): CortexThreadStageMessageItem {
   const isAgent = item.role === 'assistant' || item.role === 'illo';
   const userAccent = isAgent ? null : resolveUserAccent(item, idea, currentUser);
@@ -382,6 +383,7 @@ function mapThreadMessageItem(
     ownerColor: userAccent ? mixHex(userAccent, userOwnerText, themeMode === 'light' ? 0.22 : 0.78) : undefined,
     html: item.content ? renderReadableMarkdown(item.content) : undefined,
     attachments: attachments.length ? attachments : undefined,
+    inlineWithWork: inlineWithWork || undefined,
   };
 }
 
@@ -509,7 +511,7 @@ function appendChronologicalRunSegments(
   let workSegmentIndex = 0;
   for (const segment of segments) {
     if (segment.kind === 'live_text') {
-      transcriptItems.push(mapThreadMessageItem(segment.item, context));
+      transcriptItems.push(mapThreadMessageItem(segment.item, context, { inlineWithWork: true }));
       continue;
     }
     if (segment.items.length === 0 && !segment.showLiveCue) continue;

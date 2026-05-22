@@ -29,6 +29,7 @@ ILLO_NATIVE_SOURCES = frozenset({
 ILLO_NATIVE_EVENTS = frozenset({
     "cortex.thread_reply",
     "cortex.idea_created",
+    "cortex.thread_discussion_mention",
     "cortex.thought_state_changed",
     "cycle.due_run",
     "memory.review_due",

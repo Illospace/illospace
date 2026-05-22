@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 import os
 
-from brain.systems.cortex.project_context.drafts import load_draft_metadata, sync_draft_from_root
+from brain.systems.cortex.project_context.drafts import build_file_manifest, load_draft_metadata, sync_draft_from_root
 from brain.systems.cortex.project_context.project_root import (
     PROJECT_ROOT_MOUNT_PATH,
     PROJECT_ROOT_RESOURCE_ID,
@@ -226,6 +226,10 @@ def materialize_project_native_root(
     draft_root = project_draft_root_path(workspace_root, project_key)
     had_base_manifest = bool(load_draft_metadata(draft_root).get("base_manifest"))
     sync_result = sync_draft_from_root(source_root, draft_root)
+    root_manifest = build_file_manifest(source_root)
+    draft_manifest = build_file_manifest(draft_root)
+    root_file_count = sum(1 for entry in root_manifest.values() if entry.get("kind") == "file")
+    draft_file_count = sum(1 for entry in draft_manifest.values() if entry.get("kind") == "file")
     draft_status = {
         "updated_from_root": sync_result.copied,
         "removed_from_root": sync_result.removed,
@@ -242,6 +246,11 @@ def materialize_project_native_root(
         "source_path": str(source_root),
         "draft": True,
         "project_key": project_key,
+        "root_empty": not root_manifest,
+        "root_path_count": len(root_manifest),
+        "root_file_count": root_file_count,
+        "draft_path_count": len(draft_manifest),
+        "draft_file_count": draft_file_count,
     }
     if any(import_summary.values()):
         materialization["imports"] = import_summary

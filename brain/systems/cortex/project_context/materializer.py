@@ -810,7 +810,6 @@ async def materialize_project_context_workspaces(
             return result.fail("Project Context snapshot is missing.")
         snapshot = dict(snapshot)
         resources = [dict(item) for item in snapshot.get("resources") or [] if isinstance(item, dict)]
-        result.empty_project = not resources
         _stamp_materialization_identity(
             snapshot,
             target_payload=target_payload,
@@ -837,6 +836,8 @@ async def materialize_project_context_workspaces(
     materialized_resources.append(root_resource)
     workspaces.append(root_workspace)
     result.resources_checked += 1
+    root_materialization = root_resource.get("materialization") if isinstance(root_resource.get("materialization"), dict) else {}
+    result.empty_project = bool(root_materialization.get("root_empty", True))
 
     for resource in resources:
         if _is_project_root_resource(resource):
@@ -875,6 +876,11 @@ async def materialize_project_context_workspaces(
         "workspace_manifest": workspace_manifest_payload,
         "errors": result.errors[:10],
         "empty_project": result.empty_project,
+        "seed_resource_count": len(resources),
+        "project_root_path_count": int(root_materialization.get("root_path_count") or 0),
+        "project_root_file_count": int(root_materialization.get("root_file_count") or 0),
+        "project_draft_path_count": int(root_materialization.get("draft_path_count") or 0),
+        "project_draft_file_count": int(root_materialization.get("draft_file_count") or 0),
     }
     snapshot["permission_scope"] = derive_project_permission_scope(snapshot)
     if result.errors:

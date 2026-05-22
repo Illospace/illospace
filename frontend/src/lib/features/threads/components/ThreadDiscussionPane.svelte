@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
 
   import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
   import ChatStateView from '$lib/components/chat/ChatStateView.svelte';
@@ -11,12 +11,13 @@
     shouldShowConversationScrollCue,
   } from '$lib/components/chat/conversationScroll';
   import { ConstellationNotice, ConstellationPresenceSeed } from '$lib/components/constellation';
+  import { defaultIlloMentionOption } from '$lib/features/composer/domain/mentionAutocomplete';
   import {
     listThreadDiscussion,
     postThreadDiscussionComment,
     type ThreadDiscussionComment,
   } from '$lib/features/threads/api/threadApi';
-  import { auth } from '$lib/stores/auth.svelte';
+  import { wsClient } from '$lib/stores/ws.svelte';
   import { buildPresenceSeedStyle, normalizeHexColor, presenceToneForColor } from '$lib/utils/constellationPresence';
   import { parseServerDate } from '$lib/utils/datetime';
 
@@ -44,18 +45,23 @@
 
   const MESSAGE_GROUP_WINDOW_MS = 15 * 60 * 1000;
   const MENTION_RENDER_RE = /(^|[^A-Za-z0-9_])@([A-Za-z0-9._-]+)([.,:;!?]?)/g;
+  const THREAD_DISCUSSION_RUN_PREFIX = 'thread-discussion:';
+  const THREAD_DISCUSSION_REPLY_TOOL = 'post_thread_discussion_reply';
+  const DISCUSSION_REPLY_RECONCILE_DELAYS_MS = [1200, 3000, 7000, 15000, 30000, 45000];
   const tailSignature = $derived(`${comments.length}:${comments.at(-1)?.id ?? 'empty'}`);
   const composerPlaceholder = $derived(
     ideaId ? 'Comment on this Thread...' : 'Open a Thread to comment...',
   );
-  const composerHint = $derived(
-    posting ? 'Posting comment...' : '@illo brings Illo into this Discussion.',
-  );
+  const mentionOptions = $derived([defaultIlloMentionOption()]);
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let replyReconcileTimers: ReturnType<typeof setTimeout>[] = [];
 
   $effect(() => {
     if (!ideaId) {
       comments = [];
       loadedForIdeaId = null;
+      clearReplyReconcileTimers();
+      clearScheduledRefresh();
       return;
     }
     if (loadedForIdeaId === ideaId) return;
@@ -75,17 +81,56 @@
     tick().then(() => scrollDiscussionToBottom());
   });
 
-  async function loadComments(targetIdeaId = ideaId) {
+  $effect(() => {
+    const activeIdeaId = ideaId;
+    if (!activeIdeaId) return;
+
+    const unsubs = [
+      wsClient.on('thread_discussion_comment', (msg) => {
+        handleDiscussionCommentEvent(activeIdeaId, msg);
+      }),
+      wsClient.on('tool_finished', (msg) => {
+        handleDiscussionRunEvent(activeIdeaId, msg, { requireReplyTool: true, delayMs: 180 });
+      }),
+      wsClient.on('run_completed', (msg) => {
+        handleDiscussionRunEvent(activeIdeaId, msg, { delayMs: 450 });
+      }),
+      wsClient.onReconnect(() => {
+        scheduleCommentRefresh(activeIdeaId, 150);
+      }),
+    ];
+
+    return () => {
+      unsubs.forEach((unsub) => unsub());
+      clearReplyReconcileTimers();
+      clearScheduledRefresh();
+    };
+  });
+
+  onDestroy(() => {
+    clearReplyReconcileTimers();
+    clearScheduledRefresh();
+  });
+
+  async function loadComments(targetIdeaId = ideaId, options: { silent?: boolean } = {}) {
     if (!targetIdeaId) return;
-    loading = true;
-    error = '';
+    if (!options.silent) {
+      loading = true;
+      error = '';
+    }
     try {
-      comments = await listThreadDiscussion(targetIdeaId);
+      const nextComments = await listThreadDiscussion(targetIdeaId);
+      if (targetIdeaId !== ideaId) return;
+      comments = sortDiscussionComments(nextComments);
       loadedForIdeaId = targetIdeaId;
     } catch (err: any) {
-      error = err?.detail || 'Failed to load Discussion.';
+      if (options.silent) {
+        console.warn('[thread-discussion] failed to refresh comments', err);
+      } else {
+        error = err?.detail || 'Failed to load Discussion.';
+      }
     } finally {
-      loading = false;
+      if (!options.silent) loading = false;
     }
   }
 
@@ -99,9 +144,10 @@
         body: text,
         metadata: { source: 'thread_discussion_panel' },
       });
-      comments = [...comments, result.comment];
+      upsertDiscussionComment(result.comment);
       body = '';
       userScrolledUp = false;
+      if (result.trigger) scheduleReplyReconcile(ideaId);
     } catch (err: any) {
       error = err?.detail || 'Failed to post comment.';
     } finally {
@@ -148,12 +194,93 @@
     return comment.author_kind === 'illo' || comment.author_kind === 'agent';
   }
 
-  function isOwnComment(comment: ThreadDiscussionComment) {
-    return (
-      comment.author_user_id != null &&
-      auth.user?.id != null &&
-      String(comment.author_user_id) === String(auth.user.id)
+  function handleDiscussionCommentEvent(targetIdeaId: string, msg: any) {
+    if (!eventIdeaMatches(targetIdeaId, msg)) return;
+    const comment = msg?.comment;
+    if (comment && typeof comment === 'object') {
+      upsertDiscussionComment(comment as ThreadDiscussionComment);
+      if (isIlloComment(comment as ThreadDiscussionComment)) clearReplyReconcileTimers();
+      return;
+    }
+    scheduleCommentRefresh(targetIdeaId, 150);
+  }
+
+  function handleDiscussionRunEvent(
+    targetIdeaId: string,
+    msg: any,
+    options: { requireReplyTool?: boolean; delayMs?: number } = {},
+  ) {
+    if (!eventMatchesDiscussionRun(targetIdeaId, msg)) return;
+    if (options.requireReplyTool && !eventUsesDiscussionReplyTool(msg)) return;
+    scheduleCommentRefresh(targetIdeaId, options.delayMs ?? 350);
+  }
+
+  function eventIdeaMatches(targetIdeaId: string, msg: any) {
+    const eventIdeaId = String(msg?.idea_id ?? msg?.thread_id ?? msg?.comment?.thread_id ?? '');
+    return eventIdeaId === targetIdeaId;
+  }
+
+  function eventMatchesDiscussionRun(targetIdeaId: string, msg: any) {
+    const discussionRunThreadId = `${THREAD_DISCUSSION_RUN_PREFIX}${targetIdeaId}`;
+    return String(msg?.thread_id ?? '') === discussionRunThreadId
+      || String(msg?.idea_id ?? '') === discussionRunThreadId;
+  }
+
+  function eventUsesDiscussionReplyTool(msg: any) {
+    return String(msg?.tool_name ?? msg?.tool ?? '') === THREAD_DISCUSSION_REPLY_TOOL;
+  }
+
+  function upsertDiscussionComment(comment: ThreadDiscussionComment) {
+    if (comment.thread_id && ideaId && String(comment.thread_id) !== String(ideaId)) return;
+    const commentId = String(comment.id);
+    const existingIndex = comments.findIndex((row) => String(row.id) === commentId);
+    const nextComments = existingIndex >= 0
+      ? comments.map((row, index) => (index === existingIndex ? { ...row, ...comment } : row))
+      : [...comments, comment];
+    comments = sortDiscussionComments(nextComments);
+  }
+
+  function sortDiscussionComments(rows: ThreadDiscussionComment[]) {
+    return [...rows].sort((a, b) => {
+      const byTime = discussionCommentTime(a) - discussionCommentTime(b);
+      if (byTime !== 0) return byTime;
+      return Number(a.id) - Number(b.id);
+    });
+  }
+
+  function discussionCommentTime(comment: ThreadDiscussionComment) {
+    const time = Date.parse(comment.created_at ?? '');
+    return Number.isFinite(time) ? time : 0;
+  }
+
+  function scheduleCommentRefresh(targetIdeaId = ideaId, delayMs = 350) {
+    if (!targetIdeaId) return;
+    clearScheduledRefresh();
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null;
+      void loadComments(targetIdeaId, { silent: true });
+    }, delayMs);
+  }
+
+  function scheduleReplyReconcile(targetIdeaId: string | null) {
+    if (!targetIdeaId) return;
+    clearReplyReconcileTimers();
+    replyReconcileTimers = DISCUSSION_REPLY_RECONCILE_DELAYS_MS.map((delayMs) =>
+      setTimeout(() => {
+        void loadComments(targetIdeaId, { silent: true });
+      }, delayMs),
     );
+  }
+
+  function clearScheduledRefresh() {
+    if (refreshTimer === null) return;
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+
+  function clearReplyReconcileTimers() {
+    replyReconcileTimers.forEach((timer) => clearTimeout(timer));
+    replyReconcileTimers = [];
   }
 
   function participantTone(comment: ThreadDiscussionComment) {
@@ -171,9 +298,7 @@
     if (!accent || isIlloComment(comment)) return undefined;
 
     return [
-      `--discussion-message-author-color:color-mix(in srgb, ${accent} 76%, var(--constellation-color-text-primary))`,
-      `--discussion-message-hover-border:color-mix(in srgb, ${accent} 20%, transparent)`,
-      `--discussion-message-hover-background:color-mix(in srgb, ${accent} 8%, transparent)`,
+      `--chat-message-author-color:color-mix(in srgb, ${accent} 76%, var(--constellation-color-text-primary))`,
       `--seed-accent:${accent}`,
     ].join('; ');
   }
@@ -327,7 +452,6 @@
             class="discussion-message"
             class:has-header={showHeader}
             class:is-continuation={!showHeader}
-            class:is-own={isOwnComment(comment)}
             class:is-illo={isIlloComment(comment)}
             style={messageStyle(comment)}
           >
@@ -354,7 +478,7 @@
             <p class="discussion-message-body">
               {#each messageTextSegments(comment.body) as segment, segmentIndex (segmentIndex)}
                 {#if segment.mention}
-                  <span class="discussion-mention">{segment.text}</span>
+                  <span class="chat-mention">{segment.text}</span>
                 {:else}
                   {segment.text}
                 {/if}
@@ -387,8 +511,7 @@
       variant="thread"
       placeholder={composerPlaceholder}
       value={body}
-      hint={composerHint}
-      modeLabel="Discussion"
+      mentionOptions={mentionOptions}
       disabled={posting || !ideaId}
       loading={posting}
       canSubmit={Boolean(ideaId) && body.trim().length > 0 && !posting}
@@ -402,13 +525,13 @@
 
 <style>
   .thread-discussion-pane {
-    --discussion-message-hover-background: rgba(255, 255, 255, 0.025);
-    --discussion-message-hover-border: rgba(255, 255, 255, 0.03);
-    --discussion-message-body-text: var(--constellation-thread-message-illo-body);
-    --discussion-message-meta-text: var(--constellation-thread-message-illo-meta);
-    --discussion-message-author-color: var(--constellation-thread-message-author);
-    --discussion-mention-background: rgba(150, 188, 255, 0.16);
-    --discussion-mention-text: rgba(207, 224, 255, 0.98);
+    --chat-message-hover-background: rgba(255, 255, 255, 0.025);
+    --chat-message-hover-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+    --chat-message-body-text: var(--constellation-thread-message-illo-body);
+    --chat-message-meta-text: var(--constellation-thread-message-illo-meta);
+    --chat-message-author-color: var(--constellation-thread-message-author);
+    --chat-mention-background: rgba(150, 188, 255, 0.16);
+    --chat-mention-text: rgba(207, 224, 255, 0.98);
     width: 100%;
     height: 100%;
     min-width: 0;
@@ -416,15 +539,15 @@
     display: flex;
     flex: 1 1 auto;
     flex-direction: column;
-    color: var(--discussion-message-body-text);
+    color: var(--chat-message-body-text);
     container-type: inline-size;
   }
 
   :global(:root[data-color-scheme='light']) .thread-discussion-pane {
-    --discussion-message-hover-background: rgba(255, 255, 255, 0.42);
-    --discussion-message-hover-border: rgba(24, 35, 49, 0.04);
-    --discussion-mention-background: rgba(72, 111, 168, 0.14);
-    --discussion-mention-text: #315a91;
+    --chat-message-hover-background: rgba(255, 255, 255, 0.42);
+    --chat-message-hover-shadow: inset 0 0 0 1px rgba(24, 35, 49, 0.04);
+    --chat-mention-background: rgba(72, 111, 168, 0.14);
+    --chat-mention-text: #315a91;
   }
 
   .discussion-stream {
@@ -480,7 +603,7 @@
     z-index: -1;
     border-radius: inherit;
     background: transparent;
-    box-shadow: inset 0 0 0 1px transparent;
+    box-shadow: none;
     transition:
       background-color 140ms ease,
       box-shadow 140ms ease;
@@ -488,10 +611,9 @@
   }
 
   .discussion-message:hover::before,
-  .discussion-message:focus-within::before,
-  .discussion-message.is-own::before {
-    background: var(--discussion-message-hover-background);
-    box-shadow: inset 0 0 0 1px var(--discussion-message-hover-border);
+  .discussion-message:focus-within::before {
+    background: var(--chat-message-hover-background);
+    box-shadow: var(--chat-message-hover-shadow);
   }
 
   .discussion-message.is-continuation {
@@ -523,33 +645,33 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--discussion-message-author-color);
+    color: var(--chat-message-author-color);
     font-size: 13px;
     font-weight: 600;
     line-height: 1.15;
   }
 
   .discussion-message-author-copy time {
-    color: var(--discussion-message-meta-text);
+    color: var(--chat-message-meta-text);
     font-size: 11px;
     line-height: 1.2;
   }
 
   .discussion-message-body {
     margin: 0;
-    color: var(--discussion-message-body-text);
+    color: var(--chat-message-body-text);
     font-size: 14px;
     line-height: 1.6;
     white-space: pre-wrap;
     word-break: break-word;
   }
 
-  .discussion-mention {
+  .chat-mention {
     display: inline;
     padding: 0 0.24em;
     border-radius: 5px;
-    background: var(--discussion-mention-background);
-    color: var(--discussion-mention-text);
+    background: var(--chat-mention-background);
+    color: var(--chat-mention-text);
     font-weight: 680;
     -webkit-box-decoration-break: clone;
     box-decoration-break: clone;

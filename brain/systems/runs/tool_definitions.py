@@ -1147,8 +1147,8 @@ CHAT_TOOLS = [
             "Post an Illo-authored reply into the current Thread Discussion. "
             "Use this when a run was summoned from Discussion, or when the natural "
             "answer belongs in Discussion rather than the AI Timeline. This does not "
-            "post to the AI Timeline; use cortex_reply or other Thread tools when the "
-            "underlying AI Timeline work should visibly continue there."
+            "post to the AI Timeline. Discussion and AI Timeline are separate "
+            "conversation surfaces linked by Thread context."
         ),
         "input_schema": {
             "type": "object",
@@ -1164,6 +1164,31 @@ CHAT_TOOLS = [
                 "reply_to_comment_id": {
                     "type": "integer",
                     "description": "Optional Discussion comment id being acknowledged. Defaults to the triggering comment.",
+                },
+            },
+            "required": ["body"],
+        },
+    },
+    {
+        "name": "post_ai_timeline_message",
+        "description": (
+            "Post an Illo-authored message into the linked Thread AI Timeline. "
+            "Use this only when the user explicitly asks you to carry something into "
+            "the AI Timeline, or when the work product naturally belongs there. This "
+            "does not reply in Discussion. Discussion and AI Timeline are separate "
+            "conversation surfaces linked by Thread context, so acknowledge in "
+            "Discussion separately when the user summoned you there."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "string",
+                    "description": "Concise markdown message to post in the Thread AI Timeline as Illo.",
+                },
+                "thread_id": {
+                    "type": "string",
+                    "description": "Optional Thread id. Defaults to the linked/current Thread.",
                 },
             },
             "required": ["body"],
