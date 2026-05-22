@@ -122,6 +122,47 @@ async def test_cortex_work_intake_builds_agent_run_request_from_normalized_trigg
 
 
 @pytest.mark.asyncio
+async def test_cortex_work_intake_promotes_actor_org_to_run_identity(monkeypatch):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    class _Session:
+        async def get(self, _model, _idea_id):
+            return SimpleNamespace(
+                id="idea-1",
+                title="Launch",
+                org_id=None,
+                user_id="owner-1",
+                agent_details=None,
+            )
+
+        async def scalars(self, *_args, **_kwargs):
+            return SimpleNamespace(first=lambda: None)
+
+    async def fake_thread_context(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "brain.systems.runs.work_intake.async_build_agent_visible_thread_context",
+        fake_thread_context,
+    )
+
+    trigger = _trigger_payload(
+        source="cortex",
+        event_type="cortex.thread_reply",
+        org_id="",
+        target={"idea_id": "idea-1"},
+        payload={"user_id": "user-1", "message": "Build a workspace app", "metadata": {}},
+        policy={"run_event": "thread_reply"},
+    )
+
+    request = await build_agent_run_request(_Session(), WorkIntakeEvent.from_trigger_payload(trigger))
+
+    assert request.org_id == "org-1"
+    assert request.metadata["org_id"] == "org-1"
+    assert request.metadata["work_intake"]["org_id"] == "org-1"
+
+
+@pytest.mark.asyncio
 async def test_cortex_agent_run_request_uses_shared_work_intake_policy(monkeypatch):
     from brain.systems.runs.domain import RunProfile, RunRecipe
     from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request

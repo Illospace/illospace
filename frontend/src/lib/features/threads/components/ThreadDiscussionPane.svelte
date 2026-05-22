@@ -621,10 +621,6 @@
     padding-top: 2px;
   }
 
-  .discussion-message.is-continuation .discussion-message-body {
-    padding-left: 32px;
-  }
-
   .discussion-message-header {
     display: flex;
     align-items: flex-start;

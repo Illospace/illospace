@@ -394,6 +394,15 @@ def test_cortex_panel_light_mode_is_boundary_tokenized():
     assert "data-color-scheme='light']) .audit-card" not in utility
 
 
+def test_cortex_thread_stage_right_dock_uses_container_width_guard():
+    source = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageScreen.svelte").read_text()
+
+    assert "container: thread-stage-panel / inline-size;" in source
+    assert "@container thread-stage-panel (max-width: 1040px)" in source
+    assert "calc(100% - var(--thread-stage-thread-min) - var(--thread-stage-gutter))" in source
+    assert "grid-template-columns:\n        minmax(var(--thread-stage-thread-min), 1fr)" in source
+
+
 def test_cortex_thread_stage_main_column_light_mode_is_boundary_tokenized():
     source = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadTranscript.svelte").read_text()
     light_lines = [

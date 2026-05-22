@@ -25,6 +25,7 @@ class DirectAgentInvocationSpec:
     tool_handlers: dict | None = None
     cache_system_prompt: bool = True
     user_id: str | None = None
+    org_id: str | None = None
     run_id: int | None = None
     idea_id: str | None = None
     tool_call_source: str = "utility"
@@ -40,9 +41,13 @@ class DirectAgentInvocationSpec:
     def to_run_envelope(self) -> RunEnvelope:
         """Project the direct invocation into the normalized runtime envelope."""
         metadata = dict(self.metadata or {})
+        org_id = self.org_id or metadata.get("org_id")
+        if org_id and not metadata.get("org_id"):
+            metadata["org_id"] = org_id
         model = self.model or get_default_model(
             include_provider_prefix=False,
             user_id=self.user_id,
+            org_id=org_id,
         )
         return RunEnvelope(
             task=self.message,
@@ -52,7 +57,7 @@ class DirectAgentInvocationSpec:
                 id=self.user_id,
                 metadata={"tool_call_source": self.tool_call_source},
             ),
-            org_id=metadata.get("org_id"),
+            org_id=org_id,
             user_id=self.user_id,
             run_id=self.run_id,
             idea_id=self.idea_id,

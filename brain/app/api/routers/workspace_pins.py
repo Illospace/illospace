@@ -45,6 +45,10 @@ def _require_pin_author(pin: WorkspacePin, user: dict[str, Any]) -> None:
         raise HTTPException(status_code=403, detail="Only the pin creator can edit this pin")
 
 
+def _is_position_only_update(updates: dict[str, Any]) -> bool:
+    return bool(updates) and set(updates).issubset({"position_x", "position_y"})
+
+
 def _serialize_pin(pin: WorkspacePin) -> WorkspacePinRead:
     return WorkspacePinRead.model_validate(
         {
@@ -128,10 +132,11 @@ async def update_workspace_pin(
 ) -> WorkspacePinRead:
     org_id = require_org_context(user)
     pin = await _get_pin_for_org(db, org_id, pin_id)
-    _require_pin_author(pin, user)
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+    if not _is_position_only_update(updates):
+        _require_pin_author(pin, user)
 
     if "label" in updates and updates["label"] is not None:
         pin.label = str(updates["label"]).strip()

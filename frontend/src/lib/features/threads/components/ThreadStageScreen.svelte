@@ -1352,6 +1352,7 @@
     position: relative;
     height: 100%;
     min-height: 0;
+    container: thread-stage-panel / inline-size;
     border: 1px solid var(--constellation-thread-reading-core-border);
     border-radius: var(--thread-stage-panel-radius);
     overflow: hidden;
@@ -1704,7 +1705,15 @@
 
   @media (min-width: 1180px) {
     .thread-stage-layout.with-dock {
-      grid-template-columns: minmax(var(--thread-stage-thread-min), 1fr) minmax(0, var(--thread-stage-dock-width));
+      grid-template-columns:
+        minmax(var(--thread-stage-thread-min), 1fr)
+        minmax(
+          0,
+          min(
+            var(--thread-stage-dock-width),
+            max(0px, calc(100% - var(--thread-stage-thread-min) - var(--thread-stage-gutter)))
+          )
+        );
       column-gap: var(--thread-stage-gutter);
     }
 
@@ -1722,6 +1731,25 @@
 
     .thread-stage-layout.with-dock .thread-stage-thread :global(.thread-header-title-row) {
       min-height: var(--thread-stage-docked-header-height);
+    }
+  }
+
+  @container thread-stage-panel (max-width: 1040px) {
+    .thread-stage-layout.with-dock {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) minmax(220px, var(--thread-stage-stacked-dock-height));
+      row-gap: 10px;
+      column-gap: 0;
+    }
+
+    .thread-stage-dock {
+      position: relative;
+      inset: auto;
+      width: 100%;
+      min-height: 0;
+      padding-top: 10px;
+      border-top: 1px solid var(--constellation-utility-panel-header-border);
+      box-sizing: border-box;
     }
   }
 

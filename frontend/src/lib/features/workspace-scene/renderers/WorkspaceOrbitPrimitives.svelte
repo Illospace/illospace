@@ -160,6 +160,7 @@
       active={pinActive(pin)}
       moving={movingPinId === pin.pinId}
       canEdit={pin.canEdit}
+      canMove={pin.canMove}
       semanticLevel={semanticZoomLevel}
       activate={(event) => activatePin(pin, event)}
       hover={() => setHoveredPin(pin.id)}
