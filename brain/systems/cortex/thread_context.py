@@ -227,22 +227,23 @@ def _format_entries(
     *,
     char_limit: int,
 ) -> tuple[str, list[ThreadContextEntry]]:
-    lines: list[str] = []
-    kept: list[ThreadContextEntry] = []
+    selected: list[tuple[str, ThreadContextEntry]] = []
     used = 0
-    for entry in entries:
+    for entry in reversed(entries):
         label = "User" if entry.role == "user" else "Illo"
         content = _truncate(entry.content, MAX_ENTRY_CHARS)
         line = f"{label}: {content}"
-        next_used = used + len(line) + (1 if lines else 0)
-        if lines and next_used > char_limit:
+        next_used = used + len(line) + (1 if selected else 0)
+        if selected and next_used > char_limit:
             continue
-        if not lines and len(line) > char_limit:
+        if not selected and len(line) > char_limit:
             line = _truncate(line, char_limit)
             next_used = len(line)
-        lines.append(line)
-        kept.append(entry)
+        selected.append((line, entry))
         used = next_used
+    selected.reverse()
+    lines = [line for line, _entry in selected]
+    kept = [entry for _line, entry in selected]
     return "\n".join(lines).strip(), kept
 
 

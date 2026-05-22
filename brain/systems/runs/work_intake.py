@@ -14,6 +14,7 @@ from brain.systems.cortex.project_context.snapshot import (
     ProjectContextValidationError,
     validated_project_context_snapshot,
 )
+from brain.systems.cortex.project_context.identity import stamped_project_context
 from brain.systems.cortex.thread_context import async_build_agent_visible_thread_context
 from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
 from brain.systems.runs.skill_commands import annotate_metadata_with_slash_skill_commands
@@ -725,16 +726,16 @@ async def _a_latest_attached_project_context(session: Any, idea_id: str) -> dict
         attachment = result.first()
     except Exception:
         return {}
-    profile_id = getattr(attachment, "project_profile_id", None)
-    if profile_id and hasattr(session, "get"):
+    project_id = getattr(attachment, "project_profile_id", None)
+    if project_id and hasattr(session, "get"):
         try:
-            profile = await session.get(ProjectProfile, profile_id)
+            profile = await session.get(ProjectProfile, project_id)
         except Exception:
             profile = None
         if profile is not None and getattr(profile, "active", True) is not False:
             project_context = getattr(profile, "project_context", None)
             if isinstance(project_context, dict):
-                return dict(project_context)
+                return stamped_project_context(profile, project_context, project_id=project_id)
     snapshot = getattr(attachment, "snapshot", None)
     return dict(snapshot) if isinstance(snapshot, dict) else {}
 

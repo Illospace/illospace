@@ -152,8 +152,6 @@ def validate_project_context_snapshot(
     resources = snapshot.get("resources")
     if not isinstance(resources, list):
         return "invalid", ["project_context_snapshot.resources must be a list."]
-    if not resources:
-        return "invalid", ["project_context_snapshot.resources must contain at least one resource."]
 
     errors: list[str] = []
     seen_ids: set[str] = set()
@@ -258,7 +256,15 @@ def build_project_context_snapshot(
             "source": "metadata.project_context" if "project_context" in metadata else "metadata.project",
             "resources": resources,
         }
-        for key in ("id", "name", "description", "permissions", "mode"):
+        for key in (
+            "project_key",
+            "slug",
+            "project_id",
+            "name",
+            "description",
+            "permissions",
+            "mode",
+        ):
             value = project.get(key)
             if value is not None:
                 snapshot[key] = value

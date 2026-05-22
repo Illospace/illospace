@@ -38,6 +38,38 @@ def _project_run(source_dir, draft_dir):
     )
 
 
+def _file_project_run(source_file, draft_dir):
+    resource = {
+        "id": "resource-1",
+        "kind": "file",
+        "mount_path": f"/{Path(source_file).name}",
+        "path": str(draft_dir / Path(source_file).name),
+        "materialization": {
+            "status": "ready",
+            "provider": "local",
+            "kind": "file",
+            "path": str(draft_dir / Path(source_file).name),
+            "source_path": str(source_file),
+            "workspace_path": str(draft_dir),
+            "draft": True,
+        },
+    }
+    return SimpleNamespace(
+        id=124,
+        target_ref={"project_context_snapshot": {"resources": [resource]}},
+        workspace_ref={
+            "workspaces": [{"name": resource["mount_path"], "path": str(draft_dir)}],
+            "project_context_snapshot": {"resources": [resource]},
+            "project_context_materialization": {
+                "status": "materialized",
+                "workspaces": [{"name": resource["mount_path"], "path": str(draft_dir)}],
+                "errors": [],
+            },
+        },
+        metadata_={},
+    )
+
+
 def _repo_project_run(repo_dir):
     resource = {
         "id": "repo",
@@ -305,6 +337,87 @@ async def test_manage_project_publish_draft_applies_local_changes_and_refreshes_
     assert (source_dir / "new.md").read_text(encoding="utf-8") == "new"
     assert not (source_dir / "delete.md").exists()
     assert plan_after["summary"] == {"resource_count": 1, "operation_count": 0, "blocked_count": 0}
+
+
+async def test_manage_project_publish_draft_allows_new_sibling_for_single_uploaded_file_project(tmp_path):
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "uploads"
+    source_dir.mkdir()
+    source_file = source_dir / "unified_payments.csv"
+    source_file.write_text("base csv", encoding="utf-8")
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "resource-1"
+    sync_draft_from_root(source_file, draft_dir)
+    (draft_dir / "customer_analysis_past_4_weeks.md").write_text("analysis", encoding="utf-8")
+
+    with bind_agent_context({"run": _file_project_run(source_file, draft_dir), "idea_id": "idea-1"}):
+        plan = json.loads(await projects._handle_manage_project(action="plan_publish"))
+        published = json.loads(
+            await projects._handle_manage_project(
+                action="publish_draft",
+                publish_paths=["customer_analysis_past_4_weeks.md"],
+            )
+        )
+
+    operation = plan["groups"][0]["operations"][0]
+    assert plan["summary"] == {"resource_count": 1, "operation_count": 1, "blocked_count": 0}
+    assert plan["groups"][0]["status"] == "ready"
+    assert plan["groups"][0]["blocked_reasons"] == []
+    assert operation["draft_path"] == str(draft_dir / "customer_analysis_past_4_weeks.md")
+    assert operation["target_path"] == str(source_dir / "customer_analysis_past_4_weeks.md")
+    assert published["ok"] is True
+    assert published["summary"] == {"published_groups": 1, "operation_count": 1, "blocked_count": 0}
+    assert source_file.read_text(encoding="utf-8") == "base csv"
+    assert (source_dir / "customer_analysis_past_4_weeks.md").read_text(encoding="utf-8") == "analysis"
+
+
+async def test_manage_project_allows_original_file_root_update(tmp_path):
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "uploads"
+    source_dir.mkdir()
+    source_file = source_dir / "unified_payments.csv"
+    source_file.write_text("base csv", encoding="utf-8")
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "resource-1"
+    sync_draft_from_root(source_file, draft_dir)
+    (draft_dir / "unified_payments.csv").write_text("draft csv", encoding="utf-8")
+
+    with bind_agent_context({"run": _file_project_run(source_file, draft_dir), "idea_id": "idea-1"}):
+        plan = json.loads(await projects._handle_manage_project(action="plan_publish"))
+        published = json.loads(await projects._handle_manage_project(action="publish_draft"))
+
+    assert plan["summary"] == {"resource_count": 1, "operation_count": 1, "blocked_count": 0}
+    assert plan["groups"][0]["operations"][0]["target_path"] == str(source_file)
+    assert published["ok"] is True
+    assert source_file.read_text(encoding="utf-8") == "draft csv"
+
+
+async def test_manage_project_empty_local_project_root_publishes_new_file(tmp_path):
+    from brain.systems.cortex.project_context.drafts import sync_draft_from_root
+
+    source_dir = tmp_path / "empty-project-root"
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "empty-project"
+    source_dir.mkdir()
+    sync_draft_from_root(source_dir, draft_dir)
+    (draft_dir / "README.md").write_text("# New project\n", encoding="utf-8")
+
+    with bind_agent_context({"run": _project_run(source_dir, draft_dir), "idea_id": "idea-1"}):
+        plan = json.loads(await projects._handle_manage_project(action="plan_publish"))
+        published = json.loads(await projects._handle_manage_project(action="publish_draft"))
+
+    assert plan["summary"] == {"resource_count": 1, "operation_count": 1, "blocked_count": 0}
+    assert plan["groups"][0]["status"] == "ready"
+    assert plan["groups"][0]["operations"] == [
+        {
+            "operation": "create",
+            "path": "README.md",
+            "draft_path": str(draft_dir / "README.md"),
+            "target_path": str(source_dir / "README.md"),
+        }
+    ]
+    assert published["ok"] is True
+    assert published["summary"] == {"published_groups": 1, "operation_count": 1, "blocked_count": 0}
+    assert (source_dir / "README.md").read_text(encoding="utf-8") == "# New project\n"
 
 
 async def test_manage_project_publish_draft_rolls_back_local_root_on_failure(tmp_path, monkeypatch):
@@ -662,6 +775,39 @@ async def test_manage_project_draft_status_reports_clear_unbound_error():
     assert payload["ok"] is False
     assert payload["code"] == "project_thread_not_bound"
     assert "current AgentRun or Cortex thread" in payload["error"]
+
+
+async def test_manage_project_draft_status_allows_empty_project():
+    context = {
+        "run": SimpleNamespace(id=123, metadata_={}),
+        "idea_id": "idea-1",
+        "workspace_ref": {
+            "project_context_snapshot": {
+                "name": "Empty project",
+                "status": "validated",
+                "resources": [],
+            },
+            "project_workspace_manifest": {
+                "schema_version": 1,
+                "mounts": [],
+                "workspaces": [],
+            },
+        },
+        "target_ref": {},
+        "execution_metadata": {},
+    }
+    with bind_agent_context(context):
+        status = json.loads(await projects._handle_manage_project(action="draft_status"))
+        plan = json.loads(await projects._handle_manage_project(action="plan_publish"))
+        versions = json.loads(await projects._handle_manage_project(action="root_versions"))
+
+    assert status["ok"] is True
+    assert status["resources"] == []
+    assert status["changes"]["total"] == 0
+    assert plan["ok"] is True
+    assert plan["summary"] == {"resource_count": 0, "operation_count": 0, "blocked_count": 0}
+    assert versions["ok"] is True
+    assert versions["summary"] == {"resource_count": 0, "version_count": 0}
 
 
 async def test_manage_project_schema_exposes_draft_operations():

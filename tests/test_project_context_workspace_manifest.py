@@ -9,7 +9,7 @@ from brain.systems.cortex.project_context.workspace_manifest import (
 
 def test_workspace_manifest_disambiguates_duplicate_mount_paths():
     manifest = ProjectWorkspaceManifest.from_project_context({
-        "id": "profile-a",
+        "project_id": "project-a",
         "resources": [
             {
                 "id": "first-report-pack",
@@ -44,7 +44,7 @@ def test_workspace_manifest_disambiguates_duplicate_mount_paths():
 
 def test_durable_project_workspace_manifest_contract_disambiguates_mounts_without_materialization():
     contract = build_project_workspace_manifest_contract({
-        "id": "profile-a",
+        "project_id": "project-a",
         "resources": [
             {
                 "id": "first-report-pack",
@@ -61,7 +61,7 @@ def test_durable_project_workspace_manifest_contract_disambiguates_mounts_withou
         ],
     })
 
-    assert contract["project_key"] == "profile-a"
+    assert contract["project_key"] == "project-a"
     assert [mount["resource_id"] for mount in contract["mounts"]] == ["first-report-pack", "second-report-pack"]
     assert [mount["mount_path"] for mount in contract["mounts"]] == ["/reports", "/reports-2"]
     assert [mount["original_mount_path"] for mount in contract["mounts"]] == ["/reports", "/reports"]
@@ -78,12 +78,12 @@ def test_thread_draft_identity_is_scoped_by_project():
     first = ThreadDraftIdentity.from_project_resource(
         resource,
         thread_workspace_root="/tmp/thread-root",
-        project_context={"id": "project-alpha"},
+        project_context={"project_id": "project-alpha"},
     )
     second = ThreadDraftIdentity.from_project_resource(
         resource,
         thread_workspace_root="/tmp/thread-root",
-        project_context={"id": "project-beta"},
+        project_context={"project_id": "project-beta"},
     )
     unscoped = ThreadDraftIdentity.from_project_resource(
         resource,
@@ -99,7 +99,7 @@ def test_thread_draft_identity_is_scoped_by_project():
 
 def test_mount_path_is_the_agent_facing_truth():
     manifest = normalize_project_workspace_manifest({
-        "id": "profile-a",
+        "project_id": "project-a",
         "resources": [
             {
                 "id": "resource-folder",

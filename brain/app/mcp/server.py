@@ -238,8 +238,8 @@ async def async_tool_brain_recall(
     Without viewer context, recall intentionally returns no memories.
     """
     from brain.systems.memory.embeddings import embed_query
+    from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
 
-    query_emb = embed_query(query)
     visibility_context = MemoryVisibilityContext(
         user_id=user_id,
         org_id=org_id,
@@ -249,6 +249,8 @@ async def async_tool_brain_recall(
 
     try:
         async with UnitOfWork() as uow:
+            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+            query_emb = embed_query(query, runtime_config=runtime_config)
             results = await _maybe_await(uow.memories.graph_augmented_recall(
                 query_embedding=query_emb,
                 limit=limit,
@@ -404,7 +406,10 @@ async def async_tool_brain_guardrails(skill: str | None = None) -> dict:
         # High-salience warnings (lessons with salience >= 9)
         if skill:
             from brain.systems.memory.embeddings import embed_query
-            skill_emb = embed_query(skill)
+            from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+
+            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+            skill_emb = embed_query(skill, runtime_config=runtime_config)
             result["warnings"].extend(
                 await _maybe_await(uow.memories.high_salience_warnings_for_skill(skill_embedding=skill_emb))
             )
@@ -561,19 +566,22 @@ async def async_tool_brain_skills(task: str) -> dict:
         """), {"name": name})
         return result.mappings().first()
 
-    task_emb = None
-    emb_str = None
-    embedding_error = None
-    try:
-        task_emb = embed_query(task)
-        emb_str = vec_to_pg(task_emb)
-    except Exception as exc:
-        embedding_error = str(exc)[:300]
-        logger.warning("brain_skills running in degraded mode; embedding unavailable: %s", embedding_error)
-
     _SMALL_SKILLSET_THRESHOLD = 30  # below this, send ALL skills — model picks better than embeddings
 
     async with UnitOfWork() as uow:
+        task_emb = None
+        emb_str = None
+        embedding_error = None
+        try:
+            from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+
+            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+            task_emb = embed_query(task, runtime_config=runtime_config)
+            emb_str = vec_to_pg(task_emb)
+        except Exception as exc:
+            embedding_error = str(exc)[:300]
+            logger.warning("brain_skills running in degraded mode; embedding unavailable: %s", embedding_error)
+
         # Count active skills to decide strategy
         count_result = await _session_execute(uow.session, text(
             "SELECT COUNT(*) as cnt FROM skills WHERE NOT archived"
@@ -961,6 +969,7 @@ async def async_tool_brain_encode(
 ) -> dict:
     """Encode a new memory into the brain, scoped to the current user."""
     from brain.systems.memory.embeddings import embed_document
+    from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
 
     if len(content.strip()) < 20:
         return {"error": "Content too short (min 20 chars)"}
@@ -990,17 +999,18 @@ async def async_tool_brain_encode(
     semantic_emb = None
     degraded_reason = None
 
-    try:
-        semantic_emb = embed_document(content)
-    except Exception as exc:
-        error_text = str(exc)
-        lower = error_text.lower()
-        if any(term in lower for term in ("out of memory", "oom", "cuda")):
-            degraded_reason = f"embedding_oom: {error_text[:200]}"
-        else:
-            degraded_reason = f"embedding_failed: {error_text[:200]}"
-
     async with UnitOfWork() as uow:
+        try:
+            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+            semantic_emb = embed_document(content, runtime_config=runtime_config)
+        except Exception as exc:
+            error_text = str(exc)
+            lower = error_text.lower()
+            if any(term in lower for term in ("out of memory", "oom", "cuda")):
+                degraded_reason = f"embedding_oom: {error_text[:200]}"
+            else:
+                degraded_reason = f"embedding_failed: {error_text[:200]}"
+
         result = await _maybe_await(uow.memories.insert_memory(
             content=content,
             memory_type=memory_type,

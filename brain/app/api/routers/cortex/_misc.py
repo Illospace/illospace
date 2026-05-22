@@ -887,9 +887,10 @@ async def audit_apply(
         from brain.systems.memory.embeddings import embed_document
         from brain.systems.memory.scope import classify_scope
         from brain.systems.quality.gate import check_quality
+        from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
 
         salience = float(payload.get("salience", 7.0))
-        qr = check_quality(content, salience=salience, memory_type=payload.get("memory_type", "lesson"))
+        qr = await check_quality(content, salience=salience, memory_type=payload.get("memory_type", "lesson"))
         if not qr.passed:
             raise HTTPException(status_code=422, detail=f"Memory rejected: {qr.reason}")
         if qr.adjusted_salience is not None:
@@ -903,8 +904,9 @@ async def audit_apply(
             confidence=payload.get("confidence"),
             evidence={"audit_action_payload": payload},
         )
-        semantic_embedding = embed_document(content)
         async with UnitOfWork() as uow:
+            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+            semantic_embedding = embed_document(content, runtime_config=runtime_config)
             result = await uow.memories.insert_memory(
                 content=content,
                 memory_type=payload.get("memory_type", "lesson"),

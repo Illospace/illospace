@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import Any
 import posixpath
 
+from brain.systems.cortex.project_context.identity import PROJECT_IDENTITY_FIELDS
 from brain.systems.cortex.project_context.resources import ProjectResource
 
 
 PROJECT_CONTEXT_DIR = ".illo-project-context"
 PROJECT_CONTEXT_LOCAL_DIR = "local"
-PROJECT_KEY_FIELDS = ("id", "project_id", "profile_id", "selected_profile_id", "slug", "selected_profile_slug")
+PROJECT_KEY_FIELDS = PROJECT_IDENTITY_FIELDS
 FILE_RESOURCE_KINDS = {"file", "doc", "document"}
 ProjectResourceLike = Mapping[str, Any] | ProjectResource
 
@@ -413,7 +414,7 @@ class ProjectWorkspaceManifest:
         return cls(
             mounts=mounts,
             project_key=_project_key_from_context(snapshot),
-            project_id=_clean_text(snapshot.get("id") or snapshot.get("project_id") or snapshot.get("profile_id")),
+            project_id=_clean_text(snapshot.get("project_id")),
             workspace_root=workspace_root,
         )
 
@@ -599,7 +600,7 @@ def build_project_workspace_manifest_contract(project_context: Mapping[str, Any]
     return {
         "schema_version": 1,
         "project_key": _project_key_from_context(snapshot),
-        "project_id": _clean_text(snapshot.get("id") or snapshot.get("project_id") or snapshot.get("profile_id")),
+        "project_id": _clean_text(snapshot.get("project_id")),
         "mounts": mounts,
     }
 

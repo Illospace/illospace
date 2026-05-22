@@ -1,8 +1,9 @@
 # Project Workspaces
 
-Projects give agents an unambiguous workspace: the user selects the files,
-folders, repositories, and documents that matter, and the agent sees those
-resources through stable Project mount paths.
+Projects give agents an unambiguous workspace. A Project may start empty as a
+named collaboration container, then gain files, folders, repositories, and
+documents over time. Once resources exist, agents see them through stable
+Project mount paths.
 
 This page documents the backend contract for Project roots and thread drafts.
 
@@ -10,6 +11,9 @@ This page documents the backend contract for Project roots and thread drafts.
 
 - Project root: the published source of truth. Users and future threads read
   from the root.
+- Empty Project: a valid Project with no resources yet. It carries identity,
+  visibility, sharing, and future workspace intent, but has no mount paths until
+  resources are added.
 - Project resource: one mounted file, folder, repository, or external resource
   in a Project.
 - Project mount path: the agent-facing truth for a resource location, such as
@@ -26,6 +30,8 @@ This page documents the backend contract for Project roots and thread drafts.
 ## Invariants
 
 - The Project root is read-only during normal agent work.
+- A Project can have zero resources. Empty Projects are valid and report a
+  clean draft state with no mount paths.
 - The thread draft is the only writable local workspace for Project-mounted
   paths.
 - `draft_status` and `plan_publish` are read-only.
