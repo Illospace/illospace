@@ -273,6 +273,50 @@ async def test_notify_metadata_preserves_thread_project_context():
     assert result["execution_profile"] == "fast"
 
 
+async def test_notify_metadata_merges_stale_picker_context_with_uploaded_attachment_resource():
+    from brain.app.api.routers.cortex._ideas import _effective_notify_metadata
+
+    thread_project_context = {
+        "name": "test empty project",
+        "source": "cortex-ui-project-picker+cortex-thread-attachments",
+        "resources": [
+            {
+                "id": "attachment-1",
+                "kind": "file",
+                "name": "unified_payments.csv",
+                "path": "/app/brain/uploads/unified_payments.csv",
+                "uri": "/static/uploads/unified_payments.csv",
+                "size": 89499,
+                "source": "thread_attachment",
+            }
+        ],
+    }
+    stale_run_project_context = {
+        "name": "test empty project",
+        "source": "cortex-ui-project-picker",
+        "resources": [],
+    }
+    db = MagicMock()
+    db.execute.return_value.scalar_one_or_none.return_value = {
+        "project_context": thread_project_context,
+        "execution_profile": "deep",
+    }
+
+    async_db = _AsyncSession(db)
+    result = await _effective_notify_metadata(
+        async_db,
+        "idea-1",
+        {
+            "project_context": stale_run_project_context,
+            "execution_profile": "fast",
+        },
+    )
+
+    assert result["project_context"]["source"] == "cortex-ui-project-picker+cortex-thread-attachments"
+    assert result["project_context"]["resources"] == thread_project_context["resources"]
+    assert result["execution_profile"] == "fast"
+
+
 async def test_project_profile_resource_endpoints_mutate_context(tmp_path):
     from brain.app.api.routers.cortex import _project_context
     from brain.systems.cortex.project_context.schemas import (

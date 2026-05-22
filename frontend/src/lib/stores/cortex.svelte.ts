@@ -1462,6 +1462,7 @@ class CortexStore {
       attachments: attachments.length ? attachments : undefined,
       metadata: Object.keys(messageMetadata).length ? messageMetadata : undefined,
     });
+    const effectiveProjectContext = threadMessage?.metadata?.project_context ?? projectContext;
     const decision = this._runDecision(runContent);
     if (!runOptions.skipRun && decision.shouldRun) {
       await api.updateIdeaStatus(ideaId, 'queued');
@@ -1478,7 +1479,7 @@ class CortexStore {
         thread_message_id: threadMessage?.id,
         ...(runOptions.metadata || {}),
       };
-      if (projectContext) runMetadata.project_context = projectContext;
+      if (effectiveProjectContext) runMetadata.project_context = effectiveProjectContext;
       await api.notifyCortex({
         event,
         idea_id: ideaId,

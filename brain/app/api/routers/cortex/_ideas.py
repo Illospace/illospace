@@ -46,6 +46,7 @@ from brain.systems.cortex.thought_lifecycle import (
     post_thread_message,
     transition_thought_status,
 )
+from brain.systems.cortex.project_context.merge import merge_project_context_payloads
 from brain.systems.cortex.title_generation import generate_and_store_idea_display_title
 
 
@@ -182,7 +183,14 @@ async def _effective_notify_metadata(db: AsyncSession, idea_id: str, metadata: A
     if isinstance(metadata, dict):
         for key, value in metadata.items():
             if value is not None:
-                effective[key] = value
+                if key == "project_context" and isinstance(value, dict):
+                    thread_project_context = effective.get("project_context")
+                    if isinstance(thread_project_context, dict):
+                        effective[key] = merge_project_context_payloads(thread_project_context, value)
+                    else:
+                        effective[key] = value
+                else:
+                    effective[key] = value
     return effective
 
 

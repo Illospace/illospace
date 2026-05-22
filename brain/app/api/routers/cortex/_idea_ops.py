@@ -43,6 +43,7 @@ from brain.systems.cortex.thought_lifecycle import (
     post_thread_message,
     transition_thought_status,
 )
+from brain.systems.cortex.project_context.merge import merge_project_context_payloads
 from brain.systems.cortex.project_context.snapshot import (
     ProjectContextValidationError,
     validated_project_context_snapshot,
@@ -374,51 +375,6 @@ def _apply_run_events_to_item(item: dict[str, Any], events: list[Any]) -> None:
     }
 
 
-def _resource_identity(resource: dict[str, Any]) -> str:
-    for key in ("path", "uri", "repo", "name", "label"):
-        value = resource.get(key)
-        if isinstance(value, str) and value.strip():
-            return f"{key}:{value.strip()}"
-    return json.dumps(resource, sort_keys=True, default=str)
-
-
-def _merge_project_context_payloads(
-    base: dict[str, Any] | None,
-    addition: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    if not base:
-        return copy.deepcopy(addition) if addition else None
-    if not addition:
-        return copy.deepcopy(base)
-
-    merged = copy.deepcopy(base)
-    resources = [
-        dict(resource)
-        for resource in (merged.get("resources") or [])
-        if isinstance(resource, dict)
-    ]
-    seen = {_resource_identity(resource) for resource in resources}
-    for resource in addition.get("resources") or []:
-        if not isinstance(resource, dict):
-            continue
-        key = _resource_identity(resource)
-        if key in seen:
-            continue
-        seen.add(key)
-        resources.append(copy.deepcopy(resource))
-    merged["resources"] = resources
-    merged.setdefault("source", "cortex-thread-message")
-    if addition.get("source"):
-        sources = [
-            item
-            for item in [merged.get("source"), addition.get("source")]
-            if isinstance(item, str) and item.strip()
-        ]
-        if sources:
-            merged["source"] = "+".join(dict.fromkeys(sources))
-    return merged
-
-
 def _extract_project_context_from_message(
     attachments: list[dict[str, Any]] | None,
     metadata: dict[str, Any] | None,
@@ -434,9 +390,9 @@ def _extract_project_context_from_message(
             continue
         candidate = attachment.get("project_context")
         if attachment.get("type") == "project_context" and isinstance(candidate, dict):
-            explicit = _merge_project_context_payloads(explicit, candidate)
+            explicit = merge_project_context_payloads(explicit, candidate)
     readable_attachments = project_context_from_text_attachments(attachments)
-    return _merge_project_context_payloads(explicit, readable_attachments)
+    return merge_project_context_payloads(explicit, readable_attachments)
 
 
 def _validate_thread_project_context(project_context: dict[str, Any] | None) -> dict[str, Any] | None:
