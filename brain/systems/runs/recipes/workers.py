@@ -9,6 +9,7 @@ from typing import Any
 from brain.systems.runs.assignments import WorkerAssignment
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
+from brain.systems.runs.prompt_surfaces import prompt_json_block
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import project_runtime_workspace_from_ref
 from brain.systems.runs.status import RunStatus
@@ -106,11 +107,12 @@ class WorkerRecipe(BaseRunRecipe):
         async def _guidance() -> list[str]:
             return await runtime.drain_steering()
 
+        prompt_context = context.prompt_context(include_target=False, include_workspace=False)
         system_prompt = build_worker_prompt(
             assignment,
             target_ref=runtime.request.target_ref,
             workspace_ref=runtime.request.workspace_ref,
-            context=context.prompt_context(),
+            context=prompt_context,
             evidence_so_far=runtime.request.metadata.get("evidence") or runtime.request.metadata.get("parent_evidence"),
         )
         await runtime.activity("Starting scoped worker", workspace_root=workspace_root)
@@ -132,7 +134,7 @@ class WorkerRecipe(BaseRunRecipe):
             on_stream_activity=_activity,
             on_stream_delta=_delta,
             live_guidance_loader=_guidance,
-            brain_context_preloaded=bool(context.prompt_context()),
+            brain_context_preloaded=bool(prompt_context or runtime.request.target_ref or runtime.request.workspace_ref),
             skip_harvest=True,
             metadata={
                 "org_id": runtime.request.org_id,
@@ -218,8 +220,8 @@ def build_worker_prompt(
     return (
         WORKER_AGENT_INSTRUCTIONS
         + _json_block("Worker Assignment", assignment.to_payload())
-        + _json_block("Target", target_ref)
-        + _json_block("Workspace", workspace_ref)
+        + prompt_json_block("Target", target_ref)
+        + prompt_json_block("Workspace", workspace_ref)
         + _json_block("Parent Evidence", evidence_so_far)
         + (f"\n\n## Context\n{context}" if context else "")
     )

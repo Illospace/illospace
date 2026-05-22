@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 import json
 from typing import Any
 
+from brain.systems.runs.prompt_surfaces import (
+    compact_target_ref,
+    compact_workspace_ref,
+    prompt_json_block,
+)
 from brain.systems.runs.skill_commands import parse_slash_skill_names
 
 
@@ -46,16 +51,20 @@ class RunContext:
     handoff: dict[str, Any] = field(default_factory=dict)
     request_source: dict[str, Any] = field(default_factory=dict)
 
-    def prompt_context(self) -> str:
+    def prompt_context(self, *, include_target: bool = True, include_workspace: bool = True) -> str:
         parts: list[str] = []
         if self.thread_context:
             formatted = str(self.thread_context.get("formatted") or "").strip()
             if formatted:
                 parts.append("Thread so far, before the current user message:\n" + formatted)
-        if self.target_ref:
-            parts.append(f"Target: {self.target_ref}")
-        if self.workspace_ref:
-            parts.append(f"Workspace: {self.workspace_ref}")
+        if include_target and self.target_ref:
+            target_block = prompt_json_block("Target", self.target_ref).strip()
+            if target_block:
+                parts.append(target_block)
+        if include_workspace and self.workspace_ref:
+            workspace_block = prompt_json_block("Workspace", self.workspace_ref).strip()
+            if workspace_block:
+                parts.append(workspace_block)
         if self.handoff:
             parts.append(f"Handoff: {self.handoff}")
         if self.request_source:
@@ -101,4 +110,10 @@ class RunContextLoader:
         )
 
 
-__all__ = ["RunContext", "RunContextLoader"]
+__all__ = [
+    "RunContext",
+    "RunContextLoader",
+    "compact_target_ref",
+    "compact_workspace_ref",
+    "prompt_json_block",
+]

@@ -450,6 +450,82 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert any(_artifact_type(artifact) == "file_observation" for artifact in runtime.store.artifacts)
 
 
+async def test_fast_recipe_prompt_compacts_large_project_runtime_context(monkeypatch):
+    from brain.systems.runs.recipes.fast import FastRecipe
+
+    captured = {}
+    huge_payload = "RAW_PROJECT_FILE_CONTEXT_SHOULD_NOT_BE_IN_SYSTEM_PROMPT" * 80_000
+
+    async def fake_invoke(spec):
+        captured["spec"] = spec
+        return SimpleNamespace(output="ok", success=True, error=None)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
+
+    workspace_ref = {
+        "name": "Agent Mission Control Reference",
+        "description": "Folder-only reference copy of the old OpenClaw project.",
+        "workspace_root": "/workspaces/ideas/idea-1/.illo-project-context/local/project/project-root",
+        "project_runtime_context": {
+            "project_context_snapshot": {
+                "project_id": "project-1",
+                "project_key": "project-1",
+                "resources": [
+                    {
+                        "id": "resource-1",
+                        "kind": "folder",
+                        "name": "agent-mission-control-reference",
+                        "path": "/workspaces/agent-mission-control-reference",
+                        "content": huge_payload,
+                    }
+                ],
+                "permission_scope": {
+                    "allowed_paths": [f"/workspaces/project/file-{index}.md" for index in range(2_000)],
+                    "mode": "enforce",
+                    "permission_mode": "read_write",
+                },
+            },
+            "project_workspace_manifest": {
+                "workspace_root": "/workspaces/ideas/idea-1/.illo-project-context/local/project/project-root",
+                "workspaces": [
+                    {
+                        "name": "/",
+                        "path": "/workspaces/ideas/idea-1/.illo-project-context/local/project/project-root",
+                    }
+                ],
+                "mounts": [
+                    {
+                        "id": "/",
+                        "resource_id": "project-root",
+                        "kind": "project_root",
+                        "mount_path": "/",
+                        "workspace_path": "/workspaces/ideas/idea-1/.illo-project-context/local/project/project-root",
+                    }
+                ],
+            },
+            "project_context_materialization": {
+                "status": "materialized",
+                "project_root_file_count": 779,
+                "project_root_path_count": 779,
+                "project_draft_file_count": 779,
+                "project_draft_path_count": 779,
+            },
+        },
+    }
+
+    result = await FastRecipe().execute(_runtime("fast", workspace_ref=workspace_ref))
+
+    assert result.status.value == "completed"
+    system_prompt = captured["spec"].system_prompt
+    assert len(system_prompt) < 100_000
+    assert "RAW_PROJECT_FILE_CONTEXT_SHOULD_NOT_BE_IN_SYSTEM_PROMPT" not in system_prompt
+    assert "allowed_paths_count" in system_prompt
+    assert "project_root_file_count" in system_prompt
+    assert "/workspaces/ideas/idea-1/.illo-project-context/local/project/project-root" in system_prompt
+
+
 async def test_direct_agent_invocation_uses_async_kernel(monkeypatch):
     from brain.systems.runs.invocation import build_direct_agent_invocation
     from brain.systems.runs.invocation import invoke_direct_agent_async

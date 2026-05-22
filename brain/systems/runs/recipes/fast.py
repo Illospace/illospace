@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime, cancel_event_is_set
+from brain.systems.runs.prompt_surfaces import prompt_json_block
 from brain.systems.runs.tools import wrap_tool_handlers
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.invocation import build_direct_agent_invocation, invoke_direct_agent_async
@@ -60,12 +60,6 @@ def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:
     ]
 
 
-def _json_block(title: str, value: Any) -> str:
-    if not value:
-        return ""
-    return f"\n\n## {title}\n```json\n{json.dumps(value, indent=2, default=str)}\n```"
-
-
 def _thread_attachment_context(runtime: RunRuntime) -> dict[str, Any] | None:
     metadata_context = runtime.request.metadata.get("thread_attachment_context")
     if isinstance(metadata_context, dict):
@@ -109,6 +103,7 @@ class FastRecipe(BaseRunRecipe):
         async def _guidance() -> list[str]:
             return await runtime.drain_steering()
 
+        prompt_context = context.prompt_context(include_target=False, include_workspace=False)
         disabled_tools = _disabled_tool_names(runtime)
         raw_tool_handlers = build_tool_handlers(
             workspace_root=workspace_root,
@@ -129,9 +124,9 @@ class FastRecipe(BaseRunRecipe):
             soul_prompt_section()
             + "\n\n"
             + FAST_AGENT_INSTRUCTIONS
-            + _json_block("Target", runtime.request.target_ref)
-            + _json_block("Workspace", runtime.request.workspace_ref)
-            + (f"\n\n## Context\n{context.prompt_context()}" if context.prompt_context() else "")
+            + prompt_json_block("Target", runtime.request.target_ref)
+            + prompt_json_block("Workspace", runtime.request.workspace_ref)
+            + (f"\n\n## Context\n{prompt_context}" if prompt_context else "")
         )
         spec = build_direct_agent_invocation(
             message=context.message,
@@ -152,7 +147,7 @@ class FastRecipe(BaseRunRecipe):
             on_stream_delta=_delta,
             live_guidance_loader=_guidance,
             cancel_event=runtime.cancel_event,
-            brain_context_preloaded=bool(context.prompt_context()),
+            brain_context_preloaded=bool(prompt_context or runtime.request.target_ref or runtime.request.workspace_ref),
             skip_harvest=True,
             metadata={
                 "org_id": runtime.request.org_id,

@@ -5,17 +5,62 @@ from collections.abc import Mapping
 from typing import Any
 
 
-PROJECT_IDENTITY_FIELDS = (
-    "project_key",
+PROJECT_DURABLE_IDENTITY_FIELDS = (
     "project_id",
+    "project_profile_id",
+    "selected_profile_id",
+)
+
+PROJECT_IDENTITY_FIELDS = (
+    *PROJECT_DURABLE_IDENTITY_FIELDS,
+    "project_key",
     "slug",
 )
+
+PROJECT_IDENTITY_SENTINELS = {
+    "current",
+    "current-thread-project",
+    "current_thread_project",
+    "new",
+    "none",
+}
 
 
 def _clean_text(value: Any) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _clean_identity_field(key: str, value: Any) -> str | None:
+    text = _clean_text(value)
+    if not text:
+        return None
+    if key == "selected_profile_id" and ":" in text:
+        namespace, raw_id = text.split(":", 1)
+        if namespace in {"server", "profile", "project"} and raw_id.strip():
+            return raw_id.strip()
+    if key == "selected_profile_id" and text.lower() in PROJECT_IDENTITY_SENTINELS:
+        return None
+    return text
+
+
+def durable_project_id_from_context(project_context: Mapping[str, Any] | None) -> str | None:
+    """Return the durable persisted Project identity from a context payload."""
+
+    context = project_context if isinstance(project_context, Mapping) else {}
+    for key in PROJECT_DURABLE_IDENTITY_FIELDS:
+        value = _clean_identity_field(key, context.get(key))
+        if value:
+            return value
+    return None
+
+
+def project_identity_field_value(project_context: Mapping[str, Any] | None, key: str) -> str | None:
+    """Return a normalized identity field value."""
+
+    context = project_context if isinstance(project_context, Mapping) else {}
+    return _clean_identity_field(key, context.get(key))
 
 
 def project_context_identity(
@@ -88,8 +133,12 @@ def stamped_project_context(
 
 
 __all__ = [
+    "PROJECT_DURABLE_IDENTITY_FIELDS",
     "PROJECT_IDENTITY_FIELDS",
+    "PROJECT_IDENTITY_SENTINELS",
+    "durable_project_id_from_context",
     "project_context_identity",
+    "project_identity_field_value",
     "stamp_project_identity",
     "stamped_project_context",
 ]
