@@ -2,6 +2,7 @@
 
 import os
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -29,6 +30,10 @@ def _make_mapping_result(rows):
     result.mappings.return_value = mappings
     result.rowcount = len(rows)
     return result
+
+
+def _mock_embedding_service(vector=None):
+    return SimpleNamespace(document=MagicMock(return_value=vector if vector is not None else np.zeros(2000)))
 
 
 TEST_USER_ID = "00000000-0000-0000-0000-000000000002"
@@ -154,14 +159,15 @@ class TestExtractSemantic:
 
     @patch("brain.systems.cognition.consolidate._synthesize_with_gpu_server")
     @patch("brain.systems.memory.embeddings.vec_to_pg")
-    @patch("brain.systems.memory.embeddings.embed_document")
+    @patch("brain.systems.memory.embedding_service.EmbeddingService.from_session")
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    async def test_creates_semantic_memory(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
+    async def test_creates_semantic_memory(self, mock_uow_cls, mock_service_from_session, mock_vec, mock_gpu):
         """Should create a semantic memory from episode cluster."""
         from brain.systems.cognition.consolidate import extract_semantic
 
         mock_gpu.return_value = "[semantic] Redis TTLs require explicit expiry for session data"
-        mock_emb.return_value = np.zeros(2000)
+        embedding_service = _mock_embedding_service()
+        mock_service_from_session.return_value = embedding_service
         mock_vec.return_value = "[0,0,0]"
 
         uow, session = _make_mock_uow()
@@ -195,14 +201,15 @@ class TestExtractSemantic:
 
     @patch("brain.systems.cognition.consolidate._synthesize_with_gpu_server")
     @patch("brain.systems.memory.embeddings.vec_to_pg")
-    @patch("brain.systems.memory.embeddings.embed_document")
+    @patch("brain.systems.memory.embedding_service.EmbeddingService.from_session")
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    async def test_fallback_when_ollama_fails(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
+    async def test_fallback_when_ollama_fails(self, mock_uow_cls, mock_service_from_session, mock_vec, mock_gpu):
         """Should use heuristic fallback when GPU server unavailable."""
         from brain.systems.cognition.consolidate import extract_semantic
 
         mock_gpu.return_value = None  # Ollama fails
-        mock_emb.return_value = np.zeros(2000)
+        embedding_service = _mock_embedding_service()
+        mock_service_from_session.return_value = embedding_service
         mock_vec.return_value = "[0,0,0]"
 
         uow, session = _make_mock_uow()
@@ -267,14 +274,15 @@ class TestCrystallizeProcedural:
 
     @patch("brain.systems.cognition.consolidate._crystallize_with_gpu_server")
     @patch("brain.systems.memory.embeddings.vec_to_pg")
-    @patch("brain.systems.memory.embeddings.embed_document")
+    @patch("brain.systems.memory.embedding_service.EmbeddingService.from_session")
     @patch("brain.systems.cognition.consolidate.UnitOfWork")
-    async def test_creates_procedural_from_semantics(self, mock_uow_cls, mock_emb, mock_vec, mock_gpu):
+    async def test_creates_procedural_from_semantics(self, mock_uow_cls, mock_service_from_session, mock_vec, mock_gpu):
         """Should crystallize semantic memories into a procedure."""
         from brain.systems.cognition.consolidate import crystallize_procedural
 
         mock_gpu.return_value = "1. Check TTL\n2. Set expiry\n3. Monitor"
-        mock_emb.return_value = np.zeros(2000)
+        embedding_service = _mock_embedding_service()
+        mock_service_from_session.return_value = embedding_service
         mock_vec.return_value = "[0,0,0]"
 
         uow, session = _make_mock_uow()

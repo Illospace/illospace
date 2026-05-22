@@ -14,7 +14,8 @@ import numpy as np
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from brain.systems.memory.embeddings import embed_query, vec_to_pg
+from brain.systems.memory.embedding_service import EmbeddingService
+from brain.systems.memory.embeddings import vec_to_pg
 
 log = logging.getLogger(__name__)
 
@@ -216,10 +217,8 @@ async def async_compute_gravity(
             query_emb = row['embedding']
     elif query_text:
         try:
-            from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
-
-            runtime = await async_get_embedding_runtime_config(session, include_secret=True)
-            emb_arr = embed_query(query_text, runtime_config=runtime)
+            embedding_service = await EmbeddingService.from_session(session)
+            emb_arr = embedding_service.query(query_text)
             query_emb = vec_to_pg(emb_arr)
         except Exception as e:
             log.warning("Failed to embed gravity query: %s", e)

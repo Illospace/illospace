@@ -237,8 +237,7 @@ async def async_tool_brain_recall(
     Multiplayer: pass user_id + org_id for visibility-scoped recall.
     Without viewer context, recall intentionally returns no memories.
     """
-    from brain.systems.memory.embeddings import embed_query
-    from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+    from brain.systems.memory.embedding_service import EmbeddingService, embedding_degradation_reason
 
     visibility_context = MemoryVisibilityContext(
         user_id=user_id,
@@ -247,10 +246,11 @@ async def async_tool_brain_recall(
         principal_type="service" if service_retrieval or user_id == "system" else None,
     )
 
+    query_emb = None
     try:
         async with UnitOfWork() as uow:
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            query_emb = embed_query(query, runtime_config=runtime_config)
+            embedding_service = await EmbeddingService.from_session(uow.session)
+            query_emb = embedding_service.query(query)
             results = await _maybe_await(uow.memories.graph_augmented_recall(
                 query_embedding=query_emb,
                 limit=limit,
@@ -282,9 +282,22 @@ async def async_tool_brain_recall(
             attention_debug=attention_debug,
             expand_lazy_load=expand_lazy_load,
             service_retrieval=service_retrieval,
-        )
+            )
     except Exception as e:
         logger.warning(f"Graph recall failed, falling back to vector: {e}")
+        if query_emb is None:
+            response = await _finalize_recall_response(
+                query=query,
+                memories=[],
+                limit=limit,
+                user_id=user_id,
+                org_id=org_id,
+                attention_debug=attention_debug,
+                expand_lazy_load=expand_lazy_load,
+                service_retrieval=service_retrieval,
+            )
+            response["warning"] = embedding_degradation_reason(e)
+            return response
 
     # Fallback: pure vector search with same visibility filtering
     async with UnitOfWork() as uow:
@@ -405,11 +418,10 @@ async def async_tool_brain_guardrails(skill: str | None = None) -> dict:
 
         # High-salience warnings (lessons with salience >= 9)
         if skill:
-            from brain.systems.memory.embeddings import embed_query
-            from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+            from brain.systems.memory.embedding_service import EmbeddingService
 
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            skill_emb = embed_query(skill, runtime_config=runtime_config)
+            embedding_service = await EmbeddingService.from_session(uow.session)
+            skill_emb = embedding_service.query(skill)
             result["warnings"].extend(
                 await _maybe_await(uow.memories.high_salience_warnings_for_skill(skill_embedding=skill_emb))
             )
@@ -440,7 +452,8 @@ async def async_tool_brain_skills(task: str) -> dict:
     Returns the same structure as `skills.py plan` but without the subprocess overhead.
     """
     from brain.systems.skills.builtin import ensure_builtin_skills_cached
-    from brain.systems.memory.embeddings import embed_query, vec_to_pg
+    from brain.systems.memory.embedding_service import EmbeddingService, embedding_degradation_reason
+    from brain.systems.memory.embeddings import vec_to_pg
 
     await ensure_builtin_skills_cached()
 
@@ -573,13 +586,11 @@ async def async_tool_brain_skills(task: str) -> dict:
         emb_str = None
         embedding_error = None
         try:
-            from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
-
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            task_emb = embed_query(task, runtime_config=runtime_config)
+            embedding_service = await EmbeddingService.from_session(uow.session)
+            task_emb = embedding_service.query(task)
             emb_str = vec_to_pg(task_emb)
         except Exception as exc:
-            embedding_error = str(exc)[:300]
+            embedding_error = embedding_degradation_reason(exc)[:300]
             logger.warning("brain_skills running in degraded mode; embedding unavailable: %s", embedding_error)
 
         # Count active skills to decide strategy
@@ -968,8 +979,7 @@ async def async_tool_brain_encode(
     evidence: dict | None = None,
 ) -> dict:
     """Encode a new memory into the brain, scoped to the current user."""
-    from brain.systems.memory.embeddings import embed_document
-    from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+    from brain.systems.memory.embedding_service import EmbeddingService, embedding_degradation_reason
 
     if len(content.strip()) < 20:
         return {"error": "Content too short (min 20 chars)"}
@@ -1001,15 +1011,10 @@ async def async_tool_brain_encode(
 
     async with UnitOfWork() as uow:
         try:
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            semantic_emb = embed_document(content, runtime_config=runtime_config)
+            embedding_service = await EmbeddingService.from_session(uow.session)
+            semantic_emb = embedding_service.document(content)
         except Exception as exc:
-            error_text = str(exc)
-            lower = error_text.lower()
-            if any(term in lower for term in ("out of memory", "oom", "cuda")):
-                degraded_reason = f"embedding_oom: {error_text[:200]}"
-            else:
-                degraded_reason = f"embedding_failed: {error_text[:200]}"
+            degraded_reason = embedding_degradation_reason(exc)
 
         result = await _maybe_await(uow.memories.insert_memory(
             content=content,

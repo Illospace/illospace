@@ -184,8 +184,8 @@ async def _handle_create_skill(
         }
 
     try:
-        from brain.systems.memory.embeddings import embed_document, vec_to_pg
-        from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+        from brain.systems.memory.embedding_service import EmbeddingService
+        from brain.systems.memory.embeddings import vec_to_pg
 
         source_kind = "private_local" if user_requested else "agent_draft"
         trust_level = "private_local" if user_requested else "agent_draft"
@@ -200,8 +200,8 @@ async def _handle_create_skill(
         asset_specs = assets or []
         async with UnitOfWork() as uow:
             emb_text = f"{name}: {description}"
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            embedding = embed_document(emb_text, runtime_config=runtime_config)
+            embedding_service = await EmbeddingService.from_session(uow.session)
+            embedding = embedding_service.document(emb_text)
 
             row = (await uow.session.execute(sa_text("""
                 INSERT INTO skills

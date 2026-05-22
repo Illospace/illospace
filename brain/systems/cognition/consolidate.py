@@ -406,11 +406,11 @@ async def extract_semantic(
 
         # Compute embedding for the new semantic memory
         try:
-            from brain.systems.memory.embeddings import embed_document, vec_to_pg
-            from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+            from brain.systems.memory.embeddings import vec_to_pg
+            from brain.systems.memory.embedding_service import EmbeddingService
 
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            semantic_emb = embed_document(synthesized, runtime_config=runtime_config)
+            embedding_service = await EmbeddingService.from_session(uow.session)
+            semantic_emb = embedding_service.document(synthesized)
             source_ref = f"cluster:{scoped.visibility}:{len(cluster_ids)}:{cluster_ids[0]}-{cluster_ids[-1]}"
             promotion_evidence = {
                 "source_memory_ids": cluster_ids,
@@ -569,11 +569,11 @@ async def crystallize_procedural(
             )
 
         try:
-            from brain.systems.memory.embeddings import embed_document, vec_to_pg
-            from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+            from brain.systems.memory.embeddings import vec_to_pg
+            from brain.systems.memory.embedding_service import EmbeddingService
 
-            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
-            semantic_emb = embed_document(procedure_text, runtime_config=runtime_config)
+            embedding_service = await EmbeddingService.from_session(uow.session)
+            semantic_emb = embedding_service.document(procedure_text)
             source_ids = [s["id"] for s in semantics]
             max_sal = max(s["salience"] or 5 for s in semantics)
             source_ref = f"skill:{scoped.visibility}:{skill_name}"[:120]
