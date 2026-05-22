@@ -136,6 +136,7 @@ class FastRecipe(BaseRunRecipe):
             persist_session=True,
             workspace_root=workspace_root,
             user_id=runtime.request.user_id,
+            org_id=runtime.request.org_id,
             run_id=runtime.run.id,
             idea_id=None,
             tool_call_source="fast",
@@ -147,7 +148,6 @@ class FastRecipe(BaseRunRecipe):
             brain_context_preloaded=bool(prompt_context),
             skip_harvest=True,
             metadata={
-                "org_id": runtime.request.org_id,
                 "profile": "fast",
                 "recipe": self.name,
                 "execution_provenance": runtime.request.metadata,

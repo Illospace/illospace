@@ -167,12 +167,12 @@ async def review_completed_phase(
             max_turns=2,
             workspace_root=workspace_root_from_ref(getattr(runtime.request, "workspace_ref", {}) or {}),
             user_id=getattr(runtime.request, "user_id", None),
+            org_id=getattr(runtime.request, "org_id", None),
             run_id=runtime.run.id,
             tool_call_source="coordinator",
             brain_context_preloaded=True,
             skip_harvest=True,
             metadata={
-                "org_id": getattr(runtime.request, "org_id", None),
                 "profile": str(getattr(runtime.run.profile, "value", runtime.run.profile)),
                 "recipe": "deep_phase_review",
                 "root_run_id": runtime.run.root_run_id,

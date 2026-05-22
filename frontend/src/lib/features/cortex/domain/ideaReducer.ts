@@ -7,7 +7,6 @@ export const WORKING_IDEA_STATUSES = [
   'queued',
   'working',
   'running',
-  'active',
 ] as const;
 
 export const DONE_IDEA_STATUSES = [
@@ -33,7 +32,6 @@ export function normalizeIdeaStatus(status: string | null | undefined): Normaliz
     case 'queued':
     case 'working':
     case 'running':
-    case 'active':
       return 'working';
     case 'completed':
     case 'pending_approval':

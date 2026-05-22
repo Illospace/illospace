@@ -177,7 +177,7 @@ def test_agent_invocation_enters_through_runtime_envelope(monkeypatch):
         idea_id="idea-1",
         run_id=123,
         user_id="user-1",
-        metadata={"org_id": "org-1"},
+        org_id="org-1",
     )
 
     result = invoke_direct_agent(spec)
@@ -185,5 +185,6 @@ def test_agent_invocation_enters_through_runtime_envelope(monkeypatch):
     assert result.output == "coordinated"
     assert captured["metadata"]["runtime_origin"] == "manual_api"
     assert captured["metadata"]["runtime_trace_id"] == "run:123"
+    assert captured["metadata"]["org_id"] == "org-1"
     assert captured["metadata"]["runtime_envelope"]["org_id"] == "org-1"
     assert captured["metadata"]["provider_operation_type"] == "coordinator"

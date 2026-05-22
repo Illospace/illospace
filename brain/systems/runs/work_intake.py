@@ -73,7 +73,7 @@ class WorkIntakeEvent:
         return cls(
             source=str(trigger.get("source") or ""),
             event_type=str(trigger.get("event_type") or ""),
-            org_id=str(trigger.get("org_id") or ""),
+            org_id=str(_trigger_org_id(trigger) or ""),
             actor=trigger.get("actor"),
             target=_trigger_target(trigger),
             payload=_trigger_payload(trigger),
@@ -136,6 +136,15 @@ def _trigger_actor_user_id(trigger_payload: dict[str, Any] | Any, *, org_id: str
         return None
     actor_id = str(actor.get("id") or "").strip()
     return actor_id or None
+
+
+def _actor_org_id(actor: Any) -> str | None:
+    return str(_as_mapping(actor).get("org_id") or "").strip() or None
+
+
+def _trigger_org_id(trigger_payload: dict[str, Any] | Any) -> str | None:
+    trigger = _trigger_dict(trigger_payload)
+    return str(trigger.get("org_id") or "").strip() or _actor_org_id(trigger.get("actor"))
 
 
 def _merge_trigger_metadata(
@@ -291,6 +300,10 @@ def _event_actor_user_id(event: WorkIntakeEvent) -> str | None:
     return actor_id or None
 
 
+def _event_org_id(event: WorkIntakeEvent) -> str | None:
+    return str(event.org_id or "").strip() or _actor_org_id(event.actor)
+
+
 def _event_target(event: WorkIntakeEvent) -> dict[str, Any]:
     target = _as_mapping(event.target)
     extra = target.pop("extra", None)
@@ -307,9 +320,13 @@ def _event_metadata(event: WorkIntakeEvent) -> dict[str, Any]:
     payload = dict(event.payload or {})
     metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
     policy = _event_policy(event)
+    org_id = _event_org_id(event)
+    if org_id:
+        metadata["org_id"] = org_id
     metadata["work_intake"] = {
         "source": event.source,
         "event_type": event.event_type,
+        "org_id": org_id,
         "target": _event_target(event),
         "policy": policy,
         "actor": _as_mapping(event.actor),
@@ -359,6 +376,7 @@ def _agent_run_request_for_chat(trigger_payload: dict[str, Any] | Any) -> AgentR
     target = _trigger_target(trigger)
     payload = _trigger_payload(trigger)
     policy = _trigger_policy(trigger)
+    trigger_org_id = _trigger_org_id(trigger)
     metadata = _merge_trigger_metadata(
         trigger,
         payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
@@ -382,11 +400,11 @@ def _agent_run_request_for_chat(trigger_payload: dict[str, Any] | Any) -> AgentR
         "source": f"trigger:{trigger.get('source')}",
         "producer": "trigger",
         "idempotency_key": trigger.get("idempotency_key"),
-        "org_id": trigger.get("org_id"),
+        "org_id": trigger_org_id,
     }
     return AgentRunRequest(
-        org_id=str(trigger.get("org_id") or "") or None,
-        user_id=_payload_user_id(payload, trigger, org_id=str(trigger.get("org_id") or "") or None),
+        org_id=trigger_org_id,
+        user_id=_payload_user_id(payload, trigger, org_id=trigger_org_id),
         thread_id=thread_id,
         message=message,
         profile=profile,
@@ -406,7 +424,7 @@ async def _agent_run_request_for_thread_discussion(
     target = _trigger_target(trigger)
     payload = _trigger_payload(trigger)
     policy = _trigger_policy(trigger)
-    trigger_org_id = str(trigger.get("org_id") or "") or None
+    trigger_org_id = _trigger_org_id(trigger)
     actor_user_id = _payload_user_id(payload, trigger, org_id=trigger_org_id)
     metadata = _merge_trigger_metadata(
         trigger,
@@ -526,7 +544,7 @@ def _build_external_agent_headless_request(
 ) -> AgentRunRequest:
     profile = profile_from_metadata(metadata)
     return AgentRunRequest(
-        org_id=str(event.org_id or "") or None,
+        org_id=_event_org_id(event),
         user_id=_event_actor_user_id(event),
         thread_id=_external_agent_headless_thread_id(target),
         message=message,
@@ -558,11 +576,12 @@ async def build_agent_run_request(
     priority = _event_priority(event)
 
     if event.source == "chat" or target.get("kind") == "chat_message":
+        org_id = _event_org_id(event)
         trigger_payload = {
             "source": event.source,
             "event_type": event.event_type,
             "actor": _as_mapping(event.actor),
-            "org_id": event.org_id,
+            "org_id": org_id,
             "target": target,
             "payload": {
                 **dict(event.payload or {}),
@@ -590,11 +609,12 @@ async def build_agent_run_request(
         )
 
     if target.get("kind") == THREAD_DISCUSSION_SURFACE:
+        org_id = _event_org_id(event)
         trigger_payload = {
             "source": event.source,
             "event_type": event.event_type,
             "actor": _as_mapping(event.actor),
-            "org_id": event.org_id,
+            "org_id": org_id,
             "target": target,
             "payload": {
                 **dict(event.payload or {}),
@@ -886,8 +906,9 @@ async def _agent_run_request_for_cortex(
         if thread_context:
             metadata["thread_context"] = thread_context
     owner_user_id = user_id or getattr(idea, "user_id", None)
+    org_id = str(getattr(idea, "org_id", None) or metadata.get("org_id") or "") or None
     return AgentRunRequest(
-        org_id=str(getattr(idea, "org_id", "") or "") or None,
+        org_id=org_id,
         user_id=owner_user_id,
         thread_id=idea_id,
         message=message,
@@ -903,6 +924,7 @@ async def _agent_run_request_for_cortex(
             "source": source,
             "producer": producer,
             "idempotency_key": idempotency_key,
+            "org_id": org_id,
         },
     )
 
