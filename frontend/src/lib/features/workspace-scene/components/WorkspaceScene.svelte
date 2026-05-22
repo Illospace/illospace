@@ -980,13 +980,15 @@
     if (anchor.kind !== 'pin' || !anchor.anchorId) return null;
     const sourcePin = pins.find((pin) => pin.id === anchor.anchorId);
     const localPosition = localPinPositions.get(anchor.anchorId);
+    const isCreator = Boolean(sourcePin?.created_by_user_id && sourcePin.created_by_user_id === auth.user?.id);
     return {
       id: anchor.id,
       pinId: anchor.anchorId,
       label: anchor.name,
       accent: anchor.color,
       createdByUserId: sourcePin?.created_by_user_id ?? null,
-      canEdit: Boolean(sourcePin?.created_by_user_id && sourcePin.created_by_user_id === auth.user?.id),
+      canEdit: isCreator,
+      canMove: Boolean(sourcePin && auth.user?.id),
       x: localPosition?.x ?? anchor.x,
       y: localPosition?.y ?? anchor.y,
     };
@@ -1882,10 +1884,10 @@
   }
 
   function beginPrimitivePinDrag(pin: PrimitivePinVisual, event: PointerEvent) {
-    if (!pin.canEdit || event.button !== 0) return false;
+    if (!pin.canMove || event.button !== 0) return false;
     event.stopPropagation();
     archiveDropPinId = null;
-    setArchiveDragState(true, false);
+    setArchiveDragState(pin.canEdit, false);
     primitivePinDragState = {
       pinId: pin.pinId,
       startClientX: event.clientX,
@@ -1915,7 +1917,7 @@
     if (!state.moved && Math.sqrt(dx * dx + dy * dy) < 3) return false;
 
     const point = primitivePointerWorldPoint(event);
-    const archiveTarget = archiveBinTargetFromClient(event.clientX, event.clientY);
+    const archiveTarget = pin.canEdit ? archiveBinTargetFromClient(event.clientX, event.clientY) : null;
     state.moved = true;
     state.x = point.x;
     state.y = point.y;
@@ -1923,7 +1925,7 @@
     event.stopPropagation();
     patchPrimitivePinPosition(pin.pinId, point.x, point.y);
     archiveDropPinId = archiveTarget ? pin.pinId : null;
-    setArchiveDragState(true, Boolean(archiveTarget));
+    setArchiveDragState(pin.canEdit, Boolean(archiveTarget));
     return true;
   }
 
@@ -1988,7 +1990,7 @@
     const didMove = state.moved;
     if (state.moved) {
       const point = primitivePointerWorldPoint(event);
-      const archiveTarget = archiveBinTargetFromClient(event.clientX, event.clientY);
+      const archiveTarget = pin.canEdit ? archiveBinTargetFromClient(event.clientX, event.clientY) : null;
       state.x = point.x;
       state.y = point.y;
       patchPrimitivePinPosition(pin.pinId, point.x, point.y);

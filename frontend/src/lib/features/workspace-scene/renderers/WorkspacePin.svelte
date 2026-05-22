@@ -8,6 +8,7 @@
     active = false,
     moving = false,
     canEdit = false,
+    canMove = false,
     semanticLevel = 'detail',
     style = '',
     activate,
@@ -23,6 +24,7 @@
     active?: boolean;
     moving?: boolean;
     canEdit?: boolean;
+    canMove?: boolean;
     semanticLevel?: SemanticZoomLevel;
     style?: string;
     activate?: (event: MouseEvent) => void;
@@ -107,9 +109,10 @@
   class:is-active={active}
   class:is-moving={moving}
   class:can-edit={canEdit}
+  class:can-move={canMove}
   style={`--workspace-pin-accent:${accent};${style}`}
   aria-label={label}
-  title={canEdit ? label : undefined}
+  title={canMove ? label : undefined}
   data-cortex-workspace-pin-id={pinId}
   onclick={handleActivate}
   onpointerdown={handlePointerDown}
@@ -181,7 +184,7 @@
     --workspace-pin-label-shadow: none;
   }
 
-  .cortex-workspace-pin.can-edit {
+  .cortex-workspace-pin.can-move {
     cursor: grab;
   }
 
@@ -189,7 +192,7 @@
     cursor: grab;
   }
 
-  .cortex-workspace-pin.can-edit:active,
+  .cortex-workspace-pin.can-move:active,
   .cortex-workspace-pin.is-moving:active {
     cursor: grabbing;
   }

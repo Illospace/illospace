@@ -60,6 +60,7 @@ export type PrimitivePinVisual = {
   accent: string;
   createdByUserId: string | null;
   canEdit: boolean;
+  canMove: boolean;
   x: number;
   y: number;
 };
