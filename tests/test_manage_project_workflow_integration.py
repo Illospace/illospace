@@ -15,7 +15,7 @@ def _project_run(run_id: int, project_root: Path, *, project_id: str = "profile-
         target_ref={
             "kind": "cortex_idea",
             "project_context_snapshot": {
-                "id": project_id,
+                "project_id": project_id,
                 "status": "validated",
                 "resources": [
                     {
@@ -55,6 +55,11 @@ def _resource_workspace(run) -> Path:
     return Path(resource["materialization"]["workspace_path"])
 
 
+def _resource_source_root(run) -> Path:
+    resource = run.target_ref["project_context_snapshot"]["resources"][0]
+    return Path(resource["materialization"]["source_path"])
+
+
 async def test_manage_project_local_draft_publish_is_visible_to_next_thread(tmp_path, monkeypatch):
     from brain.systems.cortex.project_context.materializer import materialize_project_context_workspaces
 
@@ -74,6 +79,7 @@ async def test_manage_project_local_draft_publish_is_visible_to_next_thread(tmp_
         org_id="org-1",
     )
     draft_root = _resource_workspace(first_run)
+    source_root = _resource_source_root(first_run)
     (draft_root / "brief.md").write_text("draft edit", encoding="utf-8")
     (draft_root / "new.md").write_text("new draft file", encoding="utf-8")
     (draft_root / "delete.md").unlink()
@@ -102,9 +108,11 @@ async def test_manage_project_local_draft_publish_is_visible_to_next_thread(tmp_
     assert published["mutated_project_root"] is True
     assert published["summary"] == {"published_groups": 1, "operation_count": 3, "blocked_count": 0}
     assert plan_after_publish["summary"] == {"resource_count": 1, "operation_count": 0, "blocked_count": 0}
-    assert (project_root / "brief.md").read_text(encoding="utf-8") == "draft edit"
-    assert (project_root / "new.md").read_text(encoding="utf-8") == "new draft file"
-    assert not (project_root / "delete.md").exists()
+    assert source_root != project_root
+    assert (source_root / "brief.md").read_text(encoding="utf-8") == "draft edit"
+    assert (source_root / "new.md").read_text(encoding="utf-8") == "new draft file"
+    assert not (source_root / "delete.md").exists()
+    assert (project_root / "brief.md").read_text(encoding="utf-8") == "root v1"
 
     second_run = _project_run(502, project_root)
     runs[502] = second_run
@@ -149,8 +157,9 @@ async def test_manage_project_out_of_date_draft_blocks_publish(tmp_path, monkeyp
         org_id="org-1",
     )
     draft_root = _resource_workspace(run)
+    source_root = _resource_source_root(run)
     (draft_root / "brief.md").write_text("thread draft edit", encoding="utf-8")
-    (project_root / "brief.md").write_text("root v2", encoding="utf-8")
+    (source_root / "brief.md").write_text("root v2", encoding="utf-8")
 
     refreshed = await materialize_project_context_workspaces(
         601,
@@ -180,4 +189,5 @@ async def test_manage_project_out_of_date_draft_blocks_publish(tmp_path, monkeyp
     assert publish["ok"] is False
     assert publish["mutated_project_root"] is False
     assert publish["summary"] == {"published_groups": 0, "operation_count": 0, "blocked_count": 1}
-    assert (project_root / "brief.md").read_text(encoding="utf-8") == "root v2"
+    assert (source_root / "brief.md").read_text(encoding="utf-8") == "root v2"
+    assert (project_root / "brief.md").read_text(encoding="utf-8") == "root v1"

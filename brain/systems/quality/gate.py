@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.memory.embeddings import embed_document, vec_to_pg
+from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +81,10 @@ async def check_quality(
 async def _check_near_duplicate(content: str, threshold: float = 0.90) -> dict | None:
     """Check if content is a near-duplicate of an existing memory."""
     try:
-        emb = embed_document(content)
-        emb_str = vec_to_pg(emb)
         async with UnitOfWork() as uow:
+            runtime_config = await async_get_embedding_runtime_config(uow.session, include_secret=True)
+            emb = embed_document(content, runtime_config=runtime_config)
+            emb_str = vec_to_pg(emb)
             row = (await uow.session.execute(text("""
                 SELECT id, content, 1 - (semantic_embedding <=> CAST(:emb AS vector)) as similarity
                 FROM memories

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import pathlib
 import re as _re
 import shlex as _shlex
 
+from brain.systems.cortex.project_context.drafts import IGNORED_DRAFT_DIRS
 from brain.systems.cortex.project_context.workspace_manifest import (
     ProjectWorkspaceManifest,
     normalize_project_workspace_manifest,
@@ -21,6 +23,15 @@ from brain.platform.async_io import run_subprocess_sync
 
 def _path_is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root + os.sep)
+
+
+def _is_project_internal_relative_path(path: pathlib.Path) -> bool:
+    return any(part in IGNORED_DRAFT_DIRS for part in path.parts)
+
+
+def _block_project_internal_path(path: str) -> None:
+    if any(part in IGNORED_DRAFT_DIRS for part in pathlib.Path(path).parts):
+        raise ValueError("Project draft metadata is internal and is not accessible through file tools.")
 
 
 def _context_mapping(value: object) -> Mapping[str, object]:
@@ -251,6 +262,7 @@ def _resolve_path(path: str, working_dir: str | None = None, *, for_write: bool 
     project_resolution = _project_mount_resolution(path)
     if project_resolution is not None:
         resolved, _mount = project_resolution
+        _block_project_internal_path(resolved)
         if for_write:
             _block_project_source_write(resolved)
         return resolved
@@ -262,6 +274,7 @@ def _resolve_path(path: str, working_dir: str | None = None, *, for_write: bool 
 
     if for_write:
         _block_project_source_write(resolved)
+    _block_project_internal_path(resolved)
 
     # Path containment: must stay within workspace
     if not _path_is_within(resolved, base):
@@ -743,7 +756,16 @@ def _handle_search_files(pattern: str, path: str | None = None, glob: str | None
             result,
         )
         return result
-    cmd = ["grep", "-rn", "--include", glob or "*", "-E", pattern, search_path]
+    cmd = [
+        "grep",
+        "-rn",
+        *[f"--exclude-dir={name}" for name in sorted(IGNORED_DRAFT_DIRS)],
+        "--include",
+        glob or "*",
+        "-E",
+        pattern,
+        search_path,
+    ]
 
     try:
         proc = run_subprocess_sync(
@@ -782,7 +804,6 @@ def _handle_search_files(pattern: str, path: str | None = None, glob: str | None
 
 def _handle_list_files(pattern: str, path: str | None = None, _workspace: str | None = None) -> dict:
     """List files matching a glob pattern."""
-    import pathlib
 
     try:
         base = pathlib.Path(_resolve_path(path, _workspace) if path else (_workspace or _patched_workspace_root()))
@@ -796,7 +817,11 @@ def _handle_list_files(pattern: str, path: str | None = None, _workspace: str | 
         return result
 
     try:
-        matches = sorted(base.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+        matches = [
+            match
+            for match in sorted(base.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not _is_project_internal_relative_path(match.relative_to(base))
+        ]
         # Limit results
         paths = [str(m.relative_to(base)) for m in matches[:100]]
         total = len(matches)

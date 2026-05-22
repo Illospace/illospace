@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
 
   import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
   import ChatStateView from '$lib/components/chat/ChatStateView.svelte';
@@ -17,6 +17,7 @@
     postThreadDiscussionComment,
     type ThreadDiscussionComment,
   } from '$lib/features/threads/api/threadApi';
+  import { wsClient } from '$lib/stores/ws.svelte';
   import { buildPresenceSeedStyle, normalizeHexColor, presenceToneForColor } from '$lib/utils/constellationPresence';
   import { parseServerDate } from '$lib/utils/datetime';
 
@@ -44,16 +45,23 @@
 
   const MESSAGE_GROUP_WINDOW_MS = 15 * 60 * 1000;
   const MENTION_RENDER_RE = /(^|[^A-Za-z0-9_])@([A-Za-z0-9._-]+)([.,:;!?]?)/g;
+  const THREAD_DISCUSSION_RUN_PREFIX = 'thread-discussion:';
+  const THREAD_DISCUSSION_REPLY_TOOL = 'post_thread_discussion_reply';
+  const DISCUSSION_REPLY_RECONCILE_DELAYS_MS = [1200, 3000, 7000, 15000, 30000, 45000];
   const tailSignature = $derived(`${comments.length}:${comments.at(-1)?.id ?? 'empty'}`);
   const composerPlaceholder = $derived(
     ideaId ? 'Comment on this Thread...' : 'Open a Thread to comment...',
   );
   const mentionOptions = $derived([defaultIlloMentionOption()]);
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let replyReconcileTimers: ReturnType<typeof setTimeout>[] = [];
 
   $effect(() => {
     if (!ideaId) {
       comments = [];
       loadedForIdeaId = null;
+      clearReplyReconcileTimers();
+      clearScheduledRefresh();
       return;
     }
     if (loadedForIdeaId === ideaId) return;
@@ -73,17 +81,56 @@
     tick().then(() => scrollDiscussionToBottom());
   });
 
-  async function loadComments(targetIdeaId = ideaId) {
+  $effect(() => {
+    const activeIdeaId = ideaId;
+    if (!activeIdeaId) return;
+
+    const unsubs = [
+      wsClient.on('thread_discussion_comment', (msg) => {
+        handleDiscussionCommentEvent(activeIdeaId, msg);
+      }),
+      wsClient.on('tool_finished', (msg) => {
+        handleDiscussionRunEvent(activeIdeaId, msg, { requireReplyTool: true, delayMs: 180 });
+      }),
+      wsClient.on('run_completed', (msg) => {
+        handleDiscussionRunEvent(activeIdeaId, msg, { delayMs: 450 });
+      }),
+      wsClient.onReconnect(() => {
+        scheduleCommentRefresh(activeIdeaId, 150);
+      }),
+    ];
+
+    return () => {
+      unsubs.forEach((unsub) => unsub());
+      clearReplyReconcileTimers();
+      clearScheduledRefresh();
+    };
+  });
+
+  onDestroy(() => {
+    clearReplyReconcileTimers();
+    clearScheduledRefresh();
+  });
+
+  async function loadComments(targetIdeaId = ideaId, options: { silent?: boolean } = {}) {
     if (!targetIdeaId) return;
-    loading = true;
-    error = '';
+    if (!options.silent) {
+      loading = true;
+      error = '';
+    }
     try {
-      comments = await listThreadDiscussion(targetIdeaId);
+      const nextComments = await listThreadDiscussion(targetIdeaId);
+      if (targetIdeaId !== ideaId) return;
+      comments = sortDiscussionComments(nextComments);
       loadedForIdeaId = targetIdeaId;
     } catch (err: any) {
-      error = err?.detail || 'Failed to load Discussion.';
+      if (options.silent) {
+        console.warn('[thread-discussion] failed to refresh comments', err);
+      } else {
+        error = err?.detail || 'Failed to load Discussion.';
+      }
     } finally {
-      loading = false;
+      if (!options.silent) loading = false;
     }
   }
 
@@ -97,9 +144,10 @@
         body: text,
         metadata: { source: 'thread_discussion_panel' },
       });
-      comments = [...comments, result.comment];
+      upsertDiscussionComment(result.comment);
       body = '';
       userScrolledUp = false;
+      if (result.trigger) scheduleReplyReconcile(ideaId);
     } catch (err: any) {
       error = err?.detail || 'Failed to post comment.';
     } finally {
@@ -144,6 +192,95 @@
 
   function isIlloComment(comment: ThreadDiscussionComment) {
     return comment.author_kind === 'illo' || comment.author_kind === 'agent';
+  }
+
+  function handleDiscussionCommentEvent(targetIdeaId: string, msg: any) {
+    if (!eventIdeaMatches(targetIdeaId, msg)) return;
+    const comment = msg?.comment;
+    if (comment && typeof comment === 'object') {
+      upsertDiscussionComment(comment as ThreadDiscussionComment);
+      if (isIlloComment(comment as ThreadDiscussionComment)) clearReplyReconcileTimers();
+      return;
+    }
+    scheduleCommentRefresh(targetIdeaId, 150);
+  }
+
+  function handleDiscussionRunEvent(
+    targetIdeaId: string,
+    msg: any,
+    options: { requireReplyTool?: boolean; delayMs?: number } = {},
+  ) {
+    if (!eventMatchesDiscussionRun(targetIdeaId, msg)) return;
+    if (options.requireReplyTool && !eventUsesDiscussionReplyTool(msg)) return;
+    scheduleCommentRefresh(targetIdeaId, options.delayMs ?? 350);
+  }
+
+  function eventIdeaMatches(targetIdeaId: string, msg: any) {
+    const eventIdeaId = String(msg?.idea_id ?? msg?.thread_id ?? msg?.comment?.thread_id ?? '');
+    return eventIdeaId === targetIdeaId;
+  }
+
+  function eventMatchesDiscussionRun(targetIdeaId: string, msg: any) {
+    const discussionRunThreadId = `${THREAD_DISCUSSION_RUN_PREFIX}${targetIdeaId}`;
+    return String(msg?.thread_id ?? '') === discussionRunThreadId
+      || String(msg?.idea_id ?? '') === discussionRunThreadId;
+  }
+
+  function eventUsesDiscussionReplyTool(msg: any) {
+    return String(msg?.tool_name ?? msg?.tool ?? '') === THREAD_DISCUSSION_REPLY_TOOL;
+  }
+
+  function upsertDiscussionComment(comment: ThreadDiscussionComment) {
+    if (comment.thread_id && ideaId && String(comment.thread_id) !== String(ideaId)) return;
+    const commentId = String(comment.id);
+    const existingIndex = comments.findIndex((row) => String(row.id) === commentId);
+    const nextComments = existingIndex >= 0
+      ? comments.map((row, index) => (index === existingIndex ? { ...row, ...comment } : row))
+      : [...comments, comment];
+    comments = sortDiscussionComments(nextComments);
+  }
+
+  function sortDiscussionComments(rows: ThreadDiscussionComment[]) {
+    return [...rows].sort((a, b) => {
+      const byTime = discussionCommentTime(a) - discussionCommentTime(b);
+      if (byTime !== 0) return byTime;
+      return Number(a.id) - Number(b.id);
+    });
+  }
+
+  function discussionCommentTime(comment: ThreadDiscussionComment) {
+    const time = Date.parse(comment.created_at ?? '');
+    return Number.isFinite(time) ? time : 0;
+  }
+
+  function scheduleCommentRefresh(targetIdeaId = ideaId, delayMs = 350) {
+    if (!targetIdeaId) return;
+    clearScheduledRefresh();
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null;
+      void loadComments(targetIdeaId, { silent: true });
+    }, delayMs);
+  }
+
+  function scheduleReplyReconcile(targetIdeaId: string | null) {
+    if (!targetIdeaId) return;
+    clearReplyReconcileTimers();
+    replyReconcileTimers = DISCUSSION_REPLY_RECONCILE_DELAYS_MS.map((delayMs) =>
+      setTimeout(() => {
+        void loadComments(targetIdeaId, { silent: true });
+      }, delayMs),
+    );
+  }
+
+  function clearScheduledRefresh() {
+    if (refreshTimer === null) return;
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+
+  function clearReplyReconcileTimers() {
+    replyReconcileTimers.forEach((timer) => clearTimeout(timer));
+    replyReconcileTimers = [];
   }
 
   function participantTone(comment: ThreadDiscussionComment) {

@@ -144,18 +144,12 @@ def test_project_context_extraction_from_thread_payload():
     assert _extract_project_context_from_message([], {"project_context": snapshot}) == snapshot
 
 
-def test_thread_project_context_validation_rejects_empty_context():
-    from fastapi import HTTPException
-
+def test_thread_project_context_validation_allows_empty_project():
     from brain.app.api.routers.cortex._idea_ops import _validate_thread_project_context
 
-    with pytest.raises(HTTPException) as excinfo:
-        _validate_thread_project_context({"name": "Legacy empty project", "resources": []})
+    context = {"name": "Empty project", "resources": []}
 
-    assert excinfo.value.status_code == 422
-    assert excinfo.value.detail["validation_errors"] == [
-        "project_context_snapshot.resources must contain at least one resource."
-    ]
+    assert _validate_thread_project_context(context) == context
 
 
 def test_project_context_extraction_promotes_readable_thread_upload(tmp_path, monkeypatch):
@@ -316,6 +310,9 @@ async def test_project_profile_resource_endpoints_mutate_context(tmp_path):
     )
 
     assert [resource["path"] for resource in profile.project_context["resources"]] == [str(first), str(second)]
+    assert profile.project_context["project_key"] == "project-1"
+    assert profile.project_context["project_id"] == "project-1"
+    assert profile.project_context["slug"] == "yc"
     added_id = profile.project_context["resources"][1]["id"]
 
     await _project_context.reorder_project_resources(
@@ -326,6 +323,7 @@ async def test_project_profile_resource_endpoints_mutate_context(tmp_path):
     )
 
     assert [resource["id"] for resource in profile.project_context["resources"]] == [added_id, "r1"]
+    assert profile.project_context["project_key"] == "project-1"
 
 
 async def test_project_profile_resource_reorder_rejects_duplicates(tmp_path):
@@ -1516,6 +1514,92 @@ async def test_post_thread_discussion_reply_tool_writes_illo_comment(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_post_ai_timeline_message_tool_writes_linked_thread_message(monkeypatch):
+    from brain.systems.runs.execution_context import bind_agent_context
+    from brain.systems.runs.tool_catalog.handlers.chat import _handle_post_ai_timeline_message
+
+    idea = SimpleNamespace(id="some-id", org_id="test-org", status="active", user_id=None, title="Test Thread")
+    created = []
+
+    class _Session:
+        async def get(self, _model, thread_id):
+            return idea if thread_id == "some-id" else None
+
+        def add(self, obj):
+            if hasattr(obj, "content"):
+                obj.id = 19
+                obj.created_at = datetime(2026, 5, 21, 12, 6, tzinfo=timezone.utc)
+            created.append(obj)
+
+        async def flush(self):
+            return None
+
+    class _UnitOfWork:
+        async def __aenter__(self):
+            self.session = _Session()
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    published = Mock()
+    monkeypatch.setattr("brain.platform.db.repositories.unit_of_work.UnitOfWork", _UnitOfWork)
+    monkeypatch.setattr("brain.systems.cortex.events.publish_safe", published)
+
+    with bind_agent_context(
+        {
+            "org_id": "test-org",
+            "run_id": 43,
+            "thread_id": "thread-discussion:some-id",
+            "target_ref": {
+                "kind": "thread_discussion",
+                "idea_id": "some-id",
+                "thread_id": "thread-discussion:some-id",
+                "discussion_trigger": {
+                    "surface": "thread_discussion",
+                    "thread_id": "some-id",
+                    "comment_id": 13,
+                    "response_target": {
+                        "surface": "thread_discussion",
+                        "thread_id": "some-id",
+                        "reply_to_comment_id": 13,
+                    },
+                },
+                "related_surfaces": {
+                    "ai_timeline": {
+                        "thread_id": "some-id",
+                    },
+                },
+            },
+        }
+    ):
+        raw = await _handle_post_ai_timeline_message("Adding this to the AI Timeline.")
+
+    payload = json.loads(raw)
+    assert payload["ok"] is True
+    assert payload["message"]["idea_id"] == "some-id"
+    assert payload["message"]["role"] == "illo"
+    assert payload["message"]["content"] == "Adding this to the AI Timeline."
+    assert payload["message"]["metadata"] == {
+        "source": "illo_agent",
+        "surface": "ai_timeline",
+        "originating_surface": "thread_discussion",
+        "created_by_run_id": 43,
+        "discussion_comment_id": 13,
+    }
+    assert created[0].idea_id == "some-id"
+    assert idea.status == "unread_reply"
+    assert published.call_args_list[0].args == (
+        "thread_message",
+        {"idea_id": "some-id", "message": payload["message"]},
+    )
+    assert published.call_args_list[1].args == (
+        "status_change",
+        {"idea_id": "some-id", "new_status": "unread_reply"},
+    )
+
+
+@pytest.mark.asyncio
 async def test_update_idea_status_commits_before_broadcast(client, mock_session_factory):
     idea = _make_idea(id="status-idea", status="emerged", org_id="test-org")
     order: list[str] = []
@@ -1821,6 +1905,8 @@ def test_project_profile_read_includes_visibility_and_access():
 
     assert payload.visibility == "private"
     assert payload.access[0].name == "Alex"
+    assert payload.project_context["project_key"] == "project-1"
+    assert payload.project_context["slug"] == "yc"
 
 
 def test_project_profile_create_defaults_private():
@@ -1902,7 +1988,7 @@ async def test_resolve_project_access_users_rejects_ambiguous_names():
 
 
 @pytest.mark.asyncio
-async def test_create_project_profile_rejects_empty_project_context(client, mock_session_factory):
+async def test_create_project_profile_allows_empty_project_context(client, mock_session_factory):
     from brain.app.api.routers.cortex import _project_context as pc_mod
 
     with (
@@ -1923,10 +2009,15 @@ async def test_create_project_profile_rejects_empty_project_context(client, mock
             json={"slug": "empty-project", "name": "Empty Project", "project_context": {"name": "Empty Project", "resources": []}},
         )
 
-    assert response.status_code == 422
-    assert response.json()["detail"]["validation_errors"] == [
-        "project_context_snapshot.resources must contain at least one resource."
-    ]
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["slug"] == "empty-project"
+    assert payload["project_context"]["project_key"] == "empty-profile-1"
+    assert payload["project_context"]["project_id"] == "empty-profile-1"
+    assert payload["project_context"]["slug"] == "empty-project"
+    assert payload["project_context"]["resources"] == []
+    assert payload["project_context"]["status"] == "validated"
+    assert payload["project_context"]["project_workspace_manifest"]["mounts"] == []
 
 
 async def test_create_project_profile_validates_project_context(client, mock_session_factory):
@@ -2214,3 +2305,50 @@ async def test_attach_idea_project_context_persists_snapshot_scope_and_env_bindi
     assert payload["status"] == "validated"
     assert "brain/app/api" in payload["permission_scope"]["allowed_paths"]
     assert idea.agent_details["project_context"]["resources"][0]["path"] == "brain"
+
+
+async def test_attach_project_profile_stamps_project_identity_in_snapshot():
+    from brain.app.api.routers.cortex import _project_context
+    from brain.systems.cortex.project_context.schemas import IdeaProjectAttachmentCreate
+
+    idea = _make_idea(id="idea-1", org_id="org-1")
+    profile = SimpleNamespace(
+        id="profile-1",
+        org_id="org-1",
+        user_id="user-1",
+        slug="strategy-room",
+        name="Strategy Room",
+        description=None,
+        project_context={"name": "Older Name", "resources": []},
+        default_environment_binding_id=None,
+        active=True,
+        metadata_={},
+        created_at=None,
+    )
+    session = MagicMock()
+
+    def add(obj):
+        obj.id = 41
+        obj.created_at = datetime.now(timezone.utc)
+
+    session.add.side_effect = add
+    db = _AsyncSession(session)
+    user = {"id": "user-1", "org_id": "org-1", "role": "owner"}
+
+    with (
+        patch.object(_project_context, "_require_idea_for_user", AsyncMock(return_value=idea)),
+        patch.object(_project_context, "_get_project_profile", AsyncMock(return_value=profile)),
+    ):
+        payload = await _project_context.attach_idea_project_context(
+            "idea-1",
+            IdeaProjectAttachmentCreate(project_profile_id="profile-1"),
+            db=db,
+            user=user,
+        )
+
+    snapshot = payload.snapshot
+    assert payload.project_profile_id == "profile-1"
+    assert snapshot["project_key"] == "profile-1"
+    assert snapshot["project_id"] == "profile-1"
+    assert snapshot["slug"] == "strategy-room"
+    assert idea.agent_details["project_context"]["project_key"] == "profile-1"

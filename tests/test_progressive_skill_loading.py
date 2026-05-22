@@ -400,6 +400,60 @@ async def test_brain_skills_degrades_when_embedding_unavailable():
     uow.memories.guardrail_memories_for_task.assert_not_called()
 
 
+async def test_brain_skills_uses_db_backed_runtime_config_for_embeddings():
+    from brain.app.mcp.server import async_tool_brain_skills
+    from brain.systems.runtime_settings.memory import EmbeddingRuntimeConfig
+
+    row = {
+        "id": 1,
+        "name": "develop",
+        "description": "Ship focused changes.",
+        "version": 3,
+        "maturity": "proficient",
+        "confidence": 0.8,
+        "use_count": 4,
+        "success_rate": 0.75,
+        "model_tier": "medium",
+        "thinking_tier": "medium",
+        "pitfalls": [],
+        "triggers": [],
+        "bundle_version_id": 7,
+        "bundle_digest": "sha256:bundle",
+        "overlay_revision": None,
+        "effective_digest": "sha256:effective",
+        "source_kind": "illo-core",
+        "trust_level": "illo_core",
+        "skill_match": 0.5,
+        "centroid_match": None,
+        "centroid_count": 0,
+    }
+    uow = _FakeUow(
+        execute_results=[
+            _ExecuteResult(one_value={"cnt": 1}),
+            _ExecuteResult(all_value=[row]),
+            _ExecuteResult(all_value=[]),
+        ],
+    )
+    runtime = EmbeddingRuntimeConfig(
+        backend="api",
+        provider="openai",
+        api_model="text-embedding-3-small",
+        cpu_model="all-MiniLM-L6-v2",
+        dimensions=768,
+        api_key="secret",
+    )
+
+    with patch("brain.app.mcp.server.UnitOfWork", return_value=uow), \
+         patch("brain.systems.runtime_settings.memory.async_get_embedding_runtime_config", return_value=runtime), \
+         patch("brain.systems.memory.embeddings.embed_query", return_value=[0.1]) as embed_query, \
+         patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]"):
+        result = await async_tool_brain_skills("fix a bug")
+
+    embed_query.assert_called_once_with("fix a bug", runtime_config=runtime)
+    assert "degraded_reason" not in result
+    assert result["recommended_skills"][0]["name"] == "develop"
+
+
 async def test_skill_view_loads_procedure_with_digest_metadata():
     from brain.app.mcp.server import async_tool_skill_view
 

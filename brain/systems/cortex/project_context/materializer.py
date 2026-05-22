@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import inspect
 import os
 import shutil
@@ -16,7 +16,20 @@ from brain.platform.db.models.run import AgentRun
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.cortex.project_context.github import parse_github_repo_slug
 from brain.systems.cortex.project_context.drafts import load_draft_metadata, sync_draft_from_root
+from brain.systems.cortex.project_context.identity import durable_project_id_from_context
 from brain.systems.cortex.project_context.permissions import derive_project_permission_scope
+from brain.systems.cortex.project_context.project_root import is_synthetic_project_root_resource, project_key_from_context
+from brain.systems.cortex.project_context.resource_imports import (
+    backend_readable_resource_path,
+    path_is_relative_to,
+    runtime_workspace_path,
+    should_use_existing_resource_path,
+)
+from brain.systems.cortex.project_context.root_materializer import materialize_project_native_root
+from brain.systems.cortex.project_context.runtime_context import (
+    PROJECT_RUNTIME_CONTEXT_KEY,
+    build_project_runtime_context,
+)
 from brain.systems.cortex.project_context.snapshot import snapshot_from_project_context
 from brain.systems.cortex.project_context.workspace_manifest import (
     ThreadDraftIdentity,
@@ -40,10 +53,11 @@ class ProjectContextMaterializationResult:
     workspaces: list[dict[str, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     resources_checked: int = 0
+    empty_project: bool = False
 
     @property
     def ok(self) -> bool:
-        return bool(self.workspaces) and not self.errors
+        return (bool(self.workspaces) or self.empty_project) and not self.errors
 
     def fail(self, message: str) -> "ProjectContextMaterializationResult":
         self.errors.append(message)
@@ -66,6 +80,7 @@ def _looks_like_github_remote(value: str) -> bool:
         lowered.startswith("git@github.com:")
         or lowered.startswith("https://github.com/")
         or lowered.startswith("http://github.com/")
+        or lowered.startswith("github://")
         or lowered.startswith("github.com/")
     )
 
@@ -99,18 +114,47 @@ def _github_slug_from_resource(resource: dict[str, Any]) -> str | None:
     return None
 
 
+def _normalise_repo_subpath(value: Any) -> str | None:
+    text = _clean_text(value)
+    if not text:
+        return None
+    path = PurePosixPath(text.replace("\\", "/"))
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return path.as_posix() or None
+
+
+def _github_uri_subpath(value: Any) -> str | None:
+    text = _clean_text(value)
+    if not text or not text.lower().startswith("github://"):
+        return None
+    body = text.split("://", 1)[1].split("?", 1)[0].split("#", 1)[0].strip("/")
+    parts = [part for part in body.split("/") if part]
+    if len(parts) <= 2:
+        return None
+    return _normalise_repo_subpath("/".join(parts[2:]))
+
+
+def _github_subpath_from_resource(resource: dict[str, Any]) -> str | None:
+    for key in ("subpath", "path_in_repo", "relative_path"):
+        subpath = _normalise_repo_subpath(resource.get(key))
+        if subpath:
+            return subpath
+    for key in ("uri", "url"):
+        subpath = _github_uri_subpath(resource.get(key))
+        if subpath:
+            return subpath
+    return None
+
+
 def project_context_has_materializable_resources(context: dict[str, Any] | None) -> bool:
     resources = context.get("resources") if isinstance(context, dict) else None
-    if not isinstance(resources, list):
-        return False
-    return any(
-        isinstance(resource, dict)
-        and (
-            _resource_kind(resource) in _LOCAL_FIRST_RESOURCE_KINDS
-            or _github_slug_from_resource(resource)
-        )
-        for resource in resources
-    )
+    if isinstance(resources, list):
+        return True
+    if isinstance(context, dict) and context.get("project_context_snapshot"):
+        snapshot = context.get("project_context_snapshot")
+        return isinstance(snapshot, dict) and isinstance(snapshot.get("resources"), list)
+    return False
 
 
 def _vault_key_from_resource(resource: dict[str, Any]) -> str | None:
@@ -216,31 +260,6 @@ def _git_output(cwd: Path, *args: str) -> str | None:
         ).strip() or None
     except Exception:
         return None
-
-
-def _path_is_relative_to(path: Path, parent: Path) -> bool:
-    try:
-        path.expanduser().resolve().relative_to(parent.expanduser().resolve())
-        return True
-    except Exception:
-        return False
-
-
-def _is_managed_project_context_path(path: Path) -> bool:
-    return ".illo-project-context" in path.expanduser().parts
-
-
-def _should_use_existing_resource_path(existing_path: str | None, workspace_root: Path) -> Path | None:
-    if not existing_path:
-        return None
-    path = Path(existing_path).expanduser()
-    if not path.exists():
-        return None
-    if _path_is_relative_to(path, workspace_root):
-        return path
-    if _is_managed_project_context_path(path):
-        return None
-    return path
 
 
 def _existing_git_checkout(destination: Path, slug: str, branch: str | None) -> dict[str, str] | None:
@@ -373,6 +392,51 @@ def _workspace_entry_from_resource(resource: dict[str, Any], path: Path | str) -
     return {"name": _resource_workspace_name(resource, workspace_path), "path": str(workspace_path)}
 
 
+def _repo_workspace_path(resource: dict[str, Any], repo_path: Path) -> tuple[Path | None, str | None]:
+    subpath = _github_subpath_from_resource(resource)
+    if not subpath:
+        return repo_path, None
+    workspace_path = (repo_path / subpath).expanduser()
+    if not path_is_relative_to(workspace_path, repo_path):
+        return None, f"GitHub Project subpath escapes repository root: {subpath}"
+    if not workspace_path.exists():
+        return None, f"GitHub Project subpath does not exist in {resource.get('repo') or repo_path.name}: {subpath}"
+    return workspace_path, subpath
+
+
+def _mark_github_materialized(
+    resource: dict[str, Any],
+    *,
+    slug: str,
+    repo_path: Path,
+    workspace_path: Path,
+    branch: str | None,
+    commit: str | None,
+    credential: str,
+    subpath: str | None = None,
+    reused: bool = False,
+) -> dict[str, str]:
+    resource["path"] = str(workspace_path)
+    resource["repo"] = slug
+    materialization = {
+        "status": "ready",
+        "provider": "github",
+        "repo": slug,
+        "branch": branch,
+        "commit": commit,
+        "credential": credential,
+    }
+    if subpath:
+        materialization["path"] = str(workspace_path)
+        materialization["workspace_path"] = str(workspace_path)
+        materialization["repo_path"] = str(repo_path)
+        materialization["subpath"] = subpath
+    if reused:
+        materialization["reused"] = True
+    resource["materialization"] = materialization
+    return _workspace_entry_from_resource(resource, workspace_path)
+
+
 def _draft_equivalent_path(value: Any, source_path: Path, draft_path: Path) -> str | None:
     text = _clean_text(value)
     if not text:
@@ -425,10 +489,6 @@ def _rewrite_scope_paths_to_draft(resource: dict[str, Any], source_path: Path, d
                 nested[path_key] = rewrite_list(nested.get(path_key))
 
 
-def _runtime_workspace_path(path: Path) -> Path:
-    return path if path.is_dir() else path.parent
-
-
 def _sync_resource_to_draft(source_path: Path, draft_path: Path) -> dict[str, list[str]]:
     draft_workspace_path = draft_path.parent if source_path.is_file() else draft_path
     had_base_manifest = bool(load_draft_metadata(draft_workspace_path).get("base_manifest"))
@@ -443,66 +503,14 @@ def _sync_resource_to_draft(source_path: Path, draft_path: Path) -> dict[str, li
     }
 
 
-def _path_texts_from_uploaded_files(resource: dict[str, Any]) -> list[str]:
-    paths: list[str] = []
-    uploaded_files = resource.get("uploaded_files")
-    if not isinstance(uploaded_files, list):
-        return paths
-    for item in uploaded_files:
-        if not isinstance(item, dict):
-            continue
-        value = _clean_text(item.get("storage_path") or item.get("path") or item.get("local_path"))
-        if value:
-            paths.append(value)
-    return paths
+def _is_project_root_resource(resource: dict[str, Any]) -> bool:
+    return is_synthetic_project_root_resource(resource)
 
 
-def _path_texts_from_resource_scope(resource: dict[str, Any]) -> list[str]:
-    paths: list[str] = []
-    for key in ("allowed_paths", "files", "folders"):
-        values = resource.get(key)
-        if not isinstance(values, list):
-            continue
-        for item in values:
-            value = _clean_text(item)
-            if value:
-                paths.append(value)
-    return paths
-
-
-def _common_runtime_workspace_path(paths: list[Path]) -> Path | None:
-    if not paths:
-        return None
-    workspace_paths = [_runtime_workspace_path(path).resolve() for path in paths]
-    try:
-        common = Path(os.path.commonpath([str(path) for path in workspace_paths]))
-    except ValueError:
-        return None
-    return common if common.exists() else None
-
-
-def _backend_readable_resource_path(
-    resource: dict[str, Any],
-    *,
-    workspace_root: Path,
-) -> tuple[Path | None, bool]:
-    for key in ("path", "local_path", "storage_path"):
-        value = _clean_text(resource.get(key))
-        existing_path = _should_use_existing_resource_path(value, workspace_root)
-        if existing_path:
-            return existing_path, True
-
-    scoped_paths: list[Path] = []
-    path_texts = [*_path_texts_from_uploaded_files(resource), *_path_texts_from_resource_scope(resource)]
-    for value in path_texts:
-        existing_path = _should_use_existing_resource_path(value, workspace_root)
-        if existing_path:
-            scoped_paths.append(existing_path)
-
-    common_path = _common_runtime_workspace_path(scoped_paths)
-    if common_path:
-        return common_path, True
-    return None, bool(path_texts)
+def _is_project_native_seed_resource(resource: dict[str, Any]) -> bool:
+    if _is_project_root_resource(resource) or _github_slug_from_resource(resource):
+        return False
+    return _resource_kind(resource) in _LOCAL_FIRST_RESOURCE_KINDS
 
 
 def _materialize_backend_readable_resource(
@@ -512,17 +520,17 @@ def _materialize_backend_readable_resource(
     project_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str] | None, str | None, bool]:
     materialization = resource.get("materialization") if isinstance(resource.get("materialization"), dict) else {}
-    previous_source = _should_use_existing_resource_path(_clean_text(materialization.get("source_path")), workspace_root)
-    previous_draft = _should_use_existing_resource_path(
+    previous_source = should_use_existing_resource_path(_clean_text(materialization.get("source_path")), workspace_root)
+    previous_draft = should_use_existing_resource_path(
         _clean_text(resource.get("path") or materialization.get("path")),
         workspace_root,
     )
-    if previous_source and previous_draft and _path_is_relative_to(previous_draft, workspace_root):
+    if previous_source and previous_draft and path_is_relative_to(previous_draft, workspace_root):
         existing_path = previous_draft
         source_path = previous_source
         checked = True
     else:
-        existing_path, checked = _backend_readable_resource_path(resource, workspace_root=workspace_root)
+        existing_path, checked = backend_readable_resource_path(resource, workspace_root=workspace_root)
         source_path = existing_path
     if not existing_path:
         return None, None, checked
@@ -532,7 +540,7 @@ def _materialize_backend_readable_resource(
     draft = False
     draft_status: dict[str, list[str]] | None = None
     draft_identity: ThreadDraftIdentity | None = None
-    if not _path_is_relative_to(existing_path, workspace_root):
+    if not path_is_relative_to(existing_path, workspace_root):
         draft_identity = ThreadDraftIdentity.from_project_resource(
             {**resource, "path": str(existing_path)},
             thread_workspace_root=workspace_root,
@@ -571,7 +579,7 @@ def _materialize_backend_readable_resource(
         draft = True
         _rewrite_scope_paths_to_draft(resource, source_path, existing_path)
 
-    workspace_path = _runtime_workspace_path(existing_path)
+    workspace_path = runtime_workspace_path(existing_path)
     kind = _resource_kind(resource)
     resource["path"] = str(existing_path)
     materialization = {
@@ -617,8 +625,8 @@ async def _materialize_resource(
             project_context=project_context,
         )
         return workspace, error
-    existing_path = _should_use_existing_resource_path(_clean_text(resource.get("path")), workspace_root)
-    if existing_path and _path_is_relative_to(existing_path, workspace_root):
+    existing_path = should_use_existing_resource_path(_clean_text(resource.get("path")), workspace_root)
+    if existing_path and path_is_relative_to(existing_path, workspace_root):
         return _workspace_entry_from_resource(resource, existing_path), None
 
     destination = _safe_repo_destination(workspace_root, slug)
@@ -626,18 +634,28 @@ async def _materialize_resource(
     existing_checkout = _existing_git_checkout(destination, slug, branch)
     if existing_checkout:
         clone = existing_checkout
-        resource["path"] = clone["path"]
-        resource["repo"] = slug
-        resource["materialization"] = {
-            "status": "ready",
-            "provider": "github",
-            "repo": slug,
-            "branch": clone.get("branch") or branch,
-            "commit": clone.get("commit") or None,
-            "credential": "existing",
-            "reused": True,
-        }
-        return _workspace_entry_from_resource(resource, clone["path"]), None
+        repo_path = Path(clone["path"])
+        workspace_path, subpath = _repo_workspace_path(resource, repo_path)
+        if workspace_path is None:
+            message = subpath or f"Could not resolve GitHub Project workspace for {slug}."
+            resource["materialization"] = {
+                "status": "failed",
+                "provider": "github",
+                "repo": slug,
+                "error": message,
+            }
+            return None, message
+        return _mark_github_materialized(
+            resource,
+            slug=slug,
+            repo_path=repo_path,
+            workspace_path=workspace_path,
+            branch=clone.get("branch") or branch,
+            commit=clone.get("commit") or None,
+            credential="existing",
+            subpath=subpath,
+            reused=True,
+        ), None
     if destination.exists() and any(destination.iterdir()):
         message = (
             f"Project context destination {destination} already exists but is not a matching GitHub "
@@ -659,23 +677,27 @@ async def _materialize_resource(
             prefix = f"Vault key {key_name}: " if key_name else "public clone: "
             errors.append(prefix + _sanitize_git_error(str(exc)))
             continue
-        resource["path"] = clone["path"]
-        resource["repo"] = slug
-        resource["materialization"] = {
-            "status": "ready",
-            "provider": "github",
-            "repo": slug,
-            "branch": clone.get("branch") or branch,
-            "commit": clone.get("commit") or None,
-            "credential": "vault" if key_name else "public",
-        }
+        repo_path = Path(clone["path"])
+        workspace_path, subpath = _repo_workspace_path(resource, repo_path)
+        if workspace_path is None:
+            errors.append(subpath or f"Could not resolve GitHub Project workspace for {slug}.")
+            continue
         if key_name and "credential_ref" not in resource:
             resource["credential_ref"] = {
                 "type": "vault_secret",
                 "provider": "github",
                 "key_name": key_name,
             }
-        return _workspace_entry_from_resource(resource, clone["path"]), None
+        return _mark_github_materialized(
+            resource,
+            slug=slug,
+            repo_path=repo_path,
+            workspace_path=workspace_path,
+            branch=clone.get("branch") or branch,
+            commit=clone.get("commit") or None,
+            credential="vault" if key_name else "public",
+            subpath=subpath,
+        ), None
 
     resource["materialization"] = {
         "status": "failed",
@@ -719,6 +741,47 @@ def _snapshot_from_run(run: Any) -> dict[str, Any] | None:
     return None
 
 
+def _identity_sources_from_run(
+    *,
+    snapshot: dict[str, Any],
+    target_payload: dict[str, Any],
+    workspace_payload: dict[str, Any],
+    metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = [snapshot, target_payload, workspace_payload]
+    for payload in (target_payload, workspace_payload, metadata):
+        for key in ("project_context", "project_context_snapshot"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                sources.append(value)
+    return sources
+
+
+def _stamp_materialization_identity(
+    snapshot: dict[str, Any],
+    *,
+    target_payload: dict[str, Any],
+    workspace_payload: dict[str, Any],
+    metadata: dict[str, Any],
+    resources: list[dict[str, Any]],
+    fallback: str,
+) -> str:
+    for source in _identity_sources_from_run(
+        snapshot=snapshot,
+        target_payload=target_payload,
+        workspace_payload=workspace_payload,
+        metadata=metadata,
+    ):
+        durable_project_id = durable_project_id_from_context(source)
+        if durable_project_id:
+            snapshot["project_id"] = durable_project_id
+            snapshot["project_key"] = durable_project_id
+            return durable_project_id
+    project_key = project_key_from_context(snapshot, resources=resources, fallback=fallback)
+    snapshot["project_key"] = project_key
+    return project_key
+
+
 async def materialize_project_context_workspaces(
     run_id: int | None,
     *,
@@ -740,19 +803,47 @@ async def materialize_project_context_workspaces(
         if not run:
             return result.fail(f"Agent run {run_id} was not found.")
         metadata = dict(getattr(run, "metadata_", None) or {})
+        target_payload = _run_target_payload(run)
+        workspace_payload = _run_workspace_payload(run)
         snapshot = _snapshot_from_run(run)
         if not isinstance(snapshot, dict):
             return result.fail("Project Context snapshot is missing.")
         snapshot = dict(snapshot)
         resources = [dict(item) for item in snapshot.get("resources") or [] if isinstance(item, dict)]
-        if not resources:
-            return result.fail("Project Context has no resources to materialize.")
-        snapshot["resources"] = resources
+        _stamp_materialization_identity(
+            snapshot,
+            target_payload=target_payload,
+            workspace_payload=workspace_payload,
+            metadata=metadata,
+            resources=resources,
+            fallback=f"run-{run_id}",
+        )
         user_id = user_id or (str(run.user_id) if getattr(run, "user_id", None) else None)
         org_id = org_id or _clean_text(getattr(run, "org_id", None)) or _clean_text(metadata.get("org_id"))
 
+    materialized_resources: list[dict[str, Any]] = []
     workspaces: list[dict[str, str]] = []
+    root_resource, root_workspace = materialize_project_native_root(
+        snapshot,
+        resources,
+        workspace_root=root,
+        run_id=run_id,
+        actor_id=user_id,
+        org_id=org_id,
+        is_project_native_seed=_is_project_native_seed_resource,
+        workspace_entry_from_resource=_workspace_entry_from_resource,
+    )
+    materialized_resources.append(root_resource)
+    workspaces.append(root_workspace)
+    result.resources_checked += 1
+    root_materialization = root_resource.get("materialization") if isinstance(root_resource.get("materialization"), dict) else {}
+    result.empty_project = bool(root_materialization.get("root_empty", True))
+
     for resource in resources:
+        if _is_project_root_resource(resource):
+            continue
+        if _is_project_native_seed_resource(resource):
+            continue
         workspace, error = await _materialize_resource(
             resource,
             workspace_root=root,
@@ -762,13 +853,13 @@ async def materialize_project_context_workspaces(
         )
         if workspace or error or isinstance(resource.get("materialization"), dict):
             result.resources_checked += 1
+            materialized_resources.append(resource)
         if workspace:
             workspaces.append(workspace)
         if error:
             result.errors.append(error)
 
-    if not result.resources_checked:
-        return result.fail("Project Context resources do not include a supported repository or local workspace.")
+    snapshot["resources"] = materialized_resources
 
     workspace_manifest = normalize_project_workspace_manifest(
         snapshot,
@@ -776,8 +867,21 @@ async def materialize_project_context_workspaces(
         thread_workspace_root=root,
     )
     workspace_manifest_payload = workspace_manifest.to_dict()
+    snapshot["project_workspace_manifest"] = workspace_manifest_payload
     result.workspaces = workspaces
     status = "materialized" if not result.errors else "failed"
+    project_context_materialization = {
+        "status": status,
+        "workspaces": workspaces,
+        "workspace_manifest": workspace_manifest_payload,
+        "errors": result.errors[:10],
+        "empty_project": result.empty_project,
+        "seed_resource_count": len(resources),
+        "project_root_path_count": int(root_materialization.get("root_path_count") or 0),
+        "project_root_file_count": int(root_materialization.get("root_file_count") or 0),
+        "project_draft_path_count": int(root_materialization.get("draft_path_count") or 0),
+        "project_draft_file_count": int(root_materialization.get("draft_file_count") or 0),
+    }
     snapshot["permission_scope"] = derive_project_permission_scope(snapshot)
     if result.errors:
         existing_errors = snapshot.get("validation_errors") if isinstance(snapshot.get("validation_errors"), list) else []
@@ -792,9 +896,16 @@ async def materialize_project_context_workspaces(
         current_target_payload = _run_target_payload(run)
         current_workspace_payload = _run_workspace_payload(run)
         permission_scope = derive_project_permission_scope(snapshot)
+        project_runtime_context = build_project_runtime_context(
+            snapshot=snapshot,
+            permission_scope=permission_scope,
+            workspace_manifest=workspace_manifest_payload,
+            materialization=project_context_materialization,
+        )
 
         current_target_payload["project_context_snapshot"] = snapshot
         current_target_payload["project_context_permission_scope"] = permission_scope
+        current_workspace_payload[PROJECT_RUNTIME_CONTEXT_KEY] = project_runtime_context
         current_workspace_payload["project_context_snapshot"] = snapshot
         current_workspace_payload["project_context_permission_scope"] = permission_scope
         current_workspace_payload["project_workspace_manifest"] = workspace_manifest_payload
@@ -803,21 +914,11 @@ async def materialize_project_context_workspaces(
             default_workspace = workspaces[0]["path"]
             current_workspace_payload["workspace_root"] = default_workspace
             current_workspace_payload["resolved_workspace_root"] = default_workspace
-        current_workspace_payload["project_context_materialization"] = {
-            "status": status,
-            "workspaces": workspaces,
-            "workspace_manifest": workspace_manifest_payload,
-            "errors": result.errors[:10],
-        }
+        current_workspace_payload["project_context_materialization"] = project_context_materialization
 
         current_metadata["workspaces"] = _merge_workspaces(current_metadata.get("workspaces"), workspaces)
         current_metadata["project_workspace_manifest"] = workspace_manifest_payload
-        current_metadata["project_context_materialization"] = {
-            "status": status,
-            "workspaces": workspaces,
-            "workspace_manifest": workspace_manifest_payload,
-            "errors": result.errors[:10],
-        }
+        current_metadata["project_context_materialization"] = project_context_materialization
         run.metadata_ = current_metadata
         _set_run_target_payload(run, current_target_payload)
         _set_run_workspace_payload(run, current_workspace_payload)

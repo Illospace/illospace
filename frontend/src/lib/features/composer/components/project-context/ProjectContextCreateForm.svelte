@@ -207,7 +207,7 @@
 
 <div class="project-create-intro">
   <strong>Projects are saved context containers.</strong>
-  <span>Add a GitHub repo or backend-readable files before saving.</span>
+  <span>Start empty, or add GitHub repos and backend-readable files now.</span>
 </div>
 
 <div class="project-create-fields">
@@ -332,7 +332,7 @@
     onRemove={onRemoveResource}
   />
 {:else}
-  <p class="project-context-muted project-empty-note">No resources yet. Add a GitHub repo, file, or folder before saving.</p>
+  <p class="project-context-muted project-empty-note">No resources yet. Illo can add documents to this Project later.</p>
 {/if}
 
 {#if !validation.valid}

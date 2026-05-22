@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import Any
 import posixpath
 
+from brain.systems.cortex.project_context.identity import PROJECT_IDENTITY_FIELDS, project_identity_field_value
 from brain.systems.cortex.project_context.resources import ProjectResource
 
 
 PROJECT_CONTEXT_DIR = ".illo-project-context"
 PROJECT_CONTEXT_LOCAL_DIR = "local"
-PROJECT_KEY_FIELDS = ("id", "project_id", "profile_id", "selected_profile_id", "slug", "selected_profile_slug")
+PROJECT_KEY_FIELDS = PROJECT_IDENTITY_FIELDS
 FILE_RESOURCE_KINDS = {"file", "doc", "document"}
 ProjectResourceLike = Mapping[str, Any] | ProjectResource
 
@@ -38,7 +39,7 @@ def _safe_segment(value: Any, *, fallback: str) -> str:
 def _project_key_from_context(project_context: Mapping[str, Any] | None) -> str | None:
     context = project_context if isinstance(project_context, Mapping) else {}
     for key in PROJECT_KEY_FIELDS:
-        value = _clean_text(context.get(key))
+        value = project_identity_field_value(context, key)
         if value:
             return _safe_segment(value, fallback="project")
     return None
@@ -413,7 +414,7 @@ class ProjectWorkspaceManifest:
         return cls(
             mounts=mounts,
             project_key=_project_key_from_context(snapshot),
-            project_id=_clean_text(snapshot.get("id") or snapshot.get("project_id") or snapshot.get("profile_id")),
+            project_id=_clean_text(snapshot.get("project_id")),
             workspace_root=workspace_root,
         )
 
@@ -599,7 +600,7 @@ def build_project_workspace_manifest_contract(project_context: Mapping[str, Any]
     return {
         "schema_version": 1,
         "project_key": _project_key_from_context(snapshot),
-        "project_id": _clean_text(snapshot.get("id") or snapshot.get("project_id") or snapshot.get("profile_id")),
+        "project_id": _clean_text(snapshot.get("project_id")),
         "mounts": mounts,
     }
 

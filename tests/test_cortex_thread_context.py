@@ -208,6 +208,39 @@ def test_run_context_prompt_compacts_large_project_context_references():
     assert "/workspaces/agent-mission-control-reference" in prompt_context
 
 
+def test_thread_context_formatting_prefers_recent_entries_when_budget_is_tight():
+    from brain.systems.cortex.thread_context import ThreadContextEntry, _format_entries
+
+    now = datetime(2026, 5, 6, 18, 0, tzinfo=timezone.utc)
+    entries = [
+        ThreadContextEntry(
+            role="user",
+            content="old " * 200,
+            created_at=now,
+            thread_message_id=1,
+        ),
+        ThreadContextEntry(
+            role="illo",
+            content="new CRM exists",
+            created_at=now + timedelta(minutes=1),
+            artifact_id=2,
+        ),
+        ThreadContextEntry(
+            role="user",
+            content="newest question about drift",
+            created_at=now + timedelta(minutes=2),
+            thread_message_id=3,
+        ),
+    ]
+
+    formatted, kept = _format_entries(entries, char_limit=120)
+
+    assert "old old" not in formatted
+    assert "new CRM exists" in formatted
+    assert "newest question about drift" in formatted
+    assert [entry.thread_message_id or entry.artifact_id for entry in kept] == [2, 3]
+
+
 async def _add_run_final_answer(
     session,
     *,

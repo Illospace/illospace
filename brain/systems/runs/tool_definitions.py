@@ -1170,6 +1170,31 @@ CHAT_TOOLS = [
         },
     },
     {
+        "name": "post_ai_timeline_message",
+        "description": (
+            "Post an Illo-authored message into the linked Thread AI Timeline. "
+            "Use this only when the user explicitly asks you to carry something into "
+            "the AI Timeline, or when the work product naturally belongs there. This "
+            "does not reply in Discussion. Discussion and AI Timeline are separate "
+            "conversation surfaces linked by Thread context, so acknowledge in "
+            "Discussion separately when the user summoned you there."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "string",
+                    "description": "Concise markdown message to post in the Thread AI Timeline as Illo.",
+                },
+                "thread_id": {
+                    "type": "string",
+                    "description": "Optional Thread id. Defaults to the linked/current Thread.",
+                },
+            },
+            "required": ["body"],
+        },
+    },
+    {
         "name": "read_thread_discussion",
         "description": (
             "Read the Discussion comments attached to the current Thread. "

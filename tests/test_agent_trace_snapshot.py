@@ -402,3 +402,65 @@ def test_agent_trace_export_zip_contains_shareable_trace_files():
     assert "trace.json" in readme
     assert "CycleRun" in readme
     assert "not saved as a database artifact" in readme
+
+
+def test_agent_trace_export_zip_redacts_secret_like_values():
+    from brain.systems.runs.cortex.recording import build_agent_trace_export_zip
+
+    snapshot = {
+        "schema_version": 1,
+        "trace_id": "run:42",
+        "run": {
+            "run_id": 42,
+            "status": "completed",
+            "metadata": {"github_token": "ghp_" + "a" * 36},
+        },
+        "thread": {"messages": []},
+        "events": [
+            {
+                "id": 2,
+                "run_id": 42,
+                "sequence_no": 1,
+                "event_type": "run.tool_started",
+                "created_at": "2026-05-12T12:00:02+00:00",
+                "payload": {
+                    "tool_name": "exec_command",
+                    "args": {
+                        "cmd": "printf '%s' ghp_" + "b" * 36,
+                        "authorization": "Bearer " + "c" * 36,
+                    },
+                },
+            }
+        ],
+        "tools": [
+            {
+                "tool_name": "exec_command",
+                "args": {"cmd": "gh auth login --with-token <<< ghp_" + "d" * 36},
+            }
+        ],
+        "artifacts": [],
+        "cycles": {},
+        "diagnostics": {
+            "delivery_signals": [
+                {
+                    "payload": {
+                        "api_key": "sk-" + "e" * 36,
+                        "message": "token was ghp_" + "f" * 36,
+                    }
+                }
+            ]
+        },
+    }
+
+    archive_bytes = build_agent_trace_export_zip(snapshot)
+
+    with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
+        trace_text = archive.read("trace.json").decode("utf-8")
+        activity_text = archive.read("activity.json").decode("utf-8")
+
+    assert "ghp_" not in trace_text
+    assert "ghp_" not in activity_text
+    assert "sk-" not in trace_text
+    assert "Bearer c" not in trace_text
+    assert "[secret redacted]" in trace_text
+    assert "[redacted]" in trace_text

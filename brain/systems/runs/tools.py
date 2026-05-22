@@ -28,7 +28,11 @@ SENSITIVE_ARG_PARTS = ("api_key", "apikey", "authorization", "cookie", "password
 FILE_OBSERVATION_TOOLS = frozenset({"file_summary", "list_files", "read_file", "search_files", "semantic_search"})
 FILE_EDIT_TOOLS = frozenset({"apply_patch", "edit_file", "write_file"})
 COMMAND_OUTPUT_TOOLS = frozenset({"exec_command", "run_script", "test_runner"})
-CHAT_MESSAGE_TOOLS = frozenset({"post_chat_message", "post_thread_discussion_reply"})
+CHAT_MESSAGE_TOOLS = frozenset({
+    "post_chat_message",
+    "post_thread_discussion_reply",
+    "post_ai_timeline_message",
+})
 
 
 async def _maybe_await(value):

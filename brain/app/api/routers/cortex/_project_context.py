@@ -20,6 +20,7 @@ from brain.systems.cortex.project_context.github import (
     async_search_repos,
     parse_github_repo_slug,
 )
+from brain.systems.cortex.project_context.identity import stamped_project_context
 from brain.systems.cortex.project_context.profiles import attachment_to_read, profile_to_read
 from brain.systems.cortex.project_context.access import (
     can_manage_project_profile,
@@ -311,6 +312,10 @@ def _validated_snapshot_or_422(project_context: dict[str, Any]) -> dict[str, Any
         raise HTTPException(status_code=422, detail={"validation_errors": exc.errors}) from exc
 
 
+def _profile_project_context(profile: ProjectProfile, project_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    return _validated_snapshot_or_422(stamped_project_context(profile, project_context))
+
+
 def _resource_identity(resource: dict[str, Any]) -> str:
     value = resource.get("id")
     if isinstance(value, str) and value.strip():
@@ -342,7 +347,7 @@ def _project_resources(profile: ProjectProfile) -> list[dict[str, Any]]:
 def _replace_project_resources(profile: ProjectProfile, resources: list[dict[str, Any]]) -> None:
     context = dict(profile.project_context or {})
     context["resources"] = resources
-    profile.project_context = _validated_snapshot_or_422(context)
+    profile.project_context = _profile_project_context(profile, context)
 
 
 def _empty_project_change_summary() -> dict[str, Any]:
@@ -520,6 +525,7 @@ async def create_project_profile(
     )
     db.add(profile)
     await db.flush()
+    profile.project_context = _profile_project_context(profile, project_context)
     await _sync_project_access_list(
         db,
         profile,
@@ -571,7 +577,7 @@ async def update_project_profile(
     if "description" in fields:
         profile.description = body.description
     if "project_context" in fields and body.project_context is not None:
-        profile.project_context = _validated_snapshot_or_422(body.project_context)
+        profile.project_context = _profile_project_context(profile, _validated_snapshot_or_422(body.project_context))
     if "visibility" in fields and body.visibility is not None:
         profile.visibility = _request_visibility(body.visibility)
     if "default_environment_binding_id" in fields:
@@ -580,6 +586,7 @@ async def update_project_profile(
         profile.active = body.active
     if "metadata" in fields:
         profile.metadata_ = body.metadata or {}
+    profile.project_context = _profile_project_context(profile)
     db.add(profile)
     if "shared_usernames" in fields and body.shared_usernames is not None:
         await _sync_project_access_list(
@@ -865,7 +872,7 @@ async def attach_idea_project_context(
     if body.project_profile_id:
         org_id = _profile_org_id(user)
         profile = await _get_project_profile(db, body.project_profile_id, org_id, user)
-        project_context = dict(profile.project_context or {})
+        project_context = _profile_project_context(profile)
     if not project_context:
         raise HTTPException(status_code=422, detail="project_profile_id or project_context is required")
     snapshot = _validated_snapshot_or_422(project_context)

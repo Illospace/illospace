@@ -223,6 +223,63 @@ async def test_cortex_agent_run_request_uses_shared_work_intake_policy(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_cortex_work_intake_stamps_project_identity_from_latest_attachment(monkeypatch):
+    from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
+
+    class _Session:
+        async def get(self, model, key):
+            name = getattr(model, "__name__", "")
+            if name == "Idea":
+                return SimpleNamespace(
+                    id="idea-1",
+                    title="Launch",
+                    org_id="org-1",
+                    user_id="owner-1",
+                    agent_details=None,
+                )
+            if name == "ProjectProfile":
+                assert key == "profile-1"
+                return SimpleNamespace(
+                    id="profile-1",
+                    slug="strategy-room",
+                    name="Strategy Room",
+                    description=None,
+                    active=True,
+                    project_context={"resources": []},
+                )
+            return None
+
+        async def scalars(self, *_args, **_kwargs):
+            attachment = SimpleNamespace(project_profile_id="profile-1", snapshot={"resources": []})
+            return SimpleNamespace(first=lambda: attachment)
+
+    async def fake_thread_context(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "brain.systems.runs.work_intake.async_build_agent_visible_thread_context",
+        fake_thread_context,
+    )
+
+    request = await build_agent_run_request(
+        _Session(),
+        WorkIntakeEvent(
+            source="cortex",
+            event_type="cortex.thread_reply",
+            org_id="org-1",
+            actor={"id": "user-1", "org_id": "org-1", "internal": False},
+            target={"kind": "cortex_idea", "idea_id": "idea-1"},
+            payload={"message": "@illo continue", "metadata": {}},
+        ),
+    )
+
+    assert request.workspace_ref["project_key"] == "profile-1"
+    assert request.workspace_ref["project_id"] == "profile-1"
+    assert request.workspace_ref["slug"] == "strategy-room"
+    assert request.target_ref["project_context_snapshot"]["project_key"] == "profile-1"
+
+
+@pytest.mark.asyncio
 async def test_discussion_origin_cortex_work_intake_records_surface_and_trigger_comment(monkeypatch):
     from brain.systems.runs.work_intake import WorkIntakeEvent, build_agent_run_request
 

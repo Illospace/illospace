@@ -27,6 +27,7 @@ def parse_github_repo_slug(value: str) -> str | None:
         return None
     slug = re.sub(r"^git@github\.com:", "", slug, flags=re.IGNORECASE)
     slug = re.sub(r"^https?://github\.com/", "", slug, flags=re.IGNORECASE)
+    slug = re.sub(r"^github://", "", slug, flags=re.IGNORECASE)
     slug = re.sub(r"^github\.com/", "", slug, flags=re.IGNORECASE)
     slug = re.sub(r"[?#].*$", "", slug).strip("/")
     parts = [part for part in slug.split("/") if part]
