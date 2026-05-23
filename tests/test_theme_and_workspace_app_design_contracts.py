@@ -317,14 +317,17 @@ def test_thread_stage_open_motion_keeps_cortex_static():
     assert "}, 460);" in controller
 
 
-def test_thread_stage_expands_with_large_viewports():
+def test_thread_stage_expands_while_reading_column_stays_bounded():
     thread_shell = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageShell.svelte").read_text()
     stage_screen = (REPO_ROOT / "frontend/src/lib/features/threads/components/ThreadStageScreen.svelte").read_text()
 
     assert "--thread-stage-frame-width: clamp(1040px, 78vw, 1760px);" in thread_shell
     assert "width: min(100%, var(--thread-stage-frame-width));" in thread_shell
     assert "--thread-stage-thread-max: clamp(860px, 74vw, 1560px);" in stage_screen
+    assert "--thread-stage-readable-max: 860px;" in stage_screen
     assert "width: min(100%, var(--thread-stage-thread-max));" in stage_screen
+    assert "--thread-column-max: var(--thread-stage-readable-max);" in stage_screen
+    assert "--thread-column-max: var(--thread-stage-thread-max);" not in stage_screen
 
 
 def test_thread_stage_dismiss_preserves_mounted_workspace_scene():
