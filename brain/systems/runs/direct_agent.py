@@ -1273,6 +1273,7 @@ async def run_agent_async(
     on_stream_delta: "Callable[[str], None] | None" = None,
     live_guidance_loader: "Callable[[], list[str]] | None" = None,
     user_id: str | None = None,
+    org_id: str | None = None,
     skip_harvest: bool = False,
     resolved_llm=None,
     metadata: dict | None = None,
@@ -1303,6 +1304,28 @@ async def run_agent_async(
     start_time = time.time()
     session_id = session_id or f"agent-{uuid.uuid4().hex[:12]}"
     metadata = dict(metadata or {})
+    execution_provenance = metadata.get("execution_provenance")
+    if not isinstance(execution_provenance, dict):
+        execution_provenance = {}
+    runtime_envelope = metadata.get("runtime_envelope")
+    if not isinstance(runtime_envelope, dict):
+        runtime_envelope = {}
+    effective_org_id = (
+        org_id
+        or metadata.get("org_id")
+        or execution_provenance.get("org_id")
+        or runtime_envelope.get("org_id")
+    )
+    effective_user_id = (
+        user_id
+        or metadata.get("user_id")
+        or execution_provenance.get("user_id")
+        or runtime_envelope.get("user_id")
+    )
+    if effective_org_id and not metadata.get("org_id"):
+        metadata["org_id"] = effective_org_id
+    if effective_user_id and not metadata.get("user_id"):
+        metadata["user_id"] = effective_user_id
     max_parallel_tool_calls = max(1, _metadata_int(metadata, "max_parallel_tool_calls", _MAX_PARALLEL_TOOL_CALLS))
     semantic_compactor = _semantic_compactor_from_metadata(metadata)
     thread_handoff_compactor = _thread_handoff_compactor_from_metadata(metadata)
@@ -1354,10 +1377,10 @@ async def run_agent_async(
                 context_idea_id = candidate.strip()
     if context_idea_id:
         context_attrs["idea_id"] = context_idea_id
-    if user_id:
-        context_attrs["user_id"] = user_id
-    if metadata.get("org_id"):
-        context_attrs["org_id"] = metadata.get("org_id")
+    if effective_user_id:
+        context_attrs["user_id"] = effective_user_id
+    if effective_org_id:
+        context_attrs["org_id"] = effective_org_id
     if isinstance(metadata.get("target_ref"), dict):
         context_attrs["target_ref"] = dict(metadata["target_ref"])
     if isinstance(metadata.get("workspace_ref"), dict):
@@ -1375,9 +1398,19 @@ async def run_agent_async(
     try:
         _agent_context.session_id = session_id
         _agent_context.final_reply_review = None
-        execution_metadata = metadata.get("execution_provenance") if isinstance(metadata, dict) else None
-        if not isinstance(execution_metadata, dict):
-            execution_metadata = metadata if isinstance(metadata, dict) else None
+        execution_metadata = dict(execution_provenance) if execution_provenance else {}
+        for key, value in metadata.items():
+            if key == "execution_provenance":
+                continue
+            execution_metadata.setdefault(key, value)
+        if effective_org_id:
+            execution_metadata["org_id"] = effective_org_id
+        if effective_user_id:
+            execution_metadata["user_id"] = effective_user_id
+        if run_id is not None:
+            execution_metadata.setdefault("run_id", run_id)
+        if context_idea_id:
+            execution_metadata.setdefault("idea_id", context_idea_id)
         if execution_metadata:
             _agent_context.execution_metadata = execution_metadata
             if getattr(_agent_context, "execution_artifacts", None) is None:
@@ -1396,17 +1429,17 @@ async def run_agent_async(
 
         model = await _resolve_model_async(
             model,
-            user_id=user_id,
-            org_id=metadata.get("org_id"),
+            user_id=effective_user_id,
+            org_id=effective_org_id,
         )
         model = _normalize_model(model)
 
         # Resolve LLM client
         llm, state.provider, _runtime_extra_headers = await _init_llm_async(
-            user_id,
+            effective_user_id,
             session_id,
             model,
-            org_id=metadata.get("org_id"),
+            org_id=effective_org_id,
             resolved_llm=resolved_llm,
         )
         state.provider_name = llm.provider
@@ -1883,6 +1916,7 @@ def run_agent(
     on_stream_delta: "Callable[[str], None] | None" = None,
     live_guidance_loader: "Callable[[], list[str]] | None" = None,
     user_id: str | None = None,
+    org_id: str | None = None,
     skip_harvest: bool = False,
     resolved_llm=None,
     metadata: dict | None = None,
@@ -1922,6 +1956,7 @@ def run_agent(
         "on_stream_delta": on_stream_delta,
         "live_guidance_loader": live_guidance_loader,
         "user_id": user_id,
+        "org_id": org_id,
         "skip_harvest": skip_harvest,
         "resolved_llm": resolved_llm,
         "metadata": metadata,
