@@ -1323,7 +1323,7 @@
   .thread-stage-panel {
     --thread-stage-dock-width: 432px;
     --thread-stage-thread-min: 380px;
-    --thread-stage-thread-max: clamp(720px, 74vw, 1040px);
+    --thread-stage-thread-max: clamp(860px, 74vw, 1560px);
     --thread-stage-gutter: clamp(16px, 1.7vw, 24px);
     --thread-stage-panel-backdrop-filter: none;
     --thread-stage-panel-before-filter: blur(48px);

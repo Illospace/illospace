@@ -523,6 +523,76 @@ async def test_update_validates_effective_domain_manifest(session):
         )
 
 
+async def test_update_app_refreshes_server_updated_timestamp_before_returning(monkeypatch):
+    from brain.systems.workspace_apps import service as workspace_app_service
+
+    refreshed_at = datetime(2026, 5, 23, 12, 0, tzinfo=timezone.utc)
+    app = type(
+        "App",
+        (),
+        {
+            "id": "app-1",
+            "org_id": ORG_ID,
+            "key": "movable-app",
+            "name": "Movable App",
+            "description": None,
+            "renderer_key": "generated-ui-app",
+            "visual_spec": {},
+            "app_metadata": {},
+            "created_by_user_id": USER_ID,
+            "anchor_user_id": USER_ID,
+            "archived_at": None,
+            "created_at": datetime(2026, 5, 23, 11, 0, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 5, 23, 11, 0, tzinfo=timezone.utc),
+        },
+    )()
+
+    class RefreshRequired:
+        def __getattribute__(self, name):
+            if name in {"__class__", "__repr__", "__str__"}:
+                return object.__getattribute__(self, name)
+            raise AssertionError("updated_at was returned before async refresh")
+
+        def __bool__(self):
+            raise AssertionError("updated_at was returned before async refresh")
+
+    class RefreshRequiredSession:
+        flushed = False
+        refreshed = False
+
+        async def flush(self):
+            self.flushed = True
+            app.updated_at = RefreshRequired()
+
+        async def refresh(self, obj):
+            assert obj is app
+            self.refreshed = True
+            obj.updated_at = refreshed_at
+
+    async def fake_get_app(session, org_id, app_id=None, *, key=None, include_archived=False):
+        return app
+
+    async def fake_active_version(session, app_id):
+        return None
+
+    monkeypatch.setattr(workspace_app_service, "a_get_app", fake_get_app)
+    monkeypatch.setattr(workspace_app_service, "a_active_version", fake_active_version)
+
+    db = RefreshRequiredSession()
+
+    result = await workspace_app_service.a_update_app(
+        db,
+        org_id=ORG_ID,
+        app_id=app.id,
+        name="Moved App",
+    )
+
+    assert result is app
+    assert db.flushed is True
+    assert db.refreshed is True
+    assert result.updated_at == refreshed_at
+
+
 async def test_archive_and_restore_app_leave_domain_records_intact(session):
     domain = await _todo_domain(session)
     record = await AsyncDomainService(session).create_record(
