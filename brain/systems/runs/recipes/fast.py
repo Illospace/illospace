@@ -150,6 +150,8 @@ class FastRecipe(BaseRunRecipe):
             metadata={
                 "profile": "fast",
                 "recipe": self.name,
+                "org_id": runtime.request.org_id or runtime.request.metadata.get("org_id"),
+                "user_id": runtime.request.user_id or runtime.request.metadata.get("user_id"),
                 "execution_provenance": runtime.request.metadata,
                 "target_ref": runtime.request.target_ref,
                 "workspace_ref": runtime.request.workspace_ref,

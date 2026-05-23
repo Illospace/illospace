@@ -98,6 +98,7 @@ def test_run_envelope_projects_to_run_agent_kwargs_with_metadata():
     assert kwargs["persist_session"] is False
     assert kwargs["max_turns"] == 3
     assert kwargs["on_stream_delta"] is stream_delta
+    assert kwargs["org_id"] == "org-1"
     assert kwargs["metadata"]["provider_operation_type"] == "memory_extraction"
     assert kwargs["metadata"]["runtime_trace_id"] == "run:7"
     assert kwargs["metadata"]["runtime_envelope"]["origin"] == "manual_api"

@@ -383,6 +383,7 @@ class RunEnvelope:
             "on_stream_delta": self.on_stream_delta,
             "live_guidance_loader": self.live_guidance_loader,
             "user_id": self.user_id,
+            "org_id": self.org_id,
             "skip_harvest": self.skip_harvest,
             "metadata": metadata,
         }

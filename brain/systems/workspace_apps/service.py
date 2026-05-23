@@ -730,6 +730,7 @@ async def a_update_app(
             )
         )
     await session.flush()
+    await session.refresh(app)
     return app
 
 

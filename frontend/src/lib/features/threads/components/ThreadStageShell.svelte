@@ -112,6 +112,7 @@
   .thread-stage-shell {
     --thread-origin-x: 50%;
     --thread-origin-y: 56%;
+    --thread-stage-frame-width: clamp(1040px, 78vw, 1760px);
     position: absolute;
     inset: 0;
     z-index: 25;
@@ -125,7 +126,7 @@
   }
 
   .thread-stage-frame {
-    width: min(1320px, calc(100% - clamp(18px, 6vw, 104px)));
+    width: min(100%, var(--thread-stage-frame-width));
     height: calc(100% - 6px);
     max-height: 100%;
     pointer-events: none;

@@ -822,6 +822,56 @@ class TestAgentLoop:
     @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
     @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
     @patch("brain.systems.runs.direct_agent._save_session")
+    def test_run_agent_binds_org_argument_for_tool_handlers(self, mock_save, mock_load, mock_client):
+        from brain.systems.runs.direct_agent import run_agent, _agent_context
+
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            self._make_response(
+                text=None,
+                stop_reason="tool_use",
+                tool_use={"name": "brain_recall", "input": {"query": "test"}},
+            ),
+            self._make_response("Done."),
+        ]
+        mock_client.return_value = _mock_llm_client(client)
+
+        captured = {}
+
+        def handler(query):
+            execution_metadata = getattr(_agent_context, "execution_metadata", {}) or {}
+            captured["query"] = query
+            captured["user_id"] = getattr(_agent_context, "user_id", None)
+            captured["org_id"] = getattr(_agent_context, "org_id", None)
+            captured["execution_org_id"] = execution_metadata.get("org_id")
+            captured["target_ref"] = execution_metadata.get("target_ref")
+            return {"memories": [], "count": 0}
+
+        result = run_agent(
+            message="Search for test",
+            tools=[{"name": "brain_recall", "description": "test", "input_schema": {"type": "object", "properties": {}}}],
+            tool_handlers={"brain_recall": handler},
+            persist_session=False,
+            user_id="user-1",
+            org_id="org-argument",
+            metadata={
+                "execution_provenance": {"run_id": 42},
+                "target_ref": {"idea_id": "idea-1"},
+            },
+        )
+
+        assert result.success
+        assert captured == {
+            "query": "test",
+            "user_id": "user-1",
+            "org_id": "org-argument",
+            "execution_org_id": "org-argument",
+            "target_ref": {"idea_id": "idea-1"},
+        }
+
+    @patch("brain.systems.runs.direct_agent.async_resolve_llm_client")
+    @patch("brain.systems.runs.direct_agent._load_session", return_value=([], None))
+    @patch("brain.systems.runs.direct_agent._save_session")
     def test_run_agent_binds_workspace_root_for_tool_handlers(self, mock_save, mock_load, mock_client, tmp_path):
         from brain.systems.runs.direct_agent import run_agent, _agent_context
 
