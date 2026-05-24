@@ -13,12 +13,12 @@ from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import project_runtime_workspace_from_ref
-from brain.systems.personality import soul_prompt_section
+from brain.systems.personality import agent_profile_prompt_section, soul_prompt_section
 
 logger = logging.getLogger(__name__)
 
 
-FAST_AGENT_INSTRUCTIONS = """## Fast Mode
+FAST_RUNTIME_PROMPT = """## Fast Runtime Recipe
 
 This run is the interactive single-agent path. Handle the user's request in one
 continuous conversation when it can be answered, inspected, or completed with
@@ -32,10 +32,21 @@ Runtime rules:
 - Make that opening natural to the request; do not use canned acknowledgements.
 - Keep progress updates brief and meaningful when work takes more than a moment.
 - Do not simulate a Deep coordinator graph inside Fast. If the request needs parallel workers, long verification, or durable delegation, make that boundary explicit and prepare a clean handoff.
-- Before finalizing, reconcile the answer with the evidence visible in this run and name any concrete blocker or uncertainty.
+- Before finalizing, use the Agent Profile's Final Reply Presenter rules. Include evidence, blockers, or uncertainty only when they change what the user should do next.
 """
 
 _FAST_HIDDEN_TOOL_NAMES = {"cortex_reply", "cortex_visual_reply"}
+
+
+def build_fast_system_prompt(prompt_context: str = "") -> str:
+    sections = [
+        soul_prompt_section(),
+        agent_profile_prompt_section(),
+        FAST_RUNTIME_PROMPT,
+    ]
+    if prompt_context:
+        sections.append(f"## Context\n{prompt_context}")
+    return "\n\n".join(section for section in sections if section.strip())
 
 
 def _disabled_tool_names(runtime: RunRuntime) -> set[str]:
@@ -119,12 +130,7 @@ class FastRecipe(BaseRunRecipe):
         )
 
         prompt_context = context.prompt_context()
-        system_prompt = (
-            soul_prompt_section()
-            + "\n\n"
-            + FAST_AGENT_INSTRUCTIONS
-            + (f"\n\n## Context\n{prompt_context}" if prompt_context else "")
-        )
+        system_prompt = build_fast_system_prompt(prompt_context)
         spec = build_direct_agent_invocation(
             message=context.message,
             system_prompt=system_prompt,
@@ -180,4 +186,4 @@ class FastRecipe(BaseRunRecipe):
         )
 
 
-__all__ = ["FastRecipe"]
+__all__ = ["FAST_RUNTIME_PROMPT", "FastRecipe", "build_fast_system_prompt"]

@@ -442,12 +442,37 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert captured["spec"].workspace_root == "/tmp/work"
     assert "interactive single-agent path" in captured["spec"].system_prompt
     assert "write one brief task-specific assistant sentence" in captured["spec"].system_prompt
-    assert "Move quickly, but keep senior engineering hygiene." not in captured["spec"].system_prompt
-    assert "A `/skill` mention is an explicit skill command." not in captured["spec"].system_prompt
+    assert "## Agent Profile" in captured["spec"].system_prompt
+    assert "Final Reply Presenter" in captured["spec"].system_prompt
+    assert "When the user only confirms, corrects, asks yes/no" in captured["spec"].system_prompt
+    assert "config snippets, caveats, or next steps" in captured["spec"].system_prompt
     assert _stream_has(runtime.stream.messages, "run.text_delta", {"delta": "README contents", "run_id": 42})
     assert any(event.event_type == "run.activity" and event.payload["label"] == "Reading files" for event in runtime.store.events)
     assert any(event.event_type == "run.tool_completed" and event.payload["tool_name"] == "read_file" for event in runtime.store.events)
     assert any(_artifact_type(artifact) == "file_observation" for artifact in runtime.store.artifacts)
+
+
+async def test_fast_recipe_uses_the_product_prompt_pipeline(monkeypatch):
+    from brain.systems.runs.recipes.fast import FastRecipe
+
+    captured = {}
+
+    async def fake_invoke(spec):
+        captured["spec"] = spec
+        return SimpleNamespace(output="Yes, `436411779` is the missing `GA4_PROPERTY_ID`.", success=True, error=None)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_agent_tools", lambda role: [])
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.build_tool_handlers", lambda **kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime("fast", message="you mean you are just missing this? 436411779")
+
+    result = await FastRecipe().execute(runtime)
+
+    assert result.status.value == "completed"
+    prompt = captured["spec"].system_prompt
+    assert prompt.index("## Agent Soul") < prompt.index("## Agent Profile")
+    assert prompt.index("## Agent Profile") < prompt.index("## Fast Runtime Recipe")
 
 
 async def test_fast_recipe_keeps_large_project_context_out_of_system_prompt(monkeypatch):
