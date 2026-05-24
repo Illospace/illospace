@@ -208,6 +208,24 @@ def test_run_context_prompt_compacts_large_project_context_references():
     assert "/workspaces/agent-mission-control-reference" in prompt_context
 
 
+def test_run_context_project_reference_compaction_keeps_non_heavy_content_fields():
+    from brain.systems.runs.context import RunContextLoader
+
+    context = RunContextLoader().load(
+        thread_id="idea-1",
+        message="Can you see it?",
+        target_ref={
+            "kind": "cortex_idea",
+            "content": "This is a useful lightweight content field.",
+        },
+    )
+
+    prompt_context = context.prompt_context()
+
+    assert "This is a useful lightweight content field." in prompt_context
+    assert "large value omitted from prompt context" not in prompt_context
+
+
 def test_thread_context_formatting_prefers_recent_entries_when_budget_is_tight():
     from brain.systems.cortex.thread_context import ThreadContextEntry, _format_entries
 

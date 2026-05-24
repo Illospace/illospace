@@ -997,6 +997,10 @@ async def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkey
         "brain.systems.runs.recipes.deep.soul_prompt_section",
         lambda: "## Agent Soul\nUse the coordinator voice.",
     )
+    monkeypatch.setattr(
+        "brain.systems.runs.recipes.deep.agent_profile_prompt_section",
+        lambda: "## Agent Profile\nUse the final reply presenter.",
+    )
     captured = {}
 
     async def fake_deep_synthesis(spec):
@@ -1036,6 +1040,9 @@ async def test_deep_coordinator_synthesis_uses_soul_and_owns_final_answer(monkey
     assert spec.tools == []
     assert spec.persist_session is False
     assert "## Agent Soul\nUse the coordinator voice." in spec.system_prompt
+    assert "## Agent Profile\nUse the final reply presenter." in spec.system_prompt
+    assert spec.system_prompt.index("## Agent Soul") < spec.system_prompt.index("## Agent Profile")
+    assert spec.system_prompt.index("## Agent Profile") < spec.system_prompt.index("## Deep Coordinator Mode")
     assert "## Deep Coordinator Mode" in spec.system_prompt
     payload = json.loads(spec.message)
     assert payload["task"] == request_message
