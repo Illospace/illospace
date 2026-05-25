@@ -1,6 +1,7 @@
 import type {
   ProjectDraftChangeKey,
   ProjectDraftChangeSet,
+  ProjectDraftFileEntry,
   ProjectDraftPublishGroup,
   ProjectDraftPublishOperation,
   ProjectDraftResourceState,
@@ -30,6 +31,41 @@ export type DraftFileGroup = {
   paths: string[];
 };
 
+export type ProjectExplorerFile = ProjectDraftFileEntry & {
+  kind: 'file';
+  key: string;
+  resourceId: string;
+  resourceTitle: string;
+  mountPath: string;
+  displayPath: string;
+  depth: number;
+};
+
+export type ProjectExplorerDirectory = {
+  kind: 'directory';
+  key: string;
+  resourceId: string;
+  resourceTitle: string;
+  mountPath: string;
+  path: string;
+  name: string;
+  displayPath: string;
+  depth: number;
+  status: string;
+  fileCount: number;
+};
+
+export type ProjectExplorerRow = ProjectExplorerDirectory | ProjectExplorerFile;
+
+export type ProjectFileBrowserView = {
+  files: ProjectExplorerFile[];
+  rows: ProjectExplorerRow[];
+  fileCount: number;
+  changedCount: number;
+  visibleCount: number;
+  truncatedCount: number;
+};
+
 export type PublishPlanSummary = {
   ok: boolean;
   planOnly: boolean;
@@ -50,6 +86,7 @@ export type ProjectDraftPanelView = {
   totalChangeCount: number;
   outOfDatePaths: string[];
   fileGroups: DraftFileGroup[];
+  fileBrowser: ProjectFileBrowserView;
   publishPlan: PublishPlanSummary;
   rootVersions: NormalizedRootVersions;
   effectiveRunId: string | number | null | undefined;
@@ -86,6 +123,7 @@ export function buildProjectDraftPanelView({
   );
   const outOfDatePaths = collectOutOfDatePaths(statePayload, resources);
   const fileGroups = collectFileGroups(statePayload, resources, outOfDatePaths);
+  const fileBrowser = buildProjectFileBrowserView(statePayload, resources);
   const publishPlan = summarizePublishPlan(draftState, resources);
   const rootVersions = summarizeRootVersions(draftState, resources);
   const effectiveRunId = statePayload?.run_id ?? draftState?.run_id ?? runId;
@@ -97,6 +135,7 @@ export function buildProjectDraftPanelView({
     totalChangeCount,
     outOfDatePaths,
     fileGroups,
+    fileBrowser,
     publishPlan,
     rootVersions,
     effectiveRunId,
@@ -293,6 +332,174 @@ export function collectFileGroups(
     paths: stalePaths,
   });
   return groups.filter((group) => group.paths.length > 0);
+}
+
+function browserEntriesFromPayload(
+  payload: ProjectDraftStateRead | null,
+  resourceList: ProjectDraftResourceState[],
+): ProjectDraftFileEntry[] {
+  const topLevelEntries = (payload as any)?.file_browser?.entries;
+  if (Array.isArray(topLevelEntries) && topLevelEntries.length > 0) {
+    return topLevelEntries.filter((entry) => entry && typeof entry === 'object') as ProjectDraftFileEntry[];
+  }
+  return resourceList.flatMap((resource) => {
+    const entries = (resource as any)?.file_browser?.entries;
+    if (!Array.isArray(entries)) return [];
+    return entries
+      .filter((entry) => entry && typeof entry === 'object')
+      .map((entry) => ({
+        ...(entry as ProjectDraftFileEntry),
+        resource_id: resource.id,
+        mount_path: resource.mount_path,
+        resource_label: resource.label,
+      }));
+  });
+}
+
+export function buildProjectFileBrowserView(
+  payload: ProjectDraftStateRead | null,
+  resourceList: ProjectDraftResourceState[],
+): ProjectFileBrowserView {
+  const resourcesById = new Map(resourceList.map((resource) => [resource.id, resource]));
+  const files = browserEntriesFromPayload(payload, resourceList)
+    .map((entry, index): ProjectExplorerFile | null => {
+      const path = cleanProjectPath(entry.path);
+      if (!path) return null;
+      const resourceId = cleanLabel(entry.resource_id, 'project-root');
+      const resource = resourcesById.get(resourceId);
+      const mountPath = cleanProjectMount(entry.mount_path ?? resource?.mount_path ?? '/');
+      const resourceName = cleanLabel(entry.resource_label ?? resource?.label ?? mountPath, 'Project root');
+      return {
+        ...entry,
+        kind: 'file',
+        key: `${resourceId}:${path}:${index}`,
+        resourceId,
+        resourceTitle: resourceName,
+        mountPath,
+        path,
+        name: cleanLabel(entry.name, path.split('/').at(-1) ?? path),
+        displayPath: joinProjectDisplayPath(mountPath, path),
+        depth: Math.max(0, path.split('/').length - 1),
+      };
+    })
+    .filter((entry): entry is ProjectExplorerFile => Boolean(entry))
+    .sort((left, right) => left.displayPath.localeCompare(right.displayPath));
+  const rows = buildProjectExplorerRows(files);
+  const changedCount = files.filter((file) => projectFileStatusTone(file.status) !== 'clean').length;
+  const summary = (payload as any)?.file_browser?.summary ?? {};
+  const visibleCount = Number(summary.visible_count);
+  const fileCount = Number(summary.file_count);
+  const truncatedCount = Number(summary.truncated);
+  return {
+    files,
+    rows,
+    fileCount: Number.isFinite(fileCount) ? fileCount : files.length,
+    changedCount,
+    visibleCount: Number.isFinite(visibleCount) ? visibleCount : files.length,
+    truncatedCount: Number.isFinite(truncatedCount) ? truncatedCount : 0,
+  };
+}
+
+function buildProjectExplorerRows(files: ProjectExplorerFile[]): ProjectExplorerRow[] {
+  const directories = new Map<string, ProjectExplorerDirectory>();
+  for (const file of files) {
+    const parts = cleanProjectPath(file.path).split('/').filter(Boolean);
+    let current = '';
+    for (const part of parts.slice(0, -1)) {
+      current = current ? `${current}/${part}` : part;
+      const key = `${file.resourceId}:dir:${current}`;
+      const existing = directories.get(key);
+      if (existing) {
+        existing.fileCount += 1;
+        existing.status = combineFileStatuses(existing.status, file.status);
+        continue;
+      }
+      directories.set(key, {
+        kind: 'directory',
+        key,
+        resourceId: file.resourceId,
+        resourceTitle: file.resourceTitle,
+        mountPath: file.mountPath,
+        path: current,
+        name: part,
+        displayPath: joinProjectDisplayPath(file.mountPath, current),
+        depth: current.split('/').length - 1,
+        status: cleanLabel(file.status, 'clean'),
+        fileCount: 1,
+      });
+    }
+  }
+  return [...directories.values(), ...files]
+    .sort((left, right) => {
+      const byPath = left.displayPath.localeCompare(right.displayPath);
+      if (byPath !== 0) return byPath;
+      return left.kind === right.kind ? 0 : left.kind === 'directory' ? -1 : 1;
+    });
+}
+
+function combineFileStatuses(left: unknown, right: unknown): string {
+  const priority = ['conflicted', 'out_of_date', 'deleted', 'changed', 'new', 'clean'];
+  const leftStatus = normaliseProjectFileStatus(left);
+  const rightStatus = normaliseProjectFileStatus(right);
+  const leftIndex = priority.indexOf(leftStatus);
+  const rightIndex = priority.indexOf(rightStatus);
+  if (leftIndex === -1) return rightStatus;
+  if (rightIndex === -1) return leftStatus;
+  return leftIndex <= rightIndex ? leftStatus : rightStatus;
+}
+
+function normaliseProjectFileStatus(status: unknown): string {
+  const value = String(status ?? 'clean').trim().toLowerCase().replaceAll(' ', '_').replaceAll('-', '_');
+  return value || 'clean';
+}
+
+export function cleanProjectPath(path: unknown): string {
+  return String(path ?? '').replaceAll('\\', '/').replace(/^\/+/, '').trim();
+}
+
+export function cleanProjectMount(path: unknown): string {
+  const cleaned = String(path ?? '').replaceAll('\\', '/').trim();
+  if (!cleaned || cleaned === '.') return '/';
+  return cleaned.startsWith('/') ? cleaned : `/${cleaned}`;
+}
+
+export function joinProjectDisplayPath(mountPath: unknown, filePath: unknown): string {
+  const mount = cleanProjectMount(mountPath);
+  const path = cleanProjectPath(filePath);
+  if (!path) return mount;
+  if (mount === '/') return `/${path}`;
+  return `${mount.replace(/\/+$/, '')}/${path}`;
+}
+
+export function projectFileStatusLabel(status: unknown): string {
+  const value = normaliseProjectFileStatus(status);
+  if (value === 'out_of_date') return 'out of date';
+  return cleanLabel(value, 'clean');
+}
+
+export function projectFileStatusTone(status: unknown): 'clean' | 'changed' | 'new' | 'deleted' | 'conflicted' | 'warning' {
+  const value = normaliseProjectFileStatus(status);
+  if (value === 'conflicted') return 'conflicted';
+  if (value === 'out_of_date') return 'warning';
+  if (value === 'deleted') return 'deleted';
+  if (value === 'new') return 'new';
+  if (value === 'changed' || value === 'modified') return 'changed';
+  return 'clean';
+}
+
+export function projectFileLayerLabel(file: ProjectDraftFileEntry | null | undefined): string {
+  if (!file) return 'No file selected';
+  if (file.has_draft) return file.has_root ? 'draft overlay' : 'new draft file';
+  if (file.has_root) return 'project root';
+  return cleanLabel(file.layer, 'unknown layer');
+}
+
+export function projectFileSizeLabel(value: unknown): string {
+  const size = Number(value);
+  if (!Number.isFinite(size) || size < 0) return '';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function publishPlanPayload(payload: ProjectDraftStateLike): Record<string, any> | null {

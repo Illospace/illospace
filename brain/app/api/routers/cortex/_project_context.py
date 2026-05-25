@@ -20,6 +20,10 @@ from brain.systems.cortex.project_context.github import (
     async_search_repos,
     parse_github_repo_slug,
 )
+from brain.systems.cortex.project_context.browser import (
+    project_file_payload,
+    with_project_file_browser,
+)
 from brain.systems.cortex.project_context.identity import stamped_project_context
 from brain.systems.cortex.project_context.profiles import attachment_to_read, profile_to_read
 from brain.systems.cortex.project_context.access import (
@@ -443,6 +447,7 @@ async def _project_draft_state_payload(
         draft_status = await _manage_project_payload("draft_status")
         plan_publish = await _manage_project_payload("plan_publish")
         root_versions = await _manage_project_payload("root_versions")
+    draft_status = with_project_file_browser(draft_status)
 
     return {
         "ok": bool(
@@ -456,6 +461,43 @@ async def _project_draft_state_payload(
         "plan_publish": plan_publish,
         "root_versions": root_versions,
     }
+
+
+async def _project_draft_file_payload(
+    run: AgentRun | None,
+    *,
+    idea_id: str,
+    path: str,
+    resource_id: str | None = None,
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if run is None:
+        raise HTTPException(status_code=404, detail="No AgentRun exists for this Cortex thread.")
+
+    run_id = str(getattr(run, "id", "") or "")
+    org_id = str(getattr(run, "org_id", "") or (user or {}).get("org_id") or "") or None
+    user_id = str(getattr(run, "user_id", "") or (user or {}).get("id") or "") or None
+    context = {
+        "run": run,
+        "run_id": run_id,
+        "idea_id": str(idea_id),
+        "org_id": org_id,
+        "user_id": user_id,
+        "execution_metadata": {
+            "run_id": run_id,
+            "idea_id": str(idea_id),
+            "org_id": org_id,
+            "user_id": user_id,
+        },
+    }
+    with bind_agent_context(context):
+        draft_status = await _manage_project_payload("draft_status")
+    if not draft_status.get("ok"):
+        raise HTTPException(status_code=404, detail=draft_status.get("error") or "Project draft state is unavailable.")
+    try:
+        return project_file_payload(draft_status, resource_id=resource_id, path=path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 async def _project_draft_state_run(
@@ -842,6 +884,25 @@ async def get_idea_project_context_draft_state(
 ):
     run = await _project_draft_state_run(db, idea_id, run_id, user)
     return await _project_draft_state_payload(run, idea_id=idea_id, user=user)
+
+
+@router.get("/ideas/{idea_id}/project-context/draft-file")
+async def get_idea_project_context_draft_file(
+    idea_id: str,
+    path: str,
+    run_id: int | None = None,
+    resource_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    run = await _project_draft_state_run(db, idea_id, run_id, user)
+    return await _project_draft_file_payload(
+        run,
+        idea_id=idea_id,
+        path=path,
+        resource_id=resource_id,
+        user=user,
+    )
 
 
 @router.get("/ideas/{idea_id}/project-context", response_model=list[IdeaProjectAttachmentRead])

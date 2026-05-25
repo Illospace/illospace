@@ -1,34 +1,36 @@
 <script lang="ts">
   import ConstellationIcon from '$lib/components/constellation/ConstellationIcon.svelte';
-  import { getIdeaProjectDraftState } from '$lib/features/threads/api/threadApi';
+  import {
+    getIdeaProjectDraftFile,
+    getIdeaProjectDraftState,
+  } from '$lib/features/threads/api/threadApi';
   import {
     buildProjectDraftPanelView,
-    cleanLabel,
-    countResourceChange,
-    fileCountLabel,
-    latestGroupVersion,
     PROJECT_DRAFT_CHANGE_METRICS,
-    publishGroupTitle,
-    publishOperationLabel,
-    publishOperationPath,
-    publishStatus,
-    publishTargetLabel,
-    resourceMeta,
-    resourceStatus,
-    resourceTitle,
-    restoreTitle,
-    versionTitle,
+    projectFileLayerLabel,
+    projectFileSizeLabel,
+    projectFileStatusLabel,
+    projectFileStatusTone,
+    type ProjectExplorerFile,
+    type ProjectExplorerRow,
   } from '$lib/features/threads/domain/projectDraftStatePresenter';
-  import { relativeTimeAgo } from '$lib/utils/datetime';
   import type {
-    ProjectDraftStateResponse,
+    ProjectDraftFileLayer,
+    ProjectDraftFileResponse,
     ProjectDraftStateRead,
-    ProjectRootVersionState,
+    ProjectDraftStateResponse,
   } from '$lib/api/client';
 
   type DraftIdea = {
     id?: string | null;
   } | null;
+
+  type PreviewLayer = {
+    key: 'root' | 'base' | 'draft';
+    label: string;
+    detail: string;
+    layer: ProjectDraftFileLayer | undefined;
+  };
 
   const CHANGE_METRICS = PROJECT_DRAFT_CHANGE_METRICS;
 
@@ -46,6 +48,13 @@
   let loadedKey = $state('');
   let requestSeq = 0;
 
+  let selectedFileKey = $state('');
+  let filePreview = $state<ProjectDraftFileResponse | null>(null);
+  let filePreviewLoading = $state(false);
+  let filePreviewError = $state('');
+  let loadedFileKey = $state('');
+  let fileRequestSeq = 0;
+
   const draftView = $derived.by(() =>
     buildProjectDraftPanelView({ draftState, loading, loadError, runId }),
   );
@@ -53,29 +62,85 @@
   const resources = $derived(draftView.resources);
   const aggregateCounts = $derived(draftView.aggregateCounts);
   const outOfDatePaths = $derived(draftView.outOfDatePaths);
-  const fileGroups = $derived(draftView.fileGroups);
+  const fileBrowser = $derived(draftView.fileBrowser);
   const publishPlan = $derived(draftView.publishPlan);
-  const rootVersions = $derived(draftView.rootVersions);
   const runLabel = $derived(draftView.runLabel);
   const readiness = $derived(draftView.readiness);
   const signalTone = $derived(readiness.tone);
   const signalLabel = $derived(readiness.label);
+  const selectedFile = $derived(
+    fileBrowser.files.find((file) => file.key === selectedFileKey) ?? null,
+  );
+  const previewLayers = $derived(buildPreviewLayers(filePreview, selectedFile));
 
-  function formatBytes(value: unknown): string {
-    const size = Number(value);
-    if (!Number.isFinite(size) || size <= 0) return '';
-    if (size < 1024) return `${size} B`;
-    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  function metricCountLabel(value: number): string {
+    return Number.isFinite(value) ? String(value) : '0';
   }
 
-  function versionMeta(version: ProjectRootVersionState | null): string {
-    if (!version) return 'No root versions yet';
+  function rowStyle(row: ProjectExplorerRow): string {
+    return `--depth: ${Math.min(row.depth, 8)}`;
+  }
+
+  function rowTone(row: ProjectExplorerRow): ReturnType<typeof projectFileStatusTone> {
+    return projectFileStatusTone(row.status);
+  }
+
+  function selectFile(file: ProjectExplorerFile) {
+    selectedFileKey = file.key;
+  }
+
+  function layerContent(layer: ProjectDraftFileLayer | undefined): string {
+    if (!layer?.exists) return 'Not present in this layer.';
+    if (layer.binary) return 'Binary file preview is not available.';
+    if (layer.error) return layer.error;
+    return layer.content ?? '';
+  }
+
+  function layerDetail(layer: ProjectDraftFileLayer | undefined): string {
+    if (!layer?.exists) return 'missing';
     return [
-      cleanLabel(version.label, 'Version'),
-      version.created_at ? relativeTimeAgo(version.created_at) : '',
-      formatBytes(version.total_size),
+      projectFileSizeLabel(layer.size),
+      layer.binary ? 'binary' : 'text',
+      layer.truncated ? 'truncated' : '',
     ].filter(Boolean).join(' / ');
+  }
+
+  function buildPreviewLayers(
+    preview: ProjectDraftFileResponse | null,
+    file: ProjectExplorerFile | null,
+  ): PreviewLayer[] {
+    const layers = preview?.layers ?? {};
+    const root = layers.root;
+    const draft = layers.draft;
+    const base = layers.base;
+    const rootContent = root?.content ?? '';
+    const draftContent = draft?.content ?? '';
+    const showComparison = Boolean(
+      root?.exists
+      && draft?.exists
+      && (rootContent !== draftContent || projectFileStatusTone(file?.status) !== 'clean'),
+    );
+
+    if (showComparison) {
+      const rows: PreviewLayer[] = [
+        { key: 'root', label: 'Project root', detail: layerDetail(root), layer: root },
+      ];
+      if (base?.exists && base.content !== rootContent && base.content !== draftContent) {
+        rows.push({ key: 'base', label: 'Thread base', detail: layerDetail(base), layer: base });
+      }
+      rows.push({ key: 'draft', label: 'Thread draft', detail: layerDetail(draft), layer: draft });
+      return rows;
+    }
+    if (draft?.exists) {
+      return [{ key: 'draft', label: 'Thread draft', detail: layerDetail(draft), layer: draft }];
+    }
+    if (root?.exists) {
+      return [{ key: 'root', label: 'Project root', detail: layerDetail(root), layer: root }];
+    }
+    if (base?.exists) {
+      return [{ key: 'base', label: 'Thread base', detail: layerDetail(base), layer: base }];
+    }
+    return [];
   }
 
   async function loadDraftState(ideaId: string, currentRunId: string | number | null) {
@@ -95,6 +160,31 @@
     }
   }
 
+  async function loadFilePreview(
+    ideaId: string,
+    currentRunId: string | number | null,
+    file: ProjectExplorerFile,
+  ) {
+    const requestId = ++fileRequestSeq;
+    filePreviewLoading = true;
+    filePreviewError = '';
+    try {
+      const result = await getIdeaProjectDraftFile(ideaId, {
+        runId: currentRunId,
+        resourceId: file.resourceId,
+        path: file.path,
+      });
+      if (requestId !== fileRequestSeq) return;
+      filePreview = result;
+    } catch (error: any) {
+      if (requestId !== fileRequestSeq) return;
+      filePreview = null;
+      filePreviewError = error?.detail || error?.message || 'Project file preview is unavailable.';
+    } finally {
+      if (requestId === fileRequestSeq) filePreviewLoading = false;
+    }
+  }
+
   $effect(() => {
     const ideaId = idea?.id ?? null;
     const currentRunId = runId ?? null;
@@ -111,23 +201,48 @@
     loadedKey = key;
     void loadDraftState(ideaId, currentRunId);
   });
+
+  $effect(() => {
+    if (fileBrowser.files.length === 0) {
+      selectedFileKey = '';
+      return;
+    }
+    if (selectedFileKey && fileBrowser.files.some((file) => file.key === selectedFileKey)) return;
+    const changed = fileBrowser.files.find((file) => projectFileStatusTone(file.status) !== 'clean');
+    selectedFileKey = (changed ?? fileBrowser.files[0]).key;
+  });
+
+  $effect(() => {
+    const ideaId = idea?.id ?? null;
+    const file = selectedFile;
+    const currentRunId = runId ?? statePayload?.run_id ?? null;
+    if (!ideaId || !file) {
+      fileRequestSeq += 1;
+      filePreview = null;
+      filePreviewError = '';
+      filePreviewLoading = false;
+      loadedFileKey = '';
+      return;
+    }
+    const key = `${ideaId}:${currentRunId ?? ''}:${file.resourceId}:${file.path}`;
+    if (loadedFileKey === key) return;
+    loadedFileKey = key;
+    void loadFilePreview(ideaId, currentRunId, file);
+  });
 </script>
 
-<section class="project-draft-panel" aria-label="Project draft state">
+<section class="project-draft-panel" aria-label="Project workspace">
   <div class="project-draft-summary">
-    <div class="project-draft-summary-main">
-      <div class="project-draft-kicker">Project draft</div>
-      <div class="project-draft-title-row">
-        <span class="project-draft-title">Root + thread overlay</span>
-        <span class="project-draft-signal" data-tone={signalTone}>{signalLabel}</span>
-      </div>
-      <div class="project-draft-meta">
-        <span>{runLabel}</span>
-        {#if resources.length > 0}
-          <span>{resources.length} resource{resources.length === 1 ? '' : 's'}</span>
-        {/if}
-        <span>{readiness.detail}</span>
-      </div>
+    <div class="project-draft-kicker">Project</div>
+    <div class="project-draft-title-row">
+      <span class="project-draft-title">Root + thread overlay</span>
+      <span class="project-draft-signal" data-tone={signalTone}>{signalLabel}</span>
+    </div>
+    <div class="project-draft-meta">
+      <span>{runLabel}</span>
+      <span>{resources.length} resource{resources.length === 1 ? '' : 's'}</span>
+      <span>{fileBrowser.fileCount} file{fileBrowser.fileCount === 1 ? '' : 's'}</span>
+      <span>{readiness.detail}</span>
     </div>
   </div>
 
@@ -140,35 +255,11 @@
       {statePayload.error || 'No Project draft state is bound to this run.'}
     </div>
   {:else}
-    <div class="project-draft-layers" aria-label="Project workspace layers">
-      <div class="project-draft-layer" data-layer="root">
-        <div class="project-draft-layer-icon">
-          <ConstellationIcon name="lock" size={14} />
-        </div>
-        <div>
-          <strong>Project root</strong>
-          <span>Read-only source</span>
-        </div>
-      </div>
-      <div class="project-draft-layer-arrow" aria-hidden="true">
-        <ConstellationIcon name="forward" size={14} />
-      </div>
-      <div class="project-draft-layer" data-layer="draft">
-        <div class="project-draft-layer-icon">
-          <ConstellationIcon name="edit" size={14} />
-        </div>
-        <div>
-          <strong>Thread draft</strong>
-          <span>Overlay workspace</span>
-        </div>
-      </div>
-    </div>
-
     <div class="project-draft-counts" aria-label="Draft change counts">
       {#each CHANGE_METRICS as metric (metric.key)}
         <div class="project-draft-count" data-tone={metric.tone}>
           <span>{metric.label}</span>
-          <strong>{aggregateCounts[metric.key]}</strong>
+          <strong>{metricCountLabel(aggregateCounts[metric.key])}</strong>
         </div>
       {/each}
     </div>
@@ -180,203 +271,113 @@
       </div>
     {/if}
 
-    {#if aggregateCounts.conflicted_paths > 0}
-      <div class="project-draft-alert" data-tone="conflict">
-        <strong>Conflicts</strong>
-        <span>{aggregateCounts.conflicted_paths} conflicted path{aggregateCounts.conflicted_paths === 1 ? '' : 's'} detected.</span>
-      </div>
-    {/if}
-
-    <div class="project-draft-section">
-      <div class="project-draft-section-head">
-        <h4>Files</h4>
-        <span>{fileGroups.length}</span>
-      </div>
-      {#if fileGroups.length === 0}
-        <div class="project-draft-empty">No changed files in the thread draft.</div>
-      {:else}
-        <div class="project-draft-file-list">
-          {#each fileGroups as group (group.key)}
-            <div class="project-draft-path-group" data-tone={group.tone}>
-              <div class="project-draft-path-label">
-                <span>{group.label}</span>
-                <strong>{group.paths.length}</strong>
-              </div>
-              <div class="project-draft-paths">
-                {#each group.paths.slice(0, 10) as path (path)}
-                  <code title={path}>{path}</code>
-                {/each}
-                {#if group.paths.length > 10}
-                  <span class="project-draft-more">+{group.paths.length - 10} more</span>
-                {/if}
-              </div>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </div>
-
-    <div class="project-draft-section">
-      <div class="project-draft-section-head">
-        <h4>Resources</h4>
-        <span>{resources.length}</span>
-      </div>
-      {#if resources.length === 0}
-        <div class="project-draft-empty">No Project resources found for this run.</div>
-      {:else}
-        <div class="project-draft-resource-list">
-          {#each resources as resource (resource.id)}
-            <div class="project-draft-resource" data-status={resourceStatus(resource)}>
-              <div class="project-draft-resource-head">
-                <div class="project-draft-resource-copy">
-                  <h5>{resourceTitle(resource)}</h5>
-                  {#if resourceMeta(resource)}
-                    <p>{resourceMeta(resource)}</p>
-                  {/if}
-                </div>
-                <span class="project-draft-resource-status">{resourceStatus(resource)}</span>
-              </div>
-
-              <div class="project-draft-resource-paths">
-                <div>
-                  <span>Root</span>
-                  <code title={resource.source_path || publishTargetLabel({ publish_target: { kind: 'unknown' } })}>
-                    {resource.source_path || resource.repo || 'read-only source unavailable'}
-                  </code>
-                </div>
-                <div>
-                  <span>Draft</span>
-                  <code title={resource.workspace_path || resource.resource_path || ''}>
-                    {resource.workspace_path || resource.resource_path || 'thread overlay unavailable'}
-                  </code>
-                </div>
-              </div>
-
-              <div class="project-draft-resource-counts">
-                {#each CHANGE_METRICS as metric (metric.key)}
-                  <span data-tone={metric.tone}>{metric.label} {countResourceChange(resource, metric.key)}</span>
-                {/each}
-              </div>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </div>
-
-    <div class="project-draft-section">
-      <div class="project-draft-section-head">
-        <h4>Publish plan</h4>
-        <span>{publishPlan.planOnly && !publishPlan.mutatesProjectRoot ? 'Preview' : 'Mutation'}</span>
-      </div>
-      <div class="project-draft-version-summary project-draft-publish-summary">
+    <div class="project-browser">
+      <div class="project-browser-head">
         <div>
-          <strong>{publishPlan.resourceCount}</strong>
-          <span>resource{publishPlan.resourceCount === 1 ? '' : 's'}</span>
-        </div>
-        <div>
-          <strong>{publishPlan.operationCount}</strong>
-          <span>operation{publishPlan.operationCount === 1 ? '' : 's'}</span>
-        </div>
-        <div data-tone={publishPlan.blockedCount > 0 ? 'conflicted' : 'changed'}>
-          <strong>{publishPlan.blockedCount}</strong>
-          <span>blocked</span>
-        </div>
-        <div>
-          <strong>{publishPlan.readyCount}</strong>
-          <span>ready</span>
-        </div>
-      </div>
-      {#if publishPlan.groups.length === 0}
-        <div class="project-draft-empty">No publish plan is available for this run.</div>
-      {:else}
-        <div class="project-draft-publish-groups">
-          {#each publishPlan.groups as group (group.resource_id ?? group.mount_path ?? group.label)}
-            {@const operations = Array.isArray(group.operations) ? group.operations : []}
-            <div class="project-draft-publish-group" data-status={publishStatus(group)}>
-              <div class="project-draft-publish-head">
-                <div>
-                  <strong>{publishGroupTitle(group)}</strong>
-                  <span>{publishTargetLabel(group)}</span>
-                </div>
-                <span class="project-draft-resource-status">{publishStatus(group)}</span>
-              </div>
-              {#if group.blocked_reasons?.length}
-                <div class="project-draft-blockers">
-                  {#each group.blocked_reasons as reason (reason)}
-                    <span>{cleanLabel(reason)}</span>
-                  {/each}
-                </div>
-              {/if}
-              {#if operations.length > 0}
-                <div class="project-draft-operations">
-                  {#each operations.slice(0, 6) as operation (`${operation.operation}:${operation.path}:${operation.target_path}`)}
-                    <span data-operation={publishOperationLabel(operation)}>
-                      <strong>{publishOperationLabel(operation)}</strong>
-                      <code title={publishOperationPath(operation)}>{publishOperationPath(operation)}</code>
-                    </span>
-                  {/each}
-                  {#if operations.length > 6}
-                    <span class="project-draft-more">+{operations.length - 6} more</span>
-                  {/if}
-                </div>
-              {/if}
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </div>
-
-    <div class="project-draft-section">
-      <div class="project-draft-section-head">
-        <h4>Root versions</h4>
-        <span>{rootVersions.versionCount}</span>
-      </div>
-      <div class="project-draft-version-summary">
-        <div>
-          <strong>{rootVersions.resourceCount}</strong>
-          <span>resource{rootVersions.resourceCount === 1 ? '' : 's'}</span>
-        </div>
-        <div>
-          <strong>{rootVersions.versionCount}</strong>
-          <span>version{rootVersions.versionCount === 1 ? '' : 's'}</span>
-        </div>
-      </div>
-      <div class="project-draft-version-latest">
-        {versionMeta(rootVersions.latestVersion)}
-      </div>
-
-      {#if rootVersions.groups.length > 0}
-        <div class="project-draft-version-groups">
-          {#each rootVersions.groups as group (group.resource_id ?? group.mount_path ?? group.label)}
-            {@const versions = Array.isArray(group.versions) ? group.versions : []}
-            {@const latest = latestGroupVersion(group)}
-            <div class="project-draft-version-group">
-              <div>
-                <strong>{group.mount_path || group.label || group.resource_id || 'Project root'}</strong>
-                <span>{versionMeta(latest)}</span>
-              </div>
-              <span>{versions.length}</span>
-            </div>
-            {#if versions.length > 0}
-              <div class="project-draft-version-list">
-                {#each versions.slice(0, 3) as version (version.version_id ?? version.id ?? version.label)}
-                  <div class="project-draft-version-row">
-                    <div>
-                      <strong>{versionTitle(version)}</strong>
-                      <span>{[version.created_at ? relativeTimeAgo(version.created_at) : '', fileCountLabel(version), formatBytes(version.total_size)].filter(Boolean).join(' / ')}</span>
-                    </div>
-                    <button type="button" class="project-draft-restore" disabled title={restoreTitle(version)} aria-label={restoreTitle(version)}>
-                      <ConstellationIcon name="cycles" size={13} />
-                    </button>
-                  </div>
-                {/each}
-              </div>
+          <h4>Files</h4>
+          <span>
+            {fileBrowser.visibleCount} shown
+            {#if fileBrowser.truncatedCount > 0}
+              / {fileBrowser.truncatedCount} hidden
             {/if}
-          {/each}
+          </span>
         </div>
+        <div class="project-browser-legend" aria-label="Project layers">
+          <span><ConstellationIcon name="lock" size={12} /> Root</span>
+          <span><ConstellationIcon name="edit" size={12} /> Draft</span>
+        </div>
+      </div>
+
+      {#if fileBrowser.rows.length === 0}
+        <div class="project-draft-empty">No browsable files found in this Project.</div>
       {:else}
-        <div class="project-draft-empty">No restorable root versions found.</div>
+        <div class="project-browser-layout">
+          <div class="project-file-tree" aria-label="Project files">
+            {#each fileBrowser.rows as row (row.key)}
+              {#if row.kind === 'directory'}
+                <div class="project-tree-row project-tree-directory" style={rowStyle(row)} data-tone={rowTone(row)}>
+                  <ConstellationIcon name="folder" size={14} />
+                  <span title={row.displayPath}>{row.name}</span>
+                  <small>{row.fileCount}</small>
+                </div>
+              {:else}
+                <button
+                  type="button"
+                  class="project-tree-row project-tree-file"
+                  class:project-tree-file-selected={selectedFileKey === row.key}
+                  style={rowStyle(row)}
+                  data-tone={rowTone(row)}
+                  title={row.displayPath}
+                  onclick={() => selectFile(row)}
+                >
+                  <ConstellationIcon name={row.extension === '.md' ? 'document' : 'file'} size={14} />
+                  <span>{row.name}</span>
+                  <small>{projectFileStatusLabel(row.status)}</small>
+                </button>
+              {/if}
+            {/each}
+          </div>
+
+          <div class="project-file-preview" aria-live="polite">
+            {#if selectedFile}
+              <div class="project-file-preview-head">
+                <div>
+                  <h4 title={selectedFile.displayPath}>{selectedFile.displayPath}</h4>
+                  <span>
+                    {projectFileLayerLabel(selectedFile)}
+                    {#if selectedFile.size}
+                      / {projectFileSizeLabel(selectedFile.size)}
+                    {/if}
+                  </span>
+                </div>
+                <span class="project-file-status" data-tone={projectFileStatusTone(selectedFile.status)}>
+                  {projectFileStatusLabel(selectedFile.status)}
+                </span>
+              </div>
+
+              <div class="project-file-layer-strip" aria-label="Selected file layers">
+                <span data-present={selectedFile.has_root === true}>Root</span>
+                <span data-present={selectedFile.has_base === true}>Base</span>
+                <span data-present={selectedFile.has_draft === true}>Draft</span>
+              </div>
+
+              {#if filePreviewLoading}
+                <div class="project-draft-empty">Loading file preview...</div>
+              {:else if filePreviewError}
+                <div class="project-draft-empty project-draft-empty-warning">{filePreviewError}</div>
+              {:else if previewLayers.length === 0}
+                <div class="project-draft-empty">No readable preview for this file.</div>
+              {:else}
+                <div class="project-preview-layers">
+                  {#each previewLayers as item (item.key)}
+                    <div class="project-preview-layer" data-layer={item.key}>
+                      <div class="project-preview-layer-head">
+                        <strong>{item.label}</strong>
+                        <span>{item.detail}</span>
+                      </div>
+                      <pre>{layerContent(item.layer)}</pre>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            {:else}
+              <div class="project-draft-empty">No file selected.</div>
+            {/if}
+          </div>
+        </div>
       {/if}
+    </div>
+
+    <div class="project-publish-mini">
+      <div class="project-draft-kicker">Publish plan</div>
+      <div class="project-publish-metrics">
+        <span><strong>{publishPlan.resourceCount}</strong> resources</span>
+        <span><strong>{publishPlan.operationCount}</strong> operations</span>
+        <span data-tone={publishPlan.blockedCount > 0 ? 'conflicted' : 'clean'}>
+          <strong>{publishPlan.blockedCount}</strong> blocked
+        </span>
+        <span><strong>{publishPlan.readyCount}</strong> ready</span>
+      </div>
     </div>
   {/if}
 </section>
@@ -397,25 +398,29 @@
   }
 
   .project-draft-summary,
-  .project-draft-alert {
-    border: 1px solid rgba(255, 255, 255, 0.055);
+  .project-draft-alert,
+  .project-browser,
+  .project-publish-mini {
+    border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 8px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018));
+    background: rgba(255, 255, 255, 0.03);
   }
 
   :global(:root[data-color-scheme='light']) .project-draft-summary,
-  :global(:root[data-color-scheme='light']) .project-draft-alert {
-    border-color: rgba(126, 92, 52, 0.09);
-    background: rgba(255, 253, 247, 0.7);
+  :global(:root[data-color-scheme='light']) .project-draft-alert,
+  :global(:root[data-color-scheme='light']) .project-browser,
+  :global(:root[data-color-scheme='light']) .project-publish-mini {
+    border-color: rgba(85, 104, 120, 0.13);
+    background: rgba(250, 250, 246, 0.78);
   }
 
-  .project-draft-summary {
+  .project-draft-summary,
+  .project-publish-mini {
     padding: 12px;
   }
 
   .project-draft-kicker,
-  .project-draft-section-head h4,
-  .project-draft-path-label span {
+  .project-browser-head h4 {
     margin: 0;
     color: rgba(240, 240, 250, 0.56);
     font-family: var(--constellation-font-mono, var(--font-mono));
@@ -426,16 +431,23 @@
   }
 
   :global(:root[data-color-scheme='light']) .project-draft-kicker,
-  :global(:root[data-color-scheme='light']) .project-draft-section-head h4,
-  :global(:root[data-color-scheme='light']) .project-draft-path-label span {
+  :global(:root[data-color-scheme='light']) .project-browser-head h4 {
     color: rgba(82, 98, 111, 0.66);
   }
 
-  .project-draft-title-row {
+  .project-draft-title-row,
+  .project-browser-head,
+  .project-file-preview-head,
+  .project-preview-layer-head {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 10px;
+    min-width: 0;
+  }
+
+  .project-draft-title-row {
+    align-items: center;
     margin-top: 7px;
   }
 
@@ -452,7 +464,7 @@
   }
 
   .project-draft-signal,
-  .project-draft-resource-status {
+  .project-file-status {
     flex: 0 0 auto;
     border-radius: 7px;
     padding: 3px 8px;
@@ -465,24 +477,40 @@
     text-transform: uppercase;
   }
 
-  .project-draft-signal[data-tone='clean'] {
+  .project-draft-signal[data-tone='clean'],
+  .project-file-status[data-tone='clean'] {
     background: color-mix(in srgb, var(--positive, #6BC785) 16%, transparent);
     color: color-mix(in srgb, var(--positive, #6BC785) 82%, white);
   }
 
-  .project-draft-signal[data-tone='modified'] {
+  .project-draft-signal[data-tone='modified'],
+  .project-file-status[data-tone='changed'],
+  .project-file-status[data-tone='new'] {
     background: color-mix(in srgb, var(--thread-accent, #57CFA0) 14%, transparent);
     color: color-mix(in srgb, var(--thread-accent, #57CFA0) 78%, white);
   }
 
-  .project-draft-signal[data-tone='warning'] {
+  .project-draft-signal[data-tone='warning'],
+  .project-file-status[data-tone='warning'],
+  .project-file-status[data-tone='deleted'] {
     background: rgba(236, 180, 95, 0.13);
     color: #e7bc77;
   }
 
-  .project-draft-signal[data-tone='conflict'] {
+  .project-draft-signal[data-tone='conflict'],
+  .project-file-status[data-tone='conflicted'] {
     background: rgba(212, 128, 143, 0.14);
     color: #efa5b0;
+  }
+
+  .project-draft-meta,
+  .project-browser-head span,
+  .project-file-preview-head span,
+  .project-preview-layer-head span {
+    color: rgba(231, 238, 247, 0.52);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 10px;
+    line-height: 1.35;
   }
 
   .project-draft-meta {
@@ -490,101 +518,31 @@
     flex-wrap: wrap;
     gap: 5px 10px;
     margin-top: 7px;
-    color: rgba(231, 238, 247, 0.5);
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 10px;
-    line-height: 1.35;
   }
 
-  .project-draft-meta span {
+  .project-draft-meta span,
+  .project-browser-head span,
+  .project-file-preview-head span {
     min-width: 0;
     overflow-wrap: anywhere;
   }
 
-  :global(:root[data-color-scheme='light']) .project-draft-meta {
+  :global(:root[data-color-scheme='light']) .project-draft-meta,
+  :global(:root[data-color-scheme='light']) .project-browser-head span,
+  :global(:root[data-color-scheme='light']) .project-file-preview-head span,
+  :global(:root[data-color-scheme='light']) .project-preview-layer-head span {
     color: rgba(82, 98, 111, 0.66);
   }
 
-  .project-draft-layers {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);
-    align-items: stretch;
-    gap: 6px;
-  }
-
-  .project-draft-layer {
-    display: grid;
-    grid-template-columns: 28px minmax(0, 1fr);
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    min-height: 52px;
-    padding: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.055);
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.028);
-  }
-
-  :global(:root[data-color-scheme='light']) .project-draft-layer {
-    border-color: rgba(126, 92, 52, 0.08);
-    background: rgba(248, 250, 248, 0.72);
-  }
-
-  .project-draft-layer-icon {
-    display: grid;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 7px;
-    background: rgba(255, 255, 255, 0.05);
-    color: rgba(231, 238, 247, 0.72);
-  }
-
-  .project-draft-layer[data-layer='root'] .project-draft-layer-icon {
-    color: #9cb7e4;
-  }
-
-  .project-draft-layer[data-layer='draft'] .project-draft-layer-icon {
-    color: color-mix(in srgb, var(--thread-accent, #57CFA0) 86%, white);
-  }
-
-  .project-draft-layer strong,
-  .project-draft-layer span {
-    display: block;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .project-draft-layer strong {
-    color: rgba(243, 247, 255, 0.9);
-    font-size: 12px;
-    font-weight: 650;
-  }
-
-  .project-draft-layer span {
-    margin-top: 2px;
-    color: rgba(231, 238, 247, 0.48);
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 9px;
-  }
-
-  .project-draft-layer-arrow {
-    display: grid;
-    place-items: center;
-    color: rgba(231, 238, 247, 0.42);
-  }
-
   .project-draft-counts,
-  .project-draft-version-summary {
+  .project-publish-metrics {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 6px;
   }
 
   .project-draft-count,
-  .project-draft-version-summary > div {
+  .project-publish-metrics span {
     display: grid;
     gap: 5px;
     min-width: 0;
@@ -596,20 +554,20 @@
   }
 
   :global(:root[data-color-scheme='light']) .project-draft-count,
-  :global(:root[data-color-scheme='light']) .project-draft-version-summary > div {
-    border-color: rgba(126, 92, 52, 0.08);
+  :global(:root[data-color-scheme='light']) .project-publish-metrics span {
+    border-color: rgba(85, 104, 120, 0.12);
     background: rgba(248, 250, 248, 0.74);
   }
 
   .project-draft-count span,
-  .project-draft-version-summary span {
-    color: rgba(231, 238, 247, 0.48);
+  .project-publish-metrics span {
+    color: rgba(231, 238, 247, 0.5);
     font-size: 9px;
-    line-height: 1.15;
+    line-height: 1.2;
   }
 
   .project-draft-count strong,
-  .project-draft-version-summary strong {
+  .project-publish-metrics strong {
     color: rgba(243, 247, 255, 0.92);
     font-family: var(--constellation-font-mono, var(--font-mono));
     font-size: 16px;
@@ -617,16 +575,17 @@
   }
 
   :global(:root[data-color-scheme='light']) .project-draft-count span,
-  :global(:root[data-color-scheme='light']) .project-draft-version-summary span {
+  :global(:root[data-color-scheme='light']) .project-publish-metrics span {
     color: rgba(82, 98, 111, 0.64);
   }
 
   :global(:root[data-color-scheme='light']) .project-draft-count strong,
-  :global(:root[data-color-scheme='light']) .project-draft-version-summary strong {
+  :global(:root[data-color-scheme='light']) .project-publish-metrics strong {
     color: rgba(20, 29, 38, 0.9);
   }
 
-  .project-draft-count[data-tone='conflicted'] strong {
+  .project-draft-count[data-tone='conflicted'] strong,
+  .project-publish-metrics [data-tone='conflicted'] strong {
     color: #efa5b0;
   }
 
@@ -659,301 +618,245 @@
     border-color: rgba(236, 180, 95, 0.18);
   }
 
-  .project-draft-alert[data-tone='conflict'] {
-    border-color: rgba(212, 128, 143, 0.22);
-  }
-
-  .project-draft-section {
+  .project-browser {
     display: grid;
-    gap: 9px;
-    padding-top: 12px;
-    border-top: 1px solid rgba(255, 255, 255, 0.055);
-  }
-
-  :global(:root[data-color-scheme='light']) .project-draft-section {
-    border-top-color: rgba(126, 92, 52, 0.09);
-  }
-
-  .project-draft-section-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
-  .project-draft-section-head > span {
-    color: rgba(231, 238, 247, 0.48);
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 10px;
-  }
-
-  .project-draft-resource-list,
-  .project-draft-file-list,
-  .project-draft-publish-groups,
-  .project-draft-version-groups,
-  .project-draft-version-list {
-    display: grid;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .project-draft-resource {
-    display: grid;
-    gap: 9px;
-    min-width: 0;
-    padding: 10px 0;
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
-  }
-
-  .project-draft-resource[data-status*='conflict'] {
-    border-top-color: rgba(212, 128, 143, 0.22);
-  }
-
-  .project-draft-resource-head,
-  .project-draft-publish-head,
-  .project-draft-version-group,
-  .project-draft-version-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 10px;
-    min-width: 0;
-  }
-
-  .project-draft-resource-copy,
-  .project-draft-publish-head > div,
-  .project-draft-version-group > div,
-  .project-draft-version-row > div {
-    display: grid;
-    gap: 4px;
-    min-width: 0;
-  }
-
-  .project-draft-resource-copy h5,
-  .project-draft-publish-head strong,
-  .project-draft-version-group strong,
-  .project-draft-version-row strong {
-    margin: 0;
-    overflow-wrap: anywhere;
-    color: rgba(243, 247, 255, 0.9);
-    font-size: 12px;
-    font-weight: 650;
-    line-height: 1.3;
-  }
-
-  .project-draft-resource-copy p,
-  .project-draft-publish-head span,
-  .project-draft-version-group span,
-  .project-draft-version-row span,
-  .project-draft-version-latest {
-    margin: 0;
-    overflow-wrap: anywhere;
-    color: rgba(231, 238, 247, 0.48);
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 9px;
-    line-height: 1.4;
-  }
-
-  .project-draft-resource-paths {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px;
-    min-width: 0;
-  }
-
-  .project-draft-resource-paths div {
-    display: grid;
-    gap: 4px;
-    min-width: 0;
-  }
-
-  .project-draft-resource-paths span {
-    color: rgba(231, 238, 247, 0.42);
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 9px;
-    text-transform: uppercase;
-  }
-
-  .project-draft-resource-paths code {
-    min-width: 0;
+    gap: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
-    border-radius: 6px;
-    padding: 5px 6px;
-    background: rgba(255, 255, 255, 0.035);
-    color: rgba(239, 244, 251, 0.7);
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 9px;
-    line-height: 1.25;
-    white-space: nowrap;
   }
 
-  .project-draft-resource-counts {
-    display: flex;
+  .project-browser-head {
+    align-items: center;
+    padding: 11px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-browser-head {
+    border-bottom-color: rgba(85, 104, 120, 0.12);
+  }
+
+  .project-browser-head > div:first-child {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .project-browser-legend {
+    display: inline-flex;
+    align-items: center;
     flex-wrap: wrap;
-    gap: 6px;
+    justify-content: flex-end;
+    gap: 5px;
   }
 
-  .project-draft-resource-counts span {
+  .project-browser-legend span,
+  .project-file-layer-strip span {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     border-radius: 7px;
     padding: 3px 7px;
     background: rgba(255, 255, 255, 0.045);
-    color: rgba(231, 238, 247, 0.55);
+    color: rgba(231, 238, 247, 0.6);
     font-family: var(--constellation-font-mono, var(--font-mono));
     font-size: 9px;
-    line-height: 1.25;
   }
 
-  .project-draft-path-group {
+  :global(:root[data-color-scheme='light']) .project-browser-legend span,
+  :global(:root[data-color-scheme='light']) .project-file-layer-strip span {
+    background: rgba(85, 104, 120, 0.06);
+    color: rgba(57, 70, 82, 0.72);
+  }
+
+  .project-browser-layout {
     display: grid;
-    gap: 6px;
-    min-width: 0;
-    padding: 9px 0;
-    border-top: 1px solid rgba(255, 255, 255, 0.045);
+    grid-template-columns: minmax(170px, 0.9fr) minmax(0, 1.2fr);
+    min-height: 420px;
   }
 
-  .project-draft-path-label {
-    display: flex;
+  .project-file-tree {
+    min-width: 0;
+    max-height: 540px;
+    overflow: auto;
+    padding: 6px;
+    border-right: 1px solid rgba(255, 255, 255, 0.055);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-file-tree {
+    border-right-color: rgba(85, 104, 120, 0.12);
+  }
+
+  .project-tree-row {
+    --depth: 0;
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    gap: 7px;
+    width: 100%;
+    min-height: 30px;
+    margin: 1px 0;
+    padding: 5px 7px 5px calc(7px + (var(--depth) * 14px));
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: rgba(239, 244, 251, 0.74);
+    text-align: left;
   }
 
-  .project-draft-path-label strong {
-    color: rgba(231, 238, 247, 0.5);
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 10px;
+  :global(:root[data-color-scheme='light']) .project-tree-row {
+    color: rgba(29, 39, 49, 0.78);
   }
 
-  .project-draft-paths {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
+  .project-tree-file {
+    cursor: pointer;
+  }
+
+  .project-tree-file:hover,
+  .project-tree-file-selected {
+    background: rgba(255, 255, 255, 0.055);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-tree-file:hover,
+  :global(:root[data-color-scheme='light']) .project-tree-file-selected {
+    background: rgba(82, 117, 139, 0.08);
+  }
+
+  .project-tree-directory {
+    color: rgba(231, 238, 247, 0.58);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-tree-directory {
+    color: rgba(82, 98, 111, 0.72);
+  }
+
+  .project-tree-row span {
     min-width: 0;
-  }
-
-  .project-draft-paths code,
-  .project-draft-more,
-  .project-draft-blockers span,
-  .project-draft-operations span {
-    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
-    border-radius: 6px;
-    padding: 4px 6px;
-    background: rgba(255, 255, 255, 0.045);
-    color: rgba(239, 244, 251, 0.78);
+    white-space: nowrap;
+    font-size: 11px;
+  }
+
+  .project-tree-row small {
+    min-width: 0;
+    max-width: 78px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: rgba(231, 238, 247, 0.46);
     font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 10px;
-    line-height: 1.25;
+    font-size: 8px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     white-space: nowrap;
   }
 
-  .project-draft-path-group[data-tone='warning'] .project-draft-paths code {
-    background: rgba(236, 180, 95, 0.12);
+  :global(:root[data-color-scheme='light']) .project-tree-row small {
+    color: rgba(82, 98, 111, 0.58);
+  }
+
+  .project-tree-row[data-tone='changed'] small,
+  .project-tree-row[data-tone='new'] small {
+    color: color-mix(in srgb, var(--thread-accent, #57CFA0) 82%, white);
+  }
+
+  .project-tree-row[data-tone='warning'] small,
+  .project-tree-row[data-tone='deleted'] small {
     color: #e7bc77;
   }
 
-  .project-draft-path-group[data-tone='conflicted'] .project-draft-paths code {
-    background: rgba(212, 128, 143, 0.12);
+  .project-tree-row[data-tone='conflicted'] small {
     color: #efa5b0;
   }
 
-  .project-draft-version-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .project-draft-publish-summary {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  .project-draft-publish-summary [data-tone='conflicted'] strong {
-    color: #efa5b0;
-  }
-
-  .project-draft-publish-group {
+  .project-file-preview {
     display: grid;
-    gap: 8px;
+    align-content: start;
+    gap: 9px;
     min-width: 0;
-    padding: 10px 0;
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    max-height: 540px;
+    overflow: auto;
+    padding: 11px;
   }
 
-  .project-draft-publish-group[data-status='blocked'] {
-    border-top-color: rgba(212, 128, 143, 0.22);
+  .project-file-preview-head h4 {
+    margin: 0;
+    overflow-wrap: anywhere;
+    color: rgba(243, 247, 255, 0.92);
+    font-size: 12px;
+    font-weight: 650;
+    line-height: 1.35;
   }
 
-  .project-draft-blockers,
-  .project-draft-operations {
+  :global(:root[data-color-scheme='light']) .project-file-preview-head h4 {
+    color: rgba(20, 29, 38, 0.92);
+  }
+
+  .project-file-preview-head > div {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .project-file-layer-strip {
     display: flex;
     flex-wrap: wrap;
     gap: 5px;
+  }
+
+  .project-file-layer-strip span[data-present='true'] {
+    color: color-mix(in srgb, var(--positive, #6BC785) 78%, white);
+  }
+
+  .project-preview-layers {
+    display: grid;
+    gap: 9px;
     min-width: 0;
   }
 
-  .project-draft-blockers span {
-    background: rgba(212, 128, 143, 0.12);
-    color: #efa5b0;
+  .project-preview-layer {
+    display: grid;
+    gap: 7px;
+    min-width: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.055);
+    padding-top: 9px;
   }
 
-  .project-draft-operations span {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
+  :global(:root[data-color-scheme='light']) .project-preview-layer {
+    border-top-color: rgba(85, 104, 120, 0.12);
   }
 
-  .project-draft-operations strong {
-    color: rgba(231, 238, 247, 0.62);
-    font-weight: 650;
+  .project-preview-layer-head strong {
+    color: rgba(243, 247, 255, 0.86);
+    font-size: 11px;
   }
 
-  .project-draft-operations code {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: rgba(239, 244, 251, 0.78);
+  :global(:root[data-color-scheme='light']) .project-preview-layer-head strong {
+    color: rgba(20, 29, 38, 0.86);
   }
 
-  .project-draft-version-latest {
+  .project-preview-layer pre {
+    max-height: 260px;
+    min-width: 0;
+    overflow: auto;
     margin: 0;
-  }
-
-  .project-draft-version-groups {
-    margin-top: 2px;
-  }
-
-  .project-draft-version-group {
-    padding: 9px 0 4px;
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
-  }
-
-  .project-draft-version-group > span {
-    flex: 0 0 auto;
-    color: rgba(231, 238, 247, 0.5);
+    border-radius: 7px;
+    padding: 9px;
+    background: rgba(6, 10, 15, 0.34);
+    color: rgba(240, 245, 251, 0.82);
     font-family: var(--constellation-font-mono, var(--font-mono));
     font-size: 10px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
   }
 
-  .project-draft-version-row {
-    min-height: 34px;
-    padding-left: 8px;
-    border-left: 1px solid rgba(255, 255, 255, 0.06);
+  :global(:root[data-color-scheme='light']) .project-preview-layer pre {
+    background: rgba(246, 248, 248, 0.95);
+    color: rgba(28, 36, 45, 0.86);
   }
 
-  .project-draft-restore {
-    display: inline-grid;
-    flex: 0 0 auto;
-    place-items: center;
-    width: 26px;
-    height: 26px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 7px;
-    background: rgba(255, 255, 255, 0.035);
-    color: rgba(231, 238, 247, 0.42);
-  }
-
-  .project-draft-restore:disabled {
-    cursor: not-allowed;
-    opacity: 0.72;
+  .project-publish-mini {
+    display: grid;
+    gap: 9px;
   }
 
   .project-draft-empty {
@@ -963,20 +866,36 @@
     padding: 10px 0;
   }
 
+  :global(:root[data-color-scheme='light']) .project-draft-empty {
+    color: rgba(82, 98, 111, 0.68);
+  }
+
   .project-draft-empty-warning {
     color: #e7bc77;
   }
 
   @media (max-width: 720px) {
     .project-draft-counts,
-    .project-draft-publish-summary,
-    .project-draft-layers,
-    .project-draft-resource-paths {
+    .project-publish-metrics {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .project-draft-layer-arrow {
-      display: none;
+    .project-browser-layout {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .project-file-tree {
+      max-height: 260px;
+      border-right: 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+    }
+
+    :global(:root[data-color-scheme='light']) .project-file-tree {
+      border-bottom-color: rgba(85, 104, 120, 0.12);
+    }
+
+    .project-file-preview {
+      max-height: none;
     }
   }
 </style>

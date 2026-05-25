@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   buildProjectDraftPanelView,
+  joinProjectDisplayPath,
+  projectFileLayerLabel,
+  projectFileStatusTone,
   publishOperationPath,
   resourceMeta,
   resourceTitle,
@@ -28,6 +31,13 @@ test('project draft presenter summarizes root, draft, conflicts, and stale paths
             conflicted_paths: [{ relative_path: 'summary.md' }],
             out_of_date_paths: ['root.md'],
           },
+          file_browser: {
+            entries: [
+              { path: 'brief.md', name: 'brief.md', status: 'changed', has_root: true, has_draft: true, size: 120 },
+              { path: 'appendix.md', name: 'appendix.md', status: 'new', has_root: false, has_draft: true, size: 80 },
+              { path: 'archive/old.md', name: 'old.md', status: 'clean', has_root: true, has_draft: false, size: 60 },
+            ],
+          },
         },
       ],
     },
@@ -49,6 +59,10 @@ test('project draft presenter summarizes root, draft, conflicts, and stale paths
   assert.equal(view.publishPlan.blockedCount, 1);
   assert.equal(view.publishPlan.operationCount, 3);
   assert.equal(view.fileGroups.find((group) => group.key === 'conflicted_paths')?.paths[0], '/reports/summary.md');
+  assert.equal(view.fileBrowser.fileCount, 3);
+  assert.equal(view.fileBrowser.changedCount, 2);
+  assert.ok(view.fileBrowser.files.some((file) => file.displayPath === '/reports/archive/old.md'));
+  assert.ok(view.fileBrowser.rows.some((row) => row.kind === 'directory' && row.displayPath === '/reports/archive'));
   assert.equal(resourceTitle(view.resources[0]), '/reports');
   assert.equal(resourceMeta(view.resources[0]), 'folder / local / thread draft');
 });
@@ -90,4 +104,10 @@ test('project draft presenter respects explicit publish plan summaries', () => {
   assert.equal(view.publishPlan.operationCount, 2);
   assert.equal(view.publishPlan.readyCount, 1);
   assert.equal(publishOperationPath(view.publishPlan.groups[0].operations?.[0] ?? {}), 'strategy/report.md');
+});
+
+test('project file presenter formats status, layer, and mounted paths', () => {
+  assert.equal(joinProjectDisplayPath('/reports', 'analysis/summary.md'), '/reports/analysis/summary.md');
+  assert.equal(projectFileStatusTone('out_of_date'), 'warning');
+  assert.equal(projectFileLayerLabel({ path: 'new.md', has_draft: true, has_root: false }), 'new draft file');
 });

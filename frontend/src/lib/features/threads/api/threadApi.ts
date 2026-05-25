@@ -18,6 +18,7 @@ export type UploadPreview = Awaited<ReturnType<typeof api.previewUpload>>;
 export type ThreadProjectContextAttachment = Awaited<ReturnType<typeof api.listIdeaProjectContext>>[number];
 export type AttachThreadProjectContextInput = Parameters<typeof api.attachIdeaProjectContext>[1];
 export type ThreadProjectDraftState = Awaited<ReturnType<typeof api.getIdeaProjectDraftState>>;
+export type ThreadProjectDraftFile = Awaited<ReturnType<typeof api.getIdeaProjectDraftFile>>;
 export type ThreadActivityTimelineItem = Awaited<ReturnType<typeof api.activityTimeline>>[number];
 export type IdeaAudit = Awaited<ReturnType<typeof api.ideaAudit>>;
 export type IdeaAuditAnalysisResult = Awaited<ReturnType<typeof api.ideaAuditAnalysisResult>>;
@@ -52,6 +53,7 @@ type ThreadApiMethods = {
   listIdeaProjectContext: typeof api.listIdeaProjectContext;
   attachIdeaProjectContext: typeof api.attachIdeaProjectContext;
   getIdeaProjectDraftState: typeof api.getIdeaProjectDraftState;
+  getIdeaProjectDraftFile: typeof api.getIdeaProjectDraftFile;
   ideaAudit: typeof api.ideaAudit;
   ideaAuditAnalyze: typeof api.ideaAuditAnalyze;
   ideaAuditAnalysisResult: typeof api.ideaAuditAnalysisResult;
@@ -85,6 +87,7 @@ export const threadApi = pickTypedApiMethods<ThreadApiMethods>([
   'listIdeaProjectContext',
   'attachIdeaProjectContext',
   'getIdeaProjectDraftState',
+  'getIdeaProjectDraftFile',
   'ideaAudit',
   'ideaAuditAnalyze',
   'ideaAuditAnalysisResult',
@@ -118,6 +121,7 @@ export const {
   listIdeaProjectContext,
   attachIdeaProjectContext,
   getIdeaProjectDraftState,
+  getIdeaProjectDraftFile,
   ideaAudit,
   ideaAuditAnalyze,
   ideaAuditAnalysisResult,

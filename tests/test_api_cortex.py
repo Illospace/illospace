@@ -426,6 +426,11 @@ async def test_project_context_draft_state_payload_uses_manage_project_helpers(t
     assert payload["idea_id"] == "idea-1"
     assert payload["draft_status"]["resources"][0]["changes"]["changed_paths"] == ["brief.md"]
     assert payload["draft_status"]["resources"][0]["changes"]["new_paths"] == ["new.md"]
+    assert payload["draft_status"]["resources"][0]["file_browser"]["summary"]["file_count"] == 2
+    assert {
+        entry["path"]: entry["status"]
+        for entry in payload["draft_status"]["resources"][0]["file_browser"]["entries"]
+    } == {"brief.md": "changed", "new.md": "new"}
     assert payload["plan_publish"]["summary"] == {"resource_count": 1, "operation_count": 2, "blocked_count": 0}
     assert payload["root_versions"]["summary"] == {"resource_count": 1, "version_count": 0}
 
