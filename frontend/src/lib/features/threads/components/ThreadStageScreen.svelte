@@ -68,6 +68,7 @@
   import ProjectContextPicker from '$lib/features/composer/components/ProjectContextPicker.svelte';
   import SkillMentionOverlay from '$lib/features/composer/components/SkillMentionOverlay.svelte';
   import SlashAutocomplete from '$lib/features/composer/components/SlashAutocomplete.svelte';
+  import { resizeComposerTextareaToContent } from '$lib/features/composer/domain/composerTextareaSizing';
   import ThreadAttachmentPreviewPane from '$lib/features/threads/components/ThreadAttachmentPreviewPane.svelte';
   import ThreadCodeReviewPane from '$lib/features/threads/components/ThreadCodeReviewPane.svelte';
   import ProjectDraftStatePanel from '$lib/features/threads/components/ProjectDraftStatePanel.svelte';
@@ -601,10 +602,12 @@
 
   function autoGrowTextarea() {
     if (!textareaEl) return;
-    textareaEl.style.height = 'auto';
-    const baseHeight = inputValue.trim().length > 0 ? Math.min(textareaEl.scrollHeight, 120) : 34;
-    textareaEl.style.height = `${baseHeight}px`;
-    textareaScrollTop = textareaEl.scrollTop;
+    textareaScrollTop = resizeComposerTextareaToContent(textareaEl, {
+      value: inputValue,
+      minHeight: 34,
+      maxHeight: 120,
+      emptyHeight: 34,
+    });
   }
 
   function ensureTeamMembersForMentions() {

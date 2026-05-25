@@ -7,6 +7,7 @@
     type SlashCommandToken,
   } from '$lib/utils/slashCommand';
   import { hasSkillMention } from '$lib/utils/skillMention';
+  import { resizeComposerTextareaToContent } from '$lib/features/composer/domain/composerTextareaSizing';
 
   import SkillMentionOverlay from './SkillMentionOverlay.svelte';
   import SlashAutocomplete from './SlashAutocomplete.svelte';
@@ -84,10 +85,11 @@
 
   function autoGrowTextarea() {
     if (!textarea) return;
-    textarea.style.height = 'auto';
-    const nextHeight = Math.max(minHeight, Math.min(textarea.scrollHeight, maxHeight));
-    textarea.style.height = `${nextHeight}px`;
-    textareaScrollTop = textarea.scrollTop;
+    textareaScrollTop = resizeComposerTextareaToContent(textarea, {
+      value,
+      minHeight,
+      maxHeight,
+    });
   }
 
   async function syncTextareaHeight() {

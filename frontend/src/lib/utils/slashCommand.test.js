@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 import {
+  resizeComposerTextareaToContent,
+  shouldPinTextareaScrollToEnd,
+} from '../features/composer/domain/composerTextareaSizing.ts';
+import {
   findFirstSlashCommandToken,
   findSlashCommandToken,
   replaceSlashCommandToken,
@@ -104,4 +108,43 @@ test('thread composer editor does not clip overlay hosts', () => {
 
   assert.match(rule, /overflow:\s*visible/);
   assert.doesNotMatch(rule, /overflow:\s*hidden/);
+});
+
+test('composer textarea sizing keeps overflowing end-caret text visible', () => {
+  const value = 'line one\nline two\nline three\nline four';
+  const textarea = {
+    value,
+    selectionStart: value.length,
+    selectionEnd: value.length,
+    scrollHeight: 180,
+    scrollTop: 24,
+    style: { height: '40px' },
+  };
+
+  assert.equal(shouldPinTextareaScrollToEnd(textarea), true);
+  assert.equal(
+    resizeComposerTextareaToContent(textarea, { minHeight: 34, maxHeight: 120, emptyHeight: 34 }),
+    180,
+  );
+  assert.equal(textarea.style.height, '120px');
+  assert.equal(textarea.scrollTop, 180);
+});
+
+test('composer textarea sizing does not steal scroll while editing earlier text', () => {
+  const textarea = {
+    value: 'line one\nline two\nline three\nline four',
+    selectionStart: 8,
+    selectionEnd: 8,
+    scrollHeight: 180,
+    scrollTop: 24,
+    style: { height: '40px' },
+  };
+
+  assert.equal(shouldPinTextareaScrollToEnd(textarea), false);
+  assert.equal(
+    resizeComposerTextareaToContent(textarea, { minHeight: 34, maxHeight: 120, emptyHeight: 34 }),
+    24,
+  );
+  assert.equal(textarea.style.height, '120px');
+  assert.equal(textarea.scrollTop, 24);
 });
