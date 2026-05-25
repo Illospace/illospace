@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from brain.systems.runs.presentation import public_tool_event_payload
+from brain.systems.runs.visibility import run_is_headless
 
 STABLE_RUN_EVENT_TYPES = frozenset(
     {
@@ -41,7 +42,7 @@ def run_event_to_ui_message(
 ) -> dict[str, Any] | None:
     """Project a durable AgentRun event into the public Cortex stream vocabulary."""
 
-    if _run_is_headless(run):
+    if run_is_headless(run):
         return None
 
     source_type = str(getattr(event, "event_type", None) or "")
@@ -124,15 +125,6 @@ def _text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
-
-
-def _run_is_headless(run: Any | None) -> bool:
-    if run is None:
-        return False
-    metadata = getattr(run, "metadata_", None)
-    if not isinstance(metadata, dict):
-        metadata = getattr(run, "metadata", None)
-    return bool(metadata.get("headless")) if isinstance(metadata, dict) else False
 
 
 __all__ = ["STABLE_RUN_EVENT_TYPES", "run_event_to_ui_message"]

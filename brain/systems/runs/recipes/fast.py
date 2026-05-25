@@ -13,6 +13,7 @@ from brain.platform.providers.model_policy import get_model_for_tier
 from brain.systems.runs.tool_surface import build_agent_tools, build_tool_handlers
 from brain.systems.runs.recipes.base import BaseRunRecipe
 from brain.systems.runs.recipes.shared import project_runtime_workspace_from_ref
+from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems.personality import agent_profile_prompt_section, soul_prompt_section
 
 logger = logging.getLogger(__name__)
@@ -53,15 +54,7 @@ def build_fast_system_prompt(prompt_context: str = "") -> str:
 
 
 def _disabled_tool_names(runtime: RunRuntime) -> set[str]:
-    policy = runtime.request.metadata.get("tool_policy")
-    if not isinstance(policy, dict):
-        return set()
-    raw_names = policy.get("disabled_tools") or policy.get("blocked_tools") or []
-    if isinstance(raw_names, str):
-        raw_names = [raw_names]
-    if not isinstance(raw_names, list):
-        return set()
-    return {str(name).strip() for name in raw_names if str(name or "").strip()}
+    return disabled_tool_names_from_metadata(runtime.request.metadata)
 
 
 def _agent_tools_for_runtime(runtime: RunRuntime) -> list[dict]:

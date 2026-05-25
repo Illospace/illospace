@@ -11,10 +11,11 @@ from typing import Any
 
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.systems.runs.assignments import WorkerAssignment
-from brain.systems.runs.domain import AgentRunRequest, RunRecipe
+from brain.systems.runs.domain import RunRecipe
 from brain.systems.runs.events import run_event
 from brain.systems.runs.execution_context import _agent_context
-from brain.systems.runs.store import AsyncAgentRunStore, to_domain
+from brain.systems.runs.store import AsyncAgentRunStore
+from brain.systems.runs.tool_policy import normalize_tool_policy
 
 
 _HEADLESS_BLOCKED_TOOLS = frozenset({
@@ -109,14 +110,10 @@ def _headless_thread_id(parent_run_id: int, step_key: str) -> str:
 
 
 def _merge_tool_policy(tool_policy: Any, *, headless: bool) -> dict[str, Any]:
-    policy = dict(tool_policy) if isinstance(tool_policy, Mapping) else {}
-    if not headless:
-        return policy
-    raw_blocked = policy.get("blocked_tools") or policy.get("disabled_tools") or []
-    blocked = set(_string_list(raw_blocked))
-    blocked.update(_HEADLESS_BLOCKED_TOOLS)
-    policy["blocked_tools"] = sorted(blocked)
-    return policy
+    return normalize_tool_policy(
+        tool_policy,
+        disabled_tools=_HEADLESS_BLOCKED_TOOLS if headless else None,
+    )
 
 
 def _assignment_payload(
@@ -222,45 +219,18 @@ async def _handle_spawn_worker(
         parent = await store.require_run(parent_run_id)
         existing = await store.child_run_for_step(parent.id, step_key)
         deduplicated = existing is not None
-        if existing is not None:
-            child = to_domain(existing)
-        elif headless:
-            child = await store.create_run(
-                AgentRunRequest(
-                    org_id=parent.org_id,
-                    user_id=parent.user_id,
-                    thread_id=_headless_thread_id(parent.id, step_key),
-                    parent_run_id=parent.id,
-                    root_run_id=parent.root_run_id or parent.id,
-                    profile=parent.profile,
-                    recipe=RunRecipe.WORKER,
-                    message=child_message,
-                    target_ref=_current_mapping("target_ref") or dict(parent.target_ref or {}),
-                    workspace_ref=_current_mapping("workspace_ref") or dict(parent.workspace_ref or {}),
-                    model_policy=dict(parent.model_policy or {}),
-                    metadata={**worker_metadata, "parent_step_key": step_key},
-                )
-            )
-            await store.append_event(
-                run_event(
-                    parent.id,
-                    "run.child_created",
-                    {"child_run_id": child.id, "recipe": child.recipe.value, "step_key": step_key},
-                    root_run_id=parent.root_run_id or parent.id,
-                )
-            )
-        else:
-            child = await store.create_child_run(
-                parent,
-                recipe=RunRecipe.WORKER,
-                message=child_message,
-                step_key=step_key,
-                profile=parent.profile,
-                target_ref=_current_mapping("target_ref") or dict(parent.target_ref or {}),
-                workspace_ref=_current_mapping("workspace_ref") or dict(parent.workspace_ref or {}),
-                model_policy=dict(parent.model_policy or {}),
-                metadata=worker_metadata,
-            )
+        child = await store.create_child_run(
+            parent,
+            recipe=RunRecipe.WORKER,
+            message=child_message,
+            step_key=step_key,
+            thread_id=_headless_thread_id(parent.id, step_key) if headless else None,
+            profile=parent.profile,
+            target_ref=_current_mapping("target_ref") or dict(parent.target_ref or {}),
+            workspace_ref=_current_mapping("workspace_ref") or dict(parent.workspace_ref or {}),
+            model_policy=dict(parent.model_policy or {}),
+            metadata=worker_metadata,
+        )
         await store.append_event(
             run_event(
                 int(parent.id),

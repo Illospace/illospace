@@ -10,6 +10,7 @@ from typing import Any
 CORE_BUILTINS = {
     "coordinate",
     "orchestrate",
+    "report-workspace-blocker",
     "skill-authoring",
     "conversation-audit",
     "build-workspace-app",
@@ -166,6 +167,17 @@ def test_orchestrate_keeps_runtime_contract_and_memory_lifecycle():
         "session_close",
     ):
         assert expected in procedure
+
+
+def test_report_workspace_blocker_routes_to_headless_worker():
+    from brain.systems.skills.builtin import BUILTIN_SKILLS
+
+    skill = BUILTIN_SKILLS["report-workspace-blocker"]
+    assert "tickets" in skill["description"]
+    assert "spawn_worker" in skill["procedure"]
+    assert "headless=true" in skill["procedure"]
+    assert any(trigger["pattern"] == "report this bug" for trigger in skill["triggers"])
+    assert any("Search for duplicates" in guardrail["text"] for guardrail in skill["guardrails"])
 
 
 def _has_text_items(items: Any, key: str) -> bool:

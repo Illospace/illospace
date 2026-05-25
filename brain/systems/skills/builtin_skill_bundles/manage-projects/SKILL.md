@@ -26,9 +26,12 @@ and any newly uploaded file/resource metadata the user wants to keep.
 2. For durable work, call `manage_project(action="list")` unless the exact project id is already known.
 3. Create projects with a clear name, stable slug, and the smallest useful set of resources.
 4. Add, update, remove, or reorder resources with `manage_project` instead of inventing ad hoc metadata.
-5. Attach a project to the current thread when the user wants Illo to use it here.
-6. Archive projects by default for delete requests; treat permanent deletion as unavailable unless the product adds it.
-7. Tell the user what changed in plain language without exposing internal validation or status machinery.
+5. For repo, folder, file, or doc work that needs repeated access, create or
+   attach the smallest Project Context that represents the working set before
+   trying raw paths or unauthenticated remotes.
+6. Attach a project to the current thread when the user wants Illo to use it here.
+7. Archive projects by default for delete requests; treat permanent deletion as unavailable unless the product adds it.
+8. Tell the user what changed in plain language without exposing internal validation or status machinery.
 
 ## Output Contract
 

@@ -59,6 +59,28 @@ async def test_record_run_event_allocates_next_sequence_and_normalizes_payload()
     session.flush.assert_awaited_once()
 
 
+def test_run_event_projection_skips_headless_runs():
+    from brain.systems.runs.ui_events import run_event_to_ui_message
+
+    event = SimpleNamespace(
+        id=10,
+        run_id=42,
+        root_run_id=42,
+        sequence_no=1,
+        event_type="run.activity",
+        payload={"label": "Reporting blocker"},
+    )
+    run = SimpleNamespace(
+        id=42,
+        org_id="org-1",
+        thread_id="headless-worker:1:abc",
+        profile="fast",
+        metadata_={"headless": True},
+    )
+
+    assert run_event_to_ui_message(event, run=run, org_id="org-1") is None
+
+
 @pytest.mark.asyncio
 async def test_async_record_tool_call_persists_redacted_tool_trace(monkeypatch):
     recorded = []

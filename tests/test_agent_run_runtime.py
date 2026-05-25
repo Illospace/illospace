@@ -96,6 +96,7 @@ class _Store:
         workspace_ref=None,
         model_policy=None,
         metadata=None,
+        thread_id=None,
     ):
         from brain.systems.runs.domain import AgentRunRequest
         from brain.systems.runs.events import run_event
@@ -109,7 +110,7 @@ class _Store:
             AgentRunRequest(
                 org_id=parent.org_id,
                 user_id=parent.user_id,
-                thread_id=parent.thread_id,
+                thread_id=thread_id or parent.thread_id,
                 parent_run_id=parent.id,
                 root_run_id=parent.root_run_id or parent.id,
                 profile=profile or parent.profile,
@@ -441,8 +442,11 @@ async def test_fast_recipe_invokes_direct_agent_with_streaming_and_live_guidance
     assert captured["spec"].idea_id is None
     assert captured["spec"].workspace_root == "/tmp/work"
     assert "interactive single-agent path" in captured["spec"].system_prompt
+    assert "spawn_worker" in captured["spec"].system_prompt
+    assert "headless=true" in captured["spec"].system_prompt
     assert "write one brief task-specific assistant sentence" in captured["spec"].system_prompt
     assert "## Agent Profile" in captured["spec"].system_prompt
+    assert captured["spec"].metadata["max_parallel_tool_calls"] == 4
     assert "Final Reply Presenter" in captured["spec"].system_prompt
     assert "When the user only confirms, corrects, asks yes/no" in captured["spec"].system_prompt
     assert "config snippets, caveats, or next steps" in captured["spec"].system_prompt
@@ -819,18 +823,18 @@ async def test_fast_recipe_applies_runtime_tool_policy(monkeypatch):
 
     monkeypatch.setattr(
         "brain.systems.runs.recipes.fast.build_agent_tools",
-        lambda role: [{"name": "manage_cycle"}, {"name": "web_search"}],
+        lambda role: [{"name": "manage_cycle"}, {"name": "post_chat_message"}, {"name": "web_search"}],
     )
     monkeypatch.setattr(
         "brain.systems.runs.recipes.fast.build_tool_handlers",
-        lambda **kwargs: {"manage_cycle": object(), "web_search": object()},
+        lambda **kwargs: {"manage_cycle": object(), "post_chat_message": object(), "web_search": object()},
     )
     monkeypatch.setattr("brain.systems.runs.recipes.fast.invoke_direct_agent_async", fake_invoke)
 
     runtime = _runtime("fast")
     runtime.request = replace(
         runtime.request,
-        metadata={"tool_policy": {"disabled_tools": ["manage_cycle"]}},
+        metadata={"tool_policy": {"disabled_tools": ["manage_cycle"], "blocked_tools": ["post_chat_message"]}},
     )
 
     result = await FastRecipe().execute(runtime)
@@ -838,6 +842,109 @@ async def test_fast_recipe_applies_runtime_tool_policy(monkeypatch):
     assert result.status.value == "completed"
     assert [tool["name"] for tool in captured["spec"].tools] == ["web_search"]
     assert sorted(captured["spec"].tool_handlers) == ["web_search"]
+
+
+def test_tool_policy_unions_disabled_and_blocked_aliases():
+    from brain.systems.runs.direct_agent import _disabled_tool_names
+
+    assert _disabled_tool_names({
+        "tool_policy": {
+            "disabled_tools": ["manage_cycle"],
+            "blocked_tools": ["post_chat_message"],
+        }
+    }) == {"manage_cycle", "post_chat_message"}
+
+
+def test_headless_worker_policy_uses_canonical_disabled_tools():
+    from brain.systems.runs.tool_catalog.handlers.workers import _merge_tool_policy
+
+    policy = _merge_tool_policy(
+        {"disabled_tools": ["manage_cycle"], "blocked_tools": ["post_chat_message"]},
+        headless=True,
+    )
+
+    assert "blocked_tools" not in policy
+    assert set(policy["disabled_tools"]) >= {
+        "manage_cycle",
+        "post_chat_message",
+        "cortex_reply",
+        "post_ai_timeline_message",
+    }
+
+
+async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monkeypatch):
+    from brain.systems.runs.domain import RunProfile, RunRecipe
+    from brain.systems.runs.execution_context import bind_agent_context
+    import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
+
+    parent = SimpleNamespace(
+        id=42,
+        org_id="org-1",
+        user_id="user-1",
+        root_run_id=42,
+        profile=RunProfile.FAST,
+        target_ref={"kind": "cortex_idea"},
+        workspace_ref={"workspace_root": "/tmp/work"},
+        model_policy={"tier": "high"},
+    )
+    child = SimpleNamespace(id=99, root_run_id=42, recipe=RunRecipe.WORKER)
+    events = []
+    create_kwargs = {}
+
+    class _Uow:
+        session = object()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+    class _Store:
+        def __init__(self, session):
+            self.session = session
+
+        async def require_run(self, run_id):
+            assert run_id == parent.id
+            return parent
+
+        async def child_run_for_step(self, parent_id, step_key):
+            assert parent_id == parent.id
+            assert step_key == "spawn_worker:bug-report"
+            return None
+
+        async def create_child_run(self, parent_arg, **kwargs):
+            assert parent_arg is parent
+            create_kwargs.update(kwargs)
+            return child
+
+        async def append_event(self, event):
+            events.append(event)
+
+    monkeypatch.setattr(worker_handlers, "UnitOfWork", _Uow)
+    monkeypatch.setattr(worker_handlers, "AsyncAgentRunStore", _Store)
+
+    with bind_agent_context(run=SimpleNamespace(id=parent.id)):
+        payload = json.loads(
+            await worker_handlers._handle_spawn_worker(
+                objective="File the reproducible blocker.",
+                role="report_bug",
+                headless=True,
+                idempotency_key="bug-report",
+                tool_policy={"disabled_tools": ["manage_cycle"]},
+            )
+        )
+
+    assert payload["ok"] is True
+    assert payload["child_run_id"] == child.id
+    assert create_kwargs["thread_id"].startswith("headless-worker:42:")
+    assert create_kwargs["metadata"]["headless"] is True
+    assert set(create_kwargs["metadata"]["tool_policy"]["disabled_tools"]) >= {
+        "manage_cycle",
+        "cortex_reply",
+        "post_ai_timeline_message",
+    }
+    assert [event.event_type for event in events] == ["run.worker_spawned"]
 
 
 async def test_fast_recipe_passes_project_workspace_registry_to_tools(monkeypatch):
@@ -1675,6 +1782,36 @@ async def test_worker_recipe_invokes_direct_agent_with_runtime_tools_and_worker_
     assert worker_result.artifact_type == ArtifactType.WORKER_RESULT
     assert worker_result.payload["scope"]["allowed_files"] == ["README.md"]
     assert worker_result.payload["evidence"]["tool_names"] == ["read_file"]
+
+
+async def test_worker_recipe_propagates_headless_tool_policy(monkeypatch):
+    from brain.systems.runs.recipes.workers import WorkerRecipe
+
+    captured = {}
+
+    async def fake_invoke(spec):
+        captured["spec"] = spec
+        return SimpleNamespace(output="queued report", success=True, error=None)
+
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.build_agent_tools", lambda role: [{"name": "read_file"}])
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.build_tool_handlers", lambda **kwargs: {})
+    monkeypatch.setattr("brain.systems.runs.recipes.workers.invoke_direct_agent_async", fake_invoke)
+
+    runtime = _runtime("worker")
+    runtime.request = replace(
+        runtime.request,
+        metadata={
+            **runtime.request.metadata,
+            "headless": True,
+            "tool_policy": {"blocked_tools": ["post_chat_message"]},
+        },
+    )
+
+    result = await WorkerRecipe().execute(runtime)
+
+    assert result.status.value == "completed"
+    assert captured["spec"].metadata["headless"] is True
+    assert captured["spec"].metadata["tool_policy"] == {"blocked_tools": ["post_chat_message"]}
 
 
 async def test_worker_recipe_infers_workspace_root_from_project_context_permission_scope(monkeypatch):

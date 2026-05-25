@@ -118,6 +118,24 @@ def test_ai_timeline_message_tool_is_registered_and_exposed():
     assert registration.reversibility == "append_only"
 
 
+def test_spawn_worker_tool_is_coordinator_only_and_registered():
+    from brain.systems.runs.tool_definitions import COORDINATOR_TOOLS, WORKER_TOOLS
+    from brain.systems.runs.tool_handlers import _get_tool_handlers
+    from brain.systems.runs.tool_catalog.registry import get_tool_registration
+
+    name = "spawn_worker"
+    assert name in _names(COORDINATOR_TOOLS)
+    assert name not in _names(WORKER_TOOLS)
+    assert name in _get_tool_handlers()
+
+    registration = get_tool_registration(name)
+    assert registration is not None
+    assert [role.value for role in registration.availability] == ["coordinator"]
+    assert registration.permission == "spawn_worker"
+    assert registration.side_effect_class == "run_spawn"
+    assert registration.reversibility == "reversible"
+
+
 def test_context_route_surface_is_registry_driven():
     from brain.systems.runs.tool_catalog.registry import context_route_payload, context_route_tool_names
 

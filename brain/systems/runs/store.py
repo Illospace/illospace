@@ -159,6 +159,7 @@ class AsyncAgentRunStore:
         recipe = kwargs["recipe"]
         recipe_value = recipe.value if isinstance(recipe, RunRecipe) else str(recipe)
         step_key = kwargs.get("step_key")
+        thread_id = kwargs.get("thread_id") or parent_run.thread_id
         metadata_payload = dict(kwargs.get("metadata") or {})
         if step_key:
             metadata_payload["parent_step_key"] = step_key
@@ -169,7 +170,7 @@ class AsyncAgentRunStore:
             AgentRunRequest(
                 org_id=parent_run.org_id,
                 user_id=parent_run.user_id,
-                thread_id=parent_run.thread_id,
+                thread_id=str(thread_id),
                 parent_run_id=parent_run.id,
                 root_run_id=parent_run.root_run_id or parent_run.id,
                 profile=kwargs.get("profile") or parent_run.profile,

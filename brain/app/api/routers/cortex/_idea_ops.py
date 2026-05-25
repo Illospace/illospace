@@ -20,7 +20,8 @@ from brain.app.api.auth import get_current_user
 from brain.app.api.services.notifications import (
     async_build_notification_summary,
 )
-from brain.systems.runs.cortex.read_models import run_is_headless, run_stream_payload
+from brain.systems.runs.cortex.read_models import run_stream_payload
+from brain.systems.runs.visibility import fetch_visible_run_rows
 from brain.app.api.routers.cortex._helpers import (
     _infer_feedback_tags,
     _parse_message_type,
@@ -702,12 +703,9 @@ async def unified_stream_payload(
             stmt = (
                 select(AgentRun)
                 .where(AgentRun.thread_id == idea_id)
-                .order_by(AgentRun.created_at.desc())
-                .limit(20)
+                .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
             )
-            for run in (await uow.session.scalars(stmt)).all():
-                if run_is_headless(run):
-                    continue
+            for run in await fetch_visible_run_rows(uow.session, stmt, limit=20):
                 items.append(run_stream_payload(run))
 
         run_ids = [int(item["id"]) for item in items if item.get("type") == "run"]
@@ -724,8 +722,8 @@ async def unified_stream_payload(
                 .where(AgentRun.parent_run_id.in_(run_ids))
                 .order_by(AgentRun.created_at.asc(), AgentRun.id.asc())
             )
-            for child in (await uow.session.scalars(children_stmt)).all():
-                if child.parent_run_id is None or run_is_headless(child):
+            for child in await fetch_visible_run_rows(uow.session, children_stmt):
+                if child.parent_run_id is None:
                     continue
                 child_runs.setdefault(int(child.parent_run_id), []).append(run_stream_payload(child))
 

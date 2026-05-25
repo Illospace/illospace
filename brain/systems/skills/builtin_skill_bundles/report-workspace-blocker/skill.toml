@@ -1,0 +1,56 @@
+schema_version = 1
+name = "report-workspace-blocker"
+display_name = "Report Workspace Blocker"
+version = "1.0.0"
+description = "File evidence-rich repo or workspace tickets for concrete bugs, runtime blockers, and repeatable failures without interrupting the user-facing run."
+license = "Apache-2.0"
+source = "illo-core"
+visibility = "public"
+maturity = "proficient"
+guardrails = [
+  { text = "Use headless worker execution for opportunistic background reports.", severity = "warning" },
+  { text = "Search for duplicates before creating a ticket.", severity = "warning" },
+  { text = "Never include secrets, credentials, or private user data in a ticket.", severity = "high" },
+  { text = "Return a ready-to-file draft instead of guessing when tracker access is unavailable.", severity = "high" },
+]
+pitfalls = [
+  { severity = "high", text = "Filing weak or duplicate issues creates triage noise." },
+  { severity = "high", text = "Visible thread posts from background reporting distract from the active run." },
+  { severity = "warning", text = "A stack trace without impact or reproduction steps is rarely enough." },
+]
+refinements = [
+  { text = "Prefer one compact, evidence-rich ticket over a long investigation transcript." },
+  { text = "Use repo-native labels and tracker conventions when they are discoverable." },
+]
+
+[routing]
+triggers = [
+  { pattern = "report this bug", direction = "for" },
+  { pattern = "file a ticket", direction = "for" },
+  { pattern = "create a GitHub issue", direction = "for" },
+  { pattern = "workspace blocker", direction = "for" },
+  { pattern = "runtime blocker", direction = "for" },
+  { pattern = "reproducible failure", direction = "for" },
+  { pattern = "headless bug report worker", direction = "for" },
+  { pattern = "vague suspicion", direction = "against" },
+  { pattern = "missing user clarification", direction = "against" },
+]
+
+[runtime]
+default_model_tier = "medium"
+default_thinking_tier = "medium"
+
+[permissions]
+toolsets = ["brain"]
+
+[loading]
+summary = "SKILL.md#role"
+procedure = "SKILL.md"
+examples = "examples/"
+templates = "templates/"
+schemas = "schemas/"
+evals = "evals/"
+references = "references/"
+
+[assets]
+asset_1 = "templates/github-issue.md"
