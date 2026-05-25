@@ -150,6 +150,89 @@ async def test_deep_graph_shape_is_agent_run_children_and_artifacts(session_fact
     assert worker_artifacts[0].text == "Found the canonical AgentRun surface."
 
 
+async def test_child_run_can_use_headless_thread_without_bypassing_store(session_factory):
+    from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
+    from brain.systems.runs.store import AsyncAgentRunStore
+
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    parent = await store.create_run(
+        AgentRunRequest(
+            thread_id="idea-1",
+            message="Keep working.",
+            profile=RunProfile.FAST,
+            recipe=RunRecipe.FAST,
+        )
+    )
+
+    child = await store.create_child_run(
+        parent,
+        recipe=RunRecipe.WORKER,
+        profile=RunProfile.FAST,
+        step_key="spawn_worker:report",
+        thread_id="headless-worker:1:report",
+        message="Report the blocker.",
+        metadata={"headless": True},
+    )
+    same_child = await store.create_child_run(
+        parent,
+        recipe=RunRecipe.WORKER,
+        profile=RunProfile.FAST,
+        step_key="spawn_worker:report",
+        thread_id="headless-worker:1:report",
+        message="Report the blocker again.",
+    )
+    await session.commit()
+
+    assert same_child.id == child.id
+    rows = (await session.scalars(select(AgentRunRow).order_by(AgentRunRow.id.asc()))).all()
+    assert [row.thread_id for row in rows] == ["idea-1", "headless-worker:1:report"]
+    assert rows[1].metadata_["headless"] is True
+    assert rows[1].metadata_["parent_step_key"] == "spawn_worker:report"
+
+    child_created_events = (await session.scalars(
+        select(AgentRunEventRow)
+        .where(AgentRunEventRow.run_id == parent.id, AgentRunEventRow.event_type == "run.child_created")
+        .order_by(AgentRunEventRow.sequence_no.asc())
+    )).all()
+    assert [event.payload["child_run_id"] for event in child_created_events] == [child.id]
+
+
+async def test_visible_run_fetch_overfetches_when_headless_rows_are_newer(session_factory):
+    from brain.systems.runs.domain import AgentRunRequest, RunProfile, RunRecipe
+    from brain.systems.runs.store import AsyncAgentRunStore
+    from brain.systems.runs.visibility import fetch_visible_run_rows
+
+    session = session_factory()
+    store = AsyncAgentRunStore(session)
+    visible = await store.create_run(
+        AgentRunRequest(
+            thread_id="idea-1",
+            message="Visible run.",
+            profile=RunProfile.FAST,
+            recipe=RunRecipe.FAST,
+        )
+    )
+    await store.create_run(
+        AgentRunRequest(
+            thread_id="headless-worker:1:report",
+            message="Hidden report.",
+            profile=RunProfile.FAST,
+            recipe=RunRecipe.WORKER,
+            metadata={"headless": True},
+        )
+    )
+
+    rows = await fetch_visible_run_rows(
+        session,
+        select(AgentRunRow).order_by(AgentRunRow.id.desc()),
+        limit=1,
+        batch_size=1,
+    )
+
+    assert [row.id for row in rows] == [visible.id]
+
+
 def _patch_sqlite_for_agent_run_tables() -> None:
     if not hasattr(SQLiteTypeCompiler, "visit_JSONB"):
         SQLiteTypeCompiler.visit_JSONB = lambda self, type_, **kw: "TEXT"

@@ -6,6 +6,8 @@ tier constants. These are pure data — no handlers, no side effects.
 
 from __future__ import annotations
 
+from brain.systems.runs.tool_catalog.definitions.workers import WORKER_SPAWN_TOOLS
+
 
 _WORKSPACE_TIME_WINDOW_VALUES = [
     "all",
@@ -136,6 +138,7 @@ BRAIN_TOOLS = [
                         "list",
                         "get",
                         "create",
+                        "create_many",
                         "update",
                         "edit",
                         "archive",
@@ -174,6 +177,34 @@ BRAIN_TOOLS = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": "Initial package assets for create. Each item needs path and content.",
+                },
+                "skills": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                            "procedure": {"type": "string"},
+                            "model_tier": {"type": "string", "enum": ["local", "low", "medium", "high"]},
+                            "thinking_tier": {
+                                "type": "string",
+                                "enum": ["none", "low", "medium", "high", "xhigh"],
+                            },
+                            "triggers": {"type": "array", "items": {"type": "object"}},
+                            "guardrails": {"type": "array", "items": {"type": "object"}},
+                            "pitfalls": {"type": "array", "items": {}},
+                            "refinements": {"type": "array", "items": {}},
+                            "assets": {"type": "array", "items": {"type": "object"}},
+                            "create_as_package": {"type": "boolean"},
+                            "user_requested": {"type": "boolean"},
+                        },
+                        "required": ["name", "procedure"],
+                    },
+                    "description": (
+                        "Skill specs for action='create_many'. Per-skill fields mirror create; "
+                        "top-level model_tier, thinking_tier, create_as_package, and user_requested act as defaults."
+                    ),
                 },
                 "create_as_package": {
                     "type": "boolean",
@@ -2287,7 +2318,8 @@ WORKER_TOOLS = (
 )
 
 # Coordinator tools = normal workspace/product capabilities plus reply and
-# introspection tools. Deep planning/workers are runtime state transitions.
+# introspection tools. Deep planning remains recipe-owned; worker spawning is a
+# coordinator action so Fast can delegate independent slices without switching recipes.
 COORDINATOR_TOOLS = (
     BRAIN_TOOLS
     + SOUL_TOOLS
@@ -2300,6 +2332,7 @@ COORDINATOR_TOOLS = (
     + EXEC_TOOLS
     + SESSION_TOOLS
     + LIFECYCLE_TOOLS
+    + WORKER_SPAWN_TOOLS
     + [
         CORTEX_REPLY_TOOL,
         CORTEX_VISUAL_REPLY_TOOL,

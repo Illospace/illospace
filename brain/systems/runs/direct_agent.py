@@ -114,6 +114,7 @@ from brain.systems.runs.direct_loop.tool_execution import (
     resolve_tool_call as _runtime_resolve_tool_call,
 )
 from brain.systems.runs.tool_catalog.registry import parallel_safe_tool_names
+from brain.systems.runs.tool_policy import disabled_tool_names_from_metadata
 from brain.systems import sessions as _session_store
 
 logger = logging.getLogger("agent")
@@ -227,15 +228,7 @@ def _metadata_int(metadata: dict, key: str, default: int) -> int:
 
 
 def _disabled_tool_names(metadata: dict) -> set[str]:
-    policy = metadata.get("tool_policy")
-    if not isinstance(policy, dict):
-        return set()
-    raw_names = policy.get("disabled_tools") or policy.get("blocked_tools") or []
-    if isinstance(raw_names, str):
-        raw_names = [raw_names]
-    if not isinstance(raw_names, list):
-        return set()
-    return {str(name).strip() for name in raw_names if str(name or "").strip()}
+    return disabled_tool_names_from_metadata(metadata)
 
 
 def _apply_tool_policy(tools: list[dict] | None, tool_handlers: dict | None, metadata: dict) -> tuple[list[dict] | None, dict | None]:

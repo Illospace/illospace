@@ -1,3 +1,5 @@
+import { resizeComposerTextareaToContent } from './composerTextareaSizing';
+
 export const WORKSPACE_COMPOSER_MIN_HEIGHT = 40;
 export const WORKSPACE_COMPOSER_BOTTOM_MARGIN_MIN = 14;
 export const WORKSPACE_COMPOSER_BOTTOM_MARGIN_MAX = 26;
@@ -35,7 +37,8 @@ export function applyWorkspaceComposerTextareaHeight(
   textareaEl: HTMLTextAreaElement | undefined,
   maxHeight: number,
 ): void {
-  if (!textareaEl) return;
-  textareaEl.style.height = 'auto';
-  textareaEl.style.height = `${getWorkspaceComposerTextareaHeight(textareaEl.scrollHeight, maxHeight)}px`;
+  resizeComposerTextareaToContent(textareaEl, {
+    maxHeight,
+    minHeight: WORKSPACE_COMPOSER_MIN_HEIGHT,
+  });
 }

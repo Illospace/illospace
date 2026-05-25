@@ -145,6 +145,10 @@ class WorkerRecipe(BaseRunRecipe):
                 "target_ref": runtime.request.target_ref,
                 "workspace_ref": runtime.request.workspace_ref,
                 "thread_attachment_context": _thread_attachment_context(runtime),
+                "headless": bool(runtime.request.metadata.get("headless")),
+                "tool_policy": runtime.request.metadata.get("tool_policy")
+                if isinstance(runtime.request.metadata.get("tool_policy"), dict)
+                else {},
             },
         )
         try:

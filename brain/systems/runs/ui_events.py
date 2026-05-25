@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from brain.systems.runs.presentation import public_tool_event_payload
+from brain.systems.runs.visibility import run_is_headless
 
 STABLE_RUN_EVENT_TYPES = frozenset(
     {
@@ -40,6 +41,9 @@ def run_event_to_ui_message(
     replayed: bool = False,
 ) -> dict[str, Any] | None:
     """Project a durable AgentRun event into the public Cortex stream vocabulary."""
+
+    if run_is_headless(run):
+        return None
 
     source_type = str(getattr(event, "event_type", None) or "")
     ui_type = _INTERNAL_TO_UI_TYPE.get(source_type)

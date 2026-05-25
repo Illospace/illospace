@@ -65,6 +65,28 @@ def _skill(
     }
 
 
+def _skill_from_bundle(name: str, *, maturity: str = "emerging") -> dict[str, Any]:
+    """Project a bundled built-in skill into the legacy bootstrap shape."""
+
+    from brain.systems.skills.bundles import load_skill_bundle
+
+    bundle = load_skill_bundle(BUILTIN_SKILL_BUNDLE_ROOT / name)
+    manifest = bundle.manifest
+    raw = dict(manifest.raw or {})
+    return _skill(
+        name=manifest.name,
+        description=manifest.description,
+        procedure=bundle.skill_markdown,
+        model_tier=manifest.runtime.default_model_tier or "medium",
+        thinking_tier=manifest.runtime.default_thinking_tier or "medium",
+        maturity=str(raw.get("maturity") or maturity),
+        triggers=list(manifest.routing.triggers or []),
+        guardrails=list(raw.get("guardrails") or []),
+        pitfalls=list(raw.get("pitfalls") or []),
+        refinements=list(raw.get("refinements") or []),
+    )
+
+
 BUILTIN_SKILLS: dict[str, dict[str, Any]] = {
     "coordinate": _skill(
         name="coordinate",
@@ -256,6 +278,7 @@ At graph end, call `session_promote`, encode durable lessons, record
             {"text": "When a step can produce equivalent success, encode acceptable artifact alternatives in DONE WHEN."},
         ],
     ),
+    "report-workspace-blocker": _skill_from_bundle("report-workspace-blocker", maturity="proficient"),
     "skill-authoring": _skill(
         name="skill-authoring",
         description=(
@@ -895,9 +918,12 @@ and any newly uploaded file/resource metadata the user wants to keep.
 2. For durable work, call `manage_project(action="list")` unless the exact project id is already known.
 3. Create projects with a clear name, stable slug, and the smallest useful set of resources.
 4. Add, update, remove, or reorder resources with `manage_project` instead of inventing ad hoc metadata.
-5. Attach a project to the current thread when the user wants Illo to use it here.
-6. Archive projects by default for delete requests; treat permanent deletion as unavailable unless the product adds it.
-7. Tell the user what changed in plain language without exposing internal validation or status machinery.
+5. For repo, folder, file, or doc work that needs repeated access, create or
+   attach the smallest Project Context that represents the working set before
+   trying raw paths or unauthenticated remotes.
+6. Attach a project to the current thread when the user wants Illo to use it here.
+7. Archive projects by default for delete requests; treat permanent deletion as unavailable unless the product adds it.
+8. Tell the user what changed in plain language without exposing internal validation or status machinery.
 
 ## Output Contract
 

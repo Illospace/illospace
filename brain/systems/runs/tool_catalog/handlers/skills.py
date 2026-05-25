@@ -20,6 +20,8 @@ _SKILL_UPDATE_FIELDS = (
     "guardrails",
 )
 
+_MAX_CREATE_MANY_SKILLS = 50
+
 
 def _skill_error(message: str, *, hint: str | None = None, action: str | None = None) -> str:
     payload: dict[str, Any] = {"ok": False, "error": message}
@@ -288,6 +290,101 @@ async def _handle_create_skill(
         return {"created": False, "error": str(e)}
 
 
+async def _handle_create_many_skills(
+    skill_specs: list | None,
+    *,
+    model_tier: str = "medium",
+    thinking_tier: str = "medium",
+    create_as_package: bool = False,
+    user_requested: bool = True,
+) -> dict:
+    """Create several skills in one model-visible tool call."""
+    if not isinstance(skill_specs, list) or not skill_specs:
+        return {
+            "created": False,
+            "error": "create_many requires a non-empty skills array",
+            "hint": "Pass skills=[{name, description, procedure, ...}, ...].",
+        }
+    if len(skill_specs) > _MAX_CREATE_MANY_SKILLS:
+        return {
+            "created": False,
+            "error": f"create_many supports at most {_MAX_CREATE_MANY_SKILLS} skills per call",
+            "count": len(skill_specs),
+        }
+
+    results: list[dict[str, Any]] = []
+    for index, spec in enumerate(skill_specs):
+        if not isinstance(spec, dict):
+            results.append({
+                "index": index,
+                "ok": False,
+                "created": False,
+                "error": "Skill spec must be an object",
+            })
+            continue
+
+        skill_name = str(spec.get("name") or "").strip()
+        procedure = spec.get("procedure")
+        if not skill_name:
+            results.append({
+                "index": index,
+                "ok": False,
+                "created": False,
+                "error": "Skill spec requires: name",
+            })
+            continue
+        if procedure is None:
+            results.append({
+                "index": index,
+                "name": skill_name,
+                "ok": False,
+                "created": False,
+                "error": "Skill spec requires: procedure",
+            })
+            continue
+
+        skill_assets = spec.get("assets")
+        if skill_assets is not None and not isinstance(skill_assets, list):
+            results.append({
+                "index": index,
+                "name": skill_name,
+                "ok": False,
+                "created": False,
+                "error": "Skill spec assets must be an array",
+            })
+            continue
+
+        result = await _handle_create_skill(
+            name=skill_name,
+            description=str(spec.get("description") or ""),
+            procedure=str(procedure),
+            user_requested=bool(spec.get("user_requested", user_requested)),
+            model_tier=str(spec.get("model_tier") or model_tier or "medium"),
+            thinking_tier=str(spec.get("thinking_tier") or thinking_tier or "medium"),
+            triggers=spec.get("triggers"),
+            guardrails=spec.get("guardrails"),
+            pitfalls=spec.get("pitfalls"),
+            refinements=spec.get("refinements"),
+            assets=skill_assets,
+            create_as_package=bool(spec.get("create_as_package", create_as_package)),
+        )
+        results.append({
+            "index": index,
+            "ok": bool(result.get("created")),
+            **result,
+        })
+
+    created_count = sum(1 for item in results if item.get("created"))
+    failed_count = len(results) - created_count
+    return {
+        "created": failed_count == 0,
+        "count": len(results),
+        "created_count": created_count,
+        "failed_count": failed_count,
+        "results": results,
+    }
+
+
 async def _handle_manage_skill_asset(
     skill_name: str,
     path: str,
@@ -374,6 +471,7 @@ async def _handle_manage_skill(
     pitfalls: list | None = None,
     refinements: list | None = None,
     assets: list | None = None,
+    skills: list | None = None,
     create_as_package: bool = False,
     user_requested: bool = True,
     path: str | None = None,
@@ -415,6 +513,16 @@ async def _handle_manage_skill(
             refinements=refinements,
             assets=assets,
             create_as_package=create_as_package,
+        )
+        return json.dumps({"ok": bool(result.get("created")), "action": normalized, **result}, default=str)
+
+    if normalized == "create_many":
+        result = await _handle_create_many_skills(
+            skills,
+            model_tier=model_tier or "medium",
+            thinking_tier=thinking_tier or "medium",
+            create_as_package=create_as_package,
+            user_requested=bool(user_requested),
         )
         return json.dumps({"ok": bool(result.get("created")), "action": normalized, **result}, default=str)
 

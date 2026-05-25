@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import select
 
 from brain.systems.runs.cortex.permissions import RunReadScope, run_belongs_to_scope
+from brain.systems.runs.visibility import fetch_visible_run_rows, run_is_headless
 from brain.platform.db.models.agent_run import (
     AgentRunArtifactRow,
     AgentRunEventRow,
@@ -94,11 +95,10 @@ def _active_runs_stmt(scope: RunReadScope | None):
     )
 
 
-def _recent_runs_stmt(scope: RunReadScope | None, *, limit: int):
+def _recent_runs_stmt(scope: RunReadScope | None):
     return (
         _visible_query(scope)
         .order_by(AgentRunRow.created_at.desc(), AgentRunRow.id.desc())
-        .limit(limit)
     )
 
 
@@ -166,8 +166,8 @@ async def serialize_active_runs_async(
     uow_factory=UnitOfWork,
 ) -> list[dict[str, Any]]:
     async with uow_factory() as uow:
-        result = await uow.session.scalars(_active_runs_stmt(scope))
-        return [run_stream_payload(row) for row in result.all()]
+        rows = await fetch_visible_run_rows(uow.session, _active_runs_stmt(scope))
+        return [run_stream_payload(row) for row in rows]
 
 
 async def serialize_recent_runs_async(
@@ -178,8 +178,8 @@ async def serialize_recent_runs_async(
     uow_factory=UnitOfWork,
 ) -> list[dict[str, Any]]:
     async with uow_factory() as uow:
-        result = await uow.session.scalars(_recent_runs_stmt(scope, limit=limit))
-        payloads = [run_stream_payload(row) for row in result.all()]
+        rows = await fetch_visible_run_rows(uow.session, _recent_runs_stmt(scope), limit=limit)
+        payloads = [run_stream_payload(row) for row in rows]
         if include_debug:
             for payload in payloads:
                 payload["debug"] = await serialize_run_debug_async(
@@ -197,8 +197,8 @@ async def serialize_run_history_async(
     uow_factory=UnitOfWork,
 ) -> list[dict[str, Any]]:
     async with uow_factory() as uow:
-        result = await uow.session.scalars(_run_history_stmt(idea_id))
-        payloads = [run_stream_payload(row) for row in result.all()]
+        rows = await fetch_visible_run_rows(uow.session, _run_history_stmt(idea_id))
+        payloads = [run_stream_payload(row) for row in rows]
     if include_debug:
         for payload in payloads:
             payload["debug"] = await serialize_run_debug_async(
@@ -235,6 +235,7 @@ __all__ = [
     "RunReadScope",
     "project_run_status",
     "run_belongs_to_scope",
+    "run_is_headless",
     "run_stream_payload",
     "serialize_active_runs_async",
     "serialize_recent_runs_async",
