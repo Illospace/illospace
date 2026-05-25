@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from typing import Any, Iterable
 
 from brain.platform.providers.model_policy import get_model_for_tier
-from brain.systems.personality import soul_prompt_section
+from brain.systems.personality import agent_profile_prompt_section, soul_prompt_section
 from brain.systems.runs.assignments import AcceptanceCriteria, EvidenceRequirement, WorkerAssignment
 from brain.systems.runs.domain import AgentRun, AgentRunArtifact, ArtifactType, RunProfile, RunRecipe
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
@@ -530,7 +530,11 @@ class DeepRecipe(BaseRunRecipe):
     async def _synthesize_with_coordinator(self, runtime: RunRuntime, node_results: dict[str, dict[str, Any]]) -> str:
         fallback = self._synthesize_output(node_results)
         model, thinking = _coordinator_model_and_thinking(runtime)
-        system_prompt = soul_prompt_section() + "\n\n" + DEEP_COORDINATOR_SYNTHESIS_INSTRUCTIONS
+        system_prompt = "\n\n".join((
+            soul_prompt_section(),
+            agent_profile_prompt_section(),
+            DEEP_COORDINATOR_SYNTHESIS_INSTRUCTIONS,
+        ))
         payload = _coordinator_synthesis_payload(runtime, node_results)
         await runtime.store.append_event(
             run_event(
