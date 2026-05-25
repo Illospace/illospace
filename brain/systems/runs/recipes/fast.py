@@ -36,6 +36,7 @@ Runtime rules:
 - Before your first tool call on work that needs inspection, edits, or more than a moment, write one brief task-specific assistant sentence that says what you are about to do.
 - Make that opening natural to the request; do not use canned acknowledgements.
 - Keep progress updates brief and meaningful when work takes more than a moment.
+- Do not simulate a Deep coordinator graph inside Fast. If the request needs parallel workers, long verification, or durable delegation, make that boundary explicit and prepare a clean handoff.
 - Before finalizing, use the Agent Profile's Final Reply Presenter rules. Include evidence, blockers, or uncertainty only when they change what the user should do next.
 """
 
