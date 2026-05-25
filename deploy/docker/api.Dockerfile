@@ -20,7 +20,14 @@ RUN apt-get update \
         curl \
         fonts-liberation \
         git \
+        jq \
         libpq-dev \
+        nodejs \
+        npm \
+        openssh-client \
+        ripgrep \
+        unzip \
+        zip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-production.txt pyproject.toml alembic.ini ./
@@ -34,8 +41,15 @@ COPY README.md LICENSE NOTICE.md ./
 RUN chmod +x ./ops/install-browser-runtime.sh \
     && ./ops/install-browser-runtime.sh python3 \
     && useradd --create-home --uid 10001 illo \
-    && mkdir -p /data/private /app/brain/uploads /workspaces \
+    && mkdir -p /data/private /data/private/npm-cache /data/private/npm-global /app/brain/uploads /workspaces \
     && chown -R illo:illo /data /app/brain/uploads /workspaces
+
+ENV NPM_CONFIG_CACHE=/data/private/npm-cache \
+    NPM_CONFIG_PREFIX=/data/private/npm-global \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    PATH=/data/private/npm-global/bin:$PATH
 
 USER illo
 

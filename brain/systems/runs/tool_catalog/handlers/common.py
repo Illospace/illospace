@@ -360,6 +360,11 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
             ],
             "effect": "create a durable slash-routable skill",
         },
+        "create_many": {
+            "required": ["skills"],
+            "optional": ["model_tier", "thinking_tier", "create_as_package", "user_requested"],
+            "effect": "create multiple durable slash-routable skills in one tool call",
+        },
         "update": {
             "required": ["skill_id or skill_name", "at least one changed field"],
             "optional": ["name", "description", "procedure", "model_tier", "thinking_tier", "triggers", "guardrails", "pitfalls", "refinements"],

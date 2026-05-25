@@ -62,6 +62,7 @@ from brain.systems.runs.tool_catalog.handlers.session_tools import (
 )
 from brain.systems.runs.tool_catalog.handlers.activity import _handle_my_activity
 from brain.systems.runs.tool_catalog.handlers.web import _handle_web_fetch, _handle_web_search
+from brain.systems.runs.tool_catalog.handlers.workers import _handle_spawn_worker
 from brain.systems.runs.tool_catalog.handlers.workspace_data import (
     _handle_query_workspace_data,
     _handle_read_cycles,
@@ -239,6 +240,7 @@ def _get_tool_handlers(
         "cortex_reply": _handle_cortex_reply,
         "cortex_visual_reply": lambda **kwargs: _handle_cortex_visual_reply(**kwargs),
         "my_activity": _handle_my_activity,
+        "spawn_worker": lambda **kw: _patched_private("_handle_spawn_worker", _handle_spawn_worker)(**kw),
         "browser": lambda **kw: _patched_private("_handle_browser", _handle_browser)(**kw),
         "web_search": _handle_web_search,
         "web_fetch": _handle_web_fetch,

@@ -136,6 +136,7 @@ BRAIN_TOOLS = [
                         "list",
                         "get",
                         "create",
+                        "create_many",
                         "update",
                         "edit",
                         "archive",
@@ -174,6 +175,34 @@ BRAIN_TOOLS = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": "Initial package assets for create. Each item needs path and content.",
+                },
+                "skills": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                            "procedure": {"type": "string"},
+                            "model_tier": {"type": "string", "enum": ["local", "low", "medium", "high"]},
+                            "thinking_tier": {
+                                "type": "string",
+                                "enum": ["none", "low", "medium", "high", "xhigh"],
+                            },
+                            "triggers": {"type": "array", "items": {"type": "object"}},
+                            "guardrails": {"type": "array", "items": {"type": "object"}},
+                            "pitfalls": {"type": "array", "items": {}},
+                            "refinements": {"type": "array", "items": {}},
+                            "assets": {"type": "array", "items": {"type": "object"}},
+                            "create_as_package": {"type": "boolean"},
+                            "user_requested": {"type": "boolean"},
+                        },
+                        "required": ["name", "procedure"],
+                    },
+                    "description": (
+                        "Skill specs for action='create_many'. Per-skill fields mirror create; "
+                        "top-level model_tier, thinking_tier, create_as_package, and user_requested act as defaults."
+                    ),
                 },
                 "create_as_package": {
                     "type": "boolean",
@@ -2266,6 +2295,94 @@ LIFECYCLE_TOOLS = [
     },
 ]
 
+WORKER_SPAWN_TOOLS = [
+    {
+        "name": "spawn_worker",
+        "description": (
+            "Queue a scoped worker AgentRun and return immediately. Use this when an independent "
+            "slice can progress in parallel while the current run continues, or when Illo should "
+            "file/report an internal bug or blocker in the background. Set headless=true for "
+            "background reporting or investigation that should not create visible thread content."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "objective": {
+                    "type": "string",
+                    "description": "Specific outcome the worker owns. Keep it narrow and independently completable.",
+                },
+                "role": {
+                    "type": "string",
+                    "default": "worker",
+                    "description": "Short worker role label, such as investigate, report_bug, verify, or implement.",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Optional full instruction to run. Defaults to the objective.",
+                },
+                "headless": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When true, hide the worker from visible thread history and block visible reply tools.",
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Optional stable key to avoid duplicate workers for the same background task.",
+                },
+                "allowed_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional file patterns the worker may mutate/read within its scoped assignment.",
+                },
+                "forbidden_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional file patterns the worker must not touch.",
+                },
+                "allowed_resources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional resource identifiers the worker may use.",
+                },
+                "forbidden_resources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional resource identifiers the worker must not use.",
+                },
+                "expected_artifacts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional artifact types the worker should produce, such as worker_result or pr_link.",
+                },
+                "evidence_requirements": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Optional evidence requirements using WorkerAssignment evidence requirement shape.",
+                },
+                "acceptance_criteria": {
+                    "type": "object",
+                    "description": "Optional WorkerAssignment acceptance criteria.",
+                },
+                "risk_level": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "default": "medium",
+                    "description": "Risk level for the scoped worker assignment.",
+                },
+                "tool_policy": {
+                    "type": "object",
+                    "description": "Optional additional tool policy for the worker. headless=true adds visible-tool blocks.",
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Optional extra provenance metadata to attach to the worker run.",
+                },
+            },
+            "required": ["objective"],
+        },
+    },
+]
+
 # ── Composite Tool Lists ─────────────────────────────────────
 
 # Worker tools = normal workspace/product capabilities. Harness orchestration
@@ -2287,7 +2404,8 @@ WORKER_TOOLS = (
 )
 
 # Coordinator tools = normal workspace/product capabilities plus reply and
-# introspection tools. Deep planning/workers are runtime state transitions.
+# introspection tools. Deep planning remains recipe-owned; worker spawning is a
+# coordinator action so Fast can delegate independent slices without switching recipes.
 COORDINATOR_TOOLS = (
     BRAIN_TOOLS
     + SOUL_TOOLS
@@ -2300,6 +2418,7 @@ COORDINATOR_TOOLS = (
     + EXEC_TOOLS
     + SESSION_TOOLS
     + LIFECYCLE_TOOLS
+    + WORKER_SPAWN_TOOLS
     + [
         CORTEX_REPLY_TOOL,
         CORTEX_VISUAL_REPLY_TOOL,

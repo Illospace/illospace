@@ -21,6 +21,7 @@ from brain.systems.runs.tool_catalog.handlers.projects import *  # noqa: F401,F4
 from brain.systems.runs.tool_catalog.handlers.session_tools import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.skills import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.web import *  # noqa: F401,F403
+from brain.systems.runs.tool_catalog.handlers.workers import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.workspace_data import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.workspace_apps import *  # noqa: F401,F403
 from brain.systems.runs.tool_catalog.handlers.composition import get_tools_with_extended
@@ -74,6 +75,7 @@ _COMPOSITION_PATCH_NAMES = (
     "_handle_session_read",
     "_handle_session_write",
     "_handle_my_activity",
+    "_handle_spawn_worker",
     "_handle_query_workspace_data",
     "_handle_read_cycles",
     "_handle_read_project_contexts",

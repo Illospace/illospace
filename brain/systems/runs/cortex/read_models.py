@@ -45,6 +45,11 @@ def project_run_status(status: str | None, fallback: str | None = None) -> str:
     return raw
 
 
+def run_is_headless(run: AgentRunRow) -> bool:
+    metadata = run.metadata_ if isinstance(run.metadata_, dict) else {}
+    return bool(metadata.get("headless"))
+
+
 def run_stream_payload(run: AgentRunRow) -> dict[str, Any]:
     timestamp = _iso(run.created_at)
     return {
@@ -167,7 +172,7 @@ async def serialize_active_runs_async(
 ) -> list[dict[str, Any]]:
     async with uow_factory() as uow:
         result = await uow.session.scalars(_active_runs_stmt(scope))
-        return [run_stream_payload(row) for row in result.all()]
+        return [run_stream_payload(row) for row in result.all() if not run_is_headless(row)]
 
 
 async def serialize_recent_runs_async(
@@ -179,7 +184,7 @@ async def serialize_recent_runs_async(
 ) -> list[dict[str, Any]]:
     async with uow_factory() as uow:
         result = await uow.session.scalars(_recent_runs_stmt(scope, limit=limit))
-        payloads = [run_stream_payload(row) for row in result.all()]
+        payloads = [run_stream_payload(row) for row in result.all() if not run_is_headless(row)]
         if include_debug:
             for payload in payloads:
                 payload["debug"] = await serialize_run_debug_async(
@@ -198,7 +203,7 @@ async def serialize_run_history_async(
 ) -> list[dict[str, Any]]:
     async with uow_factory() as uow:
         result = await uow.session.scalars(_run_history_stmt(idea_id))
-        payloads = [run_stream_payload(row) for row in result.all()]
+        payloads = [run_stream_payload(row) for row in result.all() if not run_is_headless(row)]
     if include_debug:
         for payload in payloads:
             payload["debug"] = await serialize_run_debug_async(
@@ -235,6 +240,7 @@ __all__ = [
     "RunReadScope",
     "project_run_status",
     "run_belongs_to_scope",
+    "run_is_headless",
     "run_stream_payload",
     "serialize_active_runs_async",
     "serialize_recent_runs_async",

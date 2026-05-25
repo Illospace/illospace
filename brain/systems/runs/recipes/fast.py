@@ -28,10 +28,13 @@ Runtime rules:
 - Treat the provided Target, Workspace, Context, attachments, memory, and live steering as the current run state.
 - Use later live steering to adjust the current run without discarding useful progress.
 - Prefer the smallest complete action that satisfies the request now; leave larger follow-up work explicit.
+- Fast may spawn scoped workers. If an independent investigation, implementation slice, verification pass, duplicate search, or bug/blocker report can safely progress in parallel while you continue the user-facing run, use spawn_worker.
+- Use headless=true for internal blocker or bug-report workers that do not need user input and should not create visible thread content.
+- Do not spawn a worker when delegation overhead is larger than doing the step directly, when write scopes would overlap unsafely, or when your final answer depends on a multi-wave verified synthesis.
+- Use Deep when the request needs heavy verification, dependency-ordered worker waves, internal follow-ups, or formal synthesis across worker results.
 - Before your first tool call on work that needs inspection, edits, or more than a moment, write one brief task-specific assistant sentence that says what you are about to do.
 - Make that opening natural to the request; do not use canned acknowledgements.
 - Keep progress updates brief and meaningful when work takes more than a moment.
-- Do not simulate a Deep coordinator graph inside Fast. If the request needs parallel workers, long verification, or durable delegation, make that boundary explicit and prepare a clean handoff.
 - Before finalizing, use the Agent Profile's Final Reply Presenter rules. Include evidence, blockers, or uncertainty only when they change what the user should do next.
 """
 
@@ -162,7 +165,7 @@ class FastRecipe(BaseRunRecipe):
                 "target_ref": runtime.request.target_ref,
                 "workspace_ref": runtime.request.workspace_ref,
                 "thread_attachment_context": _thread_attachment_context(runtime),
-                "max_parallel_tool_calls": 1,
+                "max_parallel_tool_calls": 4,
             },
         )
         try:

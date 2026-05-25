@@ -190,6 +190,7 @@ class TestManageSkillUmbrella:
 
         assert result["tool"] == "manage_skill"
         assert "create" in result["operations"]
+        assert "create_many" in result["operations"]
         assert "upsert_asset" in result["operations"]
 
     @patch("brain.systems.memory.embeddings.vec_to_pg", return_value="[0.1]")
@@ -210,3 +211,59 @@ class TestManageSkillUmbrella:
         assert result["created"] is True
         assert result["skill_id"] == 45
         assert result["source_kind"] == "private_local"
+
+    @patch("brain.systems.runs.tool_catalog.handlers.skills._handle_create_skill", new_callable=AsyncMock)
+    async def test_create_many_action_creates_skills_in_one_call(self, mock_create):
+        mock_create.side_effect = [
+            {
+                "created": True,
+                "skill_id": 101,
+                "name": "diagnose",
+                "source_kind": "private_local",
+            },
+            {
+                "created": True,
+                "skill_id": 102,
+                "name": "tdd",
+                "source_kind": "private_local",
+            },
+        ]
+
+        result = json.loads(await _handle_manage_skill(
+            action="create_many",
+            model_tier="low",
+            thinking_tier="none",
+            user_requested=True,
+            skills=[
+                {
+                    "name": "diagnose",
+                    "description": "Diagnose bugs with a disciplined loop",
+                    "procedure": VALID_PROCEDURE,
+                },
+                {
+                    "name": "tdd",
+                    "description": "Build with red-green-refactor",
+                    "procedure": VALID_PROCEDURE,
+                    "model_tier": "medium",
+                },
+            ],
+        ))
+
+        assert result["ok"] is True
+        assert result["created_count"] == 2
+        assert result["failed_count"] == 0
+        assert [item["skill_id"] for item in result["results"]] == [101, 102]
+
+        first_call = mock_create.await_args_list[0].kwargs
+        second_call = mock_create.await_args_list[1].kwargs
+        assert first_call["name"] == "diagnose"
+        assert first_call["model_tier"] == "low"
+        assert first_call["thinking_tier"] == "none"
+        assert second_call["name"] == "tdd"
+        assert second_call["model_tier"] == "medium"
+
+    async def test_create_many_requires_skills_array(self):
+        result = json.loads(await _handle_manage_skill(action="create_many"))
+
+        assert result["ok"] is False
+        assert "skills array" in result["error"]

@@ -20,7 +20,7 @@ from brain.app.api.auth import get_current_user
 from brain.app.api.services.notifications import (
     async_build_notification_summary,
 )
-from brain.systems.runs.cortex.read_models import run_stream_payload
+from brain.systems.runs.cortex.read_models import run_is_headless, run_stream_payload
 from brain.app.api.routers.cortex._helpers import (
     _infer_feedback_tags,
     _parse_message_type,
@@ -706,6 +706,8 @@ async def unified_stream_payload(
                 .limit(20)
             )
             for run in (await uow.session.scalars(stmt)).all():
+                if run_is_headless(run):
+                    continue
                 items.append(run_stream_payload(run))
 
         run_ids = [int(item["id"]) for item in items if item.get("type") == "run"]
@@ -723,7 +725,7 @@ async def unified_stream_payload(
                 .order_by(AgentRun.created_at.asc(), AgentRun.id.asc())
             )
             for child in (await uow.session.scalars(children_stmt)).all():
-                if child.parent_run_id is None:
+                if child.parent_run_id is None or run_is_headless(child):
                     continue
                 child_runs.setdefault(int(child.parent_run_id), []).append(run_stream_payload(child))
 

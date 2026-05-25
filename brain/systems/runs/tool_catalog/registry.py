@@ -23,6 +23,7 @@ from brain.systems.runs.tool_definitions import (
     SESSION_TOOLS,
     WORKSPACE_OVERVIEW_SPARSE_GUIDANCE,
     WORKSPACE_APP_TOOLS,
+    WORKER_SPAWN_TOOLS,
 )
 from brain.systems.runs.tool_catalog.metadata import (
     ActionPolicyResult,
@@ -358,6 +359,14 @@ _STATIC_METADATA: dict[str, dict[str, Any]] = {
         "parallel_safety": "serial",
         "expected_effect": "execute safe read tools concurrently",
     },
+    "spawn_worker": {
+        "permission": "spawn_worker",
+        "risk_class": "medium",
+        "side_effect_class": "run_spawn",
+        "reversibility": "reversible",
+        "action_manifest": True,
+        "expected_effect": "queue a scoped child AgentRun worker",
+    },
     "web_search": {
         "permission": "network_read",
         "risk_class": "low",
@@ -477,6 +486,7 @@ def _definition_sources() -> list[tuple[str, tuple[str, ...], list[Mapping[str, 
         ("execution", ("coordinator", "worker"), EXEC_TOOLS),
         ("session", ("coordinator", "worker"), SESSION_TOOLS),
         ("lifecycle", ("coordinator",), LIFECYCLE_TOOLS),
+        ("worker_spawn", ("coordinator",), WORKER_SPAWN_TOOLS),
         ("reply", ("coordinator",), [CORTEX_REPLY_TOOL]),
         ("visual_reply", ("coordinator", "worker"), [CORTEX_VISUAL_REPLY_TOOL]),
         ("introspection", ("coordinator",), [MY_ACTIVITY_TOOL]),
@@ -748,6 +758,7 @@ def action_policy_for_tool(
         skill_action = str(_arg_at(args_tuple, kwargs_dict, "action", 0, "") or "").strip().lower()
         effect_by_action = {
             "create": "create a durable slash-routable skill",
+            "create_many": "create multiple durable slash-routable skills",
             "update": "update an installed skill",
             "edit": "update an installed skill",
             "archive": "archive an installed skill",
