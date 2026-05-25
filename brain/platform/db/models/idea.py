@@ -48,6 +48,12 @@ class Idea(Base):
 
     __tablename__ = "ideas"
     __table_args__ = (
+        CheckConstraint(
+            "status IN ('emerged', 'queued', 'active', 'working', 'needs_input', "
+            "'unread_reply', 'blocked', 'failed', 'resolved', 'stale', 'paused', "
+            "'done', 'archived', 'exploring', 'building', 'testing')",
+            name="ck_ideas_status",
+        ),
         Index("ix_ideas_archived_updated", "archived_at", "updated_at"),
         Index("ix_ideas_org_archived_updated", "org_id", "archived_at", "updated_at"),
         Index("ix_ideas_status_archived_updated", "status", "archived_at", "updated_at"),
@@ -118,10 +124,15 @@ class Idea(Base):
     embedding: Mapped[Optional[object]] = mapped_column(
         Vector(IDEA_EMBEDDING_DIM), nullable=True
     )
+
+
 class IdeaStateLog(Base):
     """State transition log for an idea."""
 
     __tablename__ = "idea_state_log"
+    __table_args__ = (
+        Index("ix_idea_state_log_idea_changed", "idea_id", "changed_at", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     idea_id: Mapped[Optional[str]] = mapped_column(

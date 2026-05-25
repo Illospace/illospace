@@ -20,6 +20,17 @@ def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
         op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        op.execute(
+            """
+            DO $$
+            BEGIN
+                EXECUTE 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements';
+            EXCEPTION WHEN OTHERS THEN
+                RAISE NOTICE 'Skipping pg_stat_statements extension: %', SQLERRM;
+            END $$;
+            """
+        )
 
     from brain.platform.db.base import Base
     import brain.platform.db.models  # noqa: F401

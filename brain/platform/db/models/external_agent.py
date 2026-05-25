@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -123,6 +124,11 @@ class ExternalAgentTaskRow(Base, TimestampMixin):
 
     __tablename__ = "external_agent_tasks"
     __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'claimed', 'running', 'submitted', 'completed', "
+            "'failed', 'cancelled', 'canceled', 'blocked', 'expired')",
+            name="ck_external_agent_tasks_status",
+        ),
         UniqueConstraint("connection_id", "idempotency_key", name="uq_external_agent_tasks_connection_idempotency"),
         Index("ix_external_agent_tasks_org_status_created", "org_id", "status", "created_at"),
         Index("ix_external_agent_tasks_connection_status_created", "connection_id", "status", "created_at"),

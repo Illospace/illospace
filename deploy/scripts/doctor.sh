@@ -187,7 +187,6 @@ check_db_provider_credentials() {
   local count
   if count="$(compose exec -T postgres psql -U "${DB_USER:-}" -d "${DB_NAME:-}" -tAc "
 SELECT
-  COALESCE((SELECT count(*) FROM user_api_keys WHERE is_active), 0) +
   COALESCE((SELECT count(*) FROM org_api_keys), 0) +
   COALESCE((SELECT count(*) FROM vault_config WHERE key LIKE 'runtime_memory_api_key_%' AND value <> ''), 0);
 " 2>/dev/null | tr -d '[:space:]')"; then

@@ -52,6 +52,16 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT_MS:-1000}
     environment:
       POSTGRES_DB: ${DB_NAME:?Set DB_NAME in deploy/compose/.env}
       POSTGRES_USER: ${DB_USER:?Set DB_USER in deploy/compose/.env}
@@ -99,7 +109,8 @@ services:
       CORTEX_MAX_RUNTIME: ${CORTEX_MAX_RUNTIME:-600}
       CORTEX_EMBEDDING_READY_TIMEOUT_SECONDS: ${CORTEX_EMBEDDING_READY_TIMEOUT_SECONDS:-300}
       ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS: ${ILLO_AGENT_RUNNER_DRAIN_TIMEOUT_SECONDS:-infinity}
-      ILLO_WORKER_DISABLE_CYCLE_SCHEDULER: "1"
+      ILLO_WORKER_ENABLE_CYCLE_SCHEDULER: "1"
+      ILLO_WORKER_DISABLE_CYCLE_SCHEDULER: "0"
     depends_on:
       postgres:
         condition: service_healthy

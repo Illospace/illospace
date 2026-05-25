@@ -257,6 +257,7 @@ def test_illo_update_auto_selects_native_or_compose_server_mode():
 def test_compose_deploy_stays_private_without_builtin_public_ingress():
     root = Path(__file__).resolve().parents[1]
     compose = (root / "deploy" / "compose" / "docker-compose.yml").read_text()
+    env_example = (root / "deploy" / "compose" / ".env.production.example").read_text()
     launcher = (root / "illo").read_text()
     services_section = compose.split("services:", 1)[1].rsplit("\nvolumes:", 1)[0]
     service_names = re.findall(r"^  ([a-z][a-z0-9_-]+):$", services_section, flags=re.MULTILINE)
@@ -265,7 +266,13 @@ def test_compose_deploy_stays_private_without_builtin_public_ingress():
     assert "127.0.0.1:${ILLO_WEB_PORT:-8080}:8080" in compose
     assert "ILLO_SELF_UPDATE_REQUEST_FILE" in compose
     assert "ILLO_SELF_UPDATE_HEARTBEAT_FILE" in compose
-    assert 'ILLO_WORKER_DISABLE_CYCLE_SCHEDULER: "1"' in compose
+    assert "shared_preload_libraries=pg_stat_statements" in compose
+    assert "pg_stat_statements.track=all" in compose
+    assert "track_io_timing=on" in compose
+    assert "log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT_MS:-1000}" in compose
+    assert "POSTGRES_LOG_MIN_DURATION_STATEMENT_MS=1000" in env_example
+    assert 'ILLO_WORKER_ENABLE_CYCLE_SCHEDULER: "1"' in compose
+    assert 'ILLO_WORKER_DISABLE_CYCLE_SCHEDULER: "0"' in compose
     assert "deploy/docker/updater.Dockerfile" in compose
     assert "illo-self-update-healthcheck" in compose
     assert "/var/run/docker.sock:/var/run/docker.sock" in compose

@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -33,6 +34,11 @@ __all__ = [
 class AgentRunRow(Base, TimestampMixin):
     __tablename__ = "agent_runs"
     __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'starting', 'running', 'paused', 'verifying', "
+            "'completed', 'failed', 'canceled', 'cancelled', 'expired', 'error', 'blocked')",
+            name="ck_agent_runs_status",
+        ),
         Index("ix_agent_runs_org_created", "org_id", "created_at"),
         Index("ix_agent_runs_thread_created", "thread_id", "created_at"),
         Index("ix_agent_runs_status_created", "status", "created_at"),

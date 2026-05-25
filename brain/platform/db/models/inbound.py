@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -240,6 +241,10 @@ class InboundEventRow(Base, CreatedAtMixin):
 
     __tablename__ = "inbound_events"
     __table_args__ = (
+        CheckConstraint(
+            "status IN ('received', 'processed', 'review_required', 'quarantined', 'failed')",
+            name="ck_inbound_events_status",
+        ),
         UniqueConstraint("connection_id", "idempotency_key", name="uq_inbound_events_connection_idempotency"),
         Index("ix_inbound_events_connection_created", "connection_id", "created_at"),
         Index("ix_inbound_events_origin_created", "org_id", "origin", "created_at"),
