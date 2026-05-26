@@ -57,6 +57,7 @@
   let fileSaveLoading = $state(false);
   let fileSaveError = $state('');
   let fileSaveNotice = $state('');
+  let previewMode = $state<'review' | 'final'>('review');
 
   const draftView = $derived.by(() =>
     buildProjectDraftPanelView({ draftState, loading, loadError, runId }),
@@ -77,6 +78,7 @@
   const visibleRows = $derived(visibleProjectExplorerRows(fileBrowser.rows, collapsedDirectoryKeys));
   const previewView = $derived(buildProjectFilePreviewView(filePreview, selectedFile));
   const isEditingSelectedFile = $derived(Boolean(selectedFile && editingFileKey === selectedFile.key));
+  const activePreviewMode = $derived(previewMode === 'review' && previewView.mode === 'diff' ? 'review' : 'final');
 
   function metricCountLabel(value: number): string {
     return Number.isFinite(value) ? String(value) : '0';
@@ -92,12 +94,17 @@
 
   function selectFile(file: ProjectExplorerFile) {
     selectedFileKey = file.key;
+    previewMode = 'review';
     fileSaveError = '';
     fileSaveNotice = '';
     if (editingFileKey && editingFileKey !== file.key) {
       editingFileKey = '';
       editorContent = '';
     }
+  }
+
+  function setPreviewMode(mode: 'review' | 'final') {
+    previewMode = mode;
   }
 
   function directoryCollapsed(row: ProjectExplorerDirectory): boolean {
@@ -145,7 +152,8 @@
       editingFileKey = '';
       editorContent = '';
       loadedFileKey = `${ideaId}:${currentRunId ?? ''}:${file.resourceId}:${file.path}`;
-      fileSaveNotice = 'Thread draft updated.';
+      fileSaveNotice = 'Thread draft saved.';
+      previewMode = 'final';
       await loadDraftState(ideaId, currentRunId);
     } catch (error: any) {
       fileSaveError = error?.detail || error?.message || 'Project draft file could not be updated.';
@@ -223,6 +231,7 @@
     if (fileBrowser.files.length === 0) {
       selectedFileKey = '';
       collapsedDirectoryKeys = [];
+      previewMode = 'review';
       return;
     }
     if (selectedFileKey && fileBrowser.files.some((file) => file.key === selectedFileKey)) return;
@@ -374,11 +383,11 @@
                     type="button"
                     class="project-file-edit-button"
                     disabled={!previewView.canEdit || filePreviewLoading || fileSaveLoading}
-                    title={previewView.canEdit ? 'Update this file in the thread draft' : 'This file cannot be edited as text here'}
+                    title={previewView.canEdit ? 'Edit this file in the thread draft' : 'This file cannot be edited as text here'}
                     onclick={isEditingSelectedFile ? cancelFileEdit : beginFileEdit}
                   >
                     <ConstellationIcon name={isEditingSelectedFile ? 'close' : 'edit'} size={12} />
-                    <span>{isEditingSelectedFile ? 'Cancel' : 'Update'}</span>
+                    <span>{isEditingSelectedFile ? 'Cancel' : 'Edit'}</span>
                   </button>
                   <span class="project-file-status" data-tone={projectFileStatusTone(selectedFile.status)}>
                     {projectFileStatusLabel(selectedFile.status)}
@@ -392,6 +401,25 @@
                 <span data-present={selectedFile.has_draft === true}>Draft</span>
               </div>
 
+              <div class="project-preview-mode-tabs" aria-label="Project file preview mode">
+                <button
+                  type="button"
+                  class:project-preview-mode-active={activePreviewMode === 'review'}
+                  disabled={previewView.mode !== 'diff' || isEditingSelectedFile}
+                  onclick={() => setPreviewMode('review')}
+                >
+                  Review
+                </button>
+                <button
+                  type="button"
+                  class:project-preview-mode-active={activePreviewMode === 'final'}
+                  disabled={isEditingSelectedFile}
+                  onclick={() => setPreviewMode('final')}
+                >
+                  Final
+                </button>
+              </div>
+
               {#if filePreviewLoading}
                 <div class="project-draft-empty">Loading file preview...</div>
               {:else if filePreviewError}
@@ -401,7 +429,7 @@
               {:else if isEditingSelectedFile}
                 <div class="project-file-editor">
                   <div class="project-preview-layer-head">
-                    <strong>Update thread draft</strong>
+                    <strong>Edit thread draft</strong>
                     <span>Saved changes stay in the draft until publish.</span>
                   </div>
                   <textarea
@@ -426,7 +454,7 @@
                 {#if fileSaveNotice}
                   <div class="project-file-save-message" data-tone="clean">{fileSaveNotice}</div>
                 {/if}
-                {#if previewView.mode === 'diff'}
+                {#if activePreviewMode === 'review' && previewView.mode === 'diff'}
                   <div class="project-preview-layer project-preview-diff">
                     <div class="project-preview-layer-head">
                       <strong>{previewView.title}</strong>
@@ -439,6 +467,16 @@
                           <code>{line.text || ' '}</code>
                         </div>
                       {/each}
+                    </div>
+                  </div>
+                {:else if previewView.finalLayer}
+                  <div class="project-preview-layers">
+                    <div class="project-preview-layer" data-layer={previewView.finalLayer.key}>
+                      <div class="project-preview-layer-head">
+                        <strong>{previewView.finalLayer.label}</strong>
+                        <span>{previewView.finalLayer.detail}</span>
+                      </div>
+                      <pre>{previewView.finalLayer.content}</pre>
                     </div>
                   </div>
                 {:else}
@@ -954,6 +992,55 @@
 
   .project-file-layer-strip span[data-present='true'] {
     color: color-mix(in srgb, var(--positive, #6BC785) 78%, white);
+  }
+
+  .project-preview-mode-tabs {
+    display: inline-flex;
+    align-items: center;
+    width: fit-content;
+    max-width: 100%;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.065);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.035);
+  }
+
+  .project-preview-mode-tabs button {
+    min-width: 64px;
+    min-height: 26px;
+    border: 0;
+    border-radius: 0;
+    padding: 4px 10px;
+    background: transparent;
+    color: rgba(231, 238, 247, 0.56);
+    font-size: 10px;
+    font-weight: 650;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .project-preview-mode-tabs button:disabled {
+    cursor: default;
+    opacity: 0.42;
+  }
+
+  .project-preview-mode-tabs button.project-preview-mode-active {
+    background: rgba(255, 255, 255, 0.075);
+    color: rgba(239, 244, 251, 0.86);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-preview-mode-tabs {
+    border-color: rgba(85, 104, 120, 0.13);
+    background: rgba(85, 104, 120, 0.045);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-preview-mode-tabs button {
+    color: rgba(57, 70, 82, 0.58);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-preview-mode-tabs button.project-preview-mode-active {
+    background: rgba(255, 255, 255, 0.7);
+    color: rgba(29, 39, 49, 0.86);
   }
 
   .project-preview-layers {

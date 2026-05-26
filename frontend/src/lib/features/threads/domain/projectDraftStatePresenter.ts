@@ -89,6 +89,7 @@ export type ProjectFilePreviewView =
     title: string;
     detail: string;
     layers: ProjectPreviewLayerView[];
+    finalLayer: ProjectPreviewLayerView | null;
     lines: ProjectTextDiffLine[];
     editableContent: string;
     canEdit: boolean;
@@ -96,6 +97,7 @@ export type ProjectFilePreviewView =
   | {
     mode: 'layers';
     layers: ProjectPreviewLayerView[];
+    finalLayer: ProjectPreviewLayerView | null;
     editableContent: string;
     canEdit: boolean;
   };
@@ -602,6 +604,25 @@ function previewLayerView(
   };
 }
 
+function previewFinalLayer(
+  file: ProjectExplorerFile | null,
+  root: ProjectDraftFileLayer | undefined,
+  base: ProjectDraftFileLayer | undefined,
+  draft: ProjectDraftFileLayer | undefined,
+): ProjectPreviewLayerView | null {
+  const tone = projectFileStatusTone(file?.status);
+  if (tone === 'deleted' || file?.has_draft || draft?.exists) {
+    return previewLayerView('draft', 'Final', draft);
+  }
+  if (root?.exists || file?.has_root) {
+    return previewLayerView('root', 'Final', root);
+  }
+  if (base?.exists) {
+    return previewLayerView('base', 'Final', base);
+  }
+  return null;
+}
+
 function samePreviewText(left: string, right: string): boolean {
   return left === right;
 }
@@ -700,6 +721,7 @@ export function buildProjectFilePreviewView(
     base?.exists ? previewLayerView('base', 'Thread base', base) : null,
     previewLayerView('draft', 'Thread draft', draft),
   ].filter((item): item is ProjectPreviewLayerView => Boolean(item));
+  const finalLayer = previewFinalLayer(file, root, base, draft);
   const editableLayer = draftReadable ? draft : rootReadable ? root : undefined;
   const editableContent = editableLayer ? projectLayerContent(editableLayer) : '';
   const canEdit = Boolean(file && editableLayer && !editableLayer.binary && !editableLayer.error);
@@ -710,6 +732,7 @@ export function buildProjectFilePreviewView(
       title: 'Project root -> thread draft',
       detail: 'red removed / green added',
       layers: layerViews,
+      finalLayer,
       lines: buildProjectTextDiff(rootContent, draftContent),
       editableContent,
       canEdit,
@@ -722,6 +745,7 @@ export function buildProjectFilePreviewView(
       title: 'New draft file',
       detail: 'green added',
       layers: layerViews,
+      finalLayer,
       lines: splitPreviewLines(draftContent).map((text) => ({ kind: 'added', text })),
       editableContent,
       canEdit,
@@ -734,6 +758,7 @@ export function buildProjectFilePreviewView(
       title: 'Deleted from thread draft',
       detail: 'red removed',
       layers: layerViews,
+      finalLayer,
       lines: splitPreviewLines(rootContent).map((text) => ({ kind: 'removed', text })),
       editableContent,
       canEdit,
@@ -744,6 +769,7 @@ export function buildProjectFilePreviewView(
   return {
     mode: 'layers',
     layers: fallbackLayers.length > 0 ? fallbackLayers : layerViews,
+    finalLayer,
     editableContent,
     canEdit,
   };

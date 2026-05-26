@@ -193,6 +193,8 @@ test('project file preview renders readable root to draft diffs', () => {
   assert.equal(view.mode, 'diff');
   assert.equal(view.canEdit, true);
   assert.equal(view.editableContent, 'draft\nkeep\nnext\n');
+  assert.equal(view.finalLayer?.label, 'Final');
+  assert.equal(view.finalLayer?.content, 'draft\nkeep\nnext\n');
   assert.ok(view.lines.some((line) => line.kind === 'removed' && line.text === 'root'));
   assert.ok(view.lines.some((line) => line.kind === 'added' && line.text === 'draft'));
 });
