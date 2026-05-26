@@ -1,7 +1,7 @@
 """Default new workspace apps to app capsules.
 
-Revision ID: 0011_app_capsule_workspace_app_defaults
-Revises: 0010_thread_context_and_discussion
+Revision ID: 0012_app_capsule_workspace_app_defaults
+Revises: 0011_db_audit_remediation_indexes
 Create Date: 2026-05-26
 """
 
@@ -11,8 +11,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0011_app_capsule_workspace_app_defaults"
-down_revision = "0010_thread_context_and_discussion"
+revision = "0012_app_capsule_workspace_app_defaults"
+down_revision = "0011_db_audit_remediation_indexes"
 branch_labels = None
 depends_on = None
 
