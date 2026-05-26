@@ -25,6 +25,7 @@
     type ProjectExplorerFile,
     type ProjectExplorerDirectory,
     type ProjectExplorerRow,
+    type ProjectPreviewLayerKey,
   } from '$lib/features/threads/domain/projectDraftStatePresenter';
   import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
   import type {
@@ -86,23 +87,25 @@
   const visibleRows = $derived(visibleProjectExplorerRows(fileBrowser.rows, collapsedDirectoryKeys));
   const previewView = $derived(buildProjectFilePreviewView(filePreview, selectedFile));
   const isEditingSelectedFile = $derived(Boolean(selectedFile && editingFileKey === selectedFile.key));
-  const activePreviewMode = $derived(previewMode === 'review' && previewView.mode === 'diff' ? 'review' : 'final');
   const selectedFileKind = $derived(projectFileKind(selectedFile));
+  const selectedFileTone = $derived(projectFileStatusTone(selectedFile?.status));
+  const selectedFileIsRich = $derived(canEmbedFinalKind(selectedFileKind));
+  const showPreviewModeTabs = $derived(previewView.mode === 'diff' && !selectedFileIsRich);
+  const activePreviewMode = $derived(showPreviewModeTabs && previewMode === 'review' ? 'review' : 'final');
   const selectedFileKindLabel = $derived(projectFileKindLabel(selectedFile));
   const selectedFileIcon = $derived(projectFileIconName(selectedFileKind));
   const selectedFileExtension = $derived(projectFileExtension(selectedFile).replace(/^\./, '').toUpperCase());
-  const finalBlobUrl = $derived.by(() => {
-    const ideaId = idea?.id ?? null;
-    const file = selectedFile;
-    const layer = previewView.finalLayer?.key;
-    if (!ideaId || !file || !layer || !previewView.finalLayer?.layer?.exists) return '';
-    return getIdeaProjectDraftFileBlobUrl(ideaId, {
-      runId: runId ?? statePayload?.run_id ?? null,
-      resourceId: file.resourceId,
-      path: file.path,
-      layer,
-    });
-  });
+  const finalBlobUrl = $derived(projectLayerBlobUrl(previewView.finalLayer?.key ?? null));
+  const rootPreviewLayer = $derived(previewView.layers.find((item) => item.key === 'root') ?? null);
+  const draftPreviewLayer = $derived(previewView.layers.find((item) => item.key === 'draft') ?? null);
+  const rootBlobUrl = $derived(projectLayerBlobUrl('root'));
+  const draftBlobUrl = $derived(projectLayerBlobUrl('draft'));
+  const showRichReplacementCompare = $derived(
+    selectedFileIsRich
+      && selectedFileTone !== 'clean'
+      && Boolean(rootPreviewLayer?.layer?.exists)
+      && Boolean(draftPreviewLayer?.layer?.exists),
+  );
   const finalSheetRows = $derived(
     projectSpreadsheetPreviewRows(previewView.finalLayer?.content ?? '', projectFileExtension(selectedFile)),
   );
@@ -155,12 +158,23 @@
     return 'thread draft';
   }
 
-  function previewKindDetail(): string {
-    return [
-      selectedFileKindLabel,
-      selectedFileExtension,
-      projectFileLayerLabel(selectedFile),
-    ].filter(Boolean).join(' / ');
+  function projectLayerBlobUrl(layer: ProjectPreviewLayerKey | null): string {
+    const ideaId = idea?.id ?? null;
+    const file = selectedFile;
+    if (!ideaId || !file || !layer) return '';
+    return getIdeaProjectDraftFileBlobUrl(ideaId, {
+      runId: runId ?? statePayload?.run_id ?? null,
+      resourceId: file.resourceId,
+      path: file.path,
+      layer,
+    });
+  }
+
+  function primaryPreviewTitle(layer: ProjectPreviewLayerKey): string {
+    if (showPreviewModeTabs) return 'Final';
+    if (layer === 'root') return 'Project root';
+    if (layer === 'base') return 'Thread base';
+    return 'Thread draft';
   }
 
   function sheetColumnIndexes(rows: string[][]): number[] {
@@ -366,6 +380,18 @@
       <span>{fileBrowser.fileCount} file{fileBrowser.fileCount === 1 ? '' : 's'}</span>
       <span>{readiness.detail}</span>
     </div>
+    <div class="project-draft-summary-chips" aria-label="Project draft summary">
+      {#each CHANGE_METRICS as metric (metric.key)}
+        <span data-tone={metric.tone}>
+          <strong>{metricCountLabel(aggregateCounts[metric.key])}</strong>
+          {metric.label}
+        </span>
+      {/each}
+      <span data-tone={publishPlan.blockedCount > 0 ? 'conflicted' : 'clean'}>
+        <strong>{publishPlan.operationCount}</strong>
+        publish ops
+      </span>
+    </div>
   </div>
 
   {#if loading && !statePayload}
@@ -377,19 +403,10 @@
       {statePayload.error || 'No Project draft state is bound to this run.'}
     </div>
   {:else}
-    <div class="project-draft-counts" aria-label="Draft change counts">
-      {#each CHANGE_METRICS as metric (metric.key)}
-        <div class="project-draft-count" data-tone={metric.tone}>
-          <span>{metric.label}</span>
-          <strong>{metricCountLabel(aggregateCounts[metric.key])}</strong>
-        </div>
-      {/each}
-    </div>
-
     {#if outOfDatePaths.length > 0}
-      <div class="project-draft-alert" data-tone="warning">
-        <strong>Out of date</strong>
-        <span>{outOfDatePaths.length} path{outOfDatePaths.length === 1 ? '' : 's'} need attention.</span>
+      <div class="project-draft-alert" data-tone="warning" aria-label="Out of date Project files">
+        <ConstellationIcon name="refresh" size={13} />
+        <span>{outOfDatePaths.length} out-of-date path{outOfDatePaths.length === 1 ? '' : 's'} need attention.</span>
       </div>
     {/if}
 
@@ -482,41 +499,47 @@
                 </div>
               </div>
 
-              <div class="project-file-layer-strip" aria-label="Selected file layers">
-                <span data-present={selectedFile.has_root === true}>Root</span>
-                <span data-present={selectedFile.has_base === true}>Base</span>
-                <span data-present={selectedFile.has_draft === true}>Draft</span>
-              </div>
-
-              <div class="project-file-profile" data-kind={selectedFileKind}>
-                <span class="project-file-profile-icon" aria-hidden="true">
-                  <ConstellationIcon name={selectedFileIcon} size={18} stroke={1.7} />
-                </span>
-                <div>
-                  <strong>{selectedFileKindLabel}</strong>
-                  <span>{previewKindDetail()}</span>
+              <div class="project-file-context-row">
+                <div class="project-file-layer-strip" aria-label="Selected file layers">
+                  {#if selectedFile.has_root === true}
+                    <span data-present="true">Root</span>
+                  {/if}
+                  {#if selectedFile.has_base === true}
+                    <span data-present="true">Base</span>
+                  {/if}
+                  {#if selectedFile.has_draft === true}
+                    <span data-present="true">Draft</span>
+                  {/if}
                 </div>
-                <small>{selectedFileExtension || 'FILE'}</small>
+                <span class="project-file-kind-chip" data-kind={selectedFileKind}>
+                  <ConstellationIcon name={selectedFileIcon} size={12} />
+                  {selectedFileKindLabel}
+                  {#if selectedFileExtension}
+                    / {selectedFileExtension}
+                  {/if}
+                </span>
               </div>
 
-              <div class="project-preview-mode-tabs" aria-label="Project file preview mode">
-                <button
-                  type="button"
-                  class:project-preview-mode-active={activePreviewMode === 'review'}
-                  disabled={previewView.mode !== 'diff' || isEditingSelectedFile}
-                  onclick={() => setPreviewMode('review')}
-                >
-                  Review
-                </button>
-                <button
-                  type="button"
-                  class:project-preview-mode-active={activePreviewMode === 'final'}
-                  disabled={isEditingSelectedFile}
-                  onclick={() => setPreviewMode('final')}
-                >
-                  Final
-                </button>
-              </div>
+              {#if showPreviewModeTabs}
+                <div class="project-preview-mode-tabs" aria-label="Project file preview mode">
+                  <button
+                    type="button"
+                    class:project-preview-mode-active={activePreviewMode === 'review'}
+                    disabled={isEditingSelectedFile}
+                    onclick={() => setPreviewMode('review')}
+                  >
+                    Review
+                  </button>
+                  <button
+                    type="button"
+                    class:project-preview-mode-active={activePreviewMode === 'final'}
+                    disabled={isEditingSelectedFile}
+                    onclick={() => setPreviewMode('final')}
+                  >
+                    Final
+                  </button>
+                </div>
+              {/if}
 
               {#if filePreviewLoading}
                 <div class="project-draft-empty">Loading file preview...</div>
@@ -598,11 +621,46 @@
                       {/each}
                     </div>
                   </div>
+                {:else if showRichReplacementCompare}
+                  <div class="project-rich-compare" data-kind={selectedFileKind}>
+                    <div class="project-rich-compare-item">
+                      <div class="project-preview-layer-head">
+                        <strong>Project root</strong>
+                        <span>{rootPreviewLayer?.detail}</span>
+                      </div>
+                      <div class="project-rich-preview" data-kind={selectedFileKind}>
+                        {#if selectedFileKind === 'image'}
+                          <img src={rootBlobUrl} alt={`${selectedFile.name} in project root`} />
+                        {:else if selectedFileKind === 'pdf'}
+                          <iframe src={rootBlobUrl} title={`${selectedFile.name} in project root`}></iframe>
+                        {:else if selectedFileKind === 'video'}
+                          <!-- svelte-ignore a11y_media_has_caption -->
+                          <video src={rootBlobUrl} controls playsinline preload="metadata"></video>
+                        {/if}
+                      </div>
+                    </div>
+                    <div class="project-rich-compare-item">
+                      <div class="project-preview-layer-head">
+                        <strong>Thread draft</strong>
+                        <span>{draftPreviewLayer?.detail}</span>
+                      </div>
+                      <div class="project-rich-preview" data-kind={selectedFileKind}>
+                        {#if selectedFileKind === 'image'}
+                          <img src={draftBlobUrl} alt={`${selectedFile.name} in thread draft`} />
+                        {:else if selectedFileKind === 'pdf'}
+                          <iframe src={draftBlobUrl} title={`${selectedFile.name} in thread draft`}></iframe>
+                        {:else if selectedFileKind === 'video'}
+                          <!-- svelte-ignore a11y_media_has_caption -->
+                          <video src={draftBlobUrl} controls playsinline preload="metadata"></video>
+                        {/if}
+                      </div>
+                    </div>
+                  </div>
                 {:else if previewView.finalLayer}
                   <div class="project-preview-layers">
                     <div class="project-preview-layer" data-layer={previewView.finalLayer.key}>
                       <div class="project-preview-layer-head">
-                        <strong>{previewView.finalLayer.label}</strong>
+                        <strong>{primaryPreviewTitle(previewView.finalLayer.key)}</strong>
                         <span>{previewView.finalLayer.detail} / {finalLayerSourceLabel(previewView.finalLayer.key)}</span>
                       </div>
                       {#if canEmbedFinalKind(selectedFileKind) && finalBlobUrl}
@@ -683,17 +741,6 @@
       {/if}
     </div>
 
-    <div class="project-publish-mini">
-      <div class="project-draft-kicker">Publish plan</div>
-      <div class="project-publish-metrics">
-        <span><strong>{publishPlan.resourceCount}</strong> resources</span>
-        <span><strong>{publishPlan.operationCount}</strong> operations</span>
-        <span data-tone={publishPlan.blockedCount > 0 ? 'conflicted' : 'clean'}>
-          <strong>{publishPlan.blockedCount}</strong> blocked
-        </span>
-        <span><strong>{publishPlan.readyCount}</strong> ready</span>
-      </div>
-    </div>
   {/if}
 </section>
 
@@ -714,8 +761,7 @@
 
   .project-draft-summary,
   .project-draft-alert,
-  .project-browser,
-  .project-publish-mini {
+  .project-browser {
     border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 8px;
     background: rgba(255, 255, 255, 0.03);
@@ -723,14 +769,12 @@
 
   :global(:root[data-color-scheme='light']) .project-draft-summary,
   :global(:root[data-color-scheme='light']) .project-draft-alert,
-  :global(:root[data-color-scheme='light']) .project-browser,
-  :global(:root[data-color-scheme='light']) .project-publish-mini {
+  :global(:root[data-color-scheme='light']) .project-browser {
     border-color: rgba(85, 104, 120, 0.13);
     background: rgba(250, 250, 246, 0.78);
   }
 
-  .project-draft-summary,
-  .project-publish-mini {
+  .project-draft-summary {
     padding: 12px;
   }
 
@@ -849,88 +893,59 @@
     color: rgba(82, 98, 111, 0.66);
   }
 
-  .project-draft-counts,
-  .project-publish-metrics {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 6px;
+  .project-draft-summary-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 9px;
   }
 
-  .project-draft-count,
-  .project-publish-metrics span {
-    display: grid;
+  .project-draft-summary-chips span,
+  .project-draft-alert {
+    display: inline-flex;
+    align-items: center;
     gap: 5px;
     min-width: 0;
-    min-height: 48px;
-    padding: 9px 8px;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.035);
-    border: 1px solid rgba(255, 255, 255, 0.04);
-  }
-
-  :global(:root[data-color-scheme='light']) .project-draft-count,
-  :global(:root[data-color-scheme='light']) .project-publish-metrics span {
-    border-color: rgba(85, 104, 120, 0.12);
-    background: rgba(248, 250, 248, 0.74);
-  }
-
-  .project-draft-count span,
-  .project-publish-metrics span {
-    color: rgba(231, 238, 247, 0.5);
-    font-size: 9px;
-    line-height: 1.2;
-  }
-
-  .project-draft-count strong,
-  .project-publish-metrics strong {
-    color: rgba(243, 247, 255, 0.92);
+    border-radius: 7px;
+    padding: 4px 7px;
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(231, 238, 247, 0.58);
     font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 16px;
-    line-height: 1;
+    font-size: 9px;
+    line-height: 1.35;
   }
 
-  :global(:root[data-color-scheme='light']) .project-draft-count span,
-  :global(:root[data-color-scheme='light']) .project-publish-metrics span {
-    color: rgba(82, 98, 111, 0.64);
+  .project-draft-summary-chips strong {
+    color: rgba(243, 247, 255, 0.86);
+    font-size: 10px;
   }
 
-  :global(:root[data-color-scheme='light']) .project-draft-count strong,
-  :global(:root[data-color-scheme='light']) .project-publish-metrics strong {
-    color: rgba(20, 29, 38, 0.9);
+  :global(:root[data-color-scheme='light']) .project-draft-summary-chips span,
+  :global(:root[data-color-scheme='light']) .project-draft-alert {
+    background: rgba(85, 104, 120, 0.055);
+    color: rgba(82, 98, 111, 0.72);
   }
 
-  .project-draft-count[data-tone='conflicted'] strong,
-  .project-publish-metrics [data-tone='conflicted'] strong {
-    color: #efa5b0;
+  :global(:root[data-color-scheme='light']) .project-draft-summary-chips strong {
+    color: rgba(20, 29, 38, 0.86);
   }
 
-  .project-draft-count[data-tone='new'] strong {
+  .project-draft-summary-chips span[data-tone='new'] strong,
+  .project-draft-summary-chips span[data-tone='clean'] strong {
     color: color-mix(in srgb, var(--positive, #6BC785) 82%, white);
   }
 
-  .project-draft-count[data-tone='deleted'] strong {
+  .project-draft-summary-chips span[data-tone='deleted'] strong {
     color: #e7bc77;
   }
 
-  .project-draft-alert {
-    display: grid;
-    gap: 3px;
-    padding: 10px 11px;
-  }
-
-  .project-draft-alert strong {
-    color: rgba(243, 247, 255, 0.9);
-    font-size: 12px;
-  }
-
-  .project-draft-alert span {
-    color: rgba(231, 238, 247, 0.58);
-    font-size: 11px;
-    line-height: 1.35;
+  .project-draft-summary-chips span[data-tone='conflicted'] strong {
+    color: #efa5b0;
   }
 
   .project-draft-alert[data-tone='warning'] {
     border-color: rgba(236, 180, 95, 0.18);
+    color: #e7bc77;
   }
 
   .project-browser {
@@ -984,13 +999,13 @@
 
   .project-browser-layout {
     display: grid;
-    grid-template-columns: minmax(170px, 0.9fr) minmax(0, 1.2fr);
-    min-height: 420px;
+    grid-template-columns: minmax(190px, 0.72fr) minmax(0, 1.55fr);
+    min-height: min(72vh, 700px);
   }
 
   .project-file-tree {
     min-width: 0;
-    max-height: 540px;
+    max-height: min(72vh, 700px);
     overflow: auto;
     padding: 6px;
     border-right: 1px solid rgba(255, 255, 255, 0.055);
@@ -1054,8 +1069,7 @@
     overflow: visible;
   }
 
-  .project-tree-file-glyph,
-  .project-file-profile-icon {
+  .project-tree-file-glyph {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1070,26 +1084,26 @@
   }
 
   .project-tree-file-glyph[data-kind='image'],
-  .project-file-profile[data-kind='image'] .project-file-profile-icon {
+  .project-file-kind-chip[data-kind='image'] {
     color: #8bd4bd;
   }
 
   .project-tree-file-glyph[data-kind='pdf'],
-  .project-file-profile[data-kind='pdf'] .project-file-profile-icon {
+  .project-file-kind-chip[data-kind='pdf'] {
     color: #efa5b0;
   }
 
   .project-tree-file-glyph[data-kind='spreadsheet'],
   .project-tree-file-glyph[data-kind='data'],
-  .project-file-profile[data-kind='spreadsheet'] .project-file-profile-icon,
-  .project-file-profile[data-kind='data'] .project-file-profile-icon {
+  .project-file-kind-chip[data-kind='spreadsheet'],
+  .project-file-kind-chip[data-kind='data'] {
     color: #e7bc77;
   }
 
   .project-tree-file-glyph[data-kind='code'],
   .project-tree-file-glyph[data-kind='graph'],
-  .project-file-profile[data-kind='code'] .project-file-profile-icon,
-  .project-file-profile[data-kind='graph'] .project-file-profile-icon {
+  .project-file-kind-chip[data-kind='code'],
+  .project-file-kind-chip[data-kind='graph'] {
     color: #9dc2ff;
   }
 
@@ -1142,7 +1156,7 @@
     align-content: start;
     gap: 9px;
     min-width: 0;
-    max-height: 540px;
+    max-height: min(72vh, 700px);
     overflow: auto;
     padding: 11px;
   }
@@ -1205,87 +1219,43 @@
     color: rgba(29, 39, 49, 0.78);
   }
 
+  .project-file-context-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+  }
+
   .project-file-layer-strip {
     display: flex;
     flex-wrap: wrap;
     gap: 5px;
+    min-width: 0;
+  }
+
+  .project-file-kind-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    border-radius: 6px;
+    padding: 3px 7px;
+    background: rgba(255, 255, 255, 0.045);
+    color: rgba(231, 238, 247, 0.56);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 9px;
+    line-height: 1.2;
   }
 
   .project-file-layer-strip span[data-present='true'] {
     color: color-mix(in srgb, var(--positive, #6BC785) 78%, white);
   }
 
-  .project-file-profile {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 9px;
-    min-width: 0;
-    border: 1px solid rgba(255, 255, 255, 0.055);
-    border-radius: 8px;
-    padding: 8px 9px;
-    background:
-      linear-gradient(90deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018));
-  }
-
-  :global(:root[data-color-scheme='light']) .project-file-profile {
-    border-color: rgba(85, 104, 120, 0.12);
-    background:
-      linear-gradient(90deg, rgba(255, 255, 255, 0.88), rgba(248, 250, 248, 0.62));
-  }
-
-  .project-file-profile-icon {
-    width: 34px;
-    height: 34px;
-    background: rgba(255, 255, 255, 0.055);
-  }
-
-  :global(:root[data-color-scheme='light']) .project-file-profile-icon {
-    background: rgba(85, 104, 120, 0.065);
-  }
-
-  .project-file-profile > div {
-    display: grid;
-    gap: 3px;
-    min-width: 0;
-  }
-
-  .project-file-profile strong,
-  .project-file-profile span,
-  .project-file-profile small {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .project-file-profile strong {
-    color: rgba(243, 247, 255, 0.9);
-    font-size: 12px;
-    line-height: 1.2;
-  }
-
-  .project-file-profile span,
-  .project-file-profile small {
-    color: rgba(231, 238, 247, 0.52);
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 9px;
-    line-height: 1.2;
-  }
-
-  .project-file-profile small {
-    border-radius: 6px;
-    padding: 3px 6px;
-    background: rgba(255, 255, 255, 0.04);
-  }
-
-  :global(:root[data-color-scheme='light']) .project-file-profile strong {
-    color: rgba(20, 29, 38, 0.9);
-  }
-
-  :global(:root[data-color-scheme='light']) .project-file-profile span,
-  :global(:root[data-color-scheme='light']) .project-file-profile small {
-    color: rgba(82, 98, 111, 0.68);
+  :global(:root[data-color-scheme='light']) .project-file-kind-chip {
+    background: rgba(85, 104, 120, 0.06);
+    color: rgba(82, 98, 111, 0.72);
   }
 
   .project-preview-mode-tabs {
@@ -1365,7 +1335,7 @@
   }
 
   .project-preview-layer pre {
-    max-height: 260px;
+    max-height: min(58vh, 560px);
     min-width: 0;
     overflow: auto;
     margin: 0;
@@ -1385,9 +1355,23 @@
     color: rgba(28, 36, 45, 0.86);
   }
 
+  .project-rich-compare {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .project-rich-compare-item {
+    display: grid;
+    align-content: start;
+    gap: 7px;
+    min-width: 0;
+  }
+
   .project-rich-preview {
-    min-height: 300px;
-    max-height: 520px;
+    min-height: min(58vh, 520px);
+    max-height: min(72vh, 680px);
     overflow: hidden;
     border-radius: 8px;
     border: 1px solid rgba(255, 255, 255, 0.06);
@@ -1402,7 +1386,7 @@
     display: block;
     width: 100%;
     height: 100%;
-    min-height: 300px;
+    min-height: min(58vh, 520px);
     border: 0;
     background: rgba(255, 255, 255, 0.94);
   }
@@ -1416,6 +1400,12 @@
   :global(:root[data-color-scheme='light']) .project-rich-preview {
     border-color: rgba(85, 104, 120, 0.12);
     background: rgba(246, 248, 248, 0.95);
+  }
+
+  @media (max-width: 980px) {
+    .project-rich-compare {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 
   .project-markdown-preview {
@@ -1727,11 +1717,6 @@
     color: #e7bc77;
   }
 
-  .project-publish-mini {
-    display: grid;
-    gap: 9px;
-  }
-
   .project-draft-empty {
     color: rgba(231, 238, 247, 0.48);
     font-size: 12px;
@@ -1748,11 +1733,6 @@
   }
 
   @media (max-width: 720px) {
-    .project-draft-counts,
-    .project-publish-metrics {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
     .project-browser-layout {
       grid-template-columns: minmax(0, 1fr);
     }
