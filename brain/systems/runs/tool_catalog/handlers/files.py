@@ -198,6 +198,14 @@ def _block_project_source_write(resolved: str) -> None:
         return
     resolved_real = os.path.realpath(resolved)
     for mount in manifest.mounts:
+        if _project_mount_is_read_only(mount):
+            workspace_real = os.path.realpath(getattr(mount, "workspace_path", "") or "")
+            if workspace_real and _path_is_within(resolved_real, workspace_real):
+                raise ValueError(
+                    f"Blocked write to read-only Project reference mount: "
+                    f"{getattr(mount, 'mount_path', '<project mount>')}. "
+                    "Mount it as a draft or copy the file into the current Project before editing."
+                )
         if not mount.source_path:
             continue
         source_real = os.path.realpath(mount.source_path)
@@ -214,6 +222,17 @@ def _project_source_mounts() -> list[object]:
     if manifest is None:
         return []
     return [mount for mount in manifest.mounts if mount.source_path]
+
+
+def _project_mount_is_read_only(mount: object) -> bool:
+    metadata = _context_mapping(getattr(mount, "metadata", None))
+    materialization = _context_mapping(metadata.get("materialization"))
+    return bool(
+        metadata.get("read_only")
+        or metadata.get("reference_mount")
+        or materialization.get("read_only")
+        or materialization.get("reference_mount")
+    )
 
 
 _PROJECT_SOURCE_WRITE_PATTERNS = [
@@ -235,12 +254,38 @@ def _block_project_source_command_write(text: str, *, operation: str, cwd: str |
     if not text or not _command_or_script_may_write(text):
         return
     cwd_real = os.path.realpath(cwd) if cwd else None
+    cwd_text = cwd or ""
     for mount in _project_source_mounts():
         source_path = getattr(mount, "source_path", None)
         if not isinstance(source_path, str) or not source_path.strip():
             continue
         source_real = os.path.realpath(source_path)
         workspace_real = os.path.realpath(getattr(mount, "workspace_path", "") or "")
+        mount_path = str(getattr(mount, "mount_path", "") or "")
+        if _project_mount_is_read_only(mount):
+            names_read_only_path = (
+                source_path in text
+                or source_real in text
+                or (workspace_real and workspace_real in text)
+                or (mount_path and mount_path in text)
+            )
+            runs_in_read_only_path = bool(
+                cwd_real
+                and (
+                    _path_is_within(cwd_real, source_real)
+                    or (workspace_real and _path_is_within(cwd_real, workspace_real))
+                )
+            )
+            runs_in_read_only_mount = bool(
+                mount_path
+                and (cwd_text == mount_path or cwd_text.startswith(mount_path.rstrip("/") + "/"))
+            )
+            if names_read_only_path or runs_in_read_only_path or runs_in_read_only_mount:
+                raise ValueError(
+                    f"Blocked {operation} that may write to read-only Project reference mount: "
+                    f"{mount_path or source_real}. Copy the file into the current Project draft before editing."
+                )
+            continue
         names_source_path = source_path in text or source_real in text
         runs_in_source_path = bool(cwd_real and _path_is_within(cwd_real, source_real))
         runs_in_draft_path = bool(cwd_real and workspace_real and _path_is_within(cwd_real, workspace_real))

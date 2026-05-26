@@ -406,7 +406,7 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         "mark_read": {"required": ["idea_id unless a current thread is bound"], "optional": [], "effect": "mark a thought read"},
     },
     "manage_project": {
-        "list": {"required": [], "optional": ["include_inactive"], "effect": "read project context profiles"},
+        "list": {"required": [], "optional": ["query", "limit", "include_inactive"], "effect": "read project context profiles, optionally filtered by project name, description, aliases, or resources"},
         "get": {"required": ["project_id"], "optional": ["include_inactive"], "effect": "read one project profile"},
         "create": {
             "required": ["slug", "name"],
@@ -428,6 +428,28 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
             "required": ["project_id or project_context", "idea_id unless a current thread is bound"],
             "optional": ["environment_binding_id", "metadata"],
             "effect": "attach project context to a thought",
+        },
+        "search_files": {
+            "required": ["query"],
+            "optional": ["project_id", "paths", "glob", "limit"],
+            "effect": "search files in visible Projects without loading all Project contents",
+            "parameters": {
+                "query": "Search text to match in files across visible Projects.",
+                "limit": "Maximum search results to return.",
+                "paths": "Optional file or folder paths to constrain the search.",
+                "glob": "Optional file glob filter such as '**/*.md'.",
+            },
+        },
+        "mount_reference": {
+            "required": ["project_id"],
+            "optional": ["paths", "path", "glob", "limit", "mount_path"],
+            "effect": "expose selected files or folders from another Project as read-only reference mounts for read_file/list_files/search_files",
+            "parameters": {
+                "paths": "Selected file or folder paths from the source Project to expose.",
+                "glob": "Optional file glob filter for selecting Project files to expose.",
+                "limit": "Maximum glob-selected mounts to create.",
+                "mount_path": "Workspace mount path where the read-only reference should appear.",
+            },
         },
     },
     "manage_workspace_app": {

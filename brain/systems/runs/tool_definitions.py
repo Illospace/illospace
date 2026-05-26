@@ -1256,6 +1256,8 @@ PROJECT_TOOLS = [
             "Use refresh_draft_from_root to explicitly apply latest root changes into untouched draft files. "
             "Use publish_draft to publish local Project draft changes back to root; conflicts return guidance for the agent to reconcile root and draft before retrying. "
             "Use root_versions, preview_root_version, and restore_root_version to inspect, preview, or roll back local Project root history. "
+            "Use search_files to find files in visible Projects without loading everything, and mount_reference to expose selected files or folders from another Project as read-only reference mounts. "
+            "Projects are context boundaries, not permission boundaries; mounted references can then be inspected with normal read_file/list_files/search_files tools. "
             "For awareness questions about what project context exists or what Illo can see, prefer "
             "read_project_contexts first. Thread attachments do not require a project. Use action='help' or "
             "action='schema' with operation to inspect arguments before mutating."
@@ -1286,13 +1288,16 @@ PROJECT_TOOLS = [
                         "root_versions",
                         "preview_root_version",
                         "restore_root_version",
+                        "search_files",
+                        "mount_reference",
                     ],
                     "description": (
                         "The project operation to run. delete archives the project profile; "
                         "draft_status and plan_publish are read-only draft inspection actions; "
                         "refresh_draft_from_root mutates only the thread draft workspace by copying latest root files into untouched draft paths; "
                         "publish_draft mutates supported Project roots after conflict checkpoints are resolved; "
-                        "preview_root_version is read-only; restore_root_version mutates a local Project root back to a captured version."
+                        "preview_root_version is read-only; restore_root_version mutates a local Project root back to a captured version; "
+                        "search_files searches visible Projects without loading full files; mount_reference exposes selected Project files/folders as read-only reference mounts."
                     ),
                 },
                 "operation": {
@@ -1328,6 +1333,28 @@ PROJECT_TOOLS = [
                 "path": {
                     "type": "string",
                     "description": "Optional single path filter for publish_draft.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Search text for action='search_files' across visible Projects; returns matching paths without loading every file.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 50,
+                    "description": "Maximum search results to return for action='search_files', or maximum glob-selected mounts for action='mount_reference'.",
+                },
+                "paths": {
+                    "type": "array",
+                    "description": "Optional file or folder paths to constrain action='search_files', or selected paths to expose with action='mount_reference'.",
+                    "items": {"type": "string"},
+                },
+                "glob": {
+                    "type": "string",
+                    "description": "Optional glob filter for action='search_files' or action='mount_reference' path selection, e.g. '**/*.md'.",
+                },
+                "mount_path": {
+                    "type": "string",
+                    "description": "Workspace mount path for action='mount_reference'; exposes selected files/folders from another Project as a read-only reference mount.",
                 },
                 "metadata": {"type": "object", "description": "Optional metadata for profile or attachment provenance."},
                 "visibility": {
