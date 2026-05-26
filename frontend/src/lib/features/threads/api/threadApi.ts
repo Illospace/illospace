@@ -55,6 +55,7 @@ type ThreadApiMethods = {
   attachIdeaProjectContext: typeof api.attachIdeaProjectContext;
   getIdeaProjectDraftState: typeof api.getIdeaProjectDraftState;
   getIdeaProjectDraftFile: typeof api.getIdeaProjectDraftFile;
+  getIdeaProjectDraftFileBlobUrl: typeof api.getIdeaProjectDraftFileBlobUrl;
   updateIdeaProjectDraftFile: typeof api.updateIdeaProjectDraftFile;
   ideaAudit: typeof api.ideaAudit;
   ideaAuditAnalyze: typeof api.ideaAuditAnalyze;
@@ -90,6 +91,7 @@ export const threadApi = pickTypedApiMethods<ThreadApiMethods>([
   'attachIdeaProjectContext',
   'getIdeaProjectDraftState',
   'getIdeaProjectDraftFile',
+  'getIdeaProjectDraftFileBlobUrl',
   'updateIdeaProjectDraftFile',
   'ideaAudit',
   'ideaAuditAnalyze',
@@ -125,6 +127,7 @@ export const {
   attachIdeaProjectContext,
   getIdeaProjectDraftState,
   getIdeaProjectDraftFile,
+  getIdeaProjectDraftFileBlobUrl,
   updateIdeaProjectDraftFile,
   ideaAudit,
   ideaAuditAnalyze,

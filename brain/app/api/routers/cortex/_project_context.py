@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from fastapi import Depends, File, Form, HTTPException, Request, UploadFile
+from starlette.responses import FileResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,7 @@ from brain.systems.cortex.project_context.github import (
     parse_github_repo_slug,
 )
 from brain.systems.cortex.project_context.browser import (
+    project_file_blob,
     project_file_payload,
     update_project_draft_file,
     with_project_file_browser,
@@ -502,6 +504,50 @@ async def _project_draft_file_payload(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+async def _project_draft_file_blob_response(
+    run: AgentRun | None,
+    *,
+    idea_id: str,
+    path: str,
+    layer: str,
+    resource_id: str | None = None,
+    user: dict[str, Any] | None = None,
+) -> FileResponse:
+    if run is None:
+        raise HTTPException(status_code=404, detail="No AgentRun exists for this Cortex thread.")
+
+    run_id = str(getattr(run, "id", "") or "")
+    org_id = str(getattr(run, "org_id", "") or (user or {}).get("org_id") or "") or None
+    user_id = str(getattr(run, "user_id", "") or (user or {}).get("id") or "") or None
+    context = {
+        "run": run,
+        "run_id": run_id,
+        "idea_id": str(idea_id),
+        "org_id": org_id,
+        "user_id": user_id,
+        "execution_metadata": {
+            "run_id": run_id,
+            "idea_id": str(idea_id),
+            "org_id": org_id,
+            "user_id": user_id,
+        },
+    }
+    with bind_agent_context(context):
+        draft_status = await _manage_project_payload("draft_status")
+    if not draft_status.get("ok"):
+        raise HTTPException(status_code=404, detail=draft_status.get("error") or "Project draft state is unavailable.")
+    try:
+        blob = project_file_blob(draft_status, resource_id=resource_id, path=path, layer=layer)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        blob["path"],
+        media_type=blob["media_type"],
+        filename=blob["filename"],
+        content_disposition_type="inline",
+    )
+
+
 async def _update_project_draft_file_payload(
     run: AgentRun | None,
     *,
@@ -943,6 +989,27 @@ async def get_idea_project_context_draft_file(
         run,
         idea_id=idea_id,
         path=path,
+        resource_id=resource_id,
+        user=user,
+    )
+
+
+@router.get("/ideas/{idea_id}/project-context/draft-file/blob")
+async def get_idea_project_context_draft_file_blob(
+    idea_id: str,
+    path: str,
+    layer: str = "draft",
+    run_id: int | None = None,
+    resource_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    run = await _project_draft_state_run(db, idea_id, run_id, user)
+    return await _project_draft_file_blob_response(
+        run,
+        idea_id=idea_id,
+        path=path,
+        layer=layer,
         resource_id=resource_id,
         user=user,
     )

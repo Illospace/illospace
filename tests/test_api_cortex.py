@@ -459,6 +459,30 @@ async def test_project_context_draft_file_update_payload_writes_thread_overlay(t
     assert (draft_dir / "brief.md").read_text(encoding="utf-8") == "manual draft edit"
 
 
+async def test_project_context_draft_file_blob_response_serves_inline_layer(tmp_path):
+    from brain.app.api.routers.cortex import _project_context
+
+    source_dir = tmp_path / "source"
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    source_dir.mkdir()
+    draft_dir.mkdir(parents=True)
+    (source_dir / "diagram.svg").write_text("<svg></svg>", encoding="utf-8")
+    (draft_dir / "diagram.svg").write_text("<svg><title>draft</title></svg>", encoding="utf-8")
+
+    response = await _project_context._project_draft_file_blob_response(
+        _project_draft_run_for_test(source_dir, draft_dir),
+        idea_id="idea-1",
+        path="diagram.svg",
+        layer="draft",
+        resource_id="reports",
+        user={"id": "user-1", "org_id": "test-org"},
+    )
+
+    assert response.media_type == "image/svg+xml"
+    assert str(response.path) == str(draft_dir / "diagram.svg")
+    assert response.headers["content-disposition"].startswith("inline;")
+
+
 async def test_project_context_draft_state_payload_handles_missing_run():
     from brain.app.api.routers.cortex import _project_context
 

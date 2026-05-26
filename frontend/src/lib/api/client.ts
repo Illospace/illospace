@@ -1057,6 +1057,21 @@ export const api = {
         path: options.path,
       }),
     ),
+  getIdeaProjectDraftFileBlobUrl: (
+    ideaId: string,
+    options: {
+      runId?: string | number | null;
+      resourceId?: string | null;
+      path: string;
+      layer?: 'root' | 'base' | 'draft';
+    },
+  ) =>
+    withQuery(`/api/cortex/ideas/${ideaId}/project-context/draft-file/blob`, {
+      run_id: options.runId,
+      resource_id: options.resourceId,
+      path: options.path,
+      layer: options.layer,
+    }),
   updateIdeaProjectDraftFile: (
     ideaId: string,
     data: ProjectDraftFileUpdateInput,

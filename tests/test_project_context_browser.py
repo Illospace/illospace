@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from brain.systems.cortex.project_context.browser import (
+    project_file_blob,
     project_file_payload,
     project_resource_file_browser,
     update_project_draft_file,
@@ -127,6 +128,32 @@ def test_update_project_draft_file_writes_only_thread_overlay(tmp_path):
     assert payload["layers"]["draft"]["content"] == "manual edit\n"
     assert (root / "report.md").read_text(encoding="utf-8") == "root v1\n"
     assert (draft / "report.md").read_text(encoding="utf-8") == "manual edit\n"
+
+
+def test_project_file_blob_resolves_previewable_layers(tmp_path):
+    root = tmp_path / "root"
+    draft = tmp_path / "draft"
+    _write(root / "image.svg", "<svg></svg>")
+    _write(draft / "image.svg", "<svg><title>draft</title></svg>")
+    save_draft_metadata(draft, base_manifest=build_file_manifest(root))
+
+    blob = project_file_blob(
+        {
+            "resources": [{
+                "id": "root",
+                "mount_path": "/",
+                "source_path": str(root),
+                "workspace_path": str(draft),
+            }],
+        },
+        resource_id="root",
+        path="image.svg",
+        layer="draft",
+    )
+
+    assert blob["path"] == draft / "image.svg"
+    assert blob["filename"] == "image.svg"
+    assert blob["media_type"] == "image/svg+xml"
 
 
 def test_project_file_payload_rejects_escaping_paths(tmp_path):

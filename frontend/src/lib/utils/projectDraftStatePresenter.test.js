@@ -8,6 +8,8 @@ import {
   joinProjectDisplayPath,
   normaliseProjectPreviewText,
   projectFileLayerLabel,
+  projectFileKind,
+  projectFileKindLabel,
   projectFileStatusTone,
   publishOperationPath,
   resourceMeta,
@@ -114,6 +116,10 @@ test('project file presenter formats status, layer, and mounted paths', () => {
   assert.equal(joinProjectDisplayPath('/reports', 'analysis/summary.md'), '/reports/analysis/summary.md');
   assert.equal(projectFileStatusTone('out_of_date'), 'warning');
   assert.equal(projectFileLayerLabel({ path: 'new.md', has_draft: true, has_root: false }), 'new draft file');
+  assert.equal(projectFileKind({ path: 'deck.pdf' }), 'pdf');
+  assert.equal(projectFileKind({ path: 'finance.xlsx' }), 'spreadsheet');
+  assert.equal(projectFileKind({ path: 'diagram.mmd' }), 'graph');
+  assert.equal(projectFileKindLabel({ path: 'analysis.ipynb' }), 'Code');
 });
 
 test('project file presenter filters rows under collapsed directories', () => {

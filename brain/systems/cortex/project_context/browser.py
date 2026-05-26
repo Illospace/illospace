@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import mimetypes
 import os
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -338,6 +339,44 @@ def project_file_payload(
             "base": _read_text_layer(base_file),
             "draft": _read_text_layer(draft_file),
         },
+    }
+
+
+def project_file_blob(
+    draft_status: Mapping[str, Any],
+    *,
+    resource_id: str | None,
+    path: str,
+    layer: str,
+) -> dict[str, Any]:
+    """Resolve a selected root/base/draft file for browser-native previews."""
+
+    relative_path = _safe_relative_path(path)
+    layer_key = _clean_text(layer).lower() or "draft"
+    if layer_key not in {"root", "base", "draft"}:
+        raise ValueError("Project file layer must be root, base, or draft.")
+
+    resources = [resource for resource in draft_status.get("resources") or [] if isinstance(resource, Mapping)]
+    resource = _select_resource(resources, resource_id, relative_path)
+    if resource is None:
+        raise ValueError("Project resource not found for selected file.")
+
+    root = _root_path(resource.get("source_path"))
+    draft = _root_path(resource.get("workspace_path") or resource.get("resource_path"))
+    if layer_key == "root":
+        file_path = _resolve_file_path(root, relative_path)
+    elif layer_key == "base":
+        file_path = draft / DRAFT_METADATA_DIR / "base" / relative_path if draft is not None else None
+    else:
+        file_path = _resolve_file_path(draft, relative_path)
+
+    if file_path is None or not file_path.exists() or not file_path.is_file() or file_path.is_symlink():
+        raise ValueError("Project file layer is not available for preview.")
+    media_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    return {
+        "path": file_path,
+        "filename": file_path.name,
+        "media_type": media_type,
     }
 
 

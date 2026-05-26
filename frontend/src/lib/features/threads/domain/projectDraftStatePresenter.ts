@@ -73,6 +73,19 @@ export type ProjectTextDiffLine = {
   text: string;
 };
 
+export type ProjectFileKind =
+  | 'archive'
+  | 'code'
+  | 'data'
+  | 'document'
+  | 'graph'
+  | 'image'
+  | 'markdown'
+  | 'pdf'
+  | 'spreadsheet'
+  | 'video'
+  | 'file';
+
 export type ProjectPreviewLayerKey = 'root' | 'base' | 'draft';
 
 export type ProjectPreviewLayerView = {
@@ -558,6 +571,44 @@ export function projectFileSizeLabel(value: unknown): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function projectFileExtension(file: ProjectDraftFileEntry | null | undefined): string {
+  const extension = cleanLabel(file?.extension).toLowerCase();
+  if (extension.startsWith('.')) return extension;
+  const path = cleanProjectPath(file?.path);
+  const suffix = path.split('/').at(-1)?.match(/\.[^.]+$/)?.[0] ?? '';
+  return suffix.toLowerCase();
+}
+
+export function projectFileKind(file: ProjectDraftFileEntry | null | undefined): ProjectFileKind {
+  const extension = projectFileExtension(file);
+  if (['.md', '.markdown', '.mdx'].includes(extension)) return 'markdown';
+  if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.bmp', '.tif', '.tiff', '.svg'].includes(extension)) return 'image';
+  if (extension === '.pdf') return 'pdf';
+  if (['.csv', '.tsv', '.xls', '.xlsx', '.ods'].includes(extension)) return 'spreadsheet';
+  if (['.json', '.jsonl', '.ndjson', '.yaml', '.yml', '.xml', '.parquet'].includes(extension)) return 'data';
+  if (['.drawio', '.mmd', '.mermaid', '.dot', '.graphml'].includes(extension)) return 'graph';
+  if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.py', '.rb', '.go', '.rs', '.java', '.kt', '.swift', '.php', '.c', '.cc', '.cpp', '.h', '.hpp', '.cs', '.sql', '.sh', '.bash', '.zsh', '.svelte', '.css', '.scss', '.html', '.toml', '.ipynb'].includes(extension)) return 'code';
+  if (['.doc', '.docx', '.rtf', '.txt', '.pages', '.ppt', '.pptx', '.key'].includes(extension)) return 'document';
+  if (['.mp4', '.mov', '.webm', '.m4v', '.avi'].includes(extension)) return 'video';
+  if (['.zip', '.tar', '.gz', '.tgz', '.rar', '.7z'].includes(extension)) return 'archive';
+  return 'file';
+}
+
+export function projectFileKindLabel(file: ProjectDraftFileEntry | null | undefined): string {
+  const kind = projectFileKind(file);
+  if (kind === 'markdown') return 'Markdown';
+  if (kind === 'spreadsheet') return 'Spreadsheet';
+  if (kind === 'pdf') return 'PDF';
+  if (kind === 'code') return 'Code';
+  if (kind === 'data') return 'Data';
+  if (kind === 'image') return 'Image';
+  if (kind === 'graph') return 'Graph';
+  if (kind === 'video') return 'Video';
+  if (kind === 'archive') return 'Archive';
+  if (kind === 'document') return 'Document';
+  return 'File';
 }
 
 export function normaliseProjectPreviewText(value: unknown): string {

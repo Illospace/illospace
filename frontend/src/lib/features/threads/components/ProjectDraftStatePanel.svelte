@@ -1,7 +1,9 @@
 <script lang="ts">
   import ConstellationIcon from '$lib/components/constellation/ConstellationIcon.svelte';
+  import type { ConstellationIconName } from '$lib/components/constellation/ConstellationIcon.svelte';
   import {
     getIdeaProjectDraftFile,
+    getIdeaProjectDraftFileBlobUrl,
     getIdeaProjectDraftState,
     updateIdeaProjectDraftFile,
   } from '$lib/features/threads/api/threadApi';
@@ -10,15 +12,20 @@
     buildProjectFilePreviewView,
     PROJECT_DRAFT_CHANGE_METRICS,
     projectDirectoryAncestorKeys,
+    projectFileExtension,
+    projectFileKind,
+    projectFileKindLabel,
     projectFileLayerLabel,
     projectFileSizeLabel,
     projectFileStatusLabel,
     projectFileStatusTone,
     visibleProjectExplorerRows,
+    type ProjectFileKind,
     type ProjectExplorerFile,
     type ProjectExplorerDirectory,
     type ProjectExplorerRow,
   } from '$lib/features/threads/domain/projectDraftStatePresenter';
+  import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
   import type {
     ProjectDraftFileResponse,
     ProjectDraftStateRead,
@@ -79,6 +86,25 @@
   const previewView = $derived(buildProjectFilePreviewView(filePreview, selectedFile));
   const isEditingSelectedFile = $derived(Boolean(selectedFile && editingFileKey === selectedFile.key));
   const activePreviewMode = $derived(previewMode === 'review' && previewView.mode === 'diff' ? 'review' : 'final');
+  const selectedFileKind = $derived(projectFileKind(selectedFile));
+  const selectedFileKindLabel = $derived(projectFileKindLabel(selectedFile));
+  const selectedFileIcon = $derived(projectFileIconName(selectedFileKind));
+  const selectedFileExtension = $derived(projectFileExtension(selectedFile).replace(/^\./, '').toUpperCase());
+  const finalBlobUrl = $derived.by(() => {
+    const ideaId = idea?.id ?? null;
+    const file = selectedFile;
+    const layer = previewView.finalLayer?.key;
+    if (!ideaId || !file || !layer || !previewView.finalLayer?.layer?.exists) return '';
+    return getIdeaProjectDraftFileBlobUrl(ideaId, {
+      runId: runId ?? statePayload?.run_id ?? null,
+      resourceId: file.resourceId,
+      path: file.path,
+      layer,
+    });
+  });
+  const finalSheetRows = $derived(
+    spreadsheetPreviewRows(previewView.finalLayer?.content ?? '', projectFileExtension(selectedFile)),
+  );
 
   function metricCountLabel(value: number): string {
     return Number.isFinite(value) ? String(value) : '0';
@@ -90,6 +116,46 @@
 
   function rowTone(row: ProjectExplorerRow): ReturnType<typeof projectFileStatusTone> {
     return projectFileStatusTone(row.status);
+  }
+
+  function projectFileIconName(kind: ProjectFileKind): ConstellationIconName {
+    if (kind === 'image') return 'image';
+    if (kind === 'pdf') return 'pdf';
+    if (kind === 'spreadsheet' || kind === 'data') return 'database';
+    if (kind === 'code' || kind === 'graph') return 'code';
+    if (kind === 'video') return 'video';
+    if (kind === 'archive') return 'archive';
+    if (kind === 'markdown' || kind === 'document') return 'document';
+    return 'file';
+  }
+
+  function finalLayerSourceLabel(key: 'root' | 'base' | 'draft'): string {
+    if (key === 'root') return 'project root';
+    if (key === 'base') return 'thread base';
+    return 'thread draft';
+  }
+
+  function previewKindDetail(): string {
+    return [
+      selectedFileKindLabel,
+      selectedFileExtension,
+      projectFileLayerLabel(selectedFile),
+    ].filter(Boolean).join(' / ');
+  }
+
+  function spreadsheetPreviewRows(content: string, extension: string): string[][] {
+    const suffix = extension.toLowerCase();
+    if (!['.csv', '.tsv'].includes(suffix) || !content.trim()) return [];
+    const delimiter = suffix === '.tsv' ? '\t' : ',';
+    return content
+      .split('\n')
+      .slice(0, 24)
+      .map((line) => line.split(delimiter).slice(0, 10).map((cell) => cell.trim()))
+      .filter((row) => row.some(Boolean));
+  }
+
+  function canEmbedFinalKind(kind: ProjectFileKind): boolean {
+    return kind === 'image' || kind === 'pdf' || kind === 'video';
   }
 
   function selectFile(file: ProjectExplorerFile) {
@@ -358,7 +424,9 @@
                   title={row.displayPath}
                   onclick={() => selectFile(row)}
                 >
-                  <ConstellationIcon name={row.extension === '.md' ? 'document' : 'file'} size={14} />
+                  <span class="project-tree-file-glyph" data-kind={projectFileKind(row)} aria-hidden="true">
+                    <ConstellationIcon name={projectFileIconName(projectFileKind(row))} size={14} />
+                  </span>
                   <span>{row.name}</span>
                   <small>{projectFileStatusLabel(row.status)}</small>
                 </button>
@@ -399,6 +467,17 @@
                 <span data-present={selectedFile.has_root === true}>Root</span>
                 <span data-present={selectedFile.has_base === true}>Base</span>
                 <span data-present={selectedFile.has_draft === true}>Draft</span>
+              </div>
+
+              <div class="project-file-profile" data-kind={selectedFileKind}>
+                <span class="project-file-profile-icon" aria-hidden="true">
+                  <ConstellationIcon name={selectedFileIcon} size={18} stroke={1.7} />
+                </span>
+                <div>
+                  <strong>{selectedFileKindLabel}</strong>
+                  <span>{previewKindDetail()}</span>
+                </div>
+                <small>{selectedFileExtension || 'FILE'}</small>
               </div>
 
               <div class="project-preview-mode-tabs" aria-label="Project file preview mode">
@@ -474,9 +553,53 @@
                     <div class="project-preview-layer" data-layer={previewView.finalLayer.key}>
                       <div class="project-preview-layer-head">
                         <strong>{previewView.finalLayer.label}</strong>
-                        <span>{previewView.finalLayer.detail}</span>
+                        <span>{previewView.finalLayer.detail} / {finalLayerSourceLabel(previewView.finalLayer.key)}</span>
                       </div>
-                      <pre>{previewView.finalLayer.content}</pre>
+                      {#if canEmbedFinalKind(selectedFileKind) && finalBlobUrl}
+                        <div class="project-rich-preview" data-kind={selectedFileKind}>
+                          {#if selectedFileKind === 'image'}
+                            <img src={finalBlobUrl} alt={selectedFile.name} />
+                          {:else if selectedFileKind === 'pdf'}
+                            <iframe src={finalBlobUrl} title={selectedFile.name}></iframe>
+                          {:else if selectedFileKind === 'video'}
+                            <!-- svelte-ignore a11y_media_has_caption -->
+                            <video src={finalBlobUrl} controls playsinline preload="metadata"></video>
+                          {/if}
+                        </div>
+                      {:else if selectedFileKind === 'markdown' && previewView.finalLayer.content.trim()}
+                        <div class="project-markdown-preview constellation-prose">
+                          {@html renderReadableMarkdown(previewView.finalLayer.content)}
+                        </div>
+                      {:else if selectedFileKind === 'spreadsheet' && finalSheetRows.length > 0}
+                        <div class="project-sheet-preview">
+                          <table>
+                            <tbody>
+                              {#each finalSheetRows as row, rowIndex (`row-${rowIndex}`)}
+                                <tr>
+                                  {#each row as cell, cellIndex (`cell-${rowIndex}-${cellIndex}`)}
+                                    <td>{cell}</td>
+                                  {/each}
+                                </tr>
+                              {/each}
+                            </tbody>
+                          </table>
+                        </div>
+                      {:else if previewView.finalLayer.layer?.binary}
+                        <div class="project-binary-preview" data-kind={selectedFileKind}>
+                          <span aria-hidden="true">
+                            <ConstellationIcon name={selectedFileIcon} size={30} stroke={1.5} />
+                          </span>
+                          <strong>{selectedFileKindLabel} preview</strong>
+                          <p>{previewView.finalLayer.detail || 'Binary file'} is available in the Project, but cannot be rendered inline here.</p>
+                          {#if finalBlobUrl}
+                            <a href={finalBlobUrl} target="_blank" rel="noreferrer">Open file</a>
+                          {/if}
+                        </div>
+                      {:else if selectedFileKind === 'code' || selectedFileKind === 'data' || selectedFileKind === 'graph'}
+                        <pre class="project-code-preview" data-kind={selectedFileKind}>{previewView.finalLayer.content}</pre>
+                      {:else}
+                        <pre>{previewView.finalLayer.content}</pre>
+                      {/if}
                     </div>
                   </div>
                 {:else}
@@ -872,6 +995,45 @@
     overflow: visible;
   }
 
+  .project-tree-file-glyph,
+  .project-file-profile-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.045);
+    color: rgba(157, 194, 255, 0.86);
+  }
+
+  .project-tree-file-glyph {
+    width: 18px;
+    height: 18px;
+  }
+
+  .project-tree-file-glyph[data-kind='image'],
+  .project-file-profile[data-kind='image'] .project-file-profile-icon {
+    color: #8bd4bd;
+  }
+
+  .project-tree-file-glyph[data-kind='pdf'],
+  .project-file-profile[data-kind='pdf'] .project-file-profile-icon {
+    color: #efa5b0;
+  }
+
+  .project-tree-file-glyph[data-kind='spreadsheet'],
+  .project-tree-file-glyph[data-kind='data'],
+  .project-file-profile[data-kind='spreadsheet'] .project-file-profile-icon,
+  .project-file-profile[data-kind='data'] .project-file-profile-icon {
+    color: #e7bc77;
+  }
+
+  .project-tree-file-glyph[data-kind='code'],
+  .project-tree-file-glyph[data-kind='graph'],
+  .project-file-profile[data-kind='code'] .project-file-profile-icon,
+  .project-file-profile[data-kind='graph'] .project-file-profile-icon {
+    color: #9dc2ff;
+  }
+
   .project-tree-row span {
     min-width: 0;
     overflow: hidden;
@@ -994,6 +1156,79 @@
     color: color-mix(in srgb, var(--positive, #6BC785) 78%, white);
   }
 
+  .project-file-profile {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+    border: 1px solid rgba(255, 255, 255, 0.055);
+    border-radius: 8px;
+    padding: 8px 9px;
+    background:
+      linear-gradient(90deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018));
+  }
+
+  :global(:root[data-color-scheme='light']) .project-file-profile {
+    border-color: rgba(85, 104, 120, 0.12);
+    background:
+      linear-gradient(90deg, rgba(255, 255, 255, 0.88), rgba(248, 250, 248, 0.62));
+  }
+
+  .project-file-profile-icon {
+    width: 34px;
+    height: 34px;
+    background: rgba(255, 255, 255, 0.055);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-file-profile-icon {
+    background: rgba(85, 104, 120, 0.065);
+  }
+
+  .project-file-profile > div {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .project-file-profile strong,
+  .project-file-profile span,
+  .project-file-profile small {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .project-file-profile strong {
+    color: rgba(243, 247, 255, 0.9);
+    font-size: 12px;
+    line-height: 1.2;
+  }
+
+  .project-file-profile span,
+  .project-file-profile small {
+    color: rgba(231, 238, 247, 0.52);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 9px;
+    line-height: 1.2;
+  }
+
+  .project-file-profile small {
+    border-radius: 6px;
+    padding: 3px 6px;
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-file-profile strong {
+    color: rgba(20, 29, 38, 0.9);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-file-profile span,
+  :global(:root[data-color-scheme='light']) .project-file-profile small {
+    color: rgba(82, 98, 111, 0.68);
+  }
+
   .project-preview-mode-tabs {
     display: inline-flex;
     align-items: center;
@@ -1089,6 +1324,161 @@
   :global(:root[data-color-scheme='light']) .project-preview-layer pre {
     background: rgba(246, 248, 248, 0.95);
     color: rgba(28, 36, 45, 0.86);
+  }
+
+  .project-rich-preview {
+    min-height: 300px;
+    max-height: 520px;
+    overflow: hidden;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    background:
+      linear-gradient(135deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
+      rgba(5, 9, 14, 0.34);
+  }
+
+  .project-rich-preview img,
+  .project-rich-preview iframe,
+  .project-rich-preview video {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 300px;
+    border: 0;
+    background: rgba(255, 255, 255, 0.94);
+  }
+
+  .project-rich-preview img,
+  .project-rich-preview video {
+    object-fit: contain;
+    background: rgba(5, 9, 14, 0.82);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-rich-preview {
+    border-color: rgba(85, 104, 120, 0.12);
+    background: rgba(246, 248, 248, 0.95);
+  }
+
+  .project-markdown-preview {
+    max-height: 520px;
+    min-width: 0;
+    overflow: auto;
+    border-radius: 8px;
+    padding: 14px;
+    background: rgba(6, 10, 15, 0.28);
+    color: rgba(240, 245, 251, 0.88);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-markdown-preview {
+    background: rgba(246, 248, 248, 0.95);
+    color: rgba(28, 36, 45, 0.9);
+  }
+
+  .project-sheet-preview {
+    max-height: 420px;
+    overflow: auto;
+    border: 1px solid rgba(255, 255, 255, 0.065);
+    border-radius: 8px;
+    background: rgba(6, 10, 15, 0.3);
+  }
+
+  .project-sheet-preview table {
+    width: 100%;
+    min-width: 420px;
+    border-collapse: collapse;
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 10px;
+    line-height: 1.35;
+  }
+
+  .project-sheet-preview td {
+    max-width: 220px;
+    border-right: 1px solid rgba(255, 255, 255, 0.055);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+    padding: 6px 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .project-sheet-preview tr:first-child td {
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(240, 245, 251, 0.88);
+    font-weight: 650;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-sheet-preview {
+    border-color: rgba(85, 104, 120, 0.12);
+    background: rgba(246, 248, 248, 0.95);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-sheet-preview td {
+    border-color: rgba(85, 104, 120, 0.12);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-sheet-preview tr:first-child td {
+    background: rgba(85, 104, 120, 0.075);
+    color: rgba(20, 29, 38, 0.88);
+  }
+
+  .project-code-preview {
+    border-left: 3px solid rgba(157, 194, 255, 0.34);
+  }
+
+  .project-code-preview[data-kind='data'],
+  .project-code-preview[data-kind='graph'] {
+    border-left-color: rgba(231, 188, 119, 0.42);
+  }
+
+  .project-binary-preview {
+    display: grid;
+    justify-items: center;
+    gap: 8px;
+    min-height: 220px;
+    border-radius: 8px;
+    padding: 26px 18px;
+    background:
+      linear-gradient(135deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.018)),
+      rgba(6, 10, 15, 0.28);
+    color: rgba(231, 238, 247, 0.68);
+    text-align: center;
+  }
+
+  .project-binary-preview strong {
+    color: rgba(243, 247, 255, 0.9);
+    font-size: 12px;
+  }
+
+  .project-binary-preview p {
+    max-width: 340px;
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .project-binary-preview a {
+    border-radius: 7px;
+    padding: 5px 9px;
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(240, 245, 251, 0.88);
+    font-size: 11px;
+    text-decoration: none;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-binary-preview {
+    background: rgba(246, 248, 248, 0.95);
+    color: rgba(82, 98, 111, 0.72);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-binary-preview strong {
+    color: rgba(20, 29, 38, 0.9);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-binary-preview a {
+    background: rgba(85, 104, 120, 0.08);
+    color: rgba(29, 39, 49, 0.84);
   }
 
   .project-diff-lines {
