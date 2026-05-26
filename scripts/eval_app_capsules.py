@@ -254,7 +254,14 @@ def static_score(payload: dict[str, Any], compiled: Any, report: dict[str, Any])
     }
 
 
-def run_browser_harness(payload: dict[str, Any], compiled: Any, *, chrome_path: str | None, timeout_ms: int) -> dict[str, Any]:
+def run_browser_harness(
+    payload: dict[str, Any],
+    compiled: Any,
+    *,
+    chrome_path: str | None,
+    timeout_ms: int,
+    screenshot_path: Path | None,
+) -> dict[str, Any]:
     browser_payload = {
         "app": {"id": "eval-app", "key": "uwear-crm-simple-tables", "name": payload["name"], "description": payload["description"]},
         "manifest": compiled.manifest,
@@ -264,6 +271,7 @@ def run_browser_harness(payload: dict[str, Any], compiled: Any, *, chrome_path: 
         "api_latency_ms": payload["api_latency_ms"],
         "timeout_ms": timeout_ms,
         "chrome_path": chrome_path,
+        "screenshot_path": str(screenshot_path) if screenshot_path else None,
     }
     with tempfile.TemporaryDirectory(prefix="app-capsule-eval-") as tmp:
         input_path = Path(tmp) / "payload.json"
@@ -278,7 +286,14 @@ def run_browser_harness(payload: dict[str, Any], compiled: Any, *, chrome_path: 
         return json.loads(completed.stdout)
 
 
-def run_eval_case(params: EvalParams, *, chrome_path: str | None, timeout_ms: int, skip_browser: bool) -> dict[str, Any]:
+def run_eval_case(
+    params: EvalParams,
+    *,
+    chrome_path: str | None,
+    timeout_ms: int,
+    skip_browser: bool,
+    screenshot_dir: Path | None = None,
+) -> dict[str, Any]:
     payload = build_scenario_payload(params)
     compiled, report = compile_and_validate(payload)
     scores = static_score(payload, compiled, report)
@@ -287,6 +302,7 @@ def run_eval_case(params: EvalParams, *, chrome_path: str | None, timeout_ms: in
         compiled,
         chrome_path=chrome_path,
         timeout_ms=timeout_ms,
+        screenshot_path=_screenshot_path(screenshot_dir, params),
     )
     scores.update(browser_result)
     passed = bool(
@@ -321,6 +337,14 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _screenshot_path(screenshot_dir: Path | None, params: EvalParams) -> Path | None:
+    if screenshot_dir is None:
+        return None
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    viewport = f"{params.viewport[0]}x{params.viewport[1]}"
+    return screenshot_dir / f"{params.scenario}-rows{params.rows}-{viewport}-latency{params.api_latency_ms}-run{params.run_index}.png"
+
+
 def compare_reports(left_path: Path, right_path: Path) -> dict[str, Any]:
     left = json.loads(left_path.read_text(encoding="utf-8"))
     right = json.loads(right_path.read_text(encoding="utf-8"))
@@ -351,6 +375,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-ms", type=int, default=10000)
     parser.add_argument("--chrome-path")
     parser.add_argument("--skip-browser", action="store_true")
+    parser.add_argument("--screenshot-dir", help="Directory for browser screenshots from each measured case")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--out")
     parser.add_argument("--compare", help="Compare two JSON reports: before.json,after.json")
@@ -378,6 +403,7 @@ def main(argv: list[str] | None = None) -> int:
                 chrome_path=args.chrome_path,
                 timeout_ms=args.timeout_ms,
                 skip_browser=args.skip_browser,
+                screenshot_dir=Path(args.screenshot_dir) if args.screenshot_dir else None,
             )
         )
 

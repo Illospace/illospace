@@ -23,6 +23,7 @@ def test_app_capsule_eval_can_run_without_browser_for_ci():
         chrome_path=None,
         timeout_ms=1000,
         skip_browser=True,
+        screenshot_dir=None,
     )
 
     assert result["passed"] is True

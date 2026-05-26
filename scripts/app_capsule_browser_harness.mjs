@@ -9,7 +9,7 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -585,6 +585,16 @@ async function run() {
     const html = buildOuterHtml(config);
     await client.send('Page.navigate', { url: `data:text/html;charset=utf-8,${encodeURIComponent(html)}` });
     const result = await waitForResult(client, Number(config.timeout_ms || 10000));
+    if (config.screenshot_path) {
+      const screenshot = await client.send('Page.captureScreenshot', {
+        format: 'png',
+        captureBeyondViewport: false,
+        fromSurface: true,
+      });
+      await mkdir(path.dirname(config.screenshot_path), { recursive: true });
+      await writeFile(config.screenshot_path, Buffer.from(screenshot.data, 'base64'));
+      result.screenshot_path = config.screenshot_path;
+    }
     const errors = consoleMessages.filter((message) => message.type === 'error' || message.type === 'exception');
     result.console_errors = errors.length;
     result.console_messages = consoleMessages;
