@@ -809,6 +809,8 @@ export interface ProjectDraftStateResponse {
   error?: string;
   run_id?: string | number | null;
   idea_id?: string | null;
+  project_profile_id?: string | null;
+  project?: Record<string, any> | null;
   draft_status?: ProjectDraftStateRead;
   plan_publish?: {
     ok?: boolean;
@@ -1059,6 +1061,16 @@ export const api = {
         run_id: options.runId,
       }),
     ),
+  getIdeaProjectProfileDraftState: (
+    ideaId: string,
+    options: { runId?: string | number | null; projectProfileId: string },
+  ) =>
+    fetchJson<ProjectDraftStateResponse>(
+      withQuery(`/api/cortex/ideas/${ideaId}/project-context/profile-draft-state`, {
+        run_id: options.runId,
+        profile_id: options.projectProfileId,
+      }),
+    ),
   getIdeaProjectDraftFile: (
     ideaId: string,
     options: { runId?: string | number | null; resourceId?: string | null; path: string },
@@ -1067,6 +1079,17 @@ export const api = {
       withQuery(`/api/cortex/ideas/${ideaId}/project-context/draft-file`, {
         run_id: options.runId,
         resource_id: options.resourceId,
+        path: options.path,
+      }),
+    ),
+  getIdeaProjectProfileDraftFile: (
+    ideaId: string,
+    options: { runId?: string | number | null; projectProfileId: string; path: string },
+  ) =>
+    fetchJson<ProjectDraftFileResponse>(
+      withQuery(`/api/cortex/ideas/${ideaId}/project-context/profile-draft-file`, {
+        run_id: options.runId,
+        profile_id: options.projectProfileId,
         path: options.path,
       }),
     ),
@@ -1085,6 +1108,21 @@ export const api = {
       path: options.path,
       layer: options.layer,
     }),
+  getIdeaProjectProfileDraftFileBlobUrl: (
+    ideaId: string,
+    options: {
+      runId?: string | number | null;
+      projectProfileId: string;
+      path: string;
+      layer?: 'root' | 'base' | 'draft';
+    },
+  ) =>
+    withQuery(`/api/cortex/ideas/${ideaId}/project-context/profile-draft-file/blob`, {
+      run_id: options.runId,
+      profile_id: options.projectProfileId,
+      path: options.path,
+      layer: options.layer,
+    }),
   updateIdeaProjectDraftFile: (
     ideaId: string,
     data: ProjectDraftFileUpdateInput,
@@ -1092,6 +1130,24 @@ export const api = {
     fetchJson<ProjectDraftFileResponse>(
       withQuery(`/api/cortex/ideas/${ideaId}/project-context/draft-file`, {
         run_id: data.runId,
+      }),
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          resource_id: data.resourceId,
+          path: data.path,
+          content: data.content,
+        }),
+      },
+    ),
+  updateIdeaProjectProfileDraftFile: (
+    ideaId: string,
+    data: ProjectDraftFileUpdateInput & { projectProfileId: string },
+  ) =>
+    fetchJson<ProjectDraftFileResponse>(
+      withQuery(`/api/cortex/ideas/${ideaId}/project-context/profile-draft-file`, {
+        run_id: data.runId,
+        profile_id: data.projectProfileId,
       }),
       {
         method: 'PATCH',

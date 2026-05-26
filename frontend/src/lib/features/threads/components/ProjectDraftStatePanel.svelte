@@ -5,7 +5,15 @@
     getIdeaProjectDraftFile,
     getIdeaProjectDraftFileBlobUrl,
     getIdeaProjectDraftState,
+    getIdeaProjectProfileDraftFile,
+    getIdeaProjectProfileDraftFileBlobUrl,
+    getIdeaProjectProfileDraftState,
+    listIdeaProjectContext,
+    listProjectContextProfiles,
     updateIdeaProjectDraftFile,
+    updateIdeaProjectProfileDraftFile,
+    type ThreadProjectContextAttachment,
+    type ThreadProjectContextProfile,
   } from '$lib/features/threads/api/threadApi';
   import {
     buildProjectDraftPanelView,
@@ -40,6 +48,13 @@
 
   const CHANGE_METRICS = PROJECT_DRAFT_CHANGE_METRICS;
 
+  type ProjectSelectorItem = {
+    id: string;
+    name: string;
+    subtitle: string;
+    group: 'attached' | 'recent';
+  };
+
   let {
     idea,
     runId = null,
@@ -53,6 +68,13 @@
   let loadError = $state('');
   let loadedKey = $state('');
   let requestSeq = 0;
+  let projectProfiles = $state<ThreadProjectContextProfile[]>([]);
+  let projectAttachments = $state<ThreadProjectContextAttachment[]>([]);
+  let projectsLoading = $state(false);
+  let projectsLoadedKey = $state('');
+  let selectedProjectProfileId = $state('');
+  let projectSelectorOpen = $state(false);
+  let projectSelectorQuery = $state('');
 
   let selectedFileKey = $state('');
   let filePreview = $state<ProjectDraftFileResponse | null>(null);
@@ -81,6 +103,18 @@
   const readiness = $derived(draftView.readiness);
   const signalTone = $derived(readiness.tone);
   const signalLabel = $derived(readiness.label);
+  const projectSelectorItems = $derived(projectSelectorOptions(projectProfiles, projectAttachments));
+  const filteredProjectSelectorItems = $derived(
+    filterProjectSelectorItems(projectSelectorItems, projectSelectorQuery),
+  );
+  const selectedProjectItem = $derived(
+    projectSelectorItems.find((item) => item.id === selectedProjectProfileId) ?? projectSelectorItems[0] ?? null,
+  );
+  const selectedProjectLabel = $derived(selectedProjectItem?.name ?? 'Project');
+  const selectedProjectSubtitle = $derived(
+    selectedProjectItem?.subtitle
+      ?? (selectedProjectProfileId ? 'Accessible project' : 'Current thread Project'),
+  );
   const selectedFile = $derived(
     fileBrowser.files.find((file) => file.key === selectedFileKey) ?? null,
   );
@@ -162,6 +196,14 @@
     const ideaId = idea?.id ?? null;
     const file = selectedFile;
     if (!ideaId || !file || !layer) return '';
+    if (selectedProjectProfileId) {
+      return getIdeaProjectProfileDraftFileBlobUrl(ideaId, {
+        runId: runId ?? statePayload?.run_id ?? null,
+        projectProfileId: selectedProjectProfileId,
+        path: file.path,
+        layer,
+      });
+    }
     return getIdeaProjectDraftFileBlobUrl(ideaId, {
       runId: runId ?? statePayload?.run_id ?? null,
       resourceId: file.resourceId,
@@ -189,6 +231,99 @@
 
   function canEmbedFinalKind(kind: ProjectFileKind): boolean {
     return kind === 'image' || kind === 'pdf' || kind === 'video';
+  }
+
+  function projectText(value: unknown): string {
+    return typeof value === 'string' ? value.trim() : '';
+  }
+
+  function projectNameFromSnapshot(snapshot: any): string {
+    return (
+      projectText(snapshot?.selected_profile_name)
+      || projectText(snapshot?.name)
+      || projectText(snapshot?.title)
+      || projectText(snapshot?.project_slug)
+      || 'Project'
+    );
+  }
+
+  function projectSelectorOptions(
+    profiles: ThreadProjectContextProfile[],
+    attachments: ThreadProjectContextAttachment[],
+  ): ProjectSelectorItem[] {
+    const profilesById = new Map<string, ThreadProjectContextProfile>();
+    for (const profile of profiles) {
+      const id = projectText((profile as any)?.id);
+      if (id) profilesById.set(id, profile);
+    }
+
+    const seen = new Set<string>();
+    const attached: ProjectSelectorItem[] = [];
+    for (const attachment of attachments) {
+      const id = projectText((attachment as any)?.project_profile_id);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const profile = profilesById.get(id);
+      const snapshot = (attachment as any)?.snapshot;
+      const name = projectText((profile as any)?.name) || projectNameFromSnapshot(snapshot);
+      attached.push({
+        id,
+        name,
+        subtitle: 'Attached project',
+        group: 'attached',
+      });
+    }
+
+    const recent: ProjectSelectorItem[] = [];
+    for (const profile of profiles) {
+      const id = projectText((profile as any)?.id);
+      if (!id || seen.has(id)) continue;
+      const name = projectText((profile as any)?.name) || projectText((profile as any)?.slug) || 'Project';
+      recent.push({
+          id,
+          name,
+          subtitle: 'Recent project',
+        group: 'recent',
+      });
+    }
+
+    return [...attached, ...recent];
+  }
+
+  function filterProjectSelectorItems(
+    items: ProjectSelectorItem[],
+    query: string,
+  ): ProjectSelectorItem[] {
+    const terms = query
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (terms.length === 0) return items;
+    return items.filter((item) => {
+      const blob = `${item.name} ${item.subtitle} ${item.group}`.toLowerCase();
+      return terms.every((term) => blob.includes(term));
+    });
+  }
+
+  function selectProjectProfile(projectId: string) {
+    if (projectId === selectedProjectProfileId) {
+      projectSelectorOpen = false;
+      projectSelectorQuery = '';
+      return;
+    }
+    selectedProjectProfileId = projectId;
+    projectSelectorOpen = false;
+    projectSelectorQuery = '';
+    selectedFileKey = '';
+    filePreview = null;
+    loadedFileKey = '';
+    collapsedDirectoryKeys = [];
+    editingFileKey = '';
+    editorContent = '';
+    fileSaveError = '';
+    fileSaveNotice = '';
+    previewMode = 'review';
   }
 
   function selectFile(file: ProjectExplorerFile) {
@@ -241,19 +376,27 @@
     fileSaveError = '';
     fileSaveNotice = '';
     try {
-      const result = await updateIdeaProjectDraftFile(ideaId, {
-        runId: currentRunId,
-        resourceId: file.resourceId,
-        path: file.path,
-        content: editorContent,
-      });
+      const result = selectedProjectProfileId
+        ? await updateIdeaProjectProfileDraftFile(ideaId, {
+            runId: currentRunId,
+            projectProfileId: selectedProjectProfileId,
+            resourceId: file.resourceId,
+            path: file.path,
+            content: editorContent,
+          })
+        : await updateIdeaProjectDraftFile(ideaId, {
+            runId: currentRunId,
+            resourceId: file.resourceId,
+            path: file.path,
+            content: editorContent,
+          });
       filePreview = result;
       editingFileKey = '';
       editorContent = '';
-      loadedFileKey = `${ideaId}:${currentRunId ?? ''}:${file.resourceId}:${file.path}`;
+      loadedFileKey = `${ideaId}:${selectedProjectProfileId}:${currentRunId ?? ''}:${file.resourceId}:${file.path}`;
       fileSaveNotice = 'Thread draft saved.';
       previewMode = 'final';
-      await loadDraftState(ideaId, currentRunId);
+      await loadDraftState(ideaId, currentRunId, selectedProjectProfileId);
     } catch (error: any) {
       fileSaveError = error?.detail || error?.message || 'Project draft file could not be updated.';
     } finally {
@@ -267,12 +410,45 @@
     return ' ';
   }
 
-  async function loadDraftState(ideaId: string, currentRunId: string | number | null) {
+  async function loadProjectSelector(ideaId: string) {
+    projectsLoading = true;
+    try {
+      const [attachments, profiles] = await Promise.all([
+        listIdeaProjectContext(ideaId),
+        listProjectContextProfiles(),
+      ]);
+      if (idea?.id !== ideaId) return;
+      projectAttachments = attachments;
+      projectProfiles = profiles;
+      const options = projectSelectorOptions(profiles, attachments);
+      if (!selectedProjectProfileId || !options.some((item) => item.id === selectedProjectProfileId)) {
+        selectedProjectProfileId = options[0]?.id ?? '';
+      }
+    } catch {
+      if (idea?.id === ideaId) {
+        projectAttachments = [];
+        projectProfiles = [];
+      }
+    } finally {
+      if (idea?.id === ideaId) projectsLoading = false;
+    }
+  }
+
+  async function loadDraftState(
+    ideaId: string,
+    currentRunId: string | number | null,
+    projectProfileId: string,
+  ) {
     const requestId = ++requestSeq;
     loading = true;
     loadError = '';
     try {
-      const result = await getIdeaProjectDraftState(ideaId, { runId: currentRunId });
+      const result = projectProfileId
+        ? await getIdeaProjectProfileDraftState(ideaId, {
+            runId: currentRunId,
+            projectProfileId,
+          })
+        : await getIdeaProjectDraftState(ideaId, { runId: currentRunId });
       if (requestId !== requestSeq) return;
       draftState = result;
     } catch (error: any) {
@@ -288,16 +464,23 @@
     ideaId: string,
     currentRunId: string | number | null,
     file: ProjectExplorerFile,
+    projectProfileId: string,
   ) {
     const requestId = ++fileRequestSeq;
     filePreviewLoading = true;
     filePreviewError = '';
     try {
-      const result = await getIdeaProjectDraftFile(ideaId, {
-        runId: currentRunId,
-        resourceId: file.resourceId,
-        path: file.path,
-      });
+      const result = projectProfileId
+        ? await getIdeaProjectProfileDraftFile(ideaId, {
+            runId: currentRunId,
+            projectProfileId,
+            path: file.path,
+          })
+        : await getIdeaProjectDraftFile(ideaId, {
+            runId: currentRunId,
+            resourceId: file.resourceId,
+            path: file.path,
+          });
       if (requestId !== fileRequestSeq) return;
       filePreview = result;
     } catch (error: any) {
@@ -311,8 +494,23 @@
 
   $effect(() => {
     const ideaId = idea?.id ?? null;
+    if (!ideaId) {
+      projectAttachments = [];
+      projectProfiles = [];
+      selectedProjectProfileId = '';
+      projectsLoadedKey = '';
+      projectsLoading = false;
+      return;
+    }
+    if (projectsLoadedKey === ideaId) return;
+    projectsLoadedKey = ideaId;
+    void loadProjectSelector(ideaId);
+  });
+
+  $effect(() => {
+    const ideaId = idea?.id ?? null;
     const currentRunId = runId ?? null;
-    const key = `${ideaId ?? ''}:${currentRunId ?? ''}`;
+    const key = `${ideaId ?? ''}:${currentRunId ?? ''}:${selectedProjectProfileId}`;
     if (!ideaId) {
       requestSeq += 1;
       draftState = null;
@@ -323,7 +521,7 @@
     }
     if (loadedKey === key) return;
     loadedKey = key;
-    void loadDraftState(ideaId, currentRunId);
+    void loadDraftState(ideaId, currentRunId, selectedProjectProfileId);
   });
 
   $effect(() => {
@@ -360,19 +558,89 @@
       loadedFileKey = '';
       return;
     }
-    const key = `${ideaId}:${currentRunId ?? ''}:${file.resourceId}:${file.path}`;
+    const key = `${ideaId}:${selectedProjectProfileId}:${currentRunId ?? ''}:${file.resourceId}:${file.path}`;
     if (loadedFileKey === key) return;
     loadedFileKey = key;
-    void loadFilePreview(ideaId, currentRunId, file);
+    void loadFilePreview(ideaId, currentRunId, file, selectedProjectProfileId);
   });
 </script>
 
 <section class="project-draft-panel" aria-label="Project workspace">
   <div class="project-draft-summary">
-    <div class="project-draft-kicker">Project</div>
+    <div class="project-selector-row">
+      <div class="project-selector-anchor">
+        <button
+          type="button"
+          class="project-selector-button"
+          aria-expanded={projectSelectorOpen}
+          aria-haspopup="listbox"
+          disabled={projectsLoading || projectSelectorItems.length === 0}
+          onclick={() => { projectSelectorOpen = !projectSelectorOpen; }}
+        >
+          <span class="project-selector-copy">
+            <span class="project-draft-kicker">Project</span>
+            <strong>{selectedProjectLabel}</strong>
+            <small>{selectedProjectSubtitle}</small>
+          </span>
+          <span class="project-selector-action">
+            {projectSelectorItems.length > 1 ? 'Switch' : projectsLoading ? 'Loading' : 'Current'}
+            {#if projectSelectorItems.length > 1}
+              <ConstellationIcon name="chevron-down" size={11} />
+            {/if}
+          </span>
+        </button>
+        {#if projectSelectorOpen && projectSelectorItems.length > 0}
+          <div class="project-selector-menu" role="listbox" aria-label="Accessible Projects">
+            <div class="project-selector-search">
+              <input
+                type="search"
+                bind:value={projectSelectorQuery}
+                placeholder={`Search ${projectSelectorItems.length} Projects`}
+                aria-label="Search accessible Projects"
+              />
+              <small>
+                {filteredProjectSelectorItems.length} of {projectSelectorItems.length} shown. Attached Projects stay first.
+              </small>
+            </div>
+            <div class="project-selector-menu-scroll">
+              {#if filteredProjectSelectorItems.length === 0}
+                <div class="project-selector-empty">No Projects match that search.</div>
+              {:else}
+                {#each ['attached', 'recent'] as group (group)}
+                  {@const groupItems = filteredProjectSelectorItems.filter((item) => item.group === group)}
+                  {#if groupItems.length > 0}
+                    <div class="project-selector-menu-section">
+                      <div class="project-selector-menu-label">
+                        {group === 'attached' ? 'Attached projects' : 'Recent projects'} / {groupItems.length}
+                      </div>
+                      {#each groupItems as project (project.id)}
+                        <button
+                          type="button"
+                          class="project-selector-option"
+                          class:project-selector-option-active={project.id === selectedProjectProfileId}
+                          role="option"
+                          aria-selected={project.id === selectedProjectProfileId}
+                          onclick={() => selectProjectProfile(project.id)}
+                        >
+                          <span>
+                            <strong>{project.name}</strong>
+                            <small>{project.subtitle}</small>
+                          </span>
+                          <em>{project.id === selectedProjectProfileId ? 'Current' : 'Open'}</em>
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                {/each}
+              {/if}
+            </div>
+          </div>
+        {/if}
+      </div>
+      <span class="project-draft-signal" data-tone={signalTone}>{signalLabel}</span>
+    </div>
     <div class="project-draft-title-row">
       <span class="project-draft-title">Root + thread overlay</span>
-      <span class="project-draft-signal" data-tone={signalTone}>{signalLabel}</span>
     </div>
     <div class="project-draft-meta">
       <span>{runLabel}</span>
@@ -819,6 +1087,272 @@
   .project-draft-title-row {
     align-items: center;
     margin-top: 7px;
+  }
+
+  .project-selector-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 10px;
+  }
+
+  .project-selector-anchor {
+    position: relative;
+    min-width: 0;
+  }
+
+  .project-selector-button {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-width: 0;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.035);
+    color: inherit;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .project-selector-button:disabled {
+    cursor: default;
+    opacity: 0.72;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-button {
+    border-color: rgba(85, 104, 120, 0.14);
+    background: rgba(255, 253, 248, 0.82);
+  }
+
+  .project-selector-copy {
+    min-width: 0;
+  }
+
+  .project-selector-copy strong {
+    display: block;
+    overflow: hidden;
+    color: rgba(243, 247, 255, 0.94);
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.25;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-copy strong {
+    color: rgba(20, 29, 38, 0.92);
+  }
+
+  .project-selector-copy small {
+    display: block;
+    margin-top: 3px;
+    overflow: hidden;
+    color: rgba(231, 238, 247, 0.52);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 10px;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-copy small {
+    color: rgba(82, 98, 111, 0.66);
+  }
+
+  .project-selector-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border-radius: 7px;
+    padding: 4px 7px;
+    background: rgba(255, 255, 255, 0.055);
+    color: rgba(231, 238, 247, 0.6);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 9px;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-action {
+    background: rgba(85, 104, 120, 0.06);
+    color: rgba(57, 70, 82, 0.66);
+  }
+
+  .project-selector-menu {
+    position: absolute;
+    z-index: 5;
+    top: calc(100% + 6px);
+    left: 0;
+    width: 100%;
+    max-height: min(68vh, 560px);
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 10px;
+    background: #10151b;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.26);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-menu {
+    border-color: rgba(85, 104, 120, 0.16);
+    background: #fffdf8;
+    box-shadow: 0 16px 40px rgba(29, 39, 49, 0.16);
+  }
+
+  .project-selector-search {
+    display: grid;
+    gap: 5px;
+    padding: 9px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+    background: #10151b;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-search {
+    border-bottom-color: rgba(85, 104, 120, 0.1);
+    background: #fffdf8;
+  }
+
+  .project-selector-search input {
+    width: 100%;
+    height: 30px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 7px;
+    padding: 0 9px;
+    background: rgba(255, 255, 255, 0.04);
+    color: inherit;
+    font: inherit;
+    font-size: 11px;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-search input {
+    border-color: rgba(85, 104, 120, 0.14);
+    background: rgba(250, 250, 246, 0.92);
+  }
+
+  .project-selector-search small,
+  .project-selector-empty {
+    color: rgba(231, 238, 247, 0.5);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 9px;
+    line-height: 1.35;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-search small,
+  :global(:root[data-color-scheme='light']) .project-selector-empty {
+    color: rgba(82, 98, 111, 0.62);
+  }
+
+  .project-selector-menu-scroll {
+    max-height: min(58vh, 460px);
+    overflow: auto;
+  }
+
+  .project-selector-empty {
+    padding: 14px 16px;
+  }
+
+  .project-selector-menu-section {
+    padding: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+  }
+
+  .project-selector-menu-section:last-child {
+    border-bottom: 0;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-menu-section {
+    border-bottom-color: rgba(85, 104, 120, 0.1);
+  }
+
+  .project-selector-menu-label {
+    margin: 2px 2px 6px;
+    color: rgba(231, 238, 247, 0.46);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 8px;
+    font-weight: 650;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-menu-label {
+    color: rgba(82, 98, 111, 0.62);
+  }
+
+  .project-selector-option {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 44px;
+    border: 0;
+    border-radius: 7px;
+    padding: 8px;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .project-selector-option:hover,
+  .project-selector-option-active {
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-option:hover,
+  :global(:root[data-color-scheme='light']) .project-selector-option-active {
+    background: rgba(82, 117, 139, 0.08);
+  }
+
+  .project-selector-option strong {
+    display: block;
+    overflow: hidden;
+    color: rgba(243, 247, 255, 0.9);
+    font-size: 12px;
+    line-height: 1.25;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-option strong {
+    color: rgba(29, 39, 49, 0.88);
+  }
+
+  .project-selector-option small {
+    display: block;
+    margin-top: 2px;
+    overflow: hidden;
+    color: rgba(231, 238, 247, 0.5);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 9px;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-option small {
+    color: rgba(82, 98, 111, 0.62);
+  }
+
+  .project-selector-option em {
+    color: rgba(231, 238, 247, 0.46);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 8px;
+    font-style: normal;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-option em {
+    color: rgba(82, 98, 111, 0.52);
   }
 
   .project-draft-title {

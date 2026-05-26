@@ -15,6 +15,7 @@ export type RunStatus = Awaited<ReturnType<typeof api.runStatus>>;
 export type SkillFeedbackInput = Parameters<typeof api.skillFeedback>[1];
 export type UploadedThreadFile = Awaited<ReturnType<typeof api.uploadFile>>;
 export type UploadPreview = Awaited<ReturnType<typeof api.previewUpload>>;
+export type ThreadProjectContextProfile = Awaited<ReturnType<typeof api.listProjectContextProfiles>>[number];
 export type ThreadProjectContextAttachment = Awaited<ReturnType<typeof api.listIdeaProjectContext>>[number];
 export type AttachThreadProjectContextInput = Parameters<typeof api.attachIdeaProjectContext>[1];
 export type ThreadProjectDraftState = Awaited<ReturnType<typeof api.getIdeaProjectDraftState>>;
@@ -51,12 +52,17 @@ type ThreadApiMethods = {
   generateTitle: typeof api.generateTitle;
   uploadFile: (file: File) => Promise<UploadedThreadFile>;
   previewUpload: typeof api.previewUpload;
+  listProjectContextProfiles: typeof api.listProjectContextProfiles;
   listIdeaProjectContext: typeof api.listIdeaProjectContext;
   attachIdeaProjectContext: typeof api.attachIdeaProjectContext;
   getIdeaProjectDraftState: typeof api.getIdeaProjectDraftState;
+  getIdeaProjectProfileDraftState: typeof api.getIdeaProjectProfileDraftState;
   getIdeaProjectDraftFile: typeof api.getIdeaProjectDraftFile;
+  getIdeaProjectProfileDraftFile: typeof api.getIdeaProjectProfileDraftFile;
   getIdeaProjectDraftFileBlobUrl: typeof api.getIdeaProjectDraftFileBlobUrl;
+  getIdeaProjectProfileDraftFileBlobUrl: typeof api.getIdeaProjectProfileDraftFileBlobUrl;
   updateIdeaProjectDraftFile: typeof api.updateIdeaProjectDraftFile;
+  updateIdeaProjectProfileDraftFile: typeof api.updateIdeaProjectProfileDraftFile;
   ideaAudit: typeof api.ideaAudit;
   ideaAuditAnalyze: typeof api.ideaAuditAnalyze;
   ideaAuditAnalysisResult: typeof api.ideaAuditAnalysisResult;
@@ -87,12 +93,17 @@ export const threadApi = pickTypedApiMethods<ThreadApiMethods>([
   'generateTitle',
   'uploadFile',
   'previewUpload',
+  'listProjectContextProfiles',
   'listIdeaProjectContext',
   'attachIdeaProjectContext',
   'getIdeaProjectDraftState',
+  'getIdeaProjectProfileDraftState',
   'getIdeaProjectDraftFile',
+  'getIdeaProjectProfileDraftFile',
   'getIdeaProjectDraftFileBlobUrl',
+  'getIdeaProjectProfileDraftFileBlobUrl',
   'updateIdeaProjectDraftFile',
+  'updateIdeaProjectProfileDraftFile',
   'ideaAudit',
   'ideaAuditAnalyze',
   'ideaAuditAnalysisResult',
@@ -123,12 +134,17 @@ export const {
   generateTitle,
   uploadFile,
   previewUpload,
+  listProjectContextProfiles,
   listIdeaProjectContext,
   attachIdeaProjectContext,
   getIdeaProjectDraftState,
+  getIdeaProjectProfileDraftState,
   getIdeaProjectDraftFile,
+  getIdeaProjectProfileDraftFile,
   getIdeaProjectDraftFileBlobUrl,
+  getIdeaProjectProfileDraftFileBlobUrl,
   updateIdeaProjectDraftFile,
+  updateIdeaProjectProfileDraftFile,
   ideaAudit,
   ideaAuditAnalyze,
   ideaAuditAnalysisResult,
