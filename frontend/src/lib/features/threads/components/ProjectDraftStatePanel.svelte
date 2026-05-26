@@ -67,7 +67,6 @@
   let fileSaveError = $state('');
   let fileSaveNotice = $state('');
   let previewMode = $state<'review' | 'final'>('review');
-  let fileTreeCollapsed = $state(false);
 
   const draftView = $derived.by(() =>
     buildProjectDraftPanelView({ draftState, loading, loadError, runId }),
@@ -217,10 +216,6 @@
     collapsedDirectoryKeys = directoryCollapsed(row)
       ? collapsedDirectoryKeys.filter((key) => key !== row.key)
       : [...collapsedDirectoryKeys, row.key];
-  }
-
-  function toggleFileTree() {
-    fileTreeCollapsed = !fileTreeCollapsed;
   }
 
   function beginFileEdit() {
@@ -437,65 +432,51 @@
       {#if fileBrowser.rows.length === 0}
         <div class="project-draft-empty">No browsable files found in this Project.</div>
       {:else}
-        <div class="project-browser-layout" data-tree-collapsed={fileTreeCollapsed}>
-          <div
-            id="project-file-tree"
-            class="project-file-tree"
-            data-collapsed={fileTreeCollapsed}
-            aria-label="Project files"
-          >
-            <button
-              type="button"
-              class="project-tree-row project-tree-collapse-action"
-              aria-expanded={!fileTreeCollapsed}
-              aria-controls="project-file-tree"
-              aria-label={fileTreeCollapsed ? 'Expand file tree' : 'Collapse file tree'}
-              title={fileTreeCollapsed ? 'Expand file tree' : 'Collapse file tree'}
-              onclick={toggleFileTree}
+        <div class="project-browser-layout">
+          <div id="project-file-tree" class="project-file-tree" aria-label="Project files">
+            <div
+              class="project-tree-rail"
+              aria-hidden="true"
+              title="Project files"
             >
-              <span class="project-tree-file-glyph" aria-hidden="true">
-                <ConstellationIcon name="side-panel" size={14} />
-              </span>
-              <span class="project-tree-label">{fileTreeCollapsed ? 'Files' : 'Collapse files'}</span>
-              <small>{fileTreeCollapsed ? 'open' : 'hide'}</small>
-            </button>
+              <span class="project-tree-rail-label">Files</span>
+              <small>{fileBrowser.visibleCount}</small>
+            </div>
 
-            {#each visibleRows as row (row.key)}
-              {#if row.kind === 'directory'}
-                <button
-                  type="button"
-                  class="project-tree-row project-tree-directory"
-                  style={rowStyle(row)}
-                  data-tone={rowTone(row)}
-                  aria-expanded={!directoryCollapsed(row)}
-                  title={row.displayPath}
-                  onclick={() => toggleDirectory(row)}
-                >
-                  <span class="project-tree-folder-glyph" aria-hidden="true">
-                    <ConstellationIcon name={directoryCollapsed(row) ? 'chevron-right' : 'chevron-down'} size={11} />
-                    <ConstellationIcon name="folder" size={14} />
-                  </span>
-                  <span class="project-tree-label" title={row.displayPath}>{row.name}</span>
-                  <small>{row.fileCount}</small>
-                </button>
-              {:else}
-                <button
-                  type="button"
-                  class="project-tree-row project-tree-file"
-                  class:project-tree-file-selected={selectedFileKey === row.key}
-                  style={rowStyle(row)}
-                  data-tone={rowTone(row)}
-                  title={row.displayPath}
-                  onclick={() => selectFile(row)}
-                >
-                  <span class="project-tree-file-glyph" data-kind={projectFileKind(row)} aria-hidden="true">
-                    <ConstellationIcon name={projectFileIconName(projectFileKind(row))} size={14} />
-                  </span>
-                  <span class="project-tree-label">{row.name}</span>
-                  <small>{projectFileStatusLabel(row.status)}</small>
-                </button>
-              {/if}
-            {/each}
+            <div class="project-tree-list">
+              {#each visibleRows as row (row.key)}
+                {#if row.kind === 'directory'}
+                  <button
+                    type="button"
+                    class="project-tree-row project-tree-directory"
+                    style={rowStyle(row)}
+                    data-tone={rowTone(row)}
+                    aria-expanded={!directoryCollapsed(row)}
+                    title={row.displayPath}
+                    onclick={() => toggleDirectory(row)}
+                  >
+                    <span class="project-tree-chevron" aria-hidden="true">
+                      <ConstellationIcon name={directoryCollapsed(row) ? 'chevron-right' : 'chevron-down'} size={11} />
+                    </span>
+                    <span class="project-tree-label" title={row.displayPath}>{row.name}</span>
+                    <small>{row.fileCount}</small>
+                  </button>
+                {:else}
+                  <button
+                    type="button"
+                    class="project-tree-row project-tree-file"
+                    class:project-tree-file-selected={selectedFileKey === row.key}
+                    style={rowStyle(row)}
+                    data-tone={rowTone(row)}
+                    title={row.displayPath}
+                    onclick={() => selectFile(row)}
+                  >
+                    <span class="project-tree-label">{row.name}</span>
+                    <small>{projectFileStatusLabel(row.status)}</small>
+                  </button>
+                {/if}
+              {/each}
+            </div>
           </div>
 
           <div class="project-file-preview" aria-live="polite">
@@ -511,16 +492,16 @@
                   </span>
                 </div>
                 <div class="project-file-preview-actions">
-                  {#if previewView.canEdit}
+                  {#if previewView.canEdit && !isEditingSelectedFile}
                     <button
                       type="button"
                       class="project-file-edit-button"
                       disabled={filePreviewLoading || fileSaveLoading}
                       title="Edit this file in the thread draft"
-                      onclick={isEditingSelectedFile ? cancelFileEdit : beginFileEdit}
+                      onclick={beginFileEdit}
                     >
-                      <ConstellationIcon name={isEditingSelectedFile ? 'close' : 'edit'} size={12} />
-                      <span>{isEditingSelectedFile ? 'Cancel' : 'Edit'}</span>
+                      <ConstellationIcon name="edit" size={12} />
+                      <span>Edit</span>
                     </button>
                   {/if}
                   <span class="project-file-status" data-tone={projectFileStatusTone(selectedFile.status)}>
@@ -1037,71 +1018,122 @@
   }
 
   .project-browser-layout {
-    --project-tree-collapsed-width: var(--constellation-nav-rail-collapsed-width, 54px);
-    --project-tree-expanded-width: minmax(190px, 0.72fr);
-    display: grid;
-    grid-template-columns: var(--project-tree-expanded-width) minmax(0, 1.55fr);
+    --project-tree-collapsed-width: 62px;
+    --project-tree-expanded-width: 260px;
+    display: flex;
     min-height: min(72vh, 700px);
-  }
-
-  .project-browser-layout[data-tree-collapsed='true'] {
-    grid-template-columns: var(--project-tree-collapsed-width) minmax(0, 1fr);
   }
 
   .project-file-tree {
     position: relative;
     z-index: 1;
+    flex: 0 0 var(--project-tree-collapsed-width);
     min-width: 0;
-    width: 100%;
     max-height: min(72vh, 700px);
+    overflow: hidden;
+    border-right: 1px solid rgba(255, 255, 255, 0.055);
+    background: #10151b;
+    transition: flex-basis 220ms cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .project-file-tree:hover,
+  .project-file-tree:focus-within {
+    flex-basis: var(--project-tree-expanded-width);
+  }
+
+  .project-tree-rail,
+  .project-tree-list {
+    position: absolute;
+    inset: 0;
+  }
+
+  .project-tree-rail {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    justify-items: center;
+    gap: 10px;
+    width: 100%;
+    border: 0;
+    padding: 12px 6px;
+    background: #10151b;
+    color: rgba(231, 238, 247, 0.68);
+    cursor: default;
+    transition: visibility 0s linear 120ms;
+  }
+
+  .project-tree-rail-label {
+    align-self: center;
+    color: rgba(239, 244, 251, 0.78);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: 0.16em;
+    line-height: 1;
+    text-transform: uppercase;
+    transform: rotate(180deg);
+    writing-mode: vertical-rl;
+  }
+
+  .project-tree-rail small {
+    min-width: 24px;
+    border-radius: 999px;
+    padding: 3px 5px;
+    background: rgba(255, 255, 255, 0.055);
+    color: rgba(231, 238, 247, 0.58);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 9px;
+    font-weight: 650;
+    line-height: 1;
+    text-align: center;
+  }
+
+  .project-tree-list {
+    min-width: 0;
     overflow: auto;
     padding: 6px;
     border-right: 1px solid rgba(255, 255, 255, 0.055);
-    background: inherit;
-    transition:
-      width 180ms ease,
-      box-shadow 180ms ease;
-  }
-
-  .project-file-tree[data-collapsed='true'] {
-    width: var(--project-tree-collapsed-width);
-    overflow-x: hidden;
-  }
-
-  .project-file-tree[data-collapsed='true']:has(.project-tree-file:hover),
-  .project-file-tree[data-collapsed='true']:has(.project-tree-directory:hover),
-  .project-file-tree[data-collapsed='true']:has(.project-tree-row:focus-visible) {
-    width: min(260px, calc(100vw - 56px));
-    box-shadow:
-      18px 0 34px rgba(0, 0, 0, 0.16),
-      inset -1px 0 0 rgba(255, 255, 255, 0.055);
+    background: #10151b;
+    clip-path: inset(0 100% 0 0);
+    pointer-events: none;
+    transition: clip-path 220ms cubic-bezier(0.2, 0, 0, 1);
+    visibility: hidden;
   }
 
   :global(:root[data-color-scheme='light']) .project-file-tree {
     border-right-color: rgba(85, 104, 120, 0.12);
+    background: #fbfaf5;
   }
 
-  :global(:root[data-color-scheme='light']) .project-file-tree[data-collapsed='true']:has(.project-tree-file:hover),
-  :global(:root[data-color-scheme='light']) .project-file-tree[data-collapsed='true']:has(.project-tree-directory:hover),
-  :global(:root[data-color-scheme='light']) .project-file-tree[data-collapsed='true']:has(.project-tree-row:focus-visible) {
-    box-shadow:
-      18px 0 34px rgba(54, 70, 82, 0.11),
-      inset -1px 0 0 rgba(85, 104, 120, 0.12);
+  :global(:root[data-color-scheme='light']) .project-tree-rail,
+  :global(:root[data-color-scheme='light']) .project-tree-list {
+    background: #fbfaf5;
   }
 
-  .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-row {
-    grid-template-columns: 28px 0 0;
-    gap: 0;
-    padding-inline: 7px;
-    padding-left: 7px;
+  :global(:root[data-color-scheme='light']) .project-tree-rail {
+    color: rgba(82, 98, 111, 0.68);
   }
 
-  .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-label,
-  .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-row small {
-    max-width: 0;
-    opacity: 0;
-    transform: translateX(-6px);
+  :global(:root[data-color-scheme='light']) .project-tree-rail small {
+    background: rgba(85, 104, 120, 0.07);
+    color: rgba(82, 98, 111, 0.76);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-tree-rail-label {
+    color: rgba(57, 70, 82, 0.82);
+  }
+
+  .project-file-tree:hover .project-tree-rail,
+  .project-file-tree:focus-within .project-tree-rail {
     pointer-events: none;
+    transition-delay: 0s;
+    visibility: hidden;
+  }
+
+  .project-file-tree:hover .project-tree-list,
+  .project-file-tree:focus-within .project-tree-list {
+    clip-path: inset(0 0 0 0);
+    pointer-events: auto;
+    visibility: visible;
   }
 
   .project-tree-label,
@@ -1115,13 +1147,13 @@
   .project-tree-row {
     --depth: 0;
     display: grid;
-    grid-template-columns: 26px minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 7px;
     width: 100%;
     min-height: 30px;
     margin: 1px 0;
-    padding: 5px 7px 5px calc(7px + (var(--depth) * 14px));
+    padding: 5px 7px 5px calc(20px + (var(--depth) * 14px));
     border: 0;
     border-radius: 6px;
     background: transparent;
@@ -1134,35 +1166,20 @@
   }
 
   .project-tree-file,
-  .project-tree-directory,
-  .project-tree-collapse-action {
+  .project-tree-directory {
     cursor: pointer;
   }
 
   .project-tree-file:hover,
   .project-tree-directory:hover,
-  .project-tree-collapse-action:hover,
   .project-tree-file-selected {
     background: rgba(255, 255, 255, 0.055);
   }
 
   :global(:root[data-color-scheme='light']) .project-tree-file:hover,
   :global(:root[data-color-scheme='light']) .project-tree-directory:hover,
-  :global(:root[data-color-scheme='light']) .project-tree-collapse-action:hover,
   :global(:root[data-color-scheme='light']) .project-tree-file-selected {
     background: rgba(82, 117, 139, 0.08);
-  }
-
-  .project-tree-collapse-action {
-    color: rgba(231, 238, 247, 0.58);
-    font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 10px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  :global(:root[data-color-scheme='light']) .project-tree-collapse-action {
-    color: rgba(82, 98, 111, 0.68);
   }
 
   .project-tree-directory {
@@ -1173,47 +1190,32 @@
     color: rgba(82, 98, 111, 0.72);
   }
 
-  .project-tree-folder-glyph {
+  .project-tree-directory {
+    grid-template-columns: 14px minmax(0, 1fr) auto;
+    padding-left: calc(7px + (var(--depth) * 14px));
+  }
+
+  .project-tree-chevron {
     display: inline-flex;
     align-items: center;
-    gap: 1px;
+    justify-content: center;
     min-width: 0;
     overflow: visible;
   }
 
-  .project-tree-file-glyph {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 6px;
-    background: rgba(255, 255, 255, 0.045);
-    color: rgba(157, 194, 255, 0.86);
-  }
-
-  .project-tree-file-glyph {
-    width: 18px;
-    height: 18px;
-  }
-
-  .project-tree-file-glyph[data-kind='image'],
   .project-file-kind-chip[data-kind='image'] {
     color: #8bd4bd;
   }
 
-  .project-tree-file-glyph[data-kind='pdf'],
   .project-file-kind-chip[data-kind='pdf'] {
     color: #efa5b0;
   }
 
-  .project-tree-file-glyph[data-kind='spreadsheet'],
-  .project-tree-file-glyph[data-kind='data'],
   .project-file-kind-chip[data-kind='spreadsheet'],
   .project-file-kind-chip[data-kind='data'] {
     color: #e7bc77;
   }
 
-  .project-tree-file-glyph[data-kind='code'],
-  .project-tree-file-glyph[data-kind='graph'],
   .project-file-kind-chip[data-kind='code'],
   .project-file-kind-chip[data-kind='graph'] {
     color: #9dc2ff;
@@ -1227,7 +1229,7 @@
     font-size: 11px;
   }
 
-  .project-tree-row .project-tree-folder-glyph {
+  .project-tree-row .project-tree-chevron {
     overflow: visible;
     white-space: normal;
   }
@@ -1265,6 +1267,7 @@
 
   .project-file-preview {
     display: grid;
+    flex: 1 1 auto;
     align-content: start;
     gap: 9px;
     min-width: 0;
@@ -1845,31 +1848,28 @@
   }
 
   @media (max-width: 720px) {
-    .project-browser-layout,
-    .project-browser-layout[data-tree-collapsed='true'] {
-      grid-template-columns: minmax(0, 1fr);
+    .project-browser-layout {
+      flex-direction: column;
     }
 
     .project-file-tree,
-    .project-file-tree[data-collapsed='true'] {
-      width: 100%;
+    .project-file-tree:hover,
+    .project-file-tree:focus-within {
+      flex-basis: auto;
       max-height: 260px;
       border-right: 0;
       border-bottom: 1px solid rgba(255, 255, 255, 0.055);
     }
 
-    .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-row {
-      grid-template-columns: 26px minmax(0, 1fr) auto;
-      gap: 7px;
-      padding: 5px 7px 5px calc(7px + (var(--depth) * 14px));
+    .project-tree-rail {
+      display: none;
     }
 
-    .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-label,
-    .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-row small {
-      max-width: none;
-      opacity: 1;
-      transform: translateX(0);
+    .project-tree-list {
+      position: static;
+      clip-path: none;
       pointer-events: auto;
+      visibility: visible;
     }
 
     :global(:root[data-color-scheme='light']) .project-file-tree {
