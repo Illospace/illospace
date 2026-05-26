@@ -1,11 +1,6 @@
-const ACTIVE_RUN_STATUSES = new Set([
-  'queued',
-  'starting',
-  'running',
-  'paused',
-  'pending_approval',
-  'verifying',
-]);
+import { LIVE_RUN_STATUSES } from '../constants/statuses.ts';
+
+const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set(LIVE_RUN_STATUSES);
 
 type RunActivityCandidate = {
   idea_id?: string | null;

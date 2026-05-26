@@ -175,7 +175,12 @@ class DomainRecord(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_domain_records_domain_object", "domain_id", "object_type_id"),
         Index("ix_domain_records_org_archived", "org_id", "archived_at"),
-        Index("ix_domain_records_search_text", "search_text"),
+        Index(
+            "ix_domain_records_search_text_trgm",
+            "search_text",
+            postgresql_using="gin",
+            postgresql_ops={"search_text": "gin_trgm_ops"},
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

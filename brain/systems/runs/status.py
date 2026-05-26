@@ -1,20 +1,20 @@
-"""Canonical run status model."""
+"""Canonical run status behavior."""
 
 from __future__ import annotations
 
-from enum import StrEnum
-
-
-class RunStatus(StrEnum):
-    QUEUED = "queued"
-    STARTING = "starting"
-    RUNNING = "running"
-    PAUSED = "paused"
-    VERIFYING = "verifying"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELED = "canceled"
-    EXPIRED = "expired"
+from brain.contracts.statuses import (
+    ACTIVE_RUN_STATUS_VALUES,
+    AGENT_RUN_DB_STATUS_VALUES,
+    LEGACY_AGENT_RUN_STATUS_VALUES,
+    OPEN_RUN_STATUS_VALUES,
+    PROCESSING_RUN_STATUS_VALUES,
+    PROJECTABLE_RUN_STATUS_VALUES,
+    RUN_FAILED_STATUS_VALUE,
+    RUN_STATUS_ALIASES,
+    RUN_STATUS_VALUES,
+    RunStatus,
+    project_run_status_value,
+)
 
 
 TERMINAL_RUN_STATUSES = frozenset({
@@ -30,8 +30,24 @@ ACTIVE_RUN_STATUSES = frozenset({
     RunStatus.PAUSED,
     RunStatus.VERIFYING,
 })
+OPEN_RUN_STATUSES = frozenset({RunStatus.QUEUED, *ACTIVE_RUN_STATUSES})
 
 RESUMABLE_RUN_STATUSES = ACTIVE_RUN_STATUSES
+PROCESSING_RUN_STATUSES = frozenset({
+    RunStatus.STARTING,
+    RunStatus.RUNNING,
+    RunStatus.VERIFYING,
+})
+
+assert RUN_STATUS_VALUES == tuple(status.value for status in RunStatus)
+assert ACTIVE_RUN_STATUS_VALUES == tuple(
+    status.value for status in RunStatus if status in ACTIVE_RUN_STATUSES
+)
+assert OPEN_RUN_STATUS_VALUES == tuple(status.value for status in RunStatus if status in OPEN_RUN_STATUSES)
+assert PROCESSING_RUN_STATUS_VALUES == tuple(
+    status.value for status in RunStatus if status in PROCESSING_RUN_STATUSES
+)
+assert RUN_FAILED_STATUS_VALUE == RunStatus.FAILED.value
 
 ALLOWED_RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     RunStatus.QUEUED: frozenset({RunStatus.STARTING, RunStatus.CANCELED, RunStatus.EXPIRED, RunStatus.FAILED}),
@@ -73,10 +89,22 @@ def ensure_run_transition(from_status: str | RunStatus | None, to_status: str | 
 __all__ = [
     "ALLOWED_RUN_TRANSITIONS",
     "ACTIVE_RUN_STATUSES",
+    "ACTIVE_RUN_STATUS_VALUES",
+    "AGENT_RUN_DB_STATUS_VALUES",
+    "LEGACY_AGENT_RUN_STATUS_VALUES",
+    "OPEN_RUN_STATUSES",
+    "OPEN_RUN_STATUS_VALUES",
+    "PROCESSING_RUN_STATUSES",
+    "PROCESSING_RUN_STATUS_VALUES",
+    "PROJECTABLE_RUN_STATUS_VALUES",
     "RESUMABLE_RUN_STATUSES",
+    "RUN_FAILED_STATUS_VALUE",
+    "RUN_STATUS_ALIASES",
     "RunStatus",
     "RunTransitionError",
+    "RUN_STATUS_VALUES",
     "TERMINAL_RUN_STATUSES",
     "coerce_run_status",
     "ensure_run_transition",
+    "project_run_status_value",
 ]

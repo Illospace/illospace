@@ -18,6 +18,8 @@ import uuid
 from sqlalchemy import func, select
 
 from brain.kernel import config as brain_config
+from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_STATUS_VALUES
+from brain.systems.cortex.status import PROTECTED_IDEA_STATUSES
 from brain.systems.runs.engine import AsyncAgentRunEngine
 from brain.systems.runs.events import activity_event, run_event
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
@@ -66,9 +68,7 @@ _default_heartbeat_interval_sec = 10.0
 _default_stale_run_sec = 300.0
 _last_stale_reconcile_monotonic = 0.0
 
-_PROCESS_ACTIVE_STATUS_VALUES = tuple(
-    status.value for status in (RunStatus.STARTING, RunStatus.RUNNING, RunStatus.VERIFYING)
-)
+_PROCESS_ACTIVE_STATUS_VALUES = PROCESSING_RUN_STATUS_VALUES
 
 
 def _coerce_concurrency(value: Any, *, default: int | None = None) -> int | None:
@@ -210,7 +210,6 @@ _TERMINAL_RUN_IDEA_STATUS = {
     "failed": "failed",
     "canceled": "failed",
 }
-_PROTECTED_IDEA_STATUSES = {"archived", "resolved"}
 _AI_TIMELINE_SURFACES = {"ai_timeline", "thread_timeline", "cortex_thread", "main_thread"}
 _THREAD_DISCUSSION_SURFACE = "thread_discussion"
 _THREAD_DISCUSSION_THREAD_PREFIX = "thread-discussion:"
@@ -470,7 +469,7 @@ async def _settle_idea_for_terminal_root_run_async(session, run_id: int) -> dict
     if idea is None:
         return None
     old_status = str(idea.status or "")
-    if old_status in _PROTECTED_IDEA_STATUSES:
+    if old_status in PROTECTED_IDEA_STATUSES:
         return None
     final_answer, artifact_id = await _latest_unmirrored_final_answer(session, run=run, idea=idea)
     settlement = await settle_terminal_run(
@@ -1068,7 +1067,7 @@ async def queue_status_async(*, consumer_running: bool | None = None, org_id: st
         "event_consumer_running": consumer_running,
         "counts": counts,
         "queued": counts.get("queued", 0),
-        "running": sum(counts.get(status, 0) for status in ("starting", "running", "verifying")),
+        "running": sum(counts.get(status, 0) for status in ACTIVE_RUN_STATUS_VALUES),
     }
 
 

@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -23,6 +24,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
 from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin
+from brain.platform.db.constraints import check_in_constraint
+from brain.contracts.statuses import INBOUND_EVENT_STATUS_VALUES
 
 JSONVariant = JSONB().with_variant(JSON(), "sqlite")
 UUIDString = UUID(as_uuid=False).with_variant(String, "sqlite")
@@ -240,6 +243,10 @@ class InboundEventRow(Base, CreatedAtMixin):
 
     __tablename__ = "inbound_events"
     __table_args__ = (
+        CheckConstraint(
+            check_in_constraint("status", INBOUND_EVENT_STATUS_VALUES),
+            name="ck_inbound_events_status",
+        ),
         UniqueConstraint("connection_id", "idempotency_key", name="uq_inbound_events_connection_idempotency"),
         Index("ix_inbound_events_connection_created", "connection_id", "created_at"),
         Index("ix_inbound_events_origin_created", "org_id", "origin", "created_at"),

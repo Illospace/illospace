@@ -1,53 +1,21 @@
 import type { Idea } from '$lib/types/cortex';
+import { DONE_IDEA_STATUSES, WORKING_IDEA_STATUSES } from '../../../constants/statuses.ts';
 
 export type NormalizedIdeaStatus = 'idle' | 'working' | 'done';
 export type NormalizedIdea<T extends Idea = Idea> = Omit<T, 'status'> & { status: NormalizedIdeaStatus };
-
-export const WORKING_IDEA_STATUSES = [
-  'queued',
-  'working',
-  'running',
-] as const;
-
-export const DONE_IDEA_STATUSES = [
-  'completed',
-  'pending_approval',
-  'needs_input',
-  'unread_reply',
-  'failed',
-  'canceled',
-  'cancelled',
-  'superseded',
-  'timeout',
-  'blocked',
-  'done',
-] as const;
 
 export type NormalizeIdeaOptions = {
   isIdeaSeen?: (idea: Pick<Idea, 'id' | 'updated_at' | 'created_at'>) => boolean;
 };
 
+const WORKING_IDEA_STATUS_SET: ReadonlySet<string> = new Set(WORKING_IDEA_STATUSES);
+const DONE_IDEA_STATUS_SET: ReadonlySet<string> = new Set(DONE_IDEA_STATUSES);
+
 export function normalizeIdeaStatus(status: string | null | undefined): NormalizedIdeaStatus {
-  switch (status) {
-    case 'queued':
-    case 'working':
-    case 'running':
-      return 'working';
-    case 'completed':
-    case 'pending_approval':
-    case 'needs_input':
-    case 'unread_reply':
-    case 'failed':
-    case 'canceled':
-    case 'cancelled':
-    case 'superseded':
-    case 'timeout':
-    case 'blocked':
-    case 'done':
-      return 'done';
-    default:
-      return 'idle';
-  }
+  const value = String(status || '').trim().toLowerCase();
+  if (WORKING_IDEA_STATUS_SET.has(value)) return 'working';
+  if (DONE_IDEA_STATUS_SET.has(value)) return 'done';
+  return 'idle';
 }
 
 export function normalizeIdea<T extends Idea>(

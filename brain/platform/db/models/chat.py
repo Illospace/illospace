@@ -122,11 +122,6 @@ class ChatConversationMember(Base):
             name="uq_chat_conversation_members_conversation_user",
         ),
         Index(
-            "ix_chat_conversation_members_conversation_user",
-            "conversation_id",
-            "user_id",
-        ),
-        Index(
             "ix_chat_conversation_members_user_conversation",
             "user_id",
             "conversation_id",
@@ -192,7 +187,6 @@ class ChatMessage(Base, CreatedAtMixin):
             "(thread_root_message_id IS NOT NULL) OR (reply_to_message_id IS NULL)",
             name="ck_chat_messages_reply_target_requires_thread_root",
         ),
-        Index("ix_chat_messages_conversation_seq", "conversation_id", "conversation_seq"),
         Index(
             "ix_chat_messages_thread_root_seq",
             "thread_root_message_id",

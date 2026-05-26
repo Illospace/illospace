@@ -697,13 +697,15 @@ from sqlalchemy import func, select
 
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.status_contracts import ACTIVE_RUN_STATUS_VALUES
 
 
 async def main() -> None:
-    active = ("starting", "running", "verifying")
     async with UnitOfWork() as uow:
         count = await uow.session.scalar(
-            select(func.count()).select_from(AgentRunRow).where(AgentRunRow.status.in_(active))
+            select(func.count())
+            .select_from(AgentRunRow)
+            .where(AgentRunRow.status.in_(ACTIVE_RUN_STATUS_VALUES))
         )
     print(int(count or 0))
 
@@ -726,6 +728,7 @@ from sqlalchemy import select
 
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.status_contracts import ACTIVE_RUN_STATUS_VALUES
 
 
 async def main() -> None:
@@ -734,11 +737,12 @@ async def main() -> None:
         for item in os.environ.get("ILLO_RUNNER_OWNER_PIDS", "").replace(",", " ").split()
         if item.strip()
     }
-    active = ("starting", "running", "verifying")
     count = 0
     async with UnitOfWork() as uow:
         rows = (
-            await uow.session.scalars(select(AgentRunRow).where(AgentRunRow.status.in_(active)))
+            await uow.session.scalars(
+                select(AgentRunRow).where(AgentRunRow.status.in_(ACTIVE_RUN_STATUS_VALUES))
+            )
         ).all()
     for row in rows:
         metadata = row.metadata_ if isinstance(row.metadata_, dict) else {}

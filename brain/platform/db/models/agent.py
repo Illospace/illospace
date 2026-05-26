@@ -65,11 +65,21 @@ class AgentApiCall(Base, CreatedAtMixin):
     __tablename__ = "agent_api_calls"
     __table_args__ = (
         Index("ix_agent_api_calls_trace_id", "trace_id"),
+        Index("ix_agent_api_calls_run_created", "run_id", "created_at"),
+        Index("ix_agent_api_calls_created_run", "created_at", "run_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(Text, nullable=False)
-    run_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    run_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "agent_runs.id",
+            name="fk_agent_api_calls_run_id_agent_runs",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
     trace_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     turn_number: Mapped[int] = mapped_column(Integer, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)

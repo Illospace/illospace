@@ -66,7 +66,7 @@ all_runtime_services() {
 active_agent_run_count() {
   local count
   if count="$(compose exec -T postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "
-SELECT count(*) FROM agent_runs WHERE status IN ('\''starting'\'', '\''running'\'', '\''verifying'\'');
+SELECT count(*) FROM agent_runs WHERE status IN ('\''starting'\'', '\''running'\'', '\''paused'\'', '\''verifying'\'');
 "' 2>/dev/null | tr -d '[:space:]')"; then
     if [[ "$count" =~ ^[0-9]+$ ]]; then
       printf '%s\n' "$count"

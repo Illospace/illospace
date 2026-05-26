@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 
+from brain.systems.cortex.status import IDEA_STATUSES, RUN_ADMISSION_CREATE_STATUSES
 from brain.systems.cortex.thought_lifecycle import (
     ThoughtStatusCommand,
     ThreadMessageCommand,
@@ -15,25 +16,6 @@ from brain.systems.cortex.thought_lifecycle import (
 )
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.runs.tool_catalog.handlers.common import *
-
-
-_IDEA_STATUSES = {
-    "emerged",
-    "queued",
-    "active",
-    "working",
-    "needs_input",
-    "unread_reply",
-    "blocked",
-    "failed",
-    "resolved",
-    "stale",
-    "paused",
-    "done",
-    "archived",
-}
-
-_RUN_ADMISSION_CREATE_STATUSES = {"queued", "working"}
 
 
 def _idea_tool_context() -> tuple[str | None, str | None, str | None]:
@@ -242,7 +224,7 @@ async def _list_ideas(
     capped_limit = max(1, min(int(limit or 20), 100))
     stmt = _scoped_ideas_stmt(org_id, actor_user_id)
     if status:
-        if status not in _IDEA_STATUSES:
+        if status not in IDEA_STATUSES:
             raise ValueError(f"Unsupported idea status: {status}")
         stmt = stmt.where(Idea.status == status)
     if not include_archived and status != "archived":
@@ -262,7 +244,7 @@ async def _list_ideas(
 
 
 async def _status_change(idea, next_status: str, *, trigger: str, session) -> tuple[str, str] | None:
-    if next_status not in _IDEA_STATUSES:
+    if next_status not in IDEA_STATUSES:
         raise ValueError(f"Unsupported idea status: {next_status}")
     old_status = str(idea.status or "")
     if old_status == next_status and (next_status != "archived" or idea.archived_at is not None):
@@ -467,12 +449,12 @@ async def _handle_manage_idea(
                 if not title:
                     return json.dumps({"error": "create requires: title"})
                 requested_status = status or "emerged"
-                if requested_status not in _IDEA_STATUSES:
+                if requested_status not in IDEA_STATUSES:
                     return json.dumps({"error": f"Unsupported idea status: {requested_status}"})
                 should_start_run = _optional_bool(start_run)
                 if should_start_run is None:
-                    should_start_run = requested_status in _RUN_ADMISSION_CREATE_STATUSES
-                initial_status = "emerged" if should_start_run or requested_status in _RUN_ADMISSION_CREATE_STATUSES else requested_status
+                    should_start_run = requested_status in RUN_ADMISSION_CREATE_STATUSES
+                initial_status = "emerged" if should_start_run or requested_status in RUN_ADMISSION_CREATE_STATUSES else requested_status
                 owner_user_id = await _validated_create_owner_id(
                     session=uow.session,
                     requested_owner_id=user_id,

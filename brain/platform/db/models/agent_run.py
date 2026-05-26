@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -21,6 +22,8 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin
+from brain.platform.db.constraints import check_in_constraint
+from brain.contracts.statuses import AGENT_RUN_DB_STATUS_VALUES
 
 __all__ = [
     "ActionManifestRow",
@@ -33,6 +36,10 @@ __all__ = [
 class AgentRunRow(Base, TimestampMixin):
     __tablename__ = "agent_runs"
     __table_args__ = (
+        CheckConstraint(
+            check_in_constraint("status", AGENT_RUN_DB_STATUS_VALUES),
+            name="ck_agent_runs_status",
+        ),
         Index("ix_agent_runs_org_created", "org_id", "created_at"),
         Index("ix_agent_runs_thread_created", "thread_id", "created_at"),
         Index("ix_agent_runs_status_created", "status", "created_at"),

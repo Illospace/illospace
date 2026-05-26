@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -22,6 +23,8 @@ from sqlalchemy.types import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from brain.platform.db.base import Base, TimestampMixin
+from brain.platform.db.constraints import check_in_constraint
+from brain.contracts.statuses import EXTERNAL_AGENT_TASK_STATUS_VALUES
 
 JSONVariant = JSONB().with_variant(JSON(), "sqlite")
 UUIDString = UUID(as_uuid=False).with_variant(String, "sqlite")
@@ -123,6 +126,10 @@ class ExternalAgentTaskRow(Base, TimestampMixin):
 
     __tablename__ = "external_agent_tasks"
     __table_args__ = (
+        CheckConstraint(
+            check_in_constraint("status", EXTERNAL_AGENT_TASK_STATUS_VALUES),
+            name="ck_external_agent_tasks_status",
+        ),
         UniqueConstraint("connection_id", "idempotency_key", name="uq_external_agent_tasks_connection_idempotency"),
         Index("ix_external_agent_tasks_org_status_created", "org_id", "status", "created_at"),
         Index("ix_external_agent_tasks_connection_status_created", "connection_id", "status", "created_at"),

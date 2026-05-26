@@ -15,6 +15,8 @@ from brain.platform.async_io import http_get
 from brain.platform.db.models.run import AgentRun
 from brain.platform.provider_health import provider_health_snapshot
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
+from brain.systems.cycles.health import async_legacy_cycle_backlog_snapshot
+from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, RUN_FAILED_STATUS_VALUE
 
 APP_VERSION = "6.0.0"
 DEFAULT_DB_TIMEOUT_MS = 1500
@@ -23,6 +25,8 @@ DEFAULT_GPU_HEALTH_TIMEOUT_SECONDS = 1.0
 DEFAULT_STUCK_RUN_SECONDS = 15 * 60
 DEFAULT_RECENT_FAILURE_WINDOW_MINUTES = 60
 DEFAULT_RECENT_FAILURE_LIMIT = 10
+DEFAULT_STALE_CYCLE_BACKLOG_MINUTES = 15
+DEFAULT_STALE_CYCLE_BACKLOG_LIMIT = 10
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"),
@@ -350,23 +354,43 @@ async def readiness_health_snapshot(
     }
 
 
-def _embedding_health_check() -> HealthCheck:
+async def _embedding_health_check(session: AsyncSession | None = None) -> HealthCheck:
     start = time.monotonic()
     try:
         import brain.kernel.config as cfg
 
-        backend = cfg.EMBEDDING_BACKEND
+        if session is not None:
+            from brain.systems.runtime_settings.memory import async_get_embedding_runtime_config
+
+            runtime = await async_get_embedding_runtime_config(session)
+            backend = (runtime.backend or "").lower()
+            provider = runtime.provider
+            api_model = runtime.api_model
+            cpu_model = runtime.cpu_model
+            dimensions = runtime.dimensions
+            api_key_configured = bool(runtime.api_key)
+            settings_source = "db_runtime_memory"
+        else:
+            backend = cfg.EMBEDDING_BACKEND
+            provider = cfg.EMBEDDING_API_PROVIDER
+            api_model = cfg.EMBEDDING_API_MODEL
+            cpu_model = cfg.EMBEDDING_CPU_MODEL
+            dimensions = cfg.EMBEDDING_DIM
+            api_key_configured = bool(cfg.EMBEDDING_API_KEY)
+            settings_source = "process_env"
+
         details: dict[str, Any] = {
             "backend": backend,
-            "dimensions": cfg.EMBEDDING_DIM,
+            "dimensions": dimensions,
+            "settings_source": settings_source,
         }
         if backend == "api":
             details.update({
-                "provider": cfg.EMBEDDING_API_PROVIDER,
-                "model": cfg.EMBEDDING_API_MODEL,
-                "api_key_configured": bool(cfg.EMBEDDING_API_KEY),
+                "provider": provider,
+                "model": api_model,
+                "api_key_configured": api_key_configured,
             })
-            if not cfg.EMBEDDING_API_KEY:
+            if not api_key_configured:
                 return HealthCheck(
                     name="embedding",
                     status="failed",
@@ -383,7 +407,7 @@ def _embedding_health_check() -> HealthCheck:
                 details=details,
             )
         if backend == "cpu":
-            details["model"] = cfg.EMBEDDING_CPU_MODEL
+            details["model"] = cpu_model
             return HealthCheck(
                 name="embedding",
                 status="ok",
@@ -439,6 +463,8 @@ def _embedding_health_check() -> HealthCheck:
             remediation="Set EMBEDDING_BACKEND to api, cpu, or gpu.",
         )
     except Exception as exc:
+        if session is not None:
+            await _rollback_health_session(session)
         return HealthCheck(
             name="embedding",
             status="failed",
@@ -578,7 +604,7 @@ async def _run_health_check(session: AsyncSession | None = None) -> HealthCheck:
         stuck_stmt = (
             select(AgentRun)
             .where(
-                AgentRun.status.in_(["starting", "running", "paused", "verifying"]),
+                AgentRun.status.in_(ACTIVE_RUN_STATUS_VALUES),
                 func.coalesce(AgentRun.updated_at, AgentRun.started_at, AgentRun.created_at) <= stuck_cutoff,
             )
             .order_by(AgentRun.created_at.asc())
@@ -587,7 +613,7 @@ async def _run_health_check(session: AsyncSession | None = None) -> HealthCheck:
         stuck_result = await session.scalars(stuck_stmt)
         stuck_runs = list(stuck_result.all())
         recent_failure_clause = and_(
-            AgentRun.status.in_(["failed"]),
+            AgentRun.status == RUN_FAILED_STATUS_VALUE,
             func.coalesce(AgentRun.completed_at, AgentRun.created_at) >= failure_cutoff,
         )
         recent_failure_result = await session.scalars(
@@ -637,16 +663,63 @@ async def _run_health_check(session: AsyncSession | None = None) -> HealthCheck:
         )
 
 
+async def _legacy_cycle_backlog_health_check(session: AsyncSession | None = None) -> HealthCheck:
+    start = time.monotonic()
+    timeout_ms = _timeout_ms("HEALTH_DEEP_DB_TIMEOUT_MS", DEFAULT_DEEP_TIMEOUT_MS)
+    stale_minutes = _int_env(
+        "HEALTH_STALE_CYCLE_BACKLOG_MINUTES",
+        DEFAULT_STALE_CYCLE_BACKLOG_MINUTES,
+        minimum=1,
+    )
+    sample_limit = _int_env(
+        "HEALTH_STALE_CYCLE_BACKLOG_LIMIT",
+        DEFAULT_STALE_CYCLE_BACKLOG_LIMIT,
+        minimum=1,
+    )
+    now = _utc_now()
+    try:
+        if session is None:
+            raise RuntimeError("health checks require an explicit database session")
+        await _apply_statement_timeout(session, timeout_ms)
+
+        snapshot = await async_legacy_cycle_backlog_snapshot(
+            session,
+            stale_after_minutes=stale_minutes,
+            sample_limit=sample_limit,
+            now=now,
+        )
+        return HealthCheck(
+            name="legacy_cycle_backlog",
+            status=snapshot.status,
+            summary=snapshot.summary,
+            latency_ms=_elapsed_ms(start),
+            details=snapshot.details,
+            remediation=snapshot.remediation,
+        )
+    except Exception as exc:
+        if session is not None:
+            await _rollback_health_session(session)
+        return HealthCheck(
+            name="legacy_cycle_backlog",
+            status="failed",
+            summary="legacy cycle backlog check failed",
+            latency_ms=_elapsed_ms(start),
+            details={"error": str(exc)},
+            remediation="Verify cycles and cycle_runs schema before relying on scheduled cycles.",
+        )
+
+
 async def deep_health_snapshot(
     *,
     consumer_running: bool | None = None,
     session: AsyncSession | None = None,
 ) -> dict[str, Any]:
     checks = {
-        "embedding": _embedding_health_check(),
+        "embedding": await _embedding_health_check(session),
         "providers": _provider_health_check(),
         "scheduler": await _scheduler_health_check(session),
         "run": await _run_health_check(session),
+        "legacy_cycle_backlog": await _legacy_cycle_backlog_health_check(session),
     }
     if consumer_running is not None:
         checks["event_backbone_runtime"] = HealthCheck(

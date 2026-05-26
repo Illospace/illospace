@@ -14,6 +14,11 @@ from brain.platform.db.models.notification import (
     NOTIFICATION_KIND_WORKSPACE_THREAD_ATTENTION,
     NOTIFICATION_SOURCE_WORKSPACE,
 )
+from brain.systems.cortex.status import (
+    ASSISTANT_REPLY_BLOCKED_IDEA_STATUSES,
+    ASSISTANT_REPLY_UNREAD_IDEA_STATUSES,
+    USER_MESSAGE_ACTIVATES_IDEA_STATUSES,
+)
 
 MentionResolver = Callable[[list[str], str], Awaitable[dict[str, str]]]
 ProductEventPublisher = Callable[[str, dict[str, Any]], Any]
@@ -152,11 +157,11 @@ def _metadata_with_context(
 
 
 def _next_status_for_message(role: str, current_status: str | None) -> str | None:
-    if role == "user" and current_status in ("needs_input", "unread_reply", "emerged"):
+    if role == "user" and current_status in USER_MESSAGE_ACTIVATES_IDEA_STATUSES:
         return "active"
-    if role in ("illo", "assistant") and current_status in ("active", "working", "queued"):
+    if role in ("illo", "assistant") and current_status in ASSISTANT_REPLY_UNREAD_IDEA_STATUSES:
         return "unread_reply"
-    if role == "illo" and current_status not in ("resolved",):
+    if role == "illo" and current_status not in ASSISTANT_REPLY_BLOCKED_IDEA_STATUSES:
         return "unread_reply"
     return None
 

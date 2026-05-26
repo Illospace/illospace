@@ -6,6 +6,12 @@ tier constants. These are pure data — no handlers, no side effects.
 
 from __future__ import annotations
 
+from brain.systems.cortex.status import IDEA_STATUS_VALUES
+from brain.systems.inbound.status import (
+    STATUS_FAILED,
+    STATUS_QUARANTINED,
+    STATUS_REVIEW_REQUIRED,
+)
 from brain.systems.runs.tool_catalog.definitions.workers import WORKER_SPAWN_TOOLS
 
 
@@ -996,7 +1002,7 @@ INBOUND_TOOLS = [
                 },
                 "validation_failure_status": {
                     "type": "string",
-                    "enum": ["review_required", "quarantined", "failed"],
+                    "enum": [STATUS_REVIEW_REQUIRED, STATUS_QUARANTINED, STATUS_FAILED],
                     "description": "Event status when projection validation fails.",
                 },
                 "auto_allow_policy_action": {
@@ -1098,21 +1104,7 @@ CORTEX_IDEA_TOOLS = [
                 "description": {"type": "string", "description": "Optional idea description."},
                 "status": {
                     "type": "string",
-                    "enum": [
-                        "emerged",
-                        "queued",
-                        "active",
-                        "working",
-                        "needs_input",
-                        "unread_reply",
-                        "blocked",
-                        "failed",
-                        "resolved",
-                        "stale",
-                        "paused",
-                        "done",
-                        "archived",
-                    ],
+                    "enum": list(IDEA_STATUS_VALUES),
                     "description": (
                         "Next status for create, update, or set_status. Use needs_input only when the "
                         "requested deliverable cannot be produced without user input; missing credentials "

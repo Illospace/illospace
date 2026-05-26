@@ -17,14 +17,16 @@ LAYERS = (
     "brain.jobs",
     "brain.systems",
     "brain.platform",
+    "brain.contracts",
     "brain.kernel",
 )
 
 ALLOWED_IMPORTS = {
-    "brain.app": {"brain.app", "brain.systems", "brain.platform", "brain.kernel"},
-    "brain.jobs": {"brain.jobs", "brain.systems", "brain.platform", "brain.kernel"},
-    "brain.systems": {"brain.systems", "brain.platform", "brain.kernel"},
-    "brain.platform": {"brain.platform", "brain.kernel"},
+    "brain.app": {"brain.app", "brain.systems", "brain.platform", "brain.contracts", "brain.kernel"},
+    "brain.jobs": {"brain.jobs", "brain.systems", "brain.platform", "brain.contracts", "brain.kernel"},
+    "brain.systems": {"brain.systems", "brain.platform", "brain.contracts", "brain.kernel"},
+    "brain.platform": {"brain.platform", "brain.contracts", "brain.kernel"},
+    "brain.contracts": {"brain.contracts", "brain.kernel"},
     "brain.kernel": {"brain.kernel"},
 }
 
@@ -134,6 +136,7 @@ def _brain_python_files() -> list[Path]:
             ROOT / line
             for line in result.stdout.splitlines()
             if line.endswith(".py")
+            and (ROOT / line).exists()
         ]
     return [
         path

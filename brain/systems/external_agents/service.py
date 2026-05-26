@@ -35,6 +35,8 @@ from brain.systems.cortex.thought_lifecycle import (
     post_thread_message,
     transition_thought_status,
 )
+from brain.systems.cortex.status import EXTERNAL_TASK_STARTABLE_IDEA_STATUSES
+from brain.systems.external_agents.status import EXTERNAL_AGENT_TASK_TERMINAL_STATUSES
 from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 
@@ -75,7 +77,7 @@ HEADLESS_ASK_BLOCKED_TOOLS = (
     "post_thread_discussion_reply",
 )
 
-TASK_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "canceled"}
+TASK_TERMINAL_STATUSES = EXTERNAL_AGENT_TASK_TERMINAL_STATUSES
 CONNECTION_ADMIN_ROLES = {"owner", "admin"}
 SIGNAL_SUBMIT_BACKFILL_TRANSPORTS = frozenset({"hosted_mcp", "bridge_pull"})
 SIGNAL_SUBMIT_BACKFILL_AGENT_KINDS = frozenset(
@@ -801,7 +803,7 @@ async def create_external_task_for_idea(
         producer="illo",
     )
 
-    if idea.status in {"emerged", "needs_input", "unread_reply", "active"}:
+    if idea.status in EXTERNAL_TASK_STARTABLE_IDEA_STATUSES:
         await transition_thought_status(
             session,
             idea=idea,

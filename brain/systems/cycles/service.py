@@ -17,6 +17,7 @@ from brain.systems.cortex.thought_lifecycle import (
     post_thread_message,
     transition_thought_status,
 )
+from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES, CYCLE_RUN_TERMINAL_STATUSES
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.run import AgentRun
@@ -29,8 +30,8 @@ logger = logging.getLogger("cycles")
 REUSABLE_THREAD_EXECUTION_MODE = "reuse_same_idea"
 VALID_EXECUTION_MODES = {"new_idea_per_run", REUSABLE_THREAD_EXECUTION_MODE}
 VALID_THINKING_OVERRIDES = {"none", "low", "medium", "high", "xhigh"}
-ACTIVE_RUN_STATUSES = {"queued", "running", "pending_approval"}
-TERMINAL_RUN_STATUSES = {"completed", "failed", "skipped"}
+ACTIVE_RUN_STATUSES = CYCLE_RUN_ACTIVE_STATUSES
+TERMINAL_RUN_STATUSES = CYCLE_RUN_TERMINAL_STATUSES
 ONE_TIME_SCHEDULE_PREFIX = "at:"
 CYCLE_LAUNCH_ENVELOPE_VERSION = 1
 CYCLE_CONTROL_TOOLS = ("manage_cycle",)
