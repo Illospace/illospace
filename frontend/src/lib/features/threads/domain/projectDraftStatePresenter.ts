@@ -611,6 +611,52 @@ export function projectFileKindLabel(file: ProjectDraftFileEntry | null | undefi
   return 'File';
 }
 
+function parseDelimitedPreviewRow(line: string, delimiter: string, maxColumns: number): string[] {
+  const cells: string[] = [];
+  let current = '';
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    const next = line[index + 1];
+    if (char === '"' && quoted && next === '"') {
+      current += '"';
+      index += 1;
+      continue;
+    }
+    if (char === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (char === delimiter && !quoted) {
+      cells.push(current.trim());
+      current = '';
+      if (cells.length >= maxColumns) break;
+      continue;
+    }
+    current += char;
+  }
+  if (cells.length < maxColumns) {
+    cells.push(current.trim());
+  }
+  return cells;
+}
+
+export function projectSpreadsheetPreviewRows(
+  content: string,
+  extension: string,
+  maxRows = 50,
+  maxColumns = 12,
+): string[][] {
+  const suffix = extension.toLowerCase();
+  if (!['.csv', '.tsv'].includes(suffix) || !content.trim()) return [];
+  const delimiter = suffix === '.tsv' ? '\t' : ',';
+  return normaliseProjectPreviewText(content)
+    .split('\n')
+    .slice(0, maxRows)
+    .map((line) => parseDelimitedPreviewRow(line, delimiter, maxColumns))
+    .filter((row) => row.some(Boolean));
+}
+
 export function normaliseProjectPreviewText(value: unknown): string {
   const text = String(value ?? '').replace(/\r\n?/g, '\n');
   const escapedBreaks = (text.match(/\\n/g) ?? []).length;

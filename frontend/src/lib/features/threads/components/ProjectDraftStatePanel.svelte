@@ -19,6 +19,7 @@
     projectFileSizeLabel,
     projectFileStatusLabel,
     projectFileStatusTone,
+    projectSpreadsheetPreviewRows,
     visibleProjectExplorerRows,
     type ProjectFileKind,
     type ProjectExplorerFile,
@@ -103,8 +104,27 @@
     });
   });
   const finalSheetRows = $derived(
-    spreadsheetPreviewRows(previewView.finalLayer?.content ?? '', projectFileExtension(selectedFile)),
+    projectSpreadsheetPreviewRows(previewView.finalLayer?.content ?? '', projectFileExtension(selectedFile)),
   );
+  const finalSheetColumnIndexes = $derived(sheetColumnIndexes(finalSheetRows));
+  const finalSheetHeader = $derived(sheetHeaderCells(finalSheetRows, finalSheetColumnIndexes));
+  const finalSheetBodyRows = $derived(finalSheetRows.slice(1));
+  const reviewSheetRows = $derived.by(() => {
+    if (previewView.mode !== 'diff') return [];
+    return previewView.lines
+      .map((line) => ({
+        kind: line.kind,
+        cells: projectSpreadsheetPreviewRows(line.text, projectFileExtension(selectedFile), 1)[0] ?? [''],
+      }))
+      .filter((row) => row.cells.some((cell) => cell.trim()));
+  });
+  const reviewSheetColumnIndexes = $derived(
+    sheetColumnIndexes(reviewSheetRows.map((row) => row.cells)),
+  );
+  const reviewSheetHeader = $derived(
+    sheetHeaderCells(reviewSheetRows.map((row) => row.cells), reviewSheetColumnIndexes),
+  );
+  const reviewSheetBodyRows = $derived(reviewSheetRows.slice(1));
 
   function metricCountLabel(value: number): string {
     return Number.isFinite(value) ? String(value) : '0';
@@ -143,15 +163,14 @@
     ].filter(Boolean).join(' / ');
   }
 
-  function spreadsheetPreviewRows(content: string, extension: string): string[][] {
-    const suffix = extension.toLowerCase();
-    if (!['.csv', '.tsv'].includes(suffix) || !content.trim()) return [];
-    const delimiter = suffix === '.tsv' ? '\t' : ',';
-    return content
-      .split('\n')
-      .slice(0, 24)
-      .map((line) => line.split(delimiter).slice(0, 10).map((cell) => cell.trim()))
-      .filter((row) => row.some(Boolean));
+  function sheetColumnIndexes(rows: string[][]): number[] {
+    const count = rows.reduce((max, row) => Math.max(max, row.length), 0);
+    return Array.from({ length: count }, (_value, index) => index);
+  }
+
+  function sheetHeaderCells(rows: string[][], columnIndexes: number[]): string[] {
+    const header = rows[0] ?? [];
+    return columnIndexes.map((columnIndex) => header[columnIndex] || `Column ${columnIndex + 1}`);
   }
 
   function canEmbedFinalKind(kind: ProjectFileKind): boolean {
@@ -533,7 +552,38 @@
                 {#if fileSaveNotice}
                   <div class="project-file-save-message" data-tone="clean">{fileSaveNotice}</div>
                 {/if}
-                {#if activePreviewMode === 'review' && previewView.mode === 'diff'}
+                {#if activePreviewMode === 'review' && previewView.mode === 'diff' && selectedFileKind === 'spreadsheet' && reviewSheetRows.length > 0}
+                  <div class="project-preview-layer project-preview-sheet-review">
+                    <div class="project-preview-layer-head">
+                      <strong>{previewView.title}</strong>
+                      <span>{previewView.detail}</span>
+                    </div>
+                    <div class="project-sheet-preview" data-review="true" aria-label="Project root to thread draft spreadsheet diff">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th class="project-sheet-index" scope="col">#</th>
+                            {#each reviewSheetColumnIndexes as columnIndex (`review-head-${columnIndex}`)}
+                              <th scope="col">{reviewSheetHeader[columnIndex]}</th>
+                            {/each}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {#each reviewSheetBodyRows as row, rowIndex (`review-row-${rowIndex}-${row.kind}`)}
+                            <tr data-kind={row.kind}>
+                              <th class="project-sheet-index" scope="row">
+                                <span>{diffMarker(row.kind)}</span>{rowIndex + 1}
+                              </th>
+                              {#each reviewSheetColumnIndexes as columnIndex (`review-cell-${rowIndex}-${columnIndex}`)}
+                                <td>{row.cells[columnIndex] ?? ''}</td>
+                              {/each}
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                {:else if activePreviewMode === 'review' && previewView.mode === 'diff'}
                   <div class="project-preview-layer project-preview-diff">
                     <div class="project-preview-layer-head">
                       <strong>{previewView.title}</strong>
@@ -573,11 +623,20 @@
                       {:else if selectedFileKind === 'spreadsheet' && finalSheetRows.length > 0}
                         <div class="project-sheet-preview">
                           <table>
+                            <thead>
+                              <tr>
+                                <th class="project-sheet-index" scope="col">#</th>
+                                {#each finalSheetColumnIndexes as columnIndex (`final-head-${columnIndex}`)}
+                                  <th scope="col">{finalSheetHeader[columnIndex]}</th>
+                                {/each}
+                              </tr>
+                            </thead>
                             <tbody>
-                              {#each finalSheetRows as row, rowIndex (`row-${rowIndex}`)}
+                              {#each finalSheetBodyRows as row, rowIndex (`row-${rowIndex}`)}
                                 <tr>
-                                  {#each row as cell, cellIndex (`cell-${rowIndex}-${cellIndex}`)}
-                                    <td>{cell}</td>
+                                  <th class="project-sheet-index" scope="row">{rowIndex + 1}</th>
+                                  {#each finalSheetColumnIndexes as columnIndex (`cell-${rowIndex}-${columnIndex}`)}
+                                    <td>{row[columnIndex] ?? ''}</td>
                                   {/each}
                                 </tr>
                               {/each}
@@ -1377,7 +1436,7 @@
   }
 
   .project-sheet-preview {
-    max-height: 420px;
+    max-height: min(54vh, 520px);
     overflow: auto;
     border: 1px solid rgba(255, 255, 255, 0.065);
     border-radius: 8px;
@@ -1385,28 +1444,72 @@
   }
 
   .project-sheet-preview table {
-    width: 100%;
-    min-width: 420px;
-    border-collapse: collapse;
+    width: max-content;
+    min-width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
     font-family: var(--constellation-font-mono, var(--font-mono));
-    font-size: 10px;
+    font-size: 10.5px;
     line-height: 1.35;
   }
 
+  .project-sheet-preview th,
   .project-sheet-preview td {
-    max-width: 220px;
+    min-width: 118px;
+    max-width: 320px;
     border-right: 1px solid rgba(255, 255, 255, 0.055);
     border-bottom: 1px solid rgba(255, 255, 255, 0.055);
-    padding: 6px 8px;
+    padding: 7px 9px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    text-align: left;
+    vertical-align: top;
   }
 
-  .project-sheet-preview tr:first-child td {
+  .project-sheet-preview thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
     background: rgba(255, 255, 255, 0.05);
     color: rgba(240, 245, 251, 0.88);
     font-weight: 650;
+  }
+
+  .project-sheet-preview .project-sheet-index {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    width: 46px;
+    min-width: 46px;
+    max-width: 46px;
+    background: rgba(12, 18, 26, 0.92);
+    color: rgba(180, 194, 208, 0.78);
+    text-align: right;
+    font-weight: 600;
+  }
+
+  .project-sheet-preview thead .project-sheet-index {
+    z-index: 3;
+  }
+
+  .project-sheet-preview .project-sheet-index span {
+    margin-right: 5px;
+    font-weight: 800;
+  }
+
+  .project-sheet-preview tbody tr[data-kind='added'] td {
+    background: rgba(47, 166, 107, 0.16);
+    color: rgba(218, 248, 231, 0.94);
+  }
+
+  .project-sheet-preview tbody tr[data-kind='removed'] td {
+    background: rgba(220, 92, 92, 0.15);
+    color: rgba(255, 223, 223, 0.94);
+  }
+
+  .project-sheet-preview tbody tr[data-kind='context'] td {
+    color: rgba(223, 231, 240, 0.78);
   }
 
   :global(:root[data-color-scheme='light']) .project-sheet-preview {
@@ -1414,13 +1517,33 @@
     background: rgba(246, 248, 248, 0.95);
   }
 
+  :global(:root[data-color-scheme='light']) .project-sheet-preview th,
   :global(:root[data-color-scheme='light']) .project-sheet-preview td {
     border-color: rgba(85, 104, 120, 0.12);
   }
 
-  :global(:root[data-color-scheme='light']) .project-sheet-preview tr:first-child td {
+  :global(:root[data-color-scheme='light']) .project-sheet-preview thead th {
     background: rgba(85, 104, 120, 0.075);
     color: rgba(20, 29, 38, 0.88);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-sheet-preview .project-sheet-index {
+    background: rgba(250, 251, 250, 0.96);
+    color: rgba(82, 98, 111, 0.74);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-sheet-preview tbody tr[data-kind='added'] td {
+    background: rgba(47, 166, 107, 0.14);
+    color: rgba(17, 92, 54, 0.94);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-sheet-preview tbody tr[data-kind='removed'] td {
+    background: rgba(220, 92, 92, 0.13);
+    color: rgba(134, 34, 42, 0.94);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-sheet-preview tbody tr[data-kind='context'] td {
+    color: rgba(57, 70, 82, 0.82);
   }
 
   .project-code-preview {

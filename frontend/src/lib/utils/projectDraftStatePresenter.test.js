@@ -11,6 +11,7 @@ import {
   projectFileKind,
   projectFileKindLabel,
   projectFileStatusTone,
+  projectSpreadsheetPreviewRows,
   publishOperationPath,
   resourceMeta,
   resourceTitle,
@@ -120,6 +121,25 @@ test('project file presenter formats status, layer, and mounted paths', () => {
   assert.equal(projectFileKind({ path: 'finance.xlsx' }), 'spreadsheet');
   assert.equal(projectFileKind({ path: 'diagram.mmd' }), 'graph');
   assert.equal(projectFileKindLabel({ path: 'analysis.ipynb' }), 'Code');
+});
+
+test('project spreadsheet previews parse escaped rows and quoted cells', () => {
+  assert.deepEqual(
+    projectSpreadsheetPreviewRows('name,notes\\nstripe,"keeps, comma"\\nadyen,plain', '.csv'),
+    [
+      ['name', 'notes'],
+      ['stripe', 'keeps, comma'],
+      ['adyen', 'plain'],
+    ],
+  );
+
+  assert.deepEqual(
+    projectSpreadsheetPreviewRows('name\tcount\\nprocessor\t12', '.tsv'),
+    [
+      ['name', 'count'],
+      ['processor', '12'],
+    ],
+  );
 });
 
 test('project file presenter filters rows under collapsed directories', () => {
