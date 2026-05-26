@@ -10,6 +10,14 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
+from brain.platform.db.constraints import check_in_constraint
+from brain.platform.status_contracts import (
+    AGENT_RUN_DB_STATUS_VALUES,
+    EXTERNAL_AGENT_TASK_STATUS_VALUES,
+    IDEA_STATUS_VALUES,
+    INBOUND_EVENT_STATUS_VALUES,
+)
+
 
 revision = "0011_db_audit_remediation_indexes"
 down_revision = "0010_thread_context_and_discussion"
@@ -20,23 +28,19 @@ depends_on = None
 STATUS_CHECKS = {
     "agent_runs": (
         "ck_agent_runs_status",
-        "status IN ('queued', 'starting', 'running', 'paused', 'verifying', "
-        "'completed', 'failed', 'canceled', 'cancelled', 'expired', 'error', 'blocked')",
+        check_in_constraint("status", AGENT_RUN_DB_STATUS_VALUES),
     ),
     "ideas": (
         "ck_ideas_status",
-        "status IN ('emerged', 'queued', 'active', 'working', 'needs_input', "
-        "'unread_reply', 'blocked', 'failed', 'resolved', 'stale', 'paused', "
-        "'done', 'archived', 'exploring', 'building', 'testing')",
+        check_in_constraint("status", IDEA_STATUS_VALUES),
     ),
     "inbound_events": (
         "ck_inbound_events_status",
-        "status IN ('received', 'processed', 'review_required', 'quarantined', 'failed')",
+        check_in_constraint("status", INBOUND_EVENT_STATUS_VALUES),
     ),
     "external_agent_tasks": (
         "ck_external_agent_tasks_status",
-        "status IN ('queued', 'claimed', 'running', 'submitted', 'completed', "
-        "'failed', 'cancelled', 'canceled', 'blocked', 'expired')",
+        check_in_constraint("status", EXTERNAL_AGENT_TASK_STATUS_VALUES),
     ),
 }
 

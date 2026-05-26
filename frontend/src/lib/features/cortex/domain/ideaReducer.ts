@@ -1,27 +1,8 @@
 import type { Idea } from '$lib/types/cortex';
+import { DONE_IDEA_STATUSES, WORKING_IDEA_STATUSES } from '../../../constants/statuses.ts';
 
 export type NormalizedIdeaStatus = 'idle' | 'working' | 'done';
 export type NormalizedIdea<T extends Idea = Idea> = Omit<T, 'status'> & { status: NormalizedIdeaStatus };
-
-export const WORKING_IDEA_STATUSES = [
-  'queued',
-  'working',
-  'running',
-] as const;
-
-export const DONE_IDEA_STATUSES = [
-  'completed',
-  'pending_approval',
-  'needs_input',
-  'unread_reply',
-  'failed',
-  'canceled',
-  'cancelled',
-  'superseded',
-  'timeout',
-  'blocked',
-  'done',
-] as const;
 
 export type NormalizeIdeaOptions = {
   isIdeaSeen?: (idea: Pick<Idea, 'id' | 'updated_at' | 'created_at'>) => boolean;

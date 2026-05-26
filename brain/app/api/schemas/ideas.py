@@ -4,6 +4,8 @@ from typing import Any
 from uuid import UUID
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
+from brain.systems.cortex.status import idea_status_pattern
+
 
 def _jsonish_or_none(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool, dict, list)):
@@ -110,9 +112,7 @@ class IdeaUpdate(BaseModel):
     user_id: str | UUID | None = None
 
 class IdeaStatusUpdate(BaseModel):
-    status: str = Field(
-        pattern="^(emerged|queued|active|working|needs_input|unread_reply|blocked|failed|resolved|stale|paused|done|archived)$"
-    )
+    status: str = Field(pattern=idea_status_pattern())
     trigger: str | None = None
 
 class ThreadMessageRead(_UUIDMixin, BaseModel):

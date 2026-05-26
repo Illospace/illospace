@@ -25,14 +25,15 @@ from brain.platform.db.models.inbound import (
     InboundSourcePolicyRow,
 )
 from brain.systems.external_agents import service as external_agents
+from brain.systems.inbound.status import (
+    STATUS_FAILED,
+    STATUS_PROCESSED,
+    STATUS_QUARANTINED,
+    STATUS_REVIEW_REQUIRED,
+)
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
 from brain.systems.user_domains.service import AsyncDomainService, DomainError, DomainNotFound
 
-
-STATUS_PROCESSED = "processed"
-STATUS_REVIEW_REQUIRED = "review_required"
-STATUS_QUARANTINED = "quarantined"
-STATUS_FAILED = "failed"
 
 ACTION_STORE_ONLY = "store_only"
 ACTION_DOMAIN_PROJECTION_UPSERT = "domain_projection.upsert"

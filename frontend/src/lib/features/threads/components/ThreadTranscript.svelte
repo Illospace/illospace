@@ -19,6 +19,7 @@
     normalizeServerUploadPreviewUrl,
     type AttachmentPreviewKind,
   } from '$lib/utils/attachmentPreview';
+  import { LIVE_RUN_STATUSES, OPEN_AGENT_RUN_STATUSES } from '$lib/constants/statuses';
   import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
   import StreamVisualBlock from '$lib/features/threads/components/StreamVisualBlock.svelte';
 
@@ -106,12 +107,12 @@
   }
 
   function isRunActiveStatus(status: string | undefined) {
-    return status === 'queued' || status === 'starting' || status === 'running' || status === 'pending_approval';
+    return Boolean(status && (LIVE_RUN_STATUSES as readonly string[]).includes(status));
   }
 
   function isRunLiveWorkStream(item: CortexThreadStageRunItem) {
     if (item.requiresApproval || item.status === 'pending_approval') return false;
-    return item.status === 'queued' || item.status === 'starting' || item.status === 'running';
+    return (OPEN_AGENT_RUN_STATUSES as readonly string[]).includes(item.status);
   }
 
   function getHeaderStatusState() {
@@ -119,7 +120,7 @@
 
     const status = header?.statusLabel?.toLowerCase() ?? '';
     const runStatus = header?.runStatus?.toLowerCase() ?? '';
-    if (status.includes('working') || ['queued', 'starting', 'running'].some((value) => runStatus.includes(value))) {
+    if (status.includes('working') || OPEN_AGENT_RUN_STATUSES.some((value) => runStatus.includes(value))) {
       return 'working';
     }
     if (status.includes('unread') || status.includes('done')) return 'unread';

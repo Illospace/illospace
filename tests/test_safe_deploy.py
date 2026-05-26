@@ -4,6 +4,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from brain.platform.status_contracts import ACTIVE_RUN_STATUS_VALUES
+
 
 def _shell_function_body(content: str, name: str) -> str:
     match = re.search(
@@ -296,3 +298,17 @@ def test_compose_upgrade_drains_worker_when_agent_runs_are_active():
     assert "wait_for_worker_exit" in upgrade
     assert "compose up -d --no-deps worker" in upgrade
     assert "avoid killing active AgentRuns" in upgrade
+
+
+def test_safe_deploy_active_run_guards_match_canonical_active_statuses():
+    root = Path(__file__).resolve().parents[1]
+    upgrade = (root / "deploy" / "scripts" / "upgrade.sh").read_text()
+    launcher = (root / "illo").read_text()
+    ops_deploy = (root / "ops" / "deploy.sh").read_text()
+
+    for status in ACTIVE_RUN_STATUS_VALUES:
+        assert repr(status) in upgrade
+    assert "ACTIVE_RUN_STATUS_VALUES" in launcher
+    assert "ACTIVE_RUN_STATUS_VALUES" in ops_deploy
+    assert '("starting", "running", "verifying")' not in launcher
+    assert '("starting", "running", "verifying")' not in ops_deploy

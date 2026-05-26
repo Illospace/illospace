@@ -22,6 +22,8 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin
+from brain.platform.db.constraints import check_in_constraint
+from brain.platform.status_contracts import AGENT_RUN_DB_STATUS_VALUES
 
 __all__ = [
     "ActionManifestRow",
@@ -35,8 +37,7 @@ class AgentRunRow(Base, TimestampMixin):
     __tablename__ = "agent_runs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued', 'starting', 'running', 'paused', 'verifying', "
-            "'completed', 'failed', 'canceled', 'cancelled', 'expired', 'error', 'blocked')",
+            check_in_constraint("status", AGENT_RUN_DB_STATUS_VALUES),
             name="ck_agent_runs_status",
         ),
         Index("ix_agent_runs_org_created", "org_id", "created_at"),

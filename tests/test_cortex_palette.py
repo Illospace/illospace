@@ -21,6 +21,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from brain.app.api.main import app
+from brain.systems.cortex.status import IDEA_STATUS_VALUES
 
 # ── Expected palette ──────────────────────────────────────────
 EXPECTED_COLORS = {
@@ -30,8 +31,7 @@ EXPECTED_COLORS = {
 }
 
 # Statuses accepted by the cortex API update endpoint
-API_STATUSES = ['emerged', 'queued', 'active', 'working', 'needs_input',
-                'unread_reply', 'blocked', 'failed', 'resolved', 'stale']
+API_STATUSES = list(IDEA_STATUS_VALUES)
 
 # Frontend source paths (visual helpers + scene component that consume them)
 FRONTEND_SRC = Path(__file__).parent.parent / 'frontend' / 'src'

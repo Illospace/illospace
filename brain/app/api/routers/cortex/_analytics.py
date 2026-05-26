@@ -11,10 +11,15 @@ from sqlalchemy import func, select, text
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.routers.cortex._router import router
+from brain.platform.db.constraints import sql_string_list
 from brain.platform.db.models.agent_run import AgentRunEventRow, AgentRunRow
 from brain.platform.db.models.idea import Idea, IdeaStateLog, IdeaThread
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
 from brain.platform.providers.model_policy import DEFAULT_MODEL_TIER, normalize_model_tier
+from brain.systems.cortex.status import (
+    ANALYTICS_QUEUED_IDEA_STATUS_VALUES,
+    SUGGESTED_IDEA_STATUS_VALUES,
+)
 from brain.systems.runs.presentation import public_tool_event_payload
 
 logger = logging.getLogger(__name__)
@@ -26,12 +31,12 @@ logger = logging.getLogger(__name__)
 async def analytics(user: dict[str, Any] = Depends(get_current_user)):
     async with UnitOfWork() as uow:
         # Complex aggregate — use text() via UnitOfWork session
-        result = await uow.session.execute(text("""
+        result = await uow.session.execute(text(f"""
             SELECT
                 COUNT(*) FILTER (WHERE archived_at IS NULL) AS total_ideas,
                 COUNT(*) FILTER (WHERE archived_at IS NULL AND status = 'working') AS working,
                 COUNT(*) FILTER (WHERE archived_at IS NULL AND status = 'needs_input') AS awaiting_response,
-                COUNT(*) FILTER (WHERE archived_at IS NULL AND status IN ('queued', 'active', 'exploring', 'building', 'testing')) AS queued,
+                COUNT(*) FILTER (WHERE archived_at IS NULL AND status IN ({sql_string_list(ANALYTICS_QUEUED_IDEA_STATUS_VALUES)})) AS queued,
                 COALESCE(SUM(active_agents) FILTER (WHERE archived_at IS NULL), 0) AS active_agents,
                 COUNT(*) FILTER (WHERE archived_at IS NULL AND created_at::date = CURRENT_DATE) AS ideas_today,
                 COUNT(*) FILTER (WHERE archived_at IS NULL AND status = 'resolved' AND updated_at::date = CURRENT_DATE) AS ideas_resolved_today
@@ -148,12 +153,12 @@ async def activity_timeline(idea_id: str, user: dict[str, Any] = Depends(get_cur
 async def suggested_idea(user: dict[str, Any] = Depends(get_current_user)):
     async with UnitOfWork() as uow:
         # Complex query with CASE ordering and subquery — use text() via UnitOfWork
-        result = await uow.session.execute(text("""
+        result = await uow.session.execute(text(f"""
             SELECT id, title, display_title, status, updated_at,
                    EXTRACT(EPOCH FROM (NOW() - updated_at)) / 3600.0 as hours_waiting,
                    (SELECT COUNT(*) FROM idea_threads WHERE idea_id = ideas.id) as thread_count
             FROM ideas
-            WHERE archived_at IS NULL AND status IN ('needs_input', 'unread_reply', 'active')
+            WHERE archived_at IS NULL AND status IN ({sql_string_list(SUGGESTED_IDEA_STATUS_VALUES)})
             ORDER BY
                 CASE status
                     WHEN 'needs_input' THEN 0

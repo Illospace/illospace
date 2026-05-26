@@ -24,6 +24,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
 from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin
+from brain.platform.db.constraints import check_in_constraint
+from brain.platform.status_contracts import INBOUND_EVENT_STATUS_VALUES
 
 JSONVariant = JSONB().with_variant(JSON(), "sqlite")
 UUIDString = UUID(as_uuid=False).with_variant(String, "sqlite")
@@ -242,7 +244,7 @@ class InboundEventRow(Base, CreatedAtMixin):
     __tablename__ = "inbound_events"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('received', 'processed', 'review_required', 'quarantined', 'failed')",
+            check_in_constraint("status", INBOUND_EVENT_STATUS_VALUES),
             name="ck_inbound_events_status",
         ),
         UniqueConstraint("connection_id", "idempotency_key", name="uq_inbound_events_connection_idempotency"),

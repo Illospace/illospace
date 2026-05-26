@@ -27,6 +27,8 @@ from pgvector.sqlalchemy import Vector
 
 from brain.kernel.config import IDEA_EMBEDDING_DIM
 from brain.platform.db.base import Base, CreatedAtMixin
+from brain.platform.db.constraints import check_in_constraint
+from brain.platform.status_contracts import IDEA_STATUS_VALUES
 
 __all__ = [
     "Idea",
@@ -49,9 +51,7 @@ class Idea(Base):
     __tablename__ = "ideas"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('emerged', 'queued', 'active', 'working', 'needs_input', "
-            "'unread_reply', 'blocked', 'failed', 'resolved', 'stale', 'paused', "
-            "'done', 'archived', 'exploring', 'building', 'testing')",
+            check_in_constraint("status", IDEA_STATUS_VALUES),
             name="ck_ideas_status",
         ),
         Index("ix_ideas_archived_updated", "archived_at", "updated_at"),

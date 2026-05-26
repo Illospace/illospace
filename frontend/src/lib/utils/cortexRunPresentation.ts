@@ -1,13 +1,13 @@
-const ACTIVE_RUN_STATUSES = new Set(['queued', 'starting', 'running', 'paused', 'verifying', 'pending_approval']);
-const FAST_TRANSCRIPT_VISIBLE_STATUSES = new Set(['queued', 'starting', 'running', 'paused', 'verifying', 'completed', 'failed', 'canceled', 'pending_approval']);
-const RUN_STATUS_RANK: Record<string, number> = {
-  queued: 1,
-  starting: 2,
-  running: 3,
-  paused: 4,
-  pending_approval: 5,
-  verifying: 6,
-};
+import {
+  FAST_TRANSCRIPT_VISIBLE_RUN_STATUSES,
+  LIVE_RUN_STATUSES,
+  RUN_STATUS_RANK,
+} from '../constants/statuses.ts';
+
+const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set(LIVE_RUN_STATUSES);
+const FAST_TRANSCRIPT_VISIBLE_STATUSES: ReadonlySet<string> = new Set(
+  FAST_TRANSCRIPT_VISIBLE_RUN_STATUSES,
+);
 
 export function runExecutionProfile(source: any): string {
   return String(

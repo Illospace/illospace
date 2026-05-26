@@ -12,10 +12,11 @@ from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.async_io import http_get
-from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.run import AgentRun
 from brain.platform.provider_health import provider_health_snapshot
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
+from brain.systems.cycles.health import async_legacy_cycle_backlog_snapshot
+from brain.platform.status_contracts import ACTIVE_RUN_STATUS_VALUES, RUN_FAILED_STATUS_VALUE
 
 APP_VERSION = "6.0.0"
 DEFAULT_DB_TIMEOUT_MS = 1500
@@ -603,7 +604,7 @@ async def _run_health_check(session: AsyncSession | None = None) -> HealthCheck:
         stuck_stmt = (
             select(AgentRun)
             .where(
-                AgentRun.status.in_(["starting", "running", "paused", "verifying"]),
+                AgentRun.status.in_(ACTIVE_RUN_STATUS_VALUES),
                 func.coalesce(AgentRun.updated_at, AgentRun.started_at, AgentRun.created_at) <= stuck_cutoff,
             )
             .order_by(AgentRun.created_at.asc())
@@ -612,7 +613,7 @@ async def _run_health_check(session: AsyncSession | None = None) -> HealthCheck:
         stuck_result = await session.scalars(stuck_stmt)
         stuck_runs = list(stuck_result.all())
         recent_failure_clause = and_(
-            AgentRun.status.in_(["failed"]),
+            AgentRun.status == RUN_FAILED_STATUS_VALUE,
             func.coalesce(AgentRun.completed_at, AgentRun.created_at) >= failure_cutoff,
         )
         recent_failure_result = await session.scalars(
@@ -662,44 +663,6 @@ async def _run_health_check(session: AsyncSession | None = None) -> HealthCheck:
         )
 
 
-def _cycle_row_payload(cycle: Cycle, *, now: datetime | None = None) -> dict[str, Any]:
-    now = now or _utc_now()
-    next_run_at = cycle.next_run_at
-    if next_run_at is not None and next_run_at.tzinfo is None:
-        next_run_at = next_run_at.replace(tzinfo=timezone.utc)
-    overdue_seconds = int((now - next_run_at).total_seconds()) if next_run_at else None
-    return {
-        "id": cycle.id,
-        "enabled": cycle.enabled,
-        "next_run_at": cycle.next_run_at.isoformat() if cycle.next_run_at else None,
-        "overdue_seconds": overdue_seconds,
-        "last_run_at": cycle.last_run_at.isoformat() if cycle.last_run_at else None,
-        "last_status": cycle.last_status,
-        "last_error_present": bool(cycle.last_error),
-    }
-
-
-def _cycle_run_row_payload(run: CycleRun, *, now: datetime | None = None) -> dict[str, Any]:
-    now = now or _utc_now()
-    scheduled_for = run.scheduled_for
-    if scheduled_for is not None and scheduled_for.tzinfo is None:
-        scheduled_for = scheduled_for.replace(tzinfo=timezone.utc)
-    stale_seconds = int((now - scheduled_for).total_seconds()) if scheduled_for else None
-    return {
-        "id": run.id,
-        "cycle_id": run.cycle_id,
-        "status": run.status,
-        "scheduled_for": run.scheduled_for.isoformat() if run.scheduled_for else None,
-        "stale_seconds": stale_seconds,
-        "started_at": run.started_at.isoformat() if run.started_at else None,
-        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
-        "skip_reason": run.skip_reason,
-        "error_present": bool(run.error),
-        "idea_id": str(run.idea_id) if run.idea_id is not None else None,
-        "run_id": run.run_id,
-    }
-
-
 async def _legacy_cycle_backlog_health_check(session: AsyncSession | None = None) -> HealthCheck:
     start = time.monotonic()
     timeout_ms = _timeout_ms("HEALTH_DEEP_DB_TIMEOUT_MS", DEFAULT_DEEP_TIMEOUT_MS)
@@ -714,72 +677,24 @@ async def _legacy_cycle_backlog_health_check(session: AsyncSession | None = None
         minimum=1,
     )
     now = _utc_now()
-    stale_cutoff = now - timedelta(minutes=stale_minutes)
-    active_cycle_run_statuses = ["queued", "running", "pending_approval"]
     try:
         if session is None:
             raise RuntimeError("health checks require an explicit database session")
         await _apply_statement_timeout(session, timeout_ms)
 
-        due_cycle_clause = and_(
-            Cycle.deleted_at.is_(None),
-            Cycle.enabled.is_(True),
-            Cycle.next_run_at.is_not(None),
-            Cycle.next_run_at <= stale_cutoff,
+        snapshot = await async_legacy_cycle_backlog_snapshot(
+            session,
+            stale_after_minutes=stale_minutes,
+            sample_limit=sample_limit,
+            now=now,
         )
-        due_cycle_count = await session.scalar(
-            select(func.count()).select_from(Cycle).where(due_cycle_clause)
-        ) or 0
-        due_cycle_result = await session.scalars(
-            select(Cycle)
-            .where(due_cycle_clause)
-            .order_by(Cycle.next_run_at.asc())
-            .limit(sample_limit)
-        )
-        stale_due_cycles = list(due_cycle_result.all())
-
-        active_run_clause = and_(
-            CycleRun.status.in_(active_cycle_run_statuses),
-            CycleRun.scheduled_for <= stale_cutoff,
-        )
-        active_run_count = await session.scalar(
-            select(func.count()).select_from(CycleRun).where(active_run_clause)
-        ) or 0
-        active_run_result = await session.scalars(
-            select(CycleRun)
-            .where(active_run_clause)
-            .order_by(CycleRun.scheduled_for.asc())
-            .limit(sample_limit)
-        )
-        stale_active_runs = list(active_run_result.all())
-
-        reasons: list[str] = []
-        if due_cycle_count:
-            reasons.append(f"{int(due_cycle_count)} stale due cycle(s)")
-        if active_run_count:
-            reasons.append(f"{int(active_run_count)} stale active cycle run(s)")
-        status = "degraded" if reasons else "ok"
-
         return HealthCheck(
             name="legacy_cycle_backlog",
-            status=status,
-            summary=", ".join(reasons) if reasons else "legacy cycle scheduler has no stale due work",
+            status=snapshot.status,
+            summary=snapshot.summary,
             latency_ms=_elapsed_ms(start),
-            details={
-                "stale_after_minutes": stale_minutes,
-                "active_cycle_run_statuses": active_cycle_run_statuses,
-                "stale_due_cycles_count": int(due_cycle_count),
-                "stale_due_cycles": [_cycle_row_payload(row, now=now) for row in stale_due_cycles],
-                "stale_active_cycle_runs_count": int(active_run_count),
-                "stale_active_cycle_runs": [
-                    _cycle_run_row_payload(row, now=now) for row in stale_active_runs
-                ],
-            },
-            remediation=(
-                "Ensure the production worker starts the legacy cycle scheduler and inspect cycle execution logs."
-                if status != "ok"
-                else None
-            ),
+            details=snapshot.details,
+            remediation=snapshot.remediation,
         )
     except Exception as exc:
         if session is not None:

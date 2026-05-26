@@ -15,10 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.kernel import config as cfg
 from brain.platform.async_io import ensure_dir, run_blocking, write_text
 from brain.platform.db.models.agent_run import AgentRunRow
+from brain.platform.status_contracts import ACTIVE_RUN_STATUS_VALUES
 
 from .schemas import RuntimeUpdateRead
 
-_ACTIVE_AGENT_RUN_STATUSES = ("starting", "running", "verifying")
 _LOG_NAME = "illo-self-update.log"
 _META_NAME = "illo-self-update.json"
 _PID_NAME = "illo-self-update.pid"
@@ -305,7 +305,7 @@ async def _async_active_agent_run_count(session: AsyncSession) -> int:
         count = await session.scalar(
             select(func.count())
             .select_from(AgentRunRow)
-            .where(AgentRunRow.status.in_(_ACTIVE_AGENT_RUN_STATUSES))
+            .where(AgentRunRow.status.in_(ACTIVE_RUN_STATUS_VALUES))
         )
         return int(count or 0)
     except Exception:

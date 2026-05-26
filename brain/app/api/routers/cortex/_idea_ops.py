@@ -12,9 +12,14 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import aliased
 
+from brain.platform.status_contracts import OPEN_RUN_STATUS_VALUES
 from brain.systems.runs.events import run_event
 from brain.systems.runs.presentation import public_tool_event_payload
-from brain.systems.runs.status import RunStatus, TERMINAL_RUN_STATUSES, coerce_run_status
+from brain.systems.runs.status import (
+    RunStatus,
+    TERMINAL_RUN_STATUSES,
+    coerce_run_status,
+)
 from brain.systems.runs.store import AsyncAgentRunStore
 from brain.app.api.auth import get_current_user
 from brain.app.api.services.notifications import (
@@ -438,13 +443,12 @@ async def _publish_notification_summary_updates(
 
 @router.post("/ideas/{idea_id}/cancel-all")
 async def idea_cancel_all(idea_id: str, user: dict[str, Any] = Depends(get_current_user)):
-    active_statuses = ["queued", "starting", "running", "paused", "verifying"]
     async with UnitOfWork() as uow:
         await _require_idea_for_user(uow.session, idea_id, user)
         result = await uow.session.scalars(
             select(AgentRun).where(
                 AgentRun.thread_id == idea_id,
-                AgentRun.status.in_(active_statuses),
+                AgentRun.status.in_(OPEN_RUN_STATUS_VALUES),
             )
         )
         store = AsyncAgentRunStore(uow.session)

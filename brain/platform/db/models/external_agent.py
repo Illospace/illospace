@@ -23,6 +23,8 @@ from sqlalchemy.types import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from brain.platform.db.base import Base, TimestampMixin
+from brain.platform.db.constraints import check_in_constraint
+from brain.platform.status_contracts import EXTERNAL_AGENT_TASK_STATUS_VALUES
 
 JSONVariant = JSONB().with_variant(JSON(), "sqlite")
 UUIDString = UUID(as_uuid=False).with_variant(String, "sqlite")
@@ -125,8 +127,7 @@ class ExternalAgentTaskRow(Base, TimestampMixin):
     __tablename__ = "external_agent_tasks"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued', 'claimed', 'running', 'submitted', 'completed', "
-            "'failed', 'cancelled', 'canceled', 'blocked', 'expired')",
+            check_in_constraint("status", EXTERNAL_AGENT_TASK_STATUS_VALUES),
             name="ck_external_agent_tasks_status",
         ),
         UniqueConstraint("connection_id", "idempotency_key", name="uq_external_agent_tasks_connection_idempotency"),

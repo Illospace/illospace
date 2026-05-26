@@ -30,6 +30,7 @@ from brain.app.api.routers.cortex._helpers import (
     _row_to_dict,
 )
 from brain.app.api.routers.cortex._router import router
+from brain.platform.status_contracts import OPEN_RUN_STATUS_VALUES
 from brain.systems.runs.events import run_event
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore as _AgentRunStore
@@ -63,11 +64,10 @@ logger = logging.getLogger(__name__)
 
 
 async def _cancel_active_runs_for_idea(session, idea_id: str, *, reason: str) -> int:
-    active_statuses = ["queued", "starting", "running", "paused", "verifying"]
     result = await session.scalars(
         select(AgentRun).where(
             AgentRun.thread_id == idea_id,
-            AgentRun.status.in_(active_statuses),
+            AgentRun.status.in_(OPEN_RUN_STATUS_VALUES),
         )
     )
     store = _AgentRunStore(session)

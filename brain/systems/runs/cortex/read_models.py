@@ -14,8 +14,9 @@ from brain.platform.db.models.agent_run import (
     AgentRunRow,
 )
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.status_contracts import OPEN_RUN_STATUS_VALUES, project_run_status_value
 
-ACTIVE_STATUSES = frozenset({"queued", "starting", "running", "paused", "verifying"})
+ACTIVE_STATUSES = frozenset(OPEN_RUN_STATUS_VALUES)
 
 
 def _duration_sec(started_at: Any, completed_at: Any, fallback_end: Any = None) -> int | None:
@@ -36,14 +37,7 @@ def _iso(value: Any) -> str | None:
 
 
 def project_run_status(status: str | None, fallback: str | None = None) -> str:
-    raw = str(status or fallback or "queued").lower()
-    if raw in {"queued", "starting", "running", "paused", "verifying", "completed", "failed", "canceled", "expired"}:
-        return raw
-    if raw in {"cancelled", "superseded"}:
-        return "canceled"
-    if raw in {"timeout"}:
-        return "failed"
-    return raw
+    return project_run_status_value(status, fallback)
 
 
 def run_stream_payload(run: AgentRunRow) -> dict[str, Any]:

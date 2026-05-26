@@ -322,11 +322,13 @@ from sqlalchemy import func, select
 
 from brain.platform.db.models.agent_run import AgentRunRow
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.platform.status_contracts import ACTIVE_RUN_STATUS_VALUES
 
-active = ("starting", "running", "verifying")
 with UnitOfWork() as uow:
     count = uow.session.scalar(
-        select(func.count()).select_from(AgentRunRow).where(AgentRunRow.status.in_(active))
+        select(func.count())
+        .select_from(AgentRunRow)
+        .where(AgentRunRow.status.in_(ACTIVE_RUN_STATUS_VALUES))
     )
 print(int(count or 0))
 PY
