@@ -30,7 +30,7 @@ from brain.app.api.routers.cortex._helpers import (
     _row_to_dict,
 )
 from brain.app.api.routers.cortex._router import router
-from brain.platform.status_contracts import OPEN_RUN_STATUS_VALUES
+from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
 from brain.systems.runs.events import run_event
 from brain.systems.runs.status import RunStatus
 from brain.systems.runs.store import AsyncAgentRunStore as _AgentRunStore

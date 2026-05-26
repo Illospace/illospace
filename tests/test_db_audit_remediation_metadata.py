@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 from pathlib import Path
 
@@ -14,7 +15,12 @@ from brain.platform.db.models.inbound import InboundEventRow
 from brain.systems.cortex.status import IDEA_STATUS_VALUES
 from brain.systems.external_agents.status import EXTERNAL_AGENT_TASK_STATUS_VALUES
 from brain.systems.inbound.status import INBOUND_EVENT_STATUS_VALUES
-from brain.platform.status_contracts import AGENT_RUN_DB_STATUS_VALUES
+from brain.contracts.statuses import (
+    AGENT_RUN_DB_STATUS_VALUES,
+    PROJECTABLE_RUN_STATUS_VALUES,
+    RUN_STATUS_VALUES,
+    project_run_status_value,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -128,6 +134,37 @@ def test_remediation_migration_status_checks_use_canonical_contracts():
             check_in_constraint("status", EXTERNAL_AGENT_TASK_STATUS_VALUES),
         ),
     }
+
+
+def test_remediation_migration_freezes_status_values_locally():
+    tree = ast.parse(MIGRATION.read_text())
+    imported_modules = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    imported_modules.update(
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    )
+
+    assert not {
+        module
+        for module in imported_modules
+        if module == "brain" or module.startswith("brain.")
+    }
+
+
+def test_agent_run_db_statuses_have_public_projection():
+    for status in AGENT_RUN_DB_STATUS_VALUES:
+        projected = project_run_status_value(status)
+        assert projected in RUN_STATUS_VALUES
+        assert projected != "queued" or status == "queued"
+
+    for status in PROJECTABLE_RUN_STATUS_VALUES:
+        assert project_run_status_value(status) in RUN_STATUS_VALUES
 
 
 def test_remediation_migration_carries_existing_database_repairs():

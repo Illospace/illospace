@@ -24,7 +24,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from brain.platform.db.base import Base, TimestampMixin
 from brain.platform.db.constraints import check_in_constraint
-from brain.platform.status_contracts import EXTERNAL_AGENT_TASK_STATUS_VALUES
+from brain.contracts.statuses import EXTERNAL_AGENT_TASK_STATUS_VALUES
 
 JSONVariant = JSONB().with_variant(JSON(), "sqlite")
 UUIDString = UUID(as_uuid=False).with_variant(String, "sqlite")

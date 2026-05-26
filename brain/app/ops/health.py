@@ -16,7 +16,7 @@ from brain.platform.db.models.run import AgentRun
 from brain.platform.provider_health import provider_health_snapshot
 from brain.app.scheduler.daemon import async_scheduler_health_snapshot
 from brain.systems.cycles.health import async_legacy_cycle_backlog_snapshot
-from brain.platform.status_contracts import ACTIVE_RUN_STATUS_VALUES, RUN_FAILED_STATUS_VALUE
+from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, RUN_FAILED_STATUS_VALUE
 
 APP_VERSION = "6.0.0"
 DEFAULT_DB_TIMEOUT_MS = 1500

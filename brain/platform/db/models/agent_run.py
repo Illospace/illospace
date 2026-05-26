@@ -23,7 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin
 from brain.platform.db.constraints import check_in_constraint
-from brain.platform.status_contracts import AGENT_RUN_DB_STATUS_VALUES
+from brain.contracts.statuses import AGENT_RUN_DB_STATUS_VALUES
 
 __all__ = [
     "ActionManifestRow",

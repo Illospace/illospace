@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from brain.kernel import config as cfg
 from brain.platform.async_io import ensure_dir, run_blocking, write_text
 from brain.platform.db.models.agent_run import AgentRunRow
-from brain.platform.status_contracts import ACTIVE_RUN_STATUS_VALUES
+from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES
 
 from .schemas import RuntimeUpdateRead
 

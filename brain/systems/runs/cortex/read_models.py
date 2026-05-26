@@ -14,7 +14,7 @@ from brain.platform.db.models.agent_run import (
     AgentRunRow,
 )
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
-from brain.platform.status_contracts import OPEN_RUN_STATUS_VALUES, project_run_status_value
+from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES, project_run_status_value
 
 ACTIVE_STATUSES = frozenset(OPEN_RUN_STATUS_VALUES)
 

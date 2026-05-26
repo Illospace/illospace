@@ -10,14 +10,6 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
-from brain.platform.db.constraints import check_in_constraint
-from brain.platform.status_contracts import (
-    AGENT_RUN_DB_STATUS_VALUES,
-    EXTERNAL_AGENT_TASK_STATUS_VALUES,
-    IDEA_STATUS_VALUES,
-    INBOUND_EVENT_STATUS_VALUES,
-)
-
 
 revision = "0011_db_audit_remediation_indexes"
 down_revision = "0010_thread_context_and_discussion"
@@ -25,22 +17,90 @@ branch_labels = None
 depends_on = None
 
 
+def _sql_string_literal(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _sql_string_list(values: tuple[str, ...]) -> str:
+    return ", ".join(_sql_string_literal(value) for value in values)
+
+
+def _check_in_constraint(column_name: str, values: tuple[str, ...]) -> str:
+    if not values:
+        raise ValueError("check constraint values cannot be empty")
+    return f"{column_name} IN ({_sql_string_list(values)})"
+
+
+# Historical migration snapshot. Keep these values frozen; future status changes
+# should alter constraints in a new revision rather than mutating this one.
+MIGRATION_AGENT_RUN_DB_STATUS_VALUES = (
+    "queued",
+    "starting",
+    "running",
+    "paused",
+    "verifying",
+    "completed",
+    "failed",
+    "canceled",
+    "expired",
+    "cancelled",
+    "error",
+    "blocked",
+)
+MIGRATION_IDEA_STATUS_VALUES = (
+    "emerged",
+    "queued",
+    "active",
+    "working",
+    "needs_input",
+    "unread_reply",
+    "blocked",
+    "failed",
+    "resolved",
+    "stale",
+    "paused",
+    "done",
+    "archived",
+    "exploring",
+    "building",
+    "testing",
+)
+MIGRATION_INBOUND_EVENT_STATUS_VALUES = (
+    "received",
+    "processed",
+    "review_required",
+    "quarantined",
+    "failed",
+)
+MIGRATION_EXTERNAL_AGENT_TASK_STATUS_VALUES = (
+    "queued",
+    "claimed",
+    "running",
+    "submitted",
+    "completed",
+    "failed",
+    "cancelled",
+    "canceled",
+    "blocked",
+    "expired",
+)
+
 STATUS_CHECKS = {
     "agent_runs": (
         "ck_agent_runs_status",
-        check_in_constraint("status", AGENT_RUN_DB_STATUS_VALUES),
+        _check_in_constraint("status", MIGRATION_AGENT_RUN_DB_STATUS_VALUES),
     ),
     "ideas": (
         "ck_ideas_status",
-        check_in_constraint("status", IDEA_STATUS_VALUES),
+        _check_in_constraint("status", MIGRATION_IDEA_STATUS_VALUES),
     ),
     "inbound_events": (
         "ck_inbound_events_status",
-        check_in_constraint("status", INBOUND_EVENT_STATUS_VALUES),
+        _check_in_constraint("status", MIGRATION_INBOUND_EVENT_STATUS_VALUES),
     ),
     "external_agent_tasks": (
         "ck_external_agent_tasks_status",
-        check_in_constraint("status", EXTERNAL_AGENT_TASK_STATUS_VALUES),
+        _check_in_constraint("status", MIGRATION_EXTERNAL_AGENT_TASK_STATUS_VALUES),
     ),
 }
 

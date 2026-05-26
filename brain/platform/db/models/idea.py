@@ -28,7 +28,7 @@ from pgvector.sqlalchemy import Vector
 from brain.kernel.config import IDEA_EMBEDDING_DIM
 from brain.platform.db.base import Base, CreatedAtMixin
 from brain.platform.db.constraints import check_in_constraint
-from brain.platform.status_contracts import IDEA_STATUS_VALUES
+from brain.contracts.statuses import IDEA_STATUS_VALUES
 
 __all__ = [
     "Idea",

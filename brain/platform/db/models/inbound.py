@@ -25,7 +25,7 @@ from sqlalchemy.types import JSON
 
 from brain.platform.db.base import Base, CreatedAtMixin, TimestampMixin
 from brain.platform.db.constraints import check_in_constraint
-from brain.platform.status_contracts import INBOUND_EVENT_STATUS_VALUES
+from brain.contracts.statuses import INBOUND_EVENT_STATUS_VALUES
 
 JSONVariant = JSONB().with_variant(JSON(), "sqlite")
 UUIDString = UUID(as_uuid=False).with_variant(String, "sqlite")

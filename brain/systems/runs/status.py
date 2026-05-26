@@ -1,10 +1,8 @@
-"""Canonical run status model."""
+"""Canonical run status behavior."""
 
 from __future__ import annotations
 
-from enum import StrEnum
-
-from brain.platform.status_contracts import (
+from brain.contracts.statuses import (
     ACTIVE_RUN_STATUS_VALUES,
     AGENT_RUN_DB_STATUS_VALUES,
     LEGACY_AGENT_RUN_STATUS_VALUES,
@@ -14,20 +12,9 @@ from brain.platform.status_contracts import (
     RUN_FAILED_STATUS_VALUE,
     RUN_STATUS_ALIASES,
     RUN_STATUS_VALUES,
+    RunStatus,
     project_run_status_value,
 )
-
-
-class RunStatus(StrEnum):
-    QUEUED = "queued"
-    STARTING = "starting"
-    RUNNING = "running"
-    PAUSED = "paused"
-    VERIFYING = "verifying"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELED = "canceled"
-    EXPIRED = "expired"
 
 
 TERMINAL_RUN_STATUSES = frozenset({

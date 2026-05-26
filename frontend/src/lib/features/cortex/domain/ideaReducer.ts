@@ -8,27 +8,14 @@ export type NormalizeIdeaOptions = {
   isIdeaSeen?: (idea: Pick<Idea, 'id' | 'updated_at' | 'created_at'>) => boolean;
 };
 
+const WORKING_IDEA_STATUS_SET: ReadonlySet<string> = new Set(WORKING_IDEA_STATUSES);
+const DONE_IDEA_STATUS_SET: ReadonlySet<string> = new Set(DONE_IDEA_STATUSES);
+
 export function normalizeIdeaStatus(status: string | null | undefined): NormalizedIdeaStatus {
-  switch (status) {
-    case 'queued':
-    case 'working':
-    case 'running':
-      return 'working';
-    case 'completed':
-    case 'pending_approval':
-    case 'needs_input':
-    case 'unread_reply':
-    case 'failed':
-    case 'canceled':
-    case 'cancelled':
-    case 'superseded':
-    case 'timeout':
-    case 'blocked':
-    case 'done':
-      return 'done';
-    default:
-      return 'idle';
-  }
+  const value = String(status || '').trim().toLowerCase();
+  if (WORKING_IDEA_STATUS_SET.has(value)) return 'working';
+  if (DONE_IDEA_STATUS_SET.has(value)) return 'done';
+  return 'idle';
 }
 
 export function normalizeIdea<T extends Idea>(

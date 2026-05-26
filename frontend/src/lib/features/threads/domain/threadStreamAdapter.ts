@@ -22,6 +22,7 @@ import { buildRunEvidenceDebug } from '$lib/utils/runEvidenceDebug';
 import { buildChronologicalRunSegments } from '$lib/utils/threadRunChronology';
 import { orderQueuedThreadStreamItems } from '$lib/utils/threadStreamOrdering';
 import type { Idea, StreamItem } from '$lib/types/cortex';
+import { normalizeAgentRunStatus } from '../../../constants/statuses.ts';
 import type {
   CortexThreadStageAttachmentItem,
   CortexThreadStageMessageItem,
@@ -180,25 +181,7 @@ export function buildRunTelemetry(item: StreamItem): { label: string; value: str
 }
 
 export function normalizeRunStatus(status: string | undefined): CortexThreadStageRunStatus {
-  switch (status) {
-    case 'starting':
-    case 'running':
-    case 'completed':
-    case 'queued':
-    case 'pending_approval':
-    case 'canceled':
-    case 'failed':
-      return status;
-    case 'paused':
-    case 'verifying':
-      return 'running';
-    case 'timeout':
-      return 'failed';
-    case 'cancelled':
-      return 'canceled';
-    default:
-      return 'queued';
-  }
+  return normalizeAgentRunStatus(status);
 }
 
 export function normalizeStepStatus(status: string | undefined): CortexThreadStageRunStepStatus {

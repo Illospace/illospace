@@ -4,7 +4,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from brain.platform.status_contracts import ACTIVE_RUN_STATUS_VALUES
+from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES
 
 
 def _shell_function_body(content: str, name: str) -> str:

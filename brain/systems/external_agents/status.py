@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from brain.platform.status_contracts import (
+from brain.contracts.statuses import (
     EXTERNAL_AGENT_TASK_STATUS_VALUES,
     EXTERNAL_AGENT_TASK_TERMINAL_STATUS_VALUES,
 )

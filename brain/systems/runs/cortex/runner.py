@@ -18,7 +18,7 @@ import uuid
 from sqlalchemy import func, select
 
 from brain.kernel import config as brain_config
-from brain.platform.status_contracts import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_STATUS_VALUES
+from brain.contracts.statuses import ACTIVE_RUN_STATUS_VALUES, PROCESSING_RUN_STATUS_VALUES
 from brain.systems.cortex.status import PROTECTED_IDEA_STATUSES
 from brain.systems.runs.engine import AsyncAgentRunEngine
 from brain.systems.runs.events import activity_event, run_event

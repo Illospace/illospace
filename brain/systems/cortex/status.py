@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from brain.platform.status_contracts import (
+from brain.contracts.statuses import (
     IDEA_STATUS_VALUES,
     idea_status_pattern,
 )

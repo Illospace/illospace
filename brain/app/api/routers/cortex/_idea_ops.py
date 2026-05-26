@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import aliased
 
-from brain.platform.status_contracts import OPEN_RUN_STATUS_VALUES
+from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
 from brain.systems.runs.events import run_event
 from brain.systems.runs.presentation import public_tool_event_payload
 from brain.systems.runs.status import (

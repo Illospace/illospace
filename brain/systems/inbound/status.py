@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from brain.platform.status_contracts import (
+from brain.contracts.statuses import (
     INBOUND_EVENT_STATUS_VALUES,
     STATUS_FAILED,
     STATUS_PROCESSED,

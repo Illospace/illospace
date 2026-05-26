@@ -2,6 +2,7 @@ import type { Snippet } from 'svelte';
 
 import type { AttachmentPreviewKind } from '$lib/utils/attachmentPreview';
 import type { RunEvidenceDebug } from '$lib/utils/runEvidenceDebug';
+import { CORTEX_THREAD_STAGE_RUN_STATUSES } from '../../../constants/statuses.ts';
 
 export const CORTEX_THREAD_STAGE_TONES = ['spectral', 'amber'] as const;
 export type CortexThreadStageTone = (typeof CORTEX_THREAD_STAGE_TONES)[number];
@@ -9,15 +10,7 @@ export type CortexThreadStageTone = (typeof CORTEX_THREAD_STAGE_TONES)[number];
 export const CORTEX_THREAD_STAGE_MESSAGE_ROLES = ['user', 'illo'] as const;
 export type CortexThreadStageMessageRole = (typeof CORTEX_THREAD_STAGE_MESSAGE_ROLES)[number];
 
-export const CORTEX_THREAD_STAGE_RUN_STATUSES = [
-  'queued',
-  'starting',
-  'running',
-  'completed',
-  'failed',
-  'canceled',
-  'pending_approval',
-] as const;
+export { CORTEX_THREAD_STAGE_RUN_STATUSES };
 export type CortexThreadStageRunStatus =
   (typeof CORTEX_THREAD_STAGE_RUN_STATUSES)[number];
 export type CortexThreadStageHeaderStatusState = 'idle' | 'working' | 'unread';
@@ -268,6 +261,8 @@ export function getCortexThreadRunStatusLabel(status: CortexThreadStageRunStatus
       return 'Failed';
     case 'canceled':
       return 'Canceled';
+    case 'expired':
+      return 'Expired';
     case 'pending_approval':
       return 'Approval';
     default:
@@ -286,6 +281,8 @@ export function getCortexThreadRunStatusGlyph(status: CortexThreadStageRunStatus
     case 'failed':
       return '×';
     case 'canceled':
+      return '×';
+    case 'expired':
       return '×';
     case 'pending_approval':
       return '◔';

@@ -85,7 +85,7 @@ async def _get_adaptation_history(run_id: int, *, session=None) -> list[dict[str
         return await _read(uow.session)
 async def async_cancel_runs_for_idea(idea_id: str) -> int:
     from sqlalchemy import select
-    from brain.platform.status_contracts import OPEN_RUN_STATUS_VALUES
+    from brain.contracts.statuses import OPEN_RUN_STATUS_VALUES
     from brain.systems.runs.status import RunStatus
     from brain.platform.db.models.agent_run import AgentRunRow
 
