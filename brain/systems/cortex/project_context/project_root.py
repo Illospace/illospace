@@ -106,6 +106,14 @@ def is_synthetic_project_root_resource(resource: Mapping[str, Any]) -> bool:
 
 def project_roots_parent(thread_workspace_root: Path) -> Path:
     root = Path(thread_workspace_root).expanduser()
+    if root.name == PROJECT_ROOTS_DIR:
+        return root
+    if PROJECT_CONTEXT_DIR in root.parts:
+        index = root.parts.index(PROJECT_CONTEXT_DIR)
+        if index > 0:
+            return project_roots_parent(Path(*root.parts[:index]))
+    if root.name == "workspaces" or (root / "ideas").exists():
+        return root / PROJECT_ROOTS_DIR
     parent = root.parent
     if parent.name == "ideas":
         return parent.parent / PROJECT_ROOTS_DIR

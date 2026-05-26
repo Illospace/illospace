@@ -129,6 +129,16 @@ async def test_manage_project_search_files_finds_paths_and_content_without_loadi
     assert path_payload["results"][0]["matched_by"] == ["path"]
 
 
+def test_project_root_path_accepts_workspace_base_and_draft_paths(tmp_path):
+    workspace_base = tmp_path / "workspaces"
+    workspace_base.mkdir()
+    thread_root = workspace_base / "ideas" / "thread-1"
+    draft_path = thread_root / ".illo-project-context" / "local" / "project-payments" / "project-root"
+
+    assert project_root_path(workspace_base, "project-payments") == workspace_base / "project-roots" / "project-payments"
+    assert project_root_path(draft_path, "project-payments") == workspace_base / "project-roots" / "project-payments"
+
+
 async def test_manage_project_mount_reference_exposes_read_only_files_to_normal_file_tools(tmp_path, monkeypatch):
     profile = _project_profile("project-payments", slug="payments", name="Payments")
     workspace_root = tmp_path / "ideas" / "thread-1"
