@@ -431,16 +431,6 @@
             <span><ConstellationIcon name="lock" size={12} /> Root</span>
             <span><ConstellationIcon name="edit" size={12} /> Draft</span>
           </div>
-          <button
-            type="button"
-            class="project-browser-tree-toggle"
-            aria-expanded={!fileTreeCollapsed}
-            aria-controls="project-file-tree"
-            onclick={toggleFileTree}
-          >
-            <ConstellationIcon name={fileTreeCollapsed ? 'side-panel' : 'eye-off'} size={12} />
-            <span>{fileTreeCollapsed ? 'Show files' : 'Hide files'}</span>
-          </button>
         </div>
       </div>
 
@@ -488,6 +478,20 @@
               {/each}
             </div>
           {/if}
+
+          <div class="project-tree-rail" aria-label="File tree controls">
+            <button
+              type="button"
+              class="project-tree-rail-toggle"
+              aria-expanded={!fileTreeCollapsed}
+              aria-controls="project-file-tree"
+              title={fileTreeCollapsed ? 'Show files' : 'Collapse file tree'}
+              onclick={toggleFileTree}
+            >
+              <ConstellationIcon name={fileTreeCollapsed ? 'chevron-right' : 'chevron-left'} size={12} />
+              <span>{fileTreeCollapsed ? 'Files' : 'Collapse'}</span>
+            </button>
+          </div>
 
           <div class="project-file-preview" aria-live="polite">
             {#if selectedFile}
@@ -1008,28 +1012,6 @@
     gap: 5px;
   }
 
-  .project-browser-tree-toggle {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    min-height: 24px;
-    border: 1px solid rgba(255, 255, 255, 0.065);
-    border-radius: 7px;
-    padding: 3px 7px;
-    background: rgba(255, 255, 255, 0.04);
-    color: rgba(231, 238, 247, 0.66);
-    font-size: 10px;
-    line-height: 1;
-    cursor: pointer;
-  }
-
-  :global(:root[data-color-scheme='light']) .project-browser-tree-toggle {
-    border-color: rgba(85, 104, 120, 0.13);
-    background: rgba(85, 104, 120, 0.055);
-    color: rgba(57, 70, 82, 0.72);
-  }
-
   .project-browser-legend span,
   .project-file-layer-strip span {
     display: inline-flex;
@@ -1051,12 +1033,12 @@
 
   .project-browser-layout {
     display: grid;
-    grid-template-columns: minmax(190px, 0.72fr) minmax(0, 1.55fr);
+    grid-template-columns: minmax(190px, 0.72fr) 28px minmax(0, 1.55fr);
     min-height: min(72vh, 700px);
   }
 
   .project-browser-layout[data-tree-collapsed='true'] {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: 28px minmax(0, 1fr);
   }
 
   .project-file-tree {
@@ -1064,11 +1046,64 @@
     max-height: min(72vh, 700px);
     overflow: auto;
     padding: 6px;
-    border-right: 1px solid rgba(255, 255, 255, 0.055);
   }
 
-  :global(:root[data-color-scheme='light']) .project-file-tree {
-    border-right-color: rgba(85, 104, 120, 0.12);
+  .project-tree-rail {
+    display: grid;
+    align-content: stretch;
+    justify-items: center;
+    min-width: 0;
+    padding: 6px 3px;
+    border-left: 1px solid rgba(255, 255, 255, 0.055);
+    border-right: 1px solid rgba(255, 255, 255, 0.055);
+    background: rgba(255, 255, 255, 0.018);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-tree-rail {
+    border-color: rgba(85, 104, 120, 0.12);
+    background: rgba(85, 104, 120, 0.025);
+  }
+
+  .project-tree-rail-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 6px;
+    width: 100%;
+    min-height: 132px;
+    border: 0;
+    border-radius: 7px;
+    padding: 8px 3px;
+    background: transparent;
+    color: rgba(231, 238, 247, 0.58);
+    font-size: 9px;
+    font-weight: 650;
+    line-height: 1;
+    cursor: pointer;
+    writing-mode: vertical-rl;
+  }
+
+  .project-tree-rail-toggle:hover {
+    background: rgba(255, 255, 255, 0.055);
+    color: rgba(239, 244, 251, 0.82);
+  }
+
+  .project-tree-rail-toggle :global(svg) {
+    transform: rotate(90deg);
+  }
+
+  .project-tree-rail-toggle span {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-tree-rail-toggle {
+    color: rgba(82, 98, 111, 0.68);
+  }
+
+  :global(:root[data-color-scheme='light']) .project-tree-rail-toggle:hover {
+    background: rgba(82, 117, 139, 0.08);
+    color: rgba(29, 39, 49, 0.82);
   }
 
   .project-tree-row {
