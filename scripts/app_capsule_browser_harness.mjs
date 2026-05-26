@@ -251,6 +251,7 @@ function buildSrcdoc(config) {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${escapeHtml(config.app.name)}</title>
     <script>window.__ILLO_APP_MANIFEST__ = ${safeScriptJson(config.manifest || {})};<\/script>
+    <script>window.__ILLO_EVAL_REQUIRES_TABS__ = ${config.requires_tabs ? 'true' : 'false'};<\/script>
     ${runtimeStyle()}
     ${bridgeScript(config.app)}
     ${evalProbeScript()}
@@ -487,12 +488,46 @@ function evalProbeScript() {
       const horizontalOverflow =
         document.documentElement.scrollWidth > document.documentElement.clientWidth + 1 ||
         document.body.scrollWidth > document.body.clientWidth + 1;
+      const panel = document.querySelector('.illo-panel');
+      const firstPanelChild = panel ? Array.from(panel.children).find((child) => child.getBoundingClientRect().width > 0) : null;
+      const panelRect = panel ? panel.getBoundingClientRect() : null;
+      const childRect = firstPanelChild ? firstPanelChild.getBoundingClientRect() : null;
+      const panelInnerLeftPadding = panelRect && childRect ? Math.round(childRect.left - panelRect.left) : 0;
+      const panelInnerTopPadding = panelRect && childRect ? Math.round(childRect.top - panelRect.top) : 0;
+      const panelPaddingPassed = panelInnerLeftPadding >= 12 && panelInnerTopPadding >= 12;
+      const tabs = Array.from(document.querySelectorAll('[role="tab"], .illo-tabs button'));
+      const panels = Array.from(document.querySelectorAll('[role="tabpanel"], [data-tab-panel]'));
+      let tabSwitchPassed = !window.__ILLO_EVAL_REQUIRES_TABS__;
+      if (window.__ILLO_EVAL_REQUIRES_TABS__) {
+        const targetTab = tabs.find((tab) => tab.getAttribute('aria-selected') !== 'true') || tabs[1];
+        if (targetTab) {
+          targetTab.click();
+          tabSwitchPassed = await waitFor(() => {
+            const visiblePanels = panels.filter((item) => !item.hidden && getComputedStyle(item).display !== 'none');
+            return targetTab.getAttribute('aria-selected') === 'true' && visiblePanels.length === 1;
+          }, 2000);
+        }
+        if (tabs[0]) {
+          tabs[0].click();
+          await waitFor(() => tabs[0].getAttribute('aria-selected') === 'true', 1000);
+        }
+      }
+      const visiblePanelCount = panels.filter((item) => !item.hidden && getComputedStyle(item).display !== 'none').length;
+      const tabsPassed = !window.__ILLO_EVAL_REQUIRES_TABS__ || (tabs.length >= 2 && visiblePanelCount === 1 && tabSwitchPassed);
       report({
-        ok: rowsReady && noteSaved && !horizontalOverflow,
+        ok: rowsReady && noteSaved && !horizontalOverflow && panelPaddingPassed && tabsPassed,
         row_count_rendered: document.querySelectorAll('[data-record-row]').length,
         note_update_passed: noteSaved,
         horizontal_overflow: horizontalOverflow,
         internal_table_scroll: wrap ? wrap.scrollWidth > wrap.clientWidth + 1 : false,
+        panel_inner_left_padding: panelInnerLeftPadding,
+        panel_inner_top_padding: panelInnerTopPadding,
+        panel_padding_passed: panelPaddingPassed,
+        tabs_required: Boolean(window.__ILLO_EVAL_REQUIRES_TABS__),
+        tab_count: tabs.length,
+        visible_tab_panel_count: visiblePanelCount,
+        tab_switch_passed: tabSwitchPassed,
+        tabs_passed: tabsPassed,
         dom_nodes: document.getElementsByTagName('*').length,
         status_text: text('#status')
       });
@@ -530,9 +565,13 @@ button { cursor: pointer; }
 .illo-generated-app-root { width: 100%; min-height: 100%; }
 .illo-app { width: 100%; min-height: 100vh; display: grid; gap: 16px; padding: clamp(16px, 3vw, 32px); color: var(--illo-text); font-family: var(--illo-font); background: var(--illo-bg); }
 .illo-panel { min-width: 0; border: 1px solid var(--illo-border); border-radius: var(--illo-radius-md); background: var(--illo-panel); overflow: hidden; }
+.illo-panel.illo-stack { padding: clamp(14px, 2vw, 22px); }
 .illo-toolbar, .illo-row { display: flex; min-width: 0; align-items: center; gap: 10px; }
 .illo-toolbar { flex-wrap: wrap; justify-content: space-between; }
 .illo-stack { display: grid; gap: 12px; }
+.illo-tabs { display: inline-flex; align-items: center; align-self: start; justify-self: start; max-width: 100%; overflow-x: auto; gap: 4px; padding: 4px; border: 1px solid var(--illo-border); border-radius: 999px; background: var(--illo-soft); }
+.illo-tabs .illo-button, .illo-tabs button { min-height: 32px; padding: 7px 11px; }
+.illo-tabs [aria-selected='true'] { background: color-mix(in srgb, var(--illo-accent) 18%, var(--illo-panel-strong)); }
 .illo-input, .illo-app input:not([type='checkbox']):not([type='radio']):not([type='hidden']) { min-width: 0; width: 100%; border: 1px solid var(--illo-border); border-radius: var(--illo-radius-md); background: var(--illo-panel-strong); color: var(--illo-text); padding: 10px 12px; outline: none; }
 .illo-button, .illo-app button { min-height: var(--illo-control-height); border: 1px solid var(--illo-border); border-radius: var(--illo-radius-md); background: var(--illo-panel-strong); color: var(--illo-text); padding: 9px 13px; font-weight: 700; line-height: 1; }
 .illo-title { margin: 0; color: var(--illo-text); font-size: clamp(22px, 4vw, 34px); line-height: 1.08; letter-spacing: 0; }

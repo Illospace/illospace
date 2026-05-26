@@ -173,10 +173,167 @@ def crm_capsule_source() -> str:
 """.strip()
 
 
+def crm_tabs_capsule_source() -> str:
+    return """
+<main class="illo-app" data-test="crm-tabs-app">
+  <section class="illo-panel illo-stack">
+    <div class="illo-toolbar">
+      <div>
+        <h1 class="illo-title">Uwear CRM</h1>
+        <p class="illo-muted">Tabbed workspace for people, companies, and notes.</p>
+      </div>
+      <button class="illo-button" id="refresh" type="button">Refresh</button>
+    </div>
+    <div class="illo-tabs" role="tablist" aria-label="CRM sections">
+      <button class="illo-button" role="tab" aria-selected="true" data-tab="people" type="button">People</button>
+      <button class="illo-button" role="tab" aria-selected="false" data-tab="companies" type="button">Companies</button>
+      <button class="illo-button" role="tab" aria-selected="false" data-tab="notes" type="button">Notes</button>
+    </div>
+
+    <section role="tabpanel" data-tab-panel="people">
+      <div class="illo-stack">
+        <input class="illo-input" id="filter" placeholder="Filter loaded rows..." />
+        <div class="illo-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Company</th>
+                <th>Job title</th>
+                <th>Role</th>
+                <th>LinkedIn status</th>
+                <th>Notes</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="people-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section role="tabpanel" data-tab-panel="companies" hidden>
+      <ul class="illo-list" id="company-list"></ul>
+    </section>
+
+    <section role="tabpanel" data-tab-panel="notes" hidden>
+      <div class="illo-empty">
+        <p id="notes-summary">No notes saved yet.</p>
+      </div>
+    </section>
+
+    <p class="illo-muted" id="status">Loading...</p>
+  </section>
+</main>
+<script>
+  const people = window.illo.data('people');
+  let rows = [];
+
+  function cell(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[char]));
+  }
+
+  function recordData(row, key) {
+    return row && row.data ? row.data[key] : row[key];
+  }
+
+  function setTab(tabName) {
+    document.querySelectorAll('[data-tab]').forEach((tab) => {
+      tab.setAttribute('aria-selected', tab.dataset.tab === tabName ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-tab-panel]').forEach((panel) => {
+      panel.hidden = panel.dataset.tabPanel !== tabName;
+    });
+  }
+
+  function renderPeople() {
+    const query = document.getElementById('filter').value.trim().toLowerCase();
+    const visible = rows.filter((row) => {
+      const text = [recordData(row, 'name'), recordData(row, 'company'), recordData(row, 'job_title'), recordData(row, 'role')].join(' ').toLowerCase();
+      return !query || text.includes(query);
+    });
+    document.getElementById('people-body').innerHTML = visible.map((row) => `
+      <tr data-record-row="${row.id}">
+        <td>${cell(recordData(row, 'name') || row.title)}</td>
+        <td>${cell(recordData(row, 'company'))}</td>
+        <td>${cell(recordData(row, 'job_title'))}</td>
+        <td>${cell(recordData(row, 'role'))}</td>
+        <td>${cell(recordData(row, 'linkedin_status'))}</td>
+        <td><input class="illo-input" data-note-input="${row.id}" value="${cell(recordData(row, 'notes'))}" /></td>
+        <td><button class="illo-button" data-note-save="${row.id}" type="button">Save</button></td>
+      </tr>
+    `).join('');
+    document.getElementById('status').textContent = `${visible.length} of ${rows.length} loaded rows`;
+  }
+
+  function renderCompanies() {
+    const counts = new Map();
+    rows.forEach((row) => {
+      const company = recordData(row, 'company') || 'Unknown';
+      counts.set(company, (counts.get(company) || 0) + 1);
+    });
+    document.getElementById('company-list').innerHTML = Array.from(counts.entries()).map(([company, count]) => `
+      <li class="illo-row" data-company-row>
+        <strong>${cell(company)}</strong>
+        <span>${count} contacts</span>
+      </li>
+    `).join('');
+  }
+
+  function renderNotesSummary() {
+    const count = rows.filter((row) => recordData(row, 'notes')).length;
+    document.getElementById('notes-summary').textContent = count ? `${count} notes saved` : 'No notes saved yet.';
+  }
+
+  function render() {
+    renderPeople();
+    renderCompanies();
+    renderNotesSummary();
+  }
+
+  async function load() {
+    document.getElementById('status').textContent = 'Loading...';
+    rows = await people.list({ limit: 500 });
+    render();
+  }
+
+  async function saveNote(recordId) {
+    const input = document.querySelector(`[data-note-input="${recordId}"]`);
+    const note = input ? input.value : '';
+    const updated = await people.update(Number(recordId), { notes: note });
+    rows = rows.map((row) => row.id === updated.id ? updated : row);
+    render();
+  }
+
+  document.querySelectorAll('[data-tab]').forEach((tab) => {
+    tab.addEventListener('click', () => setTab(tab.dataset.tab));
+  });
+  document.getElementById('filter').addEventListener('input', renderPeople);
+  document.getElementById('refresh').addEventListener('click', () => load().catch(showError));
+  document.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-note-save]');
+    if (!button) return;
+    saveNote(button.dataset.noteSave).catch(showError);
+  });
+  function showError(error) {
+    document.getElementById('status').textContent = error && error.message ? error.message : String(error);
+  }
+  load().catch(showError);
+</script>
+""".strip()
+
+
 def build_scenario_payload(params: EvalParams) -> dict[str, Any]:
-    if params.scenario != "crm_simple_table":
+    if params.scenario not in {"crm_simple_table", "crm_tabs"}:
         raise ValueError(f"Unknown scenario: {params.scenario}")
     records = crm_people(params.rows)
+    requires_tabs = params.scenario == "crm_tabs"
     manifest = {
         "contract_version": 1,
         "data_plan": {
@@ -208,12 +365,13 @@ def build_scenario_payload(params: EvalParams) -> dict[str, Any]:
         "description": "Editable CRM table capsule for outreach contacts.",
         "renderer_key": "app-capsule",
         "source_kind": "html",
-        "source_code": crm_capsule_source(),
+        "source_code": crm_tabs_capsule_source() if requires_tabs else crm_capsule_source(),
         "manifest": manifest,
         "visual_spec": visual_spec,
         "records": records,
         "viewport": {"width": params.viewport[0], "height": params.viewport[1]},
         "api_latency_ms": params.api_latency_ms,
+        "requires_tabs": requires_tabs,
     }
 
 
@@ -248,6 +406,8 @@ def static_score(payload: dict[str, Any], compiled: Any, report: dict[str, Any])
         "contract_pass": int(report["status"] == "passed"),
         "capability_bindings": sorted(bindings.keys()),
         "legacy_color_hits": sum(source.count(marker) for marker in LEGACY_SURFACE_MARKERS),
+        "tabs_requested": bool(payload.get("requires_tabs")),
+        "tab_markup_hits": source.count('role="tab"') + source.count("role='tab'"),
         "source_bytes": len(source.encode("utf-8")),
         "repairs": list(compiled.repairs),
         "contract_errors": list(report.get("errors") or []),
@@ -272,6 +432,7 @@ def run_browser_harness(
         "timeout_ms": timeout_ms,
         "chrome_path": chrome_path,
         "screenshot_path": str(screenshot_path) if screenshot_path else None,
+        "requires_tabs": bool(payload.get("requires_tabs")),
     }
     with tempfile.TemporaryDirectory(prefix="app-capsule-eval-") as tmp:
         input_path = Path(tmp) / "payload.json"
@@ -312,6 +473,9 @@ def run_eval_case(
         and scores.get("console_errors", 0) == 0
         and not scores.get("horizontal_overflow", False)
         and scores.get("note_update_passed", True)
+        and (not scores["tabs_requested"] or scores["tab_markup_hits"] >= 2)
+        and scores.get("tabs_passed", True)
+        and scores.get("panel_padding_passed", True)
         and scores["legacy_color_hits"] == 0
     )
     return {

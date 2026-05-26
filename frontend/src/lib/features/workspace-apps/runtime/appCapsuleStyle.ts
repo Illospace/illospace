@@ -98,6 +98,10 @@ export function appCapsuleRuntimeStyle(themeMode: 'dark' | 'light', accent: stri
       overflow: hidden;
     }
 
+    .illo-panel.illo-stack {
+      padding: clamp(14px, 2vw, 22px);
+    }
+
     .illo-toolbar,
     .illo-row {
       display: flex;
@@ -164,11 +168,26 @@ export function appCapsuleRuntimeStyle(themeMode: 'dark' | 'light', accent: stri
 
     .illo-tabs {
       display: inline-flex;
+      align-items: center;
+      align-self: start;
+      justify-self: start;
+      max-width: 100%;
+      overflow-x: auto;
       gap: 4px;
       padding: 4px;
       border: 1px solid var(--illo-border);
       border-radius: 999px;
       background: var(--illo-soft);
+    }
+
+    .illo-tabs .illo-button,
+    .illo-tabs button {
+      min-height: 32px;
+      padding: 7px 11px;
+    }
+
+    .illo-tabs [aria-selected='true'] {
+      background: color-mix(in srgb, var(--illo-accent) 18%, var(--illo-panel-strong));
     }
 
     .illo-badge {
