@@ -210,6 +210,13 @@ def test_context_overflow_classifier_recognizes_provider_shapes():
     exc = ContextError("maximum context length exceeded; request too large")
 
     assert is_context_overflow_error(exc, provider_name="openai")
+    assert is_context_overflow_error(
+        RuntimeError(
+            "API error: Invalid 'instructions': string too long. "
+            "Expected a string with maximum length 1048576, but got a string with length 12256492 instead."
+        ),
+        provider_name="openai",
+    )
     assert context_overflow_payload(exc, provider_name="openai")["provider"] == "openai"
     assert not is_context_overflow_error(RuntimeError("temporarily overloaded"), provider_name="openai")
 

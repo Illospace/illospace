@@ -633,6 +633,37 @@ export interface ProjectDraftChangeSet {
   out_of_date_paths?: string[];
 }
 
+export interface ProjectDraftFileEntry {
+  path: string;
+  name?: string | null;
+  parent?: string | null;
+  extension?: string | null;
+  status?: string | null;
+  layer?: 'root' | 'draft' | string | null;
+  resource_id?: string | null;
+  mount_path?: string | null;
+  resource_label?: string | null;
+  has_root?: boolean;
+  has_base?: boolean;
+  has_draft?: boolean;
+  size?: number | null;
+  root_size?: number | null;
+  draft_size?: number | null;
+  root_sha256?: string | null;
+  draft_sha256?: string | null;
+  conflicted?: boolean;
+  out_of_date?: boolean;
+}
+
+export interface ProjectDraftFileBrowser {
+  entries?: ProjectDraftFileEntry[];
+  summary?: {
+    file_count?: number;
+    visible_count?: number;
+    truncated?: number;
+  } | Record<string, any> | null;
+}
+
 export interface ProjectDraftResourceState {
   id: string;
   label?: string | null;
@@ -653,6 +684,7 @@ export interface ProjectDraftResourceState {
   changes?: ProjectDraftChangeSet;
   root_versions_summary?: Record<string, any> | null;
   root_versions?: Record<string, any> | null;
+  file_browser?: ProjectDraftFileBrowser | null;
 }
 
 export interface ProjectRootVersionState {
@@ -711,6 +743,7 @@ export interface ProjectDraftStateRead {
   workspaces?: Array<Record<string, any>>;
   materialization?: Record<string, any>;
   resources?: ProjectDraftResourceState[];
+  file_browser?: ProjectDraftFileBrowser | null;
   changes?: {
     counts?: Partial<Record<ProjectDraftChangeKey, number>>;
     total?: number;
@@ -726,6 +759,35 @@ export interface ProjectDraftStateRead {
   };
   root_versions_summary?: Record<string, any>;
   summary?: Record<string, any>;
+}
+
+export interface ProjectDraftFileLayer {
+  exists?: boolean;
+  binary?: boolean;
+  size?: number;
+  content?: string;
+  truncated?: boolean;
+  error?: string;
+}
+
+export interface ProjectDraftFileResponse {
+  ok: boolean;
+  resource_id?: string | null;
+  mount_path?: string | null;
+  path: string;
+  entry?: ProjectDraftFileEntry;
+  layers?: {
+    root?: ProjectDraftFileLayer;
+    base?: ProjectDraftFileLayer;
+    draft?: ProjectDraftFileLayer;
+  };
+}
+
+export interface ProjectDraftFileUpdateInput {
+  runId?: string | number | null;
+  resourceId?: string | null;
+  path: string;
+  content: string;
 }
 
 export interface ProjectDraftStateResponse {
@@ -983,6 +1045,49 @@ export const api = {
       withQuery(`/api/cortex/ideas/${ideaId}/project-context/draft-state`, {
         run_id: options.runId,
       }),
+    ),
+  getIdeaProjectDraftFile: (
+    ideaId: string,
+    options: { runId?: string | number | null; resourceId?: string | null; path: string },
+  ) =>
+    fetchJson<ProjectDraftFileResponse>(
+      withQuery(`/api/cortex/ideas/${ideaId}/project-context/draft-file`, {
+        run_id: options.runId,
+        resource_id: options.resourceId,
+        path: options.path,
+      }),
+    ),
+  getIdeaProjectDraftFileBlobUrl: (
+    ideaId: string,
+    options: {
+      runId?: string | number | null;
+      resourceId?: string | null;
+      path: string;
+      layer?: 'root' | 'base' | 'draft';
+    },
+  ) =>
+    withQuery(`/api/cortex/ideas/${ideaId}/project-context/draft-file/blob`, {
+      run_id: options.runId,
+      resource_id: options.resourceId,
+      path: options.path,
+      layer: options.layer,
+    }),
+  updateIdeaProjectDraftFile: (
+    ideaId: string,
+    data: ProjectDraftFileUpdateInput,
+  ) =>
+    fetchJson<ProjectDraftFileResponse>(
+      withQuery(`/api/cortex/ideas/${ideaId}/project-context/draft-file`, {
+        run_id: data.runId,
+      }),
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          resource_id: data.resourceId,
+          path: data.path,
+          content: data.content,
+        }),
+      },
     ),
   deleteIdea: (id: string) =>
     fetchJson<any>(`/api/cortex/ideas/${id}`, { method: 'DELETE' }),

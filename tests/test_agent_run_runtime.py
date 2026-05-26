@@ -488,7 +488,7 @@ async def test_fast_recipe_keeps_large_project_context_out_of_system_prompt(monk
         captured["spec"] = spec
         return SimpleNamespace(output="ok", success=True, error=None)
 
-    huge_value = "x" * 2_000_000
+    huge_value = "RAW_PROJECT_FILE_CONTEXT_SHOULD_NOT_BE_IN_SYSTEM_PROMPT" * 80_000
     large_ref = {
         "kind": "cortex_idea",
         "title": "Port the SEO workflow",
@@ -496,8 +496,10 @@ async def test_fast_recipe_keeps_large_project_context_out_of_system_prompt(monk
             "name": "Agent Mission Control Reference",
             "resources": [
                 {
+                    "id": "resource-1",
                     "kind": "folder",
                     "path": "/workspaces/agent-mission-control-reference",
+                    "content": huge_value,
                     "materialization": {
                         "status": "ready",
                         "project_root_file_count": 779,
@@ -508,6 +510,42 @@ async def test_fast_recipe_keeps_large_project_context_out_of_system_prompt(monk
                     },
                 }
             ],
+        },
+        "project_runtime_context": {
+            "project_context_snapshot": {
+                "project_id": "project-1",
+                "project_key": "project-1",
+                "resources": [
+                    {
+                        "id": "resource-1",
+                        "kind": "folder",
+                        "name": "agent-mission-control-reference",
+                        "path": "/workspaces/agent-mission-control-reference",
+                        "content": huge_value,
+                    }
+                ],
+                "permission_scope": {
+                    "allowed_paths": [f"/workspaces/project/file-{index}.md" for index in range(2_000)],
+                    "mode": "enforce",
+                    "permission_mode": "read_write",
+                },
+            },
+            "project_workspace_manifest": {
+                "workspace_root": "/workspaces/ideas/idea-1/.illo-project-context/local/project/project-root",
+                "workspaces": [
+                    {
+                        "name": "/",
+                        "path": "/workspaces/ideas/idea-1/.illo-project-context/local/project/project-root",
+                    }
+                ],
+            },
+            "project_context_materialization": {
+                "status": "materialized",
+                "project_root_file_count": 779,
+                "project_root_path_count": 779,
+                "project_draft_file_count": 779,
+                "project_draft_path_count": 779,
+            },
         },
         "workspace_root": "/workspaces/agent-mission-control-reference",
     }
@@ -523,8 +561,9 @@ async def test_fast_recipe_keeps_large_project_context_out_of_system_prompt(monk
 
     assert result.status.value == "completed"
     assert len(captured["spec"].system_prompt) < 40_000
-    assert huge_value[:1000] not in captured["spec"].system_prompt
+    assert "RAW_PROJECT_FILE_CONTEXT_SHOULD_NOT_BE_IN_SYSTEM_PROMPT" not in captured["spec"].system_prompt
     assert "large value omitted from prompt context" in captured["spec"].system_prompt
+    assert "project_root_file_count" in captured["spec"].system_prompt
     assert captured["spec"].system_prompt.count("## Context") == 1
 
 

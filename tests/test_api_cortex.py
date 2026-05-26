@@ -426,8 +426,61 @@ async def test_project_context_draft_state_payload_uses_manage_project_helpers(t
     assert payload["idea_id"] == "idea-1"
     assert payload["draft_status"]["resources"][0]["changes"]["changed_paths"] == ["brief.md"]
     assert payload["draft_status"]["resources"][0]["changes"]["new_paths"] == ["new.md"]
+    assert payload["draft_status"]["resources"][0]["file_browser"]["summary"]["file_count"] == 2
+    assert {
+        entry["path"]: entry["status"]
+        for entry in payload["draft_status"]["resources"][0]["file_browser"]["entries"]
+    } == {"brief.md": "changed", "new.md": "new"}
     assert payload["plan_publish"]["summary"] == {"resource_count": 1, "operation_count": 2, "blocked_count": 0}
     assert payload["root_versions"]["summary"] == {"resource_count": 1, "version_count": 0}
+
+
+async def test_project_context_draft_file_update_payload_writes_thread_overlay(tmp_path):
+    from brain.app.api.routers.cortex import _project_context
+    from brain.systems.cortex.project_context.schemas import ProjectDraftFileUpdate
+
+    source_dir = tmp_path / "source"
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    source_dir.mkdir()
+    draft_dir.mkdir(parents=True)
+    (source_dir / "brief.md").write_text("original", encoding="utf-8")
+
+    payload = await _project_context._update_project_draft_file_payload(
+        _project_draft_run_for_test(source_dir, draft_dir),
+        idea_id="idea-1",
+        body=ProjectDraftFileUpdate(resource_id="reports", path="brief.md", content="manual draft edit"),
+        user={"id": "user-1", "org_id": "test-org"},
+    )
+
+    assert payload["updated"] is True
+    assert payload["layers"]["root"]["content"] == "original"
+    assert payload["layers"]["draft"]["content"] == "manual draft edit"
+    assert (source_dir / "brief.md").read_text(encoding="utf-8") == "original"
+    assert (draft_dir / "brief.md").read_text(encoding="utf-8") == "manual draft edit"
+
+
+async def test_project_context_draft_file_blob_response_serves_inline_layer(tmp_path):
+    from brain.app.api.routers.cortex import _project_context
+
+    source_dir = tmp_path / "source"
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    source_dir.mkdir()
+    draft_dir.mkdir(parents=True)
+    (source_dir / "diagram.svg").write_text("<svg></svg>", encoding="utf-8")
+    (draft_dir / "diagram.svg").write_text("<svg><title>draft</title></svg>", encoding="utf-8")
+
+    response = await _project_context._project_draft_file_blob_response(
+        _project_draft_run_for_test(source_dir, draft_dir),
+        idea_id="idea-1",
+        path="diagram.svg",
+        layer="draft",
+        resource_id="reports",
+        user={"id": "user-1", "org_id": "test-org"},
+    )
+
+    assert response.media_type == "image/svg+xml"
+    assert str(response.path) == str(draft_dir / "diagram.svg")
+    assert response.headers["content-disposition"].startswith("inline;")
 
 
 async def test_project_context_draft_state_payload_handles_missing_run():

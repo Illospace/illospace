@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from brain.systems.runs.assignments import WorkerAssignment
+from brain.systems.runs.context import compact_project_reference
 from brain.systems.runs.domain import AgentRunArtifact, ArtifactType
 from brain.systems.runs.engine import RunRecipeResult, RunRuntime
 from brain.systems.runs.recipes.base import BaseRunRecipe
@@ -106,11 +107,12 @@ class WorkerRecipe(BaseRunRecipe):
         async def _guidance() -> list[str]:
             return await runtime.drain_steering()
 
+        prompt_context = context.prompt_context()
         system_prompt = build_worker_prompt(
             assignment,
             target_ref=runtime.request.target_ref,
             workspace_ref=runtime.request.workspace_ref,
-            context=context.prompt_context(),
+            context=prompt_context,
             evidence_so_far=runtime.request.metadata.get("evidence") or runtime.request.metadata.get("parent_evidence"),
         )
         await runtime.activity("Starting scoped worker", workspace_root=workspace_root)
@@ -133,7 +135,7 @@ class WorkerRecipe(BaseRunRecipe):
             on_stream_activity=_activity,
             on_stream_delta=_delta,
             live_guidance_loader=_guidance,
-            brain_context_preloaded=bool(context.prompt_context()),
+            brain_context_preloaded=bool(prompt_context or runtime.request.target_ref or runtime.request.workspace_ref),
             skip_harvest=True,
             metadata={
                 "profile": str(runtime.request.normalized_profile.value),
@@ -219,13 +221,19 @@ def build_worker_prompt(
     context: str = "",
     evidence_so_far: Any = None,
 ) -> str:
+    context_block = context
+    if not context_block:
+        context_parts = []
+        if target_ref:
+            context_parts.append("Target:\n" + compact_project_reference(target_ref))
+        if workspace_ref:
+            context_parts.append("Workspace:\n" + compact_project_reference(workspace_ref))
+        context_block = "\n\n".join(context_parts)
     return (
         WORKER_AGENT_INSTRUCTIONS
         + _json_block("Worker Assignment", assignment.to_payload())
-        + _json_block("Target", target_ref)
-        + _json_block("Workspace", workspace_ref)
         + _json_block("Parent Evidence", evidence_so_far)
-        + (f"\n\n## Context\n{context}" if context else "")
+        + (f"\n\n## Context\n{context_block}" if context_block else "")
     )
 
 

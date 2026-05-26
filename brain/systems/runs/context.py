@@ -16,9 +16,11 @@ PROMPT_DICT_ITEM_LIMIT = 48
 PromptPath = tuple[str, ...]
 
 PROJECT_REFERENCE_HEAVY_PATHS: tuple[PromptPath, ...] = (
+    ("project_context_snapshot", "resources", "*", "content"),
     ("project_context_snapshot", "resources", "*", "uploaded_files"),
     ("project_context_snapshot", "resources", "*", "materialization", "imports"),
     ("project_context_snapshot", "resources", "*", "materialization", "root_versions"),
+    ("project_runtime_context", "project_context_snapshot", "resources", "*", "content"),
     ("project_runtime_context", "project_context_snapshot", "resources", "*", "uploaded_files"),
     ("project_runtime_context", "project_context_snapshot", "resources", "*", "materialization", "imports"),
     ("project_runtime_context", "project_context_snapshot", "resources", "*", "materialization", "root_versions"),
@@ -93,8 +95,6 @@ def _compact_heavy_value(value: Any) -> dict[str, Any]:
     else:
         text = str(value or "")
         summary["char_count"] = len(text)
-        if text:
-            summary["preview"] = _truncate_scalar(text, 160)
     return summary
 
 
@@ -248,4 +248,4 @@ class RunContextLoader:
         )
 
 
-__all__ = ["RunContext", "RunContextLoader"]
+__all__ = ["RunContext", "RunContextLoader", "compact_project_reference"]
