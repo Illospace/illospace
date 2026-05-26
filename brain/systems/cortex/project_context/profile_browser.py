@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from brain.kernel import config
 from brain.systems.cortex.project_context.browser import (
     project_file_blob,
     project_file_payload,
@@ -66,7 +67,7 @@ def _thread_workspace_root_from_path(path: Any) -> Path | None:
     return Path(*parts[:index]) if index > 0 else None
 
 
-def _thread_workspace_root_for_run(run: Any) -> Path | None:
+def _thread_workspace_root_for_run(run: Any, *, idea_id: str | None = None) -> Path | None:
     for manifest in _run_project_manifests(run):
         for mount in manifest.get("mounts") or []:
             mount_payload = _mapping(mount)
@@ -97,6 +98,18 @@ def _thread_workspace_root_for_run(run: Any) -> Path | None:
             derived = _thread_workspace_root_from_path(_mapping(workspace).get("path"))
             if derived is not None:
                 return derived
+    thread_id = str(idea_id or "").strip() or str(getattr(run, "thread_id", "") or "").strip()
+    if not thread_id:
+        for payload in (
+            _mapping(getattr(run, "target_ref", None)),
+            _mapping(getattr(run, "metadata_", None)),
+        ):
+            thread_id = str(payload.get("idea_id") or payload.get("thread_id") or "").strip()
+            if thread_id:
+                break
+    if thread_id:
+        workspace_root = config.resolve_workspace_root(default=config.BRAIN_DIR.parent).expanduser()
+        return workspace_root / "ideas" / thread_id
     return None
 
 
@@ -136,14 +149,23 @@ def _draft_change_payload(root_path: Path, draft_path: Path) -> dict[str, Any]:
     }
 
 
-def _project_root_resource(profile: Any, run: Any, *, create_draft: bool = False) -> dict[str, Any]:
-    thread_root = _thread_workspace_root_for_run(run)
+def _project_root_resource(
+    profile: Any,
+    run: Any,
+    *,
+    idea_id: str | None = None,
+    create_draft: bool = False,
+) -> dict[str, Any]:
+    thread_root = _thread_workspace_root_for_run(run, idea_id=idea_id)
     if thread_root is None:
         raise ProjectProfileBrowserError("No thread workspace root is available for Project browsing.")
 
     project_key = _profile_project_key(profile)
     root_path = project_root_path(thread_root, project_key)
-    root_path.mkdir(parents=True, exist_ok=True)
+    root_available = root_path.exists()
+    if create_draft and not root_available:
+        root_path.mkdir(parents=True, exist_ok=True)
+        root_available = True
     draft_path = project_draft_root_path(thread_root, project_key)
     if create_draft and not draft_path.exists():
         sync_draft_from_root(root_path, draft_path)
@@ -155,6 +177,7 @@ def _project_root_resource(profile: Any, run: Any, *, create_draft: bool = False
         "kind": PROJECT_ROOT_RESOURCE_KIND,
         "mount_path": PROJECT_ROOT_MOUNT_PATH,
         "source_path": str(root_path),
+        "root_available": root_available,
         "project_profile_id": str(profile.id),
         "project_key": project_key,
         "changes": changes,
@@ -206,7 +229,7 @@ def _aggregate_changes(resource: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def project_profile_draft_status_payload(profile: Any, run: Any, *, idea_id: str) -> dict[str, Any]:
-    resource = _project_root_resource(profile, run)
+    resource = _project_root_resource(profile, run, idea_id=idea_id)
     return with_project_file_browser({
         "ok": True,
         "action": "profile_draft_status",
@@ -301,7 +324,7 @@ def update_project_profile_draft_file(
     path: str,
     content: str,
 ) -> dict[str, Any]:
-    resource = _project_root_resource(profile, run, create_draft=True)
+    resource = _project_root_resource(profile, run, idea_id=idea_id, create_draft=True)
     draft_status = with_project_file_browser({
         "ok": True,
         "action": "profile_draft_status",

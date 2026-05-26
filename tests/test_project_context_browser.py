@@ -17,7 +17,7 @@ from brain.systems.cortex.project_context.profile_browser import (
     project_profile_file_payload,
     update_project_profile_draft_file,
 )
-from brain.systems.cortex.project_context.project_root import project_draft_root_path
+from brain.systems.cortex.project_context.project_root import project_draft_root_path, project_root_path
 
 
 def _write(path: Path, content: str) -> None:
@@ -224,3 +224,83 @@ def test_project_profile_browser_reads_root_and_creates_thread_draft_on_edit(tmp
     refreshed = project_profile_draft_state_payload(profile, run, idea_id="idea-1")
     refreshed_entries = {entry["path"]: entry for entry in refreshed["draft_status"]["file_browser"]["entries"]}
     assert refreshed_entries["README.md"]["status"] == "changed"
+
+
+def test_project_profile_browser_falls_back_to_thread_workspace_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    project_root = tmp_path / "project-roots" / "project-1"
+    _write(project_root / "README.md", "root readme\n")
+    profile = SimpleNamespace(
+        id="project-1",
+        org_id="org-1",
+        user_id="user-1",
+        slug="payments",
+        name="Payments",
+        description=None,
+        project_context={"version": 1, "resources": []},
+        visibility="public",
+        default_environment_binding_id=None,
+        active=True,
+        metadata_={},
+        created_at=datetime.now(timezone.utc),
+    )
+    run = SimpleNamespace(
+        id=18,
+        workspace_ref={},
+        metadata_={},
+        target_ref={},
+    )
+
+    state = project_profile_draft_state_payload(profile, run, idea_id="thread-a")
+    resource = state["draft_status"]["resources"][0]
+    entries = {entry["path"]: entry for entry in state["draft_status"]["file_browser"]["entries"]}
+
+    assert resource["source_path"] == str(project_root)
+    assert resource["root_available"] is True
+    assert entries["README.md"]["has_root"] is True
+
+
+def test_project_profile_browser_does_not_create_missing_root_on_read(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    profile = SimpleNamespace(
+        id="empty-project",
+        org_id="org-1",
+        user_id="user-1",
+        slug="empty",
+        name="Empty",
+        description=None,
+        project_context={"version": 1, "resources": []},
+        visibility="public",
+        default_environment_binding_id=None,
+        active=True,
+        metadata_={},
+        created_at=datetime.now(timezone.utc),
+    )
+    run = SimpleNamespace(
+        id=19,
+        thread_id="thread-a",
+        workspace_ref={},
+        metadata_={},
+        target_ref={},
+    )
+    root = project_root_path(tmp_path / "ideas" / "thread-a", "empty-project")
+
+    state = project_profile_draft_state_payload(profile, run, idea_id="thread-a")
+    resource = state["draft_status"]["resources"][0]
+
+    assert root.exists() is False
+    assert resource["root_available"] is False
+    assert state["draft_status"]["file_browser"]["summary"]["file_count"] == 0
+
+    update_project_profile_draft_file(
+        profile,
+        run,
+        idea_id="thread-a",
+        path="notes.md",
+        content="draft note\n",
+    )
+
+    assert root.exists() is True
+    assert (project_draft_root_path(tmp_path / "ideas" / "thread-a", "empty-project") / "notes.md").read_text(
+        encoding="utf-8"
+    ) == "draft note\n"
