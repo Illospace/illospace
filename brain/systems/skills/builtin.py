@@ -806,7 +806,8 @@ small enough to stay useful, and attached to the right Cortex conversations.
 
 Use when the user asks to create, attach, rename, update, archive, delete, or
 organize a project, or when they want the same repo, folder, docs, or files to
-be reusable across multiple Illo threads.
+be reusable across multiple Illo threads. Also use when they need to find or
+read a small set of files from another visible Project as reference context.
 
 ## Do Not Use When
 
@@ -818,6 +819,9 @@ are immediate message context and should just work without a project.
 List existing projects first when the user is managing durable context. Load
 the target project profile, current resources, current thread id when attaching,
 and any newly uploaded file/resource metadata the user wants to keep.
+For cross-project reference lookups, search visible Projects with
+`manage_project(action="search_files", query=..., limit=..., paths=..., glob=...)`
+before mounting anything. Do not load whole Projects just to find candidate files.
 
 ## Operating Loop
 
@@ -829,13 +833,19 @@ and any newly uploaded file/resource metadata the user wants to keep.
    attach the smallest Project Context that represents the working set before
    trying raw paths or unauthenticated remotes.
 6. Attach a project to the current thread when the user wants Illo to use it here.
-7. Archive projects by default for delete requests; treat permanent deletion as unavailable unless the product adds it.
-8. Tell the user what changed in plain language without exposing internal validation or status machinery.
+7. Treat Projects as context boundaries, not permission boundaries.
+8. For cross-project references, use `manage_project(action="mount_reference",
+   project_id=..., paths=..., glob=..., mount_path=...)` to expose only selected
+   files or folders as read-only reference mounts. Then inspect them with normal
+   `read_file`, `list_files`, or `search_files`.
+9. Archive projects by default for delete requests; treat permanent deletion as unavailable unless the product adds it.
+10. Tell the user what changed in plain language without exposing internal validation or status machinery.
 
 ## Output Contract
 
 Return the project name, the resource changes, whether it is attached to the
-current thread, and one short note if the user should drop or upload files.
+current thread, any read-only reference mount path created, and one short note
+if the user should drop or upload files.
 
 ## Failure Modes
 

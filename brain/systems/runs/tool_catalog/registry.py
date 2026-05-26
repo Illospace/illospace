@@ -774,7 +774,7 @@ def action_policy_for_tool(
         }
     if tool_name == "manage_idea" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get"}:
         return None
-    if tool_name == "manage_project" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get"}:
+    if tool_name == "manage_project" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get", "search_files", "mount_reference"}:
         return None
     if tool_name == "manage_workspace_app" and _arg_at(args_tuple, kwargs_dict, "action", 0) in {"help", "schema", "list", "get", "get_state"}:
         return None

@@ -17,6 +17,14 @@ from brain.systems.cortex.project_context.root_history import (
     project_restore_root_version_payload,
     project_root_versions_payload,
 )
+from brain.systems.runs.tool_catalog.handlers.project_references import (
+    PROJECT_FILE_SEARCH_DEFAULT_LIMIT,
+    PROJECT_FILE_SEARCH_MAX_LIMIT,
+    limit_value as _project_limit_value,
+    mount_project_reference,
+    profile_matches_query,
+    search_project_root_files,
+)
 from brain.systems.runs.tool_catalog.handlers.common import *
 
 
@@ -224,6 +232,11 @@ async def _handle_manage_project(
     idea_id: str | None = None,
     publish_paths: list[str] | None = None,
     path: str | None = None,
+    paths: list[str] | None = None,
+    query: str | None = None,
+    glob: str | None = None,
+    limit: int | None = None,
+    mount_path: str | None = None,
     version_id: str | None = None,
     branch_name: str | None = None,
     commit_message: str | None = None,
@@ -309,7 +322,13 @@ async def _handle_manage_project(
         async with UnitOfWork() as uow:
             if action == "list":
                 stmt = _profile_stmt(org_id, user_id, include_inactive=include_inactive).order_by(ProjectProfile.created_at.desc())
-                profiles = (await uow.session.scalars(stmt)).all()
+                profiles = [
+                    profile
+                    for profile in (await uow.session.scalars(stmt)).all()
+                    if profile_matches_query(profile, query)
+                ]
+                if limit is not None:
+                    profiles = profiles[:_project_limit_value(limit, default=len(profiles) or 1, maximum=PROJECT_FILE_SEARCH_MAX_LIMIT)]
                 return json.dumps({"projects": [_profile_read(profile) for profile in profiles]}, default=str)
 
             if action == "get":
@@ -317,6 +336,74 @@ async def _handle_manage_project(
                     return json.dumps({"error": "get requires: project_id"})
                 profile = await _get_profile(uow.session, org_id, user_id, selected_project_id, include_inactive=include_inactive)
                 return json.dumps({"project": _profile_read(profile)}, default=str)
+
+            if action == "search_files":
+                if not query and not path and not paths and not glob:
+                    return json.dumps({"error": "search_files requires query, path, paths, or glob"})
+                effective_limit = _project_limit_value(limit, default=PROJECT_FILE_SEARCH_DEFAULT_LIMIT, maximum=PROJECT_FILE_SEARCH_MAX_LIMIT)
+                if selected_project_id:
+                    profiles = [
+                        await _get_profile(
+                            uow.session,
+                            org_id,
+                            user_id,
+                            selected_project_id,
+                            include_inactive=include_inactive,
+                        )
+                    ]
+                else:
+                    stmt = _profile_stmt(org_id, user_id, include_inactive=include_inactive).order_by(ProjectProfile.created_at.desc())
+                    profiles = (await uow.session.scalars(stmt)).all()
+                    profiles = sorted(
+                        profiles,
+                        key=lambda profile: 0 if profile_matches_query(profile, query) else 1,
+                    )
+
+                searched: list[dict[str, Any]] = []
+                results: list[dict[str, Any]] = []
+                remaining = effective_limit
+                for profile in profiles:
+                    payload = search_project_root_files(
+                        profile,
+                        query=query,
+                        path=path,
+                        paths=paths,
+                        glob=glob,
+                        limit=remaining,
+                    )
+                    project_results = payload.pop("results", [])
+                    searched.append(payload)
+                    results.extend(project_results)
+                    remaining = effective_limit - len(results)
+                    if remaining <= 0:
+                        break
+                return json.dumps(
+                    {
+                        "query": query,
+                        "results": results,
+                        "projects_searched": searched,
+                        "truncated": remaining <= 0,
+                        "guidance": (
+                            "Use manage_project(action='mount_reference', project_id=..., paths=[...]) "
+                            "to expose selected matches as read-only mounts, then read them with normal file tools."
+                        ),
+                    },
+                    default=str,
+                )
+
+            if action == "mount_reference":
+                if not selected_project_id:
+                    return json.dumps({"error": "mount_reference requires: project_id"})
+                profile = await _get_profile(uow.session, org_id, user_id, selected_project_id, include_inactive=include_inactive)
+                payload = mount_project_reference(
+                    profile,
+                    path=path,
+                    paths=paths,
+                    glob=glob,
+                    limit=limit,
+                    mount_path=mount_path,
+                )
+                return json.dumps(payload, default=str)
 
             if action == "create":
                 if not slug or not name:
