@@ -543,6 +543,19 @@ export interface WorkspaceAppActionRunRead {
   result: Record<string, any>;
 }
 
+export interface WorkspaceAppBindingRunInput {
+  payload?: Record<string, any>;
+}
+
+export interface WorkspaceAppBindingRunRead {
+  ok: boolean;
+  alias: string;
+  operation: string;
+  kind: string;
+  data: any;
+  warnings: string[];
+}
+
 export interface WorkspacePinRead {
   id: string;
   org_id: string;
@@ -1354,6 +1367,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ action_key: data.action_key, payload: data.payload ?? {} }),
     }),
+  runWorkspaceAppBinding: (appId: string, alias: string, operation: string, data: WorkspaceAppBindingRunInput = {}) =>
+    fetchJson<WorkspaceAppBindingRunRead>(
+      `/api/workspace-apps/${appId}/bindings/${encodeURIComponent(alias)}/${encodeURIComponent(operation)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ payload: data.payload ?? {} }),
+      },
+    ),
 
   // Workspace pins
   listWorkspacePins: () => fetchJson<WorkspacePinRead[]>('/api/workspace-pins/'),

@@ -41,7 +41,7 @@ class WorkspaceApp(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     renderer_key: Mapped[str] = mapped_column(
-        String(120), nullable=False, server_default="generated-ui-app", default="generated-ui-app"
+        String(120), nullable=False, server_default="app-capsule", default="app-capsule"
     )
     visual_spec: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
@@ -75,10 +75,10 @@ class WorkspaceAppVersion(Base, CreatedAtMixin):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     renderer_key: Mapped[str] = mapped_column(
-        String(120), nullable=False, server_default="generated-ui-app", default="generated-ui-app"
+        String(120), nullable=False, server_default="app-capsule", default="app-capsule"
     )
     source_kind: Mapped[str] = mapped_column(
-        String(40), nullable=False, server_default="json", default="json"
+        String(40), nullable=False, server_default="html", default="html"
     )
     source_code: Mapped[str] = mapped_column(Text, nullable=False)
     manifest: Mapped[dict[str, Any]] = mapped_column(

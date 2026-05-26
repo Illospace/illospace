@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import json
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -33,6 +33,7 @@ from brain.systems.workspace_apps.service import (
     a_restore_app,
     a_update_app,
 )
+from brain.systems.workspace_apps.bindings import WorkspaceAppBindingError, async_run_workspace_app_binding
 from brain.systems.workspace_apps.actions import (
     WorkspaceAppActionContractError,
     WorkspaceAppActionExecutorMissing,
@@ -161,6 +162,26 @@ def _manifest(domain_id_value: int, **overrides):
     }
 
 
+def _capsule_manifest(domain_id_value: int, **overrides):
+    binding = {
+        "kind": "domain",
+        "domain_id": domain_id_value,
+        "domain_slug": "todo-notes",
+        "object_key": "todo_item",
+        "fields": ["title", "notes", "completed"],
+        "operations": ["schema", "list", "query", "get", "create", "update", "archive", "aggregate"],
+    }
+    binding.update(overrides)
+    return {
+        "contract_version": 1,
+        "data_plan": {"mode": "capability", "bindings": {"todos": binding}},
+        "design_contract": {
+            "kit": "constellation-app-kit",
+            "theme_modes": ["dark", "light"],
+        },
+    }
+
+
 def _manifest_with_action(domain_id_value: int, action: dict | None = None):
     manifest = _manifest(domain_id_value)
     manifest["actions"] = {
@@ -261,6 +282,190 @@ async def test_domain_binding_accepts_generic_app_primitives(session):
     version = await a_active_version(session, app.id)
     assert version is not None
     assert version.manifest["data_plan"]["bindings"]["todos"]["operations"] == operations
+
+
+async def test_app_capsule_capability_manifest_saves(session):
+    domain = await _todo_domain(session)
+
+    app = await a_create_app(
+        session,
+        org_id=ORG_ID,
+        key="todo-capsule",
+        name="Todo Capsule",
+        renderer_key="app-capsule",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=_capsule_manifest(domain.id),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    version = await a_active_version(session, app.id)
+    assert version is not None
+    assert version.renderer_key == "app-capsule"
+    assert version.source_kind == "html"
+    assert version.manifest["data_plan"]["mode"] == "capability"
+
+
+async def test_workspace_app_binding_broker_routes_domain_operations(session):
+    domain = await _todo_domain(session)
+    record = await AsyncDomainService(session).create_record(
+        ORG_ID,
+        domain.id,
+        "todo_item",
+        data={"title": "Follow up", "notes": "CRM lead", "completed": False},
+        actor_id=USER_ID,
+    )
+    app = await a_create_app(
+        session,
+        org_id=ORG_ID,
+        key="todo-capsule-broker",
+        name="Todo Capsule Broker",
+        renderer_key="app-capsule",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=_capsule_manifest(domain.id),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    listed = await async_run_workspace_app_binding(
+        session,
+        org_id=ORG_ID,
+        app_id=app.id,
+        alias="todos",
+        operation="list",
+        payload={},
+        user_id=USER_ID,
+    )
+    assert listed["kind"] == "domain"
+    assert [item["id"] for item in listed["data"]] == [record.id]
+
+    created = await async_run_workspace_app_binding(
+        session,
+        org_id=ORG_ID,
+        app_id=app.id,
+        alias="todos",
+        operation="create",
+        payload={"data": {"title": "Send note", "completed": False}},
+        user_id=USER_ID,
+        can_write=True,
+    )
+    assert created["data"]["title"] == "Send note"
+
+    updated = await async_run_workspace_app_binding(
+        session,
+        org_id=ORG_ID,
+        app_id=app.id,
+        alias="todos",
+        operation="update",
+        payload={"recordId": created["data"]["id"], "dataPatch": {"completed": True}},
+        user_id=USER_ID,
+        can_write=True,
+    )
+    assert updated["data"]["data"]["completed"] is True
+
+    aggregated = await async_run_workspace_app_binding(
+        session,
+        org_id=ORG_ID,
+        app_id=app.id,
+        alias="todos",
+        operation="aggregate",
+        payload={"groupBy": "completed"},
+        user_id=USER_ID,
+    )
+    assert aggregated["data"]["total"] == 2
+    assert {group["label"]: group["count"] for group in aggregated["data"]["groups"]} == {"False": 1, "True": 1}
+
+
+async def test_workspace_app_binding_broker_rejects_disallowed_or_cross_org_access(session):
+    domain = await _todo_domain(session)
+    app = await a_create_app(
+        session,
+        org_id=ORG_ID,
+        key="todo-capsule-guarded",
+        name="Todo Capsule Guarded",
+        renderer_key="app-capsule",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=_capsule_manifest(domain.id, operations=["list"]),
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    with pytest.raises(WorkspaceAppBindingError, match="does not allow operation 'create'"):
+        await async_run_workspace_app_binding(
+            session,
+            org_id=ORG_ID,
+            app_id=app.id,
+            alias="todos",
+            operation="create",
+            payload={"data": {"title": "Blocked"}},
+            user_id=USER_ID,
+            can_write=True,
+        )
+
+    with pytest.raises(WorkspaceAppError, match="Workspace app not found"):
+        await async_run_workspace_app_binding(
+            session,
+            org_id=OTHER_ORG_ID,
+            app_id=app.id,
+            alias="todos",
+            operation="list",
+            payload={},
+            user_id=USER_ID,
+        )
+
+
+async def test_workspace_app_binding_broker_routes_system_reads(session):
+    manifest = {
+        "contract_version": 1,
+        "data_plan": {
+            "mode": "capability",
+            "bindings": {
+                "activity": {
+                    "kind": "system",
+                    "source": "activity",
+                    "operations": ["schema", "query", "aggregate"],
+                }
+            },
+        },
+        "design_contract": {
+            "kit": "constellation-app-kit",
+            "theme_modes": ["dark", "light"],
+        },
+    }
+    app = await a_create_app(
+        session,
+        org_id=ORG_ID,
+        key="activity-capsule",
+        name="Activity Capsule",
+        renderer_key="app-capsule",
+        source_kind="html",
+        source_code=VALID_SOURCE,
+        manifest=manifest,
+        visual_spec=VALID_VISUAL_SPEC,
+        created_by_user_id=USER_ID,
+    )
+
+    expected = {"sources": {"activity": [{"id": "item-1"}]}, "counts": {"activity": 1}, "total_count": 1}
+    with patch("brain.systems.workspace_apps.bindings.query_system_binding_source", AsyncMock(return_value=expected)) as query:
+        result = await async_run_workspace_app_binding(
+            session,
+            org_id=ORG_ID,
+            app_id=app.id,
+            alias="activity",
+            operation="query",
+            payload={"search": "handoff", "limit": 10},
+            user_id=USER_ID,
+        )
+
+    assert result["kind"] == "system"
+    assert result["data"] == expected
+    assert query.await_args.kwargs["source"] == "activity"
+    assert query.await_args.kwargs["org_id"] == ORG_ID
+    assert query.await_args.kwargs["user_id"] == USER_ID
+    assert query.await_args.kwargs["search"] == "handoff"
 
 
 async def test_valid_structured_generated_ui_app_saves(session):

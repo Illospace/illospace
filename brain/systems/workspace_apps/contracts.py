@@ -6,26 +6,19 @@ import json
 from html.parser import HTMLParser
 from typing import Any, Mapping
 
+from brain.systems.workspace_apps.capabilities import (
+    CAPABILITY_BINDING_KINDS,
+    DOMAIN_BROKER_OPERATIONS,
+    DOMAIN_OPERATIONS,
+    SYSTEM_READ_OPERATIONS,
+)
 
 CONTRACT_VERSION = 1
 APP_KIT_NAME = "constellation-app-kit"
+APP_CAPSULE_RENDERER_KEY = "app-capsule"
+APP_CAPSULE_SOURCE_KIND = "html"
 STRUCTURED_UI_RENDERER_KEY = "generated-ui-app"
 STRUCTURED_UI_SOURCE_KIND = "json"
-DOMAIN_OPERATIONS = {
-    "schema",
-    "list",
-    "query",
-    "get",
-    "create",
-    "update",
-    "archive",
-    "aggregate",
-    "bulkUpdate",
-    "history",
-    "listRelations",
-    "createRelation",
-    "archiveRelation",
-}
 ACTION_KINDS = {"connector", "domain", "workflow", "agent", "server"}
 ACTION_EFFECTS = {
     "domain.read",
@@ -135,12 +128,16 @@ def build_contract_validation_report(
             }
 
     _validate_data_plan(manifest_dict.get("data_plan"), errors, initial_state=initial_state)
+    if _forbidden_secret_paths(manifest_dict):
+        errors.append("manifest must not contain raw credentials or secret values")
     _validate_actions(manifest_dict, errors)
     _validate_design_contract(manifest_dict.get("design_contract"), errors)
     _validate_thumbnail(visual_spec_dict.get("thumbnail"), errors)
 
-    normalized_renderer = (renderer_key or "").strip() or STRUCTURED_UI_RENDERER_KEY
-    normalized_source_kind = (source_kind or "").strip().lower() or STRUCTURED_UI_SOURCE_KIND
+    normalized_renderer = (renderer_key or "").strip() or APP_CAPSULE_RENDERER_KEY
+    normalized_source_kind = (source_kind or "").strip().lower() or APP_CAPSULE_SOURCE_KIND
+    if normalized_renderer == APP_CAPSULE_RENDERER_KEY and normalized_source_kind == APP_CAPSULE_SOURCE_KIND:
+        _validate_app_capsule_source(source_code or "", errors)
     if normalized_renderer == "sandboxed-html-app" and normalized_source_kind == "html":
         _validate_html_source(source_code or "", errors)
     if _is_structured_ui_renderer(normalized_renderer, normalized_source_kind):
@@ -165,8 +162,22 @@ def _validate_data_plan(value: Any, errors: list[str], *, initial_state: Mapping
         return
 
     mode = str(plan.get("mode") or "").strip()
-    if mode not in {"domain", "app_local"}:
-        errors.append("manifest.data_plan.mode must be 'domain' or 'app_local'")
+    if mode not in {"capability", "domain", "app_local"}:
+        errors.append("manifest.data_plan.mode must be 'capability', 'domain', or 'app_local'")
+        return
+
+    if mode == "capability":
+        bindings = plan.get("bindings")
+        if bindings is None:
+            return
+        if not isinstance(bindings, Mapping):
+            errors.append("manifest.data_plan.bindings must be an object for capability apps")
+            return
+        bindings = _as_mapping(bindings)
+        for alias, raw_binding in bindings.items():
+            _validate_capability_binding(str(alias), raw_binding, errors)
+        if record_like_state_keys(initial_state):
+            errors.append("initial_state must not contain record-like collections; use a Domain capability binding")
         return
 
     if mode == "domain":
@@ -207,6 +218,41 @@ def _validate_domain_binding(alias: str, value: Any, errors: list[str]) -> None:
     invalid = sorted({str(item) for item in operations} - DOMAIN_OPERATIONS)
     if invalid:
         errors.append(f"{prefix}.operations contains unsupported operation(s): {', '.join(invalid)}")
+
+
+def _validate_capability_binding(alias: str, value: Any, errors: list[str]) -> None:
+    binding = _as_mapping(value)
+    prefix = f"manifest.data_plan.bindings.{alias}"
+    if not alias or not re.match(r"^[a-zA-Z][\w-]*$", alias):
+        errors.append("manifest.data_plan.bindings aliases must be stable identifiers")
+
+    kind = str(binding.get("kind") or "").strip()
+    if kind not in CAPABILITY_BINDING_KINDS:
+        errors.append(f"{prefix}.kind must be 'domain' or 'system'")
+        return
+
+    operations = binding.get("operations")
+    if not isinstance(operations, list) or not operations:
+        errors.append(f"{prefix}.operations must list allowed operations")
+        return
+    operation_set = {str(item) for item in operations}
+
+    if kind == "domain":
+        invalid = sorted(operation_set - DOMAIN_BROKER_OPERATIONS)
+        if invalid:
+            errors.append(f"{prefix}.operations contains unsupported domain capability operation(s): {', '.join(invalid)}")
+        domain_id = binding.get("domain_id")
+        if not isinstance(domain_id, int) or domain_id <= 0:
+            errors.append(f"{prefix}.domain_id must be a positive integer")
+        if not str(binding.get("object_key") or "").strip():
+            errors.append(f"{prefix}.object_key is required")
+        return
+
+    invalid = sorted(operation_set - SYSTEM_READ_OPERATIONS)
+    if invalid:
+        errors.append(f"{prefix}.operations contains unsupported system operation(s): {', '.join(invalid)}")
+    if not str(binding.get("source") or binding.get("source_key") or "").strip():
+        errors.append(f"{prefix}.source is required for system bindings")
 
 
 def _validate_actions(manifest: Mapping[str, Any], errors: list[str]) -> None:
@@ -472,6 +518,25 @@ def _validate_html_source(source: str, errors: list[str]) -> None:
     if _BODY_BACKGROUND_RE.search(source):
         errors.append("source_code must not set a fixed body background")
     _validate_app_kit_html(source, errors)
+
+
+def _validate_app_capsule_source(source: str, errors: list[str]) -> None:
+    if not source.strip():
+        errors.append("source_code is required for app-capsule apps")
+        return
+    lowered = source.lower()
+    if "localstorage" in lowered or "sessionstorage" in lowered or "indexeddb" in lowered:
+        errors.append("source_code must not use browser storage for app data")
+    if _EXTERNAL_SCRIPT_RE.search(source):
+        errors.append("source_code must not load external scripts")
+    if _EXTERNAL_STYLESHEET_RE.search(source) or _CSS_IMPORT_RE.search(source) or _REMOTE_FONT_RE.search(source):
+        errors.append("source_code must not load external stylesheets or fonts")
+    if _NEGATIVE_LETTER_SPACING_RE.search(source):
+        errors.append("source_code must not use negative letter spacing")
+    if _BODY_BACKGROUND_RE.search(source):
+        errors.append("source_code must not set a fixed body background")
+    if _SECRET_VALUE_RE.search(source):
+        errors.append("source_code must not contain raw credentials or secret values")
 
 
 def _forbidden_secret_paths(value: Any, prefix: str = "") -> list[str]:

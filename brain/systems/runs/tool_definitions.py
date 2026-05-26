@@ -1395,16 +1395,17 @@ WORKSPACE_APP_TOOLS = [
         "description": (
             "Create, list, update, archive, and persist state for generated workspace apps. "
             "This is the action tool to create or change a persistent programmable UI surface or dashboard "
-            "inside Cortex. Use renderer_key='generated-ui-app' and source_kind='json' for common "
-            "host-rendered structured UIs, including tables, lists, cards, metrics, charts, forms, details, "
-            "board/kanban views, and manifest action buttons. Use renderer_key='sandboxed-html-app' and source_kind='html' "
-            "only for bespoke interactions or custom blocks that cannot be represented by structured views. "
+            "inside Cortex. Default new on-demand software to renderer_key='app-capsule' and source_kind='html': "
+            "a full-code single-document HTML/CSS/JS app with a capability manifest. Use generated-ui-app/json "
+            "only for legacy structured app edits or when the user explicitly asks for that renderer. Use "
+            "sandboxed-html-app/html only for existing legacy sandboxed HTML apps. "
             "For list/get discovery, keep include_archived=false unless the user explicitly asks to inspect archived apps; "
             "archived apps are not candidates for new build/create requests. "
             "Use action='restore' only when the user explicitly asks to restore an archived app; for build/create "
             "requests, create a new app or update an active app instead of resurrecting archived drafts. "
-            "Recordful apps must use manage_domain first; app-local "
-            "state is only for UI preferences, filters, drafts, and ephemeral interface state. "
+            "Durable generated or user data should be exposed through manifest data capabilities, usually "
+            "Domain bindings that Illo creates or attaches behind the scenes. App-local state is only for "
+            "UI preferences, filters, drafts, and ephemeral interface state. "
             "For awareness questions about what apps exist or current app state, prefer read_workspace_apps first. "
             "New generated apps must pass the workspace app contract before they are persisted. Use action='help' "
             "or action='schema' with operation to inspect arguments before mutating."
@@ -1438,25 +1439,26 @@ WORKSPACE_APP_TOOLS = [
                 "description": {"type": "string", "description": "Short app description."},
                 "renderer_key": {
                     "type": "string",
-                    "default": "generated-ui-app",
+                    "default": "app-capsule",
                     "description": (
-                        "Renderer runtime key. Use generated-ui-app for host-rendered structured UI. "
-                        "Use sandboxed-html-app for first-class full-code workspace apps that still follow "
-                        "the Illospace design contract."
+                        "Renderer runtime key. Use app-capsule for new full-code workspace apps. "
+                        "Use generated-ui-app only for legacy structured UI edits, and sandboxed-html-app "
+                        "only for existing legacy sandboxed HTML apps."
                     ),
                 },
                 "source_kind": {
                     "type": "string",
-                    "default": "json",
-                    "description": "Generated source format. Use json for generated-ui-app; html for sandboxed HTML apps.",
+                    "default": "html",
+                    "description": "Generated source format. Use html for app-capsule apps; json only for legacy generated-ui-app specs.",
                 },
                 "source_code": {
                     "type": "string",
                     "description": (
-                        "Generated app source. For generated-ui-app, provide a JSON string with "
-                        "schema_version=1, title, optional description, optional top-level actions "
-                        "referencing manifest.actions, and views. For sandboxed html, "
-                        "provide a responsive HTML/CSS/JS body or document only when structured views are insufficient. "
+                        "Generated app source. For app-capsule, provide a responsive single-document HTML/CSS/JS app "
+                        "that uses the runtime bridge: window.illo.data(alias), window.illo.state.get/set/update, "
+                        "and window.illo.actions.run(actionKey, payload). For generated-ui-app legacy edits, provide "
+                        "a JSON string with schema_version=1, title, optional description, optional top-level actions "
+                        "referencing manifest.actions, and views. "
                         "Canonical calls pass "
                         "manifest, visual_spec, and metadata as separate tool args; the app compiler "
                         "also normalizes wrapped generated-app envelopes when needed."
@@ -1466,8 +1468,8 @@ WORKSPACE_APP_TOOLS = [
                     "type": "object",
                     "description": (
                         "Optional contract-bearing runtime manifest. The app compiler supplies safe "
-                        "contract_version, app_local UI-state, and design_contract defaults for simple "
-                        "generated-ui apps. For Domain-backed apps, provide an explicit data_plan "
+                        "contract_version, capability data_plan, and design_contract defaults for new app-capsule apps. "
+                        "For data-backed capsules, provide explicit data_plan.mode='capability' bindings. "
                         "and include the strict design contract shape "
                         "{\"design_contract\":{\"kit\":\"constellation-app-kit\","
                         "\"theme_modes\":[\"dark\",\"light\"]}}. Do not use alternate keys like "
@@ -1476,17 +1478,18 @@ WORKSPACE_APP_TOOLS = [
                         "Domain records expose a virtual top-level title; bindings may include \"title\" "
                         "for display/card labels even when the object's field definitions do not contain "
                         "a data field named title. "
-                        "Use bindings such as {\"data_plan\":{\"mode\":\"domain\","
+                        "Use bindings such as {\"data_plan\":{\"mode\":\"capability\","
                         "\"bindings\":{\"todos\":{\"domain_id\":1,\"domain_slug\":\"todo-notes\","
-                        "\"object_key\":\"todo_item\",\"fields\":[\"title\",\"notes\",\"completed\"],"
+                        "\"kind\":\"domain\",\"object_key\":\"todo_item\",\"fields\":[\"title\",\"notes\",\"completed\"],"
                         "\"operations\":[\"schema\",\"list\",\"query\",\"create\",\"update\",\"archive\","
-                        "\"aggregate\",\"bulkUpdate\",\"history\",\"listRelations\",\"createRelation\","
-                        "\"archiveRelation\"]}}}} and access them with window.illo.domain('todos'). "
+                        "\"aggregate\"]}}}} and access them with window.illo.data('todos'). "
+                        "Use system bindings such as {\"kind\":\"system\",\"source\":\"threads\","
+                        "\"operations\":[\"schema\",\"list\",\"query\",\"get\",\"aggregate\"]} for scoped workspace reads. "
                         "Domain binding operations are exact SDK method names; do not use capability labels "
                         "such as read, write, or crud in manifest.data_plan.bindings.*.operations. "
-                        "The app runtime exposes manifest-bound Domain CRUD, aggregate, bulkUpdate, "
-                        "history, relation helpers, polling-backed subscribe, app state, and "
-                        "window.illo.actions.run(actionKey, payload) for manifest-declared server-side actions. "
+                        "The app-capsule runtime exposes manifest-bound data CRUD/read operations, polling-backed "
+                        "subscribe, app-local state, and window.illo.actions.run(actionKey, payload) for "
+                        "manifest-declared server-side actions. "
                         "Treat Domains as the workspace truth bridge and actions/connectors as external IO. "
                         "For external systems, prefer workflow-level action keys such as tickets.importExternal "
                         "or tickets.syncExternal; declare provider/auth as connector metadata rather than "

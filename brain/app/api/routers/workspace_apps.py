@@ -7,11 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.auth import get_current_user
-from brain.app.api.authorization import require_org_context
+from brain.app.api.authorization import can_write_domains, require_org_context
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.schemas.workspace_apps import (
     WorkspaceAppActionRun,
     WorkspaceAppActionRunRead,
+    WorkspaceAppBindingRun,
+    WorkspaceAppBindingRunRead,
     WorkspaceAppCreate,
     WorkspaceAppRead,
     WorkspaceAppStateRead,
@@ -25,6 +27,7 @@ from brain.systems.workspace_apps.actions import (
     WorkspaceAppActionNotDeclared,
     async_run_workspace_app_action,
 )
+from brain.systems.workspace_apps.bindings import async_run_workspace_app_binding
 from brain.systems.workspace_apps.service import (
     WorkspaceAppConflict,
     WorkspaceAppContractError,
@@ -266,6 +269,34 @@ async def update_workspace_app_state(
             user_id=_user_id(user),
         )
         return serialize_state(state)
+    except WorkspaceAppError as exc:
+        _raise_http(exc)
+
+
+@router.post("/{app_id}/bindings/{alias}/{operation}", response_model=WorkspaceAppBindingRunRead)
+async def run_workspace_app_binding(
+    app_id: str,
+    alias: str,
+    operation: str,
+    body: WorkspaceAppBindingRun,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    org_id = require_org_context(user)
+    try:
+        result = await async_run_workspace_app_binding(
+            db,
+            org_id=org_id,
+            app_id=app_id,
+            alias=alias,
+            operation=operation,
+            payload=body.payload,
+            user_id=_user_id(user),
+            can_write=can_write_domains(user),
+        )
+        if operation in {"create", "update", "archive", "bulkUpdate", "createRelation", "archiveRelation"}:
+            await db.commit()
+        return result
     except WorkspaceAppError as exc:
         _raise_http(exc)
 

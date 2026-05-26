@@ -10,33 +10,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.platform.db.models.domain import Domain, DomainFieldDefinition, DomainObjectType
 from brain.platform.db.models.workspace_app import WorkspaceApp, WorkspaceAppState, WorkspaceAppVersion
+from brain.systems.workspace_apps.capabilities import DOMAIN_OPERATIONS
 from brain.systems.workspace_apps.contracts import (
+    APP_CAPSULE_RENDERER_KEY,
+    APP_CAPSULE_SOURCE_KIND,
     CONTRACT_VERSION,
     build_contract_validation_report,
     record_like_state_keys,
 )
 
-DEFAULT_RENDERER_KEY = "generated-ui-app"
-DEFAULT_SOURCE_KIND = "json"
+DEFAULT_RENDERER_KEY = APP_CAPSULE_RENDERER_KEY
+DEFAULT_SOURCE_KIND = APP_CAPSULE_SOURCE_KIND
 DEFAULT_STATE_KEY = "default"
 _VERSION_MISSING = object()
-ALLOWED_DOMAIN_BINDING_OPERATIONS = frozenset(
-    {
-        "schema",
-        "list",
-        "query",
-        "get",
-        "create",
-        "update",
-        "archive",
-        "aggregate",
-        "bulkUpdate",
-        "history",
-        "listRelations",
-        "createRelation",
-        "archiveRelation",
-    }
-)
 
 
 class WorkspaceAppError(ValueError):
@@ -110,14 +96,24 @@ def _domain_binding_payload(manifest: dict[str, Any] | None) -> tuple[bool, dict
     if not isinstance(data_plan, dict):
         return False, {}
     bindings = data_plan.get("bindings")
-    requires_domain = data_plan.get("mode") == "domain" or bindings is not None
+    mode = data_plan.get("mode")
+    requires_domain = mode == "domain" or bindings is not None
     if not requires_domain:
         return False, {}
     if not isinstance(bindings, dict) or not bindings:
+        if mode == "capability":
+            return False, {}
         raise WorkspaceAppError(
             "Workspace app Domain binding validation failed: data_plan.bindings must be a non-empty object"
         )
-    return True, bindings
+    domain_bindings = {
+        str(alias): binding
+        for alias, binding in bindings.items()
+        if isinstance(binding, dict) and (mode == "domain" or binding.get("kind") == "domain")
+    }
+    if mode == "domain":
+        return True, bindings
+    return bool(domain_bindings), domain_bindings
 
 
 def _binding_error(alias: str, message: str) -> WorkspaceAppError:
@@ -319,9 +315,9 @@ def _validate_domain_binding_objects(
 
     operations = _string_list(alias_text, binding.get("operations"), "operations")
     if operations is not None:
-        unknown_ops = sorted(set(operations) - ALLOWED_DOMAIN_BINDING_OPERATIONS)
+        unknown_ops = sorted(set(operations) - DOMAIN_OPERATIONS)
         if unknown_ops:
-            allowed = ", ".join(sorted(ALLOWED_DOMAIN_BINDING_OPERATIONS))
+            allowed = ", ".join(sorted(DOMAIN_OPERATIONS))
             raise _binding_error(
                 alias_text,
                 f"declares unsupported operation(s): {', '.join(unknown_ops)}; allowed: {allowed}",

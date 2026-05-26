@@ -56,6 +56,43 @@ VALID_THUMBNAIL = {
     }
 }
 
+VALID_CAPSULE_MANIFEST = {
+    "contract_version": 1,
+    "data_plan": {
+        "mode": "capability",
+        "bindings": {
+            "tasks": {
+                "kind": "domain",
+                "domain_id": 1,
+                "object_key": "task",
+                "operations": ["schema", "list", "query", "get", "create", "update", "archive", "aggregate"],
+            },
+            "activity": {
+                "kind": "system",
+                "source": "activity",
+                "operations": ["schema", "list", "query", "aggregate"],
+            },
+        },
+    },
+    "design_contract": {
+        "kit": "constellation-app-kit",
+        "theme_modes": ["dark", "light"],
+    },
+}
+
+VALID_CAPSULE_SOURCE = """
+<main class="illo-app">
+  <section class="illo-panel">
+    <h1>Task capsule</h1>
+    <button type="button" id="load">Load</button>
+  </section>
+</main>
+<script>
+  const tasks = window.illo.data('tasks');
+  document.getElementById('load').addEventListener('click', () => tasks.list());
+</script>
+"""
+
 VALID_GENERATED_UI_SOURCE = json.dumps(
     {
         "schema_version": 1,
@@ -88,6 +125,52 @@ def _report(**overrides):
     }
     payload.update(overrides)
     return build_contract_validation_report(**payload)
+
+
+def _capsule_report(**overrides):
+    payload = {
+        "renderer_key": "app-capsule",
+        "source_kind": "html",
+        "source_code": VALID_CAPSULE_SOURCE,
+        "manifest": VALID_CAPSULE_MANIFEST,
+        "visual_spec": VALID_THUMBNAIL,
+        "metadata": {},
+    }
+    payload.update(overrides)
+    return build_contract_validation_report(**payload)
+
+
+def test_app_capsule_capability_payload_is_accepted():
+    report = _capsule_report()
+
+    assert report["status"] == "passed"
+    assert report["errors"] == []
+
+    rejected_state = _capsule_report(initial_state={"tasks": []})
+    assert rejected_state["status"] == "failed"
+    assert any("initial_state" in error and "Domain capability binding" in error for error in rejected_state["errors"])
+
+
+def test_app_capsule_contract_rejects_unsafe_source_and_capabilities():
+    secret = _capsule_report(source_code="<main></main><script>const token = 'sk-12345678901234567890';</script>")
+    assert secret["status"] == "failed"
+    assert any("raw credentials" in error for error in secret["errors"])
+
+    external = _capsule_report(source_code="<script src=\"https://cdn.example.test/app.js\"></script>")
+    assert external["status"] == "failed"
+    assert any("external scripts" in error for error in external["errors"])
+
+    bad_manifest = json.loads(json.dumps(VALID_CAPSULE_MANIFEST))
+    bad_manifest["data_plan"]["bindings"]["activity"]["operations"].append("create")
+    disallowed_write = _capsule_report(manifest=bad_manifest)
+    assert disallowed_write["status"] == "failed"
+    assert any("unsupported system operation" in error for error in disallowed_write["errors"])
+
+    unimplemented_domain = json.loads(json.dumps(VALID_CAPSULE_MANIFEST))
+    unimplemented_domain["data_plan"]["bindings"]["tasks"]["operations"].append("listRelations")
+    rejected_domain = _capsule_report(manifest=unimplemented_domain)
+    assert rejected_domain["status"] == "failed"
+    assert any("unsupported domain capability operation" in error for error in rejected_domain["errors"])
 
 
 def test_domain_backed_app_kit_payload_is_accepted():

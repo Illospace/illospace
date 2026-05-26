@@ -1,27 +1,26 @@
 # Host Bridge
 
-Generated apps are workspace-native app surfaces. The bridge exposes app-local
-state for UI preferences and manifest-bound Domain APIs for durable workspace
-records. Do not treat sandboxed HTML as a template escape hatch; use it when
-the app needs full-code layout or interaction while still using Illospace App
-Kit classes and design tokens.
+App capsules are workspace-native app surfaces. The bridge exposes app-local
+state for UI preferences, manifest-bound Domain APIs for durable workspace
+records, and system bindings for scoped workspace reads.
 
 ## App State
 
-- `await window.illo.getState()` to read state.
-- `await window.illo.setState(nextState)` to replace state.
-- `await window.illo.updateState(patch)` for shallow patches.
+- `await window.illo.state.get()` to read state.
+- `await window.illo.state.set(nextState)` to replace state.
+- `await window.illo.state.update(patch)` for shallow patches.
 - `window.addEventListener('illo:state', handler)` for host-pushed state.
 
 Use app state for filters, drafts, collapsed sections, selected tabs, and other
 ephemeral UI preferences. Store durable shared rows in Domains.
 
-## Domain Records
+## Data Bindings
 
-Bind Domains in `manifest.data_plan.bindings`, then use the friendly SDK:
+Bind Domains or system sources in `manifest.data_plan.bindings`, then use the
+friendly SDK:
 
 ```js
-const tickets = window.illo.domain("tickets");
+const tickets = window.illo.data("tickets");
 
 await tickets.schema();
 await tickets.list({ limit: 100 });
@@ -29,14 +28,12 @@ await tickets.query({ search: "blocked" });
 await tickets.get(recordId);
 await tickets.create({ title: "Fix upload retry", status: "todo" }, { title: "Fix upload retry" });
 await tickets.update(recordId, { status: "in_progress" }, { expectedVersion });
-await tickets.bulkUpdate([{ recordId, dataPatch: { status: "done" } }]);
 await tickets.archive(recordId);
 ```
 
 Generated app code should use the canonical camelCase request shape shown
 above. The bridge may accept snake_case aliases for compatibility, but new app
-source should prefer `recordId`, `recordIds`, `dataPatch`, and
-`expectedVersion`.
+source should prefer `recordId`, `dataPatch`, and `expectedVersion`.
 
 For simple charts and summaries, use the generic aggregation helper:
 
@@ -47,31 +44,17 @@ await tickets.aggregate({
 });
 ```
 
-For linked records, use relation helpers:
+For refresh:
 
 ```js
-await tickets.relations.list({ relationKey: "ticket_blocks_ticket", sourceRecordId: recordId });
-await tickets.relations.link("ticket_blocks_ticket", blockerId, blockedId, { reason: "API dependency" });
-await tickets.relations.archive(relationId);
-```
-
-Do not call `relations.list({ recordId })`. Relation lists need a
-`relationKey` and either `sourceRecordId` for outgoing links or
-`targetRecordId` for incoming links.
-
-For audit trails and refresh:
-
-```js
-await tickets.history(recordId, { limit: 20 });
 const unsubscribe = tickets.subscribe((records) => render(records), { intervalMs: 5000 });
 ```
 
 `subscribe` is polling-backed today; prefer it over ad hoc intervals so the host
 can replace it with push subscriptions later without changing app code.
 
-Compatibility methods remain available as `window.illo.domains.query(...)`,
-`create(...)`, `update(...)`, `archive(...)`, and related operations. Prefer
-`window.illo.domain(alias)` in new app code.
+Legacy compatibility methods may exist in old renderers. Prefer
+`window.illo.data(alias)` in new app-capsule code.
 
 ## Workspace Actions
 

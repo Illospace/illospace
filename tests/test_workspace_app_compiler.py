@@ -18,6 +18,17 @@ def _validation_report(compiled, *, initial_state=None):
     )
 
 
+def test_compiler_defaults_empty_create_to_app_capsule():
+    compiled = compile_workspace_app_input(action="create", name="Quick CRM")
+
+    assert compiled.renderer_key == "app-capsule"
+    assert compiled.source_kind == "html"
+    assert "Quick CRM" in compiled.source_code
+    assert compiled.manifest["data_plan"] == {"mode": "capability", "bindings": {}}
+    assert compiled.visual_spec["thumbnail"]["label"] == "Quick CRM"
+    assert _validation_report(compiled)["status"] == "passed"
+
+
 def test_compiler_defaults_minimal_generated_ui_rows_into_valid_app_contract():
     compiled = compile_workspace_app_input(
         action="create",
