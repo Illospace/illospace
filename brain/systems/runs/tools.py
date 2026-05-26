@@ -414,9 +414,19 @@ def wrap_tool_handlers(
             continue
 
         async def _handler(_tool_name=tool_name, _handler=handler, **kwargs):
+            tool_args = dict(kwargs or {})
+            handler_for_execution = _handler
+            if _tool_name == "spawn_worker":
+                async def _handler_with_runtime_run_id(**inner_kwargs):
+                    return await _maybe_await(
+                        _handler(_runtime_run_id=run_id, **inner_kwargs)
+                    )
+
+                handler_for_execution = _handler_with_runtime_run_id
+
             return await executor.execute(
                 run_id,
-                ToolExecution(name=_tool_name, args=dict(kwargs or {}), handler=_handler),
+                ToolExecution(name=_tool_name, args=tool_args, handler=handler_for_execution),
                 root_run_id=root_run_id,
                 scope=scope,
                 collector=collector,
