@@ -40,8 +40,8 @@ class WorkspaceAppCreate(BaseModel):
     key: str | None = Field(default=None, max_length=100)
     name: str = Field(min_length=1, max_length=500)
     description: str | None = None
-    renderer_key: str = Field(default="generated-ui-app", max_length=120)
-    source_kind: str = Field(default="json", max_length=40)
+    renderer_key: str = Field(default="app-capsule", max_length=120)
+    source_kind: str = Field(default="html", max_length=40)
     source_code: str = ""
     manifest: dict[str, Any] = Field(default_factory=dict)
     visual_spec: dict[str, Any] = Field(default_factory=dict)
@@ -92,3 +92,16 @@ class WorkspaceAppActionRunRead(BaseModel):
     effects: list[str] = Field(default_factory=list)
     connector_keys: list[str] = Field(default_factory=list)
     result: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceAppBindingRun(BaseModel):
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceAppBindingRunRead(BaseModel):
+    ok: bool
+    alias: str
+    operation: str
+    kind: str
+    data: Any = None
+    warnings: list[str] = Field(default_factory=list)

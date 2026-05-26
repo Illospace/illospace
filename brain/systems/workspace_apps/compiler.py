@@ -10,10 +10,16 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from brain.systems.workspace_apps.app_capsule_compiler import compile_app_capsule_source
+from brain.systems.workspace_apps.capabilities import (
+    normalize_domain_operations,
+    normalize_system_operations,
+)
 from brain.systems.workspace_apps.contracts import (
     APP_KIT_NAME,
+    APP_CAPSULE_RENDERER_KEY,
+    APP_CAPSULE_SOURCE_KIND,
     CONTRACT_VERSION,
-    DOMAIN_OPERATIONS,
     STRUCTURED_UI_RENDERER_KEY,
     STRUCTURED_UI_SOURCE_KIND,
 )
@@ -44,32 +50,6 @@ _VIEW_TYPE_ALIASES = {
     "kanban": "board",
     "board-view": "board",
 }
-COMMON_DOMAIN_BINDING_OPERATIONS = [
-    "schema",
-    "list",
-    "get",
-    "query",
-    "create",
-    "update",
-    "archive",
-]
-_OPERATION_CANONICAL_BY_COMPACT = {
-    re.sub(r"[^a-z0-9]+", "", operation.lower()): operation for operation in DOMAIN_OPERATIONS
-}
-_OPERATION_ALIAS_EXPANSIONS = {
-    "read": ("schema", "list", "get", "query"),
-    "readonly": ("schema", "list", "get", "query"),
-    "write": ("create", "update"),
-    "writes": ("create", "update"),
-    "mutate": ("create", "update"),
-    "mutation": ("create", "update"),
-    "upsert": ("create", "update"),
-    "delete": ("archive",),
-    "remove": ("archive",),
-    "destroy": ("archive",),
-    "crud": tuple(COMMON_DOMAIN_BINDING_OPERATIONS),
-}
-
 
 @dataclass(frozen=True)
 class WorkspaceAppCompileResult:
@@ -88,14 +68,22 @@ def infer_renderer_defaults(
     source_kind: str | None,
     source_code: Any,
 ) -> tuple[str | None, str | None]:
+    if renderer_key == APP_CAPSULE_RENDERER_KEY and not source_kind:
+        return renderer_key, APP_CAPSULE_SOURCE_KIND
     if renderer_key == STRUCTURED_UI_RENDERER_KEY and not source_kind:
         return renderer_key, STRUCTURED_UI_SOURCE_KIND
+    if renderer_key == "sandboxed-html-app" and not source_kind:
+        return renderer_key, "html"
+    if not renderer_key and source_kind == APP_CAPSULE_SOURCE_KIND:
+        return APP_CAPSULE_RENDERER_KEY, source_kind
+    if not renderer_key and not source_kind and not source_code:
+        return APP_CAPSULE_RENDERER_KEY, APP_CAPSULE_SOURCE_KIND
     if renderer_key or source_kind or not source_code:
         return renderer_key, source_kind
     stripped = str(source_code).strip()
     if stripped.startswith("{"):
         return STRUCTURED_UI_RENDERER_KEY, STRUCTURED_UI_SOURCE_KIND
-    return renderer_key, source_kind
+    return APP_CAPSULE_RENDERER_KEY, APP_CAPSULE_SOURCE_KIND
 
 
 def compile_workspace_app_input(
@@ -122,7 +110,10 @@ def compile_workspace_app_input(
     warnings: list[str] = []
     is_create = action == "create"
 
-    next_renderer, next_source_kind = infer_renderer_defaults(renderer_key, source_kind, source_code)
+    if not is_create and not renderer_key and not source_kind and source_code is None:
+        next_renderer, next_source_kind = None, None
+    else:
+        next_renderer, next_source_kind = infer_renderer_defaults(renderer_key, source_kind, source_code)
     source_text = _source_text(source_code)
     parsed_source = _json_object(source_text)
 
@@ -139,8 +130,10 @@ def compile_workspace_app_input(
         next_source_kind = embedded_source_kind
         _record(repairs, "source_kind", "lifted source_kind from source envelope")
 
-    next_renderer, next_source_kind = infer_renderer_defaults(next_renderer, next_source_kind, source_text)
+    if is_create or renderer_key or source_kind or source_code is not None or next_renderer or next_source_kind:
+        next_renderer, next_source_kind = infer_renderer_defaults(next_renderer, next_source_kind, source_text)
     generated_ui = _is_generated_ui_source(next_renderer, next_source_kind)
+    app_capsule = _is_app_capsule_source(next_renderer, next_source_kind)
 
     next_manifest = _prefer_mapping(manifest, embedded_manifest)
     next_visual_spec = _prefer_mapping(visual_spec, embedded_visual_spec)
@@ -165,9 +158,15 @@ def compile_workspace_app_input(
                 source_text = envelope_source
                 _record(repairs, "source_code", "extracted source text from app envelope")
 
-    should_compile_contract_fields = generated_ui or (is_create and source_text is not None)
+    should_compile_contract_fields = generated_ui or app_capsule or (is_create and source_text is not None)
     if should_compile_contract_fields:
-        next_manifest = _compile_manifest(next_manifest, is_create=is_create, repairs=repairs)
+        next_manifest = _compile_manifest(
+            next_manifest,
+            is_create=is_create,
+            renderer_key=next_renderer,
+            source_kind=next_source_kind,
+            repairs=repairs,
+        )
         next_visual_spec = _compile_visual_spec(
             next_visual_spec,
             app_name=_display_name(name=name, key=key),
@@ -179,6 +178,13 @@ def compile_workspace_app_input(
             source_text,
             app_name=_display_name(name=name, key=key),
             manifest=next_manifest,
+            repairs=repairs,
+        )
+    elif app_capsule:
+        source_text = compile_app_capsule_source(
+            source_text,
+            app_name=_display_name(name=name, key=key),
+            parsed_source=parsed_source,
             repairs=repairs,
         )
 
@@ -260,6 +266,12 @@ def _is_generated_ui_source(renderer_key: str | None, source_kind: str | None) -
     return normalized_renderer == STRUCTURED_UI_RENDERER_KEY or normalized_source_kind in _STRUCTURED_SOURCE_KINDS
 
 
+def _is_app_capsule_source(renderer_key: str | None, source_kind: str | None) -> bool:
+    normalized_renderer = (renderer_key or "").strip()
+    normalized_source_kind = (source_kind or "").strip().lower()
+    return normalized_renderer == APP_CAPSULE_RENDERER_KEY and normalized_source_kind == APP_CAPSULE_SOURCE_KIND
+
+
 def _source_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -321,6 +333,8 @@ def _compile_manifest(
     manifest: dict[str, Any] | None,
     *,
     is_create: bool,
+    renderer_key: str | None,
+    source_kind: str | None,
     repairs: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     if manifest is None and not is_create:
@@ -333,14 +347,22 @@ def _compile_manifest(
     data_plan = next_manifest.get("data_plan")
     if not isinstance(data_plan, Mapping) or not dict(data_plan):
         if is_create:
-            next_manifest["data_plan"] = {"mode": "app_local", "scope": DEFAULT_APP_LOCAL_SCOPE}
-            _record(repairs, "manifest.data_plan", "defaulted create to app-local UI state")
+            if _is_app_capsule_source(renderer_key, source_kind):
+                next_manifest["data_plan"] = {"mode": "capability", "bindings": {}}
+                _record(repairs, "manifest.data_plan", "defaulted create to capability data plan")
+            else:
+                next_manifest["data_plan"] = {"mode": "app_local", "scope": DEFAULT_APP_LOCAL_SCOPE}
+                _record(repairs, "manifest.data_plan", "defaulted create to app-local UI state")
     else:
         next_plan = dict(data_plan)
         mode = str(next_plan.get("mode") or "").strip()
         if not mode and isinstance(next_plan.get("bindings"), Mapping):
-            next_plan["mode"] = "domain"
-            _record(repairs, "manifest.data_plan.mode", "inferred domain mode from bindings")
+            if _bindings_look_capability_style(next_plan.get("bindings")):
+                next_plan["mode"] = "capability"
+                _record(repairs, "manifest.data_plan.mode", "inferred capability mode from bindings")
+            else:
+                next_plan["mode"] = "domain"
+                _record(repairs, "manifest.data_plan.mode", "inferred domain mode from bindings")
         elif not mode and (next_plan.get("scope") or next_plan.get("app_local_scope") or next_plan.get("ui_state_only")):
             next_plan["mode"] = "app_local"
             _record(repairs, "manifest.data_plan.mode", "inferred app_local mode from UI state scope")
@@ -351,6 +373,8 @@ def _compile_manifest(
             _record(repairs, "manifest.data_plan.scope", "defaulted app-local scope to UI state")
         if next_plan.get("mode") == "domain":
             _normalize_domain_bindings(next_plan, repairs=repairs)
+        if next_plan.get("mode") == "capability":
+            _normalize_capability_bindings(next_plan, repairs=repairs)
         next_manifest["data_plan"] = next_plan
 
     design_contract = next_manifest.get("design_contract")
@@ -388,7 +412,7 @@ def _normalize_domain_bindings(
             continue
 
         binding = dict(raw_binding)
-        operations, operations_changed = _normalize_domain_operations(binding.get("operations"))
+        operations, operations_changed = normalize_domain_operations(binding.get("operations"))
         if operations:
             if operations != binding.get("operations"):
                 binding["operations"] = operations
@@ -406,43 +430,67 @@ def _normalize_domain_bindings(
         data_plan["bindings"] = next_bindings
 
 
-def _normalize_domain_operations(value: Any) -> tuple[list[str], bool]:
-    if isinstance(value, str):
-        raw_items = [item for item in re.split(r"[\s,|/]+", value) if item]
-        changed = True
-    elif isinstance(value, list):
-        raw_items = value
-        changed = False
-    else:
-        return list(COMMON_DOMAIN_BINDING_OPERATIONS), True
-
-    if not raw_items:
-        return list(COMMON_DOMAIN_BINDING_OPERATIONS), True
-
-    operations: list[str] = []
-    for raw_item in raw_items:
-        canonical = _domain_operation_expansion(raw_item)
-        if canonical != [str(raw_item)]:
-            changed = True
-        for operation in canonical:
-            if operation not in operations:
-                operations.append(operation)
-
-    if not operations:
-        return list(COMMON_DOMAIN_BINDING_OPERATIONS), True
-    return operations, changed
+def _bindings_look_capability_style(bindings: Any) -> bool:
+    if not isinstance(bindings, Mapping):
+        return False
+    for raw_binding in bindings.values():
+        if not isinstance(raw_binding, Mapping):
+            continue
+        if raw_binding.get("kind") in {"domain", "system"} or raw_binding.get("source") or raw_binding.get("source_key"):
+            return True
+    return False
 
 
-def _domain_operation_expansion(value: Any) -> list[str]:
-    raw = str(value or "").strip()
-    if not raw:
-        return []
-    compact = re.sub(r"[^a-z0-9]+", "", raw.lower())
-    if compact in _OPERATION_ALIAS_EXPANSIONS:
-        return list(_OPERATION_ALIAS_EXPANSIONS[compact])
-    if compact in _OPERATION_CANONICAL_BY_COMPACT:
-        return [_OPERATION_CANONICAL_BY_COMPACT[compact]]
-    return [raw]
+def _normalize_capability_bindings(
+    data_plan: dict[str, Any],
+    *,
+    repairs: list[dict[str, Any]],
+) -> None:
+    bindings = data_plan.get("bindings")
+    if not isinstance(bindings, Mapping):
+        return
+
+    next_bindings: dict[str, Any] = {}
+    changed_bindings = False
+    for alias, raw_binding in bindings.items():
+        if not isinstance(raw_binding, Mapping):
+            next_bindings[alias] = raw_binding
+            continue
+
+        binding = dict(raw_binding)
+        kind = str(binding.get("kind") or "").strip()
+        if not kind:
+            if binding.get("source") or binding.get("source_key"):
+                kind = "system"
+            elif binding.get("domain_id") or binding.get("object_key"):
+                kind = "domain"
+            if kind:
+                binding["kind"] = kind
+                _record(repairs, f"manifest.data_plan.bindings.{alias}.kind", f"defaulted capability binding kind to {kind}")
+                changed_bindings = True
+
+        if kind == "domain":
+            operations, operations_changed = normalize_domain_operations(binding.get("operations"), broker_only=True)
+        elif kind == "system":
+            operations, operations_changed = normalize_system_operations(binding.get("operations"))
+        else:
+            operations, operations_changed = [], False
+
+        if operations:
+            if operations != binding.get("operations"):
+                binding["operations"] = operations
+                _record(
+                    repairs,
+                    f"manifest.data_plan.bindings.{alias}.operations",
+                    "normalized capability binding operations",
+                )
+                changed_bindings = True
+            elif operations_changed:
+                changed_bindings = True
+        next_bindings[alias] = binding
+
+    if changed_bindings:
+        data_plan["bindings"] = next_bindings
 
 
 def _compile_visual_spec(
@@ -789,6 +837,16 @@ def _label(value: str) -> str:
 def _slug(value: Any) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
     return slug or "view"
+
+
+def _escape_html(value: Any) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
 def _json_dumps(value: Mapping[str, Any]) -> str:

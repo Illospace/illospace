@@ -32,7 +32,7 @@
       <div class="thread-apps-pane__list">
         {#each apps as app (app.id)}
           <button type="button" class="thread-apps-pane__app" onclick={() => onSelectApp?.(app.id)}>
-            <span class="thread-apps-pane__app-thumb" style={`--app-accent:${app.visual_spec?.accent || '#57CFA0'}`} aria-hidden="true">
+            <span class="thread-apps-pane__app-thumb" style={`--app-accent:${app.visual_spec?.accent || 'var(--positive)'}`} aria-hidden="true">
               <ConstellationIcon name="code" size={15} stroke={1.9} />
             </span>
             <span class="thread-apps-pane__app-copy">
@@ -131,7 +131,7 @@
   }
 
   .thread-apps-pane__app-thumb {
-    --app-accent: #57CFA0;
+    --app-accent: var(--positive);
     display: inline-flex;
     width: 34px;
     height: 34px;

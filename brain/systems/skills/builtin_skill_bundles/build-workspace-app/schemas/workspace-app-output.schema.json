@@ -25,17 +25,18 @@
     },
     "renderer": {
       "enum": [
+        "app-capsule",
         "generated-ui-app",
         "sandboxed-html-app"
       ],
-      "default": "generated-ui-app"
+      "default": "app-capsule"
     },
     "source_kind": {
       "enum": [
         "json",
         "html"
       ],
-      "default": "json"
+      "default": "html"
     },
     "state_bridge_used": {
       "type": "array",

@@ -2,6 +2,7 @@
   import type { WorkspaceAppRead } from '$lib/features/workspace-apps/api/workspaceAppsApi';
   import { ConstellationIcon, ConstellationPill } from '$lib/components/constellation';
 
+  import AppCapsuleRenderer from './AppCapsuleRenderer.svelte';
   import GeneratedHtmlAppRuntime from './GeneratedHtmlAppRuntime.svelte';
   import GeneratedUiRenderer from './GeneratedUiRenderer.svelte';
 
@@ -16,6 +17,13 @@
   } = $props();
 
   const activeVersion = $derived(app?.active_version ?? null);
+  const canRenderAppCapsule = $derived(
+    !!app
+      && (
+        app.renderer_key === 'app-capsule'
+        || (activeVersion?.renderer_key === 'app-capsule' && activeVersion?.source_kind === 'html')
+      ),
+  );
   const canRenderGeneratedUi = $derived(
     !!app
       && (
@@ -29,12 +37,14 @@
     !!app
       && (
         app.renderer_key === 'sandboxed-html-app'
-        || activeVersion?.source_kind === 'html'
+        || activeVersion?.renderer_key === 'sandboxed-html-app'
       ),
 );
 </script>
 
-{#if app && canRenderGeneratedUi}
+{#if app && canRenderAppCapsule}
+  <AppCapsuleRenderer {app} {surface} {onclose} />
+{:else if app && canRenderGeneratedUi}
   <GeneratedUiRenderer {app} {surface} {onclose} />
 {:else if app && canRenderHtml}
   <GeneratedHtmlAppRuntime {app} {surface} {onclose} />

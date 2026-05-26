@@ -6,6 +6,8 @@ from pathlib import Path
 
 from brain.systems.workspace_apps import service
 from brain.systems.workspace_apps.contracts import (
+    APP_CAPSULE_RENDERER_KEY,
+    APP_CAPSULE_SOURCE_KIND,
     STRUCTURED_UI_RENDERER_KEY,
     STRUCTURED_UI_SOURCE_KIND,
     build_contract_validation_report,
@@ -122,33 +124,36 @@ def test_frontend_theme_bootstrap_registry_matches_store_registry():
     assert _theme_color_schemes_from_boot(app_html) == _theme_color_schemes_from_store(theme_store)
 
 
-def test_workspace_app_defaults_prefer_structured_generated_ui():
+def test_workspace_app_defaults_prefer_app_capsules():
     schema_path = (
         REPO_ROOT
         / "brain/systems/skills/builtin_skill_bundles/build-workspace-app/schemas/workspace-app-output.schema.json"
     )
     schema = json.loads(schema_path.read_text())
 
-    assert service.DEFAULT_RENDERER_KEY == STRUCTURED_UI_RENDERER_KEY
-    assert service.DEFAULT_SOURCE_KIND == STRUCTURED_UI_SOURCE_KIND
-    assert schema["properties"]["renderer"]["default"] == STRUCTURED_UI_RENDERER_KEY
+    assert service.DEFAULT_RENDERER_KEY == APP_CAPSULE_RENDERER_KEY
+    assert service.DEFAULT_SOURCE_KIND == APP_CAPSULE_SOURCE_KIND
+    assert schema["properties"]["renderer"]["default"] == APP_CAPSULE_RENDERER_KEY
+    assert APP_CAPSULE_RENDERER_KEY in schema["properties"]["renderer"]["enum"]
     assert STRUCTURED_UI_RENDERER_KEY in schema["properties"]["renderer"]["enum"]
-    assert schema["properties"]["source_kind"]["default"] == STRUCTURED_UI_SOURCE_KIND
+    assert schema["properties"]["source_kind"]["default"] == APP_CAPSULE_SOURCE_KIND
+    assert STRUCTURED_UI_SOURCE_KIND in schema["properties"]["source_kind"]["enum"]
 
 
 def test_workspace_app_db_defaults_are_in_canonical_model():
     from brain.platform.db.models.workspace_app import WorkspaceAppVersion
 
-    assert service.DEFAULT_RENDERER_KEY == STRUCTURED_UI_RENDERER_KEY
-    assert service.DEFAULT_SOURCE_KIND == STRUCTURED_UI_SOURCE_KIND
-    assert str(WorkspaceAppVersion.__table__.c.renderer_key.server_default.arg) == "generated-ui-app"
-    assert str(WorkspaceAppVersion.__table__.c.source_kind.server_default.arg) == "json"
+    assert service.DEFAULT_RENDERER_KEY == APP_CAPSULE_RENDERER_KEY
+    assert service.DEFAULT_SOURCE_KIND == APP_CAPSULE_SOURCE_KIND
+    assert str(WorkspaceAppVersion.__table__.c.renderer_key.server_default.arg) == "app-capsule"
+    assert str(WorkspaceAppVersion.__table__.c.source_kind.server_default.arg) == "html"
 
 
 def test_generated_app_host_styles_use_theme_tokens():
     checked_files = [
         REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedUiRenderer.svelte",
         REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedHtmlAppRuntime.svelte",
+        REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/AppCapsuleRenderer.svelte",
         REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedAppRenderer.svelte",
     ]
     constellation_css = (REPO_ROOT / "frontend/src/lib/styles/constellation.css").read_text()
@@ -171,6 +176,34 @@ def test_generated_app_host_styles_use_theme_tokens():
             offenders.append(str(path.relative_to(REPO_ROOT)))
 
     assert offenders == []
+
+
+def test_app_capsule_runtime_uses_new_bridge_and_responsive_surface():
+    dispatcher = (
+        REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/GeneratedAppRenderer.svelte"
+    ).read_text()
+    capsule = (
+        REPO_ROOT / "frontend/src/lib/features/workspace-apps/components/AppCapsuleRenderer.svelte"
+    ).read_text()
+    runtime_dir = REPO_ROOT / "frontend/src/lib/features/workspace-apps/runtime"
+    capsule_runtime = "\n".join(
+        (runtime_dir / filename).read_text()
+        for filename in ["appCapsuleRuntime.ts", "appCapsuleBridge.ts", "appCapsuleStyle.ts"]
+    )
+
+    assert "AppCapsuleRenderer" in dispatcher
+    assert "app.renderer_key === 'app-capsule'" in dispatcher
+    assert "activeVersion?.source_kind === 'html'" not in dispatcher.split("const canRenderHtml", 1)[1]
+
+    assert "runWorkspaceAppBinding" in capsule
+    assert "window.illo.data(alias)" in capsule_runtime
+    assert "state: stateApi" in capsule_runtime
+    assert "window.illo.domain" not in capsule_runtime
+    assert "illo:ready" in capsule_runtime
+    assert "did not finish connecting" in capsule
+    assert "width: min(1400px" in capsule
+    assert "#57CFA0" not in capsule
+    assert "rgba(252, 248" not in capsule_runtime
 
 
 def test_constellation_global_foundation_light_mode_is_root_tokenized():
