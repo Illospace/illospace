@@ -28,6 +28,13 @@ from brain.systems.cortex.project_context.browser import (
     with_project_file_browser,
 )
 from brain.systems.cortex.project_context.identity import stamped_project_context
+from brain.systems.cortex.project_context.profile_browser import (
+    ProjectProfileBrowserError,
+    project_profile_draft_state_payload,
+    project_profile_file_blob,
+    project_profile_file_payload,
+    update_project_profile_draft_file,
+)
 from brain.systems.cortex.project_context.profiles import attachment_to_read, profile_to_read
 from brain.systems.cortex.project_context.access import (
     can_manage_project_profile,
@@ -548,6 +555,53 @@ async def _project_draft_file_blob_response(
     )
 
 
+async def _project_profile_draft_file_payload(
+    db: AsyncSession,
+    run: AgentRun | None,
+    *,
+    idea_id: str,
+    profile_id: str,
+    path: str,
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if run is None:
+        raise HTTPException(status_code=404, detail="No AgentRun exists for this Cortex thread.")
+    profile = await _get_project_profile(db, profile_id, _profile_org_id(user or {}), user)
+    try:
+        return project_profile_file_payload(profile, run, idea_id=idea_id, path=path)
+    except ProjectProfileBrowserError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+async def _project_profile_draft_file_blob_response(
+    db: AsyncSession,
+    run: AgentRun | None,
+    *,
+    idea_id: str,
+    profile_id: str,
+    path: str,
+    layer: str,
+    user: dict[str, Any] | None = None,
+) -> FileResponse:
+    if run is None:
+        raise HTTPException(status_code=404, detail="No AgentRun exists for this Cortex thread.")
+    profile = await _get_project_profile(db, profile_id, _profile_org_id(user or {}), user)
+    try:
+        blob = project_profile_file_blob(profile, run, idea_id=idea_id, path=path, layer=layer)
+    except ProjectProfileBrowserError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        blob["path"],
+        media_type=blob["media_type"],
+        filename=blob["filename"],
+        content_disposition_type="inline",
+    )
+
+
 async def _update_project_draft_file_payload(
     run: AgentRun | None,
     *,
@@ -585,6 +639,32 @@ async def _update_project_draft_file_payload(
             path=body.path,
             content=body.content,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _update_project_profile_draft_file_payload(
+    db: AsyncSession,
+    run: AgentRun | None,
+    *,
+    idea_id: str,
+    profile_id: str,
+    body: ProjectDraftFileUpdate,
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if run is None:
+        raise HTTPException(status_code=404, detail="No AgentRun exists for this Cortex thread.")
+    profile = await _get_project_profile(db, profile_id, _profile_org_id(user or {}), user)
+    try:
+        return update_project_profile_draft_file(
+            profile,
+            run,
+            idea_id=idea_id,
+            path=body.path,
+            content=body.content,
+        )
+    except ProjectProfileBrowserError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -975,6 +1055,24 @@ async def get_idea_project_context_draft_state(
     return await _project_draft_state_payload(run, idea_id=idea_id, user=user)
 
 
+@router.get("/ideas/{idea_id}/project-context/profile-draft-state")
+async def get_idea_project_profile_context_draft_state(
+    idea_id: str,
+    profile_id: str,
+    run_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    run = await _project_draft_state_run(db, idea_id, run_id, user)
+    if run is None:
+        return _empty_project_draft_state_payload()
+    profile = await _get_project_profile(db, profile_id, _profile_org_id(user), user)
+    try:
+        return project_profile_draft_state_payload(profile, run, idea_id=idea_id)
+    except ProjectProfileBrowserError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/ideas/{idea_id}/project-context/draft-file")
 async def get_idea_project_context_draft_file(
     idea_id: str,
@@ -990,6 +1088,26 @@ async def get_idea_project_context_draft_file(
         idea_id=idea_id,
         path=path,
         resource_id=resource_id,
+        user=user,
+    )
+
+
+@router.get("/ideas/{idea_id}/project-context/profile-draft-file")
+async def get_idea_project_profile_context_draft_file(
+    idea_id: str,
+    profile_id: str,
+    path: str,
+    run_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    run = await _project_draft_state_run(db, idea_id, run_id, user)
+    return await _project_profile_draft_file_payload(
+        db,
+        run,
+        idea_id=idea_id,
+        profile_id=profile_id,
+        path=path,
         user=user,
     )
 
@@ -1015,6 +1133,28 @@ async def get_idea_project_context_draft_file_blob(
     )
 
 
+@router.get("/ideas/{idea_id}/project-context/profile-draft-file/blob")
+async def get_idea_project_profile_context_draft_file_blob(
+    idea_id: str,
+    profile_id: str,
+    path: str,
+    layer: str = "draft",
+    run_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    run = await _project_draft_state_run(db, idea_id, run_id, user)
+    return await _project_profile_draft_file_blob_response(
+        db,
+        run,
+        idea_id=idea_id,
+        profile_id=profile_id,
+        path=path,
+        layer=layer,
+        user=user,
+    )
+
+
 @router.patch("/ideas/{idea_id}/project-context/draft-file")
 async def update_idea_project_context_draft_file(
     idea_id: str,
@@ -1027,6 +1167,26 @@ async def update_idea_project_context_draft_file(
     return await _update_project_draft_file_payload(
         run,
         idea_id=idea_id,
+        body=body,
+        user=user,
+    )
+
+
+@router.patch("/ideas/{idea_id}/project-context/profile-draft-file")
+async def update_idea_project_profile_context_draft_file(
+    idea_id: str,
+    profile_id: str,
+    body: ProjectDraftFileUpdate,
+    run_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    run = await _project_draft_state_run(db, idea_id, run_id, user)
+    return await _update_project_profile_draft_file_payload(
+        db,
+        run,
+        idea_id=idea_id,
+        profile_id=profile_id,
         body=body,
         user=user,
     )

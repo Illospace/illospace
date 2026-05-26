@@ -1,4 +1,6 @@
 from pathlib import Path
+from types import SimpleNamespace
+from datetime import datetime, timezone
 
 import pytest
 
@@ -10,6 +12,12 @@ from brain.systems.cortex.project_context.browser import (
     with_project_file_browser,
 )
 from brain.systems.cortex.project_context.drafts import build_file_manifest, save_draft_metadata
+from brain.systems.cortex.project_context.profile_browser import (
+    project_profile_draft_state_payload,
+    project_profile_file_payload,
+    update_project_profile_draft_file,
+)
+from brain.systems.cortex.project_context.project_root import project_draft_root_path
 
 
 def _write(path: Path, content: str) -> None:
@@ -161,3 +169,58 @@ def test_project_file_payload_rejects_escaping_paths(tmp_path):
         project_file_payload({"resources": []}, resource_id=None, path="../secret.md")
     with pytest.raises(ValueError, match="internal metadata"):
         project_file_payload({"resources": []}, resource_id=None, path=".illo-project-history/version.json")
+
+
+def test_project_profile_browser_reads_root_and_creates_thread_draft_on_edit(tmp_path):
+    thread_root = tmp_path / "ideas" / "thread-a"
+    project_root = tmp_path / "project-roots" / "project-1"
+    _write(project_root / "README.md", "root readme\n")
+    profile = SimpleNamespace(
+        id="project-1",
+        org_id="org-1",
+        user_id="user-1",
+        slug="payments",
+        name="Payments",
+        description=None,
+        project_context={"version": 1, "resources": []},
+        visibility="public",
+        default_environment_binding_id=None,
+        active=True,
+        metadata_={},
+        created_at=datetime.now(timezone.utc),
+    )
+    run = SimpleNamespace(
+        id=17,
+        workspace_ref={
+            "project_workspace_manifest": {
+                "mounts": [{
+                    "draft_identity": {"thread_workspace_root": str(thread_root)},
+                }],
+            },
+        },
+        metadata_={},
+        target_ref={},
+    )
+
+    state = project_profile_draft_state_payload(profile, run, idea_id="idea-1")
+    entries = {entry["path"]: entry for entry in state["draft_status"]["file_browser"]["entries"]}
+    assert entries["README.md"]["has_root"] is True
+    assert entries["README.md"]["has_draft"] is False
+    assert entries["README.md"]["status"] == "clean"
+    assert project_profile_file_payload(profile, run, idea_id="idea-1", path="README.md")["layers"]["root"]["content"] == "root readme\n"
+
+    updated = update_project_profile_draft_file(
+        profile,
+        run,
+        idea_id="idea-1",
+        path="README.md",
+        content="draft readme\n",
+    )
+
+    draft_root = project_draft_root_path(thread_root, "project-1")
+    assert updated["updated"] is True
+    assert (project_root / "README.md").read_text(encoding="utf-8") == "root readme\n"
+    assert (draft_root / "README.md").read_text(encoding="utf-8") == "draft readme\n"
+    refreshed = project_profile_draft_state_payload(profile, run, idea_id="idea-1")
+    refreshed_entries = {entry["path"]: entry for entry in refreshed["draft_status"]["file_browser"]["entries"]}
+    assert refreshed_entries["README.md"]["status"] == "changed"
