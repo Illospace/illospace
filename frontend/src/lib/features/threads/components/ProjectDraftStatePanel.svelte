@@ -67,6 +67,7 @@
   let fileSaveError = $state('');
   let fileSaveNotice = $state('');
   let previewMode = $state<'review' | 'final'>('review');
+  let fileTreeCollapsed = $state(false);
 
   const draftView = $derived.by(() =>
     buildProjectDraftPanelView({ draftState, loading, loadError, runId }),
@@ -216,6 +217,10 @@
     collapsedDirectoryKeys = directoryCollapsed(row)
       ? collapsedDirectoryKeys.filter((key) => key !== row.key)
       : [...collapsedDirectoryKeys, row.key];
+  }
+
+  function toggleFileTree() {
+    fileTreeCollapsed = !fileTreeCollapsed;
   }
 
   function beginFileEdit() {
@@ -421,54 +426,68 @@
             {/if}
           </span>
         </div>
-        <div class="project-browser-legend" aria-label="Project layers">
-          <span><ConstellationIcon name="lock" size={12} /> Root</span>
-          <span><ConstellationIcon name="edit" size={12} /> Draft</span>
+        <div class="project-browser-tools">
+          <div class="project-browser-legend" aria-label="Project layers">
+            <span><ConstellationIcon name="lock" size={12} /> Root</span>
+            <span><ConstellationIcon name="edit" size={12} /> Draft</span>
+          </div>
+          <button
+            type="button"
+            class="project-browser-tree-toggle"
+            aria-expanded={!fileTreeCollapsed}
+            aria-controls="project-file-tree"
+            onclick={toggleFileTree}
+          >
+            <ConstellationIcon name={fileTreeCollapsed ? 'side-panel' : 'eye-off'} size={12} />
+            <span>{fileTreeCollapsed ? 'Show files' : 'Hide files'}</span>
+          </button>
         </div>
       </div>
 
       {#if fileBrowser.rows.length === 0}
         <div class="project-draft-empty">No browsable files found in this Project.</div>
       {:else}
-        <div class="project-browser-layout">
-          <div class="project-file-tree" aria-label="Project files">
-            {#each visibleRows as row (row.key)}
-              {#if row.kind === 'directory'}
-                <button
-                  type="button"
-                  class="project-tree-row project-tree-directory"
-                  style={rowStyle(row)}
-                  data-tone={rowTone(row)}
-                  aria-expanded={!directoryCollapsed(row)}
-                  title={row.displayPath}
-                  onclick={() => toggleDirectory(row)}
-                >
-                  <span class="project-tree-folder-glyph" aria-hidden="true">
-                    <ConstellationIcon name={directoryCollapsed(row) ? 'chevron-right' : 'chevron-down'} size={11} />
-                    <ConstellationIcon name="folder" size={14} />
-                  </span>
-                  <span title={row.displayPath}>{row.name}</span>
-                  <small>{row.fileCount}</small>
-                </button>
-              {:else}
-                <button
-                  type="button"
-                  class="project-tree-row project-tree-file"
-                  class:project-tree-file-selected={selectedFileKey === row.key}
-                  style={rowStyle(row)}
-                  data-tone={rowTone(row)}
-                  title={row.displayPath}
-                  onclick={() => selectFile(row)}
-                >
-                  <span class="project-tree-file-glyph" data-kind={projectFileKind(row)} aria-hidden="true">
-                    <ConstellationIcon name={projectFileIconName(projectFileKind(row))} size={14} />
-                  </span>
-                  <span>{row.name}</span>
-                  <small>{projectFileStatusLabel(row.status)}</small>
-                </button>
-              {/if}
-            {/each}
-          </div>
+        <div class="project-browser-layout" data-tree-collapsed={fileTreeCollapsed}>
+          {#if !fileTreeCollapsed}
+            <div id="project-file-tree" class="project-file-tree" aria-label="Project files">
+              {#each visibleRows as row (row.key)}
+                {#if row.kind === 'directory'}
+                  <button
+                    type="button"
+                    class="project-tree-row project-tree-directory"
+                    style={rowStyle(row)}
+                    data-tone={rowTone(row)}
+                    aria-expanded={!directoryCollapsed(row)}
+                    title={row.displayPath}
+                    onclick={() => toggleDirectory(row)}
+                  >
+                    <span class="project-tree-folder-glyph" aria-hidden="true">
+                      <ConstellationIcon name={directoryCollapsed(row) ? 'chevron-right' : 'chevron-down'} size={11} />
+                      <ConstellationIcon name="folder" size={14} />
+                    </span>
+                    <span title={row.displayPath}>{row.name}</span>
+                    <small>{row.fileCount}</small>
+                  </button>
+                {:else}
+                  <button
+                    type="button"
+                    class="project-tree-row project-tree-file"
+                    class:project-tree-file-selected={selectedFileKey === row.key}
+                    style={rowStyle(row)}
+                    data-tone={rowTone(row)}
+                    title={row.displayPath}
+                    onclick={() => selectFile(row)}
+                  >
+                    <span class="project-tree-file-glyph" data-kind={projectFileKind(row)} aria-hidden="true">
+                      <ConstellationIcon name={projectFileIconName(projectFileKind(row))} size={14} />
+                    </span>
+                    <span>{row.name}</span>
+                    <small>{projectFileStatusLabel(row.status)}</small>
+                  </button>
+                {/if}
+              {/each}
+            </div>
+          {/if}
 
           <div class="project-file-preview" aria-live="polite">
             {#if selectedFile}
@@ -483,16 +502,18 @@
                   </span>
                 </div>
                 <div class="project-file-preview-actions">
-                  <button
-                    type="button"
-                    class="project-file-edit-button"
-                    disabled={!previewView.canEdit || filePreviewLoading || fileSaveLoading}
-                    title={previewView.canEdit ? 'Edit this file in the thread draft' : 'This file cannot be edited as text here'}
-                    onclick={isEditingSelectedFile ? cancelFileEdit : beginFileEdit}
-                  >
-                    <ConstellationIcon name={isEditingSelectedFile ? 'close' : 'edit'} size={12} />
-                    <span>{isEditingSelectedFile ? 'Cancel' : 'Edit'}</span>
-                  </button>
+                  {#if previewView.canEdit}
+                    <button
+                      type="button"
+                      class="project-file-edit-button"
+                      disabled={filePreviewLoading || fileSaveLoading}
+                      title="Edit this file in the thread draft"
+                      onclick={isEditingSelectedFile ? cancelFileEdit : beginFileEdit}
+                    >
+                      <ConstellationIcon name={isEditingSelectedFile ? 'close' : 'edit'} size={12} />
+                      <span>{isEditingSelectedFile ? 'Cancel' : 'Edit'}</span>
+                    </button>
+                  {/if}
                   <span class="project-file-status" data-tone={projectFileStatusTone(selectedFile.status)}>
                     {projectFileStatusLabel(selectedFile.status)}
                   </span>
@@ -970,12 +991,43 @@
     min-width: 0;
   }
 
+  .project-browser-tools {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+  }
+
   .project-browser-legend {
     display: inline-flex;
     align-items: center;
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 5px;
+  }
+
+  .project-browser-tree-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    min-height: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.065);
+    border-radius: 7px;
+    padding: 3px 7px;
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(231, 238, 247, 0.66);
+    font-size: 10px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-browser-tree-toggle {
+    border-color: rgba(85, 104, 120, 0.13);
+    background: rgba(85, 104, 120, 0.055);
+    color: rgba(57, 70, 82, 0.72);
   }
 
   .project-browser-legend span,
@@ -1001,6 +1053,10 @@
     display: grid;
     grid-template-columns: minmax(190px, 0.72fr) minmax(0, 1.55fr);
     min-height: min(72vh, 700px);
+  }
+
+  .project-browser-layout[data-tree-collapsed='true'] {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .project-file-tree {
