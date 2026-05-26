@@ -435,6 +435,30 @@ async def test_project_context_draft_state_payload_uses_manage_project_helpers(t
     assert payload["root_versions"]["summary"] == {"resource_count": 1, "version_count": 0}
 
 
+async def test_project_context_draft_file_update_payload_writes_thread_overlay(tmp_path):
+    from brain.app.api.routers.cortex import _project_context
+    from brain.systems.cortex.project_context.schemas import ProjectDraftFileUpdate
+
+    source_dir = tmp_path / "source"
+    draft_dir = tmp_path / "thread" / ".illo-project-context" / "local" / "reports"
+    source_dir.mkdir()
+    draft_dir.mkdir(parents=True)
+    (source_dir / "brief.md").write_text("original", encoding="utf-8")
+
+    payload = await _project_context._update_project_draft_file_payload(
+        _project_draft_run_for_test(source_dir, draft_dir),
+        idea_id="idea-1",
+        body=ProjectDraftFileUpdate(resource_id="reports", path="brief.md", content="manual draft edit"),
+        user={"id": "user-1", "org_id": "test-org"},
+    )
+
+    assert payload["updated"] is True
+    assert payload["layers"]["root"]["content"] == "original"
+    assert payload["layers"]["draft"]["content"] == "manual draft edit"
+    assert (source_dir / "brief.md").read_text(encoding="utf-8") == "original"
+    assert (draft_dir / "brief.md").read_text(encoding="utf-8") == "manual draft edit"
+
+
 async def test_project_context_draft_state_payload_handles_missing_run():
     from brain.app.api.routers.cortex import _project_context
 

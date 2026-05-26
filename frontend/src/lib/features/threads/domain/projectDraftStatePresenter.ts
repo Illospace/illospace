@@ -2,6 +2,8 @@ import type {
   ProjectDraftChangeKey,
   ProjectDraftChangeSet,
   ProjectDraftFileEntry,
+  ProjectDraftFileLayer,
+  ProjectDraftFileResponse,
   ProjectDraftPublishGroup,
   ProjectDraftPublishOperation,
   ProjectDraftResourceState,
@@ -65,6 +67,38 @@ export type ProjectFileBrowserView = {
   visibleCount: number;
   truncatedCount: number;
 };
+
+export type ProjectTextDiffLine = {
+  kind: 'context' | 'removed' | 'added';
+  text: string;
+};
+
+export type ProjectPreviewLayerKey = 'root' | 'base' | 'draft';
+
+export type ProjectPreviewLayerView = {
+  key: ProjectPreviewLayerKey;
+  label: string;
+  detail: string;
+  content: string;
+  layer: ProjectDraftFileLayer | undefined;
+};
+
+export type ProjectFilePreviewView =
+  | {
+    mode: 'diff';
+    title: string;
+    detail: string;
+    layers: ProjectPreviewLayerView[];
+    lines: ProjectTextDiffLine[];
+    editableContent: string;
+    canEdit: boolean;
+  }
+  | {
+    mode: 'layers';
+    layers: ProjectPreviewLayerView[];
+    editableContent: string;
+    canEdit: boolean;
+  };
 
 export type PublishPlanSummary = {
   ok: boolean;
@@ -400,6 +434,28 @@ export function buildProjectFileBrowserView(
   };
 }
 
+export function projectDirectoryAncestorKeys(resourceId: string, path: string): string[] {
+  const parts = cleanProjectPath(path).split('/').filter(Boolean);
+  const keys: string[] = [];
+  let current = '';
+  for (const part of parts.slice(0, -1)) {
+    current = current ? `${current}/${part}` : part;
+    keys.push(`${resourceId}:dir:${current}`);
+  }
+  return keys;
+}
+
+export function visibleProjectExplorerRows(
+  rows: ProjectExplorerRow[],
+  collapsedDirectoryKeys: Iterable<string>,
+): ProjectExplorerRow[] {
+  const collapsed = new Set(collapsedDirectoryKeys);
+  if (collapsed.size === 0) return rows;
+  return rows.filter((row) =>
+    projectDirectoryAncestorKeys(row.resourceId, row.path).every((key) => !collapsed.has(key)),
+  );
+}
+
 function buildProjectExplorerRows(files: ProjectExplorerFile[]): ProjectExplorerRow[] {
   const directories = new Map<string, ProjectExplorerDirectory>();
   for (const file of files) {
@@ -500,6 +556,197 @@ export function projectFileSizeLabel(value: unknown): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function normaliseProjectPreviewText(value: unknown): string {
+  const text = String(value ?? '').replace(/\r\n?/g, '\n');
+  const escapedBreaks = (text.match(/\\n/g) ?? []).length;
+  const realBreaks = (text.match(/\n/g) ?? []).length;
+  if (escapedBreaks > realBreaks) {
+    return text.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+  }
+  return text;
+}
+
+function projectLayerContent(layer: ProjectDraftFileLayer | undefined): string {
+  if (!layer?.exists) return 'Not present in this layer.';
+  if (layer.binary) return 'Binary file preview is not available.';
+  if (layer.error) return layer.error;
+  return normaliseProjectPreviewText(layer.content ?? '');
+}
+
+function projectLayerDetail(layer: ProjectDraftFileLayer | undefined): string {
+  if (!layer?.exists) return 'missing';
+  return [
+    projectFileSizeLabel(layer.size),
+    layer.binary ? 'binary' : 'text',
+    layer.truncated ? 'truncated' : '',
+  ].filter(Boolean).join(' / ');
+}
+
+function canReadTextLayer(layer: ProjectDraftFileLayer | undefined): boolean {
+  return Boolean(layer?.exists && !layer.binary && !layer.error);
+}
+
+function previewLayerView(
+  key: ProjectPreviewLayerKey,
+  label: string,
+  layer: ProjectDraftFileLayer | undefined,
+): ProjectPreviewLayerView {
+  return {
+    key,
+    label,
+    detail: projectLayerDetail(layer),
+    content: projectLayerContent(layer),
+    layer,
+  };
+}
+
+function samePreviewText(left: string, right: string): boolean {
+  return left === right;
+}
+
+function splitPreviewLines(value: unknown): string[] {
+  return normaliseProjectPreviewText(value).split('\n');
+}
+
+function cappedProjectDiffLines(lines: ProjectTextDiffLine[], maxLines: number): ProjectTextDiffLine[] {
+  if (lines.length <= maxLines) return lines;
+  const omitted = lines.length - maxLines + 1;
+  return [
+    ...lines.slice(0, maxLines - 1),
+    { kind: 'context', text: `... ${omitted} diff lines omitted ...` },
+  ];
+}
+
+function buildFallbackDiff(
+  rootLines: string[],
+  draftLines: string[],
+  maxLines: number,
+): ProjectTextDiffLine[] {
+  return cappedProjectDiffLines([
+    ...rootLines.map((text) => ({ kind: 'removed' as const, text })),
+    ...draftLines.map((text) => ({ kind: 'added' as const, text })),
+  ], maxLines);
+}
+
+export function buildProjectTextDiff(
+  rootContent: unknown,
+  draftContent: unknown,
+  maxLines = 700,
+): ProjectTextDiffLine[] {
+  const rootLines = splitPreviewLines(rootContent);
+  const draftLines = splitPreviewLines(draftContent);
+  if (samePreviewText(rootLines.join('\n'), draftLines.join('\n'))) {
+    return cappedProjectDiffLines(rootLines.map((text) => ({ kind: 'context', text })), maxLines);
+  }
+  if (rootLines.length * draftLines.length > 160_000) {
+    return buildFallbackDiff(rootLines, draftLines, maxLines);
+  }
+
+  const matrix = Array.from({ length: rootLines.length + 1 }, () =>
+    Array<number>(draftLines.length + 1).fill(0),
+  );
+  for (let row = rootLines.length - 1; row >= 0; row -= 1) {
+    for (let column = draftLines.length - 1; column >= 0; column -= 1) {
+      matrix[row][column] = rootLines[row] === draftLines[column]
+        ? matrix[row + 1][column + 1] + 1
+        : Math.max(matrix[row + 1][column], matrix[row][column + 1]);
+    }
+  }
+
+  const lines: ProjectTextDiffLine[] = [];
+  let rootIndex = 0;
+  let draftIndex = 0;
+  while (rootIndex < rootLines.length && draftIndex < draftLines.length) {
+    if (rootLines[rootIndex] === draftLines[draftIndex]) {
+      lines.push({ kind: 'context', text: rootLines[rootIndex] });
+      rootIndex += 1;
+      draftIndex += 1;
+    } else if (matrix[rootIndex + 1][draftIndex] >= matrix[rootIndex][draftIndex + 1]) {
+      lines.push({ kind: 'removed', text: rootLines[rootIndex] });
+      rootIndex += 1;
+    } else {
+      lines.push({ kind: 'added', text: draftLines[draftIndex] });
+      draftIndex += 1;
+    }
+  }
+  while (rootIndex < rootLines.length) {
+    lines.push({ kind: 'removed', text: rootLines[rootIndex] });
+    rootIndex += 1;
+  }
+  while (draftIndex < draftLines.length) {
+    lines.push({ kind: 'added', text: draftLines[draftIndex] });
+    draftIndex += 1;
+  }
+  return cappedProjectDiffLines(lines, maxLines);
+}
+
+export function buildProjectFilePreviewView(
+  preview: ProjectDraftFileResponse | null,
+  file: ProjectExplorerFile | null,
+): ProjectFilePreviewView {
+  const layers = preview?.layers ?? {};
+  const root = layers.root;
+  const draft = layers.draft;
+  const base = layers.base;
+  const rootContent = projectLayerContent(root);
+  const draftContent = projectLayerContent(draft);
+  const rootReadable = canReadTextLayer(root);
+  const draftReadable = canReadTextLayer(draft);
+  const fileTone = projectFileStatusTone(file?.status);
+  const layerViews = [
+    previewLayerView('root', 'Project root', root),
+    base?.exists ? previewLayerView('base', 'Thread base', base) : null,
+    previewLayerView('draft', 'Thread draft', draft),
+  ].filter((item): item is ProjectPreviewLayerView => Boolean(item));
+  const editableLayer = draftReadable ? draft : rootReadable ? root : undefined;
+  const editableContent = editableLayer ? projectLayerContent(editableLayer) : '';
+  const canEdit = Boolean(file && editableLayer && !editableLayer.binary && !editableLayer.error);
+
+  if (rootReadable && draftReadable && (!samePreviewText(rootContent, draftContent) || fileTone !== 'clean')) {
+    return {
+      mode: 'diff',
+      title: 'Project root -> thread draft',
+      detail: 'red removed / green added',
+      layers: layerViews,
+      lines: buildProjectTextDiff(rootContent, draftContent),
+      editableContent,
+      canEdit,
+    };
+  }
+
+  if (!root?.exists && draftReadable) {
+    return {
+      mode: 'diff',
+      title: 'New draft file',
+      detail: 'green added',
+      layers: layerViews,
+      lines: splitPreviewLines(draftContent).map((text) => ({ kind: 'added', text })),
+      editableContent,
+      canEdit,
+    };
+  }
+
+  if (rootReadable && !draft?.exists && fileTone === 'deleted') {
+    return {
+      mode: 'diff',
+      title: 'Deleted from thread draft',
+      detail: 'red removed',
+      layers: layerViews,
+      lines: splitPreviewLines(rootContent).map((text) => ({ kind: 'removed', text })),
+      editableContent,
+      canEdit,
+    };
+  }
+
+  const fallbackLayers = layerViews.filter((item) => item.layer?.exists);
+  return {
+    mode: 'layers',
+    layers: fallbackLayers.length > 0 ? fallbackLayers : layerViews,
+    editableContent,
+    canEdit,
+  };
 }
 
 function publishPlanPayload(payload: ProjectDraftStateLike): Record<string, any> | null {

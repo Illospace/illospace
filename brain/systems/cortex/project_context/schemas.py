@@ -94,6 +94,12 @@ class IdeaProjectAttachmentRead(BaseModel):
     created_at: datetime | None = None
 
 
+class ProjectDraftFileUpdate(BaseModel):
+    resource_id: str | None = None
+    path: str = Field(..., min_length=1)
+    content: str
+
+
 class GitHubVaultTokenRequest(BaseModel):
     vault_key: str = Field(..., min_length=1, max_length=255)
 

@@ -1,7 +1,8 @@
-"""Read-only Project draft browser payloads for the thread UI."""
+"""Project draft browser payloads for the thread UI."""
 from __future__ import annotations
 
 from collections.abc import Mapping
+import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -14,6 +15,7 @@ from brain.systems.cortex.project_context.drafts import (
 
 MAX_BROWSER_FILES = 2_000
 MAX_FILE_PREVIEW_BYTES = 120_000
+MAX_FILE_UPDATE_BYTES = 2_000_000
 _TEXT_EXTENSIONS = {
     ".css",
     ".csv",
@@ -251,6 +253,30 @@ def _resolve_file_path(root: Path | None, relative_path: str) -> Path | None:
     return root / relative_path
 
 
+def _writable_draft_file(root: Path | None, relative_path: str) -> Path:
+    if root is None:
+        raise ValueError("Project draft workspace is not writable for this file.")
+    root = root.expanduser()
+    if root.is_file():
+        if relative_path != root.name:
+            raise ValueError("Project file path is outside the draft resource.")
+        if root.is_symlink():
+            raise ValueError("Project draft file cannot be a symlink.")
+        return root
+
+    target = root / relative_path
+    if target.exists() and target.is_symlink():
+        raise ValueError("Project draft file cannot be a symlink.")
+    if target.exists() and not target.is_file():
+        raise ValueError("Project draft path is not a regular file.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    root_resolved = root.resolve()
+    parent_resolved = target.parent.resolve()
+    if os.path.commonpath([str(root_resolved), str(parent_resolved)]) != str(root_resolved):
+        raise ValueError("Project file path must stay inside the mounted Project resource.")
+    return target
+
+
 def _read_text_layer(path: Path | None) -> dict[str, Any]:
     if path is None:
         return {"exists": False}
@@ -312,6 +338,38 @@ def project_file_payload(
             "base": _read_text_layer(base_file),
             "draft": _read_text_layer(draft_file),
         },
+    }
+
+
+def update_project_draft_file(
+    draft_status: Mapping[str, Any],
+    *,
+    resource_id: str | None,
+    path: str,
+    content: str,
+) -> dict[str, Any]:
+    """Write a text file into the thread draft overlay and return its refreshed preview."""
+
+    relative_path = _safe_relative_path(path)
+    encoded = content.encode("utf-8")
+    if len(encoded) > MAX_FILE_UPDATE_BYTES:
+        raise ValueError("Project draft file update is too large.")
+
+    resources = [resource for resource in draft_status.get("resources") or [] if isinstance(resource, Mapping)]
+    resource = _select_resource(resources, resource_id, relative_path)
+    if resource is None:
+        raise ValueError("Project resource not found for selected file.")
+
+    draft = _root_path(resource.get("workspace_path") or resource.get("resource_path"))
+    target = _writable_draft_file(draft, relative_path)
+    try:
+        target.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"Project draft file could not be updated: {exc}") from exc
+
+    return {
+        **project_file_payload(draft_status, resource_id=resource_id, path=relative_path),
+        "updated": True,
     }
 
 

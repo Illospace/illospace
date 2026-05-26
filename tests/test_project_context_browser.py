@@ -5,6 +5,7 @@ import pytest
 from brain.systems.cortex.project_context.browser import (
     project_file_payload,
     project_resource_file_browser,
+    update_project_draft_file,
     with_project_file_browser,
 )
 from brain.systems.cortex.project_context.drafts import build_file_manifest, save_draft_metadata
@@ -98,6 +99,34 @@ def test_project_file_payload_reads_root_base_and_draft_layers(tmp_path):
     assert payload["layers"]["root"]["content"] == "root v1\n"
     assert payload["layers"]["base"]["content"] == "root v1\n"
     assert payload["layers"]["draft"]["content"] == "draft v2\n"
+
+
+def test_update_project_draft_file_writes_only_thread_overlay(tmp_path):
+    root = tmp_path / "root"
+    draft = tmp_path / "draft"
+    _write(root / "report.md", "root v1\n")
+    _write(draft / ".illo-project-draft" / "base" / "report.md", "root v1\n")
+    save_draft_metadata(draft, base_manifest=build_file_manifest(root))
+
+    payload = update_project_draft_file(
+        {
+            "resources": [{
+                "id": "root",
+                "mount_path": "/",
+                "source_path": str(root),
+                "workspace_path": str(draft),
+            }],
+        },
+        resource_id="root",
+        path="report.md",
+        content="manual edit\n",
+    )
+
+    assert payload["updated"] is True
+    assert payload["layers"]["root"]["content"] == "root v1\n"
+    assert payload["layers"]["draft"]["content"] == "manual edit\n"
+    assert (root / "report.md").read_text(encoding="utf-8") == "root v1\n"
+    assert (draft / "report.md").read_text(encoding="utf-8") == "manual edit\n"
 
 
 def test_project_file_payload_rejects_escaping_paths(tmp_path):

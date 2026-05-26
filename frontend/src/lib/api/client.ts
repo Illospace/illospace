@@ -783,6 +783,13 @@ export interface ProjectDraftFileResponse {
   };
 }
 
+export interface ProjectDraftFileUpdateInput {
+  runId?: string | number | null;
+  resourceId?: string | null;
+  path: string;
+  content: string;
+}
+
 export interface ProjectDraftStateResponse {
   ok: boolean;
   code?: string;
@@ -1049,6 +1056,23 @@ export const api = {
         resource_id: options.resourceId,
         path: options.path,
       }),
+    ),
+  updateIdeaProjectDraftFile: (
+    ideaId: string,
+    data: ProjectDraftFileUpdateInput,
+  ) =>
+    fetchJson<ProjectDraftFileResponse>(
+      withQuery(`/api/cortex/ideas/${ideaId}/project-context/draft-file`, {
+        run_id: data.runId,
+      }),
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          resource_id: data.resourceId,
+          path: data.path,
+          content: data.content,
+        }),
+      },
     ),
   deleteIdea: (id: string) =>
     fetchJson<any>(`/api/cortex/ideas/${id}`, { method: 'DELETE' }),
