@@ -1068,8 +1068,9 @@
     overflow-x: hidden;
   }
 
-  .project-file-tree[data-collapsed='true']:hover,
-  .project-file-tree[data-collapsed='true']:focus-within {
+  .project-file-tree[data-collapsed='true']:has(.project-tree-file:hover),
+  .project-file-tree[data-collapsed='true']:has(.project-tree-directory:hover),
+  .project-file-tree[data-collapsed='true']:has(.project-tree-row:focus-visible) {
     width: min(260px, calc(100vw - 56px));
     box-shadow:
       18px 0 34px rgba(0, 0, 0, 0.16),
@@ -1080,22 +1081,23 @@
     border-right-color: rgba(85, 104, 120, 0.12);
   }
 
-  :global(:root[data-color-scheme='light']) .project-file-tree[data-collapsed='true']:hover,
-  :global(:root[data-color-scheme='light']) .project-file-tree[data-collapsed='true']:focus-within {
+  :global(:root[data-color-scheme='light']) .project-file-tree[data-collapsed='true']:has(.project-tree-file:hover),
+  :global(:root[data-color-scheme='light']) .project-file-tree[data-collapsed='true']:has(.project-tree-directory:hover),
+  :global(:root[data-color-scheme='light']) .project-file-tree[data-collapsed='true']:has(.project-tree-row:focus-visible) {
     box-shadow:
       18px 0 34px rgba(54, 70, 82, 0.11),
       inset -1px 0 0 rgba(85, 104, 120, 0.12);
   }
 
-  .project-file-tree[data-collapsed='true']:not(:hover):not(:focus-within) .project-tree-row {
+  .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-row {
     grid-template-columns: 28px 0 0;
     gap: 0;
     padding-inline: 7px;
     padding-left: 7px;
   }
 
-  .project-file-tree[data-collapsed='true']:not(:hover):not(:focus-within) .project-tree-label,
-  .project-file-tree[data-collapsed='true']:not(:hover):not(:focus-within) .project-tree-row small {
+  .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-label,
+  .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-row small {
     max-width: 0;
     opacity: 0;
     transform: translateX(-6px);
@@ -1856,14 +1858,14 @@
       border-bottom: 1px solid rgba(255, 255, 255, 0.055);
     }
 
-    .project-file-tree[data-collapsed='true']:not(:hover):not(:focus-within) .project-tree-row {
+    .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-row {
       grid-template-columns: 26px minmax(0, 1fr) auto;
       gap: 7px;
       padding: 5px 7px 5px calc(7px + (var(--depth) * 14px));
     }
 
-    .project-file-tree[data-collapsed='true']:not(:hover):not(:focus-within) .project-tree-label,
-    .project-file-tree[data-collapsed='true']:not(:hover):not(:focus-within) .project-tree-row small {
+    .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-label,
+    .project-file-tree[data-collapsed='true']:not(:has(.project-tree-file:hover)):not(:has(.project-tree-directory:hover)):not(:has(.project-tree-row:focus-visible)) .project-tree-row small {
       max-width: none;
       opacity: 1;
       transform: translateX(0);
