@@ -38,6 +38,7 @@
     IconListDetails,
     IconLogout,
     IconMenu2,
+    IconMicrophone,
     IconMessages,
     IconMessageReply,
     IconMoon,
@@ -100,6 +101,7 @@
     | 'logout'
     | 'memory'
     | 'menu'
+    | 'mic'
     | 'moon'
     | 'notification'
     | 'overview'
@@ -170,6 +172,7 @@
     logout: IconLogout,
     memory: IconNotes,
     menu: IconMenu2,
+    mic: IconMicrophone,
     moon: IconMoon,
     notification: IconBell,
     overview: IconLayoutGrid,

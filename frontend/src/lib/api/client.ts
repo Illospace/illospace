@@ -1,3 +1,5 @@
+import type { RuntimeSettings, RuntimeVoiceSession } from '$lib/types/runtimeSettings';
+
 const BASE = '';
 const DEFAULT_API_TIMEOUT_MS = 20_000;
 const PROJECT_CONTEXT_UPLOAD_TIMEOUT_MS = 30_000;
@@ -1601,7 +1603,7 @@ export const api = {
 
   // System
   systemInfo: () => fetchJson<any>('/api/system'),
-  runtimeSettings: () => fetchJson<any>('/api/runtime-settings'),
+  runtimeSettings: () => fetchJson<RuntimeSettings>('/api/runtime-settings'),
   runtimeUpdateStatus: () => fetchJson<any>('/api/runtime-settings/update'),
   startRuntimeUpdate: () =>
     fetchJson<any>('/api/runtime-settings/update', { method: 'POST' }),
@@ -1627,6 +1629,8 @@ export const api = {
     fetchJson<any>('/api/runtime-settings/memory', { method: 'PATCH', body: JSON.stringify(data) }),
   checkRuntimeMemory: () =>
     fetchJson<any>('/api/runtime-settings/memory/check', { method: 'POST' }),
+  createRuntimeVoiceSession: () =>
+    fetchJson<RuntimeVoiceSession>('/api/runtime-settings/voice/session', { method: 'POST' }),
 
   // Onboarding
   runtimeReadyIntroDraft: () =>

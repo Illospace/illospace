@@ -30,9 +30,11 @@ from .schemas import (
     RuntimeModelsUpdate,
     RuntimeSettingsRead,
     RuntimeUpdateRead,
+    RuntimeVoiceSessionRead,
 )
 from .service import async_get_runtime_settings, can_manage_runtime_settings
 from .self_update import async_get_runtime_update_status, async_start_runtime_update
+from .voice import async_create_runtime_voice_session
 
 router = APIRouter(prefix="/api/runtime-settings", tags=["runtime-settings"], dependencies=[Depends(rate_limit)])
 _OPENAI_OAUTH_CALLBACK_START_MODES = {"auto", "server", "local_bridge"}
@@ -161,6 +163,14 @@ async def check_memory(
 ) -> RuntimeMemoryCheckRead:
     _require_settings_admin(user)
     return await async_check_runtime_memory(db, user)
+
+
+@router.post("/voice/session", response_model=RuntimeVoiceSessionRead)
+async def create_voice_session(
+    user: User = Depends(_runtime_user),
+    db: AsyncSession = Depends(get_db),
+) -> RuntimeVoiceSessionRead:
+    return await async_create_runtime_voice_session(db, user)
 
 
 @router.get("/update", response_model=RuntimeUpdateRead)
