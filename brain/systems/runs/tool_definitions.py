@@ -709,18 +709,9 @@ BRAIN_TOOLS = [
                     "enum": ["none", "low", "medium", "high", "xhigh"],
                     "description": "Optional thinking level override",
                 },
-                "execution_mode": {
-                    "type": "string",
-                    "enum": ["reuse_same_idea"],
-                    "description": "Cycles always reuse one thought thread",
-                },
                 "target_idea_id": {
                     "type": "string",
                     "description": "Optional thought id to reuse; the first run creates one if omitted",
-                },
-                "reopen_archived": {
-                    "type": "boolean",
-                    "description": "Archived cycle thoughts are reopened automatically",
                 },
                 "guidance": {
                     "type": "string",

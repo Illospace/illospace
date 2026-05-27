@@ -4,14 +4,19 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from brain.app.api.auth import get_current_user
 from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.schemas.cycles import CycleCreate, CycleRead, CycleRunRead, CycleUpdate
+from brain.systems.cycles.access import (
+    CycleActor,
+    cycle_scope_conditions,
+    target_idea_scope_conditions,
+)
 from brain.systems.cycles.commands import (
-    CycleMutationActor,
+    UNSET_CYCLE_FIELD,
     async_create_cycle as command_create_cycle,
     async_delete_cycle as command_delete_cycle,
     async_update_cycle as command_update_cycle,
@@ -22,7 +27,6 @@ from brain.systems.cycles.serializers import serialize_cycle, serialize_cycle_ru
 from brain.systems.cycles.service import async_run_cycle_now
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import Idea
-from brain.platform.db.models.org import User
 
 router = APIRouter(
     prefix="/api/cycles",
@@ -31,61 +35,14 @@ router = APIRouter(
 )
 
 
-def _is_service_principal(user: dict[str, Any]) -> bool:
-    return user.get("principal_type") == "service"
-
-
-def _cycle_scope_conditions(user: dict[str, Any]) -> list[Any]:
-    if _is_service_principal(user):
-        return [Cycle.deleted_at.is_(None)]
-    org_id = user.get("org_id")
-    if org_id:
-        org_user_ids = select(User.id).where(User.org_id == str(org_id))
-        return [
-            or_(
-                Cycle.org_id == str(org_id),
-                and_(Cycle.org_id.is_(None), Cycle.user_id.in_(org_user_ids)),
-            ),
-            Cycle.deleted_at.is_(None),
-        ]
-    return [Cycle.user_id == str(user["id"]), Cycle.deleted_at.is_(None)]
-
-
 def _bad_request(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
-
-
-def _cycle_actor(user: dict[str, Any]) -> CycleMutationActor:
-    return CycleMutationActor(
-        user_id=str(user["id"]),
-        org_id=str(user["org_id"]) if user.get("org_id") else None,
-        principal_type=user.get("principal_type") or "user",
-        source_id=str(user["id"]),
-    )
-
-
-def _target_idea_scope_conditions(idea_id: str, user: dict[str, Any]) -> list[Any]:
-    conditions: list[Any] = [Idea.id == idea_id]
-    if _is_service_principal(user):
-        return conditions
-    org_id = user.get("org_id")
-    if org_id:
-        org_user_ids = select(User.id).where(User.org_id == str(org_id))
-        conditions.append(
-            or_(
-                Idea.org_id == str(org_id),
-                and_(Idea.org_id.is_(None), Idea.user_id.in_(org_user_ids)),
-            )
-        )
-    else:
-        conditions.append(Idea.user_id == str(user["id"]))
-    return conditions
 
 
 async def _get_cycle_or_404(db: AsyncSession, cycle_id: int, user: dict[str, Any]) -> Cycle:
     stmt = select(Cycle).where(
         Cycle.id == cycle_id,
-        *_cycle_scope_conditions(user),
+        *cycle_scope_conditions(CycleActor.from_user_payload(user)),
     )
     result = await db.scalars(stmt)
     cycle = result.first()
@@ -97,7 +54,9 @@ async def _get_cycle_or_404(db: AsyncSession, cycle_id: int, user: dict[str, Any
 async def _validate_target_idea(db: AsyncSession, idea_id: str | None, user: dict[str, Any]) -> None:
     if not idea_id:
         return
-    stmt = select(Idea.id).where(*_target_idea_scope_conditions(idea_id, user))
+    stmt = select(Idea.id).where(
+        *target_idea_scope_conditions(idea_id, CycleActor.from_user_payload(user))
+    )
     result = await db.execute(stmt)
     if not result.first():
         raise HTTPException(
@@ -114,7 +73,7 @@ async def list_cycles(
 ):
     stmt = (
         select(Cycle)
-        .where(*_cycle_scope_conditions(user))
+        .where(*cycle_scope_conditions(CycleActor.from_user_payload(user)))
         .order_by(Cycle.created_at.desc())
     )
     result = await db.scalars(stmt)
@@ -132,7 +91,7 @@ async def create_cycle(
     try:
         cycle = await command_create_cycle(
             db,
-            actor=_cycle_actor(user),
+            actor=CycleActor.from_user_payload(user),
             name=body.name,
             prompt=body.prompt,
             timezone_name=body.timezone,
@@ -183,19 +142,16 @@ async def update_cycle(
         await command_update_cycle(
             db,
             cycle,
-            actor=_cycle_actor(user),
+            actor=CycleActor.from_user_payload(user),
             name=updates.get("name"),
             prompt=updates.get("prompt"),
             timezone_name=updates.get("timezone"),
             schedule_expr=updates.get("schedule_expr"),
-            run_at=updates.get("run_at"),
-            enabled=updates.get("enabled"),
-            model_override=updates.get("model_override"),
-            model_override_provided="model_override" in updates,
-            thinking_override=updates.get("thinking_override"),
-            thinking_override_provided="thinking_override" in updates,
-            target_idea_id=updates.get("target_idea_id"),
-            target_idea_provided="target_idea_id" in updates,
+            run_at=updates.get("run_at", UNSET_CYCLE_FIELD),
+            enabled=updates.get("enabled", UNSET_CYCLE_FIELD),
+            model_override=updates.get("model_override", UNSET_CYCLE_FIELD),
+            thinking_override=updates.get("thinking_override", UNSET_CYCLE_FIELD),
+            target_idea_id=updates.get("target_idea_id", UNSET_CYCLE_FIELD),
             guidance=updates.get("guidance"),
             rationale=updates.get("rationale"),
         )

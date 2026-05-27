@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from brain.app.api.schemas.cycles import CycleRead, CycleRunRead
+from brain.systems.cycles import access as cycle_access
 from brain.systems.cycles import execution as cycle_execution
 from brain.systems.cycles import service
 from brain.app.api.routers import cycles as cycles_router
@@ -21,6 +22,7 @@ class _FakeSession:
         self._agent_run = agent_run
         self._run = run
         self._cycle = cycle
+        self.added = []
 
     def get(self, model, value):
         if model is AgentRun:
@@ -30,6 +32,9 @@ class _FakeSession:
         if model is Cycle:
             return self._cycle
         return None
+
+    def add(self, value):
+        self.added.append(value)
 
 
 class _AsyncFakeSession(_FakeSession):
@@ -241,6 +246,7 @@ class _RecoverStaleSession:
         self._runs = list(runs)
         self._cycles = {cycle.id: cycle for cycle in (cycles or [])}
         self._agent_runs = {run.id: run for run in (agent_runs or [])}
+        self.added = []
 
     async def scalars(self, statement):
         return _AllResult(self._runs)
@@ -251,6 +257,9 @@ class _RecoverStaleSession:
         if model is AgentRun:
             return self._agent_runs.get(value)
         return None
+
+    def add(self, value):
+        self.added.append(value)
 
 
 class _SingleRunSession:
@@ -998,8 +1007,10 @@ def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch):
 
 
 def test_cycle_route_scope_uses_workspace_when_available():
-    conditions = cycles_router._cycle_scope_conditions(
-        {"id": "user-2", "org_id": "org-1", "principal_type": "human"}
+    conditions = cycle_access.cycle_scope_conditions(
+        cycle_access.CycleActor.from_user_payload(
+            {"id": "user-2", "org_id": "org-1", "principal_type": "human"}
+        )
     )
 
     compiled = str(
@@ -1012,9 +1023,11 @@ def test_cycle_route_scope_uses_workspace_when_available():
 
 
 def test_cycle_target_idea_scope_uses_workspace_when_available():
-    conditions = cycles_router._target_idea_scope_conditions(
+    conditions = cycle_access.target_idea_scope_conditions(
         "idea-1",
-        {"id": "user-2", "org_id": "org-1", "principal_type": "human"},
+        cycle_access.CycleActor.from_user_payload(
+            {"id": "user-2", "org_id": "org-1", "principal_type": "human"}
+        ),
     )
 
     compiled = str(
@@ -1034,7 +1047,7 @@ def test_cycle_executor_target_idea_scope_uses_workspace_with_legacy_fallback():
 
     compiled = str(
         select(Idea.id)
-        .where(cycle_execution._cycle_target_idea_scope_condition(cycle))
+        .where(cycle_access.cycle_target_idea_scope_condition(cycle))
         .compile(compile_kwargs={"literal_binds": True})
     )
 

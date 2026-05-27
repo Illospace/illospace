@@ -5,16 +5,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 
 from brain.platform.db.models.cycle import Cycle, CycleRun
 from brain.platform.db.models.idea import Idea
-from brain.platform.db.models.org import User
 from brain.platform.db.models.run import AgentRun
 from brain.systems.cortex.thought_lifecycle import (
     ThoughtStatusCommand,
     transition_thought_status,
 )
+from brain.systems.cycles.access import cycle_target_idea_scope_condition
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES
 
 
@@ -99,7 +99,7 @@ async def _async_load_target_idea(session, cycle: Cycle) -> Idea | None:
         select(Idea)
         .where(
             Idea.id == cycle.target_idea_id,
-            _cycle_target_idea_scope_condition(cycle),
+            cycle_target_idea_scope_condition(cycle),
         )
         .with_for_update()
     )
@@ -117,16 +117,6 @@ async def _async_idea_has_active_run(session, idea_id: str) -> bool:
     )
     result = await session.execute(stmt)
     return result.first() is not None
-
-
-def _cycle_target_idea_scope_condition(cycle: Cycle):
-    if cycle.org_id:
-        org_user_ids = select(User.id).where(User.org_id == cycle.org_id)
-        return or_(
-            Idea.org_id == cycle.org_id,
-            and_(Idea.org_id.is_(None), Idea.user_id.in_(org_user_ids)),
-        )
-    return Idea.user_id == cycle.user_id
 
 
 def _new_cycle_run_idea(cycle: Cycle, run: CycleRun, *, per_run: bool) -> Idea:

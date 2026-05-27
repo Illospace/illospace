@@ -13,7 +13,6 @@ from brain.platform.db.models.cycle import (
 )
 from brain.systems.cycles.common import (
     CYCLE_LEDGER_OUTPUT_TARGET_TYPE,
-    THREAD_OUTPUT_TARGET_TYPE,
     actor_id,
     actor_type,
     creator_payload,
@@ -26,6 +25,7 @@ from brain.systems.cycles.serializers import (
     serialize_cycle_output_target,
     serialize_cycle_revision,
 )
+from brain.systems.cycles.output_targets import default_output_target_specs
 
 
 async def async_record_cycle_revision(
@@ -201,10 +201,10 @@ def finalize_cycle_run(
     run: CycleRun,
     cycle: Cycle,
     *,
+    session,
     status: str,
     error: str | None = None,
     skip_reason: str | None = None,
-    session=None,
 ) -> None:
     from datetime import datetime, timezone
 
@@ -230,10 +230,10 @@ def finalize_stale_cycle_run(
     run: CycleRun,
     cycle: Cycle | None,
     *,
+    session,
     status: str,
     error: str | None = None,
     skip_reason: str | None = None,
-    session=None,
 ) -> None:
     from datetime import datetime, timezone
 
@@ -274,14 +274,14 @@ def record_cycle_run_evaluation(
     evaluator_type: str = "system",
     evaluator_id: str | None = None,
 ) -> None:
+    if run.id is None:
+        raise ValueError("CycleRun must be flushed before recording an evaluation")
     summary = cycle_run_evaluation_summary(
         status=status,
         error=error,
         skip_reason=skip_reason,
     )
     run.self_review_summary = summary
-    if session is None or not hasattr(session, "add") or run.id is None:
-        return
     session.add(
         CycleRunEvaluation(
             cycle_id=cycle.id,
@@ -332,35 +332,21 @@ async def _async_active_cycle_output_targets(session, cycle_id: int) -> list[Cyc
 
 
 def _ensure_default_output_targets(cycle: Cycle, output_targets: list[dict]) -> None:
-    if not any(target.get("target_type") == CYCLE_LEDGER_OUTPUT_TARGET_TYPE for target in output_targets):
-        output_targets.insert(
-            0,
-            {
-                "target_type": CYCLE_LEDGER_OUTPUT_TARGET_TYPE,
-                "target_id": str(cycle.id),
-                "label": "Cycle ledger",
-                "config": {},
-                "source_type": "system",
-                "rationale": "Implicit durable Cycle memory target.",
-                "is_active": True,
-            },
-        )
-    if cycle.target_idea_id and not any(
-        target.get("target_type") == THREAD_OUTPUT_TARGET_TYPE
-        and target.get("target_id") == str(cycle.target_idea_id)
+    for spec in default_output_target_specs(cycle):
+        if _has_output_target(output_targets, spec.target_type, spec.target_id):
+            continue
+        row = spec.snapshot()
+        if spec.target_type == CYCLE_LEDGER_OUTPUT_TARGET_TYPE:
+            output_targets.insert(0, row)
+        else:
+            output_targets.append(row)
+
+
+def _has_output_target(output_targets: list[dict], target_type: str, target_id: str | None) -> bool:
+    return any(
+        target.get("target_type") == target_type and target.get("target_id") == target_id
         for target in output_targets
-    ):
-        output_targets.append(
-            {
-                "target_type": THREAD_OUTPUT_TARGET_TYPE,
-                "target_id": str(cycle.target_idea_id),
-                "label": "Cycle thread",
-                "config": {},
-                "source_type": "system",
-                "rationale": "Implicit display thread target.",
-                "is_active": True,
-            }
-        )
+    )
 
 
 def cycle_run_evaluation_summary(

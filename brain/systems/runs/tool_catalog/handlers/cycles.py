@@ -5,14 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 
 from brain.platform.db.models.cycle import Cycle
 from brain.platform.db.models.idea import Idea
-from brain.platform.db.models.org import User
 from brain.platform.db.repositories.unit_of_work import UnitOfWork
+from brain.systems.cycles.access import (
+    CycleActor,
+    cycle_scope_conditions,
+    target_idea_scope_conditions,
+)
 from brain.systems.cycles.commands import (
-    CycleMutationActor,
+    UNSET_CYCLE_FIELD,
     async_add_guidance_to_cycle,
     async_add_output_target_to_cycle,
     async_create_cycle,
@@ -55,7 +59,7 @@ class ManageCycleArgs:
 @dataclass(frozen=True)
 class ManageCycleContext:
     args: ManageCycleArgs
-    actor: CycleMutationActor
+    actor: CycleActor
 
 
 CycleAction = Callable[[ManageCycleContext], Awaitable[dict[str, Any]]]
@@ -172,7 +176,7 @@ async def _action_list(ctx: ManageCycleContext) -> dict[str, Any]:
     async with UnitOfWork() as uow:
         result = await uow.session.scalars(
             select(Cycle)
-            .where(*_cycle_scope(ctx.actor))
+            .where(*cycle_scope_conditions(ctx.actor))
             .order_by(Cycle.created_at.desc())
         )
         return {"cycles": [serialize_cycle(cycle) for cycle in result.all()]}
@@ -213,18 +217,15 @@ async def _action_update(ctx: ManageCycleContext) -> dict[str, Any]:
             uow.session,
             cycle,
             actor=ctx.actor,
-            name=_optional_text(args.name),
-            prompt=_optional_text(args.prompt),
-            timezone_name=_optional_text(args.timezone),
-            schedule_expr=_optional_text(args.schedule_expr),
-            run_at=_optional_text(args.run_at),
-            enabled=args.enabled,
-            model_override=args.model_override,
-            model_override_provided=args.model_override is not None,
-            thinking_override=_optional_text(args.thinking_override),
-            thinking_override_provided=args.thinking_override is not None,
-            target_idea_id=update_target_idea_id,
-            target_idea_provided=args.target_idea_id is not None,
+            name=_patch_text(args.name),
+            prompt=_patch_text(args.prompt),
+            timezone_name=_patch_text(args.timezone),
+            schedule_expr=_patch_text(args.schedule_expr),
+            run_at=_patch_text(args.run_at),
+            enabled=_patch_value(args.enabled),
+            model_override=_patch_value(args.model_override),
+            thinking_override=_patch_text(args.thinking_override),
+            target_idea_id=_patch_text(args.target_idea_id),
             guidance=_optional_text(args.guidance),
             rationale=_optional_text(args.rationale),
         )
@@ -308,13 +309,13 @@ CYCLE_ACTIONS: dict[str, CycleAction] = {
 }
 
 
-def _tool_actor(user_id: str) -> CycleMutationActor:
+def _tool_actor(user_id: str) -> CycleActor:
     org_id = getattr(_agent_context, "org_id", None)
     run_id = getattr(_agent_context, "run_id", None)
     if run_id is None:
         run = getattr(_agent_context, "run", None)
         run_id = getattr(run, "run_id", None)
-    return CycleMutationActor(
+    return CycleActor(
         user_id=user_id,
         org_id=str(org_id) if org_id else None,
         principal_type="agent",
@@ -322,50 +323,22 @@ def _tool_actor(user_id: str) -> CycleMutationActor:
     )
 
 
-def _cycle_scope(actor: CycleMutationActor) -> list[Any]:
-    scope = [Cycle.deleted_at.is_(None)]
-    if actor.org_id:
-        org_user_ids = select(User.id).where(User.org_id == actor.org_id)
-        scope.append(
-            or_(
-                Cycle.org_id == actor.org_id,
-                and_(Cycle.org_id.is_(None), Cycle.user_id.in_(org_user_ids)),
-            )
-        )
-    else:
-        scope.append(Cycle.user_id == actor.user_id)
-    return scope
-
-
-def _idea_scope(idea_id: str, actor: CycleMutationActor) -> list[Any]:
-    scope = [Idea.id == idea_id]
-    if actor.org_id:
-        org_user_ids = select(User.id).where(User.org_id == actor.org_id)
-        scope.append(
-            or_(
-                Idea.org_id == actor.org_id,
-                and_(Idea.org_id.is_(None), Idea.user_id.in_(org_user_ids)),
-            )
-        )
-    else:
-        scope.append(Idea.user_id == actor.user_id)
-    return scope
-
-
-async def _load_cycle(session, actor: CycleMutationActor, cycle_id: int | None) -> Cycle:
+async def _load_cycle(session, actor: CycleActor, cycle_id: int | None) -> Cycle:
     if not cycle_id:
         raise ValueError("id is required")
-    result = await session.scalars(select(Cycle).where(Cycle.id == cycle_id, *_cycle_scope(actor)))
+    result = await session.scalars(
+        select(Cycle).where(Cycle.id == cycle_id, *cycle_scope_conditions(actor))
+    )
     cycle = result.first()
     if not cycle:
         raise ValueError(f"Cycle {cycle_id} not found")
     return cycle
 
 
-async def _validate_target_idea(session, idea_id: str | None, actor: CycleMutationActor) -> None:
+async def _validate_target_idea(session, idea_id: str | None, actor: CycleActor) -> None:
     if not idea_id:
         return
-    result = await session.execute(select(Idea.id).where(*_idea_scope(idea_id, actor)))
+    result = await session.execute(select(Idea.id).where(*target_idea_scope_conditions(idea_id, actor)))
     if not result.first():
         raise ValueError("target_idea_id must belong to the current workspace")
 
@@ -375,6 +348,14 @@ def _optional_text(value: str | None) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _patch_value(value):
+    return UNSET_CYCLE_FIELD if value is None else value
+
+
+def _patch_text(value: str | None):
+    return UNSET_CYCLE_FIELD if value is None else _optional_text(value)
 
 
 def _int_required(value: str | None, field_name: str) -> int:
