@@ -262,14 +262,6 @@ export function addBrowserThreadSidePanelTab(
   };
 }
 
-export function openBrowserThreadSidePanelTab(
-  state: ThreadSidePanelTabState,
-): ThreadSidePanelTabState {
-  const existing = state.tabs.find((tab) => tab.kind === 'browser');
-  if (existing) return { ...state, activeTabId: existing.id };
-  return addBrowserThreadSidePanelTab(state);
-}
-
 export function openSingletonThreadSidePanelTab(
   state: ThreadSidePanelTabState,
   kind: ThreadStageRightDockSingletonKind,
