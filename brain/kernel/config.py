@@ -115,6 +115,8 @@ VAULT_MASTER_KEY = os.getenv("VAULT_MASTER_KEY", "")
 
 DB_POOL_MIN = int(os.getenv("DB_POOL_MIN", "1"))
 DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
+DB_POOL_OVERFLOW = int(os.getenv("DB_POOL_OVERFLOW", "0"))
+DB_POOL_TIMEOUT_SECONDS = float(os.getenv("DB_POOL_TIMEOUT_SECONDS", "10"))
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------

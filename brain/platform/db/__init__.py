@@ -36,6 +36,8 @@ def _engine_kwargs_for_environment(env: Mapping[str, str] | None = None) -> dict
         kwargs["poolclass"] = NullPool
         return kwargs
     kwargs["pool_size"] = config.DB_POOL_MAX
+    kwargs["max_overflow"] = config.DB_POOL_OVERFLOW
+    kwargs["pool_timeout"] = config.DB_POOL_TIMEOUT_SECONDS
     return kwargs
 
 

@@ -70,4 +70,6 @@ def test_runtime_engine_keeps_pool_for_single_loop_runtime():
     kwargs = _engine_kwargs_for_environment({})
 
     assert kwargs["pool_size"] == config.DB_POOL_MAX
+    assert kwargs["max_overflow"] == config.DB_POOL_OVERFLOW
+    assert kwargs["pool_timeout"] == config.DB_POOL_TIMEOUT_SECONDS
     assert "poolclass" not in kwargs
