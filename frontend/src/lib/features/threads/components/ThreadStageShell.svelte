@@ -1,4 +1,5 @@
 <script lang="ts">
+  import WorkspaceStageShell from '$lib/components/layout/WorkspaceStageShell.svelte';
   import type { Snippet } from 'svelte';
 
   type ThreadEdgeSide = 'top' | 'right' | 'bottom' | 'left';
@@ -77,92 +78,39 @@
   }
 </script>
 
-<div class="thread-stage-shell" class:entering={entering} class:ready={ready} style={shellStyle}>
-  {#if peripherySignals.length > 0}
-    <div class="thread-periphery-layer" aria-hidden="true">
-      {#each peripherySignals as cue, index (`${cue.side}-${Math.round(cue.offset)}-${index}`)}
-        <div
-          class={`thread-edge-signal side-${cue.side} kind-${cue.kind} ${cue.related ? 'is-related' : ''}`}
-          style={`--signal-offset:${cue.offset}%; --signal-color:${cue.color}; --signal-rgb:${cue.rgb}; --signal-strength:${cue.strength}; --signal-duration:${cue.pulseMs}ms; --signal-span:${cue.span}px; --signal-opacity:${cue.opacity};`}
-        >
-          <div class="thread-edge-aura"></div>
-          <div class="thread-edge-core"></div>
-          {#if cue.count > 1}
-            <div class="thread-edge-trace"></div>
-          {/if}
-        </div>
-      {/each}
-    </div>
-  {/if}
+<WorkspaceStageShell
+  className="thread-stage-shell"
+  frameClassName="thread-stage-frame"
+  {entering}
+  {ready}
+  style={shellStyle}
+  dismissLabel="Leave thread"
+  dismissCursor="zoom-out"
+  ondismiss={handleDismiss}
+>
+  {#snippet periphery()}
+    {#if peripherySignals.length > 0}
+      <div class="thread-periphery-layer" aria-hidden="true">
+        {#each peripherySignals as cue, index (`${cue.side}-${Math.round(cue.offset)}-${index}`)}
+          <div
+            class={`thread-edge-signal side-${cue.side} kind-${cue.kind} ${cue.related ? 'is-related' : ''}`}
+            style={`--signal-offset:${cue.offset}%; --signal-color:${cue.color}; --signal-rgb:${cue.rgb}; --signal-strength:${cue.strength}; --signal-duration:${cue.pulseMs}ms; --signal-span:${cue.span}px; --signal-opacity:${cue.opacity};`}
+          >
+            <div class="thread-edge-aura"></div>
+            <div class="thread-edge-core"></div>
+            {#if cue.count > 1}
+              <div class="thread-edge-trace"></div>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+  {/snippet}
 
-  <button
-    type="button"
-    class="thread-stage-edge-dismiss"
-    tabindex="-1"
-    aria-label="Leave thread"
-    onclick={handleDismiss}
-  ></button>
-
-  <div class="thread-stage-frame">
-    {@render children?.()}
-  </div>
-</div>
+  {@render children?.()}
+</WorkspaceStageShell>
 
 <style>
-  .thread-stage-shell {
-    --thread-origin-x: 50%;
-    --thread-origin-y: 56%;
-    --thread-stage-frame-width: clamp(1040px, 78vw, 1760px);
-    position: absolute;
-    inset: 0;
-    z-index: 25;
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
-    padding: clamp(18px, 2.4vw, 30px);
-    box-sizing: border-box;
-    pointer-events: auto;
-    opacity: 1;
-  }
-
-  .thread-stage-frame {
-    width: min(100%, var(--thread-stage-frame-width));
-    height: calc(100% - 6px);
-    max-height: 100%;
-    pointer-events: none;
-    transform-origin: 50% 54%;
-    position: relative;
-    z-index: 3;
-    overflow: visible;
-    isolation: isolate;
-    opacity: 0;
-    transform: translate3d(0, 10px, 0) scale(0.985);
-    will-change: opacity, transform;
-    transition:
-      opacity 180ms cubic-bezier(0.22, 1, 0.36, 1),
-      transform 340ms cubic-bezier(0.18, 0.95, 0.32, 1);
-  }
-
-  .thread-stage-frame > * {
-    pointer-events: auto;
-  }
-
-  .thread-stage-shell.ready .thread-stage-frame {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-
-  .thread-stage-edge-dismiss {
-    position: absolute;
-    inset: 0;
-    z-index: 1;
-    border: 0;
-    padding: 0;
-    margin: 0;
-    background: transparent;
-    cursor: zoom-out;
-  }
-
   .thread-periphery-layer {
     position: absolute;
     inset: 0;
@@ -332,29 +280,7 @@
     }
   }
 
-  .thread-stage-shell.entering {
-    animation: thread-shell-presence 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  }
-
-  @keyframes thread-shell-presence {
-    0% {
-      opacity: 0;
-    }
-    100% {
-      opacity: 1;
-    }
-  }
-
   @media (max-width: 900px) {
-    .thread-stage-shell {
-      padding: 6px 10px 4px;
-    }
-
-    .thread-stage-frame {
-      width: calc(100% - 18px);
-      height: calc(100% - 6px);
-    }
-
     .thread-edge-signal.side-left,
     .thread-edge-signal.side-right {
       width: 108px;
@@ -367,18 +293,10 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .thread-stage-shell,
     .thread-edge-aura,
     .thread-edge-core,
     .thread-edge-trace {
       animation: none !important;
-    }
-
-    .thread-stage-frame {
-      transition: none;
-      opacity: 1;
-      transform: none;
-      filter: none;
     }
   }
 </style>

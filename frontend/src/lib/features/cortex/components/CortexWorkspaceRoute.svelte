@@ -4,6 +4,7 @@
   import { page } from '$app/stores';
   import { onMount, onDestroy, type Component } from 'svelte';
   import { fly } from 'svelte/transition';
+  import WorkspaceStageShell from '$lib/components/layout/WorkspaceStageShell.svelte';
   import type { AppNotification } from '$lib/features/notifications/api/notificationsApi';
   import type { WorkspaceAppRead } from '$lib/features/workspace-apps/api/workspaceAppsApi';
   import type { WorkspacePinRead } from '$lib/features/workspace-scene/api/workspacePinsApi';
@@ -1151,21 +1152,25 @@
     {/if}
 
     {#if !cortex.panelOpen && activeWorkspaceApp && GeneratedAppRendererComponent}
-      <button
-        type="button"
-        class="workspace-app-dismiss-surface"
-        tabindex="-1"
-        aria-label="Close generated app"
-        onclick={() => workspaceOverlay.closeWorkspaceApp()}
-      ></button>
-
-      <div
-        class="workspace-app-overlay"
-        in:fly={{ y: 42, duration: 240 }}
-        out:fly={{ y: 28, duration: 160 }}
+      <WorkspaceStageShell
+        className="workspace-app-stage"
+        frameClassName="workspace-app-stage-frame"
+        zIndex={29}
+        dismissLabel="Close generated app"
+        ondismiss={() => workspaceOverlay.closeWorkspaceApp()}
       >
-        <GeneratedAppRendererComponent app={activeWorkspaceApp} onclose={() => workspaceOverlay.closeWorkspaceApp()} />
-      </div>
+        <div
+          class="workspace-app-overlay"
+          in:fly={{ y: 42, duration: 240 }}
+          out:fly={{ y: 28, duration: 160 }}
+        >
+          <GeneratedAppRendererComponent
+            app={activeWorkspaceApp}
+            surface="stage"
+            onclose={() => workspaceOverlay.closeWorkspaceApp()}
+          />
+        </div>
+      </WorkspaceStageShell>
     {/if}
 
     {#if activeWorkspacePageModal}
@@ -1356,22 +1361,6 @@
     z-index: 0;
   }
 
-  .workspace-app-dismiss-surface {
-    position: absolute;
-    inset: 0;
-    z-index: 18;
-    border: 0;
-    padding: 0;
-    margin: 0;
-    background: transparent;
-    cursor: default;
-  }
-
-  .workspace-app-dismiss-surface:focus,
-  .workspace-app-dismiss-surface:focus-visible {
-    outline: none;
-  }
-
   .workspace-top-tools {
     display: inline-flex;
     align-items: center;
@@ -1467,25 +1456,17 @@
   }
 
   .workspace-app-overlay {
-    position: absolute;
-    top: 88px;
-    left: 50%;
-    bottom: 22px;
-    z-index: 29;
     display: flex;
-    width: min(1040px, calc(100% - 132px));
+    width: 100%;
+    height: 100%;
     min-width: 0;
     min-height: 0;
-    translate: -50% 0;
-    justify-content: center;
-    pointer-events: auto;
   }
 
   .workspace-app-overlay > :global(*) {
     flex: 1 1 auto;
     min-width: 0;
     min-height: 0;
-    overflow: auto;
   }
 
   .cortex-main {
@@ -1643,12 +1624,6 @@
       --constellation-workspace-backdrop-composer-width: clamp(300px, 40vw, 440px);
     }
 
-    .workspace-app-overlay {
-      top: 76px;
-      left: 50%;
-      bottom: 16px;
-      width: calc(100% - 20px);
-    }
   }
 
   @media (max-width: 700px) {

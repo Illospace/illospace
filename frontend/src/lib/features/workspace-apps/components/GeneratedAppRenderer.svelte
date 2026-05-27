@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { WorkspaceAppRead } from '$lib/features/workspace-apps/api/workspaceAppsApi';
   import { ConstellationIcon, ConstellationPill } from '$lib/components/constellation';
+  import type { GeneratedAppSurface } from '$lib/features/workspace-apps/domain/generatedAppSurface';
 
   import AppCapsuleRenderer from './AppCapsuleRenderer.svelte';
   import GeneratedHtmlAppRuntime from './GeneratedHtmlAppRuntime.svelte';
@@ -12,7 +13,7 @@
     onclose,
   }: {
     app: WorkspaceAppRead | null;
-    surface?: 'workspace' | 'dock';
+    surface?: GeneratedAppSurface;
     onclose?: () => void;
   } = $props();
 
@@ -49,7 +50,11 @@
 {:else if app && canRenderHtml}
   <GeneratedHtmlAppRuntime {app} {surface} {onclose} />
 {:else if app}
-  <section class="generated-app-unsupported generated-app-shell" class:is-dock={surface === 'dock'}>
+  <section
+    class="generated-app-unsupported generated-app-shell"
+    class:is-dock={surface === 'dock'}
+    class:is-stage={surface === 'stage'}
+  >
     <div class="generated-app-unsupported__glyph" aria-hidden="true">
       <ConstellationIcon name="code" size={18} stroke={1.9} />
     </div>
@@ -76,6 +81,11 @@
   width: 100%;
   min-height: 100%;
   border-radius: 0;
+}
+
+.generated-app-unsupported.is-stage {
+  width: 100%;
+  min-height: 100%;
 }
 
 .generated-app-unsupported__glyph {

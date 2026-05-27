@@ -16,11 +16,14 @@
     updateDomainRecord,
     type WorkspaceAppRead,
   } from '$lib/features/workspace-apps/api/workspaceAppsApi';
-  import { ConstellationIcon, ConstellationIconButton, ConstellationPill } from '$lib/components/constellation';
+  import { ConstellationPill } from '$lib/components/constellation';
+  import type { GeneratedAppSurface } from '$lib/features/workspace-apps/domain/generatedAppSurface';
   import { theme } from '$lib/stores/theme.svelte';
   import { workspaceApps } from '$lib/stores/workspaceApps.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import { normalizeDomainRequest, withDomainRecordAliases } from '$lib/utils/generatedAppBridge';
+
+  import GeneratedAppChrome from './GeneratedAppChrome.svelte';
 
   type RuntimeMessage = {
     source?: string;
@@ -47,7 +50,7 @@
     onclose,
   }: {
     app: WorkspaceAppRead;
-    surface?: 'workspace' | 'dock';
+    surface?: GeneratedAppSurface;
     onclose?: () => void;
   } = $props();
 
@@ -972,12 +975,6 @@
     sendInit({ force: true });
   }
 
-  function handleCloseClick(event: MouseEvent) {
-    event.preventDefault();
-    event.stopPropagation();
-    onclose?.();
-  }
-
   onMount(() => {
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
@@ -998,25 +995,18 @@
   });
 </script>
 
-<section class="generated-html-app generated-app-shell" class:is-dock={surface === 'dock'} aria-label={app.name}>
-  <header class="generated-html-app__header generated-app-shell__header">
-    <div class="generated-html-app__identity">
-      <span class="generated-html-app__dot" style={`--app-accent:${appAccent}`} aria-hidden="true"></span>
-      <div>
-        <span class="generated-html-app__eyebrow">Generated app</span>
-        <h2>{app.name}</h2>
-      </div>
-    </div>
-
-    <div class="generated-html-app__actions">
-      <ConstellationPill variant={saving ? 'warning' : 'info'} leadingDot>{saving ? 'saving' : loading ? 'loading' : versionLabel}</ConstellationPill>
-      {#if onclose}
-        <ConstellationIconButton label="Close generated app" variant="quiet" size="md" onclick={handleCloseClick}>
-          <ConstellationIcon name="close" size={15} stroke={2} />
-        </ConstellationIconButton>
-      {/if}
-    </div>
-  </header>
+<GeneratedAppChrome
+  className="generated-html-app"
+  title={app.name}
+  eyebrow="Generated app"
+  accent={appAccent}
+  {surface}
+  {onclose}
+  closeLabel="Close generated app"
+>
+  {#snippet actions()}
+    <ConstellationPill variant={saving ? 'warning' : 'info'} leadingDot>{saving ? 'saving' : loading ? 'loading' : versionLabel}</ConstellationPill>
+  {/snippet}
 
   <iframe
     bind:this={iframeEl}
@@ -1026,10 +1016,10 @@
     {srcdoc}
     onload={handleFrameLoad}
   ></iframe>
-</section>
+</GeneratedAppChrome>
 
 <style>
-.generated-html-app {
+:global(.generated-app-chrome.generated-html-app) {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   width: min(760px, calc(100vw - 28px));
@@ -1040,66 +1030,11 @@
   border-radius: 22px;
 }
 
-.generated-html-app.is-dock {
+:global(.generated-app-chrome.generated-html-app.is-dock) {
   width: 100%;
   height: 100%;
   min-height: 0;
   border-radius: 0;
-}
-
-.generated-html-app__header {
-  position: relative;
-  z-index: 2;
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 13px 14px;
-}
-
-.generated-html-app.is-dock .generated-html-app__header {
-  padding-inline: 0;
-}
-
-.generated-html-app__identity,
-.generated-html-app__actions {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-}
-
-.generated-html-app__dot {
-  --app-accent: var(--positive);
-  width: 12px;
-  height: 12px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--app-accent);
-  box-shadow: 0 0 18px color-mix(in srgb, var(--app-accent) 42%, transparent);
-}
-
-.generated-html-app__eyebrow {
-  display: block;
-  color: var(--constellation-label-meta);
-  font-family: var(--constellation-font-mono);
-  font-size: 9px;
-  font-weight: 680;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-.generated-html-app h2 {
-  overflow: hidden;
-  margin: 2px 0 0;
-  color: var(--constellation-section-title);
-  font-size: 14px;
-  font-weight: 720;
-  letter-spacing: 0;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .generated-html-app__frame {
@@ -1112,7 +1047,7 @@
 }
 
 @media (max-width: 720px) {
-  .generated-html-app {
+  :global(.generated-app-chrome.generated-html-app) {
     width: calc(100vw - 20px);
     height: min(720px, calc(100vh - 74px));
     min-height: 320px;
