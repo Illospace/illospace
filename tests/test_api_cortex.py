@@ -1962,6 +1962,48 @@ def test_project_profile_read_includes_visibility_and_access():
     assert payload.project_context["slug"] == "yc"
 
 
+def test_project_profile_read_includes_root_file_and_repo_counts(tmp_path, monkeypatch):
+    from brain.systems.cortex.project_context.profiles import profile_to_read
+
+    workspace_root = tmp_path / "workspaces"
+    root = workspace_root / "project-roots" / "project-1"
+    root.mkdir(parents=True)
+    (root / "README.md").write_text("Project notes", encoding="utf-8")
+    (root / "docs").mkdir()
+    (root / "docs" / "summary.md").write_text("Summary", encoding="utf-8")
+    (root / ".illo-project-history").mkdir()
+    (root / ".illo-project-history" / "internal.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+
+    profile = SimpleNamespace(
+        id="project-1",
+        org_id="org-1",
+        user_id="owner-1",
+        slug="yc",
+        name="YC",
+        description=None,
+        project_context={
+            "resources": [
+                {"kind": "github_repo", "repo": "Illospace/illospace"},
+                {"kind": "file", "path": "README.md"},
+            ]
+        },
+        visibility="private",
+        default_environment_binding_id=None,
+        active=True,
+        metadata_={},
+        created_at=None,
+    )
+
+    summary = profile_to_read(profile).content_summary
+
+    assert summary.root_exists is True
+    assert summary.file_count == 2
+    assert summary.file_count_exact is True
+    assert summary.repo_count == 1
+    assert summary.resource_count == 2
+
+
 def test_project_profile_create_defaults_private():
     from brain.systems.cortex.project_context.schemas import ProjectProfileCreate
 

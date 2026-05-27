@@ -644,7 +644,14 @@
   }
 
   .right-dock-project {
+    align-items: stretch;
     overflow: visible;
+  }
+
+  .right-dock-project > :global(*) {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
   }
 
   .right-dock-vault {

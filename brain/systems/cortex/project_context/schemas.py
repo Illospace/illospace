@@ -41,6 +41,14 @@ class ProjectProfileAccessRead(BaseModel):
     created_at: datetime | None = None
 
 
+class ProjectProfileContentSummary(BaseModel):
+    root_exists: bool = False
+    file_count: int = 0
+    file_count_exact: bool = True
+    repo_count: int = 0
+    resource_count: int = 0
+
+
 class ProjectProfileRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -55,6 +63,7 @@ class ProjectProfileRead(BaseModel):
     access: list[ProjectProfileAccessRead] = Field(default_factory=list)
     default_environment_binding_id: int | None = None
     active: bool = True
+    content_summary: ProjectProfileContentSummary = Field(default_factory=ProjectProfileContentSummary)
     metadata_: dict[str, Any] | None = Field(default=None, alias="metadata")
     created_at: datetime | None = None
 

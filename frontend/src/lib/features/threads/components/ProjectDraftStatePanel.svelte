@@ -53,6 +53,8 @@
     name: string;
     subtitle: string;
     group: 'attached' | 'recent';
+    contentLabels: string[];
+    searchText: string;
   };
 
   let {
@@ -115,6 +117,7 @@
     selectedProjectItem?.subtitle
       ?? (selectedProjectProfileId ? 'Accessible project' : 'Current thread Project'),
   );
+  const selectedProjectContentLabels = $derived(selectedProjectItem?.contentLabels ?? []);
   const selectedFile = $derived(
     fileBrowser.files.find((file) => file.key === selectedFileKey) ?? null,
   );
@@ -247,6 +250,60 @@
     );
   }
 
+  function positiveInteger(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0
+      ? Math.floor(value)
+      : null;
+  }
+
+  function projectResourcesFromContext(context: any): any[] {
+    return Array.isArray(context?.resources) ? context.resources : [];
+  }
+
+  function projectResourceIsRepo(resource: any): boolean {
+    const kind = projectText(resource?.kind || resource?.type || resource?.resource_type).toLowerCase();
+    const source = projectText(resource?.source || resource?.provider).toLowerCase();
+    const uri = projectText(resource?.uri || resource?.url || resource?.repo_url).toLowerCase();
+    return (
+      ['github', 'github_repo', 'github_repository', 'repo', 'repository'].includes(kind)
+      || ['github', 'git'].includes(source)
+      || Boolean(projectText(resource?.repo))
+      || uri.startsWith('git@')
+      || uri.startsWith('https://github.com/')
+      || uri.startsWith('http://github.com/')
+      || uri.endsWith('.git')
+    );
+  }
+
+  function inferredProjectFileCount(resources: any[]): number {
+    let count = 0;
+    for (const resource of resources) {
+      const explicitCount = positiveInteger(resource?.file_count ?? resource?.uploaded_file_count);
+      if (explicitCount !== null) {
+        count += explicitCount;
+        continue;
+      }
+      const kind = projectText(resource?.kind || resource?.type || resource?.resource_type).toLowerCase();
+      if (kind === 'file' || kind === 'doc') count += 1;
+      if (Array.isArray(resource?.files)) count += resource.files.length;
+      if (Array.isArray(resource?.uploaded_files)) count += resource.uploaded_files.length;
+    }
+    return count;
+  }
+
+  function projectSelectorContentLabels(profile: any, fallbackContext: any = null): string[] {
+    const summary = profile?.content_summary || {};
+    const context = profile?.project_context || fallbackContext || {};
+    const resources = projectResourcesFromContext(context);
+    const summaryFileCount = positiveInteger(summary?.file_count);
+    const fileCount = summaryFileCount ?? inferredProjectFileCount(resources);
+    const repoCount = positiveInteger(summary?.repo_count) ?? resources.filter(projectResourceIsRepo).length;
+    const fileSuffix = summary?.file_count_exact === false ? '+' : '';
+    const labels = [`${fileCount}${fileSuffix} file${fileCount === 1 ? '' : 's'}`];
+    if (repoCount > 0) labels.push(`${repoCount} repo${repoCount === 1 ? '' : 's'}`);
+    return labels;
+  }
+
   function projectSelectorOptions(
     profiles: ThreadProjectContextProfile[],
     attachments: ThreadProjectContextAttachment[],
@@ -266,11 +323,14 @@
       const profile = profilesById.get(id);
       const snapshot = (attachment as any)?.snapshot;
       const name = projectText((profile as any)?.name) || projectNameFromSnapshot(snapshot);
+      const contentLabels = projectSelectorContentLabels(profile, snapshot);
       attached.push({
         id,
         name,
         subtitle: 'Attached project',
         group: 'attached',
+        contentLabels,
+        searchText: contentLabels.join(' '),
       });
     }
 
@@ -279,11 +339,14 @@
       const id = projectText((profile as any)?.id);
       if (!id || seen.has(id)) continue;
       const name = projectText((profile as any)?.name) || projectText((profile as any)?.slug) || 'Project';
+      const contentLabels = projectSelectorContentLabels(profile);
       recent.push({
-          id,
-          name,
-          subtitle: 'Recent project',
+        id,
+        name,
+        subtitle: 'Recent project',
         group: 'recent',
+        contentLabels,
+        searchText: contentLabels.join(' '),
       });
     }
 
@@ -301,7 +364,7 @@
       .filter(Boolean);
     if (terms.length === 0) return items;
     return items.filter((item) => {
-      const blob = `${item.name} ${item.subtitle} ${item.group}`.toLowerCase();
+      const blob = `${item.name} ${item.subtitle} ${item.group} ${item.searchText}`.toLowerCase();
       return terms.every((term) => blob.includes(term));
     });
   }
@@ -581,6 +644,13 @@
             <span class="project-draft-kicker">Project</span>
             <strong>{selectedProjectLabel}</strong>
             <small>{selectedProjectSubtitle}</small>
+            {#if selectedProjectContentLabels.length > 0}
+              <span class="project-selector-counts" aria-label="Selected Project contents">
+                {#each selectedProjectContentLabels as label (label)}
+                  <span>{label}</span>
+                {/each}
+              </span>
+            {/if}
           </span>
           <span class="project-selector-action">
             {projectSelectorItems.length > 1 ? 'Switch' : projectsLoading ? 'Loading' : 'Current'}
@@ -622,11 +692,18 @@
                           aria-selected={project.id === selectedProjectProfileId}
                           onclick={() => selectProjectProfile(project.id)}
                         >
-                          <span>
+                          <span class="project-selector-option-copy">
                             <strong>{project.name}</strong>
                             <small>{project.subtitle}</small>
                           </span>
-                          <em>{project.id === selectedProjectProfileId ? 'Current' : 'Open'}</em>
+                          <span class="project-selector-option-aside">
+                            <span class="project-selector-option-counts" aria-label="Project contents">
+                              {#each project.contentLabels as label (label)}
+                                <span>{label}</span>
+                              {/each}
+                            </span>
+                            <em>{project.id === selectedProjectProfileId ? 'Current' : 'Open'}</em>
+                          </span>
                         </button>
                       {/each}
                     </div>
@@ -1028,7 +1105,9 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+    flex: 1 1 auto;
     width: 100%;
+    min-height: 100%;
     min-width: 0;
     color: rgba(239, 244, 251, 0.86);
     font-size: 12px;
@@ -1129,6 +1208,8 @@
   }
 
   .project-selector-copy {
+    display: grid;
+    gap: 3px;
     min-width: 0;
   }
 
@@ -1149,7 +1230,6 @@
 
   .project-selector-copy small {
     display: block;
-    margin-top: 3px;
     overflow: hidden;
     color: rgba(231, 238, 247, 0.52);
     font-family: var(--constellation-font-mono, var(--font-mono));
@@ -1161,6 +1241,35 @@
 
   :global(:root[data-color-scheme='light']) .project-selector-copy small {
     color: rgba(82, 98, 111, 0.66);
+  }
+
+  .project-selector-counts,
+  .project-selector-option-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .project-selector-counts span,
+  .project-selector-option-counts span {
+    display: inline-flex;
+    align-items: center;
+    min-height: 18px;
+    border-radius: 6px;
+    padding: 2px 6px;
+    background: rgba(255, 255, 255, 0.055);
+    color: rgba(231, 238, 247, 0.62);
+    font-family: var(--constellation-font-mono, var(--font-mono));
+    font-size: 9px;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  :global(:root[data-color-scheme='light']) .project-selector-counts span,
+  :global(:root[data-color-scheme='light']) .project-selector-option-counts span {
+    background: rgba(85, 104, 120, 0.06);
+    color: rgba(57, 70, 82, 0.7);
   }
 
   .project-selector-action {
@@ -1298,6 +1407,21 @@
     text-align: left;
     font: inherit;
     cursor: pointer;
+  }
+
+  .project-selector-option-copy,
+  .project-selector-option-aside {
+    min-width: 0;
+  }
+
+  .project-selector-option-aside {
+    display: grid;
+    justify-items: end;
+    gap: 4px;
+  }
+
+  .project-selector-option-counts {
+    justify-content: flex-end;
   }
 
   .project-selector-option:hover,
