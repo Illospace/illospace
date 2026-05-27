@@ -661,10 +661,10 @@ BRAIN_TOOLS = [
     {
         "name": "manage_cycle",
         "description": (
-            "Create, update, delete, list, or manually run workspace Cycles, which are recurring "
+            "Create, update, delete, list, manually run, or orient workspace Cycles, which are recurring "
             "Illo prompts/check-ins/reports or one-time reminders. This is the action tool. For answering questions about "
             "which Cycles exist or what ran recently, prefer read_cycles first. Actions: 'create', "
-            "'list', 'update', 'delete', 'run'. Use action='help' or action='schema' with operation to inspect "
+            "'list', 'update', 'delete', 'run', 'add_guidance', 'add_output_target', 'remove_output_target'. Use action='help' or action='schema' with operation to inspect "
             "arguments before mutating."
         ),
         "input_schema": {
@@ -672,7 +672,18 @@ BRAIN_TOOLS = [
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["help", "schema", "create", "list", "update", "delete", "run"],
+                    "enum": [
+                        "help",
+                        "schema",
+                        "create",
+                        "list",
+                        "update",
+                        "delete",
+                        "run",
+                        "add_guidance",
+                        "add_output_target",
+                        "remove_output_target",
+                    ],
                     "description": "What to do. Use help/schema to inspect cycle operations before mutating.",
                 },
                 "operation": {
@@ -710,6 +721,30 @@ BRAIN_TOOLS = [
                 "reopen_archived": {
                     "type": "boolean",
                     "description": "Archived cycle thoughts are reopened automatically",
+                },
+                "guidance": {
+                    "type": "string",
+                    "description": "Durable guidance to add to a Cycle or seed at creation.",
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": "Why this Cycle change is useful. Required by convention for autonomous changes.",
+                },
+                "output_target_type": {
+                    "type": "string",
+                    "description": "Output target type, such as cycle_ledger, thread, domain, project_file, workspace_app, or chat.",
+                },
+                "output_target_id": {
+                    "type": "string",
+                    "description": "Identifier for the output target; for remove_output_target this is the numeric CycleOutputTarget id.",
+                },
+                "output_target_label": {
+                    "type": "string",
+                    "description": "Human label for the output target.",
+                },
+                "output_target_config": {
+                    "type": "object",
+                    "description": "Optional structured output target configuration.",
                 },
             },
             "required": ["action"],

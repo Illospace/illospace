@@ -51,6 +51,11 @@ class _FirstResult:
     def first(self):
         return self._value
 
+    def scalar_one(self):
+        if isinstance(self._value, tuple):
+            return 0
+        return self._value if self._value is not None else 0
+
 
 class _AllResult:
     def __init__(self, values):
@@ -72,6 +77,7 @@ class _RouterCycleResult:
 class _RouterCycleSession:
     def __init__(self, cycle):
         self._cycle = cycle
+        self.added = []
         self.flushed = False
         self.refreshed = False
         self.committed = False
@@ -82,8 +88,14 @@ class _RouterCycleSession:
     async def execute(self, statement):
         return _FirstResult((self._cycle.target_idea_id,))
 
+    def add(self, value):
+        self.added.append(value)
+
     async def flush(self):
         self.flushed = True
+        for index, value in enumerate(self.added, start=1):
+            if getattr(value, "id", None) is None:
+                value.id = index
 
     async def refresh(self, obj):
         assert obj is self._cycle
@@ -122,6 +134,8 @@ class _ExecuteCycleSession:
         for value in self.added:
             if value.__class__.__name__ == "IdeaThread" and getattr(value, "id", None) is None:
                 value.id = 123
+            if value.__class__.__name__ == "Idea" and getattr(value, "id", None) is None:
+                value.id = uuid4()
 
 
 class _AsyncUnitOfWorkFactory:
@@ -648,11 +662,12 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
     assert cycle.last_status == "running"
     assert admissions[0]["metadata"]["origin"] == "cycle"
     assert admissions[0]["metadata"]["launch_envelope"]["origin"] == "scheduled_cycle"
+    assert admissions[0]["metadata"]["launch_envelope"]["launch_mode"] == "background_cycle_run"
     assert admissions[0]["metadata"]["launch_envelope"]["active_instruction_source"] == "cycle.prompt"
     assert admissions[0]["metadata"]["context_policy"]["prior_thread_role"] == "context_only"
-    assert admissions[0]["metadata"]["tool_policy"]["disabled_tools"] == ["manage_cycle"]
+    assert "tool_policy" not in admissions[0]["metadata"]
     assert "Scheduled Prompt Launch" in admissions[0]["message"]
-    assert "Prior thread messages are background context only" in admissions[0]["message"]
+    assert "Thread messages are output/context surfaces" in admissions[0]["message"]
 
 
 @pytest.mark.asyncio
@@ -720,7 +735,89 @@ async def test_async_execute_cycle_run_uses_native_uow_without_sync_bridges(monk
     assert run.status == "running"
     assert cycle.last_status == "running"
     assert admissions[0]["metadata"]["origin"] == "cycle"
-    assert admissions[0]["metadata"]["tool_policy"]["disabled_tools"] == ["manage_cycle"]
+    assert "tool_policy" not in admissions[0]["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_execute_cycle_run_creates_execution_thread_when_target_thread_is_busy(monkeypatch):
+    target_idea_id = uuid4()
+
+    run = CycleRun()
+    run.id = 12
+    run.cycle_id = 5
+    run.status = "queued"
+    run.scheduled_for = datetime(2026, 4, 28, 20, 20, tzinfo=timezone.utc)
+    run.prompt_snapshot = "Summarize the newest news"
+
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.user_id = "user-1"
+    cycle.org_id = "org-1"
+    cycle.name = "Daily Anthropic news summary"
+    cycle.prompt = "Summarize the newest news"
+    cycle.schedule_expr = "20 16 * * *"
+    cycle.timezone = "America/Toronto"
+    cycle.target_idea_id = target_idea_id
+    cycle.deleted_at = None
+    cycle.model_override = None
+    cycle.thinking_override = None
+
+    target_idea = Idea()
+    target_idea.id = target_idea_id
+    target_idea.title = "Daily Anthropic news summary"
+    target_idea.display_title = None
+    target_idea.description = "Summarize the newest news"
+    target_idea.status = "working"
+    target_idea.origin = "cycle"
+    target_idea.origin_ref = "cycle:5"
+    target_idea.salience_score = None
+    target_idea.position_x = None
+    target_idea.position_y = None
+    target_idea.created_at = None
+    target_idea.updated_at = None
+    target_idea.user_id = "user-1"
+    target_idea.org_id = "org-1"
+    target_idea.archived_at = None
+    target_idea.active_agents = []
+    target_idea.attachments = []
+
+    session = _AsyncExecuteCycleSession(
+        run=run,
+        cycle=cycle,
+        idea=target_idea,
+        expected_run_id=run.id,
+    )
+    admissions = []
+
+    async def fake_async_admit(*args, **kwargs):
+        admissions.append(kwargs)
+        return 77
+
+    async def fake_idea_has_active_run(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(service, "_async_idea_has_active_run", fake_idea_has_active_run)
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fake_async_admit)
+    monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
+
+    await service.async_execute_cycle_run(run.id)
+
+    created_ideas = [item for item in session.added if isinstance(item, Idea)]
+    assert len(created_ideas) == 1
+    assert created_ideas[0].origin == "cycle_run"
+    assert str(run.idea_id) == str(created_ideas[0].id)
+    assert str(cycle.target_idea_id) == str(target_idea_id)
+    assert run.status == "running"
+    assert run.skip_reason is None
+    assert admissions[0]["idea_id"] == created_ideas[0].id
+    target_ids = {
+        target.get("target_id")
+        for target in admissions[0]["metadata"]["cycle_memory"]["output_targets"]
+        if isinstance(target, dict) and target.get("target_type") == "thread"
+    }
+    assert str(target_idea_id) in target_ids
+    assert str(created_ideas[0].id) in target_ids
 
 
 @pytest.mark.asyncio

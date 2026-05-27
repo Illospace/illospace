@@ -4,8 +4,18 @@ Cycles are database-backed recurring jobs owned by the Illo scheduler.
 
 ## Runtime Model
 
-- Recurring prompts and background work live in the database as `cycles` and
+- Recurring missions and background work live in the database as `cycles` and
   `cycle_runs`.
+- The durable memory source for a Cycle is its database ledger, not the display
+  thread. Threads are output/context targets that can orient future Cycle memory.
+- Mission/configuration changes are recorded as immutable `cycle_revisions`.
+- User or agent guidance is recorded in `cycle_guidance` and snapshotted onto
+  each run.
+- Output destinations are recorded in `cycle_output_targets`. Runs snapshot the
+  active targets so they can repair, replace, or adapt output surfaces without
+  losing the mission.
+- Each terminal run writes a self-review entry to `cycle_run_evaluations` and a
+  short `cycle_runs.self_review_summary`.
 - One-time reminders use the same table with a schedule expression of
   `at:<ISO datetime>`. The scheduler runs them once, clears `next_run_at`, and
   disables the cycle after it claims the run.
@@ -50,13 +60,29 @@ Immediate reliability checklist:
 
 Product redesign checklist:
 
-- [ ] Treat a Cycle as an autonomous recurring mission, not a scheduled message
+- [x] Treat a Cycle as an autonomous recurring mission, not a scheduled message
   inside a thread.
-- [ ] Decouple execution state from thread state; a busy output/context thread
+- [x] Decouple execution state from thread state; a busy output/context thread
   should not make the Cycle skip.
-- [ ] Make cadence, context envelope, output contract, run ledger, and learning
+- [x] Make cadence, context envelope, output contract, run ledger, and learning
   loop first-class primitives.
-- [ ] Keep autonomy broad by default; use system-level safety rules rather than
+- [x] Keep autonomy broad by default; use system-level safety rules rather than
   a Cycle-specific permission layer.
 - [ ] Add visible recovery/observability for stale queued, stale running,
   skipped, and missed-window runs.
+
+Implementation checklist:
+
+- [x] Add workspace creator/maintainer fields to `cycles`.
+- [x] Add `cycle_revisions`, `cycle_guidance`, `cycle_output_targets`, and
+  `cycle_run_evaluations`.
+- [x] Snapshot revision, guidance, output targets, and context onto every new
+  CycleRun.
+- [x] Let Cycle runs call `manage_cycle` and mutate future Cycle guidance/output
+  targets with rationale.
+- [x] Create a per-run execution thread when the target/display thread is busy
+  instead of terminally skipping the run.
+- [x] Record terminal CycleRun self-review summaries in the Cycle ledger.
+- [ ] Surface revision/guidance/output-target editing in first-class UI.
+- [ ] Teach the runtime to extract agent-authored self-review text from final
+  answers instead of the current status-derived summary.

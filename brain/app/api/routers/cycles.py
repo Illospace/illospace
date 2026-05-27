@@ -13,6 +13,9 @@ from brain.app.api.deps import get_db, rate_limit
 from brain.app.api.schemas.cycles import CycleCreate, CycleRead, CycleRunRead, CycleUpdate
 from brain.systems.cycles.events import publish_cycle_change
 from brain.systems.cycles.service import (
+    async_add_cycle_guidance,
+    async_add_cycle_output_target,
+    async_record_cycle_revision,
     async_run_cycle_now,
     build_one_time_schedule_expr,
     compute_next_run_at,
@@ -144,6 +147,10 @@ async def create_cycle(
     cycle = Cycle(
         user_id=user["id"],
         org_id=user.get("org_id"),
+        creator_type=user.get("principal_type") or "user",
+        creator_id=str(user["id"]),
+        maintainer_type=user.get("principal_type") or "user",
+        maintainer_id=str(user["id"]),
         name=name,
         prompt=prompt,
         schedule_expr=schedule_expr,
@@ -161,6 +168,46 @@ async def create_cycle(
     )
     db.add(cycle)
     await db.flush()
+    revision = await async_record_cycle_revision(
+        db,
+        cycle,
+        source_type=user.get("principal_type") or "user",
+        source_id=str(user["id"]),
+        rationale=body.rationale or "Initial Cycle definition.",
+    )
+    await async_add_cycle_output_target(
+        db,
+        cycle,
+        target_type="cycle_ledger",
+        target_id=str(cycle.id),
+        label="Cycle ledger",
+        source_type=user.get("principal_type") or "user",
+        source_id=str(user["id"]),
+        rationale="Every Cycle persists durable memory in its ledger.",
+        revision_id=revision.id,
+    )
+    if cycle.target_idea_id:
+        await async_add_cycle_output_target(
+            db,
+            cycle,
+            target_type="thread",
+            target_id=str(cycle.target_idea_id),
+            label="Cycle thread",
+            source_type=user.get("principal_type") or "user",
+            source_id=str(user["id"]),
+            rationale="Initial display thread for Cycle output.",
+            revision_id=revision.id,
+        )
+    if body.guidance:
+        await async_add_cycle_guidance(
+            db,
+            cycle,
+            guidance=body.guidance,
+            source_type=user.get("principal_type") or "user",
+            source_id=str(user["id"]),
+            rationale=body.rationale,
+            revision_id=revision.id,
+        )
     await db.refresh(cycle)
     payload = serialize_cycle(cycle)
     event = {
@@ -241,6 +288,23 @@ async def update_cycle(
         cycle.next_run_at = next_run_at
     except ValueError as exc:
         raise _bad_request(exc) from exc
+    revision = await async_record_cycle_revision(
+        db,
+        cycle,
+        source_type=user.get("principal_type") or "user",
+        source_id=str(user["id"]),
+        rationale=updates.get("rationale") or "Cycle updated.",
+    )
+    if updates.get("guidance"):
+        await async_add_cycle_guidance(
+            db,
+            cycle,
+            guidance=updates["guidance"],
+            source_type=user.get("principal_type") or "user",
+            source_id=str(user["id"]),
+            rationale=updates.get("rationale"),
+            revision_id=revision.id,
+        )
     await db.flush()
     await db.refresh(cycle)
     payload = serialize_cycle(cycle)

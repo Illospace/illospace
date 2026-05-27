@@ -21,6 +21,12 @@ async def _handle_manage_cycle(
     execution_mode: str | None = None,
     target_idea_id: str | None = None,
     reopen_archived: bool | None = None,
+    guidance: str | None = None,
+    rationale: str | None = None,
+    output_target_type: str | None = None,
+    output_target_id: str | None = None,
+    output_target_label: str | None = None,
+    output_target_config: dict | None = None,
 ):
     return await _handle_manage_cycle_async(
         action=action,
@@ -37,6 +43,12 @@ async def _handle_manage_cycle(
         execution_mode=execution_mode,
         target_idea_id=target_idea_id,
         reopen_archived=reopen_archived,
+        guidance=guidance,
+        rationale=rationale,
+        output_target_type=output_target_type,
+        output_target_id=output_target_id,
+        output_target_label=output_target_label,
+        output_target_config=output_target_config,
     )
 
 
@@ -55,6 +67,12 @@ async def _handle_manage_cycle_async(
     execution_mode: str | None = None,
     target_idea_id: str | None = None,
     reopen_archived: bool | None = None,
+    guidance: str | None = None,
+    rationale: str | None = None,
+    output_target_type: str | None = None,
+    output_target_id: str | None = None,
+    output_target_label: str | None = None,
+    output_target_config: dict | None = None,
 ) -> str:
     action = str(action or "").strip().lower()
     if action in {"help", "schema"}:
@@ -67,8 +85,14 @@ async def _handle_manage_cycle_async(
         compute_next_run_at,
         cycle_defaults,
         REUSABLE_THREAD_EXECUTION_MODE,
+        async_add_cycle_guidance,
+        async_add_cycle_output_target,
+        async_record_cycle_revision,
+        async_remove_cycle_output_target,
         async_run_cycle_now,
         serialize_cycle,
+        serialize_cycle_guidance,
+        serialize_cycle_output_target,
         validate_nonempty_trimmed,
         validate_execution_mode,
         validate_schedule_expr,
@@ -155,6 +179,8 @@ async def _handle_manage_cycle_async(
             thinking = validate_thinking_override(thinking_override)
             normalized_name = validate_nonempty_trimmed(create_name, "name")
             normalized_prompt = validate_nonempty_trimmed(create_prompt, "prompt")
+            create_guidance = _optional_text(guidance)
+            create_rationale = _optional_text(rationale)
             async with UnitOfWork() as uow:
                 if target_idea_id:
                     stmt = select(Idea.id).where(*_idea_scope(target_idea_id))
@@ -164,6 +190,10 @@ async def _handle_manage_cycle_async(
                 cycle = Cycle(
                     user_id=user_id,
                     org_id=org_id,
+                    creator_type="agent",
+                    creator_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                    maintainer_type="agent",
+                    maintainer_id=str(getattr(_agent_context, "run_id", None) or user_id),
                     name=normalized_name,
                     prompt=normalized_prompt,
                     schedule_expr=expr,
@@ -181,6 +211,46 @@ async def _handle_manage_cycle_async(
                 )
                 uow.session.add(cycle)
                 await uow.session.flush()
+                revision = await async_record_cycle_revision(
+                    uow.session,
+                    cycle,
+                    source_type="agent",
+                    source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                    rationale=create_rationale or "Cycle created by manage_cycle.",
+                )
+                await async_add_cycle_output_target(
+                    uow.session,
+                    cycle,
+                    target_type="cycle_ledger",
+                    target_id=str(cycle.id),
+                    label="Cycle ledger",
+                    source_type="agent",
+                    source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                    rationale="Every Cycle persists durable memory in its ledger.",
+                    revision_id=revision.id,
+                )
+                if target_idea_id:
+                    await async_add_cycle_output_target(
+                        uow.session,
+                        cycle,
+                        target_type="thread",
+                        target_id=target_idea_id,
+                        label="Cycle thread",
+                        source_type="agent",
+                        source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                        rationale="Initial display thread for Cycle output.",
+                        revision_id=revision.id,
+                    )
+                if create_guidance:
+                    await async_add_cycle_guidance(
+                        uow.session,
+                        cycle,
+                        guidance=create_guidance,
+                        source_type="agent",
+                        source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                        rationale=create_rationale,
+                        revision_id=revision.id,
+                    )
                 payload = serialize_cycle(cycle)
             publish_cycle_change(
                 action="create",
@@ -202,6 +272,8 @@ async def _handle_manage_cycle_async(
             update_thinking_override = _optional_update_text(thinking_override)
             update_execution_mode = _optional_update_text(execution_mode)
             update_target_idea_id = _optional_update_text(target_idea_id)
+            update_guidance = _optional_update_text(guidance)
+            update_rationale = _optional_update_text(rationale)
             async with UnitOfWork() as uow:
                 stmt = select(Cycle).where(
                     Cycle.id == id,
@@ -247,6 +319,23 @@ async def _handle_manage_cycle_async(
                 cycle.reopen_archived = True
                 cycle.updated_at = datetime.now(dt_timezone.utc)
                 cycle.next_run_at = compute_next_run_at(cycle.schedule_expr, cycle.timezone)
+                revision = await async_record_cycle_revision(
+                    uow.session,
+                    cycle,
+                    source_type="agent",
+                    source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                    rationale=update_rationale or "Cycle updated by manage_cycle.",
+                )
+                if update_guidance:
+                    await async_add_cycle_guidance(
+                        uow.session,
+                        cycle,
+                        guidance=update_guidance,
+                        source_type="agent",
+                        source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                        rationale=update_rationale,
+                        revision_id=revision.id,
+                    )
                 payload = serialize_cycle(cycle)
             publish_cycle_change(
                 action="update",
@@ -305,6 +394,114 @@ async def _handle_manage_cycle_async(
                 target_idea_id=cycle_target_id,
             )
             return json.dumps({"run": payload}, default=str)
+        elif action == "add_guidance":
+            if not id:
+                return json.dumps({"error": "add_guidance requires: id"})
+            guidance_text = _optional_text(guidance)
+            if not guidance_text:
+                return json.dumps({"error": "add_guidance requires: guidance"})
+            async with UnitOfWork() as uow:
+                stmt = select(Cycle).where(
+                    Cycle.id == id,
+                    *_cycle_scope(),
+                )
+                result = await uow.session.scalars(stmt)
+                cycle = result.first()
+                if not cycle:
+                    return json.dumps({"error": f"Cycle {id} not found"})
+                revision = await async_record_cycle_revision(
+                    uow.session,
+                    cycle,
+                    source_type="agent",
+                    source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                    rationale=_optional_text(rationale) or "Cycle guidance added by manage_cycle.",
+                )
+                row = await async_add_cycle_guidance(
+                    uow.session,
+                    cycle,
+                    guidance=guidance_text,
+                    source_type="agent",
+                    source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                    rationale=_optional_text(rationale),
+                    revision_id=revision.id,
+                )
+                payload = serialize_cycle_guidance(row)
+            return json.dumps({"guidance": payload}, default=str)
+        elif action == "add_output_target":
+            if not id:
+                return json.dumps({"error": "add_output_target requires: id"})
+            target_type_text = _optional_text(output_target_type)
+            if not target_type_text:
+                return json.dumps({"error": "add_output_target requires: output_target_type"})
+            async with UnitOfWork() as uow:
+                stmt = select(Cycle).where(
+                    Cycle.id == id,
+                    *_cycle_scope(),
+                )
+                result = await uow.session.scalars(stmt)
+                cycle = result.first()
+                if not cycle:
+                    return json.dumps({"error": f"Cycle {id} not found"})
+                revision = await async_record_cycle_revision(
+                    uow.session,
+                    cycle,
+                    source_type="agent",
+                    source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                    rationale=_optional_text(rationale) or "Cycle output target added by manage_cycle.",
+                )
+                row = await async_add_cycle_output_target(
+                    uow.session,
+                    cycle,
+                    target_type=target_type_text,
+                    target_id=_optional_text(output_target_id),
+                    label=_optional_text(output_target_label),
+                    config=output_target_config,
+                    source_type="agent",
+                    source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                    rationale=_optional_text(rationale),
+                    revision_id=revision.id,
+                )
+                payload = serialize_cycle_output_target(row)
+            return json.dumps({"output_target": payload}, default=str)
+        elif action == "remove_output_target":
+            if not id:
+                return json.dumps({"error": "remove_output_target requires: id"})
+            target_id_text = _optional_text(output_target_id)
+            if not target_id_text:
+                return json.dumps({"error": "remove_output_target requires: output_target_id"})
+            try:
+                output_target_pk = int(target_id_text)
+            except ValueError:
+                return json.dumps({"error": "remove_output_target output_target_id must be the numeric target row id"})
+            async with UnitOfWork() as uow:
+                stmt = select(Cycle).where(
+                    Cycle.id == id,
+                    *_cycle_scope(),
+                )
+                result = await uow.session.scalars(stmt)
+                cycle = result.first()
+                if not cycle:
+                    return json.dumps({"error": f"Cycle {id} not found"})
+                revision = await async_record_cycle_revision(
+                    uow.session,
+                    cycle,
+                    source_type="agent",
+                    source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                    rationale=_optional_text(rationale) or "Cycle output target removed by manage_cycle.",
+                )
+                row = await async_remove_cycle_output_target(
+                    uow.session,
+                    cycle,
+                    target_id=output_target_pk,
+                    source_type="agent",
+                    source_id=str(getattr(_agent_context, "run_id", None) or user_id),
+                    rationale=_optional_text(rationale),
+                    revision_id=revision.id,
+                )
+                if row is None:
+                    return json.dumps({"error": f"Cycle output target {output_target_pk} not found"})
+                payload = serialize_cycle_output_target(row)
+            return json.dumps({"output_target": payload}, default=str)
         else:
             return json.dumps({"error": f"Unknown action: {action}"})
     except ValueError as e:

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from brain.systems.cortex.events import publish
 from brain.systems.cortex.thought_lifecycle import (
@@ -19,7 +19,14 @@ from brain.systems.cortex.thought_lifecycle import (
 )
 from brain.systems.cycles.status import CYCLE_RUN_ACTIVE_STATUSES, CYCLE_RUN_TERMINAL_STATUSES
 from brain.systems.runs.work_intake import WorkIntakeEvent, admit_work
-from brain.platform.db.models.cycle import Cycle, CycleRun
+from brain.platform.db.models.cycle import (
+    Cycle,
+    CycleGuidance,
+    CycleOutputTarget,
+    CycleRevision,
+    CycleRun,
+    CycleRunEvaluation,
+)
 from brain.platform.db.models.run import AgentRun
 from brain.platform.db.models.idea import Idea
 from brain.platform.db.models.org import User
@@ -34,9 +41,10 @@ ACTIVE_RUN_STATUSES = CYCLE_RUN_ACTIVE_STATUSES
 TERMINAL_RUN_STATUSES = CYCLE_RUN_TERMINAL_STATUSES
 ONE_TIME_SCHEDULE_PREFIX = "at:"
 CYCLE_LAUNCH_ENVELOPE_VERSION = 1
-CYCLE_CONTROL_TOOLS = ("manage_cycle",)
 DEFAULT_STALE_CYCLE_RUN_SECONDS = 60
 DEFAULT_CYCLE_RUN_CATCHUP_WINDOW_SECONDS = 24 * 60 * 60
+CYCLE_LEDGER_OUTPUT_TARGET_TYPE = "cycle_ledger"
+THREAD_OUTPUT_TARGET_TYPE = "thread"
 RUN_STATUS_TO_CYCLE_RUN_STATUS = {
     "completed": "completed",
     "failed": "failed",
@@ -233,13 +241,115 @@ def _required_datetime(*values) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _json_list(value) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _json_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _actor_type(value: str | None) -> str:
+    return (value or "system").strip() or "system"
+
+
+def _actor_id(value: str | None) -> str | None:
+    text = (value or "").strip()
+    return text or None
+
+
+def _creator_payload(cycle: Cycle) -> dict:
+    creator_type = getattr(cycle, "creator_type", None) or "user"
+    creator_id = getattr(cycle, "creator_id", None) or _string_or_none(cycle.user_id)
+    maintainer_type = getattr(cycle, "maintainer_type", None) or creator_type
+    maintainer_id = getattr(cycle, "maintainer_id", None) or creator_id
+    return {
+        "creator_type": creator_type,
+        "creator_id": _string_or_none(creator_id),
+        "maintainer_type": maintainer_type,
+        "maintainer_id": _string_or_none(maintainer_id),
+    }
+
+
+def serialize_cycle_revision(revision: CycleRevision | None) -> dict | None:
+    if revision is None:
+        return None
+    return {
+        "id": revision.id,
+        "cycle_id": revision.cycle_id,
+        "revision_number": revision.revision_number,
+        "source_type": revision.source_type,
+        "source_id": _string_or_none(revision.source_id),
+        "rationale": revision.rationale,
+        "name": revision.name,
+        "prompt": revision.prompt,
+        "schedule_expr": revision.schedule_expr,
+        "timezone": revision.timezone,
+        "enabled": revision.enabled,
+        "model_override": revision.model_override,
+        "thinking_override": revision.thinking_override,
+        "target_idea_id": _string_or_none(revision.target_idea_id),
+        "context_policy": _json_dict(revision.context_policy),
+        "created_at": _required_datetime(revision.created_at),
+    }
+
+
+def serialize_cycle_guidance(guidance: CycleGuidance) -> dict:
+    return {
+        "id": guidance.id,
+        "cycle_id": guidance.cycle_id,
+        "revision_id": guidance.revision_id,
+        "source_type": guidance.source_type,
+        "source_id": _string_or_none(guidance.source_id),
+        "guidance": guidance.guidance,
+        "rationale": guidance.rationale,
+        "is_active": guidance.is_active,
+        "created_at": _required_datetime(guidance.created_at),
+    }
+
+
+def serialize_cycle_output_target(target: CycleOutputTarget) -> dict:
+    return {
+        "id": target.id,
+        "cycle_id": target.cycle_id,
+        "revision_id": target.revision_id,
+        "target_type": target.target_type,
+        "target_id": _string_or_none(target.target_id),
+        "label": target.label,
+        "config": _json_dict(target.config),
+        "source_type": target.source_type,
+        "source_id": _string_or_none(target.source_id),
+        "rationale": target.rationale,
+        "is_active": target.is_active,
+        "created_at": _required_datetime(target.created_at, target.updated_at),
+        "updated_at": _required_datetime(target.updated_at, target.created_at),
+    }
+
+
+def serialize_cycle_run_evaluation(evaluation: CycleRunEvaluation) -> dict:
+    return {
+        "id": evaluation.id,
+        "cycle_id": evaluation.cycle_id,
+        "cycle_run_id": evaluation.cycle_run_id,
+        "evaluator_type": evaluation.evaluator_type,
+        "evaluator_id": _string_or_none(evaluation.evaluator_id),
+        "summary": evaluation.summary,
+        "score": evaluation.score,
+        "details": _json_dict(evaluation.details),
+        "created_at": _required_datetime(evaluation.created_at),
+    }
+
+
 def serialize_cycle(cycle: Cycle) -> dict:
     created_at = _required_datetime(cycle.created_at, cycle.updated_at)
     updated_at = _required_datetime(cycle.updated_at, created_at)
+    creator = _creator_payload(cycle)
     return {
         "id": cycle.id,
         "user_id": str(cycle.user_id),
         "org_id": _string_or_none(cycle.org_id),
+        "workspace_id": _string_or_none(cycle.org_id),
+        **creator,
         "name": cycle.name,
         "prompt": cycle.prompt,
         "schedule_expr": cycle.schedule_expr,
@@ -264,6 +374,7 @@ def serialize_cycle_run(run: CycleRun) -> dict:
     return {
         "id": run.id,
         "cycle_id": run.cycle_id,
+        "revision_id": getattr(run, "revision_id", None),
         "scheduled_for": run.scheduled_for,
         "started_at": run.started_at,
         "completed_at": run.completed_at,
@@ -273,6 +384,10 @@ def serialize_cycle_run(run: CycleRun) -> dict:
         "idea_id": _string_or_none(run.idea_id),
         "run_id": run.run_id,
         "prompt_snapshot": run.prompt_snapshot,
+        "guidance_snapshot": _json_list(getattr(run, "guidance_snapshot", None)),
+        "output_targets_snapshot": _json_list(getattr(run, "output_targets_snapshot", None)),
+        "context_snapshot": _json_dict(getattr(run, "context_snapshot", None)),
+        "self_review_summary": getattr(run, "self_review_summary", None),
         "created_at": _required_datetime(run.created_at, run.scheduled_for),
     }
 
@@ -328,6 +443,207 @@ def _cycle_target_idea_scope_condition(cycle: Cycle):
     return Idea.user_id == cycle.user_id
 
 
+async def async_record_cycle_revision(
+    session,
+    cycle: Cycle,
+    *,
+    source_type: str = "system",
+    source_id: str | None = None,
+    rationale: str | None = None,
+) -> CycleRevision:
+    result = await session.execute(
+        select(func.coalesce(func.max(CycleRevision.revision_number), 0)).where(
+            CycleRevision.cycle_id == cycle.id
+        )
+    )
+    current_revision = int(result.scalar_one() or 0)
+    revision = CycleRevision(
+        cycle_id=cycle.id,
+        revision_number=current_revision + 1,
+        source_type=_actor_type(source_type),
+        source_id=_actor_id(source_id),
+        rationale=(rationale or "").strip() or None,
+        name=cycle.name,
+        prompt=cycle.prompt,
+        schedule_expr=cycle.schedule_expr,
+        timezone=cycle.timezone,
+        enabled=cycle.enabled,
+        model_override=cycle.model_override,
+        thinking_override=cycle.thinking_override,
+        target_idea_id=cycle.target_idea_id,
+        context_policy={
+            "workspace_id": _string_or_none(cycle.org_id),
+            "owner_user_id": _string_or_none(cycle.user_id),
+            **_creator_payload(cycle),
+        },
+    )
+    session.add(revision)
+    await session.flush()
+    return revision
+
+
+async def async_add_cycle_guidance(
+    session,
+    cycle: Cycle,
+    *,
+    guidance: str,
+    source_type: str = "user",
+    source_id: str | None = None,
+    rationale: str | None = None,
+    revision_id: int | None = None,
+) -> CycleGuidance:
+    guidance_text = validate_nonempty_trimmed(guidance, "guidance")
+    row = CycleGuidance(
+        cycle_id=cycle.id,
+        revision_id=revision_id,
+        source_type=_actor_type(source_type),
+        source_id=_actor_id(source_id),
+        guidance=guidance_text,
+        rationale=(rationale or "").strip() or None,
+        is_active=True,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def async_add_cycle_output_target(
+    session,
+    cycle: Cycle,
+    *,
+    target_type: str,
+    target_id: str | None = None,
+    label: str | None = None,
+    config: dict | None = None,
+    source_type: str = "user",
+    source_id: str | None = None,
+    rationale: str | None = None,
+    revision_id: int | None = None,
+) -> CycleOutputTarget:
+    target_type_text = validate_nonempty_trimmed(target_type, "target_type")
+    row = CycleOutputTarget(
+        cycle_id=cycle.id,
+        revision_id=revision_id,
+        target_type=target_type_text,
+        target_id=(str(target_id).strip() if target_id is not None else None) or None,
+        label=(label or "").strip() or None,
+        config=_json_dict(config),
+        source_type=_actor_type(source_type),
+        source_id=_actor_id(source_id),
+        rationale=(rationale or "").strip() or None,
+        is_active=True,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def async_remove_cycle_output_target(
+    session,
+    cycle: Cycle,
+    *,
+    target_id: int,
+    source_type: str = "user",
+    source_id: str | None = None,
+    rationale: str | None = None,
+    revision_id: int | None = None,
+) -> CycleOutputTarget | None:
+    row = await session.get(CycleOutputTarget, target_id)
+    if row is None or row.cycle_id != cycle.id:
+        return None
+    row.is_active = False
+    row.revision_id = revision_id
+    row.source_type = _actor_type(source_type)
+    row.source_id = _actor_id(source_id)
+    row.rationale = (rationale or "").strip() or row.rationale
+    await session.flush()
+    return row
+
+
+async def _async_latest_cycle_revision(session, cycle_id: int) -> CycleRevision | None:
+    result = await session.scalars(
+        select(CycleRevision)
+        .where(CycleRevision.cycle_id == cycle_id)
+        .order_by(CycleRevision.revision_number.desc(), CycleRevision.id.desc())
+        .limit(1)
+    )
+    return result.first()
+
+
+async def _async_active_cycle_guidance(session, cycle_id: int) -> list[CycleGuidance]:
+    result = await session.scalars(
+        select(CycleGuidance)
+        .where(CycleGuidance.cycle_id == cycle_id, CycleGuidance.is_active.is_(True))
+        .order_by(CycleGuidance.created_at.asc(), CycleGuidance.id.asc())
+        .limit(25)
+    )
+    return list(result.all())
+
+
+async def _async_active_cycle_output_targets(session, cycle_id: int) -> list[CycleOutputTarget]:
+    result = await session.scalars(
+        select(CycleOutputTarget)
+        .where(CycleOutputTarget.cycle_id == cycle_id, CycleOutputTarget.is_active.is_(True))
+        .order_by(CycleOutputTarget.created_at.asc(), CycleOutputTarget.id.asc())
+        .limit(25)
+    )
+    return list(result.all())
+
+
+async def _async_prepare_cycle_run_memory_snapshot(session, cycle: Cycle, run: CycleRun) -> None:
+    try:
+        revision = await _async_latest_cycle_revision(session, cycle.id)
+        guidance_rows = await _async_active_cycle_guidance(session, cycle.id)
+        target_rows = await _async_active_cycle_output_targets(session, cycle.id)
+    except (AttributeError, IndexError, NotImplementedError):
+        revision = None
+        guidance_rows = []
+        target_rows = []
+
+    if revision is not None:
+        run.revision_id = revision.id
+
+    output_targets = [serialize_cycle_output_target(target) for target in target_rows]
+    if not any(target.get("target_type") == CYCLE_LEDGER_OUTPUT_TARGET_TYPE for target in output_targets):
+        output_targets.insert(
+            0,
+            {
+                "target_type": CYCLE_LEDGER_OUTPUT_TARGET_TYPE,
+                "target_id": str(cycle.id),
+                "label": "Cycle ledger",
+                "config": {},
+                "source_type": "system",
+                "rationale": "Implicit durable Cycle memory target.",
+                "is_active": True,
+            },
+        )
+    if cycle.target_idea_id and not any(
+        target.get("target_type") == THREAD_OUTPUT_TARGET_TYPE
+        and target.get("target_id") == str(cycle.target_idea_id)
+        for target in output_targets
+    ):
+        output_targets.append(
+            {
+                "target_type": THREAD_OUTPUT_TARGET_TYPE,
+                "target_id": str(cycle.target_idea_id),
+                "label": "Cycle thread",
+                "config": {},
+                "source_type": "system",
+                "rationale": "Implicit display thread target.",
+                "is_active": True,
+            }
+        )
+
+    run.guidance_snapshot = [serialize_cycle_guidance(row) for row in guidance_rows]
+    run.output_targets_snapshot = output_targets
+    run.context_snapshot = {
+        "revision": serialize_cycle_revision(revision),
+        "workspace_id": _string_or_none(cycle.org_id),
+        "owner_user_id": _string_or_none(cycle.user_id),
+        **_creator_payload(cycle),
+    }
+
+
 async def _async_admit_cycle_run(
     session,
     *,
@@ -366,13 +682,15 @@ def _cycle_launch_envelope(cycle: Cycle, run: CycleRun) -> dict:
         "origin": "scheduled_cycle",
         "cycle_id": cycle.id,
         "cycle_run_id": run.id,
+        "cycle_revision_id": getattr(run, "revision_id", None),
         "cycle_name": cycle.name,
         "scheduled_for": run.scheduled_for.isoformat() if run.scheduled_for else None,
-        "launch_mode": "reuse_same_thread",
+        "launch_mode": "background_cycle_run",
         "active_instruction_source": "cycle.prompt",
         "prior_thread_role": "context_only",
         "lifecycle_owner": "cycle_run",
-        "thread_visibility": "visible",
+        "thread_visibility": "output_target",
+        "cycle_memory_role": "source_of_truth",
     }
 
 
@@ -386,18 +704,19 @@ def _cycle_run_metadata(cycle: Cycle, run: CycleRun) -> dict:
         "model_override": cycle.model_override,
         "thinking_override": cycle.thinking_override,
         "launch_envelope": envelope,
+        "cycle_memory": {
+            "guidance": _json_list(getattr(run, "guidance_snapshot", None)),
+            "output_targets": _json_list(getattr(run, "output_targets_snapshot", None)),
+            "context": _json_dict(getattr(run, "context_snapshot", None)),
+        },
         "contract": {
-            "kind": "scheduled_prompt",
+            "kind": "autonomous_cycle_run",
             "active_instruction_source": "cycle.prompt",
             "lifecycle_owner": "cycle_run",
         },
         "context_policy": {
             "current_instruction_role": "scheduled_prompt",
             "prior_thread_role": "context_only",
-        },
-        "tool_policy": {
-            "disabled_tools": list(CYCLE_CONTROL_TOOLS),
-            "reason": "Cycle executions run the scheduled prompt; scheduler mutation belongs to explicit control-plane requests.",
         },
     }
 
@@ -410,10 +729,19 @@ def _cycle_run_message(idea: Idea, cycle: Cycle, run: CycleRun) -> str:
         f"- Origin: {envelope['origin']}\n"
         f"- Cycle ID: {cycle.id}\n"
         f"- Cycle run ID: {run.id}\n"
-        "- The scheduled prompt below is the current user instruction.\n"
-        "- Prior thread messages are background context only, not active commands.\n"
-        "- Do not create, update, delete, or run Cycles from this execution; scheduler changes belong to explicit control-plane turns.\n\n"
-        "## Scheduled Prompt\n"
+        "- The Cycle mission below is the current instruction.\n"
+        "- Thread messages are output/context surfaces, not durable Cycle memory.\n"
+        "- Use Cycle memory, revisions, guidance, output targets, and the workspace state as source of truth.\n"
+        "- You may create, update, delete, or run Cycles when that is the right workspace action; include rationale.\n"
+        "- If an output target is unavailable, repair or replace it when possible instead of treating it as a blocker.\n"
+        "- End with a short self-review summary suitable for the Cycle ledger and visible outputs.\n\n"
+        "## Cycle Memory Snapshot\n"
+        f"{_json_dict(getattr(run, 'context_snapshot', None))}\n\n"
+        "## Guidance Snapshot\n"
+        f"{_json_list(getattr(run, 'guidance_snapshot', None))}\n\n"
+        "## Output Targets\n"
+        f"{_json_list(getattr(run, 'output_targets_snapshot', None))}\n\n"
+        "## Cycle Mission\n"
     )
     return f"{header}{cycle.prompt[:2000]}"
 
@@ -460,6 +788,7 @@ def _finalize_cycle_run(
     status: str,
     error: str | None = None,
     skip_reason: str | None = None,
+    session=None,
 ) -> None:
     now = datetime.now(timezone.utc)
     run.status = status
@@ -469,6 +798,14 @@ def _finalize_cycle_run(
     cycle.last_run_at = now
     cycle.last_status = status
     cycle.last_error = error
+    _record_cycle_run_evaluation(
+        session,
+        run,
+        cycle,
+        status=status,
+        error=error,
+        skip_reason=skip_reason,
+    )
 
 
 def _finalize_stale_cycle_run(
@@ -478,12 +815,23 @@ def _finalize_stale_cycle_run(
     status: str,
     error: str | None = None,
     skip_reason: str | None = None,
+    session=None,
 ) -> None:
     now = datetime.now(timezone.utc)
     run.status = status
     run.completed_at = now
     run.error = error
     run.skip_reason = skip_reason
+    if cycle is not None:
+        _record_cycle_run_evaluation(
+            session,
+            run,
+            cycle,
+            status=status,
+            error=error,
+            skip_reason=skip_reason,
+            evaluator_type="recovery",
+        )
     if cycle is None:
         return
     cycle_last_run_at = _aware_utc(cycle.last_run_at)
@@ -494,6 +842,61 @@ def _finalize_stale_cycle_run(
         cycle.last_run_at = now
         cycle.last_status = status
         cycle.last_error = error
+
+
+def _cycle_run_evaluation_summary(
+    *,
+    status: str,
+    error: str | None = None,
+    skip_reason: str | None = None,
+) -> str:
+    if status == "completed":
+        return "Cycle run completed and was recorded in the Cycle ledger."
+    if status == "failed":
+        detail = error or "unknown failure"
+        return f"Cycle run failed and was recorded in the Cycle ledger: {detail}"
+    if status == "skipped":
+        detail = skip_reason or "unknown skip reason"
+        return f"Cycle run was skipped and recorded in the Cycle ledger: {detail}"
+    return f"Cycle run reached status {status} and was recorded in the Cycle ledger."
+
+
+def _record_cycle_run_evaluation(
+    session,
+    run: CycleRun,
+    cycle: Cycle,
+    *,
+    status: str,
+    error: str | None = None,
+    skip_reason: str | None = None,
+    evaluator_type: str = "system",
+    evaluator_id: str | None = None,
+) -> None:
+    summary = _cycle_run_evaluation_summary(
+        status=status,
+        error=error,
+        skip_reason=skip_reason,
+    )
+    run.self_review_summary = summary
+    if session is None or not hasattr(session, "add") or run.id is None:
+        return
+    session.add(
+        CycleRunEvaluation(
+            cycle_id=cycle.id,
+            cycle_run_id=run.id,
+            evaluator_type=evaluator_type,
+            evaluator_id=_actor_id(evaluator_id),
+            summary=summary,
+            score=1 if status == "completed" else 0 if status == "failed" else None,
+            details={
+                "status": status,
+                "error": error,
+                "skip_reason": skip_reason,
+                "agent_run_id": run.run_id,
+                "idea_id": _string_or_none(run.idea_id),
+            },
+        )
+    )
 
 
 async def async_run_cycle_now(cycle_id: int) -> dict:
@@ -510,6 +913,7 @@ async def async_run_cycle_now(cycle_id: int) -> dict:
         )
         uow.session.add(run)
         await uow.session.flush()
+        await _async_prepare_cycle_run_memory_snapshot(uow.session, cycle, run)
         run_id = run.id
 
     await async_execute_cycle_run(run_id)
@@ -564,6 +968,7 @@ async def async_recover_stale_cycle_runs_once(
                         cycle,
                         status="skipped",
                         skip_reason="missed_catchup_window",
+                        session=uow.session,
                     )
                 elif cycle is None or cycle.deleted_at is not None:
                     _finalize_stale_cycle_run(
@@ -571,6 +976,7 @@ async def async_recover_stale_cycle_runs_once(
                         cycle,
                         status="failed",
                         error="Cycle unavailable before stale queued run recovered",
+                        session=uow.session,
                     )
                 else:
                     executable_run_ids.append(run.id)
@@ -588,6 +994,7 @@ async def async_recover_stale_cycle_runs_once(
                         if terminal_status == "failed"
                         else None
                     ),
+                    session=uow.session,
                 )
 
     for run_id in executable_run_ids:
@@ -626,6 +1033,7 @@ async def async_schedule_due_cycles_once(*, limit: int = 10) -> list[int]:
             )
             uow.session.add(run)
             await uow.session.flush()
+            await _async_prepare_cycle_run_memory_snapshot(uow.session, cycle, run)
             next_run_at = compute_next_run_at(
                 cycle.schedule_expr,
                 cycle.timezone,
@@ -672,6 +1080,7 @@ async def async_execute_cycle_run(run_id: int) -> None:
                     cycle,
                     status="failed",
                     error="Cycle deleted before run started",
+                    session=uow.session,
                 )
             else:
                 run.status = "failed"
@@ -711,14 +1120,18 @@ async def async_execute_cycle_run(run_id: int) -> None:
             )
             should_publish_idea = True
         if idea and await _async_idea_has_active_run(uow.session, idea.id):
-            run.idea_id = idea.id
-            _finalize_cycle_run(
-                run,
-                cycle,
-                status="skipped",
-                skip_reason="idea_busy",
+            idea = Idea(
+                title=_cycle_idea_title(cycle, run.scheduled_for, per_run=True),
+                description=cycle.prompt[:2000],
+                status="emerged",
+                origin="cycle_run",
+                origin_ref=f"cycle:{cycle.id}:run:{run.id}",
+                user_id=cycle.user_id,
+                org_id=cycle.org_id,
             )
-            return
+            uow.session.add(idea)
+            await uow.session.flush()
+            should_publish_idea = True
         if idea is None:
             idea = Idea(
                 title=_cycle_idea_title(cycle, run.scheduled_for, per_run=False),
@@ -735,6 +1148,26 @@ async def async_execute_cycle_run(run_id: int) -> None:
             should_publish_idea = True
 
         run.idea_id = idea.id
+        await _async_prepare_cycle_run_memory_snapshot(uow.session, cycle, run)
+        output_targets = _json_list(getattr(run, "output_targets_snapshot", None))
+        if not any(
+            target.get("target_type") == THREAD_OUTPUT_TARGET_TYPE
+            and target.get("target_id") == str(idea.id)
+            for target in output_targets
+            if isinstance(target, dict)
+        ):
+            output_targets.append(
+                {
+                    "target_type": THREAD_OUTPUT_TARGET_TYPE,
+                    "target_id": str(idea.id),
+                    "label": "Cycle run execution thread",
+                    "config": {"ephemeral": cycle.target_idea_id != idea.id},
+                    "source_type": "system",
+                    "rationale": "Execution output surface for this CycleRun.",
+                    "is_active": True,
+                }
+            )
+            run.output_targets_snapshot = output_targets
         run.started_at = datetime.now(timezone.utc)
         run.status = "running"
         idea_id = idea.id
@@ -753,8 +1186,9 @@ async def async_execute_cycle_run(run_id: int) -> None:
             _finalize_cycle_run(
                 run,
                 cycle,
-                status="skipped",
-                skip_reason="idea_busy",
+                status="failed",
+                error="Cycle work admission failed before an agent run was created",
+                session=uow.session,
             )
             return
         message_payload, status_payload = await _async_append_cycle_thread_message(
@@ -808,6 +1242,7 @@ async def async_finalize_cycle_run_from_run(
             cycle,
             status=status,
             error=error if status == "failed" else None,
+            session=uow.session,
         )
 
 
