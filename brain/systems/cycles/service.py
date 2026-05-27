@@ -232,7 +232,7 @@ async def async_recover_stale_cycle_runs_once(
             if run.status == "queued":
                 scheduled_for = _aware_utc(run.scheduled_for)
                 if scheduled_for is not None and scheduled_for < catchup_cutoff:
-                    _finalize_stale_cycle_run(
+                    await _finalize_stale_cycle_run(
                         run,
                         cycle,
                         status="skipped",
@@ -240,7 +240,7 @@ async def async_recover_stale_cycle_runs_once(
                         session=uow.session,
                     )
                 elif cycle is None or cycle.deleted_at is not None:
-                    _finalize_stale_cycle_run(
+                    await _finalize_stale_cycle_run(
                         run,
                         cycle,
                         status="failed",
@@ -254,7 +254,7 @@ async def async_recover_stale_cycle_runs_once(
             agent_run = await uow.session.get(AgentRun, run.run_id) if run.run_id else None
             terminal_status = _agent_run_terminal_cycle_status(agent_run)
             if terminal_status is not None:
-                _finalize_stale_cycle_run(
+                await _finalize_stale_cycle_run(
                     run,
                     cycle,
                     status=terminal_status,
@@ -344,7 +344,7 @@ async def async_execute_cycle_run(run_id: int) -> None:
         cycle = result.first()
         if not cycle or cycle.deleted_at is not None:
             if cycle:
-                _finalize_cycle_run(
+                await _finalize_cycle_run(
                     run,
                     cycle,
                     status="failed",
@@ -396,7 +396,7 @@ async def async_execute_cycle_run(run_id: int) -> None:
             cycle_run_id=run.id,
         )
         if agent_run_id is None:
-            _finalize_cycle_run(
+            await _finalize_cycle_run(
                 run,
                 cycle,
                 status="failed",
@@ -450,7 +450,7 @@ async def async_finalize_cycle_run_from_run(
         cycle = await uow.session.get(Cycle, run.cycle_id) if run else None
         if not run or not cycle or run.status in TERMINAL_RUN_STATUSES:
             return
-        _finalize_cycle_run(
+        await _finalize_cycle_run(
             run,
             cycle,
             status=status,

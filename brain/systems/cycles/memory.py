@@ -197,7 +197,7 @@ def append_cycle_run_output_target_snapshot(
     run.output_targets_snapshot = output_targets
 
 
-def finalize_cycle_run(
+async def finalize_cycle_run(
     run: CycleRun,
     cycle: Cycle,
     *,
@@ -216,7 +216,7 @@ def finalize_cycle_run(
     cycle.last_run_at = now
     cycle.last_status = status
     cycle.last_error = error
-    record_cycle_run_evaluation(
+    await record_cycle_run_evaluation(
         session,
         run,
         cycle,
@@ -226,7 +226,7 @@ def finalize_cycle_run(
     )
 
 
-def finalize_stale_cycle_run(
+async def finalize_stale_cycle_run(
     run: CycleRun,
     cycle: Cycle | None,
     *,
@@ -244,7 +244,7 @@ def finalize_stale_cycle_run(
     run.skip_reason = skip_reason
     if cycle is None:
         return
-    record_cycle_run_evaluation(
+    await record_cycle_run_evaluation(
         session,
         run,
         cycle,
@@ -263,7 +263,7 @@ def finalize_stale_cycle_run(
         cycle.last_error = error
 
 
-def record_cycle_run_evaluation(
+async def record_cycle_run_evaluation(
     session,
     run: CycleRun,
     cycle: Cycle,
