@@ -93,16 +93,31 @@ _MANAGE_TOOL_OPERATIONS: dict[str, dict[str, dict[str, object]]] = {
         "list": {"required": [], "optional": [], "effect": "read scheduled cycles"},
         "create": {
             "required": ["name", "prompt", "timezone", "schedule_expr or run_at"],
-            "optional": ["enabled", "target_idea_id", "model_override", "thinking_override"],
+            "optional": ["enabled", "target_idea_id", "model_override", "thinking_override", "guidance", "rationale"],
             "effect": "create a recurring cycle or one-time reminder",
         },
         "update": {
             "required": ["id"],
-            "optional": ["name", "prompt", "timezone", "schedule_expr", "run_at", "enabled", "target_idea_id"],
+            "optional": ["name", "prompt", "timezone", "schedule_expr", "run_at", "enabled", "target_idea_id", "guidance", "rationale"],
             "effect": "change an existing cycle",
         },
         "delete": {"required": ["id"], "optional": [], "effect": "archive/disable a cycle"},
         "run": {"required": ["id"], "optional": [], "effect": "run a cycle immediately"},
+        "add_guidance": {
+            "required": ["id", "guidance"],
+            "optional": ["rationale"],
+            "effect": "append durable guidance for future cycle runs",
+        },
+        "add_output_target": {
+            "required": ["id", "output_target_type"],
+            "optional": ["output_target_id", "output_target_label", "output_target_config", "rationale"],
+            "effect": "add a durable output target the cycle may publish to or repair",
+        },
+        "remove_output_target": {
+            "required": ["id", "output_target_id"],
+            "optional": ["rationale"],
+            "effect": "deactivate a durable output target",
+        },
     },
     "manage_domain": {
         "list": {"required": [], "optional": ["include_archived"], "effect": "read available domains"},

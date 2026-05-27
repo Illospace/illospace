@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
 
 from brain.app.api.schemas.cycles import CycleRead, CycleRunRead
+from brain.systems.cycles import access as cycle_access
+from brain.systems.cycles import execution as cycle_execution
 from brain.systems.cycles import service
 from brain.app.api.routers import cycles as cycles_router
 from brain.platform.db.models.cycle import Cycle, CycleRun
@@ -20,6 +22,7 @@ class _FakeSession:
         self._agent_run = agent_run
         self._run = run
         self._cycle = cycle
+        self.added = []
 
     def get(self, model, value):
         if model is AgentRun:
@@ -29,6 +32,9 @@ class _FakeSession:
         if model is Cycle:
             return self._cycle
         return None
+
+    def add(self, value):
+        self.added.append(value)
 
 
 class _AsyncFakeSession(_FakeSession):
@@ -51,10 +57,18 @@ class _FirstResult:
     def first(self):
         return self._value
 
+    def scalar_one(self):
+        if isinstance(self._value, tuple):
+            return 0
+        return self._value if self._value is not None else 0
+
 
 class _AllResult:
     def __init__(self, values):
         self._values = list(values)
+
+    def first(self):
+        return self._values[0] if self._values else None
 
     def all(self):
         return list(self._values)
@@ -72,6 +86,7 @@ class _RouterCycleResult:
 class _RouterCycleSession:
     def __init__(self, cycle):
         self._cycle = cycle
+        self.added = []
         self.flushed = False
         self.refreshed = False
         self.committed = False
@@ -82,8 +97,14 @@ class _RouterCycleSession:
     async def execute(self, statement):
         return _FirstResult((self._cycle.target_idea_id,))
 
+    def add(self, value):
+        self.added.append(value)
+
     async def flush(self):
         self.flushed = True
+        for index, value in enumerate(self.added, start=1):
+            if getattr(value, "id", None) is None:
+                value.id = index
 
     async def refresh(self, obj):
         assert obj is self._cycle
@@ -107,6 +128,8 @@ class _ExecuteCycleSession:
             params = statement.compile().params
             if self.expected_run_id not in params.values():
                 return _ScalarResult(None)
+        if not self._scalar_values:
+            return _AllResult([])
         return _ScalarResult(self._scalar_values.pop(0))
 
     def execute(self, statement):
@@ -122,6 +145,8 @@ class _ExecuteCycleSession:
         for value in self.added:
             if value.__class__.__name__ == "IdeaThread" and getattr(value, "id", None) is None:
                 value.id = 123
+            if value.__class__.__name__ == "Idea" and getattr(value, "id", None) is None:
+                value.id = uuid4()
 
 
 class _AsyncUnitOfWorkFactory:
@@ -183,6 +208,9 @@ class _AsyncRunNowCreateSession:
             return self._cycle
         return None
 
+    async def scalars(self, statement):
+        return _AllResult([])
+
     def add(self, value):
         self._created_runs.append(value)
 
@@ -211,6 +239,35 @@ class _AsyncCycleListSession:
 
     async def scalars(self, statement):
         return _AllResult(self._cycles)
+
+
+class _RecoverStaleSession:
+    def __init__(self, *, runs, cycles=None, agent_runs=None):
+        self._runs = list(runs)
+        self._cycles = {cycle.id: cycle for cycle in (cycles or [])}
+        self._agent_runs = {run.id: run for run in (agent_runs or [])}
+        self.added = []
+
+    async def scalars(self, statement):
+        return _AllResult(self._runs)
+
+    async def get(self, model, value):
+        if model is Cycle:
+            return self._cycles.get(value)
+        if model is AgentRun:
+            return self._agent_runs.get(value)
+        return None
+
+    def add(self, value):
+        self.added.append(value)
+
+
+class _SingleRunSession:
+    def __init__(self, run):
+        self._run = run
+
+    async def scalars(self, statement):
+        return _ScalarResult(self._run)
 
 
 def _fail_sync_bridge(*args, **kwargs):
@@ -260,17 +317,11 @@ def test_humanize_one_time_schedule():
     assert label == "Once at May 8, 2026 9:30 AM (America/Toronto)"
 
 
-def test_cycle_defaults_reuse_same_idea_reopens_by_default():
-    assert service.cycle_defaults(execution_mode="reuse_same_idea", reopen_archived=None) is True
-    assert service.cycle_defaults(execution_mode="new_idea_per_run", reopen_archived=None) is True
-    assert service.cycle_defaults(execution_mode="new_idea_per_run", reopen_archived=True) is True
-    assert service.cycle_defaults(execution_mode="reuse_same_idea", reopen_archived=False) is True
-
-
-def test_validate_execution_mode_coerces_legacy_new_thread_mode():
-    assert service.validate_execution_mode(None) == service.REUSABLE_THREAD_EXECUTION_MODE
-    assert service.validate_execution_mode("reuse_same_idea") == service.REUSABLE_THREAD_EXECUTION_MODE
-    assert service.validate_execution_mode("new_idea_per_run") == service.REUSABLE_THREAD_EXECUTION_MODE
+def test_canonical_execution_mode_is_single_autonomous_runtime_policy():
+    assert service.canonical_execution_mode(None) == service.REUSABLE_THREAD_EXECUTION_MODE
+    assert service.canonical_execution_mode("reuse_same_idea") == service.REUSABLE_THREAD_EXECUTION_MODE
+    assert service.canonical_execution_mode("new_idea_per_run") == service.REUSABLE_THREAD_EXECUTION_MODE
+    assert service.canonical_execution_mode("ignored") == service.REUSABLE_THREAD_EXECUTION_MODE
 
 
 def test_validate_schedule_expr_rejects_non_five_field_expr():
@@ -623,11 +674,12 @@ async def test_execute_cycle_run_logs_uuid_idea_id_without_slicing_error(monkeyp
     assert cycle.last_status == "running"
     assert admissions[0]["metadata"]["origin"] == "cycle"
     assert admissions[0]["metadata"]["launch_envelope"]["origin"] == "scheduled_cycle"
+    assert admissions[0]["metadata"]["launch_envelope"]["launch_mode"] == "background_cycle_run"
     assert admissions[0]["metadata"]["launch_envelope"]["active_instruction_source"] == "cycle.prompt"
     assert admissions[0]["metadata"]["context_policy"]["prior_thread_role"] == "context_only"
-    assert admissions[0]["metadata"]["tool_policy"]["disabled_tools"] == ["manage_cycle"]
+    assert "tool_policy" not in admissions[0]["metadata"]
     assert "Scheduled Prompt Launch" in admissions[0]["message"]
-    assert "Prior thread messages are background context only" in admissions[0]["message"]
+    assert "Thread messages are output/context surfaces" in admissions[0]["message"]
 
 
 @pytest.mark.asyncio
@@ -695,7 +747,89 @@ async def test_async_execute_cycle_run_uses_native_uow_without_sync_bridges(monk
     assert run.status == "running"
     assert cycle.last_status == "running"
     assert admissions[0]["metadata"]["origin"] == "cycle"
-    assert admissions[0]["metadata"]["tool_policy"]["disabled_tools"] == ["manage_cycle"]
+    assert "tool_policy" not in admissions[0]["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_execute_cycle_run_creates_execution_thread_when_target_thread_is_busy(monkeypatch):
+    target_idea_id = uuid4()
+
+    run = CycleRun()
+    run.id = 12
+    run.cycle_id = 5
+    run.status = "queued"
+    run.scheduled_for = datetime(2026, 4, 28, 20, 20, tzinfo=timezone.utc)
+    run.prompt_snapshot = "Summarize the newest news"
+
+    cycle = Cycle()
+    cycle.id = 5
+    cycle.user_id = "user-1"
+    cycle.org_id = "org-1"
+    cycle.name = "Daily Anthropic news summary"
+    cycle.prompt = "Summarize the newest news"
+    cycle.schedule_expr = "20 16 * * *"
+    cycle.timezone = "America/Toronto"
+    cycle.target_idea_id = target_idea_id
+    cycle.deleted_at = None
+    cycle.model_override = None
+    cycle.thinking_override = None
+
+    target_idea = Idea()
+    target_idea.id = target_idea_id
+    target_idea.title = "Daily Anthropic news summary"
+    target_idea.display_title = None
+    target_idea.description = "Summarize the newest news"
+    target_idea.status = "working"
+    target_idea.origin = "cycle"
+    target_idea.origin_ref = "cycle:5"
+    target_idea.salience_score = None
+    target_idea.position_x = None
+    target_idea.position_y = None
+    target_idea.created_at = None
+    target_idea.updated_at = None
+    target_idea.user_id = "user-1"
+    target_idea.org_id = "org-1"
+    target_idea.archived_at = None
+    target_idea.active_agents = []
+    target_idea.attachments = []
+
+    session = _AsyncExecuteCycleSession(
+        run=run,
+        cycle=cycle,
+        idea=target_idea,
+        expected_run_id=run.id,
+    )
+    admissions = []
+
+    async def fake_async_admit(*args, **kwargs):
+        admissions.append(kwargs)
+        return 77
+
+    async def fake_idea_has_active_run(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(service, "UnitOfWork", _AsyncUnitOfWorkFactory([session]))
+    monkeypatch.setattr(cycle_execution, "_async_idea_has_active_run", fake_idea_has_active_run)
+    monkeypatch.setattr(service, "_async_admit_cycle_run", fake_async_admit)
+    monkeypatch.setattr(service, "publish", lambda *args, **kwargs: None)
+
+    await service.async_execute_cycle_run(run.id)
+
+    created_ideas = [item for item in session.added if isinstance(item, Idea)]
+    assert len(created_ideas) == 1
+    assert created_ideas[0].origin == "cycle_run"
+    assert str(run.idea_id) == str(created_ideas[0].id)
+    assert str(cycle.target_idea_id) == str(target_idea_id)
+    assert run.status == "running"
+    assert run.skip_reason is None
+    assert admissions[0]["idea_id"] == created_ideas[0].id
+    target_ids = {
+        target.get("target_id")
+        for target in admissions[0]["metadata"]["cycle_memory"]["output_targets"]
+        if isinstance(target, dict) and target.get("target_type") == "thread"
+    }
+    assert str(target_idea_id) in target_ids
+    assert str(created_ideas[0].id) in target_ids
 
 
 @pytest.mark.asyncio
@@ -719,6 +853,99 @@ async def test_manage_cycle_list_uses_native_uow_without_sync_bridges(monkeypatc
     assert factory.uows[0].entered is True
     assert payload["cycles"][0]["id"] == cycle.id
     assert payload["cycles"][0]["name"] == cycle.name
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_cycle_runs_executes_recent_queued_and_settles_old_rows(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    recent_queued = CycleRun()
+    recent_queued.id = 21
+    recent_queued.cycle_id = 5
+    recent_queued.status = "queued"
+    recent_queued.scheduled_for = now.replace(microsecond=0) - timedelta(hours=2)
+    recent_queued.prompt_snapshot = "Run recent missed work"
+
+    old_queued = CycleRun()
+    old_queued.id = 22
+    old_queued.cycle_id = 5
+    old_queued.status = "queued"
+    old_queued.scheduled_for = now.replace(microsecond=0) - timedelta(days=3)
+    old_queued.prompt_snapshot = "Run ancient missed work"
+
+    stale_running = CycleRun()
+    stale_running.id = 23
+    stale_running.cycle_id = 6
+    stale_running.status = "running"
+    stale_running.scheduled_for = now.replace(microsecond=0) - timedelta(hours=3)
+    stale_running.started_at = stale_running.scheduled_for
+    stale_running.run_id = 99
+    stale_running.prompt_snapshot = "Finish stale running work"
+
+    active_cycle = Cycle()
+    active_cycle.id = 5
+    active_cycle.deleted_at = None
+    active_cycle.last_run_at = now
+    active_cycle.last_status = "completed"
+    active_cycle.last_error = None
+
+    running_cycle = Cycle()
+    running_cycle.id = 6
+    running_cycle.deleted_at = None
+    running_cycle.last_run_at = stale_running.scheduled_for
+    running_cycle.last_status = "running"
+    running_cycle.last_error = None
+
+    agent_run = AgentRun()
+    agent_run.id = 99
+    agent_run.status = "completed"
+
+    factory = _AsyncUnitOfWorkFactory([
+        _RecoverStaleSession(
+            runs=[old_queued, recent_queued, stale_running],
+            cycles=[active_cycle, running_cycle],
+            agent_runs=[agent_run],
+        )
+    ])
+    executed_run_ids = []
+
+    async def fake_async_execute_cycle_run(run_id):
+        executed_run_ids.append(run_id)
+        recent_queued.status = "running"
+
+    monkeypatch.setattr(service, "UnitOfWork", factory)
+    monkeypatch.setattr(service, "async_execute_cycle_run", fake_async_execute_cycle_run)
+
+    recovered = await service.async_recover_stale_cycle_runs_once(
+        stale_after_seconds=60,
+        catchup_window_seconds=24 * 60 * 60,
+    )
+
+    assert recovered == [recent_queued.id]
+    assert executed_run_ids == [recent_queued.id]
+    assert old_queued.status == "skipped"
+    assert old_queued.skip_reason == "missed_catchup_window"
+    assert active_cycle.last_status == "completed"
+    assert stale_running.status == "completed"
+    assert stale_running.completed_at is not None
+    assert running_cycle.last_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_execute_cycle_run_ignores_non_queued_rows(monkeypatch):
+    run = CycleRun()
+    run.id = 12
+    run.status = "running"
+
+    factory = _AsyncUnitOfWorkFactory([
+        _SingleRunSession(run),
+    ])
+
+    monkeypatch.setattr(service, "UnitOfWork", factory)
+
+    await service.async_execute_cycle_run(run.id)
+
+    assert run.status == "running"
 
 
 def test_finalize_cycle_run_from_run_updates_cycle_and_run(monkeypatch):
@@ -780,8 +1007,10 @@ def test_finalize_cycle_run_from_run_ignores_non_cycle_run(monkeypatch):
 
 
 def test_cycle_route_scope_uses_workspace_when_available():
-    conditions = cycles_router._cycle_scope_conditions(
-        {"id": "user-2", "org_id": "org-1", "principal_type": "human"}
+    conditions = cycle_access.cycle_scope_conditions(
+        cycle_access.CycleActor.from_user_payload(
+            {"id": "user-2", "org_id": "org-1", "principal_type": "human"}
+        )
     )
 
     compiled = str(
@@ -794,9 +1023,11 @@ def test_cycle_route_scope_uses_workspace_when_available():
 
 
 def test_cycle_target_idea_scope_uses_workspace_when_available():
-    conditions = cycles_router._target_idea_scope_conditions(
+    conditions = cycle_access.target_idea_scope_conditions(
         "idea-1",
-        {"id": "user-2", "org_id": "org-1", "principal_type": "human"},
+        cycle_access.CycleActor.from_user_payload(
+            {"id": "user-2", "org_id": "org-1", "principal_type": "human"}
+        ),
     )
 
     compiled = str(
@@ -816,7 +1047,7 @@ def test_cycle_executor_target_idea_scope_uses_workspace_with_legacy_fallback():
 
     compiled = str(
         select(Idea.id)
-        .where(service._cycle_target_idea_scope_condition(cycle))
+        .where(cycle_access.cycle_target_idea_scope_condition(cycle))
         .compile(compile_kwargs={"literal_binds": True})
     )
 
