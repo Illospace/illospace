@@ -2,7 +2,8 @@
   import { browser } from '$app/environment';
   import { onMount } from 'svelte';
 
-  import { ConstellationIcon, ConstellationIconButton, ConstellationPill } from '$lib/components/constellation';
+  import { ConstellationIcon, ConstellationPill } from '$lib/components/constellation';
+  import type { GeneratedAppSurface } from '$lib/features/workspace-apps/domain/generatedAppSurface';
   import {
     runWorkspaceAppAction,
     runWorkspaceAppBinding,
@@ -16,6 +17,8 @@
   import { theme } from '$lib/stores/theme.svelte';
   import { ui } from '$lib/stores/ui.svelte';
   import { workspaceApps } from '$lib/stores/workspaceApps.svelte';
+
+  import GeneratedAppChrome from './GeneratedAppChrome.svelte';
 
   type RuntimeMessage = {
     source?: string;
@@ -36,7 +39,7 @@
     onclose,
   }: {
     app: WorkspaceAppRead;
-    surface?: 'workspace' | 'dock';
+    surface?: GeneratedAppSurface;
     onclose?: () => void;
   } = $props();
 
@@ -256,12 +259,6 @@
     scheduleSmokeGate(frameGeneration);
   }
 
-  function handleCloseClick(event: MouseEvent) {
-    event.preventDefault();
-    event.stopPropagation();
-    onclose?.();
-  }
-
   onMount(() => {
     window.addEventListener('message', handleMessage);
     return () => {
@@ -294,27 +291,19 @@
   });
 </script>
 
-<section class="app-capsule generated-app-shell" class:is-dock={surface === 'dock'} aria-label={app.name}>
-  <header class="app-capsule__header generated-app-shell__header">
-    <div class="app-capsule__identity">
-      <span class="app-capsule__dot" style={`--app-accent:${appAccent}`} aria-hidden="true"></span>
-      <div>
-        <span class="app-capsule__eyebrow">App capsule</span>
-        <h2>{app.name}</h2>
-      </div>
-    </div>
-
-    <div class="app-capsule__actions">
-      <ConstellationPill variant={smokeError ? 'danger' : saving ? 'warning' : 'info'} leadingDot>
-        {smokeError ? 'error' : saving ? 'saving' : loading ? 'loading' : versionLabel}
-      </ConstellationPill>
-      {#if onclose}
-        <ConstellationIconButton label="Close app capsule" variant="quiet" size="md" onclick={handleCloseClick}>
-          <ConstellationIcon name="close" size={15} stroke={2} />
-        </ConstellationIconButton>
-      {/if}
-    </div>
-  </header>
+<GeneratedAppChrome
+  className="app-capsule"
+  title={app.name}
+  accent={appAccent}
+  {surface}
+  {onclose}
+  closeLabel="Close workspace app"
+>
+  {#snippet actions()}
+    <ConstellationPill variant={smokeError ? 'danger' : saving ? 'warning' : 'info'} leadingDot>
+      {smokeError ? 'error' : saving ? 'saving' : loading ? 'loading' : versionLabel}
+    </ConstellationPill>
+  {/snippet}
 
   <div class="app-capsule__body">
     <iframe
@@ -336,12 +325,10 @@
       </div>
     {/if}
   </div>
-</section>
+</GeneratedAppChrome>
 
 <style>
-.app-capsule {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+:global(.generated-app-chrome.app-capsule) {
   width: min(1400px, calc(100vw - 32px));
   height: min(900px, calc(100vh - 56px));
   min-width: min(360px, calc(100vw - 32px));
@@ -350,55 +337,12 @@
   border-radius: var(--radius-lg);
 }
 
-.app-capsule.is-dock {
+:global(.generated-app-chrome.app-capsule.is-dock) {
   width: 100%;
   height: 100%;
   min-width: 0;
   min-height: 100%;
   border-radius: 0;
-}
-
-.app-capsule__header {
-  align-items: center;
-  justify-content: space-between;
-}
-
-.app-capsule__identity,
-.app-capsule__actions {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-}
-
-.app-capsule__dot {
-  width: 10px;
-  height: 10px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--app-accent, var(--positive));
-  box-shadow: var(--constellation-orbit-core-shadow);
-}
-
-.app-capsule__eyebrow {
-  display: block;
-  color: var(--constellation-section-description);
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0;
-  line-height: 1.1;
-  text-transform: uppercase;
-}
-
-.app-capsule h2 {
-  margin: 0;
-  overflow: hidden;
-  color: var(--constellation-section-title);
-  font-size: 15px;
-  letter-spacing: 0;
-  line-height: 1.18;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .app-capsule__body {

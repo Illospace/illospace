@@ -41,7 +41,6 @@
     createDefaultThreadSidePanelTabs,
     isThreadSidePanelSingletonKind,
     openAppThreadSidePanelTab,
-    openBrowserThreadSidePanelTab,
     openSingletonThreadSidePanelTab,
     type ThreadSidePanelTabState,
     type ThreadStageRightDockAddMenuItem,
@@ -141,7 +140,6 @@
   let activeSidePanelTabId = $state<string | null>('activity');
   let sidePanelTabs = $state<ThreadStageRightDockTab[]>(createDefaultThreadSidePanelTabs());
   let nextBrowserTabIndex = $state(1);
-  let lastAutoOpenedBrowserSessionId = $state<string | null>(null);
   let lastAutoOpenedVaultPromptId = $state<string | null>(null);
   let lastAutoOpenedVaultGrantPromptId = $state<string | null>(null);
   let lastAutoOpenedCycleSignal = $state<number | null>(null);
@@ -832,10 +830,6 @@
     applySidePanelState(addBrowserThreadSidePanelTab(sidePanelState()));
   }
 
-  function openBrowserSessionTab() {
-    applySidePanelState(openBrowserThreadSidePanelTab(sidePanelState()));
-  }
-
   function openSingletonTab(kind: ThreadStageRightDockSingletonKind) {
     applySidePanelState(openSingletonThreadSidePanelTab(sidePanelState(), kind));
   }
@@ -896,17 +890,6 @@
     if (!workspaceApps.appById(changedAppId)) return;
     lastAutoSelectedAppId = changedAppId;
     openAppTab(changedAppId);
-  });
-
-  $effect(() => {
-    const browserSessionId = cortex.browserSession?.id ?? null;
-    if (!browserSessionId) {
-      lastAutoOpenedBrowserSessionId = null;
-      return;
-    }
-    if (browserSessionId === lastAutoOpenedBrowserSessionId) return;
-    lastAutoOpenedBrowserSessionId = browserSessionId;
-    openBrowserSessionTab();
   });
 
   $effect(() => {
