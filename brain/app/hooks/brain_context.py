@@ -170,7 +170,10 @@ def format_system_message(ctx: dict) -> str:
         parts.append("🔐 VAULT (scoped secret names only):")
         for cat, names in ctx["vault_inventory"].items():
             parts.append(f"  • {cat}: {', '.join(names)}")
-        parts.append("  → Never use os.environ.get() for secrets. Use brain_vault with a specific reason; user approval may be required.")
+        parts.append(
+            "  → Never use os.environ.get() for secrets. For CLI/API commands, mount Vault keys with "
+            "exec_command/run_script secret_env; brain_vault returns a reference, not a raw token."
+        )
         parts.append("  → If a secret is missing, tell the user to add it in the Vault dashboard.")
 
     if ctx.get("vault_missing"):

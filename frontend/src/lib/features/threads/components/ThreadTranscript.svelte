@@ -4,7 +4,6 @@
     ConstellationIcon,
     ConstellationIconButton,
     ConstellationPill,
-    ConstellationPresenceSeed,
     ConstellationSignalStatusIndicator,
   } from '$lib/components/constellation';
   import ConversationScrollCue from '$lib/components/chat/ConversationScrollCue.svelte';
@@ -22,6 +21,7 @@
   import { LIVE_RUN_STATUSES, OPEN_AGENT_RUN_STATUSES } from '$lib/constants/statuses';
   import { renderReadableMarkdown } from '$lib/utils/readableMarkdown';
   import StreamVisualBlock from '$lib/features/threads/components/StreamVisualBlock.svelte';
+  import ThreadAuthorMark from '$lib/features/threads/components/ThreadAuthorMark.svelte';
 
   import {
     getCortexThreadRunStepTone,
@@ -619,14 +619,12 @@
             {@const hasSupplementalMeta = hasMessageSupplementalMeta(item)}
             <article class={getMessageClass(item)}>
               <header class="thread-message-header">
-                <ConstellationPresenceSeed
-                  label={item.author}
-                  role={item.role ?? 'illo'}
+                <ThreadAuthorMark
+                  author={item.author}
+                  role={item.role}
                   tone={getMessageTone(item)}
-                  size="xs"
-                  treatment="plain"
-                  className="thread-presence-seed"
-                  style={getUserPresenceStyle(item)}
+                  {isIllo}
+                  presenceStyle={getUserPresenceStyle(item)}
                 />
 
                 {#if !isIllo || hasSupplementalMeta}
@@ -1609,10 +1607,6 @@
     align-items: center;
     gap: 10px;
     min-width: 0;
-  }
-
-  .thread-presence-seed {
-    flex-shrink: 0;
   }
 
   .thread-message-meta {

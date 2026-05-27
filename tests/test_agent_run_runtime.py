@@ -1668,7 +1668,150 @@ async def test_runtime_tool_executor_records_public_events_and_redacted_artifact
     assert _stream_has(runtime.stream.messages, "run.tool_completed", completed.payload | {"run_id": 42})
 
 
-async def test_runtime_tool_executor_redacts_vault_grant_metadata_from_public_run_event():
+async def test_runtime_tool_executor_resolves_secret_env_mount_without_public_value(monkeypatch):
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    secret_value = "ghp-secret-value"
+    vault_calls = []
+
+    async def fake_runtime_secret_read(key, **kwargs):
+        vault_calls.append({"key": key, **kwargs})
+        return {"key": key, "value": secret_value}
+
+    monkeypatch.setattr("brain.systems.vault.agent_access.read_agent_secret_for_runtime", fake_runtime_secret_read)
+
+    runtime = _runtime("worker")
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+    seen = {}
+
+    def handler(**kwargs):
+        seen["kwargs"] = kwargs
+        return {"exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    result = await executor.execute(
+        42,
+        ToolExecution(
+            name="exec_command",
+            args={
+                "command": "gh api user",
+                "secret_env": {
+                    "GH_TOKEN": {
+                        "vault_key": "GITHUB_TOKEN",
+                        "reason": "Check the token identity without exposing it.",
+                    },
+                },
+            },
+            handler=handler,
+        ),
+        root_run_id=42,
+    )
+
+    assert result["exit_code"] == 0
+    assert seen["kwargs"]["_resolved_secret_env"] == {"GH_TOKEN": secret_value}
+    assert vault_calls == [{
+        "key": "GITHUB_TOKEN",
+        "reason": "Check the token identity without exposing it.",
+        "user_id": "user-1",
+        "org_id": "org-1",
+        "run_id": 42,
+        "idea_id": "idea-1",
+        "requested_by": "secret_env_mount",
+        "project_slug": None,
+        "project_slugs": None,
+        "target_registry_id": None,
+    }]
+    started = next(event for event in runtime.store.events if event.event_type == "run.tool_started")
+    assert started.payload["args"]["secret_env"] == "[redacted]"
+    public_payload = json.dumps([event.payload for event in runtime.store.events], default=str)
+    artifact_payload = json.dumps([artifact.text for artifact in runtime.store.artifacts], default=str)
+    assert secret_value not in public_payload
+    assert secret_value not in artifact_payload
+
+
+async def test_runtime_tool_executor_rejects_secret_env_on_unsupported_tool():
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    runtime = _runtime("worker")
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+    called = False
+
+    def handler(**kwargs):
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    with pytest.raises(ValueError, match="does not support secret_env"):
+        await executor.execute(
+            42,
+            ToolExecution(
+                name="read_file",
+                args={"path": "README.md", "secret_env": {"GH_TOKEN": {"vault_key": "GITHUB_TOKEN"}}},
+                handler=handler,
+            ),
+            root_run_id=42,
+        )
+
+    assert called is False
+
+
+async def test_runtime_tool_executor_rejects_secret_env_shorthand():
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    runtime = _runtime("worker")
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+    called = False
+
+    def handler(**kwargs):
+        nonlocal called
+        called = True
+        return {"exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    with pytest.raises(ValueError, match="must be an object with vault_key"):
+        await executor.execute(
+            42,
+            ToolExecution(
+                name="exec_command",
+                args={"command": "gh api user", "secret_env": {"GH_TOKEN": "GITHUB_TOKEN"}},
+                handler=handler,
+            ),
+            root_run_id=42,
+        )
+
+    assert called is False
+
+
+async def test_runtime_tool_executor_stops_before_command_when_secret_mount_fails(monkeypatch):
+    from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
+
+    async def fake_runtime_secret_read(key, **kwargs):
+        return {"error": "Vault grant required before this agent can read the secret", "key_name": key}
+
+    monkeypatch.setattr("brain.systems.vault.agent_access.read_agent_secret_for_runtime", fake_runtime_secret_read)
+
+    runtime = _runtime("worker")
+    executor = AsyncRunToolExecutor(runtime.store, stream=runtime.stream)
+    called = False
+
+    def handler(**kwargs):
+        nonlocal called
+        called = True
+        return {"exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    with pytest.raises(PermissionError, match="Vault grant required"):
+        await executor.execute(
+            42,
+            ToolExecution(
+                name="exec_command",
+                args={"command": "gh api user", "secret_env": {"GH_TOKEN": {"vault_key": "GITHUB_TOKEN"}}},
+                handler=handler,
+            ),
+            root_run_id=42,
+        )
+
+    assert called is False
+
+
+async def test_runtime_tool_executor_redacts_brain_vault_reference_from_public_run_event():
     from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
 
     runtime = _runtime("worker")
@@ -1676,22 +1819,21 @@ async def test_runtime_tool_executor_redacts_vault_grant_metadata_from_public_ru
 
     result = await executor.execute(
         42,
-        ToolExecution(
-            name="brain_vault",
-            args={"key": "OPENAI_API_KEY"},
-            handler=lambda **kwargs: {
-                "error": "Vault grant required before this agent can read the secret",
-                "grant_id": 123,
-                "key_name": "OPENAI_API_KEY",
-                "status": "pending",
-                "value": "sk-secret",
-            },
-        ),
+            ToolExecution(
+                name="brain_vault",
+                args={"key": "OPENAI_API_KEY"},
+                handler=lambda **kwargs: {
+                    "key": "OPENAI_API_KEY",
+                    "secret_ref": "vault:OPENAI_API_KEY",
+                    "status": "available",
+                },
+            ),
         root_run_id=42,
     )
 
     completed = next(event for event in runtime.store.events if event.event_type == "run.tool_completed")
-    assert result["value"] == "sk-secret"
+    assert result["secret_ref"] == "vault:OPENAI_API_KEY"
+    assert "value" not in result
     assert completed.payload["result"] == "[secret redacted]"
     assert runtime.store.artifacts[-1].text == completed.payload["result"]
 

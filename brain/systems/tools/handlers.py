@@ -14,6 +14,7 @@ by providing higher-level, structured, bounded-output alternatives.
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 import json
 import logging
 import os
@@ -31,6 +32,7 @@ from brain.systems.runs.project_execution_env import (
     prepare_project_execution_env,
     redact_sensitive_output,
 )
+from brain.systems.runs.secret_mounts import SECRET_ENV_SCHEMA
 from brain.platform.async_io import run_blocking, run_subprocess_sync
 
 logger = logging.getLogger("agent.tools")
@@ -112,6 +114,7 @@ EXTENDED_TOOLS = [
                     "description": "Only run tests matching this pattern (pytest -k flag)",
                 },
                 "verbose": {"type": "boolean", "description": "Include full failure output", "default": False},
+                "secret_env": SECRET_ENV_SCHEMA,
             },
             "required": ["target"],
         },
@@ -543,7 +546,13 @@ def handle_file_summary(path: str, workspace_root: str | None = None) -> dict:
     return result
 
 
-def handle_test_runner(target: str, pattern: str | None = None, verbose: bool = False, workspace_root: str | None = None) -> dict:
+def handle_test_runner(
+    target: str,
+    pattern: str | None = None,
+    verbose: bool = False,
+    workspace_root: str | None = None,
+    _resolved_secret_env: Mapping[str, str] | None = None,
+) -> dict:
     """Run tests and return structured results."""
     cmd = [sys.executable, "-m", "pytest", target, "--tb=short", "-q"]
     if pattern:
@@ -551,7 +560,7 @@ def handle_test_runner(target: str, pattern: str | None = None, verbose: bool = 
     if verbose:
         cmd.append("-v")
 
-    project_execution = prepare_project_execution_env()
+    project_execution = prepare_project_execution_env(extra_env=_resolved_secret_env)
 
     try:
         proc = run_subprocess_sync(

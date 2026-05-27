@@ -14,6 +14,11 @@ trusted local automation system, not as a hardened multi-tenant sandbox.
   `ILLO_PRIVATE_HOME`.
 - Database-backed vault entries are encrypted and scoped by user/org metadata,
   but agents may still be granted access through configured tool policies.
+- Agent command tools can mount Vault entries through run-scoped `secret_env`
+  bindings. The trusted runtime resolves the Vault key, injects the value only
+  for that tool call, and redacts the mounted value from command output and
+  artifacts; prompts and public traces should contain only Vault key names and
+  environment variable names.
 - Never paste real secrets into issues, PRs, logs, screenshots, or fixtures.
 
 ## Tool Execution

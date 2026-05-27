@@ -323,7 +323,7 @@ async def test_vault_secret_prompt_handler_uses_execution_metadata_context(monke
 async def test_brain_vault_requests_grant_before_reading():
     from brain.app.mcp.server import tool_brain_vault
 
-    with patch("brain.systems.vault.authorize_agent_secret_read", new=AsyncMock(return_value={
+    with patch("brain.systems.vault.authorize_agent_secret_reference", new=AsyncMock(return_value={
         "allowed": False,
         "status": "pending",
         "grant": {"id": 123},
@@ -364,7 +364,7 @@ async def test_brain_vault_publishes_grant_prompt_for_thread_approval():
         "requested_at": requested_at,
         "expires_at": datetime(2026, 5, 19, 14, 30, tzinfo=timezone.utc),
     }
-    with patch("brain.systems.vault.authorize_agent_secret_read", new=AsyncMock(return_value={
+    with patch("brain.systems.vault.authorize_agent_secret_reference", new=AsyncMock(return_value={
         "allowed": False,
         "status": "pending",
         "grant": grant,
@@ -402,10 +402,14 @@ async def test_brain_vault_publishes_grant_prompt_for_thread_approval():
     assert "value" not in payload["prompt"]
 
 
-async def test_brain_vault_uses_scoped_agent_read_after_grant():
+async def test_brain_vault_returns_secret_ref_after_grant_without_revealing_value():
+    import inspect
+
     from brain.app.mcp.server import tool_brain_vault
 
-    with patch("brain.systems.vault.authorize_agent_secret_read", new=AsyncMock(return_value={"allowed": True, "status": "approved"})), \
+    assert "reveal" not in inspect.signature(tool_brain_vault).parameters
+
+    with patch("brain.systems.vault.authorize_agent_secret_reference", new=AsyncMock(return_value={"allowed": True, "status": "approved"})), \
          patch("brain.systems.vault.get_secret", new=AsyncMock(return_value="secret-value")) as get_secret:
         result = await tool_brain_vault(
             "OPENAI_API_KEY",
@@ -413,6 +417,28 @@ async def test_brain_vault_uses_scoped_agent_read_after_grant():
             user_id=USER["id"],
             org_id=USER["org_id"],
             run_id=42,
+        )
+
+    assert result["key"] == "OPENAI_API_KEY"
+    assert result["status"] == "available"
+    assert result["secret_ref"] == "vault:OPENAI_API_KEY"
+    assert "value" not in result
+    assert "secret-value" not in str(result)
+    get_secret.assert_not_awaited()
+
+
+async def test_runtime_secret_read_uses_scoped_agent_read_after_grant():
+    from brain.systems.vault.agent_access import read_agent_secret_for_runtime
+
+    with patch("brain.systems.vault.authorize_agent_secret_read", new=AsyncMock(return_value={"allowed": True, "status": "approved"})), \
+         patch("brain.systems.vault.get_secret", new=AsyncMock(return_value="secret-value")) as get_secret:
+        result = await read_agent_secret_for_runtime(
+            "OPENAI_API_KEY",
+            reason="Mount provider access for this trusted runtime call",
+            user_id=USER["id"],
+            org_id=USER["org_id"],
+            run_id=42,
+            idea_id=None,
         )
 
     assert result == {"key": "OPENAI_API_KEY", "value": "secret-value"}

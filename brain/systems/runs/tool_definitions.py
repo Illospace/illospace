@@ -13,6 +13,7 @@ from brain.systems.inbound.status import (
     STATUS_REVIEW_REQUIRED,
 )
 from brain.systems.runs.tool_catalog.definitions.workers import WORKER_SPAWN_TOOLS
+from brain.systems.runs.secret_mounts import SECRET_ENV_SCHEMA
 
 
 _WORKSPACE_TIME_WINDOW_VALUES = [
@@ -271,10 +272,10 @@ BRAIN_TOOLS = [
         "name": "vault_inventory",
         "description": (
             "List metadata-only Vault secrets for credential reasoning. Returns key names, "
-            "descriptions, categories, and agent_access_level, never secret values. Call this before "
-            "brain_vault or vault_secret_prompt when a task needs a credential. Use a returned exact "
-            "key with brain_vault; if multiple candidates fit, ask the user; only call "
-            "vault_secret_prompt when no suitable existing secret exists."
+            "descriptions, categories, and agent_access_level, never secret values. For command/API "
+            "work, use a returned exact key with exec_command or run_script secret_env. Call "
+            "brain_vault only to check/request access to a reference; call vault_secret_prompt when "
+            "no suitable existing secret exists."
         ),
         "input_schema": {
             "type": "object",
@@ -306,8 +307,8 @@ BRAIN_TOOLS = [
     {
         "name": "brain_vault",
         "description": (
-            "Request task-scoped access to a secret (API key, token, etc.) from the encrypted vault. "
-            "The secret is only returned when the user has approved a live grant for this exact run and key."
+            "Request task-scoped access to a Vault secret reference. Raw secret values are not returned "
+            "to agents. For command/API work, mount the Vault key with exec_command or run_script secret_env."
         ),
         "input_schema": {
             "type": "object",
@@ -1596,6 +1597,7 @@ EXEC_TOOLS = [
                 },
                 "working_dir": {"type": "string", "description": "Working directory (optional, defaults to workspace)"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 60, max 300)", "default": 60},
+                "secret_env": SECRET_ENV_SCHEMA,
             },
             "required": ["command"],
         },
@@ -1714,6 +1716,7 @@ EXEC_TOOLS = [
                     "description": "Optional workspace root or registered workspace name to target",
                 },
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 60, max 300)", "default": 60},
+                "secret_env": SECRET_ENV_SCHEMA,
             },
             "required": ["script"],
         },
