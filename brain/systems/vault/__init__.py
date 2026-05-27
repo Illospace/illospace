@@ -9,6 +9,7 @@ import logging
 import os
 import secrets as stdlib_secrets
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 
 import bcrypt
 from sqlalchemy import or_, select
@@ -46,6 +47,17 @@ VAULT_AGENT_ACCESS_LEVELS = {
     VAULT_AGENT_ACCESS_ASK,
     VAULT_AGENT_ACCESS_MANUAL,
 }
+
+
+class AgentSecretAccessIntent(str, Enum):
+    REFERENCE = "reference"
+    READ = "read"
+
+    @property
+    def consumes_approved_grant(self) -> bool:
+        return self is AgentSecretAccessIntent.READ
+
+
 DEFAULT_VAULT_AGENT_ACCESS_LEVEL = VAULT_AGENT_ACCESS_ASK
 
 # ---------------------------------------------------------------------------
@@ -1255,7 +1267,7 @@ async def async_authorize_agent_secret_read(
         project_slug=project_slug,
         project_slugs=project_slugs,
         target_registry_id=target_registry_id,
-        consume_approved_grant=True,
+        intent=AgentSecretAccessIntent.READ,
     )
 
 
@@ -1282,7 +1294,7 @@ async def async_authorize_agent_secret_reference(
         project_slug=project_slug,
         project_slugs=project_slugs,
         target_registry_id=target_registry_id,
-        consume_approved_grant=False,
+        intent=AgentSecretAccessIntent.REFERENCE,
     )
 
 
@@ -1297,7 +1309,7 @@ async def _async_authorize_agent_secret_access(
     project_slug: str | None = None,
     project_slugs: list[str] | tuple[str, ...] | set[str] | None = None,
     target_registry_id: int | None = None,
-    consume_approved_grant: bool,
+    intent: AgentSecretAccessIntent,
 ) -> dict:
     """Policy check/approval flow for org-owned agent secret access."""
     try:
@@ -1373,7 +1385,7 @@ async def _async_authorize_agent_secret_access(
             )
         ).first()
         if grant:
-            if consume_approved_grant:
+            if intent.consumes_approved_grant:
                 grant.read_count = int(grant.read_count or 0) + 1
                 grant.last_used_at = now
                 if grant.read_count >= int(grant.max_reads or 1):

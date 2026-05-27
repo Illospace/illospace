@@ -8,6 +8,7 @@ from typing import Any
 
 
 SECRET_ENV_MOUNT_TOOLS = frozenset({"exec_command", "run_script", "test_runner"})
+RESOLVED_SECRET_ENV_ARG = "_resolved_secret_env"
 SECRET_ENV_SCHEMA = {
     "type": "object",
     "description": (
@@ -120,9 +121,9 @@ def handler_args_with_resolved_secret_env(
     args: dict[str, Any],
     resolved_secret_env: dict[str, str],
 ) -> dict[str, Any]:
-    """Remove raw mount specs before invoking tool handlers."""
+    """Remove public mount specs and pass resolved values on the internal channel."""
     handler_args = dict(args)
     handler_args.pop("secret_env", None)
     if tool_name in SECRET_ENV_MOUNT_TOOLS and resolved_secret_env:
-        handler_args["secret_env"] = dict(resolved_secret_env)
+        handler_args[RESOLVED_SECRET_ENV_ARG] = dict(resolved_secret_env)
     return handler_args

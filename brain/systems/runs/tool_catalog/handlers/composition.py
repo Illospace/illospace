@@ -119,6 +119,12 @@ def _current_requested_by():
     return getattr(_agent_context, "worker_name", None) or "agent"
 
 
+def _resolved_secret_env_arg(secret_env=None, _resolved_secret_env=None):
+    if secret_env not in (None, {}, []):
+        raise ValueError("secret_env mount specs must be resolved by the runtime before invoking tool handlers")
+    return _resolved_secret_env
+
+
 def _get_tool_handlers(
     workspace_root: str | None = None,
     allowed_workspaces: list[str | dict] | None = None,
@@ -310,16 +316,41 @@ def _get_tool_handlers(
         }
 
     ws = workspace_root  # capture for closures
+
+    def _exec_command_handler(
+        command,
+        working_dir=None,
+        timeout=60,
+        workspace=None,
+        secret_env=None,
+        _resolved_secret_env=None,
+    ):
+        return _handle_exec_command(
+            command,
+            working_dir=working_dir,
+            timeout=timeout,
+            _workspace=_select_workspace(workspace, ws, allowed_workspaces),
+            _resolved_secret_env=_resolved_secret_env_arg(secret_env, _resolved_secret_env),
+        )
+
+    def _run_script_handler(
+        script,
+        description=None,
+        timeout=60,
+        workspace=None,
+        secret_env=None,
+        _resolved_secret_env=None,
+    ):
+        return _handle_run_script(
+            script,
+            description,
+            timeout,
+            _workspace=_select_workspace(workspace, ws, allowed_workspaces),
+            _resolved_secret_env=_resolved_secret_env_arg(secret_env, _resolved_secret_env),
+        )
+
     handlers.update({
-        "exec_command": lambda command, working_dir=None, timeout=60, workspace=None, secret_env=None: (
-            _handle_exec_command(
-                command,
-                working_dir=working_dir,
-                timeout=timeout,
-                _workspace=_select_workspace(workspace, ws, allowed_workspaces),
-                secret_env=secret_env,
-            )
-        ),
+        "exec_command": _exec_command_handler,
         "read_file": lambda path, workspace=None, start_line=None, end_line=None: (
             _predictive_read(
                 path,
@@ -358,15 +389,7 @@ def _get_tool_handlers(
                 _workspace=_select_workspace(workspace, ws, allowed_workspaces),
             )
         ),
-        "run_script": lambda script, description=None, timeout=60, workspace=None, secret_env=None: (
-            _handle_run_script(
-                script,
-                description,
-                timeout,
-                _workspace=_select_workspace(workspace, ws, allowed_workspaces),
-                secret_env=secret_env,
-            )
-        ),
+        "run_script": _run_script_handler,
     })
 
     # Extended tools (semantic search, file summary, test runner, etc.)
@@ -405,15 +428,16 @@ def _get_tool_handlers(
             "file_summary",
             _file_summary_with_workspace,
         )
-        handlers["test_runner"] = lambda target, pattern=None, verbose=False, secret_env=None: (
-            extended_handlers["test_runner"](
+        def _test_runner_handler(target, pattern=None, verbose=False, secret_env=None, _resolved_secret_env=None):
+            return extended_handlers["test_runner"](
                 target,
                 pattern=pattern,
                 verbose=verbose,
                 workspace_root=_workspace_hint(),
-                secret_env=secret_env,
+                _resolved_secret_env=_resolved_secret_env_arg(secret_env, _resolved_secret_env),
             )
-        )
+
+        handlers["test_runner"] = _test_runner_handler
         handlers["project_context"] = lambda path=None: (
             extended_handlers["project_context"](
                 path=path,

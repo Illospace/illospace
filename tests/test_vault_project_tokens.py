@@ -571,7 +571,7 @@ def test_exec_command_redacts_project_bound_git_auth_from_output(monkeypatch, tm
     assert result["stderr"].count("[secret redacted]") == 1
 
 
-def test_exec_command_uses_explicit_secret_env_mounts_without_returning_values(tmp_path):
+def test_exec_command_uses_resolved_secret_env_without_returning_values(tmp_path):
     from brain.systems.runs.tool_catalog.handlers.files import _handle_exec_command
 
     token = "ghp-secret-value"
@@ -583,7 +583,11 @@ def test_exec_command_uses_explicit_secret_env_mounts_without_returning_values(t
     )
 
     with patch("subprocess.run", return_value=proc) as run:
-        result = _handle_exec_command("gh auth status", working_dir=str(tmp_path), secret_env={"GH_TOKEN": token})
+        result = _handle_exec_command(
+            "gh auth status",
+            working_dir=str(tmp_path),
+            _resolved_secret_env={"GH_TOKEN": token},
+        )
 
     run_env = run.call_args.kwargs["env"]
     assert run_env["GH_TOKEN"] == token
@@ -594,14 +598,14 @@ def test_exec_command_uses_explicit_secret_env_mounts_without_returning_values(t
     assert result["stdout"].count("[secret redacted]") == 2
 
 
-def test_exec_command_rejects_unresolved_secret_env_specs(tmp_path):
+def test_exec_command_rejects_non_string_resolved_secret_env_values(tmp_path):
     from brain.systems.runs.tool_catalog.handlers.files import _handle_exec_command
 
     with pytest.raises(ValueError, match="resolved string value"):
         _handle_exec_command(
             "gh auth status",
             working_dir=str(tmp_path),
-            secret_env={"GH_TOKEN": {"vault_key": "GITHUB_TOKEN"}},
+            _resolved_secret_env={"GH_TOKEN": {"vault_key": "GITHUB_TOKEN"}},
         )
 
 

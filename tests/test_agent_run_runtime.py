@@ -1707,7 +1707,7 @@ async def test_runtime_tool_executor_resolves_secret_env_mount_without_public_va
     )
 
     assert result["exit_code"] == 0
-    assert seen["kwargs"]["secret_env"] == {"GH_TOKEN": secret_value}
+    assert seen["kwargs"]["_resolved_secret_env"] == {"GH_TOKEN": secret_value}
     assert vault_calls == [{
         "key": "GITHUB_TOKEN",
         "reason": "Check the token identity without exposing it.",
@@ -1811,7 +1811,7 @@ async def test_runtime_tool_executor_stops_before_command_when_secret_mount_fail
     assert called is False
 
 
-async def test_runtime_tool_executor_redacts_vault_grant_metadata_from_public_run_event():
+async def test_runtime_tool_executor_redacts_brain_vault_reference_from_public_run_event():
     from brain.systems.runs.tools import AsyncRunToolExecutor, ToolExecution
 
     runtime = _runtime("worker")
@@ -1819,22 +1819,21 @@ async def test_runtime_tool_executor_redacts_vault_grant_metadata_from_public_ru
 
     result = await executor.execute(
         42,
-        ToolExecution(
-            name="brain_vault",
-            args={"key": "OPENAI_API_KEY"},
-            handler=lambda **kwargs: {
-                "error": "Vault grant required before this agent can read the secret",
-                "grant_id": 123,
-                "key_name": "OPENAI_API_KEY",
-                "status": "pending",
-                "value": "sk-secret",
-            },
-        ),
+            ToolExecution(
+                name="brain_vault",
+                args={"key": "OPENAI_API_KEY"},
+                handler=lambda **kwargs: {
+                    "key": "OPENAI_API_KEY",
+                    "secret_ref": "vault:OPENAI_API_KEY",
+                    "status": "available",
+                },
+            ),
         root_run_id=42,
     )
 
     completed = next(event for event in runtime.store.events if event.event_type == "run.tool_completed")
-    assert result["value"] == "sk-secret"
+    assert result["secret_ref"] == "vault:OPENAI_API_KEY"
+    assert "value" not in result
     assert completed.payload["result"] == "[secret redacted]"
     assert runtime.store.artifacts[-1].text == completed.payload["result"]
 
