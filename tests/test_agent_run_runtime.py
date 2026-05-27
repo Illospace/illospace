@@ -986,6 +986,74 @@ async def test_spawn_worker_handler_uses_child_run_store_path_for_headless(monke
     assert [event.event_type for event in events] == ["run.worker_spawned"]
 
 
+async def test_spawn_worker_handler_prefers_runtime_run_id_over_stale_context(monkeypatch):
+    from brain.systems.runs.domain import RunProfile, RunRecipe
+    from brain.systems.runs.execution_context import bind_agent_context
+    import brain.systems.runs.tool_catalog.handlers.workers as worker_handlers
+
+    stale_parent = SimpleNamespace(id=375)
+    current_parent = SimpleNamespace(
+        id=377,
+        org_id="org-1",
+        user_id="user-1",
+        root_run_id=377,
+        profile=RunProfile.FAST,
+        target_ref={"kind": "cortex_idea", "idea_id": "idea-1"},
+        workspace_ref={},
+        model_policy={},
+    )
+    child = SimpleNamespace(id=378, root_run_id=377, recipe=RunRecipe.WORKER)
+    created = {}
+
+    class _Uow:
+        session = object()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+    class _Store:
+        def __init__(self, session):
+            self.session = session
+
+        async def require_run(self, run_id):
+            assert run_id == current_parent.id
+            return current_parent
+
+        async def child_run_for_step(self, parent_id, step_key):
+            assert parent_id == current_parent.id
+            return None
+
+        async def create_child_run(self, parent_arg, **kwargs):
+            assert parent_arg is current_parent
+            created.update(kwargs)
+            return child
+
+        async def append_event(self, event):
+            assert event.run_id == current_parent.id
+
+    monkeypatch.setattr(worker_handlers, "UnitOfWork", _Uow)
+    monkeypatch.setattr(worker_handlers, "AsyncAgentRunStore", _Store)
+
+    with bind_agent_context(run=stale_parent):
+        payload = json.loads(
+            await worker_handlers._handle_spawn_worker(
+                objective="File the browser status bug.",
+                role="report_bug",
+                headless=True,
+                idempotency_key="bug-report",
+                _runtime_run_id=current_parent.id,
+            )
+        )
+
+    assert payload["ok"] is True
+    assert payload["parent_run_id"] == current_parent.id
+    assert payload["root_run_id"] == current_parent.root_run_id
+    assert created["thread_id"].startswith("headless-worker:377:")
+
+
 async def test_fast_recipe_passes_project_workspace_registry_to_tools(monkeypatch):
     from brain.systems.runs.recipes.fast import FastRecipe
 
