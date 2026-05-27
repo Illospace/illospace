@@ -140,11 +140,6 @@
   let activeSidePanelTabId = $state<string | null>('activity');
   let sidePanelTabs = $state<ThreadStageRightDockTab[]>(createDefaultThreadSidePanelTabs());
   let nextBrowserTabIndex = $state(1);
-  let lastAutoOpenedVaultPromptId = $state<string | null>(null);
-  let lastAutoOpenedVaultGrantPromptId = $state<string | null>(null);
-  let lastAutoOpenedCycleSignal = $state<number | null>(null);
-  let lastAutoOpenedCodeReviewSignature = $state<string | null>(null);
-  let lastAutoSelectedAppId = $state<string | null>(null);
   let dockPreviewAttachment = $state<CortexThreadStageImageAttachment | CortexThreadStageFileAttachment | null>(null);
   let teamMembers = $state<any[]>([]);
   let teamMembersLoading = false;
@@ -883,64 +878,6 @@
     }
   }
 
-  $effect(() => {
-    const changedAppId = workspaceApps.lastChangedAppId;
-    if (!changedAppId || changedAppId === lastAutoSelectedAppId) return;
-    if (workspaceApps.lastChangeAction !== 'create') return;
-    if (!workspaceApps.appById(changedAppId)) return;
-    lastAutoSelectedAppId = changedAppId;
-    openAppTab(changedAppId);
-  });
-
-  $effect(() => {
-    const prompt = cortex.vaultSecretPrompt;
-    const promptId = prompt && String(prompt.idea_id ?? '') === String(idea?.id ?? '') ? prompt.id : null;
-    if (!promptId) {
-      lastAutoOpenedVaultPromptId = null;
-      return;
-    }
-    if (promptId === lastAutoOpenedVaultPromptId) return;
-    lastAutoOpenedVaultPromptId = promptId;
-    openSingletonTab('vault');
-  });
-
-  $effect(() => {
-    const prompt = cortex.vaultAgentGrantPrompt;
-    const promptId = prompt && String(prompt.idea_id ?? '') === String(idea?.id ?? '') ? prompt.id : null;
-    if (!promptId) {
-      lastAutoOpenedVaultGrantPromptId = null;
-      return;
-    }
-    if (promptId === lastAutoOpenedVaultGrantPromptId) return;
-    lastAutoOpenedVaultGrantPromptId = promptId;
-    openSingletonTab('vault');
-  });
-
-  $effect(() => {
-    const signal = cortex.cyclePanelSignal;
-    if (!signal || signal.ideaId !== idea?.id) return;
-    if (signal.serial === lastAutoOpenedCycleSignal) return;
-    lastAutoOpenedCycleSignal = signal.serial;
-    openSingletonTab('cycles');
-  });
-
-  $effect(() => {
-    const currentIdeaId = idea?.id ?? null;
-    if (!currentIdeaId) {
-      lastAutoOpenedCodeReviewSignature = null;
-      return;
-    }
-    const signature = codeReviewSignature;
-    if (!signature) {
-      lastAutoOpenedCodeReviewSignature = null;
-      return;
-    }
-    const scopedSignature = `${currentIdeaId}:${signature}`;
-    if (scopedSignature === lastAutoOpenedCodeReviewSignature) return;
-    lastAutoOpenedCodeReviewSignature = scopedSignature;
-    openSingletonTab('code-review');
-  });
-
   let pendingInitialScrollIdeaId = $state<string | null>(null);
   let lastSelectedIdeaId = $state<string | null>(null);
 
@@ -966,8 +903,11 @@
       ideaProjectContextAttachments = [];
       ideaProjectContextLoadedForIdeaId = null;
       ideaProjectContextLoadingForIdeaId = null;
+      activeSidePanelTabId = 'activity';
+      sidePanelTabs = createDefaultThreadSidePanelTabs();
+      nextBrowserTabIndex = 1;
       dockPreviewAttachment = null;
-      lastAutoOpenedCodeReviewSignature = null;
+      onBrowserOpenChange?.(false);
       if (currentIdeaId) void loadIdeaProjectContext(currentIdeaId);
     }
   });
